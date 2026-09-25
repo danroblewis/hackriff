@@ -550,6 +550,16 @@ def _git(repo: str, *args: str) -> str:
         return ""
 
 
+def _bulk_base(ops: str) -> str:
+    try:
+        for ln in open(os.path.join(ops, "bulk-in-progress")):
+            if ln.startswith("base="):
+                return ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
 def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
     """Per remote worker host (hosts.json; user, 2026-09-25): its mirror's main as this repo last pushed it (the
     remote-tracking ref - local, no network) and how far main is ahead of it, its running claims, and how many of
@@ -566,7 +576,9 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
     out = []
     for h in hosts:
         tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/remotes/{h}/main")
-        behind = _git(repo, "rev-list", "--count", f"{tip}..main") if tip else ""
+        # Drift from the LANDED main: while a batch gates, main holds its provisional merges, which no mirror should have.
+        landed = _bulk_base(ops) or "main"
+        behind = _git(repo, "rev-list", "--count", f"{tip}..{landed}") if tip else ""
         pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
         # Work on the host: a review keeps its claim's host but runs on this Mac (the work runner's busy_workers).
         running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running"

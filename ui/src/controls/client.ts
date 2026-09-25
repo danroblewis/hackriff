@@ -49,21 +49,28 @@ export function errorFrom(status: number, body: unknown, statusText = ""): Contr
 
 export type FetchFn = (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; statusText: string; json(): Promise<unknown> }>;
 
+/** Per-call options: an `AbortSignal` (a deadline, or a cancellation) the caller owns. */
+export interface CallOptions { readonly signal?: AbortSignal }
+
 /** Calls the API with the tab's token. */
 export class ControlClient {
   constructor(private token: string, private fetchFn: FetchFn = (u, i) => fetch(u, i)) {}
 
-  async call<T = unknown>(method: Method, path: string, body?: unknown): Promise<T> {
+  async call<T = unknown>(method: Method, path: string, body?: unknown, opts?: CallOptions): Promise<T> {
     // Mutating calls always send a JSON object (`{}` when empty): the server accepts it and the
     // Content-Type is then unambiguous.
     const req = buildRequest(method, path, this.token, isMutating(method) && method !== "DELETE" ? body ?? {} : body);
+    // A caller that can be left hanging passes its own deadline (T-927: a density GET that never
+    // settles used to hold its slot until the browser's connection timeout). No default here — the
+    // deadline belongs to the caller that knows what "too long" means for its route.
+    if (opts?.signal) req.init.signal = opts.signal;
     const r = await this.fetchFn(req.url, req.init);
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw errorFrom(r.status, data, r.statusText);
     return data as T;
   }
 
-  get<T = unknown>(path: string) { return this.call<T>("GET", path); }
+  get<T = unknown>(path: string, opts?: CallOptions) { return this.call<T>("GET", path, undefined, opts); }
   post<T = unknown>(path: string, body?: unknown) { return this.call<T>("POST", path, body); }
   put<T = unknown>(path: string, body: unknown) { return this.call<T>("PUT", path, body); }
   del<T = unknown>(path: string) { return this.call<T>("DELETE", path); }

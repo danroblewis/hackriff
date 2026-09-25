@@ -468,9 +468,51 @@ pub trait Engine: Sync {
 /// analyze job manager over [`server_backend`] — asked about every emitter it produced.
 pub struct Product;
 
+/// The API `hk serve` exposes over a finished run's data directory **with the analyze job manager
+/// on** — inventory, bookmarks, audit, the IQ ring and `AnalyzeJobs` over [`server_backend`], with
+/// the shipped `SynthesizedConfirm` as the attacher's confirm rule. Extracted so the false-confirm
+/// suite (T-576) drives the same server this one does, rather than a second copy of it.
+pub fn serve_with_analyze(
+    dir: &std::path::Path,
+    ring: Arc<hk_pipeline::iqbuffer::IqBufferService>,
+) -> hk_api::Server {
+    let jobs = Arc::new(AnalyzeJobs::with_attacher(
+        Arc::new(RingJobEnv::new(
+            Arc::clone(&ring),
+            Box::new(|| None::<hk_model::FreqRange>),
+        )),
+        server_backend(),
+        PowerPolicy::Mains,
+        Some(Arc::new(RepoAttacher::new(
+            dir.join("hackriff.db"),
+            hk_pipeline::inventory::SynthesizedConfirm::default(),
+        ))),
+    ));
+    let state = hk_api::ApiState {
+        inventory: Some(Arc::new(std::sync::Mutex::new(repo(dir)))),
+        bookmarks: Some(Arc::new(std::sync::Mutex::new(repo(dir)))),
+        audit: Some(Arc::new(
+            hk_api::AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+        )),
+        iq_buffer: Some(Arc::new(hk_cli::control::PipelineIqBuffer(Arc::clone(
+            &ring,
+        )))),
+        analyze: Some(Arc::new(hk_cli::control::PipelineAnalyze(jobs))),
+        ..hk_api::ApiState::default()
+    };
+    hk_api::Server::start(
+        hk_api::ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            hk_api::Token::from_config(API_TOKEN).unwrap(),
+        ),
+        state,
+    )
+    .unwrap()
+}
+
 /// Polls a job to a terminal state. The bound is a hang guard derived from the job's own wall
 /// backstop, never a choice of what to assert.
-fn wait_job(addr: std::net::SocketAddr, job: &Value) -> Value {
+pub fn wait_job(addr: std::net::SocketAddr, job: &Value) -> Value {
     let id = job["id"].as_str().expect("a job has an id").to_owned();
     let backstop = job["budget"]["wall_s"].as_f64().unwrap_or(60.0);
     let guard = Duration::from_secs_f64(backstop * 2.0 + 60.0);
@@ -565,39 +607,7 @@ impl Engine for Product {
             "[{USE_CASES}] the IQ ring did not finish opening"
         );
         let _ = finish(handle);
-        let db = dir.0.join("hackriff.db");
-        let jobs = Arc::new(AnalyzeJobs::with_attacher(
-            Arc::new(RingJobEnv::new(
-                Arc::clone(&ring),
-                Box::new(|| None::<hk_model::FreqRange>),
-            )),
-            server_backend(),
-            PowerPolicy::Mains,
-            Some(Arc::new(RepoAttacher::new(
-                db,
-                hk_pipeline::inventory::SynthesizedConfirm::default(),
-            ))),
-        ));
-        let state = hk_api::ApiState {
-            inventory: Some(Arc::new(std::sync::Mutex::new(repo(&dir.0)))),
-            bookmarks: Some(Arc::new(std::sync::Mutex::new(repo(&dir.0)))),
-            audit: Some(Arc::new(
-                hk_api::AuditLog::open(&dir.0.join("audit.jsonl")).unwrap(),
-            )),
-            iq_buffer: Some(Arc::new(hk_cli::control::PipelineIqBuffer(Arc::clone(
-                &ring,
-            )))),
-            analyze: Some(Arc::new(hk_cli::control::PipelineAnalyze(jobs))),
-            ..hk_api::ApiState::default()
-        };
-        let server = hk_api::Server::start(
-            hk_api::ServerConfig::new(
-                "127.0.0.1:0".parse().unwrap(),
-                hk_api::Token::from_config(API_TOKEN).unwrap(),
-            ),
-            state,
-        )
-        .unwrap();
+        let server = serve_with_analyze(&dir.0, Arc::clone(&ring));
         let addr = server.local_addr();
         let (status, body) = api_get(addr, "/api/inventory?limit=500");
         assert_eq!(

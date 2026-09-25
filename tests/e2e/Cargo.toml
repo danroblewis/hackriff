@@ -45,3 +45,7 @@ hk-classify.workspace = true
 # checkable predicate (`hk_ml::exit_gate`), so the gate row is asserted over a real run instead of
 # being satisfied by nothing checking it.
 hk-ml.workspace = true
+# T-576 the false-confirm acceptance suite (tests/acceptance/mauto_false_confirm.rs): A3's recall
+# control runs the shipped `ConfirmPolicy.synthesized` gate over `hk_synth::PipelineResult` hold-out
+# evidence, so the suite asserts the real gate rather than a copy of its arithmetic.
+hk-synth.workspace = true

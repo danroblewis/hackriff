@@ -56,12 +56,6 @@ the truth generators the build uses. Tests: `py/tests/test_fixture_tooling.py`.
 
 - `tiny/tone.sigmf-*`: an 8 KB noiseless ci8 CW tone for `just replay` and parser smoke tests.
   Regenerate with `uv run --project py python fixtures/tiny/make_tone.py`.
-- `hackrf/fm-stations/`: the per-station RDS set (T-926): one narrow capture per broadcast station
-  (2.4 Msps, ~5 s, 24 MB), clipped from the live app's IQ ring by the explorer agent, with hidden
-  truth — the PI an independent decoder (`py/fixtures/rds_ref.py`) read from the same IQ, and the PS
-  only where it is stable. `tests/e2e/tests/acceptance/fm_stations.rs` runs every capture in the
-  directory blind through the mock SDR and requires every station's PI, so the set grows by
-  adding files.
 - `hackrf/2026-09-13/`: five annotated windows of the 2026-09-13 HackRF One captures (FM + RDS,
   915 MHz FHSS FSK, urban FM-band clipped/mid gain pair, 433 MHz noise-only control). See its README.
 - `sweeps/2026-09-13/`: three `hackrf_sweep` surveys (plain CSV, not LFS). See its README.

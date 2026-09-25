@@ -212,8 +212,14 @@ struct Sig {
 }
 
 fn ev(stage: Stage, metric: MetricId, group: GroupId, n: u32, bits: f32) -> EvidenceSet {
+    // A check's `raw` is its differences (ADR-0022 §4.2): here every tested frame differs.
+    let raw = if metric == MetricId::CheckDistinctValid {
+        n as f32
+    } else {
+        bits
+    };
     let mut s = EvidenceSet::new();
-    s.push(Evidence::new(stage, metric, group, bits, n, bits))
+    s.push(Evidence::new(stage, metric, group, raw, n, bits))
         .unwrap();
     s
 }
@@ -302,6 +308,7 @@ impl Evaluator for World {
             corrected_excluded: 0,
             tested: 12,
             holdout,
+            node: None,
         });
         // The hold-out run's decoded frames: what the attach step stores (ADR-0015 §5.5).
         let frames = if holdout && on && req.stage == Stage::S5 {
@@ -747,6 +754,14 @@ fn without_an_evaluator_a_job_acquires_then_fails_not_searched_never_unknown() {
     assert!(j.results.is_empty() && j.trace_summary.is_none());
     let t = jobs.trace("a1", &TraceQuery::default()).unwrap();
     assert_eq!(t["nodes"], json!([]));
+    // T-930: it ended without ever producing a trace, so the fetch is `final` — a client that
+    // stops on `final` would otherwise poll this job forever (every job on a build with no
+    // evaluator).
+    assert_eq!(
+        t["final"],
+        json!(true),
+        "a failed job's trace is final: {t}"
+    );
 }
 
 #[test]
@@ -767,6 +782,10 @@ fn cancel_is_immediate_and_final_for_a_running_job_and_removes_a_queued_one() {
     assert_eq!(jobs.get("a1").unwrap().state, JobState::Searching);
     assert_eq!(jobs.get("a2").unwrap().state, JobState::Queued);
 
+    // While a1 runs its trace is NOT final: the engine may still hand a partial one over.
+    let t = jobs.trace("a1", &TraceQuery::default()).unwrap();
+    assert_eq!(t["final"], json!(false), "a running job's trace: {t}");
+
     // Queued: removed, cancelled, never run.
     let (q, forgotten) = jobs.cancel("a2").unwrap();
     assert!(!forgotten);
@@ -774,6 +793,13 @@ fn cancel_is_immediate_and_final_for_a_running_job_and_removes_a_queued_one() {
     assert_eq!(
         q.resolution.as_ref().unwrap().kind,
         ResolutionKind::NotSearched
+    );
+    // T-930: cancelled while queued, so nothing will ever hand a trace over — final at once.
+    let t = jobs.trace("a2", &TraceQuery::default()).unwrap();
+    assert_eq!(
+        (t["final"].clone(), t["nodes"].clone()),
+        (json!(true), json!([])),
+        "a queued-cancelled job's trace is final: {t}"
     );
     // Running: cancelled at once, and it stays cancelled when the engine hands back.
     let (r, forgotten) = jobs.cancel("a1").unwrap();
@@ -784,6 +810,9 @@ fn cancel_is_immediate_and_final_for_a_running_job_and_removes_a_queued_one() {
     });
     let a1 = jobs.get("a1").unwrap();
     assert_eq!(a1.state, JobState::Cancelled);
+    // Its worker has handed back, so the trace fetch is final now (with or without nodes).
+    let t = jobs.trace("a1", &TraceQuery::default()).unwrap();
+    assert_eq!(t["final"], json!(true), "handed back: {t}");
     assert_eq!(a1.end_reason, Some(StopReason::Cancelled));
     assert_eq!(
         a1.resolution.as_ref().unwrap().kind,
@@ -1171,6 +1200,16 @@ mod m9 {
         assert_eq!(job.null_control.as_ref().unwrap()["capped"], json!(false));
         assert_eq!((job.decodes_stored, job.decodes_valid), (12, 12));
         assert_eq!(job.confirm.as_ref().unwrap()["outcome"], json!("confirmed"));
+        // ADR-0022 §8: the decision was counted, durably, and the claim it was made under holds.
+        assert_eq!(
+            job.confirm.as_ref().unwrap()["decision_rate"],
+            json!({"decisions_7d": 1, "assumed_per_week": 20000, "budget_claim": "holds"})
+        );
+        assert_eq!(
+            repo.confirm_decisions_in_week(CONFIRM_SYNTH_RULE, hk_model::Timestamp::now())
+                .unwrap(),
+            1
+        );
         let e = repo.emitter(emitter).unwrap();
         assert_eq!(
             e.f_center_hz, CENTER_HZ,

@@ -1206,6 +1206,16 @@ impl Pipeline {
             t_end: None,
             summary: None,
         };
+        // T-913: a run that crashed left its survey open, and retention ages an open survey from
+        // its own newest row — so its last hour is never aged out until something closes it. One
+        // process writes a store, so any survey still open here belongs to a process that is gone.
+        match repo.abort_orphaned_surveys() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("hk-pipeline: aborted {n} survey(s) left open by an earlier run"),
+            Err(e) => {
+                eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}")
+            }
+        }
         repo.insert_survey(&survey)?;
         store_calibrations(&mut repo, &cfg.calibrations)?;
         let product = FloorProduct::open(
@@ -1513,6 +1523,7 @@ impl Pipeline {
             thread: Some(thread),
             started: Instant::now(),
             recipes: std::sync::OnceLock::new(),
+            vlf: Arc::default(),
         })
     }
 }
@@ -2827,6 +2838,8 @@ pub struct PipelineHandle {
     started: Instant,
     /// The run's recipe runtime (T-088), created on first use.
     recipes: std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+    /// T-891: accessory-fed VLF services attached to this run (none by default); stopped with it.
+    vlf: Arc<crate::vlf::VlfServices>,
 }
 
 /// Detection resolution of the run.
@@ -2950,12 +2963,13 @@ impl RunSummary {
             c("/detect/dense_frames")
         ));
         line(format!(
-            "tracks:      {} opened, {} closed, {} confirmed, {} rows, {} links",
+            "tracks:      {} opened, {} closed, {} confirmed, {} rows, {} links ({} dropped)",
             c("/detect/tracks_opened"),
             c("/detect/tracks_closed"),
             c("/detect/tracks_confirmed"),
             c("/detect/track_rows"),
-            c("/detect/track_links")
+            c("/detect/track_links"),
+            c("/detect/track_links_dropped")
         ));
         line(format!(
             "anomalies:   {} opened, {} closed, {} explanations",
@@ -3148,6 +3162,13 @@ impl PipelineHandle {
     /// Stops capture; the readers and chains then drain and finish.
     pub fn stop(&self) {
         self.stopper().stop();
+        self.vlf.stop_all();
+    }
+
+    /// T-891: the run's accessory-fed VLF services ([`crate::vlf`]); attach one with
+    /// [`crate::vlf::VlfServices::attach`]. Empty unless an accessory was given.
+    pub fn vlf(&self) -> Arc<crate::vlf::VlfServices> {
+        Arc::clone(&self.vlf)
     }
 
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while
@@ -3385,6 +3406,29 @@ impl PipelineHandle {
         std::iter::once(primary)
             .chain(c.aux.iter().map(devices::AuxDevice::run_device))
             .collect()
+    }
+
+    /// **The run's lossless flow gate** ([`crate::gate::FlowGate`]), while a segment is running.
+    ///
+    /// The gate is what makes a lossless replay lossless: every reader holds a [`crate::gate::GateCursor`] and
+    /// the capture thread refuses to write a block that would lap the slowest of them. That is a
+    /// *property of the run*, observable the same way [`Self::ring_position`] is, and a caller
+    /// that wants to establish the backpressure path is armed has no other way to ask.
+    ///
+    /// **Why this exists** (T-920). `view_pause_keeps_capture` guarded against a vacuous claim —
+    /// "no view control stalled the source" means nothing if a stalled reader could not have
+    /// stalled it either — by asserting the gate happened to hold a block back during its
+    /// measurement window (`gate_waits > 0`). But whether the writer runs a *half ring* ahead of
+    /// the readers inside any given 5 s of capture is a race between a replay thread and three
+    /// FFT threads, not a property of the system: on one Linux box, alone, on current `main`, that
+    /// assertion failed 5 runs in 7 while the run itself stayed perfectly lossless. The guard is
+    /// now a deterministic demonstration instead — pin a cursor, watch the source stop, release
+    /// it, watch it resume — and it needs the gate.
+    ///
+    /// `None` before the first segment's shared state exists (the same window in which
+    /// [`Self::ring_position`] answers 0).
+    pub fn flow_gate(&self) -> Option<Arc<FlowGate>> {
+        self.sup.lock().shared.as_ref().map(|s| Arc::clone(&s.gate))
     }
 
     /// The newest ring sample index.

@@ -107,16 +107,26 @@ export function truncationNote(t: Pick<TraceFetch, "bounds">): string | null {
   return t.bounds.truncated ? `list truncated to the retained bound (${t.bounds.max_nodes} nodes) — counts below are complete, detail is not` : null;
 }
 
-/** An empty response is never the answer (acceptance item 4): the backend's own `not_applicable`
- * root node already carries the sentence for a family outside the skeleton set, so ordinarily
- * `nodes` is never empty for a real filter. This only fires if even that is missing, and it still
- * reads as an explicit statement rather than a blank box. */
 /** `job.trace_summary.nodes_elided` beside the list (acceptance item 5): the session-level count of
  * decisions the recorded trace dropped, stated even when the fetch itself is not truncated. Null
  * when the job has no summary yet or nothing was elided. */
 export function nodesElidedNote(job: Pick<AnalyzeJob, "trace_summary">): string | null {
   const n = job.trace_summary?.nodes_elided;
   return typeof n === "number" && n > 0 ? `${n} decision${n === 1 ? "" : "s"} elided from the recorded trace (nodes_elided)` : null;
+}
+
+/** Which filter the drawn list answers (T-930). A failed fetch keeps the PREVIOUS filter's
+ * results on screen under the error line (deliberate: losing the answer would be worse), so the
+ * list must say whose answer it is — an error for `psk` above an unfiltered list otherwise reads
+ * as psk's answer. Built from the filter the drawn trace was fetched with, never the one now in
+ * the input box. */
+export function filterLabel(f: TraceFilter): string {
+  const parts: string[] = [];
+  if (f.family) parts.push(`family ${f.family}`);
+  if (f.stage) parts.push(`stage ${f.stage}`);
+  if (f.outcome) parts.push(`outcome ${f.outcome}`);
+  if (f.tried !== undefined) parts.push(f.tried ? "tried only" : "not-tried only");
+  return parts.length ? `showing: ${parts.join(", ")}` : "showing: the whole trace (no filter)";
 }
 
 /** A failed trace fetch, stated plainly (a trace expires with its job; a bad filter is a 400) —
@@ -129,11 +139,20 @@ export function traceErrorText(e: unknown): string {
 /** The trace poll may stop only when both the trace is `final` AND the job copy the panel holds is
  * the handed-back one: it carries its `resolution`, or has ended (a solved job has none). The
  * backend sets both in the same hand-back, so a `final` trace can arrive before the job poll has
- * brought the resolution — stopping then would lose the headline (review FAIL, T-570). */
+ * brought the resolution — stopping then would lose the headline (review FAIL, T-570).
+ *
+ * `final` is the served field and nothing is inferred from it here: the backend serves `true` for
+ * a job that ENDED without ever producing a trace (a failure, a cancel of a still-queued job), so
+ * this condition now terminates for those too — before T-930 it could not, and the panel fetched
+ * the trace every 2 s for as long as such a job was watched. */
 export function tracePollDone(trace: Pick<TraceFetch, "final">, job: AnalyzeJob): boolean {
   return trace.final && (job.resolution != null || !jobIsActive(job));
 }
 
+/** An empty response is never the answer (acceptance item 4): the backend's own `not_applicable`
+ * root node already carries the sentence for a family outside the skeleton set, so ordinarily
+ * `nodes` is never empty for a real filter. This only fires if even that is missing, and it still
+ * reads as an explicit statement rather than a blank box. */
 export function emptyTraceText(t: Pick<TraceFetch, "nodes" | "elided">): string | null {
   return t.nodes.length || t.elided.length ? null : "no trace nodes recorded for this filter";
 }
@@ -171,7 +190,7 @@ function resolutionBlock(r: Resolution): HTMLElement {
  * `mountTracePanel` below) cannot touch the family `<input>` a user may be mid-keystroke in
  * (found in review: rebuilding the whole panel on every ~1 s job poll wiped focus and typed text,
  * so "Why not PSK?" could not be used at all). */
-function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, trace: TraceFetch | null, error: string | null = null): void {
+function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, trace: TraceFetch | null, error: string | null = null, shown: TraceFilter = {}): void {
   const kids: Array<Node | undefined> = [];
   if (error) kids.push(h("div", { class: "tr-error" }, error));
   if (!trace) {
@@ -179,6 +198,9 @@ function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, t
   } else {
     const resolution = job.resolution as Resolution | undefined;
     if (resolution) kids.push(resolutionBlock(resolution));
+    // Whose answer the list below is — the filter it was FETCHED with, which after a failed fetch
+    // for a new filter is not the one in the input box (T-930).
+    kids.push(h("small", { class: "tr-shown" }, filterLabel(shown)));
     const empty = emptyTraceText(trace);
     if (empty) kids.push(h("div", { class: "empty" }, empty));
     for (const g of groupByStage(trace.nodes)) {
@@ -198,17 +220,23 @@ function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, t
 
 /** Mounts the trace panel into `el`. The caller (`mountAnalyzeSection`, via its own `AnalyzeJob`
  * poll) drives `setJob`; this module makes no `GET /api/analyze/{id}` call of its own, only the
- * trace fetch, at 2 s while a job is watched (stopped per `tracePollDone`, restarted on the next
- * job; a failed fetch is stated and rethrown so `startPoll` backs off).
+ * trace fetch, at 2 s while a job is watched, restarted on the next job. It stops per
+ * `tracePollDone` — which terminates for EVERY ended job, including one that failed or was
+ * cancelled while queued, because the backend serves `final: true` for a job that ended without a
+ * trace (T-930); a failed fetch is stated and rethrown so `startPoll` backs off, and the poll then
+ * keeps retrying at the backed-off interval.
+ *
+ * The results carry the filter they were FETCHED with (`filterLabel`), so the list under a failed
+ * fetch's error line never reads as the answer to the filter that failed.
  *
  * The filter row (the family `<input>` and its buttons) is built exactly once per watched job and
  * never rebuilt by a results redraw — the fix for the review finding above. `renderTraceResults`
  * runs on every trace fetch, and on a same-id `setJob` (the 1 s `AnalyzeJob` poll) only when that
  * job brings a new or changed `resolution`/`trace_summary` — so the headline appears even when the
- * `final` trace arrived before the job poll carried the resolution. The poll stops only when the
- * trace is final AND the job copy is the handed-back one (`tracePollDone`). A monotonic request
- * sequence discards a stale trace response that resolves after a newer one (e.g. the unfiltered fetch still in flight when "why not psk" is asked) rather than letting it
- * overwrite the answer to a later question. */
+ * `final` trace arrived before the job poll carried the resolution. A monotonic request sequence
+ * discards a stale trace response that resolves after a newer one (e.g. the unfiltered fetch still
+ * in flight when "why not psk" is asked) rather than letting it overwrite the answer to a later
+ * question. */
 export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: AnalyzeJob | null): void } {
   let job: AnalyzeJob | null = null;
   let filter: TraceFilter = {};
@@ -227,7 +255,8 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
   // the headline without refetching, and a failed fetch keeps what was already shown.
   let lastTrace: TraceFetch | null = null;
   let lastError: string | null = null;
-  const redraw = () => { if (job) renderTraceResults(resultsEl, ctx, job, lastTrace, lastError); };
+  let lastFilter: TraceFilter = {}; // the filter `lastTrace` answers, for its label
+  const redraw = () => { if (job) renderTraceResults(resultsEl, ctx, job, lastTrace, lastError, lastFilter); };
 
   /** One trace fetch. Draws with the LATEST job (never a copy saved before the await: the backend
    * hands the resolution and the final trace back together, so a saved copy can predate it).
@@ -236,6 +265,7 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
     if (!job) return;
     const mySeq = ++seq;
     const id = job.id;
+    const asked = filter; // the filter THIS fetch answers (the box may move on before it lands)
     let trace: TraceFetch;
     try {
       trace = await ctx.client.get<TraceFetch>(tracePath(id, filter));
@@ -246,7 +276,7 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
       throw e;
     }
     if (seq !== mySeq || job?.id !== id) return; // superseded by a later filter, or the job changed
-    lastTrace = trace; lastError = null;
+    lastTrace = trace; lastError = null; lastFilter = asked;
     redraw();
     if (tracePollDone(trace, job) && stopPoll) { stopPoll(); stopPoll = null; }
   };
@@ -270,7 +300,7 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
           || JSON.stringify(prev?.trace_summary ?? null) !== JSON.stringify(j.trace_summary ?? null))) redraw();
         return;
       }
-      lastTrace = null; lastError = null;
+      lastTrace = null; lastError = null; lastFilter = {};
       filter = {}; familyInput.value = "";
       resultsEl.replaceChildren(h("div", { class: "empty" }, "loading trace…"));
       if (stopPoll) stopPoll();

@@ -86,6 +86,14 @@
   font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* T-916: where this viewport's last-known (shadow) cells were read — its own line, like the ruler,
+   and shown only when they came from a coarser source than the pane's stated level. */
+.hk-surface-shadow-source {
+  flex-basis: 100%;
+  opacity: 0.7;
+  font: 10.5px/1.45 system-ui, sans-serif;
+}
+
 /* A row's control and sentence are hidden by `el.hidden`; these are flex children, so the UA's
    `display: none` must not be outranked by anything above. */
 .hk-surface-viewport [hidden] { display: none !important; }

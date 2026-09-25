@@ -196,6 +196,7 @@ impl Block for Bch {
                     &self.bits[at..at + self.word_bits],
                     ok && c == 0 && upstream_clean,
                     width,
+                    width as usize,
                 );
                 self.meter.push(!ok);
                 match (ok, c) {

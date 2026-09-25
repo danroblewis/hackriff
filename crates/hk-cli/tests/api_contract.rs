@@ -893,6 +893,11 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         storage["wal_bytes"].is_u64(),
         "a file database in WAL mode has a -wal file: {storage}"
     );
+    // T-913: the row counts carry the time they were taken; the sizes beside them are current.
+    assert!(
+        storage["detection_rows_counted_s"].is_f64(),
+        "storage.detection_rows_counted_s: {storage}"
+    );
     for field in ["oldest_detection_s", "newest_detection_s"] {
         assert!(
             storage[field].is_null() || storage[field].is_f64(),
@@ -922,6 +927,7 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
             "keep_per_emitter": 256,
             "batch": 100,
             "interval_s": 600.0,
+            "count_rows_s": 600.0,
             "rollup_gap_s": 10.0,
             "rollup_span_s": 60.0,
         }),
@@ -2669,6 +2675,120 @@ fn paths_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-898 (docs/23 §10.6 rule 2): `GET /api/tune-history` answers as `docs/api.md` documents it, on
+/// a live `hk serve` over the mock device. By value: the run is tuned to the fixture's window, so
+/// the served route must be that front end's, its vertices must sit at the tuned centre, and a
+/// window the radio was never in (nor crossed) must draw nothing. The blind end-to-end assertion —
+/// vertices landing on **scripted retune instants** — is `hk-pipeline/tests/tune_history_path.rs`.
+#[test]
+fn tune_history_route_answers_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    // The route is drawn at the TUNED CENTRE, so the viewport is the fixture's own window.
+    let (f_lo, f_hi) = (FIXTURE_CENTER_HZ - 400e3, FIXTURE_CENTER_HZ + 400e3);
+    let url = |t0: f64, t1: f64, extra: &str| {
+        format!("/api/tune-history?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}{extra}")
+    };
+    wait_for(
+        "a tune record to reach the tune-history route",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(addr, &url(t1 - 3600.0, t1, "")).1["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(addr, &url(t0, t1, ""));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "context",
+        "paths",
+        "devices",
+        "total",
+        "limit",
+        "truncated",
+        "horizon",
+        "method",
+    ] {
+        assert!(
+            v.get(field).is_some(),
+            "tune-history answer missing {field}: {v}"
+        );
+    }
+    assert_eq!(v["method"], json!("hk-store/tune-path@1"), "{v}");
+    assert_eq!(v["limit"], json!(64), "{v}");
+    assert_eq!(v["window"]["f_lo_hz"].as_f64(), Some(f_lo), "{v}");
+    // The context widens the time window by its own duration, capped at 600 s, and never narrows
+    // the frequency axis: the band bounds are null, not numbers.
+    assert_eq!(v["context"]["f_lo_hz"], json!(null), "{v}");
+    assert_eq!(v["context"]["f_hi_hz"], json!(null), "{v}");
+    let ct0 = v["context"]["t0_s"].as_f64().unwrap();
+    assert!((ct0 - (t0 - 600.0)).abs() < 1e-3, "{v}");
+    // The one front end's route, over the window it is tuned to.
+    let p = &v["paths"][0];
+    assert!(p["device"].is_string(), "{v}");
+    assert!(
+        p["vertices"].as_array().is_some_and(|a| a.len() >= 2),
+        "{v}"
+    );
+    for vx in p["vertices"].as_array().unwrap() {
+        assert!(vx["t_s"].as_f64().is_some_and(f64::is_finite), "{vx}");
+        let f = vx["f_hz"].as_f64().expect("a vertex names a frequency");
+        assert!(
+            (f - FIXTURE_CENTER_HZ).abs() < 1.0,
+            "the route sits at the tuned centre: {vx}"
+        );
+        assert!(
+            ["start", "end"].contains(&vx["at"].as_str().unwrap_or("")),
+            "{vx}"
+        );
+    }
+    assert!(
+        p["legs"].as_u64().unwrap_or(0).max(1) > p["retunes"].as_u64().unwrap_or(0),
+        "retunes are the changes of centre between legs: {p}"
+    );
+    assert!(v["horizon"]["as_of_s"].as_f64().is_some(), "{v}");
+    // A band the radio was never in and never crossed draws nothing.
+    let (st, far) = get(
+        addr,
+        &format!("/api/tune-history?f_lo=2.0e9&f_hi=2.1e9&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{far}");
+    assert_eq!(far["total"], json!(0), "{far}");
+    // `device` and `limit` narrow; malformed ones refuse.
+    let dev = p["device"].as_str().unwrap().to_owned();
+    let (st, d) = get(addr, &url(t0, t1, &format!("&device={dev}&limit=5")));
+    assert_eq!(st, 200, "{d}");
+    assert_eq!(d["limit"], json!(5), "{d}");
+    assert_eq!(d["total"], v["total"], "{d}");
+    let (st, none) = get(addr, &url(t0, t1, "&device=no-such-radio"));
+    assert_eq!(st, 200, "{none}");
+    assert_eq!(none["total"], json!(0), "{none}");
+    for bad in ["&device=any", "&limit=0", "&limit=5000"] {
+        let (st, e) = get(addr, &url(t0, t1, bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // A viewport route needs the whole viewport.
+    for q in [
+        format!("/api/tune-history?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+        format!("/api/tune-history?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+        format!("/api/tune-history?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),
+        "/api/tune-history".to_owned(),
+    ] {
+        let (st, e) = get(addr, &q);
+        assert_eq!(st, 400, "{q}: {e}");
+    }
+    let (st, e) = post(addr, "/api/tune-history", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(t0, t1, ""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
@@ -3544,6 +3664,13 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
     assert_eq!(st, 200, "{t}");
     assert_eq!(t["nodes"], json!([]), "{t}");
     assert_eq!(t["job_id"], json!(id), "{t}");
+    // T-930: this job ENDED (failed) without ever producing a trace, so the fetch is `final` —
+    // otherwise a watching client polls it every 2 s for as long as it is on screen.
+    assert_eq!(
+        t["final"],
+        json!(true),
+        "a job that ended without a trace is final: {t}"
+    );
     // Every filter is parsed, and an unknown VALUE is `400 invalid` — never silently ignored,
     // which would answer a different question from the one asked (ADR-0021 §4.2).
     for good in [
@@ -7311,6 +7438,67 @@ fn require_iq_ring(addr: SocketAddr) {
     }
 }
 
+/// The `sources[]` row a coverage answer serves for `kind`.
+fn coverage_source<'a>(coverage: &'a Value, kind: &str) -> &'a Value {
+    coverage
+        .get("sources")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.iter().find(|s| s["kind"] == json!(kind)))
+        .unwrap_or_else(|| panic!("the {kind} source row is always reported: {coverage}"))
+}
+
+/// **T-920: waits for the coverage answer whose evidence is the IQ RING's tune journal.**
+///
+/// `observed_cells > 0` alone is *not* that answer. Since T-596 the **open dwell** — the dwell in
+/// flight, before the observation log has sealed a record for it — rasterises into the same planes
+/// and can carry the tuned band on its own. The IQ ring, meanwhile, opens on a background thread
+/// (T-178/T-217), so for the first fraction of a second to several seconds of a run, depending on
+/// the quota and how loaded the box is, `/api/coverage` answers `observed_cells: 8` with
+/// `sources[iq-ring]` reporting `available: false, state: "allocating"`.
+///
+/// A wait that stops at the observed count therefore steps straight into an assertion about the
+/// ring while the ring is still being laid down. That is exactly how this file's coverage test ran
+/// red 4/4 on a loaded Linux host and green on a quiet Mac: not a platform defect, a wait that did
+/// not wait for its own evidence. [`require_iq_ring`] does not catch it either — `"allocating"` is
+/// deliberately "not an answer yet" there, because it is the one unavailable state that resolves
+/// itself.
+///
+/// So the wait is on **both**: the ring able to contribute, and the band observed. A settled
+/// refusal still fails immediately in the server's words, and a ring that never finishes opening
+/// fails naming the `state` and `reason` it was last serving (T-920 put them on the row for
+/// exactly this).
+fn wait_for_ring_backed_coverage(addr: SocketAddr, query: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = Value::Null;
+    loop {
+        // T-621: this loop's evidence is the ring's tune journal, so a server that was refused
+        // one can never satisfy it. Fail here, in the server's words, instead of 60 s later on
+        // an assertion about *coverage*.
+        require_iq_ring(addr);
+        // 404 until the ring has a live edge to hang a capture window on: a server with no
+        // capture window says so rather than inventing a span.
+        let (st, got) = get(addr, query);
+        if st == 200 {
+            let ring_ready = coverage_source(&got, "iq-ring")["available"] == json!(true);
+            let observed = got["any"]["observed_cells"].as_u64().unwrap_or(0) > 0;
+            last = got;
+            if ring_ready && observed {
+                return last;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the IQ ring to back the coverage answer for {query}. The ring              row's own words: {}. (`available: false` with `state: \"allocating\"` means it is              still opening; anything else settled is this machine, not the code under test.) Last              answer: {last}",
+            if last.is_null() {
+                Value::Null
+            } else {
+                coverage_source(&last, "iq-ring").clone()
+            },
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// T-368: **grey means genuinely unobserved.**
 ///
 /// The user's invariant: *"the view renders whatever samples are actually available for the current
@@ -7352,25 +7540,11 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     // away from the fixture's 100.8 MHz.
     let (flo, fhi) = (2.400e9, 2.410e9);
 
-    let mut tuned = Value::Null;
-    wait_for(
-        "the coverage map to report the tuned band as sampled",
-        Duration::from_secs(60),
-        || {
-            // T-621: this loop's evidence is the ring's tune journal, so a server that was
-            // refused one can never satisfy it. Fail here, in the server's words, instead of
-            // 60 s later on a coverage assertion.
-            require_iq_ring(addr);
-            // 404 until the ring has a live edge to hang a capture window on: a server with no
-            // capture window says so rather than inventing a span.
-            let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
-            if st != 200 {
-                return false;
-            }
-            tuned = got;
-            tuned["any"]["observed_cells"].as_u64().unwrap_or(0) > 0
-        },
-    );
+    // T-920: waits for the ring to be able to contribute, not merely for a cell to read
+    // `observed` — the open dwell can supply the latter while the ring is still allocating, and
+    // every assertion below is about the RING's journal. See [`wait_for_ring_backed_coverage`].
+    let tuned =
+        wait_for_ring_backed_coverage(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
 
     // ---- state 1/2: the tuned band was sampled, and the answer says how ----
     let cells = tuned["any"]["cells"].as_array().expect("cells").clone();
@@ -7914,16 +8088,25 @@ fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() 
         "a refused ring contributes no spans: {tuned}"
     );
     assert_eq!(ring["named_spans"], json!(0), "{tuned}");
-    // NOT asserted here: `sources[iq-ring].available`. Measured 2026-09-21 on this very server, a
-    // refused ring still reports `available: true` — the flag tracks whether a ring *handle* is
-    // wired into the API state, not whether a tune journal could answer. Under the documented
-    // meaning ("a client can tell 'this record had nothing here' from 'this record was not
-    // consulted'") that is the wrong way round, and it is a fail-open: `Evidence::unknown_rows`
-    // decides `no_tune_history` from these same flags, so a refused ring makes the server believe
-    // it still holds a tune history it does not have. The fix belongs in
-    // `crates/hk-api/src/coverage.rs`, which T-621 was told to stay out of (T-596 holds it);
-    // reported as a follow-up rather than asserted either way, because pinning today's value here
-    // would enshrine the defect and pinning tomorrow's would fail the gate now.
+    // T-640 closed what T-621 could only report here: `available` is measured (can this source
+    // contribute evidence?), not declared (is a handle wired?), so a refused ring reports
+    // `false` — and `Evidence::unknown_rows` reads `no_tune_history` from it rather than
+    // believing in a journal that was never allocated.
+    assert_eq!(
+        ring["available"],
+        json!(false),
+        "a refused ring holds no journal and must not claim one: {tuned}"
+    );
+    // T-920: and it says WHICH negative it is, end to end, in the words `/api/iqbuffer` served
+    // above. A client that cannot tell `"refused"` from `"allocating"` cannot tell *this device
+    // has no ring today* from *wait a moment*, and that silence is what sent a Linux worker
+    // hunting a portability defect that was not there.
+    assert_eq!(ring["state"], json!("refused"), "{tuned}");
+    assert_eq!(
+        ring["reason"].as_str(),
+        Some(reason.as_str()),
+        "the coverage row quotes the ring's own refusal verbatim: {tuned}"
+    );
     let log = src("observation-log");
     assert_eq!(log["available"], json!(true), "{tuned}");
     // T-680: the surviving tune history is the observation log's sealed records AND the dwell in
@@ -7933,6 +8116,12 @@ fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() 
     // the first poll, and the log's sealed spans may still be zero.
     let open = src("open-dwell");
     assert_eq!(open["available"], json!(true), "{tuned}");
+    // T-920: an available source states that too, rather than only the unavailable ones, so
+    // neither of the rows above can pass by carrying a complaint unconditionally.
+    for r in [&log, &open] {
+        assert_eq!(r["state"], json!("open"), "{tuned}");
+        assert_eq!(r["reason"], Value::Null, "{tuned}");
+    }
     assert!(
         log["spans"].as_u64().unwrap_or(0) + open["spans"].as_u64().unwrap_or(0) > 0,
         "the surviving tune history is what answered: {tuned}"
@@ -13051,4 +13240,111 @@ fn saved_views_crud_share_and_paging_answer_as_documented() {
     assert_eq!(st, 201, "{back}");
     assert_eq!(back["share"], share);
     stop_server(serving);
+}
+
+// T-891 VLF accessory
+
+/// T-891 (SPACE-001, SPACE-041, PROP-019): `hk serve --device mock:<radio> --device
+/// vlf-mock:<recording>` attaches the mock VLF receiver **beside** the radio, and `/api/vlf`
+/// answers the documented shape for it — the accessory's provenance on every report — while the
+/// radio's routes are untouched. The science itself is asserted blind in
+/// `crates/hk-pipeline/tests/vlf_accessory.rs`; this pins the wire.
+#[test]
+fn vlf_accessory_route_answers_documented_shape_through_serve() {
+    let fs = 48_000.0;
+    let rec_dir = temp_data_dir();
+    let _rec_guard = TempDataDirGuard::new(rec_dir.clone());
+    std::fs::create_dir_all(&rec_dir).unwrap();
+    let meta = rec_dir.join("vlf.sigmf-meta");
+    let x: Vec<f32> = (0..(fs as usize * 3))
+        .map(|i| 0.01 * (2.0 * std::f64::consts::PI * 19_800.0 * i as f64 / fs).cos() as f32)
+        .collect();
+    hk_core::source::write_real_sigmf(&meta, &x, fs, "2026-09-25T12:00:00Z", "t891", None).unwrap();
+
+    let dir = temp_data_dir();
+    let guard = TempDataDirGuard::new(dir.clone());
+    let serving = start(&ServeOptions {
+        source: ServeSource::HackRf {
+            spec: format!("mock:{}", fixture_path().display()),
+            extra: vec![(format!("vlf-mock:{}", meta.display()), LiveArgs::default())],
+            live: LiveArgs::default(),
+        },
+        data_dir: Some(dir),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(64 << 20),
+        },
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = serving.server.local_addr();
+
+    // The accessory runs in real time; wait (bounded) for its first block.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let v = loop {
+        let (st, v) = get(addr, "/api/vlf");
+        assert_eq!(st, 200, "{v}");
+        if v["accessories"][0]["state"] != "waiting" || Instant::now() > deadline {
+            break v;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(is_array(&v["accessories"]), "{v}");
+    assert_eq!(v["accessories"].as_array().unwrap().len(), 1, "{v}");
+    let r = &v["accessories"][0];
+    for field in [
+        "state",
+        "device_id",
+        "accessory",
+        "provenance_ref",
+        "provenance",
+        "sample_rate_hz",
+        "phase_disciplined",
+        "window",
+        "samples",
+        "gaps",
+        "dropped_samples",
+        "carriers",
+        "sferics",
+        "sferic_total",
+    ] {
+        assert!(r.get(field).is_some(), "missing {field}: {r}");
+    }
+    assert!(
+        ["discovering", "tracking", "finished"].contains(&r["state"].as_str().unwrap()),
+        "{r}"
+    );
+    assert_eq!(r["accessory"], "vlf-receiver");
+    let device = r["device_id"].as_str().unwrap().to_string();
+    assert!(device.starts_with("vlf-receiver:"), "{r}");
+    assert_eq!(r["provenance"]["device_id"], device.as_str());
+    assert_eq!(r["provenance"]["antenna_port"], "accessory:vlf-receiver");
+    assert_eq!(r["provenance"]["tune"]["center_hz"], 0.0);
+    assert_eq!(r["sample_rate_hz"], fs);
+    assert!(is_array(&r["carriers"]) && is_array(&r["sferics"]), "{r}");
+    assert!(r["window"]["start_ns"].is_i64(), "{r}");
+
+    let (st, v) = get(addr, &format!("/api/vlf?device={device}&points=1"));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["accessories"][0]["device_id"], device.as_str());
+    let (st, _) = get(addr, "/api/vlf?device=hackrf:nope");
+    assert_eq!(st, 404);
+    let (st, _) = get(addr, "/api/vlf?points=2");
+    assert_eq!(st, 400);
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(addr, "POST", "/api/vlf", Some(&auth), Some("{}"));
+    assert_eq!(st, 405);
+    let (st, _) = call(addr, "GET", "/api/vlf", None, None);
+    assert_eq!(st, 401);
+
+    stop_server(serving);
+    drop(guard);
 }

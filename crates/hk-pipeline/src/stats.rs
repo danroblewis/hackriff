@@ -137,8 +137,12 @@ counter_group!(
         track_merges,
         /// Track rows upserted.
         track_rows,
-        /// Track↔detection links written.
+        /// Track↔detection links written (T-913: written, not attempted).
         track_links,
+        /// Track↔detection links asked for whose detection was not stored — never written, or
+        /// aged out by retention before the link was drained (T-913). Any growth here is lost
+        /// track membership, not a rounding detail.
+        track_links_dropped,
         /// Tracks confirmed (offered as POIs / chain candidates).
         tracks_confirmed,
         /// Floor-change events.
