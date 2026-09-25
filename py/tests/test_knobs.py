@@ -1,6 +1,8 @@
 """The knob store and the bounded hold enforce the pipeline-manager invariants 3-6 in code."""
 
 import json
+import pathlib
+import re
 
 from hkpy import knobs
 
@@ -126,7 +128,6 @@ def test_gate_tiers_takes_a_word_and_only_full_or_check(tmp_path):
 
 def test_the_merge_runner_passes_the_gate_tier_to_every_merge_gate():
     """Every gate call the runner makes on a merge carries $GATE_PHASE, and the retry commands too."""
-    import pathlib, re
     src = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
     calls = re.findall(r"limited just gate(?:-merge)?[^;\n]*", src)
     assert calls and all("$GATE_PHASE" in c for c in calls), calls
