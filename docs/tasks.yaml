@@ -18832,7 +18832,8 @@ tasks:
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
-    status: todo
+    status: in-progress
+    branch: task-t576
     priority: high
     parallel_group: M-E
     model: opus
@@ -25999,7 +26000,8 @@ tasks:
   - id: T-869
     milestone: MAUTO
     title: "LP-5: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate"
-    status: todo
+    status: in-progress
+    branch: task-t869
     priority: normal
     deps:
     - T-868
@@ -27537,7 +27539,8 @@ tasks:
   - id: T-928
     milestone: MAUTO
     title: Confirm-gate init-cancel guard misses spans with start_bit > 0 (must precede template seeding / floor 8); stale floor-8 doc text; CheckTally preallocates ~790 KB per check block (T-575 review)
-    status: todo
+    status: in-progress
+    branch: task-t928
     priority: high
     deps:
     - T-575
