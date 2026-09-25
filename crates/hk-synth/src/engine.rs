@@ -327,7 +327,8 @@ pub struct SolveRule {
     pub min_analytic_holdout_bits: f32,
     /// ADR-0022 §4.3: 16 of those bits from a check stage. Derived.
     pub hard_check_floor_bits: f32,
-    /// ADR-0022 §4.3: 8. **Assumed, not derived** (T-577 measures it).
+    /// ADR-0022 §4.3 / §4.3.1: 16, **measured by T-577** (8 only once §4.3.1's count is
+    /// re-measured by T-577's harness; never below 8).
     pub min_check_width: u32,
 }
 
@@ -336,7 +337,7 @@ impl Default for SolveRule {
         Self {
             min_analytic_holdout_bits: 24.0,
             hard_check_floor_bits: 16.0,
-            min_check_width: 8,
+            min_check_width: 16,
         }
     }
 }
@@ -847,13 +848,16 @@ fn differences_of(e: &Evidence) -> u32 {
     (e.raw.floor() as u32).min(e.n)
 }
 
-/// The S5 differences of one evaluation: the largest over the blocks that reported a check.
-fn differences(ev: &[NodeEvidence]) -> u32 {
+/// The differences of one evaluation, read off the check block `node` whose summary supplies
+/// the width — never another block's count against this block's width. With no node named, the
+/// **smallest** count any check block reported (the pairing is unknown, so the weakest).
+fn differences(ev: &[NodeEvidence], node: Option<&str>) -> u32 {
     ev.iter()
+        .filter(|n| node.is_none_or(|id| n.node == id))
         .flat_map(|n| n.evidence.iter())
         .filter(|e| e.metric == MetricId::CheckDistinctValid)
         .map(differences_of)
-        .max()
+        .min()
         .unwrap_or(0)
 }
 
@@ -2743,11 +2747,10 @@ impl<'a, E: Evaluator> Engine<'a, E> {
                         .map(|e| StageEvidence::from_evidence(n.node.clone(), e)),
                 );
             }
-            if stage == Stage::S5 {
-                run.differences = differences(&ev.evidence);
-            }
-            if ev.check.is_some() {
-                run.check = ev.check;
+            if let Some(check) = ev.check {
+                // `width` and `differences` from one block (T-575 review): the summary's node.
+                run.differences = differences(&ev.evidence, check.node.as_deref());
+                run.check = Some(check);
             }
             if window == EvalWindow::Holdout && !ev.frames.is_empty() {
                 // The deepest stage that decodes wins: its frames carry the most structure.
@@ -3352,7 +3355,7 @@ mod tests {
             13.0,
         );
         assert_eq!(differences_of(&beacon), 1);
-        assert_eq!(differences(&[node(&[beacon])]), 1);
+        assert_eq!(differences(&[node(&[beacon])], None), 1);
         // Never more than was tested, and nothing from an unreadable count.
         let mut e = beacon;
         e.raw = 40.0;
@@ -3361,7 +3364,7 @@ mod tests {
         assert_eq!(differences_of(&e), 0);
         e.raw = -3.0;
         assert_eq!(differences_of(&e), 0);
-        // The largest over the blocks that reported a check; other metrics are not counted.
+        // Paired with the block the check summary names; the smallest when it names none.
         let sync = Evidence::new(
             Stage::S5,
             MetricId::SyncExcess,
@@ -3372,8 +3375,40 @@ mod tests {
         );
         let mut three = beacon;
         three.raw = 3.0;
-        assert_eq!(differences(&[node(&[sync, beacon]), node(&[three])]), 3);
-        assert_eq!(differences(&[node(&[sync])]), 0);
+        let mut other = node(&[three]);
+        other.node = "crc_b".into();
+        let both = [node(&[sync, beacon]), other];
+        assert_eq!(differences(&both, Some("crc_b")), 3);
+        assert_eq!(differences(&both, Some("n")), 1);
+        assert_eq!(
+            differences(&both, None),
+            1,
+            "unpaired: the weakest, never the max"
+        );
+        assert_eq!(differences(&both, Some("absent")), 0);
+        assert_eq!(differences(&[node(&[sync])], None), 0);
+    }
+
+    /// ADR-0022 §4.3.1 (T-577, applied by T-575): the solve rule's width floor is the measured
+    /// 16 — a CRC-8 carrying any number of bits does not solve.
+    #[test]
+    fn the_solve_rule_width_floor_is_t577s_measured_16() {
+        let rule = SolveRule::default();
+        assert_eq!(rule.min_check_width, 16);
+        let h = |w: u32| HoldoutEvidence {
+            evidence_bits: 200.0,
+            analytic_bits: 200.0,
+            check_bits: Some(160.0),
+            l_check: Some(0.0),
+            check_width: Some(w),
+            differences: 20,
+            check_origin: CheckOrigin::TemplateFixed,
+            stages: Vec::new(),
+            null_control: None,
+        };
+        assert!(!rule.met(Stage::S5, &h(8)));
+        assert!(!rule.met(Stage::S5, &h(15)));
+        assert!(rule.met(Stage::S5, &h(16)));
     }
 
     /// ADR-0022 §2.1 (T-575): only the four "contributes: yes" metrics pay for a confirmation.

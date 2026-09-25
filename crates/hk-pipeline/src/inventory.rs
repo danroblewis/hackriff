@@ -330,7 +330,7 @@ pub struct ConfirmPolicy {
 /// undone only by a user delete — and every clause is a positive measurement that must be present:
 /// a missing or NaN one refuses. The numbers are ADR-0022's, derived from the user's budget of
 /// one wrong Confirmed emitter per unattended week; they are guesses on a one-way door
-/// everywhere ADR-0022 says so (the 8-bit width floor, the 9.7-bit margin inside 24), and only
+/// everywhere ADR-0022 says so (the 9.7-bit margin inside 24; the width floor is T-577's measured 16), and only
 /// ever tighten.
 ///
 /// The gate, in order (ADR-0022 §6):
@@ -362,7 +362,9 @@ pub struct SynthesizedConfirm {
     pub min_analytic_holdout_bits: f64,
     /// ADR-0022 §4.3: at least this much from a check stage. Derived.
     pub hard_check_floor_bits: f64,
-    /// ADR-0022 §4.3: a degenerate-null floor. **Assumed, not derived** (T-577).
+    /// ADR-0022 §4.3 / §4.3.1: a degenerate-null floor, **measured by T-577**: 16. It may return
+    /// to 8 only once §4.3.1's count ships in every counter the gate reads *and* is re-measured
+    /// by T-577's harness; never below 8. Only ever raised by configuration, never lowered.
     pub min_check_width: u32,
     /// ADR-0022 §1.2: the budget's denominator. Monitored, not trusted (§8, T-575).
     pub assumed_decisions_per_week: u32,
@@ -380,7 +382,7 @@ impl Default for SynthesizedConfirm {
             enabled: true,
             min_analytic_holdout_bits: 24.0,
             hard_check_floor_bits: 16.0,
-            min_check_width: 8,
+            min_check_width: 16,
             assumed_decisions_per_week: 20_000,
             require_null_control_when_searched: true,
             max_suspect_detection_fraction: 0.5,
@@ -643,7 +645,7 @@ impl SynthesizedConfirm {
         let check = r
             .check
             .as_ref()
-            .map_or_else(|| format!("{width}-bit check"), |c| c.model.clone());
+            .map_or_else(|| format!("{width}-bit check"), |c| clip(&c.model, 48));
         let origin = if searched {
             "searched"
         } else {
@@ -653,12 +655,26 @@ impl SynthesizedConfirm {
             "decoded by synthesized pipeline `{}`: {check} ({origin}), {} differing frame(s) valid \
              on hold-out without correction, {:.1} − {l_check:.1} = {check_bits:.1} check bits, \
              {analytic:.1} analytic bits against a {:.0}-bit threshold{null_text}",
-            ev.pipeline,
+            clip(&ev.pipeline, 96),
             h.differences,
             check_bits + l_check,
             self.min_analytic_holdout_bits,
         ))
     }
+}
+
+/// `s` cut to at most `max` bytes on a character boundary, with `…` when cut: the names in a
+/// lifecycle reason are unbounded (template ids, check models) and must never crowd the
+/// arithmetic out of the store's 512-byte limit.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut n = max;
+    while !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    format!("{}…", &s[..n])
 }
 
 impl Default for ConfirmPolicy {

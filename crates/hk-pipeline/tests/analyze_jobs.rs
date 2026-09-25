@@ -308,6 +308,7 @@ impl Evaluator for World {
             corrected_excluded: 0,
             tested: 12,
             holdout,
+            node: None,
         });
         // The hold-out run's decoded frames: what the attach step stores (ADR-0015 §5.5).
         let frames = if holdout && on && req.stage == Stage::S5 {

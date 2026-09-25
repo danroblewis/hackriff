@@ -262,6 +262,7 @@ impl Evaluator for World {
             corrected_excluded: 0,
             tested: self.holdout_frames.max(1),
             holdout,
+            node: None,
         });
         let frames = if holdout && on_truth && req.stage == Stage::S5 {
             (0..self.holdout_frames)

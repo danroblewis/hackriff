@@ -642,6 +642,7 @@ mod tests {
                 corrected_excluded: 0,
                 tested: 3,
                 holdout: true,
+                node: None,
             }),
             frames_preview: Vec::new(),
             characterisation: None,
@@ -733,8 +734,14 @@ mod tests {
 
     #[test]
     fn width_floor_hard_check_floor_and_analytic_threshold_each_refuse() {
-        let e = ok(&with(|h| h.check_width = Some(7))).unwrap_err();
-        assert!(e.contains("under the 8-bit floor"), "{e}");
+        // T-577 / ADR-0022 §4.3.1: the floor is 16 while 8 is unmeasured with the shipped count.
+        let e = ok(&with(|h| h.check_width = Some(15))).unwrap_err();
+        assert!(
+            e.contains("a 15-bit check is under the 16-bit floor"),
+            "{e}"
+        );
+        let e = ok(&with(|h| h.check_width = Some(8))).unwrap_err();
+        assert!(e.contains("under the 16-bit floor"), "{e}");
         let e = ok(&with(|h| h.check_width = None)).unwrap_err();
         assert!(e.contains("always carries a check"), "{e}");
         // 24 analytic bits of sync excess and a thin check: not a decode.
@@ -809,14 +816,12 @@ mod tests {
     }
 
     /// ADR-0022 §4.2 (review M1): the check is worth at most `width × differences − L_check`,
-    /// whatever the evaluator reports. A searched CRC-8 on a beacon repeating one payload five
-    /// times has one difference: 8 − 13 = −5 bits, so it refuses even when told 40.
+    /// whatever the evaluator reports. A searched CRC-16 on a beacon repeating one payload five
+    /// times has one difference: 16 − 21 = −5 bits, so it refuses even when told 40.
     #[test]
     fn check_bits_are_clamped_to_width_times_differences_less_l_check() {
         let e = ok(&with(|h| {
-            h.check_width = Some(8);
             h.differences = 1;
-            h.l_check = Some(13.0);
             h.check_bits = Some(40.0);
             h.analytic_bits = 45.0;
         }))
@@ -906,29 +911,36 @@ mod tests {
         assert!(e.contains("3 needed"), "{e}");
     }
 
-    /// ADR-0022 §4.2: `differences`, not `distinct_valid`. A template-fixed CRC-8 beacon repeating
-    /// one payload eight times has eight valid frames and one difference; whatever its check
-    /// reports, it is worth one frame's 8 bits, and the repeat count confirms nothing.
+    /// ADR-0022 §4.2: `differences`, not `distinct_valid`. A template-fixed CRC-16 beacon
+    /// repeating one payload eight times has eight valid frames and one difference; whatever its
+    /// check reports, it is worth one frame's 16 bits, so with 6 bits of sync it reaches 22 of the
+    /// 24 — and the repeat count confirms nothing.
     #[test]
     fn t575_a_repeated_payload_beacon_does_not_confirm_on_its_repeat_count() {
         let mut r = crc24_single_frame(CheckOrigin::TemplateFixed, 0.0);
         let c = r.check.as_mut().unwrap();
-        c.model = "CRC-8".into();
-        c.width = 8;
+        c.model = "CRC-16".into();
+        c.width = 16;
         c.distinct_valid = 8;
         c.tested = 8;
         let h = r.holdout.as_mut().unwrap();
-        h.check_width = Some(8);
+        h.check_width = Some(16);
         h.differences = 1;
-        h.check_bits = Some(64.0);
-        h.analytic_bits = 70.0;
+        h.check_bits = Some(128.0);
+        h.analytic_bits = 134.0;
         let e = ok(&r).unwrap_err();
-        assert!(e.contains("8.0 bits after L_check 0.0"), "{e}");
-        assert!(e.contains("1 differing frames of 8 bits; 3 needed"), "{e}");
-        // With eight *different* payloads the same frames carry 64 check bits, and confirm.
+        assert!(
+            e.contains("22.0 analytic hold-out bits against a 24-bit threshold"),
+            "{e}"
+        );
+        // With eight *different* payloads the same frames carry 128 check bits, and confirm.
         let h = r.holdout.as_mut().unwrap();
         h.differences = 8;
-        assert!(ok(&r).is_ok());
+        let reason = ok(&r).unwrap();
+        assert!(
+            reason.contains("128.0 − 0.0 = 128.0 check bits"),
+            "{reason}"
+        );
     }
 
     /// ADR-0022 §4.1: the rank currency does not pay. 70 `evidence_bits`, 22 of them analytic.
@@ -1025,6 +1037,29 @@ mod tests {
         );
         // The same evidence decides the same way at any count: no uptime-dependent charge.
         assert!(ok(&solved()).is_ok());
+    }
+
+    /// T-575 review: the pipeline name comes first in the reason and is unbounded (a template id),
+    /// so a long one pushed the arithmetic past the 512-byte lifecycle cut. It is capped.
+    #[test]
+    fn t575_a_long_pipeline_name_never_crowds_the_arithmetic_out_of_the_lifecycle_reason() {
+        let r = solved();
+        let reason = SynthesizedConfirm::default()
+            .decide(&SynthesizedEvidence {
+                profile: Profile::Standard,
+                result: &r,
+                pipeline: "x".repeat(2_000),
+                suspect_fraction: Some(0.0),
+                overload: Some(false),
+            })
+            .unwrap();
+        let kept = lifecycle_text(&reason);
+        assert!(
+            kept.contains("analytic bits against a 24-bit threshold"),
+            "{kept}"
+        );
+        assert!(kept.contains("null control passed"), "{kept}");
+        assert!(kept.contains('…'), "{kept}");
     }
 
     #[test]
