@@ -47,6 +47,19 @@ const CARD = `JSON.stringify((() => {
 })())`;
 const card = async (page) => JSON.parse(await page.eval(CARD));
 
+/** T-996's left column (Go-to, nudges, pills, Retune + widths, the offer, the mode banner) is taller
+ * at phone width, and the open card covers the bottom, so the top fifth of a box can sit UNDER
+ * chrome. The press stays off-centre inside the box (\`pressPoint\`); only its height moves down to
+ * the first point where the canvas is what a click lands on (undefined: none — the box's own top-
+ * fifth point is used, and the assertion below says why that press is not a map hit test). */
+const PRESS_Y = `((r) => {
+  const dx = Math.max(3, Math.min(r.width / 5, r.width / 2 - 1));
+  for (let y = r.y + Math.max(3, Math.min(r.height / 5, r.height / 2 - 1)); y < r.bottom - 3; y += 4) {
+    if (document.elementFromPoint(r.x + dx, y)?.classList.contains('sf-canvas')) return y;
+  }
+  return undefined;
+})`;
+
 /** The detection box nearest the live edge, as its own invisible hit area over the drawn rectangle
  * (`surface/pins.ts`: `.sf-pin.detection.area` is placed exactly on the box). A box too small to be
  * drawn is generalized to a symbol (docs/23 §10.6 rule 6), which is then what there is to click. */
@@ -59,6 +72,7 @@ const BOX_AT = `(() => {
     if (!inside) continue;
     const q = { id: p.dataset.pin, label: p.getAttribute('aria-label'), area: p.classList.contains('area'),
       x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
+    q.pressY = ${PRESS_Y}(r);
     if (!best || q.y < best.y) best = q;
   }
   return best;
@@ -71,7 +85,8 @@ function pressPoint(box) {
   if (!box.area) return { x: box.cx, y: box.cy, offCentre: false };
   const dx = Math.max(3, Math.min(box.w / 5, box.w / 2 - 1));
   const dy = Math.max(3, Math.min(box.h / 5, box.h / 2 - 1));
-  return { x: box.x + dx, y: box.y + dy, offCentre: box.w > 10 && box.h > 10 };
+  const y = box.pressY ?? box.y + dy;
+  return { x: box.x + dx, y, offCentre: box.w > 10 && box.h > 10 && Math.abs(y - box.cy) > 1 };
 }
 
 /** A point on the canvas that is BARE MAP: no pin/box hit area, no floating chrome, no card, not the
@@ -186,8 +201,11 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
     const others = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.sf-pins .sf-pin.detection')]
       .filter((p) => p.dataset.pin !== ${JSON.stringify(box.id)}).map((p) => { const r = p.getBoundingClientRect();
         return { id: p.dataset.pin, label: p.getAttribute('aria-label'), area: p.classList.contains('area'),
-          x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width / 2, cy: r.y + r.height / 2 }; })
-      .filter((q) => q.w > 0 && q.h > 0))`));
+          x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width / 2, cy: r.y + r.height / 2, pressY: ${PRESS_Y}(r) }; })
+      .filter((q) => q.w > 0 && q.h > 0)
+      // A second box whose press point is under chrome (or the open card) is not a map click; prefer
+      // one the canvas is under, the same way the first box's press is chosen.
+      .sort((a, b) => Number(b.pressY !== undefined) - Number(a.pressY !== undefined)))`));
     if (others.length > 0) {
       const at = pressPoint(others[0]);
       await page.mouse("mousePressed", at.x, at.y, { buttons: 1, clickCount: 1 });
@@ -204,7 +222,13 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
       const r = await page.$rect(".sf-canvas");
       const dpr = await page.eval("window.devicePixelRatio || 1");
       const bottom = r.y + r.h - MINIMAP_PX / dpr - 40;
-      await page.drag({ x: r.x + r.w * 0.2, y: r.y + r.h * 0.25 }, { x: r.x + r.w * 0.34, y: bottom }, 10, { shift: true });
+      // The drag starts on the MAP: at phone width T-996's left column (Retune + widths, the offer)
+      // spans the whole width a quarter of the way down, so the start moves below it — the first
+      // point the canvas is what a press lands on.
+      const x0 = r.x + r.w * 0.2;
+      const y0 = await page.eval(`(() => { for (let y = ${r.y + r.h * 0.25}; y < ${bottom - 60}; y += 4)
+        if (document.elementFromPoint(${x0}, y)?.classList.contains('sf-canvas')) return y; return ${r.y + r.h * 0.25}; })()`);
+      await page.drag({ x: x0, y: y0 }, { x: r.x + r.w * 0.34, y: bottom }, 10, { shift: true });
       await page.waitFor("the card to swap to the selected region",
         `/Selected region/.test(document.querySelector('.sheet-title')?.textContent ?? '')`, { timeoutMs: 20000 });
       t.diagnostic("swapped to a marked region (this window held one detection)");
