@@ -21,6 +21,7 @@ import importlib.util
 import json
 import time
 import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -1123,3 +1124,19 @@ def test_the_merge_runner_writes_what_it_holds_in_memory():
     assert 'echo "$1" > "$S/merging-now"; process "$1"' in text and 'rm -f "$S/merging-now"' in text
     loop = text[text.index('        rest="$isolate"'):]
     assert '> "$S/isolate-remaining"' in loop[:400] and 'rm -f "$S/isolate-remaining"' in loop[:1200]
+
+
+def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_path):
+    """Review 2026-09-24: a runner killed mid-isolation or mid single merge left those branches in no
+    queue (the reason a restart during an isolation lost them) and now a stale depth file."""
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    i = text.index('for f in "$S/isolate-remaining" "$S/merging-now"; do')
+    block = text[i:text.index("\ndone\n", i) + 6]
+    (tmp_path / "isolate-remaining").write_text("task-b task-c task-d\n")
+    (tmp_path / "merging-now").write_text("task-a\n")
+    (tmp_path / "q").write_text("task-x\n")
+    script = f'set -u\nS={tmp_path}; QUEUE={tmp_path}/q\nlog(){{ echo "LOG $*"; }}\n{block}\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "q").read_text().split() == ["task-x", "task-b", "task-c", "task-d", "task-a"]
+    assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()

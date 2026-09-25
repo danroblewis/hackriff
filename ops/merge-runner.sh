@@ -912,6 +912,13 @@ if [ -e "$REPO/.git/MERGE_HEAD" ]; then
   git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
     || log "STARTUP: could not abort the staged merge ($stale) - a person must look"
 fi
+# An isolation or a single merge this runner was killed in: those branches were in no queue - put them
+# back, so a restart never loses them (and the queue-depth count never shows them as phantoms).
+for f in "$S/isolate-remaining" "$S/merging-now"; do
+  [ -s "$f" ] || { rm -f "$f"; continue; }
+  sleft=$(tr -s ' \n' ' ' < "$f"); for b in $sleft; do echo "$b" >> "$QUEUE"; done
+  rm -f "$f"; log "STARTUP: re-queued what a killed run was still holding ($(basename "$f")): $sleft"
+done
 if [ -f "$BULKMARK" ]; then
   sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
   if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
