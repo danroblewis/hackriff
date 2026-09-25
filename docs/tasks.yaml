@@ -29263,6 +29263,30 @@ tasks:
       FOUND BY merge runner bisect 2026-09-25: Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix
     dispatch: manual
     high_effort_reason: "bulk red with no single culprit: interaction-vs-nondeterminism triage across three branches on the replay/recovery path, a real-time-adjacent area"
+  - id: T-1016
+    milestone: M2-hardening
+    title: "sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-SWEEP-RESIDENCY
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY the merge runner / supervisor (2026-09-25 11:34): hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads has reddened THREE bulk gates (2026-09-24 16:21, overnight, 2026-09-25 11:26 - base 6b521960, 12 branches; today 29 branches waited on it). Each red costs a solo re-run or a bisect. Messages (ops merge-runner.log):
+        crates/hk-pipeline/tests/sweep_residency.rs:188 '400 attaches left 17 chains running, above the 16 cap' (report: 'attaches 25: threads 60 running 16 ... + 0 classifying; attaches 400: threads 62 running 17 ... + 1 classifying')
+        crates/hk-pipeline/tests/sweep_residency.rs:229 '400 attaches left 17 chains (classifying chains excluded) running, above the 16 cap'
+      The test (T-558) asserts the run-wide chain cap (16) holds under a sustained survey. Flakes registry: branch_defects 2, never triaged alone.
+      DELIVER (deflake-triage rules): run it ALONE >= 10x on main (nextest -p hk-pipeline -E 'binary(sweep_residency)') and under load; then decide:
+      - red alone => a REAL cap defect (an admission race letting a 17th chain start, or a finishing chain counted before it releases its slot): fix the product (the admission/release ordering), prove red on regression. The cap is a CPU-budget invariant - do not raise it or loosen the bound.
+      - passes alone, red only under load => the COUNT is racy, not the cap: count at a deterministic point (join/quiesce the chains that have ended, or read the scheduler's own admitted-count under its lock) instead of sampling live threads at an instant; never a sleep or retry. If the assertion is inherently a load-dependent bound it moves to the `timing` tier (docs/10 §3.6) with evidence - but prefer the deterministic count.
+      Do not #[ignore], quarantine or loosen. Red-on-regression proof required (re-inject an off-by-one admission and show the test catches it).
+      TESTING PROTOCOL (CLAUDE.md): targeted only (cargo nextest run -p hk-pipeline -E 'binary(sweep_residency)'; just precheck hk-pipeline), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY supervisor 2026-09-25 11:34 (merge gate reds x3): sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point
+    high_effort_reason: "three bulk reds on a CPU-budget invariant (the run-wide chain cap): real admission race vs racy count must be told apart and fixed deterministically on the real-time scheduling path"
+    dispatch: manual
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
