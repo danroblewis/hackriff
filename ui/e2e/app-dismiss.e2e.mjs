@@ -9,6 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
+import * as chrome from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
@@ -38,8 +39,11 @@ const STACKED = OVERLAYS.filter((o) => !o.alone);
 // T-918: an overlay that animates between its states (the sheet's height transition, sheet.css
 // .28 s) is measured once it has ARRIVED, never at a frame of the way there — a box read two frames
 // into its opening, or its closing, is most of the way back where it started.
-const settled = (page, o, what) => page.waitFor(`${o.name} to finish ${what}`,
-  `document.querySelector(${JSON.stringify(o.box)}).getAnimations().length === 0`, { timeoutMs: 5000 });
+// T-958: through the shared `arrived` predicate, which adds the second half of "has it arrived" —
+// the rendered height against the one the product set. `getAnimations()` alone is empty in the
+// window between the click's style mutation and the style recalc that creates the transition, i.e.
+// exactly when this poll first runs.
+const settled = (page, o, what) => chrome.settled(page, o.box, `${o.name}'s ${what}`);
 
 for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes back to the map, and Escape closes the topmost`, async (t) => {
   const browser = await Browser.open();
@@ -54,6 +58,8 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   if (await page.eval(OVERLAYS[0].isOpen)) {
     await page.click("document.querySelector('.sheet-close')");
     await page.waitFor("the sheet at peek", `!(${OVERLAYS[0].isOpen})`, { timeoutMs: 5000 });
+    // T-958: and arrived, before the loop below measures it shut and presses its head open again.
+    await settled(page, OVERLAYS[0], "reset");
   }
   await page.frames(3);
   // T-918 (docs/23 §10.1): the canvas is 100vw x 100vh and no chrome subtracts from it — so every

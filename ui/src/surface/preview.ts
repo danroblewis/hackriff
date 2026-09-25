@@ -33,7 +33,7 @@
 
 import { ControlError } from "../controls/client";
 import {
-  coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
+  coverageUrl, observedExtent, openingWindow, orientationNote, recentObservedExtent, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { batchedTileSource } from "./tilebatch";
@@ -248,24 +248,36 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   }
 
   const census = observedExtent(cov);
+  // T-955: the box the refinement pass narrows is the RECENTLY active one, not the lifetime union.
+  // A session that tuned to one band for an hour and retuned five minutes ago has both bands inside
+  // one record horizon, and `observedExtent`'s box is a bounding rectangle over every observed cell
+  // ever — measured live as a reload opening on a box still centred near the band the radio had just
+  // left, and a separate session opening on "100–1100 MHz × 1.6 h" with the actually-tuned band drawn
+  // as a sliver inside it. `recent` falls back to the whole-history box only when the recent rows
+  // hold nothing at all, so a server with no live front end still opens on whatever it has.
+  const recent = recentObservedExtent(cov);
+  const coarse = recent.box ? recent : census;
   // **One refinement pass, measured rather than assumed.** A 128-cell map of a 6.5 GHz surface has
   // 51.2 MHz cells, so the coarse box around a 2.4 MHz capture is ~20x too wide — measured on a
   // replay: 0.78 % observed, and the observed box came back as 51.2–102.4 MHz for a recording that
   // spans 99.6–102 MHz. Opening there would put the capture in a twentieth of the pane's width and
   // read as "still nothing here". Asking the *same route* again over the box it just returned costs
-  // one request and is the same question at the resolution the answer made available.
-  let refined = census;
-  if (census.box) {
+  // one request and is the same question at the resolution the answer made available — over a MUCH
+  // smaller extent, so this second pass is also what resolves a retune boundary the coarse recency
+  // narrowing above was still too coarse to see.
+  let refined = coarse;
+  if (coarse.box) {
     try {
-      fine = (await ask(coverageUrl(census.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
-      refined = observedExtent(fine);
+      fine = (await ask(coverageUrl(coarse.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
+      const fineRecent = recentObservedExtent(fine);
+      refined = fineRecent.box ? fineRecent : observedExtent(fine);
     } catch (e) {
       degraded.push(`the coverage refinement pass failed (${describe(e)}): the view opens on the coarse observed box, which may be much wider than what was actually sampled.`);
-      refined = census;
+      refined = coarse;
     }
     // A refinement that found nothing is not evidence against the coarse answer — the coarse cell
     // was observed, so something is in there. Keep the wider box rather than opening on nowhere.
-    if (refined.observed === 0) refined = census;
+    if (refined.observed === 0) refined = coarse;
   }
   // The note's share is the SURFACE-wide census: it is a statement about the whole surface, and
   // quoting the refined pass's share (measured inside coverage, so near 100 %) would invert it.

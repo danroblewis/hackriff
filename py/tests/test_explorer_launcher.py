@@ -111,6 +111,15 @@ def test_dry_run_validates_and_touches_nothing(tmp_path):
     assert not (tmp_path / "claude.args").exists()
 
 
+def test_the_session_id_from_launch_sh_reaches_the_agent(tmp_path):
+    """ops/launch.sh picks the id and records it in role-session/explorer; the agent must run as it."""
+    env, _, _ = _stubs(tmp_path)
+    sid = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    r = subprocess.run([str(WINDOW), "--window", "1m", "--session-id", sid], env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert f"--session-id {sid}" in (tmp_path / "claude.args").read_text()
+
+
 def test_a_bare_number_is_minutes_like_just_radio_take(tmp_path):
     env, _, _ = _stubs(tmp_path)
     r = subprocess.run([str(WINDOW), "--window", "90", "--dry-run"], env=env, capture_output=True, text=True)
