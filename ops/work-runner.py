@@ -606,11 +606,7 @@ def remote_prepare(host, wt, branch, d, resume=False):
                               f"if git rev-parse -q --verify origin/{branch} >/dev/null; then git worktree add -q -B {branch} {q(wt)} origin/{branch}; "
                               f"else git worktree add -q -b {branch} {q(wt)} origin/main; fi; "
                               f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true; "
-                              # the Mac's commits on the branch (a runner board result, a coordinator's merge), pushed
-                              # to the mirror by the tick's sync: a clean worktree takes them, fast-forward only
-                              f"elif [ -z \"$(git -C {q(wt)} status --porcelain --untracked-files=no)\" ] && "
-                              f"git -C {q(wt)} merge-base --is-ancestor HEAD origin/{branch} 2>/dev/null; then "
-                              f"git -C {q(wt)} merge -q --ff-only origin/{branch}; fi", timeout=600)
+                              f"elif {rs.ff_worktree_cmd(q(wt), branch)}; then :; fi", timeout=600)
     if rc:
         raise RuntimeError(f"remote_prepare on {host}: {out.strip()[-200:]}")
 
@@ -651,6 +647,7 @@ def _reposync():
 
 
 _REPOSYNC = {}      # host -> the last tick's hkpy.reposync.sync_host result, for the status file
+GIT_SSH = "ssh " + " ".join(SSH_OPTS)      # a fetch/push to a host: BatchMode, ConnectTimeout, like every other ssh here
 
 
 def sync_repos(dry):
@@ -659,7 +656,9 @@ def sync_repos(dry):
     for h in hosts():
         before = _REPOSYNC.get(h, {})
         try:
-            _REPOSYNC[h] = r = _reposync().sync_host(REPO, h, dry=dry)
+            if not host_ready(h):          # its last probe: unreachable (or stale) - no call that would wait on it
+                raise RuntimeError("host probe says unreachable or stale - not synced this tick")
+            _REPOSYNC[h] = r = _reposync().sync_host(REPO, h, dry=dry, ssh=GIT_SSH)
         except Exception as e:
             _REPOSYNC[h] = r = {"refs_in_sync": False, "drifting": None, "error": str(e)[:200], "branches": {}}
         # what moved, every time; what drifts, when that set changes (a diverged branch is not re-logged every tick)
@@ -689,10 +688,16 @@ def sync_back(c):
         # Invariant 29 (user ruling 2026-09-25 11:50): the hand-back is judged only from a branch verified identical on
         # the host's worktree, its mirror and this Mac. 2026-09-25: nine resumed node2 runs (T-957..T-972) committed
         # there and were judged NO_WORK from this Mac's unmoved ref.
-        e = _reposync().sync_branch(REPO, host, branch)
+        rs = _reposync()
+        e = rs.sync_branch(REPO, host, branch, ssh=GIT_SSH)
         if e["state"] == "fetch-failed":
             raise RuntimeError(f"fetch {branch}: {e.get('why', '')[:160]}")
-        rc, out = remote_sh(host, f"git -C {shlex.quote(wt)} rev-parse HEAD && git -C {shlex.quote(wt)} status --porcelain --untracked-files=no", timeout=60)
+        # The Mac's commits the host never had (a runner board result while the run went on): a clean host worktree
+        # takes them fast-forward, or the claim would sit in sync-error with nothing for a person to decide.
+        qwt = shlex.quote(wt)
+        rc, out = remote_sh(host, f"git -C {qwt} fetch -q origin +refs/heads/{branch}:refs/remotes/origin/{branch} && "
+                                  f"{{ {rs.ff_worktree_cmd(qwt, branch)} || true; }} && "
+                                  f"git -C {qwt} rev-parse HEAD && git -C {qwt} status --porcelain --untracked-files=no", timeout=60)
         if rc:
             raise RuntimeError(f"remote status: {out.strip()[:160]}")
         head, *dirty = out.splitlines() or [""]
@@ -701,7 +706,9 @@ def sync_back(c):
             detail = (f"{branch}: {host} worktree {head.strip()[:8] or '-'}, mirror {(e['mirror'] or '-')[:8]}, this Mac "
                       f"{(e['local'] or '-')[:8]} ({e['state']}{': ' + e['why'] if e.get('why') else ''}) - not judged; the claim "
                       "is held and re-judged the tick they agree")
-            log(f"SYNC_ERROR {tid}: {detail}")
+            if detail != c.get("sync_error_detail"):          # a held claim is re-tried every tick: said on change
+                c["sync_error_detail"] = detail
+                log(f"SYNC_ERROR {tid}: {detail}")
             if not c.get("sync_error_said"):
                 c["sync_error_said"] = True
                 attention(tid, branch, "SYNC_ERROR", detail)
@@ -1209,6 +1216,7 @@ def reap(claims, dry):
             if held:
                 log(f"SYNC {tid}: host, mirror and this Mac agree again - judged now")
                 c.pop("sync_error_said", None)
+                c.pop("sync_error_detail", None)
             c["detached"], c["state"] = False, "running"
         changed = True
         # The root is gone; anything of this run still running is a LEAK, holding cores and disk
@@ -2077,7 +2085,7 @@ def reap_worktrees(claims, dry):
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}   # a held fix resumes there
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "sync-error")}   # a held fix resumes there
     if not dry:
         sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
@@ -2303,7 +2311,7 @@ def reclaim_idle_targets(claims, dry):
     (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "sync-error")}
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
