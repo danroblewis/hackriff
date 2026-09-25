@@ -12,6 +12,13 @@ Environment-specific constants at the top of each file (edit for a different mac
 `REPO` (the repo path, `/Users/daniellewis/hackriff`); in `monitor.py` also `PROJ` (the Claude
 projects dir), `COORD` (the coordinator's conversation id), and `SUPER`.
 
+**Role sessions (2026-09-25).** `ops/launch.sh <role>` starts claude with `--session-id <uuid>` (a
+`--resume <id>` keeps that id) and writes it to `$HACKRIFF_OPS/role-session/<role>` (the coordinator
+also to `coordinator-session`). The dashboard's agents panel names roles only from those files and
+shows a session as live only while a claude process carries its id (`ps`, or Claude Code's
+`~/.claude/sessions/<pid>.json`); otherwise `ended hh:mm`, hidden 5 min later. `COORD` is only the
+fallback until `role-session/coordinator` exists.
+
 ## The five scripts
 
 ### `stage.sh` — staging demo watcher (port 8899)

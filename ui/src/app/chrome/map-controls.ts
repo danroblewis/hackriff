@@ -22,6 +22,7 @@ import { parseFrequency } from "../../controls/freq";
 import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
+import { registerMapHome } from "./top-chrome";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
  * step. The pane's own `zoomBoth` holds the aspect lock and the bounds (T-472), so a press at a
@@ -342,7 +343,25 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, record",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
   }, svg(["path", "M4 5h16v14H4z"], ["path", "M12 5v14"])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn);
+  // T-993: the retired top bar's Review button is moved in here (`top-chrome.ts`), beside the other
+  // panels' buttons, and Theme into a small ⋯ menu — settings, not a bar button.
+  const reviewHome = h("span", { class: "map-review-home" });
+  const moreBtn = h("button", {
+    type: "button", class: "map-ibtn map-more-btn", "aria-label": "More: settings", title: "More: theme and settings",
+    "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-more-menu",
+  }, svg(["circle", 5, 12, 1.2], ["circle", 12, 12, 1.2], ["circle", 19, 12, 1.2])) as HTMLButtonElement;
+  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn, reviewHome, moreBtn);
+  const moreClose = h("button", {
+    type: "button", class: "map-layers-close map-more-close", "aria-label": "Close the settings menu — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
+  const moreBody = h("div", { class: "map-more-body" });
+  const moreMenu = h("div", { class: "map-glass map-pane-menu map-more-menu", id: "map-more-menu", role: "group", "aria-label": "Settings", hidden: true },
+    h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreBody);
+  // T-993: the retired bar's other homes. The mode switch and device/stream state float as one small
+  // pill; the tuning nudges (T-409, device commands through the one gated DeviceAction path) sit
+  // under Go-to, where the retune offer — the other device command on the map — already lives.
+  const statusHome = h("div", { class: "map-glass map-status map-fade", role: "group", "aria-label": "View and device", hidden: true });
+  const nudgeHome = h("div", { class: "map-glass map-nudge map-fade", hidden: true });
   const paneItem = (act: string, label: string, title: string, run: () => void) => {
     const b = h("button", { type: "button", class: "map-pane-item", "data-pane-act": act, title }, label) as HTMLButtonElement;
     // A menu item acts and closes the menu, like any menu; Record IQ (a host extra) keeps it open so
@@ -385,7 +404,7 @@ export function mountMapControls(host: MapControlHost): {
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
     svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, offer, modeBanner, topright, layers, paneMenu, zoom, fab);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
@@ -496,13 +515,27 @@ export function mountMapControls(host: MapControlHost): {
     paneMenu.hidden = !open;
     paneBtn.setAttribute("aria-pressed", String(open));
     paneBtn.setAttribute("aria-expanded", String(open));
-    if (open) { syncPaneMenu(); if (layersOpen) setLayersOpen(false); }
+    if (open) { syncPaneMenu(); if (layersOpen) setLayersOpen(false); if (moreOpen) setMoreOpen(false); }
     fade.hold("pane-menu", open); // an open menu never fades
   };
+  let moreOpen = false;
+  const moreOverlay = trackOverlay("more-menu", () => { setMoreOpen(false); moreBtn.focus(); });
+  const setMoreOpen = (open: boolean) => {
+    moreOpen = open;
+    moreOverlay.open(open);
+    moreMenu.hidden = !open;
+    moreBtn.setAttribute("aria-pressed", String(open));
+    moreBtn.setAttribute("aria-expanded", String(open));
+    if (open) { if (layersOpen) setLayersOpen(false); if (paneOpen) setPaneOpen(false); }
+    fade.hold("more-menu", open); // an open menu never fades
+  };
+  moreBtn.addEventListener("click", () => setMoreOpen(!moreOpen));
+  moreClose.addEventListener("click", () => { setMoreOpen(false); moreBtn.focus(); });
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
     layersOverlay.open(open);
     if (open && paneOpen) setPaneOpen(false);
+    if (open && moreOpen) setMoreOpen(false);
     layers.hidden = !open;
     layersBtn.setAttribute("aria-pressed", String(open));
     layersBtn.setAttribute("aria-expanded", String(open));
@@ -549,6 +582,7 @@ export function mountMapControls(host: MapControlHost): {
 
   syncFollow();
   syncMeasure();
+  registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
   return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch };

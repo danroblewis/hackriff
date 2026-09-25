@@ -21,8 +21,8 @@ const cssImports = [...entryCss.matchAll(/@import "\.\/([^"]+)";/g)].map((m) => 
 const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n");
 // T-445's cutover replaced four centre slots — "live" (the waterfall), "axis" (the frequency tick
 // strip) and the two edge navigators "timenav"/"freqnav" — with ONE: "surface".
-// T-409's "nudge" stays: the tuning-nudge buttons in the top bar, beside the Go to control they sit
-// next to and the Centre readout they change.
+// T-409's "nudge" stays: the tuning-nudge buttons in the top bar (in Explore, since T-993, moved
+// under the map's floating Go-to — `chrome/top-chrome.ts`) and the Centre readout they change.
 // T-803's "sheet": the bottom sheet that wraps the focus slot (index.html nests "focus" inside it).
 // T-895's "side": the left column that wraps "inventory" and "selections" (its collapsed chip).
 const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "drawer", "side", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue", "research"];
