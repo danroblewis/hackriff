@@ -1044,6 +1044,25 @@ pub(crate) fn parse_inventory_query_limited(
     // T-219: rows that currently defer to another row (suppressed by a Confirmed entry, the weaker
     // of a duplicate group, an attributed receiver artifact) are hidden unless asked for. Their
     // rows, detections, tracks and history are kept and still reachable by id.
+    // T-566 (ADR-0021 §7A.4, §11.1): the decode-side resolution filter. Its values are exactly
+    // the `ResolutionKind` enum; an unknown one is `400 invalid` rather than silently ignored,
+    // because a filter that quietly matches everything answers a different question from the one
+    // asked. `not-searched` also selects emitters nothing has analysed at all — *un-looked-at* is
+    // a state of its own, never rendered as *searched and found nothing*.
+    let resolution = match nonempty(q, "resolution") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<hk_model::repo::synthesis::ResolutionKind>(Value::String(
+                v.trim().to_owned(),
+            ))
+            .map_err(|_| {
+                bad(
+                    "resolution must be not-searched, unknown, structured-unidentified or \
+                     unsupported-structure",
+                )
+            })?,
+        ),
+    };
     let relations = match nonempty(q, "relations") {
         None | Some("shown") => RelationVisibility::Shown,
         Some("all") => RelationVisibility::All,
@@ -1057,6 +1076,7 @@ pub(crate) fn parse_inventory_query_limited(
         tag: short_text(q, "tag")?,
         identity_scheme,
         family: short_text(q, "family")?,
+        resolution,
         relations,
         limit: limit as u32,
         offset,
@@ -1606,11 +1626,15 @@ pub fn inventory_entry_json_at(
         // a row, with its `resolution`). Withheld rows read `null` whatever storage holds, like
         // `estimated_params` and `cluster_id`: a template id or a decode count appearing is not
         // allowed to confirm a withheld identity indirectly (T-159/T-163).
-        let synthesis = if withheld {
-            None
+        // T-566 (ADR-0021 §7A.4): the row's decode-side resolution, beside the summary, so the
+        // inventory can show a **characterised unknown** as different from an un-analysed row —
+        // the difference between a catalogue and a list of boxes.
+        let (synthesis, resolution) = if withheld {
+            (None, resolution_row_json(None, true))
         } else {
-            repo.synthesis(e.id)?
-                .map(|row| synthesis_summary_json(&row))
+            let row = repo.synthesis(e.id)?;
+            let resolution = resolution_row_json(row.as_ref(), false);
+            (row.as_ref().map(synthesis_summary_json), resolution)
         };
         // T-860 (ADR-0015 §5.5 trust rules): whether the identity rests only on synthesized
         // decodes. A synthesized identity — even a real one, such as `adsb-icao` from a
@@ -1763,6 +1787,8 @@ pub fn inventory_entry_json_at(
             "relation": relation,
             // T-860 (ADR-0015 §5.4): the latest analysis, summarised; null = not searched.
             "synthesis": synthesis,
+            // T-566 (ADR-0021 §7A.4): {kind, reason, t, profile, withheld} — never absent.
+            "resolution": resolution,
         });
         // ADR-0017 §7.1: present only when the request named a window — see the function docs for
         // why absent and `null` must stay different answers.
@@ -1774,6 +1800,47 @@ pub fn inventory_entry_json_at(
         }
         Ok(row)
     }
+}
+
+/// T-566 (ADR-0021 §7A.4, §11.1): the inventory row's `resolution` — `{kind, reason, t, profile,
+/// withheld}`, present on **every** row.
+///
+/// > *Not-yet-analysed and analysed-and-found-nothing are different states, and neither may be
+/// > rendered as the other.* This is the decode-side statement of the canvas's grey rule.
+///
+/// So an emitter with **no** `emitter_synthesis` row reads `kind: "not-searched"` with no `t` —
+/// *un-looked-at*, a positive state rather than a missing field — and a finished search that
+/// identified nothing reads its own sealed `kind` (`unknown`, `structured-unidentified`,
+/// `unsupported-structure`) with the time and profile it was measured at. `kind: null` means the
+/// latest analysis **solved**: there is no unresolved finding, and `synthesis` carries the
+/// pipeline it chose.
+///
+/// A **withheld-identity** row reads every field `null` with `withheld: true` (T-159/T-163: a
+/// field appearing must never confirm a withheld identity indirectly) — which is still not
+/// `not-searched`, so nothing analysed is rendered as un-looked-at. Such a row matches no
+/// `?resolution=` filter value, exactly as a non-vocabulary `tag` never matches it.
+fn resolution_row_json(
+    row: Option<&hk_model::repo::synthesis::EmitterSynthesis>,
+    withheld: bool,
+) -> Value {
+    if withheld {
+        return json!({
+            "kind": null, "reason": null, "t": null, "profile": null, "withheld": true,
+        });
+    }
+    let Some(row) = row else {
+        return json!({
+            "kind": hk_model::repo::synthesis::ResolutionKind::NotSearched,
+            "reason": null, "t": null, "profile": null, "withheld": false,
+        });
+    };
+    json!({
+        "kind": row.resolution.as_ref().map(|r| r.kind),
+        "reason": row.resolution.as_ref().and_then(|r| r.reason),
+        "t": ts_s(row.t),
+        "profile": row.job.as_ref().map(|j| j.profile.as_str()),
+        "withheld": false,
+    })
 }
 
 /// The inventory row's `synthesis` summary of an `emitter_synthesis` row (ADR-0015 §5.4): what
