@@ -714,3 +714,21 @@ def test_liveness_gives_up_after_three_relaunches_that_came_back_dead(monkeypatc
     fake.sessions["dev"] = 100                        # a person brought it back: the count resets
     W.liveness(ALIVE, since, t)
     assert "liveness:failed:coordinator" not in since
+
+
+def test_a_process_running_from_a_live_claims_worktree_is_that_workers():
+    """2026-09-24 22:4x: T-577's own targeted test (a Bash tool shell reparented to launchd) alarmed as
+    'unowned at 93% CPU - kill it'; T-882's and T-901's did the same earlier that day."""
+    claims = {"T-577": {"state": "running", "pid": 800, "ticket": "T-577", "wt": "/r/.claude/worktrees/t577"},
+              "T-607": {"state": "queued", "pid": 900, "ticket": "T-607", "wt": "/r/.claude/worktrees/t607"}}
+    rows = table(
+        row(800, 1, "cpulimit -l 300 -i -- taskpolicy -c background claude -p"),
+        row(44791, 1, "/bin/zsh -c source /Users/d/.claude/shell-snapshots/snapshot-zsh-1.sh"),
+        row(44793, 44791, "/opt/homebrew/bin/cargo-nextest nextest run -p hk-estimate -E binary(degenerate_null)"),
+        row(44877, 44793, "/r/.claude/worktrees/t577/target/debug/deps/degenerate_null-3765 --exact x", cpu=93.0),
+        row(44900, 1, "/r/.claude/worktrees/t607/target/debug/hk serve --bind 127.0.0.1:9930", cpu=95.0),
+        row(44901, 1, "/r/.claude/worktrees/t5770/target/debug/hk serve", cpu=91.0),   # not t577's: a prefix is a dir
+    )
+    agg, unowned = W.owners(rows, claims)
+    assert 44877 in agg["worker:T-577"]["pids"]
+    assert {r["pid"] for r in unowned} >= {44900, 44901}      # a queued claim owns nothing; t5770 is not t577
