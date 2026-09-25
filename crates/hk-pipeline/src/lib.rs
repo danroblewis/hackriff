@@ -118,10 +118,10 @@ pub use recorder::{
 pub use refine::RefineSettings;
 pub use run::{
     CaptureState, ControlFailure, ControlStats, ControlStatus, DeviceReplay, ExtraSource,
-    MAX_RECOVERY_ATTEMPTS, MAX_START_SKEW, Pipeline, PipelineController, PipelineHandle,
-    REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunDevice, RunSummary, SegmentHold,
-    SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT, open_mock_replay, open_replay,
-    recovery_backoff, replay_block_len, replay_once,
+    InventoryHold, MAX_RECOVERY_ATTEMPTS, MAX_START_SKEW, Pipeline, PipelineController,
+    PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunDevice,
+    RunSummary, SegmentHold, SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT,
+    open_mock_replay, open_replay, recovery_backoff, replay_block_len, replay_once,
 };
 pub use stats::Counters;
 pub use survey::{ReceiverSurvey, SurveyCadence, SurveyCounts};

@@ -115,6 +115,14 @@ const DENSE_MEMORY_FRAMES: u64 = 1 << 20;
 /// Longest end-of-stream wait for the writer.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How many inventory events [`Writer::file_inventory`] files under one hold of the repository and
+/// inventory locks before releasing them (T-941).
+///
+/// Small enough that a chain's teardown — and so `hk-control`'s stop — never waits out a whole
+/// batch of closes, large enough that the lock round-trips are lost in the per-event SQLite work
+/// (each event is several statements; taking two uncontended mutexes is tens of nanoseconds).
+const INVENTORY_LOCK_CHUNK: usize = 32;
+
 // Short-lived per frame (moved straight into the tracker and the writer), like hk-detect's
 // own `TrackEvent`.
 #[allow(clippy::large_enum_variant)]
@@ -1021,6 +1029,8 @@ impl Writer {
         inc(&dc.db_batches);
         let now = Timestamp::from_unix_nanos(self.now_ns);
         let mut opened = Vec::new();
+        // Set inside the hold below, read by the inventory stage after it is released.
+        let tracks_stored;
         {
             let mut repo = shared.repo();
             let mut retry = Vec::new();
@@ -1043,7 +1053,7 @@ impl Writer {
             // Track links (and the closes that summarise them) name detections: write them only
             // once every detection is stored, otherwise keep them for the next pass.
             let detections_stored = self.pending.is_empty() && self.detections.pending() == 0;
-            let tracks_stored = detections_stored
+            tracks_stored = detections_stored
                 && match self.tracks.write(&mut repo) {
                     Ok((tracks, links)) => {
                         add(&dc.track_rows, tracks as u64);
@@ -1057,41 +1067,6 @@ impl Writer {
                         false
                     }
                 };
-            if tracks_stored
-                && !(self.closed.is_empty() && self.live.is_empty() && self.live_reviews.is_empty())
-            {
-                let mut inv = shared
-                    .inventory
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                // Live offers first: a carried batch can hold an older snapshot of a track whose
-                // close, merge or hop set arrived since, and the end must come after the offer so
-                // the inventory can retract it (T-109).
-                for s in self.live.drain(..) {
-                    if inv.live_track(&mut repo, &s).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-                // T-403: then the reviews. They create nothing, so their order against the
-                // offers does not matter; they run before the closes for the same reason the
-                // offers do — a close must be able to supersede a live decision, never the
-                // reverse.
-                for s in self.live_reviews.drain(..) {
-                    // T-403: whether a chain holds this emission as the review runs. The live
-                    // continuous route yields to one — see `ConfirmPolicy::decide`.
-                    let measuring = shared
-                        .claims
-                        .measuring(s.track.f_center_hz, s.track.bandwidth_hz.max(0.0) / 2.0);
-                    if inv.live_trust(&mut repo, &s, measuring).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-                for e in self.closed.drain(..) {
-                    if inv.track_event(&mut repo, &e).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-            }
             for e in self.floor.drain(..) {
                 inc(&dc.floor_events);
                 let Some(life) = self.anomalies.as_mut() else {
@@ -1121,6 +1096,12 @@ impl Writer {
                 }
             }
         }
+        // T-941: the inventory stage runs **outside** that hold, in chunks of its own — see
+        // [`Self::file_inventory`]. Gated on `tracks_stored` exactly as it was: an event that
+        // names a track row which is not stored yet waits for the next pass.
+        if tracks_stored {
+            self.file_inventory(&shared);
+        }
         if opened.is_empty() {
             return;
         }
@@ -1145,6 +1126,89 @@ impl Writer {
                 }
             }
             Err(_) => inc(&dc.db_errors),
+        }
+    }
+
+    /// Files this pass's inventory events — the live offers, the T-403 reviews and the closes —
+    /// taking the repository and inventory locks for **each chunk** of
+    /// [`INVENTORY_LOCK_CHUNK`] and releasing them in between (T-941).
+    ///
+    /// # Why the hold is chunked, not held for the batch
+    ///
+    /// This used to run inside [`Writer::write`]'s one repository hold, with the inventory lock
+    /// taken across every event of the batch. That is the hold T-941 was reported against, and it
+    /// couples three threads that should be independent:
+    ///
+    /// 1. **`hk-detect`** cannot end until its writer has drained what its `finish` handed over,
+    ///    and a segment's end closes *every open track it has* — in a dense band, hundreds of
+    ///    closes, each several SQLite statements of inventory work.
+    /// 2. **`hk-control`** cannot end until every chain has, and a chain's last act takes
+    ///    `shared.repo()` and then `shared.inventory` ([`crate::chains`]) — the two locks this
+    ///    held for the whole batch. So one long batch made *both* threads straggle, which is
+    ///    exactly the pair the live report names ("hk-detect did not stop within 8s … hk-control
+    ///    did not stop within 8s").
+    /// 3. **The next segment**'s first inventory write waits behind whatever of (1) is still
+    ///    running, since T-941 made the inventory the run's.
+    ///
+    /// Chunking changes none of the work and none of its order — all the offers, then all the
+    /// reviews, then all the closes, each event still filed under `&mut Repository` — only how
+    /// long anyone else waits to be let in between them. What does move is where this stage sits
+    /// against the *rest* of the pass: it now runs after the same pass's floor-anomaly and
+    /// trust-verdict writes rather than before them. Those are unrelated domains (a noise-floor
+    /// anomaly and a track's inventory entry name nothing in common), and the order that matters —
+    /// detections and track rows stored before anything that references them, offers before
+    /// closes — is the order above and inside this function.
+    fn file_inventory(&mut self, shared: &Shared) {
+        let dc = &shared.counters.detect;
+        // Live offers first: a carried batch can hold an older snapshot of a track whose close,
+        // merge or hop set arrived since, and the end must come after the offer so the inventory
+        // can retract it (T-109).
+        while !self.live.is_empty() {
+            let n = self.live.len().min(INVENTORY_LOCK_CHUNK);
+            let mut repo = shared.repo();
+            let mut inv = shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for s in self.live.drain(..n) {
+                if inv.live_track(&mut repo, &s).is_err() {
+                    inc(&dc.db_errors);
+                }
+            }
+        }
+        // T-403: then the reviews. They create nothing, so their order against the offers does
+        // not matter; they run before the closes for the same reason the offers do — a close must
+        // be able to supersede a live decision, never the reverse.
+        while !self.live_reviews.is_empty() {
+            let n = self.live_reviews.len().min(INVENTORY_LOCK_CHUNK);
+            let mut repo = shared.repo();
+            let mut inv = shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for s in self.live_reviews.drain(..n) {
+                // T-403: whether a chain holds this emission as the review runs. The live
+                // continuous route yields to one — see `ConfirmPolicy::decide`.
+                let measuring = shared
+                    .claims
+                    .measuring(s.track.f_center_hz, s.track.bandwidth_hz.max(0.0) / 2.0);
+                if inv.live_trust(&mut repo, &s, measuring).is_err() {
+                    inc(&dc.db_errors);
+                }
+            }
+        }
+        while !self.closed.is_empty() {
+            let n = self.closed.len().min(INVENTORY_LOCK_CHUNK);
+            let mut repo = shared.repo();
+            let mut inv = shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for e in self.closed.drain(..n) {
+                if inv.track_event(&mut repo, &e).is_err() {
+                    inc(&dc.db_errors);
+                }
+            }
         }
     }
 
