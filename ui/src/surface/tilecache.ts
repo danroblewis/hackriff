@@ -823,6 +823,21 @@ export class TileCache<T> {
    * before deciding whether the coverage survey may answer the place instead (T-580). */
   isResident(addr: TileAddr): boolean { return this.map.has(keyOf(addr)); }
 
+  /**
+   * **Places the coverage survey settles as never sampled — no lane may start a request for one**
+   * (T-905). T-580 gated the renderer's own misses on the survey, but a request can start from
+   * other lanes: T-538's pan look-ahead ([[prefetchAhead]]) issues straight to the route, and it
+   * fires exactly when this cache is idle — which a pane over never-sampled spectrum always is,
+   * because the survey answered every place it draws. The fog-of-war e2e caught that as a tile
+   * requested over never-swept band C about one run in nine. So the rule lives HERE, where every
+   * miss begins ([[pump]] and [[prefetchAhead]]), not in each caller. Consulted only for a place
+   * not in hand: a resident copy's revalidation is not a skip decision.
+   *
+   * `null` (the default) settles nothing — a cache with no survey fetches as before.
+   */
+  setSettled(fn: ((addr: TileAddr) => boolean) | null): void { this.settled = fn; }
+  private settled: ((addr: TileAddr) => boolean) | null = null;
+
   /** Want this tile soon, but do not draw it: the parent-level pin, and pan prefetch. */
   prefetch(addr: TileAddr): void {
     if (this.map.has(keyOf(addr))) { this.peek(addr, true); return; }
@@ -1431,6 +1446,10 @@ export class TileCache<T> {
       const key = keyOf(addr);
       if (this.speculated.has(key) || this.map.has(key) || this.inflight.has(key) ||
           this.queued.has(key) || this.terminal.has(key)) continue;
+      // A guess over spectrum the survey settles as never sampled is not a guess worth a slot: the
+      // answer is already known (T-905). Not remembered as speculated, so a later survey that says
+      // the band WAS sampled leaves it askable.
+      if (this.settled?.(addr)) continue;
       this.speculated.add(key);
       while (this.speculated.size > SPECULATED_MEMORY) {
         this.speculated.delete(this.speculated.values().next().value as string);
@@ -1550,6 +1569,10 @@ export class TileCache<T> {
       const key = keyOf(addr);
       this.queued.delete(key);
       if (this.map.has(key) || this.inflight.has(key)) continue;
+      // Queued before the survey settled it (or by a lane that does not read the survey, like the
+      // next-row look-ahead): dropped, never issued (T-905). The renderer re-asks every frame, so a
+      // place the next survey calls sampled is queued again then.
+      if (this.settled?.(addr)) { this.stats.cancelled++; continue; }
       this.issue(addr, owner);
     }
     this.pumpRefresh();

@@ -454,6 +454,8 @@ export class Surface {
     }
     this.vao = gl.createVertexArray()!;
     this.cache = typeof cache === "function" ? cache(new GlTileTextures(gl)) : cache;
+    // Every lane that can start a request reads the survey, not only [[render]] (T-905).
+    this.cache.setSettled((a) => this.settledBySurvey(a));
   }
 
   /** The **detail** lattice both axes are addressed on. Set once from a probe; changing it drops
@@ -469,6 +471,21 @@ export class Surface {
   /** Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580). */
   setSurvey(s: Survey | "awaiting" | null): void { this.survey = s; }
   get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /**
+   * **May no request be started for this place?** (T-905) — the cache's gate for every miss lane.
+   * True while a survey is awaited (coverage FIRST: nothing is requested before it answers) and
+   * where the survey settles the place as never sampled; false with no survey, and for an address
+   * on a lattice this surface does not know (the conservative direction: fetch).
+   */
+  private settledBySurvey(a: TileAddr): boolean {
+    const s = this.survey;
+    if (s === null) return false;
+    if (s === "awaiting") return true;
+    const { detail, overview } = this.lattices;
+    const lat = a.scheme === detail.scheme ? detail : a.scheme === overview.scheme ? overview : null;
+    return lat !== null && s.unobservedThrough(extentOf(lat, a)) !== null;
+  }
 
   /** When the survey settles `region` as never sampled, the instant it is grey up to; else null. */
   private surveyedThrough(region: Box): number | null {
