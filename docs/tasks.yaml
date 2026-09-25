@@ -18758,7 +18758,7 @@ tasks:
   - id: T-567
     milestone: MAUTO
     title: "MAUTO: the sealed Resolution - unknown as a durable finding, not-searched as its own state, and the shuffled-null control that caps a manufactured verdict"
-    status: in-progress
+    status: done
     branch: task-t567
     priority: high
     parallel_group: W
@@ -18840,6 +18840,7 @@ tasks:
       Observed, not chased: FOR THE DEFLAKER: hk-cli api_contract::the_band_collapsed_activity_series_is_measured_and_states_its_fold (crates/hk-cli/tests/api_contract.rs:7108) fails under the full-binary parallel run and passes alone. It polls every 50 ms for two /api/timeline answers to land inside one capture window and then `.expect("two timeline answers over the same capture window")`; under load the window moves first. Pre-existing and outside this diff. | The previously reported hk-cli red, coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked (api_contract.rs:7328, iq-ring available:false), now passes after merging b7e9dc03 - main fixed it or it was load-sensitive too. The hk-pipeline red (view_pause_keeps_capture::holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection, 'gate_waits: 0', fails alone because its assertion needs a BUSY box) was not re-run this round; nothing in this diff reaches the capture, ring or gate path. | THE BOARD ENTRY FOR T-567 STILL CARRIES T-575's ACCEPTANCE TEXT VERBATIM, which the reviewer confirmed independently. Main has since landed T-575's own work (save_as_template, and T-921 filed from it), so the duplication is now visible in the history too; the coordinator should repair both entries so T-567 is not recorded as meeting acceptance it never targeted. The work on this branch is the ticket's TITLE, the sealed Resolution. | NOTHING IN PRODUCTION BUILDS A SearchSpec (`grep -rn SearchSpec crates/hk-pipeline/src` is still empty), so no production Evaluator constructs an `Evaluated` and both the s7A.6 suspicion path and the s8.2 cap path this branch fixes are latent contracts until M-5 seeding lands. | The sealed Resolution's `coverage.window` and `explanations[]` remain unfilled (the job layer's and the post-seal attachment's), and ADR-0021 s11.1's `/api/inventory` row `resolution: {kind, reason, t, profile}` plus the `?resolution=` filter are M-8 (T-566), deliberately untouched.
       Use cases: SIGNAL-001, SIGNAL-062, RESEARCH-009
       Resources: 34 CPU-s, peak 1.5 GB
+    commit: c8283ca0
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
