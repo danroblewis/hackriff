@@ -29307,6 +29307,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-model/hk-api/hk-plugins binaries you touch, api_contract, just test-ui, just precheck), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY review of T-967 2026-09-25: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+
+      2026-09-25 coordinator, from T-967's re-review (PASS): add the missing guard test while here - a restricted/metadata-only decode naming the same PI alongside an hk-rds summary row must make latest_decode_identity_summary return None (withheld row serves identity_label and identity_label_share null); correct by inspection today (crates/hk-model/src/repo/gating.rs, IdentityAccess::Standard.reveals), untested. T-967 landed the RDS-only summary; this ticket generalises it by declaration.
     core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
