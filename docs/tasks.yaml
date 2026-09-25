@@ -26066,7 +26066,7 @@ tasks:
   - id: T-877
     milestone: M3
     title: The fsk class density is one Gaussian over modulation index 0.4-5, so real device FSK at h~4 sits in its tail and reads unknown
-    status: blocked
+    status: cancelled
     branch: task-t877
     priority: high
     deps: []
@@ -26084,7 +26084,7 @@ tasks:
 
       2026-09-24 coordinator: T-887 (task-t887 053a50b8, queued) with T-888 now claims fsk on 16/16 above-gate device rows WITHOUT T-877's line/continuous mixture (sigma_aa fixed at the estimator; densities = T-888's refit). Once T-887 lands, re-measure task-t877's mixture on top: if it adds nothing (claims already 16/16, sweeps unchanged), CANCEL T-877 with that evidence; if it improves the open-set sweeps, rebase and land it. The verifier near-tie sharpening noted above is now T-908.
     core_interface: true
-    blocked_on: "T-887 landing, then re-measure task-t877 (1d62fe12) on top: device claims are already 16/16 without it - cancel with evidence if it adds nothing"
+    cancelled_reason: "Superseded: device FSK at h~4 reading unknown (its premise) was fixed by T-887 (sigma_aa half-level edges) + T-888 (unmeasured PSK features absent); main claims 16/16 above-gate device rows. Re-measured 2026-09-24 on main 2a3f4a85 with 1d62fe12's line/continuous mixture refitted by fit-densities: device 16/16 -> 15/16, open-set identical (1.00 of 88), wrong-label 0.000 both, verifier_gain 2fsk/gfsk 37 -> 36, fsk-family top-1 unchanged (0.94); the only accuracy gain is one psk-qam snippet. Mixture kept on task-t877 (1d62fe12) for reference; handback ~/.hackriff-ops/work/T-877/handback.json."
   - id: T-878
     milestone: M3
     title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
@@ -26843,6 +26843,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-887 worker 2026-09-24.
+
+      2026-09-24 coordinator, from T-877's re-measure on main 2a3f4a85: 2fsk is the weakest fsk class on main - 7 right / 5 wrong at or above the class gate (none confidently wrong); the verifier rescues gfsk snippets the tree calls 2fsk at p~0.6. T-877 (line/continuous mixture) was cancelled - it lowered device claims 16->15 - so any 2fsk density change belongs here, measured against those numbers.
     core_interface: true
   - id: T-909
     milestone: MMAP
