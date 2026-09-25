@@ -512,7 +512,9 @@ workers_running(){
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    print(sum(1 for c in d.values() if c.get("state") == "running"))
+    # A claim with a host runs on that remote host: it shares neither this box's CPU nor its ports, so the gate
+    # never waits for it (2026-09-25 01:2x: 'gating a contended box - 10 worker(s) running' counted node2's three).
+    print(sum(1 for c in d.values() if c.get("state") == "running" and not c.get("host")))
 except Exception:
     print(0)
 PY
