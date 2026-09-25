@@ -23983,8 +23983,8 @@ tasks:
     branch: task-t810
     priority: normal
     parallel_group: MAP-LAYERS
-    model: sonnet
-    effort: medium
+    model: opus
+    effort: high
     depends_on: [T-809, T-910]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
@@ -24019,6 +24019,7 @@ tasks:
       Observed, not chased: GET /api/tiles/events's ALLOWED query-parameter list (crates/hk-api/src/tiles.rs, tile_events_json) has no `client` entry, unlike /api/tiles and /api/tiles/batch (T-630's per-caller in-flight share). density.ts sidesteps this by building its own URL instead of reusing lattice.ts's tileUrl(), so this FE ticket is unaffected, but the backend gap itself is real. | DENSITY_MIN_CELLS_PER_PX=50 is a first-guess presentation constant (like the hatch/dash lengths T-910 also flagged as unchecked); it has not been tuned against real staging data and may want a follow-up pass once the density layer is visible in practice.
       Use cases: AWARE-042
       Resources: 4 CPU-s, peak 0.3 GB
+    effort_reason: two sonnet rounds failed review on a live-edge refresh policy (supervisor 2026-09-25 02:18)
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
