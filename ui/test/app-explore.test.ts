@@ -188,9 +188,9 @@ function fakeClient(handlers: { get?: (path: string) => unknown; post?: (path: s
   };
 }
 
-test("decodeActionLabel: names the known scheme, else the generic invitation", () => {
+test("decodeActionLabel: names the known scheme, else plain Decode", () => {
   assert.equal(decodeActionLabel({ identity_scheme: "rds-pi" }), "Decode RDS");
-  assert.equal(decodeActionLabel({ identity_scheme: null }), "Open in Decode");
+  assert.equal(decodeActionLabel({ identity_scheme: null }), "Decode");
 });
 
 test("recordEmitterClip: posts emitter_id and the record kinds, reports the server's kinds", async () => {
