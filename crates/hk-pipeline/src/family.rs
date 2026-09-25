@@ -91,13 +91,25 @@
 //!    230 kHz of occupied bandwidth is not a 25 kHz aviation voice channel. Services with no
 //!    bandwidth signature (amateur; Part 15, which spans a 20 kHz remote and a 20 MHz WLAN
 //!    channel) state none, and read `not-discriminating` rather than pretending to a test.
-//! 3. **A receiver artefact is explained as one.** [`artefact_verdict`] reads the repository for a
-//!    standing `artifact-of` relation (T-219, with its arithmetic) or an [`ARTEFACT_TAGS`] tag
-//!    (written by `TrackInventory` when a track's member detections were mostly suspect — DC,
-//!    reference or clock harmonic, comb, image, IMD, clipping). Such a row gets exactly one
-//!    explanation, [`RECEIVER_ARTEFACT`], and **no** service candidate: nothing was on the air, so
-//!    no allocation applies to it. T-948 stops the DC point being admitted at all; this is what
-//!    the ones already in the inventory say.
+//! 3. **A receiver artefact is explained as one — but never over a measurement.**
+//!    [`artefact_verdict`] reads the repository for a standing `artifact-of` relation (T-219,
+//!    with its arithmetic) or a majority of the row's newest linked detections flagged by a
+//!    **receiver-mechanism** rule ([`Repository::emitter_receiver_artefact_share`]). Such a row
+//!    gets exactly one explanation, [`RECEIVER_ARTEFACT`], and **no** service candidate: nothing
+//!    was on the air, so no allocation applies to it. T-948 stops the DC point being admitted at
+//!    all; this is what the ones already in the inventory say.
+//!
+//!    Three limits, from the T-990 review, and each is load-bearing rather than a softening:
+//!    `clipped` and `compressed` never count (a real station strong enough to clip the ADC on one
+//!    high-gain tune is still a real station, and an artefact label would override what was
+//!    measured); a row carrying demodulator, decoder or classifier evidence keeps it at rank 1
+//!    and shows the artefact only as an alternative at [`ARTEFACT_ALTERNATIVE_SCORE`], so the
+//!    status that evidence earned stands; and the verdict is derived on every call and never
+//!    written down, so it is revocable in both directions with nothing to un-tag.
+//! 4. **The `unidentified` row carries the raster verdict it displaced.** The client reads
+//!    `explanations[0]` for the off-raster chip and the channel-raster readout, so rank 1 copies
+//!    the `off-raster` flag and the [`ExplanationEvidence::Raster`] entry of the best candidate
+//!    below it. A centre off its channel raster is flagged, never dropped and never snapped.
 //!
 //! Neither pseudo-service carries non-shape evidence, so neither can set a status.
 //!
@@ -189,9 +201,10 @@ pub const UNIDENTIFIED: &str = "unidentified";
 /// The explanation of a row the receiver made: the service name for [`service_label`] and
 /// [`Explanation::service`] (T-990).
 pub const RECEIVER_ARTEFACT: &str = "receiver-artefact";
-/// Emitter tags that say the row is the receiver's own artefact rather than an emission
-/// ([`hk_model::TAG_VOCABULARY`]; written by `TrackInventory` from the track's suspect fraction).
-pub const ARTEFACT_TAGS: &[&str] = &["artifact", "spur"];
+/// Score of the [`RECEIVER_ARTEFACT`] candidate when it ranks as an alternative beside measured
+/// evidence: above a bare allocation ([`ALLOCATION_ONLY_SCORE`]), because a receiver mechanism was
+/// measured on the row's detections, and below anything a demodulator, decoder or classifier said.
+pub const ARTEFACT_ALTERNATIVE_SCORE: f64 = 0.3;
 
 /// Occupied bandwidth of a continuous emission read as broadcast FM, Hz — derived from the
 /// service, not from any capture.
@@ -974,8 +987,17 @@ fn rank_all(
     duty_cycle: Option<f64>,
     artefact: Option<&ArtefactVerdict>,
 ) -> Vec<Explanation> {
+    // T-990 review: the short-circuit is only for a row nothing measured has named. A
+    // demodulator lock, a decode or a classifier row is proof the signal was on the air, and the
+    // artefact verdict never overrides what was measured (vision step 4) -- there it ranks as one
+    // more alternative, disclosed, below the evidence.
+    let measured_on_air = evidence
+        .iter()
+        .any(|e| !is_shape_evidence(&e.model_version) && map_name(&e.family).service.is_some());
     if let Some(a) = artefact {
-        return vec![artefact_explanation(a)];
+        if !measured_on_air {
+            return vec![artefact_explanation(a)];
+        }
     }
     let occupancy = Occupancy {
         bandwidth_hz,
@@ -1109,6 +1131,21 @@ fn rank_all(
     // it is the same suggestion an empty channel gets -- so when nothing here rests on signal
     // evidence, the honest top explanation is that the emission is unidentified, and the
     // allocations rank below it as what the band plan expects.
+    if let Some(a) = artefact {
+        // Reached only with measured evidence above (the no-evidence case short-circuited), so
+        // this is an alternative and never the answer: above a bare allocation, because a
+        // receiver mechanism was actually measured on these detections, and below anything a
+        // demodulator, decoder or classifier said.
+        let mut alt = artefact_explanation(a);
+        alt.score = ARTEFACT_ALTERNATIVE_SCORE;
+        alt.rank = 0;
+        out.push(alt);
+        out.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.service.cmp(&b.service))
+        });
+    }
     if !out.iter().any(|x| x.evidence_confidence > 0.0) {
         out.insert(0, unidentified_explanation(&occupancy, &out, no_rows));
     }
@@ -1174,6 +1211,31 @@ fn unidentified_explanation(
             considered.join(", ")
         )
     };
+    // T-990 review, finding 2: the raster verdict travels with the rank-1 row. The client reads
+    // `explanations[0]` for the "off raster" chip and the Channel raster line, and a centre that
+    // misses its channel raster is exactly the mismatch the product says to flag rather than snap
+    // (CLAUDE.md, vision step 4) -- losing it because an honest "unidentified" moved into rank 1
+    // would be this change quietly deleting a finding. The verdict is copied from the
+    // best-ranked candidate that has one, which is the row the client used to show.
+    let mut flags = vec!["no-measured-support".to_owned()];
+    let mut evidence = vec![ExplanationEvidence::Occupancy {
+        bandwidth_hz: occupancy.bandwidth_hz,
+        duty_cycle: occupancy.duty_cycle,
+        expected_obw_hz: None,
+        support: Support::Unmeasured,
+        reason,
+    }];
+    if let Some((raster, from)) = below.iter().find_map(|x| {
+        x.evidence
+            .iter()
+            .find(|e| matches!(e, ExplanationEvidence::Raster { .. }))
+            .map(|e| (e.clone(), x))
+    }) {
+        if from.has_flag("off-raster") {
+            flags.push("off-raster".to_owned());
+        }
+        evidence.push(raster);
+    }
     Explanation {
         rank: 0,
         service: UNIDENTIFIED.to_owned(),
@@ -1185,14 +1247,8 @@ fn unidentified_explanation(
         status_evidence_confidence: 0.0,
         status: KnownStatus::Unknown,
         prior_ref: None,
-        flags: vec!["no-measured-support".to_owned()],
-        evidence: vec![ExplanationEvidence::Occupancy {
-            bandwidth_hz: occupancy.bandwidth_hz,
-            duty_cycle: occupancy.duty_cycle,
-            expected_obw_hz: None,
-            support: Support::Unmeasured,
-            reason,
-        }],
+        flags,
+        evidence,
     }
 }
 
@@ -1224,10 +1280,27 @@ pub struct ArtefactVerdict {
     pub reason: String,
 }
 
-/// `emitter`'s receiver-artefact verdict, from what the repository holds: a standing
-/// `artifact-of` relation (T-219's overlap resolver, with the arithmetic in its reason), or an
-/// [`ARTEFACT_TAGS`] tag (written by `TrackInventory` when the track's member detections were
-/// mostly suspect -- DC, a reference harmonic, a comb tooth, an image, IMD, clipping).
+/// Share of an emitter's newest linked detections that a receiver mechanism must explain before
+/// the row is called the receiver's own. A majority: "mostly the receiver", the same reading of
+/// "mostly" as [`hk_detect::track::inventory::SUSPECT_FRACTION`], applied to a strictly narrower
+/// set of flags.
+pub const RECEIVER_ARTEFACT_FRACTION: f64 = 0.5;
+
+/// `emitter`'s receiver-artefact verdict, recomputed from what the repository holds: a standing
+/// `artifact-of` relation (T-219's overlap resolver, with the arithmetic in its reason), or a
+/// majority of its newest linked detections flagged by a **receiver-mechanism** rule
+/// ([`Repository::emitter_receiver_artefact_share`]: spur candidate — DC/LO leakage, a reference
+/// or clock harmonic, a comb tooth, a spur-map entry — IQ image, or intermodulation).
+///
+/// **Two things this deliberately is not** (T-990 review):
+///
+/// - **It is not "the measurement was untrustworthy".** `clipped` and `compressed` are excluded,
+///   so a real station strong enough to drive the ADC into clipping on one high-gain tune is
+///   never relabelled the receiver's own. Those flags still make the track suspect everywhere
+///   else they already did; they just do not decide *who made the signal*.
+/// - **It is not durable.** Nothing is written, nothing is tagged, and the answer is derived from
+///   the current detections every time it is asked, so a line that stops being flagged stops
+///   being an artefact — revocable in both directions, like a detected end (ADR-0017).
 pub fn artefact_verdict(
     repo: &Repository,
     emitter: EmitterId,
@@ -1246,18 +1319,20 @@ pub fn artefact_verdict(
             reason: r.reason,
         }));
     }
-    let e = repo.emitter(id)?;
-    Ok(e.tags
-        .iter()
-        .find(|t| ARTEFACT_TAGS.contains(&t.as_str()))
-        .map(|t| ArtefactVerdict {
-            source: format!("tag:{t}"),
-            reason: format!(
-                "the member detections of this row were mostly flagged suspect (DC, reference \
-                 harmonic, comb, image, IMD or clipping), so it is tagged `{t}`: the receiver \
-                 made it, and no service explains it"
-            ),
-        }))
+    let share = repo.emitter_receiver_artefact_share(id)?;
+    if share.detections == 0 || share.fraction() <= RECEIVER_ARTEFACT_FRACTION {
+        return Ok(None);
+    }
+    let mechanism = share.reason.clone().unwrap_or_else(|| "spur".to_owned());
+    Ok(Some(ArtefactVerdict {
+        source: format!("receiver-mechanism:{mechanism}"),
+        reason: format!(
+            "{} of this row's {} newest detections are flagged by a receiver-mechanism rule \
+             (newest: {mechanism}); clipping and compression are not counted, so this is the \
+             receiver's own line and not a measurement it could not be trusted on",
+            share.receiver_made, share.detections,
+        ),
+    }))
 }
 
 /// The status, `prior_ref` and reason `ranked` (best first, untruncated) supports: the verdict of
@@ -1570,7 +1645,12 @@ mod tests {
     use hk_context::{Region, is_service_family};
     use hk_demod::AnalogMode;
     use hk_demod::fsk::FSK_FAMILY;
-    use hk_model::{Fingerprint, LinkTarget, Sighting, TimeRange, TrackId};
+    use hk_model::detection::SpurReason;
+    use hk_model::{
+        Detection, DetectionFlags, DetectionId, Fingerprint, FreqRange, LinkTarget, PlanRegion,
+        ScanPlan, ScanPlanId, ScanPolicy, Schedule, Sighting, Survey, SurveyId, SurveyState,
+        TimeRange, TimingFeatures, Track, TrackId, TrackState,
+    };
 
     const FM_ROW: &str = "us-47cfr2106-compact:fm-broadcast";
     const AIRBAND_ROW: &str = "us-47cfr2106-compact:aviation-vhf-comm";
@@ -1588,6 +1668,149 @@ mod tests {
             family: family.into(),
             confidence,
             model_version: model_version.into(),
+        }
+    }
+
+    /// One open survey the test's detections can reference (the schema needs one).
+    fn test_survey(repo: &mut Repository) -> SurveyId {
+        let plan = ScanPlan {
+            id: ScanPlanId::new(),
+            version: 1,
+            name: "t990".into(),
+            created_at: t(0),
+            regions: vec![PlanRegion {
+                freq: FreqRange::new(1e6, 6e9),
+                priority: 1.0,
+                revisit_ns: None,
+            }],
+            policy: ScanPolicy::SweepThenDwell,
+            gain_table: vec![],
+            schedule: Schedule::Cron {
+                expr: "* * * * *".into(),
+            },
+            extra: serde_json::Value::Null,
+        };
+        repo.insert_scan_plan(&plan).unwrap();
+        let survey = Survey {
+            id: SurveyId::new(),
+            plan_id: plan.id,
+            plan_version: plan.version,
+            device_id: "mock:t990".into(),
+            state: SurveyState::Open,
+            t_start: t(0),
+            t_end: None,
+            summary: None,
+        };
+        repo.insert_survey(&survey).unwrap();
+        survey.id
+    }
+
+    /// A track-backed emitter at `f`/`bw` whose linked detections carry `flags`, so the
+    /// repository-derived receiver-artefact verdict (T-990) has real measurements to read.
+    /// `family` is stored as a classification unless it is `"unknown"`.
+    fn emitter_with_detections(
+        repo: &mut Repository,
+        f: f64,
+        bw: f64,
+        family: &str,
+        flags: &[DetectionFlags],
+    ) -> EmitterId {
+        let survey_id = test_survey(repo);
+        let track_id = TrackId::new();
+        let seen = TimeRange::new(t(0), t(1));
+        let id = repo
+            .record_sighting(
+                &Sighting {
+                    source: LinkTarget::Track(track_id),
+                    seen,
+                    count: flags.len() as u64,
+                    f_center_hz: f,
+                    bandwidth_hz: bw,
+                    fingerprint: Some(Fingerprint::new(f, bw)),
+                    identity: None,
+                    context: None,
+                    classification: (family != "unknown").then(|| Classification {
+                        t: t(1),
+                        family: family.into(),
+                        confidence: 0.9,
+                        open_set_score: 0.1,
+                        model_version: "test@1".into(),
+                    }),
+                    tags: Vec::new(),
+                },
+                None,
+            )
+            .unwrap()
+            .emitter_id;
+        let prov = repo
+            .intern_provenance(
+                &serde_json::from_value(serde_json::json!({
+                    "device_id": "mock:t990",
+                    "tune": {"center_hz": f, "sample_rate_hz": 2.4e6, "lna_db": 16.0,
+                             "vga_db": 20.0, "amp_on": false, "bandwidth_hz": 1.8e6},
+                    "overload": false, "quantisation_limited": false,
+                    "clock_source": "internal", "clock_locked": true,
+                    "timestamp_method": "synthetic", "timestamp_error_budget_ns": 0,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let dets: Vec<Detection> = flags
+            .iter()
+            .enumerate()
+            .map(|(i, fl)| Detection {
+                id: DetectionId::new(),
+                survey_id,
+                time: TimeRange::new(t(i as i64), t(i as i64 + 1)),
+                f_center_hz: f,
+                obw_hz: bw,
+                xdb_bandwidth_hz: Some(bw),
+                xdb_level_db: Some(-3.0),
+                snr_peak_db: 12.0,
+                snr_mean_db: 9.0,
+                peak_level_dbfs: -30.0,
+                peak_level_dbm: None,
+                sk: None,
+                clip_count: 0,
+                detector_version: "test@1".into(),
+                provenance_ref: prov,
+                flags: *fl,
+            })
+            .collect();
+        repo.insert_detections(&dets).unwrap();
+        repo.upsert_track(&Track {
+            id: track_id,
+            state: TrackState::Closed,
+            split_from: None,
+            time: seen,
+            f_center_hz: f,
+            bandwidth_hz: bw,
+            detection_count: dets.len() as u64,
+            timing: TimingFeatures::default(),
+            updated_at: seen.end,
+        })
+        .unwrap();
+        let ids: Vec<DetectionId> = dets.iter().map(|d| d.id).collect();
+        repo.link_detections_to_track(track_id, &ids, seen.end)
+            .unwrap();
+        id
+    }
+
+    /// The receiver's own DC/LO-leakage line.
+    fn dc_flag() -> DetectionFlags {
+        DetectionFlags {
+            spur_candidate: true,
+            spur_reason: Some(SpurReason::Dc),
+            ..DetectionFlags::default()
+        }
+    }
+
+    /// A measurement that could not be trusted, on a signal that was genuinely on the air.
+    fn clipped_flag() -> DetectionFlags {
+        DetectionFlags {
+            clipped: true,
+            compressed: true,
+            ..DetectionFlags::default()
         }
     }
 
@@ -2103,16 +2326,74 @@ mod tests {
         }
     }
 
-    /// T-990 / T-948: the DC point in the airband. A row whose member detections were mostly
-    /// suspect is the receiver's own; it is explained as a receiver artefact and **no** service
-    /// is offered for it, because nothing was on the air to allocate.
+    /// T-990 review, finding 2. The client reads `explanations[0].flags` for the "off raster"
+    /// chip and `explanations[0].evidence` for the Channel raster line. An honest `unidentified`
+    /// at rank 1 must therefore carry the raster verdict of the candidate it displaced, or a
+    /// station sitting off its channel raster silently loses the flag the product exists to
+    /// raise ("Mismatches are interesting… flagged, not snapped").
+    #[test]
+    fn t990_the_unidentified_row_carries_the_raster_verdict_it_displaced() {
+        let table = table();
+        // An unmodulated carrier 47 kHz off the 200 kHz FM raster, with no family evidence.
+        let ranked = rank_explanations(&table, &[], 98.147e6, 180e3);
+        let top = &ranked[0];
+        assert_eq!(top.service, UNIDENTIFIED, "{ranked:?}");
+        let fm = ranked
+            .iter()
+            .find(|e| e.service == "fm-broadcast")
+            .unwrap_or_else(|| panic!("{ranked:?}"));
+        assert!(fm.has_flag("off-raster"), "{fm:?}");
+        assert!(
+            top.has_flag("off-raster"),
+            "the off-raster flag was lost when unidentified took rank 1: {top:?}"
+        );
+        let raster = top
+            .evidence
+            .iter()
+            .find(|e| matches!(e, ExplanationEvidence::Raster { .. }))
+            .unwrap_or_else(|| panic!("no raster evidence on the rank-1 row: {top:?}"));
+        assert!(
+            matches!(
+                raster,
+                ExplanationEvidence::Raster {
+                    on_raster: false,
+                    ..
+                }
+            ),
+            "{raster:?}"
+        );
+
+        // On the raster, the flag is absent and the readout still has its numbers.
+        let on = rank_explanations(&table, &[], 98.1e6, 180e3);
+        assert_eq!(on[0].service, UNIDENTIFIED, "{on:?}");
+        assert!(!on[0].has_flag("off-raster"), "{:?}", on[0]);
+        assert!(
+            on[0].evidence.iter().any(|e| matches!(
+                e,
+                ExplanationEvidence::Raster {
+                    on_raster: true,
+                    ..
+                }
+            )),
+            "{:?}",
+            on[0]
+        );
+    }
+
+    /// T-990 / T-948: the DC point in the airband. A row whose detections a **receiver
+    /// mechanism** explains is the receiver's own; it is explained as a receiver artefact and
+    /// **no** service is offered for it, because nothing was on the air to allocate.
     #[test]
     fn t990_a_receiver_artefact_row_is_explained_as_one_not_as_aviation_voice() {
         let mut repo = Repository::open_in_memory().unwrap();
-        let r = repo
-            .record_sighting(&sighting(120.5e6, 8e3, "unknown"), None)
-            .unwrap();
-        let before = explain_emitter(&mut repo, &table(), r.emitter_id).unwrap();
+        let clean = emitter_with_detections(
+            &mut repo,
+            120.5e6,
+            8e3,
+            "unknown",
+            &[DetectionFlags::default(); 4],
+        );
+        let before = explain_emitter(&mut repo, &table(), clean).unwrap();
         assert!(
             before
                 .explanations
@@ -2120,25 +2401,114 @@ mod tests {
                 .any(|e| e.service == "aviation-voice"),
             "{before:?}"
         );
-        repo.add_emitter_tag(r.emitter_id, "artifact").unwrap();
-        let after = explain_emitter(&mut repo, &table(), r.emitter_id).unwrap();
+
+        let dc = emitter_with_detections(
+            &mut repo,
+            120.5001e6,
+            2e3,
+            "unknown",
+            &[dc_flag(), dc_flag(), dc_flag(), DetectionFlags::default()],
+        );
+        let after = explain_emitter(&mut repo, &table(), dc).unwrap();
         assert_eq!(after.explanations.len(), 1, "{:?}", after.explanations);
         let top = &after.explanations[0];
         assert_eq!(top.service, RECEIVER_ARTEFACT);
         assert_eq!(top.label, "Receiver artefact");
         assert!(
-            !after
-                .explanations
-                .iter()
-                .any(|e| e.service == "aviation-voice"),
-            "{:?}",
-            after.explanations
-        );
-        assert!(
-            matches!(top.evidence.first(), Some(ExplanationEvidence::Artefact { source, .. }) if source == "tag:artifact"),
+            matches!(top.evidence.first(), Some(ExplanationEvidence::Artefact { source, .. }) if source == "receiver-mechanism:dc"),
             "{top:?}"
         );
         assert_eq!(after.status_appended, None);
+    }
+
+    /// T-990 review, finding 1a. A strong real station that drove the ADC into clipping on one
+    /// high-gain tune is **still a real station**. `clipped` and `compressed` say the measurement
+    /// could not be trusted, not that the receiver invented the signal, so they never reach the
+    /// artefact verdict — only a spur, image or intermod rule does.
+    #[test]
+    fn t990_clipping_and_compression_alone_never_make_a_row_a_receiver_artefact() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let id = emitter_with_detections(&mut repo, 120.5e6, 8e3, "unknown", &[clipped_flag(); 4]);
+        assert_eq!(artefact_verdict(&repo, id).unwrap(), None);
+        let x = explain_emitter(&mut repo, &table(), id).unwrap();
+        assert!(
+            !x.explanations
+                .iter()
+                .any(|e| e.service == RECEIVER_ARTEFACT),
+            "an all-clipped real station was relabelled the receiver's own: {:?}",
+            x.explanations
+        );
+        assert_eq!(x.explanations[0].service, UNIDENTIFIED, "{x:?}");
+    }
+
+    /// T-990 review, finding 1b. A demodulator lock, a decode or a classifier row is proof the
+    /// signal **was on the air**, and the artefact verdict never overrides what was measured
+    /// (vision step 4: the database never overrides the measurement, and neither does a receiver
+    /// heuristic). The verdict is still disclosed — it ranks as one more alternative, above a
+    /// bare allocation and below the evidence — and the status the evidence earned stands.
+    #[test]
+    fn t990_an_artefact_verdict_never_overrides_measured_evidence() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        // A real broadcast station that also clipped, and that a spur rule flagged on most of its
+        // detections: the worst case the review names.
+        let id = emitter_with_detections(
+            &mut repo,
+            98.5e6,
+            180e3,
+            "wfm",
+            &[dc_flag(), dc_flag(), dc_flag(), DetectionFlags::default()],
+        );
+        assert!(artefact_verdict(&repo, id).unwrap().is_some());
+        let x = explain_emitter(&mut repo, &table(), id).unwrap();
+        assert_eq!(x.explanations[0].service, "fm-broadcast", "{x:?}");
+        assert_eq!(x.status_appended, Some(KnownStatus::Known), "{x:?}");
+        assert_eq!(
+            repo.emitter(id).unwrap().known_status,
+            KnownStatus::Known,
+            "the artefact verdict reset a status the measurement earned"
+        );
+        let alt = x
+            .explanations
+            .iter()
+            .find(|e| e.service == RECEIVER_ARTEFACT)
+            .unwrap_or_else(|| panic!("the verdict was hidden rather than ranked: {x:?}"));
+        assert!(alt.rank > 1, "{alt:?}");
+        assert_eq!(alt.score, ARTEFACT_ALTERNATIVE_SCORE);
+    }
+
+    /// T-990 review, finding 1c. The verdict is derived from the current detections, never
+    /// written down, so it is revocable: a row that stops being flagged stops being an artefact
+    /// on the next explain. Nothing has to un-tag it, because nothing tagged it.
+    #[test]
+    fn t990_the_artefact_verdict_is_revocable() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let id = emitter_with_detections(&mut repo, 120.5e6, 8e3, "unknown", &[dc_flag(); 3]);
+        assert_eq!(
+            explain_emitter(&mut repo, &table(), id)
+                .unwrap()
+                .explanations[0]
+                .service,
+            RECEIVER_ARTEFACT
+        );
+        // The receiver retunes; the same emission is measured off the tuned centre, clean.
+        let same = emitter_with_detections(
+            &mut repo,
+            120.5e6,
+            8e3,
+            "unknown",
+            &[DetectionFlags::default(); 6],
+        );
+        assert_eq!(same, id, "the second sighting resolved to another emitter");
+        assert_eq!(artefact_verdict(&repo, id).unwrap(), None);
+        let after = explain_emitter(&mut repo, &table(), id).unwrap();
+        assert_eq!(after.explanations[0].service, UNIDENTIFIED, "{after:?}");
+        assert!(
+            after
+                .explanations
+                .iter()
+                .any(|e| e.service == "aviation-voice"),
+            "{after:?}"
+        );
     }
 
     /// Decision (module docs): unmapped FSK in an ISM band keeps `unknown`, with ISM / Part 15 as

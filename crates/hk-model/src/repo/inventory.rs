@@ -9,7 +9,8 @@ use super::{
 };
 use crate::cluster::{IdentityAccess, InventoryEntry, InventoryIdentity};
 use crate::detection::{
-    MAX_TRACK_PAGE, PageRequest, Track, TrackFilter, TrackKind, TrackPage, TrackSegment, TrackState,
+    DetectionFlags, MAX_TRACK_PAGE, PageRequest, Track, TrackFilter, TrackKind, TrackPage,
+    TrackSegment, TrackState,
 };
 use crate::emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
@@ -87,6 +88,24 @@ pub(super) const EMITTER_REGION_SQL: &str = concat!(
 /// `track_detection`/`detection` primary keys, so this is index-only, no table scan. `t_start` was
 /// already read to order the rows; T-350 only stops it (and `t_end`) being thrown away at the
 /// `SELECT`. Parameter `?1` is the emitter id, given twice (once per source path).
+/// T-990: the emitter's newest linked detections' **receiver-made** flags, for the artefact
+/// verdict. Same "linked" reach as [`EMITTER_LATEST_DETECTION_SQL`], newest first, capped at `?2`.
+/// Returns the flag bits and the stored spur reason per row; the caller decides which bits mean
+/// "the receiver made it" so the rule lives in one place and not in SQL.
+const EMITTER_DETECTION_FLAGS_SQL: &str = "\
+     SELECT flags, spur_reason, t_start FROM ( \
+       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN track_detection td ON td.track_id = el.target_id \
+       JOIN detection d ON d.detection_id = td.detection_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
+       UNION ALL \
+       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN detection d ON d.detection_id = el.target_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
+     ) ORDER BY t_start DESC LIMIT ?2";
+
 const EMITTER_LATEST_DETECTION_SQL: &str = "\
      SELECT snr_peak, peak_dbfs, t_start, t_end FROM ( \
        SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, \
@@ -999,6 +1018,74 @@ impl Repository {
                 })
             })
             .optional()?)
+    }
+
+    /// T-990: how much of what this emitter is made of the receiver made — the share of its
+    /// newest linked detections (at most [`super::MAX_EVIDENCE_DETECTIONS`], newest first)
+    /// flagged by a rule that names a **receiver mechanism**: a spur candidate (DC/LO leakage, a
+    /// reference or clock harmonic, a comb tooth, an LO-relative product, a spur-map entry), an
+    /// IQ image, or an intermodulation product.
+    ///
+    /// **`clipped` and `compressed` are deliberately excluded**, and that exclusion is the whole
+    /// point of this method existing beside the `suspect_fraction` the tracker reports. Those two
+    /// say *the measurement cannot be trusted*, not *the receiver invented this signal*: a strong
+    /// real station that drove the ADC into clipping on one high-gain tune is still a real
+    /// station, and calling it an artefact would override what was measured — the one thing the
+    /// known-signal machinery is never allowed to do.
+    ///
+    /// Recomputed from the detections on every call, never cached and never stored as a durable
+    /// mark, so the verdict follows the latest measurements: a line that stops being flagged
+    /// stops being an artefact, the same revocability the presence model gives a detected end.
+    pub fn emitter_receiver_artefact_share(
+        &self,
+        emitter_id: EmitterId,
+    ) -> Result<ReceiverArtefactShare, RepoError> {
+        let mut stmt = self.conn.prepare_cached(EMITTER_DETECTION_FLAGS_SQL)?;
+        let rows = stmt.query_map(
+            params![blob(emitter_id), super::MAX_EVIDENCE_DETECTIONS as i64],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+        )?;
+        let mut out = ReceiverArtefactShare::default();
+        for row in rows {
+            let (bits, reason) = row?;
+            out.detections += 1;
+            let f = DetectionFlags::from_bits(u32::try_from(bits).unwrap_or(0));
+            if f.spur_candidate || f.image_candidate || f.suspect_imd {
+                out.receiver_made += 1;
+                if out.reason.is_none() {
+                    out.reason = Some(match reason.as_deref() {
+                        Some(kind) => kind.to_owned(),
+                        None if f.image_candidate => "image".to_owned(),
+                        None if f.suspect_imd => "intermod".to_owned(),
+                        None => "spur".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// T-990: [`Repository::emitter_receiver_artefact_share`]'s answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReceiverArtefactShare {
+    /// Detections read (at most [`super::MAX_EVIDENCE_DETECTIONS`]).
+    pub detections: u64,
+    /// Of those, the ones a receiver-mechanism rule flagged.
+    pub receiver_made: u64,
+    /// The mechanism the newest flagged one named (the stored `spur_reason`, else `image`,
+    /// `intermod` or `spur`), for saying *why* rather than only *that*.
+    pub reason: Option<String>,
+}
+
+impl ReceiverArtefactShare {
+    /// Share of the read detections a receiver mechanism explains, 0 with none read.
+    pub fn fraction(&self) -> f64 {
+        if self.detections == 0 {
+            0.0
+        } else {
+            self.receiver_made as f64 / self.detections as f64
+        }
     }
 }
 

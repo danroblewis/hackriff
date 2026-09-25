@@ -88,9 +88,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::family::{explain_emitter, track_family};
 
-/// T-990: the [`hk_model::TAG_VOCABULARY`] tag saying a row is the receiver's own artefact.
-pub const ARTEFACT_TAG: &str = "artifact";
-
 /// Producer name of track and hop-set sightings in a [`MeasurementKey`].
 pub const TRACK_PRODUCER: &str = "hk-track";
 
@@ -1161,8 +1158,6 @@ pub struct TrackInventory {
     pub duplicates: u64,
     /// T-219: candidates attributed to the source whose receiver artifact they are.
     pub artifacts: u64,
-    /// T-990: rows tagged [`ARTEFACT_TAG`] because their detections were mostly suspect.
-    pub artefact_tagged: u64,
     /// T-598: sightings related to another sighting of the same LO-relative receiver artefact,
     /// so the inventory shows the artefact once instead of once per tuning centre.
     pub retune_siblings: u64,
@@ -1210,7 +1205,6 @@ impl TrackInventory {
             retuned: HashSet::new(),
             multipath_reviewed: HashMap::new(),
             retracted: 0,
-            artefact_tagged: 0,
             sightings: 0,
             created: 0,
             confirmed: 0,
@@ -1803,7 +1797,6 @@ impl TrackInventory {
         id: EmitterId,
         trust: Option<TrackTrust>,
     ) -> Result<(), RepoError> {
-        self.mark_artefact(repo, id, trust)?;
         if let Some(table) = &self.table {
             explain_emitter(repo, table, id)?;
         }
@@ -1812,35 +1805,6 @@ impl TrackInventory {
         self.resolve_overlaps(repo, id)?;
         self.resolve_retune(repo, id)?;
         self.resolve_multipath(repo, id)
-    }
-
-    /// T-990: a row whose member detections were mostly flagged suspect -- DC / LO leakage, a
-    /// reference or clock harmonic, a comb tooth, an IQ image, IMD, compression, clipping -- is
-    /// the **receiver's** own, and the inventory says so with the [`hk_model::TAG_VOCABULARY`]
-    /// `artifact` tag before the row is explained.
-    ///
-    /// The tag is what [`crate::family::artefact_verdict`] reads, so such a row is explained as a
-    /// receiver artefact instead of being handed the band-plan allocation it happens to sit in --
-    /// the explorer's DC point in the airband, offered "Aviation voice (VHF AM)". The gate is the
-    /// same [`ConfirmPolicy::max_suspect_fraction`] that already stops an all-suspect emitter
-    /// minting a signature in [`Self::characterise`]: one meaning of "mostly suspect", used
-    /// twice. Nothing is deleted or hidden; the row stays, with an explanation that names the
-    /// mechanism.
-    fn mark_artefact(
-        &mut self,
-        repo: &mut Repository,
-        id: EmitterId,
-        trust: Option<TrackTrust>,
-    ) -> Result<(), RepoError> {
-        if !trust.is_some_and(|t| t.suspect_fraction > self.policy.max_suspect_fraction) {
-            return Ok(());
-        }
-        if repo.emitter(id)?.tags.contains(ARTEFACT_TAG) {
-            return Ok(());
-        }
-        repo.add_emitter_tag(id, ARTEFACT_TAG)?;
-        self.artefact_tagged += 1;
-        Ok(())
     }
 
     /// T-242: aggregates what this entry has measured and asks the catalogue and the clusterer
@@ -1941,49 +1905,6 @@ mod tests {
             next_burst_eta: None,
             closed,
         }
-    }
-
-    /// T-990 / T-948: the explorer's DC point. A closed track whose member detections were
-    /// mostly flagged suspect — the DC / LO-leakage line sits at the tuned centre on every tune —
-    /// is the receiver's own. The inventory tags the row `artifact` **before** it is explained,
-    /// so what the Candidate list offers is "Receiver artefact" and not the band-plan allocation
-    /// the line happens to land in. In the airband that allocation is "Aviation voice (VHF AM)",
-    /// which is exactly what 52 noise and DC rows were given in an empty band.
-    #[test]
-    fn t990_a_mostly_suspect_track_is_tagged_artifact_and_explained_as_a_receiver_artefact() {
-        let mut repo = Repository::open_in_memory().unwrap();
-        let mut inv = TrackInventory::default();
-        let mut dc = channel_summary(TrackId::new(), 6, 5, Some(CloseCause::Idle));
-        // The DC point of a receiver tuned to 120.5 MHz, two bins wide.
-        dc.track.f_center_hz = 120.5e6;
-        dc.track.bandwidth_hz = 2e3;
-        dc.suspect_fraction = 1.0;
-        inv.track_event(&mut repo, &TrackEvent::Closed(dc)).unwrap();
-        assert_eq!(inv.artefact_tagged, 1);
-        let id = repo
-            .query_inventory(&InventoryQuery::default())
-            .unwrap()
-            .entries
-            .first()
-            .expect("one row")
-            .emitter
-            .id;
-        assert!(repo.emitter(id).unwrap().tags.contains(ARTEFACT_TAG));
-        let ex = crate::family::explanations(&repo, id).unwrap();
-        assert_eq!(ex.len(), 1, "{ex:?}");
-        assert_eq!(ex[0].service, crate::family::RECEIVER_ARTEFACT, "{ex:?}");
-        assert!(
-            !ex.iter().any(|e| e.service == "aviation-voice"),
-            "the DC point was offered the aviation allocation: {ex:?}"
-        );
-        // Tagging is idempotent: a second sighting of the same line does not re-tag.
-        let mut again = channel_summary(TrackId::new(), 9, 5, Some(CloseCause::Idle));
-        again.track.f_center_hz = 120.5e6;
-        again.track.bandwidth_hz = 2e3;
-        again.suspect_fraction = 1.0;
-        inv.track_event(&mut repo, &TrackEvent::Closed(again))
-            .unwrap();
-        assert_eq!(inv.artefact_tagged, 1);
     }
 
     #[test]

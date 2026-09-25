@@ -155,12 +155,13 @@ pub use repo::{
     CollectionSummary, EmitterSynthesis, EmitterUpsert, HarmonicFamilyRow, LIFECYCLE_TEXT_MAX,
     LatestMeasurement, MARKERS_PER_COLLECTION_MAX, MAX_FAMILY_CANDIDATES, MAX_LO_SPAN_HZ,
     MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, Marker, MarkerWindow, PROVENANCE_TEXT_MAX,
-    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning,
-    RepoBatch, RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict,
-    SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
-    SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS,
-    Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
-    TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
+    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE,
+    ReceiverArtefactShare, RefinedTuning, RepoBatch, RepoError, Repository, RetuneFamily,
+    RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX,
+    SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX,
+    SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink, SelectionLinkKind, SelectionWatch,
+    StorePage, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand,
+    ViewTier, authored_block,
 };
 // T-904 per-frame detection retention and rollup (docs/07 §2.9).
 pub use repo::{
