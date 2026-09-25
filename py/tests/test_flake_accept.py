@@ -589,6 +589,7 @@ set -u
 REPO={repo}; LOG={tmp_path}/log; NEEDS={tmp_path}/needs
 log(){{ :; }}; ticket_of(){{ echo "$1"; }}
 {batch_sig}
+probe(){{
 branches=(task-t1 task-t2)
 {loop}
 branches=("${{merged[@]}}")
@@ -597,9 +598,11 @@ echo "UNMOVED=$([ "$gated_sig" = "$(batch_sig "${{branches[@]}}")" ] && echo sam
 git -C $REPO checkout -q task-t2; echo fix > $REPO/fix; git -C $REPO add fix; git -C $REPO commit -qm fix; git -C $REPO checkout -q main
 echo "MOVED=$([ "$gated_sig" = "$(batch_sig "${{branches[@]}}")" ] && echo same || echo DIFFERENT)"
 echo "GATED=${{gated[*]}}"
+}}
+probe
 """
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
-    assert out.returncode == 0, out.stderr
+    assert out.returncode == 0 and "local" not in out.stderr, out.stderr
     assert "UNMOVED=same" in out.stdout           # an unchanged batch still matches its hold
     assert "MOVED=DIFFERENT" in out.stdout        # a tip pushed after the merge releases it
     t1, t2 = run("rev-parse", "task-t1"), run("rev-parse", "task-t2~1")
