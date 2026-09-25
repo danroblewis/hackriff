@@ -44,12 +44,6 @@
 
   <!-- EXPLORE -->
   <div class="main" id="view-explore">
-    <!-- T-895 (P1): collapsed to a chip with the lists' counts by default; `chrome/side-chip.ts` adds
-         the chip and the open overlay's close (×) around the two slots without touching them. -->
-    <aside class="side" data-slot="side" aria-label="Inventory and selections">
-      <div class="side-inv" data-slot="inventory"></div>
-      <div class="side-sel" data-slot="selections"></div>
-    </aside>
     <!-- T-445 (docs/16 §8.5): ONE surface. The live waterfall, the history render, the frequency
          axis strip and both bespoke edge navigators are retired into a single virtual canvas —
          X = frequency across the device-available range, Y = time — over the coverage tile pyramid.
@@ -69,6 +63,15 @@
          around `.sheet-body` without touching the focus slot inside it. -->
     <section class="sheet" data-slot="sheet" aria-label="Selected">
       <div class="sheet-body">
+        <!-- T-997: the inventory lists and the selections under them live IN the sheet now. The
+             T-895 chip that opened them as a left-hand overlay sat at mid-height over each pane's
+             time ruler; its replacement is two pills in the map's top-left chrome
+             (`chrome/inv-pills.ts`), and each pill opens THIS sheet on its list. The `side` slot
+             is where the pills mount from; `sheet.css` orders the body. -->
+        <aside class="side" data-slot="side" aria-label="Inventory and selections">
+          <div class="side-inv" data-slot="inventory"></div>
+          <div class="side-sel" data-slot="selections"></div>
+        </aside>
         <div class="drawer" data-slot="drawer"></div>
         <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>
       </div>
@@ -93,7 +96,11 @@
        the viewed window. Workflow #3: choose a region and see what was seen there over time. -->
   <div class="hist" id="view-history" data-slot="catalogue" aria-label="History" hidden></div>
 
-  <footer class="dock" data-slot="outputs" aria-label="Live outputs"></footer>
+  <!-- T-994: the Outputs dock BAR is retired — its pixels return to the map, where a box with an
+       open output shows an active halo + badge and carries its actions in a right-click /
+       long-press menu. What remains is a small, closeable Active-outputs chips strip that exists only
+       while something is open (hidden otherwise), so every former dock action stays reachable. -->
+  <div class="out-strip" data-slot="outputs" role="region" aria-label="Active outputs" hidden></div>
 </div>
 
 <aside class="review" id="review" data-slot="review" aria-label="Review" hidden></aside>

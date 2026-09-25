@@ -27,8 +27,8 @@ import { dirname, join, normalize } from "node:path";
 import test from "node:test";
 
 import {
-  coverageUrl, fmtShare, latticeSpanHz, observedExtent, openingWindow, orientationNote, recentObservedExtent,
-  surfaceBounds,
+  coverageUrl, fmtShare, latticeSpanHz, newestObservedRow, observedExtent, openingWindow, orientationNote,
+  recentObservedExtent, surfaceBounds,
 } from "../src/surface/bootstrap";
 import { GREY } from "../src/surface/cellrule";
 import { legendEntries, swatchPixels } from "../src/surface/legend";
@@ -194,10 +194,10 @@ test("probeSurface asks exactly five read-only routes, in dependency order", asy
       : coverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 60, f1: 62, t0: 0, t1: 31 });
   });
   assert.deepEqual(asked, [
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=f16",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=compact",
     // T-505: the second tier, probed the same cheap way. Both lattices are READ OFF an answer;
     // neither is ever chosen here.
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8&planes=f16",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8&planes=compact",
     "/api/navigation",
     coverageUrl({ f0Hz: 1e6, f1Hz: 6e9, t0Ns: T0 * S, t1Ns: T1 * S }, ORIENT_CELLS, ORIENT_ROWS),
     coverageUrl(surfaceWide.box!, ORIENT_CELLS, ORIENT_ROWS),
@@ -233,6 +233,87 @@ test("T-955: probeSurface opens on the RECENTLY tuned band, not the union of eve
   assert.ok(p.opening.freq.centerHz >= 9e6 && p.opening.freq.centerHz <= 14e6,
     `opened away from the currently-tuned band: centre ${p.opening.freq.centerHz / 1e6} MHz`);
   assert.ok(p.opening.freq.spanHz < 20e6, `sliver span left over from the old union box: ${p.opening.freq.spanHz}`);
+});
+
+test("T-955: recency is anchored at the NEWEST OBSERVED row, not the grid's last row", () => {
+  // A grid whose last rows are empty — the server's `latest_s` ran ahead of capture (seen live: 34 min
+  // in the future), or capture paused. Counting back from the grid's end finds nothing and falls back
+  // to the lifetime union; anchoring at the newest observed row finds the band the radio holds now.
+  const cov = twoBandCoverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 100, f1: 102, t1: 15 }, { f0: 10, f1: 12, t0: 17, t1: 20 });
+  assert.equal(newestObservedRow(cov), 20);
+  const recent = recentObservedExtent(cov);
+  assert.ok(recent.box, "rows 28..31 are empty, but the newest OBSERVED rows are not");
+  assert.ok(recent.box!.f0Hz >= 9e6 && recent.box!.f1Hz <= 14e6, `boxed the old band too: ${JSON.stringify(recent.box)}`);
+  assert.equal(newestObservedRow(coverage(4, 4, null)), -1);
+  assert.equal(recentObservedExtent(coverage(4, 4, null)).box, null);
+});
+
+/** A coverage SERVER: answers any `/api/coverage` query by sampling `bands` (absolute Hz x seconds)
+ * over the grid the query asked for, so a refinement pass sees what a real server would show it. */
+type Band = { f0: number; f1: number; t0: number; t1: number };
+function coverageServer(bands: Band[], latestS: number, horizonS: number) {
+  const asked: string[] = [];
+  const get = async (path: string): Promise<unknown> => {
+    if (path.startsWith("/api/tiles")) {
+      const r = tileProbeResponse(path.includes("scheme=overview") ? "overview" : "view");
+      return { ...r, coverage: { ...r.coverage, horizon: { oldest_record_s: horizonS } } };
+    }
+    if (path === "/api/navigation") return { frequency: { ranges_hz: [[1e6, 6e9]], center_step_hz: 28.6 }, time: { latest_s: latestS } };
+    asked.push(path);
+    const q = new URLSearchParams(path.slice(path.indexOf("?") + 1));
+    const flo = +q.get("f_lo")!, fhi = +q.get("f_hi")!, n = +q.get("cells")!, r = +q.get("rows")!;
+    const t0 = +q.get("t0")!, t1 = +q.get("t1")!;
+    const fc = (fhi - flo) / n, tc = (t1 - t0) / r;
+    const cells: { state: string }[] = [];
+    for (let t = 0; t < r; t++) {
+      for (let f = 0; f < n; f++) {
+        const a0 = flo + f * fc, b0 = t0 + t * tc;
+        const hit = bands.some((b) => b.f0 < a0 + fc && b.f1 > a0 && b.t0 < b0 + tc && b.t1 > b0);
+        cells.push({ state: hit ? "observed" : "unobserved" });
+      }
+    }
+    return { grid: { cells: n, rows: r, f_lo_hz: flo, f_cell_hz: fc, t0_s: t0, t_cell_s: tc }, any: { cells } };
+  };
+  return { get, asked };
+}
+const OLD_BAND = { f0: 161e6, f1: 163.4e6 }; // 162.2 MHz at 2.4 Msps — the band the radio LEFT
+const NEW_BAND = { f0: 143.4e6, f1: 145.8e6 }; // 144.6 MHz at 2.4 Msps — the band it holds now
+
+for (const [name, latestS, retuneAgoS] of [
+  ["a reload 30 s after the retune", T1, 30],
+  ["a reload 2 min after the retune", T1, 120],
+  ["a server whose latest_s is 34 min in the future", T1 + 2040, 120],
+] as const) {
+  test(`T-955: ${name} opens on the band tuned NOW, with the whole history's time span`, async () => {
+    const srv = coverageServer([
+      { ...OLD_BAND, t0: T1 - 3600, t1: T1 - retuneAgoS },
+      { ...NEW_BAND, t0: T1 - retuneAgoS, t1: T1 },
+    ], latestS, T0);
+    const p = await probeSurface(srv.get);
+    assert.equal(p.opening.onCoverage, true);
+    assert.ok(p.opening.freq.centerHz > NEW_BAND.f0 && p.opening.freq.centerHz < NEW_BAND.f1,
+      `opened off the tuned band: centre ${p.opening.freq.centerHz / 1e6} MHz`);
+    assert.ok(p.opening.freq.spanHz < 3 * (NEW_BAND.f1 - NEW_BAND.f0), `tuned band drawn as a sliver: ${p.opening.freq.spanHz / 1e6} MHz`);
+    // TIME comes from the whole census, not from the recent rows (the regression the first pass shipped).
+    assert.ok(p.opening.spanNs >= 3600 * S, `the opening's time span shrank to ${p.opening.spanNs / S} s of an hour's history`);
+
+    // The narrowed request the client BUILDS (the T-367 guard): the refinement asks over the recent
+    // rows — ending at the newest OBSERVED row, whatever `latest_s` says — never the whole horizon.
+    assert.equal(srv.asked.length, 2);
+    const q = new URLSearchParams(srv.asked[1].slice(srv.asked[1].indexOf("?") + 1));
+    assert.ok(+q.get("t1")! >= T1 && +q.get("t1")! <= T1 + 3600 / ORIENT_ROWS + 1,
+      `the refinement's window does not end at the newest observed row: t1 = ${+q.get("t1")! - T1} s past it`);
+    assert.ok(+q.get("t1")! - +q.get("t0")! <= 4 * (latestS - T0) / ORIENT_ROWS + 1,
+      `the refinement asked over ${+q.get("t1")! - +q.get("t0")!} s, not the recent rows`);
+    assert.ok(+q.get("f_lo")! <= NEW_BAND.f0 && +q.get("f_hi")! >= NEW_BAND.f1, "the refinement's box lost the tuned band");
+  });
+}
+
+test("T-955: a steady 1.6 h tuning keeps its whole time span at open (5760 s, not the last rows)", async () => {
+  const srv = coverageServer([{ f0: 100.5e6, f1: 102.9e6, t0: T1 - 5760, t1: T1 }], T1, T1 - 5760);
+  const p = await probeSurface(srv.get);
+  assert.ok(p.opening.freq.centerHz > 100.5e6 && p.opening.freq.centerHz < 102.9e6);
+  assert.ok(p.opening.spanNs >= 5760 * S, `opening time span ${p.opening.spanNs / S} s — the regression was 126 s`);
 });
 
 test("a refinement that finds nothing keeps the coarse box: an observed cell has something in it", async () => {
@@ -290,7 +371,7 @@ test("the route's backpressure is answered by ASKING AGAIN, never by a banner qu
     undefined,
     { backoffMs: 4, sleep: async (ms) => { slept.push(ms); } },
   );
-  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=f16";
+  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=compact";
   assert.deepEqual(asked.slice(0, 3), [probePath, probePath, probePath],
     "the request the client builds on a refusal is the SAME request, again");
   assert.deepEqual(slept, [4, 8], "and it waits longer each time rather than re-asking on one cadence");

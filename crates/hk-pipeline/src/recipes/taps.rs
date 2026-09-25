@@ -237,6 +237,11 @@ pub struct StreamCtx {
     pub emitter_id: Option<EmitterId>,
     /// Follow-hops: the channels known at open (empty: the one channel above).
     pub channels: Vec<ChannelInfo>,
+    /// What the Listen chooser measured on this channel (T-869, ADR-0015 §12.2), when the
+    /// pipeline was started by the `listen` opener rather than by hand. `None` means nothing
+    /// measured the channel, and an `audio` header then says so (`mode_rules: recipe-declared`)
+    /// instead of inventing a confidence.
+    pub measured: Option<std::sync::Arc<crate::recipes::audio::Measured>>,
 }
 
 /// Header of a frames stream (inspector output `output_id`, or a frames tap named

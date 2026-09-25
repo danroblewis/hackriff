@@ -143,6 +143,24 @@ pub fn classify_box<T: IqSample>(
     request: &SnippetRequest,
     t: Timestamp,
 ) -> Option<Classification> {
+    classify_box_observed(classifier, c14, survey, info, iq, request, t, None).map(|(c, _)| c)
+}
+
+/// [`classify_box`], plus the learned stage's input (`hk_classify::dl_input`) of the **same**
+/// normalised snippet when `ml` has a model in a non-`off` mode for the family that came out
+/// (T-844). The vector is computed only then, so an idle shadow stage costs nothing here; `None`
+/// in the second slot means no model wanted it, or the snippet was unmeasurable.
+#[allow(clippy::too_many_arguments)]
+pub fn classify_box_observed<T: IqSample>(
+    classifier: &Classifier,
+    c14: &mut SymbolEstimator,
+    survey: &crate::survey::ReceiverSurvey,
+    info: InputInfo<'_>,
+    iq: &[T],
+    request: &SnippetRequest,
+    t: Timestamp,
+    ml: Option<&crate::ml::MlStage>,
+) -> Option<(Classification, Option<Vec<f32>>)> {
     survey.apply(c14, info.provenance.get());
     let (snippet, params) = measure_box(info, iq, request)?;
     let window = c14.window_from_snippet(&snippet, &params);
@@ -161,7 +179,11 @@ pub fn classify_box<T: IqSample>(
     req.symbol_sample_rate_hz = window.as_ref().map(|w| w.sample_rate_hz);
     req.suspect.clipped = params.flags.clipped;
     req.suspect.spur = params.flags.overload;
-    Some(classifier.classify(&req))
+    let classification = classifier.classify(&req);
+    let input = ml
+        .filter(|m| m.wants(&classification.family))
+        .and_then(|_| hk_classify::dl_input(req.samples, req.sample_rate_hz, req.obw_hz));
+    Some((classification, input))
 }
 
 /// Appends `classification` to `emitter` at [`ArbRank::Classifier`]. **Always writes** (T-878):

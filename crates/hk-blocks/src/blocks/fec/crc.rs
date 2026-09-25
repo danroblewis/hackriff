@@ -337,6 +337,27 @@ pub struct Crc {
 }
 
 impl Crc {
+    /// The bits of a `len`-bit frame this block's check **covers**: the span (data ‖ check
+    /// field) or the blocks lattice, and empty when the frame is too short to check. The
+    /// evidence tally's degenerate-frame guard runs over exactly this slice, never the whole
+    /// frame: with `span.start_bit > 0` an idle frame whose *covered* data cancels the register
+    /// is valid while the whole frame is not short-periodic (T-928, ADR-0022 §4.3.1 hole A).
+    fn covered(&self, len: usize) -> std::ops::Range<usize> {
+        match &self.mode {
+            Mode::Span(span) => {
+                if len < span.start + span.trim + self.width {
+                    0..0
+                } else {
+                    span.start..len - span.trim
+                }
+            }
+            Mode::Blocks { data, offsets, .. } => {
+                let end = offsets.len() * (data + self.width);
+                if len < end { 0..0 } else { 0..end }
+            }
+        }
+    }
+
     /// Checks one frame (unpacked into `self.bits`, corrected in place); fills `self.out`.
     fn check(&mut self, bytes: &[u8]) -> Checked {
         let len = self.bits.len();
@@ -527,7 +548,9 @@ impl Block for Crc {
                     .map(|a| self.width as f64 - (a.len().max(1) as f64).log2())
                     .sum(),
             };
-            self.ev.record(&self.bits, clean, width, self.width);
+            let covered = self.covered(self.bits.len());
+            self.ev
+                .record(&self.bits[covered], clean, width, self.width);
             if check == CrcStatus::Valid {
                 self.frames_ok += 1;
             } else {

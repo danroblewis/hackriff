@@ -5,7 +5,9 @@
 
 /* ---- 1. Immersive: ALL the floating chrome fades together ----------------------------------------
    The cluster over the canvas (Go-to, top-right, zoom, FAB) already faded on `IdleFade` (T-802);
-   the top bar, the dock and the lists' chip did not, so the "faded" map still wore a full-width bar.
+   the top bar and the dock did not, so the "faded" map still wore a full-width bar. (T-997: the
+   lists' chip is gone; its replacement, the inventory pills, is inside the cluster and carries
+   `map-fade`, so it fades with the rest by that rule and needs none here.)
    (T-993: there is no top bar over the map any more — its controls are in the cluster and fade with
    it, `map-controls.css`; the status pill stays solid while it states the stream is not live.)
    `IdleFade` now also states `chrome-idle` on <body> (map-controls.ts, IDLE_CLASS), and they follow it
@@ -14,10 +16,8 @@
    (none named here), a focused control (`:focus-within` / `:focus-visible`), or an honesty statement —
    so the status pill stays solid while its stream status says the picture is not live (`.conn` shown). Fade is
    an idle courtesy, never a dismiss (§10.6 rule 1): every overlay keeps its own close (T-900). */
-.app:has(#view-explore:not([hidden])) > .dock,
-#view-explore > .side.is-collapsed > .side-chip { transition: opacity .5s ease; }
-body.chrome-idle .app:has(#view-explore:not([hidden])) > .dock:not(:focus-within),
-body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visible) { opacity: .35; }
+.app:has(#view-explore:not([hidden])) > .out-strip { transition: opacity .5s ease; }
+body.chrome-idle .app:has(#view-explore:not([hidden])) > .out-strip:not(:focus-within) { opacity: .35; }
 
 /* ---- 2. Below the sheet breakpoint ---------------------------------------------------------------
    T-824 shortened the surface here (`padding-bottom: calc(70px + 56px + 8px)`) because the sheet's
@@ -46,13 +46,9 @@ body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visi
      everything in Explore's), and sits above the floating cluster (z 20) — a panel the cluster's
      zoom stack and FAB painted over would be neither readable nor the full-height panel §10.3 asks
      for. Its close (×) and the cluster's Research button both dismiss it. */
-  .research { top: 56px; bottom: 70px; left: 8px; right: 8px; width: auto; z-index: 25; }
-
-  /* The dock's own row scrolls sideways, never the page (§10.5). */
-  .app:has(#view-explore:not([hidden])) > .dock { overflow-x: auto; overflow-y: hidden; }
+  .research { top: 56px; bottom: 8px; left: 8px; right: 8px; width: auto; z-index: 25; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app:has(#view-explore:not([hidden])) > .dock,
-  #view-explore > .side.is-collapsed > .side-chip { transition: none; }
+  .app:has(#view-explore:not([hidden])) > .out-strip { transition: none; }
 }

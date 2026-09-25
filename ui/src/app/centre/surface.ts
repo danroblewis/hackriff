@@ -52,6 +52,7 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
+import { TIME_LABEL_BOX_CSS, type HudReserve } from "../../surface/hud";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
@@ -59,7 +60,7 @@ import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrien
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
-  acceptPaneRetune, acceptPaneWidth, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
@@ -82,6 +83,7 @@ import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
+import { boxActivity, type BoxActivity } from "../dock/activity";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
@@ -168,6 +170,33 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/**
+ * T-997: the floating chrome's TOP-LEFT column, measured against the canvas, so the time ruler's
+ * labels are dropped rather than printed underneath it (`surface/hud.ts`'s `HudReserve`). The
+ * cluster's children are absolutely placed by `map-controls.css`, and the ones that matter are the
+ * ones that reach into the ruler's own band down the left edge — Go-to, the nudge row, the
+ * inventory pills, the retune offer, and at phone width the status pill. Whichever they are, this
+ * asks the layout rather than repeating the CSS's numbers: one rect read per child, once per frame,
+ * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
+ * most one layout and never a read-write thrash.
+ */
+const RULER_BAND_CSS = TIME_LABEL_BOX_CSS.left + TIME_LABEL_BOX_CSS.width; // where a time label prints.
+function chromeReserve(canvas: HTMLCanvasElement, ctl: HTMLElement | null): HudReserve | null {
+  if (!ctl) return null;
+  const base = canvas.getBoundingClientRect();
+  let left = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const child of Array.from(ctl.children)) {
+    const r = child.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const x0 = r.left - base.left, x1 = r.right - base.left, y1 = r.bottom - base.top;
+    // Only what reaches into the band the time labels print in, and only above the fold: the zoom
+    // stack, the FAB and the top-right cluster are nowhere near the left ruler.
+    if (x0 > RULER_BAND_CSS) continue;
+    left = Math.min(left, x0); right = Math.max(right, x1); bottom = Math.max(bottom, y1);
+  }
+  return bottom > -Infinity ? { left, right, bottom } : null;
+}
+
 /** The surface's tool modes (docs/23 §10.4's table columns). */
 type ToolMode = "navigate" | "measure" | "annotate" | "pin";
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
@@ -474,13 +503,28 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // box and rect. `composeOverlays` concatenates the pane's VISIBLE ones in ascending z into the one
   // `marks` hook — still one place overlay geometry is produced and one pass (`overlay.ts`: no
   // sampler, no ramp) that draws it. MAP-07…MAP-13 each add one entry here.
+  // T-994: which boxes have an open output (Listen / stream-out / decode / recording), from the
+  // backend's open-output records the Active-outputs mount polls (`dock/activity.ts`). Re-derived
+  // only when those records change, and read INSIDE the frame like every other mark's state, so the
+  // halo and the badge are laid out through the pane's own mapping on every frame (never on the
+  // poll's cadence — T-388).
+  let activitySrc: readonly [unknown, unknown] = [null, null];
+  let activityMap: Map<string, BoxActivity> = new Map();
+  const activityNow = (): ReadonlyMap<string, BoxActivity> => {
+    const s = store.get();
+    if (activitySrc[0] !== s.outputs || activitySrc[1] !== s.servedOutputs) {
+      activitySrc = [s.outputs, s.servedOutputs];
+      activityMap = boxActivity(s.outputs, s.servedOutputs.pipelines, s.servedOutputs.recordings);
+    }
+    return activityMap;
+  };
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
     // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
     const rows = Object.values(s.inventory.rows);
-    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained, activityNow()), edge, pane.box, pane.rect,
       { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
@@ -608,6 +652,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
     onFocus: (p) => { focusedPin = p; },
     onSelect: selectPin,
   });
+  // T-994: the keyboard's menu key / Shift+F10 on a focused feature (the browser targets the focused
+  // button with `contextmenu`) opens the same menu, at the feature.
+  pinsEl.addEventListener("contextmenu", (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>(".sf-pin[data-pin]");
+    const row = btn ? store.get().inventory.rows[btn.dataset.pin ?? ""] : undefined;
+    if (!btn || !row) return;
+    e.preventDefault();
+    const r = btn.getBoundingClientRect();
+    openSignalMenu(ctx, row, e.clientX || r.left + Math.min(r.width, 24), e.clientY || r.top + Math.min(r.height, 24));
+  });
   /** The MapTip for whichever pin is focused (keyboard) or else hovered (pointer), re-placed on the
    * pin's position THIS frame so it moves with the pin. It reads loaded state only. */
   const placeTip = () => {
@@ -636,7 +690,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const layouts = panes
       .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
-    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
+    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null, activityNow());
     placeTip();
   };
   /** T-1000: outline the active pane, from pane rectangles in drawing-buffer px. Set-if-changed, like
@@ -1273,6 +1327,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
+        hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
         dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); },
       });
     } catch (e) {
@@ -1398,9 +1453,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
         setMeasureMode(false);
       },
       onContext: (p, e) => {
+        const s = store.get();
+        // T-994: a feature on the map — a detection's box or its generalized symbol — is hit the way
+        // a click hits it (the pin layer's polygon/quadtree pick), so right-click / long-press on ANY
+        // box opens its menu. (The detections are the `detections` LAYER since T-806, so `hitAt`'s
+        // marks — the user's own selections and measurements — no longer contain them.)
+        const c = cssPoint(e);
+        const pin = pinLayer.pick(c.x, c.y);
+        if (pin && pin.pin.source === "detection") {
+          const row = s.inventory.rows[pin.pin.id];
+          if (row) { openSignalMenu(ctx, row, e.clientX, e.clientY); return; }
+        }
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
-        const s = store.get();
         if (hit.mark.kind === "signal-box") {
           const row = s.inventory.rows[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
@@ -1418,9 +1483,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
-      // T-955: follow-live brings the pane's FREQUENCY back to the front end's own current window
-      // too, when one is known — the same `frequency.current` the retune-offer span already reads
-      // (`goToSpanHz`), never a device call.
+      // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
+      // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
+      // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
+      // NOTE for T-1006 (per-pane device): this reads the GLOBAL `frequency.current`, not the
+      // pane's own device's window.
       () => {
         const cur = store.get().navGrid.grid?.frequency?.current;
         return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
@@ -1461,7 +1528,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const o = offerNow(pv.activePane);
         // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
         // reaches it and the pane row's persistent control is where a finer capture is offered.
-        if (!o || o.covered) { lastPaintedGoto = null; return null; }
+        // T-955: a Go-to names a CENTRE (T-947), so "covered" is whether the tuned window holds the
+        // pane's centre — not whether it holds the whole viewport, which a pane zoomed out past the
+        // capture never is. Checked against `frequency.current` as well as the active windows, so a
+        // retune by anyone withdraws the offer the moment the navigation poll reports it (the
+        // explorer's 0428: "Retune to 162.2000 MHz" still painted with the radio at 162.2, then 144.6).
+        const pane = pv.view.panes.get(pv.activePane);
+        const cur = store.get().navGrid.grid?.frequency?.current ?? null;
+        const c = pane?.freq.centerHz ?? NaN;
+        const heldNow = !!pane && (coveringWindow(windows, c, c, pane.device) !== null
+          || (!!cur && Math.abs(c - cur.center_hz) <= cur.span_hz / 2));
+        if (!o || heldNow) { lastPaintedGoto = null; return null; }
         const wo = widthOfferNow(pv.activePane, gotoSpanHz());
         if (!wo) { lastPaintedGoto = null; return null; }
         lastPaintedGoto = wo;
@@ -1537,6 +1614,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
+    // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
+    store.select((s) => {
+      const c = s.navGrid.grid?.frequency?.current;
+      return c ? `${c.center_hz}/${c.span_hz}` : "";
+    }, () => controls.tuningChanged());
 
     // ---- the active pane, made visible (T-1000, docs/23 §10.7) ----
     // Whatever made a pane active — a press, a right-click, a wheel, a split, a close, a key — the
@@ -1576,9 +1659,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
-      // T-918: the canvas runs under the floating dock at the bottom (full-bleed, docs/23 §10.1), so
-      // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
-      const dock = document.querySelector<HTMLElement>(".app > .dock");
+      // T-918: the canvas runs under the floating chrome at the bottom (full-bleed, docs/23 §10.1),
+      // so the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
+      // T-994: the dock bar is retired; what can sit there now is the Active-outputs strip, and only
+      // while an output is open (hidden — height 0, nothing to clear — otherwise).
+      const dock = document.querySelector<HTMLElement>(".app > .out-strip");
       const dr = dock?.getBoundingClientRect();
       const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
       // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
@@ -1629,6 +1714,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
+    // T-994: the Active-outputs strip appears and disappears with the outputs; its box changing size
+    // (0 while hidden) re-fits the map strip's clearance.
+    const outStrip = document.querySelector<HTMLElement>(".app > .out-strip");
+    if (outStrip) ro?.observe(outStrip);
     window.addEventListener("resize", fit);
     preview.start();
 
