@@ -23,6 +23,7 @@ import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
 import { registerMapHome } from "./top-chrome";
+import { registerMapInvHome } from "./inv-home";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
  * step. The pane's own `zoomBoth` holds the aspect lock and the bounds (T-472), so a press at a
@@ -362,6 +363,11 @@ export function mountMapControls(host: MapControlHost): {
   // under Go-to, where the retune offer — the other device command on the map — already lives.
   const statusHome = h("div", { class: "map-glass map-status map-fade", role: "group", "aria-label": "View and device", hidden: true });
   const nudgeHome = h("div", { class: "map-glass map-nudge map-fade", hidden: true });
+  // T-997: the inventory pills' row, under Go-to and the nudges in the left stack — the place the
+  // mid-height chip over the time ruler was retired from. Filled by `chrome/inv-pills.ts` (which may
+  // mount before or after this cluster), and hidden until it is: an empty glass box is chrome that
+  // says nothing.
+  const invHome = h("div", { class: "map-glass map-inv map-fade", role: "group", "aria-label": "Signal lists", hidden: true });
   const paneItem = (act: string, label: string, title: string, run: () => void) => {
     const b = h("button", { type: "button", class: "map-pane-item", "data-pane-act": act, title }, label) as HTMLButtonElement;
     // A menu item acts and closes the menu, like any menu; Record IQ (a host extra) keeps it open so
@@ -404,7 +410,7 @@ export function mountMapControls(host: MapControlHost): {
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
     svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
@@ -583,6 +589,7 @@ export function mountMapControls(host: MapControlHost): {
   syncFollow();
   syncMeasure();
   registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
+  registerMapInvHome(invHome);
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
   return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch };
