@@ -27579,15 +27579,14 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
+    dispatch: manual
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (first window). Two live captures clipped through POST /api/iqbuffer/clip while the app's RDS was decoding, each with hidden truth:
       - ~/.hackriff-ops/explorer/captures/20260925/fm-101p3-pi1694.sigmf-{meta,data} + .truth.json - 2.4 Msps x 5 s at 100.9 MHz, 24 MB; truth: 101.3 MHz WFM, pilot, RDS PI 1694, RT "Star 101.3 - ..." (PS scrolling/dynamic).
       - ~/.hackriff-ops/explorer/captures/20260925/fm-98p9-piA4FF.sigmf-{meta,data} + .truth.json - 2.4 Msps x 5 s at 98.5 MHz; truth: 98.9 MHz WFM + RDS PI A4FF, and 98.1 MHz WFM with pilot, no PI (second emission).
       DELIVER: move both into fixtures/ under Git LFS following fixtures/README.md (e.g. fixtures/hackrf/explorer-2026-09-25/): hackriff:truth annotations written with py/fixtures/annotate.py so the truth is HIDDEN from the system under test (the .sigmf-meta the mock SDR replays carries no truth the pipeline can read - check how the existing captures hide it and match that), manifest.json entries (truth_summary, purpose, lfs, datetime, the capture settings: LNA 32 / VGA 30 / amp on, overload flagged, antenna unknown/stock, HackRF serial from the journal), SIGNAL-062. Cross-check the truth PIs with py/fixtures/rds_ref.py (the independent oracle) and record the oracle's PI/PS per station. Keep SigMF metadata complete (every capture's settings recorded).
       MAC ONLY: the captures live in ~/.hackriff-ops on the Mac Studio - not on node2.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`. (py/tests/test_fixture_tooling.py + just test-py for the manifest.)
-    dispatch: manual
   - id: T-936
     milestone: MAUTO
     title: "All captured signals decode: failing-first blind FM/RDS acceptance tests through the mock SDR on the explorer captures (T-545 pattern)"
@@ -27601,13 +27600,12 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       THE FIRST MEMBERS OF THE "ALL CAPTURED SIGNALS DECODE" SET (user 2026-09-25): every signal the explorer captures becomes a failing-first blind acceptance test, T-545's pattern (tests/e2e/tests/acceptance_mauto.rs + acceptance/signal_087.rs): through the MOCK SDR replaying the fixture (never files into the pipeline), BLIND, no frequency/modulation/protocol passed in. Fixtures: the two explorer FM captures (the fixture ticket this depends on).
       Per truth emission, assert: (1) DETECTED as ONE time-frequency region per station (centre within tolerance, bandwidth ~150-200 kHz, time extent; not the 13 narrow fragments the live app produced); (2) classified WFM with a pilot, with parameters estimated; (3) the WFM+RDS chain AUTO-ATTACHED without a prompt; (4) DECODED: PI 1694 (101.3) and PI A4FF (98.9) and PS/RT where the hidden truth has them, 98.1 reported as pilot-without-PI - checked against the hidden truth; (5) a sensible explanation (FM broadcast allocation) ranks in the top suggestions without identifying. Tests that fail today are red for the RIGHT reason (state per assertion what a passing run proves; a red from an empty fixture or a broken harness teaches nothing), registered the way T-545's were as a milestone exit target (acceptance-mauto / e2e_milestones - never in the per-merge gate), each naming the ticket that must turn it green (T-926 for auto-attach/decode, the FM-fragmentation ticket for (1), the centre-refinement ticket for the offset).
       Name the set so later captures join it (one test per captured signal, same shape): "all captured signals decode".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-937
     milestone: MAUTO
     title: Broadcast FM fragments into many narrow candidates in the 2.4 Msps sweep (349 for ~19 stations)
@@ -27618,13 +27616,12 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (live FM band 88-108 MHz, 2.4 Msps fine sweep): broadcast FM is FRAGMENTED into many narrow candidates - 349 candidates for ~19 stations; e.g. 13 candidates of 9-47 kHz across 98.74-98.97 MHz, none WFM-classified, so no WFM/RDS chain ever attaches. The same stations at 20 Msps come out as single 123-200 kHz detections, so the merge works there but not in the fine sweep. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: one region per station in the 2.4 Msps sweep: find why the near-duplicate merge / OBW grouping splits a WFM emission at the fine-sweep resolution (FFT bin width, CFAR guard, per-segment merge across sweep steps?) and fix it at the source; overlap-is-an-error (CLAUDE.md) should already force re-analysis of 13 abutting boxes - say why it did not. Test through the mock SDR on the explorer FM fixtures (or a synthetic multi-station WFM scene at the sweep's resolution): one detection per station, red on current code.
       WHAT THE USER WILL SEE ON STAGING: one box per FM station in a 2.4 MHz sweep of 88-108.
       core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-938
     milestone: MAUTO
     title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
@@ -27636,7 +27633,6 @@ tasks:
     model: opus
     effort: medium
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer: detection centres are biased and the RDS recipe does not refine them - 98.925 MHz where the recipe's fm.offset_hz says the carrier is at -24.4 kHz (~98.900); 98.088 -> +10.0 kHz. The rds recipe has refine: null. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: closed-loop centre refinement for the WFM/RDS recipe from the processed output (pilot phase/frequency and discriminator DC offset - CLAUDE.md "tune from the processed output"), so an attached chain converges on the carrier and the refined centre flows back to the emitter; say why the detection centre is biased at 2.4 Msps (asymmetric OBW edges?). Test on the explorer FM fixtures or a synthetic WFM+RDS offset by 25 kHz: refined centre within 1 kHz and RDS group rate recovers; red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -27650,13 +27646,12 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer at 20 Msps (live HackRF): the detect reader cannot keep up - readers.detect.lost_samples 3.1 G with 39 overruns in ~4 min, source.source_dropped 54 M, and the live waterfall shows mostly empty rows (shots 0402/0404). The history reader lost 0. A user choosing the 20 MHz span gets a broken live view and holes in detection. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: measure (T-453: measure, don't assume) where the detect reader spends its time at 20 Msps on the release build (profile per stage), and fix so detection keeps up at 20 Msps on the Mac (decimate/segment, bound per-frame work, or shed detection frames honestly with a coverage mark - never silently); the waterfall rows must never go empty because detection is behind (live is never gated on another reader). Also say why source_dropped is non-zero when only the detect reader lags (does a slow reader back-pressure the source?). Test: a throughput bound goes in the timing tier (just timing, docs/10 §3.6); a deterministic test in the gate that a lagging detect reader never starves the waterfall/history readers.
       WHAT THE USER WILL SEE ON STAGING: at 20 MHz span the waterfall is solid and detection shows no loss counters climbing.
       Real-time path. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-940
     milestone: M2-hardening
     title: "On-air FM stations (incl. Confirmed 101.3 while decoding) read liveness: ended; lists show Nothing on the air"
@@ -27667,13 +27662,12 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (live FM band): continuously transmitting stations read ENDED - /api/inventory?t0=now-60&t1=now listed 18 FM entries, ALL liveness: ended, including Confirmed 101.3 while it was on air and decoding. The Signal lists panel showed "Confirmed 0" / "Nothing on the air in this window" (shots 0402/0404). This breaks the CLAUDE.md invariant (a signal is ongoing, end=null, until an end is affirmatively detected; the end is revocable). T-591 (events vs inventory liveness) landed earlier; this is a different or returned defect. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: root-cause why an on-air station's track gets an end (sweep dwell leaving the station's band? a quiet-gap timer counting un-observed time as quiet? the retune/segment change closing tracks?) - an emitter the receiver is not currently observing is NOT ended (unobserved is not quiet: Coverage::Unobserved is not quiet); a detected end must reopen when the signal is seen again. Test through the mock SDR: a continuous carrier under sweeping/retuning stays ongoing, and an in-window list query returns it live; red on current code.
       WHAT THE USER WILL SEE ON STAGING: an FM station that is on air is listed (Confirmed or Candidate) and ongoing, never ended.
       core_interface (inventory model, ADR-0017/0019). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-941
     milestone: M2-hardening
     title: "Class-boundary retune leaves the run with no inventory: detect/control stragglers lock the old segment's inventory"
@@ -27684,13 +27678,12 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (SEVERE): a class-boundary retune (100.9 -> 162.2 MHz, unrestricted -> metadata-only, re-plumb to segment 6) left the run with NO INVENTORY. hk-serve.log: "hk-detect did not stop within 8s of its segment ending ... hk-control did not stop within 8s ... segment state still held 5 s after its threads ended (26 holders); salvaging it" and "the old segment's inventory is locked by its straggler; continuing without inventory". Afterwards detect.detections_written kept rising (12 487 -> 15 619 in 20 s) while tracks_opened froze at 2163 and /api/inventory answered total 0: detection runs and writes rows but tracks, candidates and the inventory never update, the UI shows "Nothing on the air" everywhere, and only a restart fixes it. Log kept as ~/.hackriff-ops/explorer/hk-serve-run1.log. Related: T-917 (survey thread outlived its segment by 8 s - a different straggler). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: (1) why hk-detect / hk-control outlive their segment by 8 s on this path (what blocks their stop?) - fix so they stop promptly; (2) the re-plumb must hand the inventory to the new segment (or recover it) - never "continue without inventory"; a straggler holding the lock must not detach the live run's inventory for ever; if detection is ever detached it must be reported (status + UI), never silent. Test through the mock SDR: a class-boundary retune while detect is busy keeps tracks opening and /api/inventory populated; red on current code (reproduce the straggler deterministically - no wall-clock choice of what to assert).
       WHAT THE USER WILL SEE ON STAGING: after any retune the signal lists keep filling; no restart needed.
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-942
     milestone: M2-hardening
     title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
@@ -27702,7 +27695,6 @@ tasks:
     model: opus
     effort: medium
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer: after a restart on the same --data-dir, /api/status history reads frames_ingested 0, frames_late 2024 - every spectrum-history frame is rejected as late, /api/history has observed_cells 0 for the live window, and history is silently not recorded for the new run (view tiles still work: view_frames 5050). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: root-cause the late classification after a restart (a persisted watermark/last-sealed time from the previous run compared against the new run's capture clock? a clock-base mismatch?) and fix so a restarted run on an existing data dir records history; any frame genuinely rejected is counted AND surfaced, never a silent 100 % loss. Test: restart-on-existing-dir through the mock SDR ingests frames; red on current code.
       WHAT THE USER WILL SEE ON STAGING: restarting the app keeps adding to history.
@@ -27718,7 +27710,6 @@ tasks:
     model: opus
     effort: medium
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (two targets):
       (a) The Selected-region panel is not scoped to the region: a region selected at 98.8226-99.0407 MHz listed 107.816, 106.997, 106.159 and 107.662 MHz as "Unknown & unexplained - the priority" and 106.166 as "Strongest" (shots/0404-region-989.png) - the whole UI is scoped to the (t x f) window (CLAUDE.md), the region panel included.
       (b) Listen / Decode are not reachable from a selection: the region panel offered no Listen or Decode; a candidate row and the "Selected signal" panel offer only "Go"; Listen lives only in a right-click context menu (ui/src/app/menu/actions.ts) and a right-click on a list row opened nothing.
@@ -27737,7 +27728,6 @@ tasks:
     model: opus
     effort: medium
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer: decoding needs a manual recipe choice and gives no confirmation it started. Decode tab -> "New from recipe: ACARS / ADS-B / Analog WFM / POCSAG / RDS" makes the user pick the decoder by hand; after the click the Pipelines list still said "no pipelines running" and GET /api/pipelines briefly answered [] although p1 had been created (shots/0407-rds-recipe.png). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: (1) the backend race: why /api/pipelines omits a just-created pipeline (created before registered? a list snapshot taken before insert?) - fix so a created pipeline is listed from the moment the create call returns (contract test in api_contract.rs); (2) the UI shows the created pipeline immediately from the create response and its running state; (3) the default action on a selected signal is the backend's auto-chosen decode (the MAUTO/T-926 chooser) with the recipe list as an override, not the entry point - wire to whatever the backend offers today and say what is missing. Thin client. Red on current code for (1) and (2).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -27751,13 +27741,12 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (live FM band, SF, stock antenna): every clip is flagged overload: true at LNA 32 / VGA 30 / amp on; the app flags it but nothing reduces gain (no AGC). One manual retry at amp off / LNA 24 / VGA 24 made RDS WORSE (98.9: 106 groups -> 0; 98.1: 3 -> 0). So the gain choice is a trade the app should make from the processed output, not a flag. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: automatic front-end gain management, closed-loop on measured quality (CLAUDE.md: AGC estimated from the signal; tune from the processed output): a policy that walks LNA/VGA/amp through the gated DeviceAction path (settle gap, provenance recorded per interval) scoring overload flags AND the decode/SNR quality of what is being worked (RDS group rate, pilot lock, noise-floor rise from IMD), converging on the best state and reporting why; never oscillating; off by default until proven, per-device capability-aware (no HackRF specifics in core). Design note first (docs/, which ADR it touches), then the mock-SDR implementation with a synthetic overload model; test red on current code that an overloaded scene converges to a better decode state.
       HARDWARE NOTE FOR THE USER (not this ticket): at this location RDS on all but the two strongest stations is front-end limited (8-bit, no preselector, strong SF FM) - an FM-band antenna + FM notch/preselector is the physical fix (existing user item).
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-946
     milestone: MMAP
     title: "Sweep view legibility: shadow hides stations, sampled-fraction banner frozen at first paint, black live-pane rectangle, span select sends stale rate"
@@ -27769,7 +27758,6 @@ tasks:
     model: sonnet
     effort: medium
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (FM sweep, 88-108): the sweep's product view is hard to read - (a) the "last known" scanlined shadow makes stations barely visible (shot 0355); (b) the "0.8 % of this surface was ever sampled (32 of 4096)" banner stays at its first-paint value after the sweep has lit 20 MHz; (c) at first paint of / the lower-right of the live pane was a black rectangle (0352). Also (d, unconfirmed - the explorer's synthetic change event): Review -> Device -> Span 20 MHz sent POST /api/control/rate {"sample_rate_hz": 2400000} (the OLD value, audit log), and afterwards the Device panel still showed "Span 2.400 MHz" while the header said 20 MHz (shot 0401) - verify with a real select before fixing. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: (a) shadow contrast so observed-then-quiet reads as dim but stations stay legible (docs/23 §10.6 honesty tiers; do not make shadow read as live); (b) the sampled-fraction banner refreshes as coverage grows (from the backend's coverage, not a client counter); (c) find the black rectangle (unpainted pane region? a tile never requested?) - grey only where unobserved; (d) reproduce with a real select in an e2e; fix if real (assert the request the client builds). Thin client; red tests for each fixed item.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -27784,7 +27772,6 @@ tasks:
     model: sonnet
     effort: medium
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer: Explore -> "Go to frequency" 162.2M offers "Retune to 162.2000 MHz at 15.819 MHz span" (shots/0416-goto-offer.png) - the retune offer takes its span from the current VIEW width, so accepting it from a zoomed-out view puts the HackRF at 16 Msps. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: the go-to retune offer proposes the device's default working span (or keeps the current tuned span) - never the view width - snapped to a realizable config through the gated DeviceAction path (CLAUDE.md navigation rules); the view may stay wide. Assert the request the client builds (ui/test); red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -27798,12 +27785,11 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: true
     notes: |
-      FOUND BY explorer-20260925.
       FOUND 2026-09-25 by the explorer (162.2 MHz tuned, 2.4 Msps): (a) the DC point is listed as a signal - a candidate at the exact tuned centre (162.1998 MHz, 8.5 kHz); it should be excluded by the DC notch (the excluded coverage state, T-595) and never listed; (b) a steady line at ~161.984 MHz is the readout's "peak -57.5 dB" but never became a detection or an explanation (spur? interferer? - either way list it or explain it). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: (a) candidates overlapping the DC-notch exclusion are not admitted (test: mock SDR with a DC spike -> no candidate at centre; red on current code); (b) find why a steady -57.5 dB line is not detected at 162 MHz (floor estimate, CFAR guard, a spur mask that swallowed it?) - if it is masked as a known spur, the inventory/explanation must say so rather than drop it silently; test on a synthetic steady line near a DC notch.
       core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    core_interface: true
   - id: T-949
     milestone: MAUTO
     title: "FLEX pager capture into fixtures/ (LFS, hidden truth) + new use cases: terrestrial paging, terrestrial APRS"
