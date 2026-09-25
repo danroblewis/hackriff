@@ -118,6 +118,9 @@ REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # attempts; the coordinator hears about it only when the cap is spent.
 FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
 KILL_RESUMES = 2   # resumes of a run killed by a signal; not fix attempts - nothing failed
+# A work run that hits MAX_MINUTES is resumed ONCE to wrap up (commit what is done, hand back) instead of parking
+# for a person: five did on 2026-09-24 (T-852, T-878, T-888, T-887, T-904), each finished by hand afterwards.
+TIMEOUT_RESUMES = 1
 # A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
@@ -800,9 +803,14 @@ def reap(claims, dry):
                     pass
                 c["state"] = "timeout"
                 c["ended"] = time.time()
-                attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
                 record_done(c, "timeout", {})
                 changed = True
+                if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
+                        and os.path.isdir(c.get("wt", "")) and _gone(pid)):
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped")
+                    log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
+                else:
+                    attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
             continue
         # finished
         changed = True
@@ -947,6 +955,20 @@ def fix_reason(fail_line, branch):
         return "OTHER", " ".join(fail_line.split())[:200]
 
 
+def _gone(pid, wait_s=30):
+    """The stopped run has exited (SIGKILL after wait_s): a resume must not share the session with it."""
+    for _ in range(wait_s):
+        if not alive(pid):
+            return True
+        time.sleep(1)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    time.sleep(1)
+    return not alive(pid)
+
+
 def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
@@ -970,6 +992,19 @@ full gate, never edit docs/tasks.yaml by hand.
 """
         r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json")
         return dict(r, kill_resumes=k)
+    if fail_line.startswith("TIMEOUT"):
+        t = c.get("timeout_resumes", 0) + 1
+        prompt = f"""Your run on {tid} reached its {MAX_MINUTES}-minute limit and was stopped; this resumes the same session ONCE,
+with the same limit, to WRAP UP - not to continue open-ended.
+In {wt}: `git status` and `git log --oneline main..{branch}` show what you have. Start no new scope. Get what is done into a
+committed, tested state: targeted tests only, commit on {branch}, write {d}/handback.json. If the ticket's acceptance is met,
+hand back DONE. If it is not, hand back BLOCKED and say precisely what remains (files, tests, the next step) in
+blocked.needs, so the coordinator can split or re-brief it - a clear remainder is a good outcome here, a half-commit is not.
+End your final message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main
+checkout, never the full gate, never edit docs/tasks.yaml by hand.
+"""
+        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json")
+        return dict(r, timeout_resumes=t)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):
