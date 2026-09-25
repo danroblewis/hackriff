@@ -875,8 +875,9 @@ fn stage_bits(ev: &[NodeEvidence], stage: Stage) -> f32 {
         .sum()
 }
 
-/// The analytic-null part of `b_k` (ADR-0022 §2.1): §13.1's combination over only the metrics
-/// whose null is a closed-form tail. `None` when the stage emitted no analytic evidence.
+/// The confirm-paying part of `b_k` (ADR-0022 §2.1): §13.1's combination over only the metrics
+/// **§2.1's table lists as contributing** ([`MetricId::pays_for_confirm`]) — not every metric with
+/// a closed-form null. `None` when the stage emitted none of them.
 fn analytic_stage_bits(ev: &[NodeEvidence], stage: Stage) -> Option<f32> {
     let mut any = false;
     let b = ev
@@ -885,7 +886,7 @@ fn analytic_stage_bits(ev: &[NodeEvidence], stage: Stage) -> Option<f32> {
             let it = n
                 .evidence
                 .iter()
-                .filter(|e| e.stage == stage && e.metric.is_analytic());
+                .filter(|e| e.stage == stage && e.metric.pays_for_confirm());
             let v: Vec<&Evidence> = it.collect();
             any |= !v.is_empty();
             combine_stage_bits(v)
@@ -2821,7 +2822,14 @@ impl<'a, E: Evaluator> Engine<'a, E> {
     fn holdout_evidence(&self, root: u32, run: &ChainRun) -> HoldoutEvidence {
         let origin = self.spec.roots[root as usize].check_origin;
         let inherited = origin.inherited_bits();
-        let l5 = self.l(Stage::S5);
+        // ADR-0022 §5.1: a **template-fixed** check tried zero hypotheses, so `L_check = 0` — the
+        // S5 stage's own job-wide count is not its charge (T-884 item 4). Every other origin pays
+        // that count plus whatever it inherited.
+        let l5 = if origin == CheckOrigin::TemplateFixed {
+            0.0
+        } else {
+            self.l(Stage::S5)
+        };
         // An unknown inherited charge is left out of the two sums below — which makes them upper
         // bounds — and `l_check` is `None`, which the solve rule and the confirm gate refuse.
         let extra = inherited.unwrap_or(0.0);
@@ -2831,11 +2839,12 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             .iter()
             .find(|(s, _)| *s == Stage::S5)
             .map(|(_, b)| b - l5 - extra);
-        // Each analytic stage pays its own `L_j`; the inherited `L_check` is charged once more.
+        // Each analytic stage pays its own `L_j` — S5's being `l5`, which a template-fixed check
+        // makes 0 — and the inherited `L_check` is charged once more.
         let analytic_bits = run
             .analytic
             .iter()
-            .map(|(s, b)| b - self.l(*s))
+            .map(|(s, b)| b - if *s == Stage::S5 { l5 } else { self.l(*s) })
             .sum::<f32>()
             - extra;
         HoldoutEvidence {
@@ -3388,6 +3397,66 @@ impl<'a, E: Evaluator> Engine<'a, E> {
 mod tests {
     use super::*;
     use crate::candidate::{EnumDomain, FloatDomain, IntDomain};
+    use crate::{Evidence, GroupId, MetricId};
+
+    /// T-884 item 7: the confirm key is built from ADR-0022 §2.1's table, not from every metric
+    /// with a closed-form null. `sync_regularity` has an analytic null and is reported and ranked,
+    /// but it may not pay for an irreversible confirm, so it is not in `analytic_stage_bits`.
+    /// Red before the fix: the filter was `is_analytic`, and the regularity bits were counted.
+    #[test]
+    fn t884_the_confirm_key_counts_only_the_metrics_adr0022_2_1_lists() {
+        let mut set = crate::EvidenceSet::new();
+        set.push(Evidence::new(
+            Stage::S4,
+            MetricId::SyncExcess,
+            GroupId::default(),
+            0.0,
+            100,
+            12.0,
+        ))
+        .unwrap();
+        set.push(Evidence::new(
+            Stage::S4,
+            MetricId::SyncRegularity,
+            GroupId::default(),
+            0.0,
+            100,
+            18.0,
+        ))
+        .unwrap();
+        let ev = vec![NodeEvidence {
+            node: "sync".into(),
+            evidence: set,
+        }];
+        let paid = analytic_stage_bits(&ev, Stage::S4).expect("S4 emitted a paying metric");
+        let all = stage_bits(&ev, Stage::S4);
+        assert!(
+            (paid - 12.0).abs() < 1e-3,
+            "only sync_excess pays: {paid} (the stage total is {all})"
+        );
+        assert!(
+            all > paid,
+            "the stronger regularity bits still rank the node: {all}"
+        );
+
+        // A stage whose only evidence is a non-paying metric contributes nothing to the key.
+        let mut only = crate::EvidenceSet::new();
+        only.push(Evidence::new(
+            Stage::S6,
+            MetricId::Plausibility,
+            GroupId::default(),
+            0.0,
+            10,
+            7.0,
+        ))
+        .unwrap();
+        let ev = vec![NodeEvidence {
+            node: "fields".into(),
+            evidence: only,
+        }];
+        assert_eq!(analytic_stage_bits(&ev, Stage::S6), None);
+        assert!(stage_bits(&ev, Stage::S6) > 0.0);
+    }
 
     #[test]
     fn paths_parse_only_in_the_adr_shape() {

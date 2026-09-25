@@ -31,7 +31,10 @@
 
 use std::collections::HashSet;
 
-use hk_model::{Annotation, Decode, EmitterId, ProvenanceId, RepoError, Repository, Sighting};
+use hk_model::{
+    Annotation, Decode, EmitterId, EmitterLink, LinkTarget, ProvenanceId, RepoError, Repository,
+    Sighting,
+};
 use hk_stream::policy;
 use hk_stream::{MessageRecord, Publisher};
 
@@ -248,6 +251,42 @@ impl Ingest {
         self.stats.decodes_stored += 1;
         self.upsert_emitter(&row, emitter, channel_center_hz, channel_bandwidth_hz);
         self.publish(MessageRecord::from_decode(&row, emitter, provenance));
+        Ok(stored)
+    }
+
+    /// Stores a decode **for an emitter already known**, links it to that emitter, and
+    /// republishes it — with **no identity sighting** (T-884 item 2).
+    ///
+    /// The difference from [`Self::store_decode`] is the sighting, and it matters: entity
+    /// resolution mints a new entry per sighting of a structural or shared-channel identity, so a
+    /// caller that has already decided which emitter these frames belong to would stack one ghost
+    /// candidate per frame by ingesting them. MAUTO's attach step is that caller (ADR-0015 §5.5).
+    ///
+    /// It used to insert and link by hand for exactly that reason, and so its rows never reached
+    /// the `messages` stream at all — a decode that exists but is not published is the "we have it
+    /// but didn't show it" defect on the fastest surface there is. The sanitising, the content
+    /// gate and the republish are the same ones every other stored row goes through.
+    pub fn store_decode_linked(
+        &mut self,
+        mut decode: Decode,
+        emitter: EmitterId,
+        provenance: Option<ProvenanceId>,
+    ) -> Result<Stored, RepoError> {
+        if !policy::decode_is_allowlist_shaped(&decode) {
+            let fallback = token_or_unsanitized(&decode.frame_model);
+            policy::sanitize_decode(None, &fallback, &mut decode);
+            self.stats.rows_stripped += 1;
+        }
+        // INVARIANT (legal guardrail), as in `store_decode`: `row` is the single sanitised value,
+        // and the link and the republish both consume it and nothing earlier.
+        let (row, stored) = self.store(decode, |d| &mut d.content, Repository::insert_decode)?;
+        self.stats.decodes_stored += 1;
+        self.repo.link_emitter(&EmitterLink {
+            emitter_id: emitter,
+            target: LinkTarget::Decode(row.id),
+            linked_at: row.t,
+        })?;
+        self.publish(MessageRecord::from_decode(&row, Some(emitter), provenance));
         Ok(stored)
     }
 
