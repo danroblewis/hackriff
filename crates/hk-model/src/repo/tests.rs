@@ -1959,92 +1959,91 @@ fn signal_062_rds_pi_identity_and_ps_label() {
     );
 }
 
-/// T-967: `latest_decode_identity_summary` renders a decoder's human-readable label (RDS's `ps`
-/// station name) and its own vote share (`pi_share`) so a list row can show them beside the bare
-/// identity code — reading whichever of `metadata`/`content` the decoder wrote the field into
-/// (decoders are not consistent), and the most recent decode that carries each.
+/// T-967 N1: the list-row identity summary is served only from a decoder's explicit session
+/// summary (RDS: `hk-rds`'s `rds-pi` row — the real writer's shape is tested end to end in
+/// `hk-demod`'s `t967_identity_label`). Nothing is guessed from similarly-named fields: an RDS
+/// per-frame fragment, a recipe-written `rds-pi` row and another scheme's `callsign`/`ps` keys all
+/// read as no summary.
 #[test]
-fn t_967_latest_decode_identity_summary_renders_label_and_confidence() {
+fn t_967_identity_summary_reads_only_the_decoders_explicit_summary_row() {
     let mut b = base();
     let pi = DecodedIdentity {
         scheme: IdentityScheme::RdsPi,
         value: "A1B2".into(),
     };
-
-    // No decode naming this identity yet: no summary to render.
+    let decode = |decoder: &str, frame_model: &str, identity: &DecodedIdentity, md, secs| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: decoder.into(),
+        decoder_version: "0.1.0".into(),
+        frame_model: frame_model.into(),
+        metadata: md,
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(identity.clone()),
+        content_class: ContentClass::Unrestricted,
+        t: t(secs),
+        provenance: None,
+    };
     assert_eq!(b.repo.latest_decode_identity_summary(&pi).unwrap(), None);
 
-    // The earliest decode names the label only in `content` (one writer's shape) and no vote
-    // share at all.
-    let early = Decode {
-        id: DecodeId::new(),
-        demodulation_ref: None,
-        recording_ref: None,
-        decoder_id: "hk-rds".into(),
-        decoder_version: "0.1.0".into(),
-        frame_model: "rds-group-0a".into(),
-        metadata: json!({"pi": "A1B2"}),
-        content: Some(json!({"ps": " KROQ   "})),
-        crc_status: CrcStatus::Valid,
-        identity: Some(pi.clone()),
-        content_class: ContentClass::Unrestricted,
-        t: t(10),
-        provenance: None,
-    };
-    b.repo.insert_decode(&early).unwrap();
-    let s = b.repo.latest_decode_identity_summary(&pi).unwrap().unwrap();
-    assert_eq!(s.label.as_deref(), Some("KROQ"), "trimmed: {s:?}");
-    assert_eq!(s.confidence, None, "this decode named no vote share: {s:?}");
+    // A per-frame fragment and a recipe-written row under the same identity: no summary.
+    b.repo
+        .insert_decode(&decode(
+            "hk-rds",
+            "rds-group-0-ps-frame",
+            &pi,
+            json!({"pi": "A1B2", "ps": "NOW PLAY"}),
+            10,
+        ))
+        .unwrap();
+    b.repo
+        .insert_decode(&decode(
+            "recipe:rds",
+            "rds-pi",
+            &pi,
+            json!({"ps": "GUESSED "}),
+            11,
+        ))
+        .unwrap();
+    assert_eq!(b.repo.latest_decode_identity_summary(&pi).unwrap(), None);
 
-    // A later decode names both, in `metadata` (the built-in writer's shape) — the summary reads
-    // the newest decode's fields, not the earliest.
-    let later = Decode {
-        id: DecodeId::new(),
-        demodulation_ref: None,
-        recording_ref: None,
-        decoder_id: "hk-rds".into(),
-        decoder_version: "0.1.0".into(),
-        frame_model: "rds-pi".into(),
-        metadata: json!({"pi": "A1B2", "ps": "KROQ    ", "pi_share": 0.92}),
-        content: None,
-        crc_status: CrcStatus::Valid,
-        identity: Some(pi.clone()),
-        content_class: ContentClass::Unrestricted,
-        t: t(20),
-        provenance: None,
-    };
-    b.repo.insert_decode(&later).unwrap();
-    let s = b.repo.latest_decode_identity_summary(&pi).unwrap().unwrap();
-    assert_eq!(s.label.as_deref(), Some("KROQ"), "{s:?}");
+    // The decoder's summary row: its voted PS, and that PS's own share of the frames (not
+    // `pi_share`), even though a later fragment exists.
+    b.repo
+        .insert_decode(&decode(
+            "hk-rds",
+            "rds-pi",
+            &pi,
+            json!({"pi": "A1B2", "pi_share": 0.97, "ps": "KROQ    ",
+                   "ps_frames": [["KROQ    ", 3], ["NOW PLAY", 1]]}),
+            5,
+        ))
+        .unwrap();
     assert_eq!(
-        s.confidence,
-        Some(0.92),
-        "the newest decode's own vote share: {s:?}"
+        b.repo.latest_decode_identity_summary(&pi).unwrap(),
+        Some(DecodeIdentitySummary {
+            label: "KROQ".into(),
+            label_share: Some(0.75),
+        })
     );
 
-    // An identity with no decode naming a recognised field at all reads no summary, never an
-    // empty one.
-    let bare = DecodedIdentity {
-        scheme: IdentityScheme::AisMmsi,
-        value: "123456789".into(),
+    // Another scheme with label-like keys: no summary (no guessing by key name).
+    let icao = DecodedIdentity {
+        scheme: IdentityScheme::AdsbIcao,
+        value: "a1b2c3".into(),
     };
-    let no_label = Decode {
-        id: DecodeId::new(),
-        demodulation_ref: None,
-        recording_ref: None,
-        decoder_id: "ais".into(),
-        decoder_version: "0.1.0".into(),
-        frame_model: "ais-position".into(),
-        metadata: json!({"mmsi": "123456789", "lat": 37.7, "lon": -122.4}),
-        content: None,
-        crc_status: CrcStatus::Valid,
-        identity: Some(bare.clone()),
-        content_class: ContentClass::Unrestricted,
-        t: t(10),
-        provenance: None,
-    };
-    b.repo.insert_decode(&no_label).unwrap();
-    assert_eq!(b.repo.latest_decode_identity_summary(&bare).unwrap(), None);
+    b.repo
+        .insert_decode(&decode(
+            "adsb",
+            "adsb-ident",
+            &icao,
+            json!({"callsign": "UAL123", "flight": "UA123", "ps": "X", "share": 1.0}),
+            10,
+        ))
+        .unwrap();
+    assert_eq!(b.repo.latest_decode_identity_summary(&icao).unwrap(), None);
 }
 
 /// AWARE-053: an emitter that matches priors but is not expected here gets

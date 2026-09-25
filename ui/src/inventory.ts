@@ -57,12 +57,12 @@ export interface Row {
   status: { author: string; reason: string | null; prior_ref: string | null; reason_withheld: boolean } | null;
   tags: string[]; tags_withheld?: boolean; family: string | null;
   identity_scheme: string | null; identity_value?: string; identity_class: string | null; withheld: boolean;
-  /** docs/api.md `identity_label`/`identity_confidence` (T-967): the backend's own human-readable
-   * rendering of the decoded identity (RDS's PS station name, and similarly-named fields from
-   * other decoders) and the decoder's own confidence/vote share behind it. Both `null` without a
-   * recognised field, and on a withheld row — never present without `identity_scheme`. Optional
-   * so fixtures/tests that predate T-967 still typecheck; a current server always sends both. */
-  identity_label?: string | null; identity_confidence?: number | null;
+  /** docs/api.md `identity_label`/`identity_label_share` (T-967): the backend's voted session
+   * label for the decoded identity (RDS: the most frequent PS, never the latest fragment) and that
+   * label's own share of the session's frames (not the PI vote). Both `null` for a scheme with no
+   * decoder summary and on a withheld row. Optional so fixtures/tests that predate T-967 still
+   * typecheck; a current server always sends both. */
+  identity_label?: string | null; identity_label_share?: number | null;
   recurrence: Recurrence | null;
   /** Optional so existing fixtures/tests that predate T-193 still typecheck; a server that serves
    * the field always sends `null` when unset, never omits it. */

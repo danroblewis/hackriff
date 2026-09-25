@@ -130,30 +130,31 @@ test("clusterChip: names the group and says the rows measure alike — never 'du
 });
 
 // T-967: the explorer's field report — a CRC-valid RDS PI/PS decode read "unknown"/"100% unk" in
-// the Confirmed list because nothing rendered `identity_label`/`identity_confidence`, even though
+// the Confirmed list because nothing rendered `identity_label`/`identity_label_share`, even though
 // the row already carried them. RED without the fix: `identityChip` did not exist.
-test("identityChip: prefers the decoded label, falls back to the bare code, appends the vote share only under 100%", () => {
+test("identityChip: the voted label beside its code, the label's frame share worded as such and only under 100%, else the bare code", () => {
   // No decoded identity at all: no chip.
   assert.equal(identityChip(makeRow({ identity_scheme: null })), null);
   // A label with a settled (100%) vote share: no redundant percentage.
   assert.deepEqual(
-    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_confidence: 1 })),
-    { cls: "identity", text: "KROQ", title: IDENTITY_CHIP_TITLE },
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 1 })),
+    { cls: "identity", text: "KROQ · A1B2", title: IDENTITY_CHIP_TITLE },
   );
-  // A provisional vote share is shown beside the label — "its provisional/vote state" (T-967).
+  // A split vote: the label's share of the session's frames, worded as a share of frames so it
+  // never reads as confidence in the code (T-967 N2).
   assert.deepEqual(
-    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_confidence: 0.92 })),
-    { cls: "identity", text: "KROQ · 92%", title: IDENTITY_CHIP_TITLE },
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92 })),
+    { cls: "identity", text: "KROQ · A1B2 · 92% of frames", title: IDENTITY_CHIP_TITLE },
   );
   // No label decoded yet: the bare code, so a decoded-but-unlabelled identity (an ICAO address,
   // an MMSI) still shows something rather than nothing.
   assert.deepEqual(
-    identityChip(makeRow({ identity_scheme: "adsb-icao", identity_value: "a1b2c3", identity_label: null, identity_confidence: null })),
+    identityChip(makeRow({ identity_scheme: "adsb-icao", identity_value: "a1b2c3", identity_label: null, identity_label_share: null })),
     { cls: "identity", text: "a1b2c3", title: IDENTITY_CHIP_TITLE },
   );
   // A gated row: "withheld", never the identity — matching the focus panel's identity box.
   assert.deepEqual(
-    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: undefined, identity_label: null, identity_confidence: null, withheld: true })),
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: undefined, identity_label: null, identity_label_share: null, withheld: true })),
     { cls: "identity", text: "withheld", title: IDENTITY_CHIP_TITLE },
   );
 });
@@ -1196,7 +1197,7 @@ test("loadInventoryRows: THE REQUEST — both Candidate and Confirmed queries ca
 test("loadInventoryRows: THE REQUEST — the decoded identity rides the one list response, never a per-row /decode fetch (T-967)", async () => {
   const withPi = makeRow({
     id: "station", state: "confirmed",
-    identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_confidence: 0.92,
+    identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92,
   });
   const { ctx, paths, atLiveEdge } = windowCtx({ confirmed: [withPi], candidate: [] });
   atLiveEdge(CAPTURE_EDGE_S);
@@ -1205,7 +1206,7 @@ test("loadInventoryRows: THE REQUEST — the decoded identity rides the one list
   // client reads them off the one response it already made, and adds nothing of its own.
   const stored = ctx.store.get().inventory.rows.station;
   assert.equal(stored.identity_label, "KROQ");
-  assert.equal(stored.identity_confidence, 0.92);
+  assert.equal(stored.identity_label_share, 0.92);
   // Never a decode lookup per row: the whole point of serving the summary on the list response is
   // that a page of rows costs one request, not one plus N.
   assert.ok(
@@ -1214,7 +1215,7 @@ test("loadInventoryRows: THE REQUEST — the decoded identity rides the one list
   );
   // And the rendered row: the same fixture through identityChip, the function the sidebar's row
   // renderer calls — this is "the rendered row" for a row with no DOM under node:test.
-  assert.deepEqual(identityChip(stored), { cls: "identity", text: "KROQ · 92%", title: IDENTITY_CHIP_TITLE });
+  assert.deepEqual(identityChip(stored), { cls: "identity", text: "KROQ · A1B2 · 92% of frames", title: IDENTITY_CHIP_TITLE });
 });
 
 test("renderedInventory: an artifact-of row IS listed and boxed (T-587) — suppressed-by/duplicate-of stay hidden (T-219, unchanged)", () => {

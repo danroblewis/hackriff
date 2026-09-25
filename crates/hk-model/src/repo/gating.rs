@@ -14,19 +14,15 @@ use crate::cluster::{
 };
 use crate::content::ContentClass;
 use crate::decode::{
-    Decode, DecodeIdentitySummary, DecodeView, WITHHELD_LABEL, decoded_confidence, decoded_label,
+    Decode, DecodeIdentitySummary, DecodeView, RDS_DECODER_ID, RDS_SUMMARY_FRAME_MODEL,
+    WITHHELD_LABEL, rds_session_summary,
 };
-use crate::emitter::DecodedIdentity;
+use crate::emitter::{DecodedIdentity, IdentityScheme};
 use crate::ids::{DecodeId, EmitterId};
 use crate::time::Timestamp;
 
 /// Shortest metadata value treated as a possible identifier when checking labels.
 const MIN_LABEL_SECRET_LEN: usize = 3;
-
-/// How many of an identity's most recent decodes [`Repository::latest_decode_identity_summary`]
-/// reads looking for a label/confidence — enough to cross a decoder's per-frame-model rows (RDS's
-/// group/PS/RadioText each get their own) without scanning the identity's whole history.
-const RECENT_DECODES_FOR_IDENTITY_SUMMARY: usize = 8;
 
 /// The audited reclassification chain of an identity, folded to `(old, new)`: the most
 /// restrictive class it was ever opened from, and the latest class it was opened to. So
@@ -138,30 +134,43 @@ fn is_empty_metadata(value: &Value) -> bool {
 /// The output view of a decode for `access` (rules: [`crate::cluster`], fail closed).
 fn gate_decode(
     conn: &Connection,
-    mut decode: Decode,
+    decode: Decode,
     access: IdentityAccess,
 ) -> Result<DecodeView, RepoError> {
+    let class = match &decode.identity {
+        Some(d) => decode_identity_class(conn, d)?,
+        None => None,
+    };
+    Ok(gate_decode_with_class(decode, access, class))
+}
+
+/// [`gate_decode`] with the decode's identity class already computed by
+/// [`decode_identity_class`] — for a caller gating several decodes of **one** identity, which
+/// computes the class once instead of re-scanning every decode row of that identity per decode
+/// (T-967 N3). `class` is ignored when `decode` names no identity.
+fn gate_decode_with_class(
+    mut decode: Decode,
+    access: IdentityAccess,
+    class: Option<ContentClass>,
+) -> DecodeView {
     let (identity, identity_shown) = match &decode.identity {
         None => (InventoryIdentity::None, true),
-        Some(d) => {
-            let class = decode_identity_class(conn, d)?;
-            match (access.reveals(class), class) {
-                (true, class) => (
-                    InventoryIdentity::Clear {
-                        identity: d.clone(),
-                        class: class.unwrap_or(ContentClass::FAIL_CLOSED),
-                    },
-                    true,
-                ),
-                _ => (
-                    InventoryIdentity::Withheld {
-                        scheme: d.scheme.clone(),
-                        class,
-                    },
-                    false,
-                ),
-            }
-        }
+        Some(d) => match (access.reveals(class), class) {
+            (true, class) => (
+                InventoryIdentity::Clear {
+                    identity: d.clone(),
+                    class: class.unwrap_or(ContentClass::FAIL_CLOSED),
+                },
+                true,
+            ),
+            _ => (
+                InventoryIdentity::Withheld {
+                    scheme: d.scheme.clone(),
+                    class,
+                },
+                false,
+            ),
+        },
     };
     let detail_shown = identity_shown && access.reveals(Some(decode.content_class));
     let mut metadata_withheld = false;
@@ -197,13 +206,13 @@ fn gate_decode(
     if !identity_shown {
         decode.identity = None;
     }
-    Ok(DecodeView {
+    DecodeView {
         decode,
         identity,
         metadata_withheld,
         content_withheld,
         labels_withheld,
-    })
+    }
 }
 
 /// An emitter's decoded identity class as the inventory gate sees it: `None` without a decoded
@@ -382,7 +391,8 @@ impl Repository {
         access: IdentityAccess,
     ) -> Result<Vec<DecodeView>, RepoError> {
         let tx = self.read_tx()?;
-        if !access.reveals(decode_identity_class(&tx, identity)?) {
+        let class = decode_identity_class(&tx, identity)?;
+        if !access.reveals(class) {
             return Ok(Vec::new());
         }
         let rows: Vec<Decode> = bodies(
@@ -391,57 +401,59 @@ impl Repository {
              ORDER BY t, decode_id",
             params![identity.scheme.as_string(), identity.value],
         )?;
-        rows.into_iter()
-            .map(|d| gate_decode(&tx, d, access))
-            .collect()
+        // Every row names this same identity, so its class is the one just computed: gate with it
+        // rather than re-scanning the identity's decodes once per row (T-967 N3).
+        Ok(rows
+            .into_iter()
+            .map(|d| gate_decode_with_class(d, access, class))
+            .collect())
     }
 
-    /// A backend-rendered summary of the identity's most recent decode(s) — a human-readable
-    /// label (RDS's PS station name and similarly-named fields) and the decoder's own
-    /// confidence/vote share, when it recorded one (T-967, `/api/inventory`'s `identity_label` /
-    /// `identity_confidence`). `None` when the identity is withheld from
-    /// [`IdentityAccess::Standard`] (never confirms one indirectly, matching
-    /// [`Repository::decodes_for_identity`]), or when none of its recent decodes carry a
-    /// recognised field.
+    /// The decoded identity's summary for a list row (T-967, `/api/inventory`'s `identity_label` /
+    /// `identity_label_share`): the label its decoder **voted** over its latest committed session,
+    /// and that label's own share of the session's frames — see [`DecodeIdentitySummary`].
     ///
-    /// Bounded to the identity's [`RECENT_DECODES_FOR_IDENTITY_SUMMARY`] most recent decodes,
-    /// read newest first over the same `idx_decode_identity` index `decodes_for_identity` uses —
-    /// unlike that method, which returns the identity's *entire* decode history for the decode
-    /// panel, this is for a list row's compact summary and must stay cheap on a page of up to 500
-    /// rows.
+    /// Only schemes whose built-in decoder writes an explicit session summary row are served; today
+    /// that is RDS (`rds-pi`: the `hk-rds` decoder's `rds-pi` row, whose `ps` is the session's most
+    /// frequent complete PS frame). Every other scheme answers `None`, as does an identity withheld
+    /// from [`IdentityAccess::Standard`] (never confirms one indirectly, matching
+    /// [`Repository::decodes_for_identity`]) and an identity whose sessions voted no PS.
+    ///
+    /// Reads **one** row — the newest summary row with a PS, over `idx_decode_identity` newest
+    /// first — so the label is never the newest per-frame fragment (a scrolling song/artist PS),
+    /// and a list page of up to 500 rows pays one identity-class scan and one indexed lookup per
+    /// row, not a decode-history read.
     pub fn latest_decode_identity_summary(
         &self,
         identity: &DecodedIdentity,
     ) -> Result<Option<DecodeIdentitySummary>, RepoError> {
+        if !matches!(identity.scheme, IdentityScheme::RdsPi) {
+            return Ok(None);
+        }
         let tx = self.read_tx()?;
-        if !IdentityAccess::Standard.reveals(decode_identity_class(&tx, identity)?) {
+        let class = decode_identity_class(&tx, identity)?;
+        if !IdentityAccess::Standard.reveals(class) {
             return Ok(None);
         }
         let rows: Vec<Decode> = bodies(
             &tx,
             "SELECT body FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2 \
-             ORDER BY t DESC, decode_id DESC LIMIT ?3",
+             AND decoder_id = ?3 AND json_extract(body, '$.frame_model') = ?4 \
+             AND json_extract(body, '$.metadata.ps') IS NOT NULL \
+             ORDER BY t DESC, decode_id DESC LIMIT 1",
             params![
                 identity.scheme.as_string(),
                 identity.value,
-                RECENT_DECODES_FOR_IDENTITY_SUMMARY as i64
+                RDS_DECODER_ID,
+                RDS_SUMMARY_FRAME_MODEL
             ],
         )?;
-        let (mut label, mut confidence) = (None, None);
-        for d in rows {
-            let gated = gate_decode(&tx, d, IdentityAccess::Standard)?.decode;
-            if label.is_none() {
-                label = decoded_label(&gated);
-            }
-            if confidence.is_none() {
-                confidence = decoded_confidence(&gated);
-            }
-            if label.is_some() && confidence.is_some() {
-                break;
-            }
-        }
-        Ok((label.is_some() || confidence.is_some())
-            .then_some(DecodeIdentitySummary { label, confidence }))
+        Ok(rows.into_iter().next().and_then(|d| {
+            // Gated like every decode read: a row whose own class hides its detail loses its
+            // metadata here, and then states no label.
+            let gated = gate_decode_with_class(d, IdentityAccess::Standard, class).decode;
+            rds_session_summary(&gated)
+        }))
     }
 
     /// Opens an emitter's decoded identity to `new_class` after the user asserts it is their own

@@ -1325,10 +1325,10 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-860 (ADR-0015 §5.5): the identity rests only on synthesized decodes (present, possibly
         // null).
         "identity_synthesized",
-        // T-967: the backend's own rendering of the decoded identity (RDS PS and similarly
-        // named fields) and the decoder's own confidence/vote share — present, possibly null.
+        // T-967: the decoder's voted session label for the identity (RDS: the most frequent PS)
+        // and that label's own frame share — present, possibly null.
         "identity_label",
-        "identity_confidence",
+        "identity_label_share",
         // T-566 (ADR-0021 §7A.4): the decode-side resolution — never absent, and `not-searched`
         // rather than `null` on a row nothing has analysed.
         "resolution",
