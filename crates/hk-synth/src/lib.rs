@@ -94,7 +94,7 @@ pub use result::{PipelineResult, Verdict};
 pub use score::{CalibrationSet, Scored, StageLadder, WindowEvidence, evaluate_window, score_node};
 pub use search::{JobState, NodeHeuristic, NodeView, Profile, StopReason, SynthBudget};
 pub use skeleton::{Skeleton, SlotAlternative};
-pub use template::Template;
+pub use template::{SaveAsTemplate, Template, save_as_template};
 pub use trace::{Outcome, Reason, Resolution, ResolutionKind, TraceNode};
 pub use trace_sink::{Trace, TraceSink};
 

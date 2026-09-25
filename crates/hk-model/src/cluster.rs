@@ -1034,6 +1034,16 @@ pub struct InventoryQuery {
     pub identity_scheme: Option<IdentityScheme>,
     /// Current family (latest classification, else fingerprint family).
     pub family: Option<String>,
+    /// T-566 (ADR-0021 §7A.4, §11.1): the emitter's **decode-side resolution** — the `kind` of
+    /// its latest `emitter_synthesis` row's sealed [`crate::repo::synthesis::Resolution`], with
+    /// [`crate::repo::synthesis::ResolutionKind::NotSearched`] also matching an emitter that has
+    /// no row at all (*un-looked-at*, which is never the same answer as *searched and found
+    /// nothing*). A row whose latest analysis **solved** matches no value: there is no unresolved
+    /// finding on it. `None` = any.
+    ///
+    /// Like a non-vocabulary `tag`, this filter is applied per row after identity gating: a
+    /// withheld-identity row serves no resolution (T-159/T-163) and therefore matches no value.
+    pub resolution: Option<crate::repo::synthesis::ResolutionKind>,
     /// T-219: whether rows that currently defer to another row (suppressed by a Confirmed entry,
     /// a weaker duplicate, or an attributed receiver artifact) are listed. The default hides
     /// them; their rows, detections, tracks and history are always kept and reachable by id.
@@ -1056,6 +1066,7 @@ impl Default for InventoryQuery {
             tag: None,
             identity_scheme: None,
             family: None,
+            resolution: None,
             relations: crate::relate::RelationVisibility::default(),
             limit: 100,
             offset: 0,

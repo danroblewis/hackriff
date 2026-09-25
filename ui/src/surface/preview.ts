@@ -494,6 +494,40 @@ export function dragIntent(e: PointerLike): "pan" | "region" {
   return e.shiftKey === true ? "region" : "pan";
 }
 
+/**
+ * **Touch has no Shift, so a finger says "region" by waiting** (T-824, docs/23 §10.5: "region
+ * select = the retune *offer*"). A finger that rests at least this long before it travels
+ * [[DRAG_PX]]-worth marks out a region; one that moves sooner pans. It is the phone's own
+ * long-press-then-drag-to-select, and — like shift — it is decided ONCE, at the moment the stroke
+ * first travels, and latched: a stroke that has started panning can never become a region, and a
+ * region stroke never pans. A region still only *offers* a retune (T-444/T-476): nothing here, and
+ * nothing the stroke commits, reaches a device route.
+ */
+export const HOLD_TO_MARK_MS = 450;
+
+/** The touch twin of [[dragIntent]]: what a single finger's stroke means, from how long it rested
+ * at the press before it first travelled. `heldMs` below zero or non-finite is a pan. */
+export function touchIntent(heldMs: number): "pan" | "region" {
+  return Number.isFinite(heldMs) && heldMs >= HOLD_TO_MARK_MS ? "region" : "pan";
+}
+
+/** The smallest finger spread a pinch is credited with, CSS px, so two fingers meeting cannot divide
+ * by zero or fling the zoom (the same guard `navigators.ts` keeps for its strip). */
+export const MIN_PINCH_SPREAD_PX = 12;
+
+/**
+ * **A two-finger pinch is the touch twin of a plain wheel** (T-824, docs/23 §10.5: "pinch = zoom
+ * (view)"): uniform on both axes, so it takes [[SurfacePreview.wheel]]'s aspect lock, anchored at the
+ * fingers' midpoint by the caller. `factor` is `PaneModel`'s convention — `> 1` zooms out — so
+ * fingers spreading apart (`spread > prevSpread`) zoom in. Clamped per event to the same 4x bound as
+ * [[zoomFactor]]. A view change only: it never reaches a route.
+ */
+export function pinchZoom(prevSpread: number, spread: number): { factor: number; axes: { freq: boolean; time: boolean } } {
+  const a = Math.max(MIN_PINCH_SPREAD_PX, Number.isFinite(prevSpread) ? prevSpread : 0);
+  const b = Math.max(MIN_PINCH_SPREAD_PX, Number.isFinite(spread) ? spread : 0);
+  return { factor: Math.min(4, Math.max(0.25, a / b)), axes: { freq: true, time: true } };
+}
+
 export interface PreviewOptions {
   canvas: HTMLCanvasElement;
   probe: SurfaceProbe;

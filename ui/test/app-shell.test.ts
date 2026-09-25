@@ -146,7 +146,7 @@ test("every panel slot is mounted by exactly one area index", () => {
 });
 
 test("app.css is an import list: base first, then one file per area", () => {
-  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css", "chrome/map-layout.css", "chrome/sheet.css", "chrome/map-controls.css", "map/research.css"]);
+  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css", "chrome/map-layout.css", "chrome/sheet.css", "chrome/map-controls.css", "map/research.css", "chrome/phone.css"]);
   assert.doesNotMatch(entryCss.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@import "[^"]+";/g, ""), /\S/, "no rules in app.css itself");
 });
 

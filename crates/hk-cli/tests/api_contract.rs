@@ -1319,6 +1319,9 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-860 (ADR-0015 §5.5): the identity rests only on synthesized decodes (present, possibly
         // null).
         "identity_synthesized",
+        // T-566 (ADR-0021 §7A.4): the decode-side resolution — never absent, and `not-searched`
+        // rather than `null` on a row nothing has analysed.
+        "resolution",
     ] {
         assert!(
             row.get(field).is_some(),
@@ -1646,6 +1649,40 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     );
     let (st, v) = get(addr, "/api/inventory?relations=bogus");
     assert_eq!(st, 400, "{v}");
+    // T-566 (ADR-0021 §7A.4): every row carries its decode-side `resolution`, and nothing on this
+    // run has been analysed, so every row reads `not-searched` — the un-looked-at state, with no
+    // time and no profile, which is never `null` and never `unknown`. The filter takes exactly the
+    // four kinds, and an unknown value is `400 invalid` rather than a filter that quietly matches
+    // everything.
+    let (st, none_searched) = get(addr, "/api/inventory?resolution=not-searched&limit=500");
+    assert_eq!(st, 200, "{none_searched}");
+    let (st, listed) = get(addr, "/api/inventory?limit=500");
+    assert_eq!(st, 200, "{listed}");
+    assert_eq!(
+        none_searched["total"], listed["total"],
+        "nothing here has been analysed: {none_searched}"
+    );
+    for row in listed["entries"].as_array().expect("entries") {
+        let r = &row["resolution"];
+        assert_eq!(r["kind"], json!("not-searched"), "{row}");
+        assert_eq!(r["reason"], Value::Null, "{row}");
+        assert_eq!(r["t"], Value::Null, "{row}");
+        assert_eq!(r["profile"], Value::Null, "{row}");
+        assert_eq!(r["withheld"], json!(false), "{row}");
+    }
+    for kind in [
+        "unknown",
+        "structured-unidentified",
+        "unsupported-structure",
+    ] {
+        let (st, v) = get(addr, &format!("/api/inventory?resolution={kind}"));
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["total"], json!(0), "{kind}: {v}");
+    }
+    for bad in ["solved", "energy", "notsearched", "not_searched"] {
+        let (st, v) = get(addr, &format!("/api/inventory?resolution={bad}"));
+        assert_eq!(st, 400, "{bad} must be refused, never ignored: {v}");
+    }
     // T-369: and what is left is never two boxes drawn on top of each other. Overlap in time
     // *and* frequency is an error signal, not a display choice: the served list is what the
     // waterfall lays its boxes out from (`f_lo_hz`, `f_hi_hz`, `presence.last_interval`), so two
@@ -3621,8 +3658,37 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
     assert_eq!(st, 200, "{t}");
     assert_eq!(t["nodes"], json!([]), "{t}");
     assert_eq!(t["job_id"], json!(id), "{t}");
-    let (st, t) = get(addr, &format!("/api/analyze/{id}/trace?stage=S9"));
-    assert_eq!((st, t["code"].as_str()), (400, Some("invalid")), "{t}");
+    // Every filter is parsed, and an unknown VALUE is `400 invalid` — never silently ignored,
+    // which would answer a different question from the one asked (ADR-0021 §4.2).
+    for good in [
+        "stage=S1",
+        "outcome=pruned_floor",
+        "family=fsk",
+        "tried=false",
+        "limit=512",
+        "stage=S3&outcome=deferred_budget&family=psk&tried=false&limit=8",
+    ] {
+        let (st, t) = get(addr, &format!("/api/analyze/{id}/trace?{good}"));
+        assert_eq!(st, 200, "{good}: {t}");
+        assert_eq!(t["nodes"], json!([]), "{good}: {t}");
+    }
+    for bad in [
+        "stage=S9",
+        "outcome=pruned-floor",
+        "outcome=nope",
+        "tried=maybe",
+        "limit=513",
+        "limit=0",
+        "limit=lots",
+        "bogus=1",
+    ] {
+        let (st, t) = get(addr, &format!("/api/analyze/{id}/trace?{bad}"));
+        assert_eq!(
+            (st, t["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {t}"
+        );
+    }
 
     // ---- an explicit window older than the ring: 410 evicted, and no job ----
     let (st, v) = post(
