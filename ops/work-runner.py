@@ -956,17 +956,27 @@ def fix_reason(fail_line, branch):
 
 
 def _gone(pid, wait_s=30):
-    """The stopped run has exited (SIGKILL after wait_s): a resume must not share the session with it."""
-    for _ in range(wait_s):
-        if not alive(pid):
+    """The stopped run's whole process group has exited (SIGKILL after wait_s): a resume must not share the
+    session with it. The leader is this runner's own unreaped Popen child - os.kill(pid, 0) succeeds on a
+    zombie - so reap it first, and ask the GROUP, not the cpulimit wrapper (review, 2026-09-24)."""
+    for i in range(wait_s + 3):
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
             return True
+        except PermissionError:
+            pass
+        if i == wait_s:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
         time.sleep(1)
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        pass
-    time.sleep(1)
-    return not alive(pid)
+    return False
 
 
 def launch_fix(c, fail_line):
