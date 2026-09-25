@@ -2,10 +2,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { foldSurveyRecords, groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { drawerScope, foldSurveyRecords, groupItems, itemsInScope, peekLine, quietItems, scopeKey, scopeLine, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type DrawerItem, type EventsResp } from "../src/app/chrome/explore-drawer";
 import { PaneModel } from "../src/surface/panes";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
 import type { SchedulerResponse } from "../src/scheduler";
+import type { Selection } from "../src/selections";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
 import { gotoWindow, initialState, requestGoto, type AppState } from "../src/app/state";
@@ -161,7 +162,7 @@ class FakeEl {
   all(): FakeEl[] { return this.children.flatMap((c) => [c, ...c.all()]); }
 }
 
-async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unknown } = {}) {
+async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unknown; region?: Selection; events?: unknown } = {}) {
   const g = globalThis as Record<string, unknown>;
   // The fake document stays installed: row clicks re-render. Nothing else in this file needs a DOM.
   const saved = { setInterval: g.setInterval };
@@ -178,8 +179,11 @@ async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unkn
   };
   if (opts.obs) replies["/api/observations"] = opts.obs;
   const client = { get: async (path: string) => { calls.push(path); const f = replies[path.split("?")[0]]; const r = typeof f === "function" ? f(path) : f; if (!r) throw new Error("none"); return r; } };
+  if (opts.events) replies["/api/events"] = opts.events;
   const store = createStore(initialState());
   store.set(() => ({ live: { ...store.get().live, edgeTS: opts.edge ?? 100, view: { loHz: 400e6, hiHz: 500e6 } } }));
+  // T-943: a selected region is the drawer's scope, so a test can put one there.
+  if (opts.region) store.set(() => ({ selections: { list: [opts.region!], sync: "" }, focus: { kind: "selection", id: opts.region!.id } }));
   const el = new FakeEl("div");
   try {
     mountExploreDrawer(el as unknown as HTMLElement, { store, client, token: "t" } as unknown as AppContext);
@@ -322,4 +326,74 @@ test("T-906: an older slice that failed to load is retried on the next refresh, 
   const n = calls.length;
   await dense.refresh(async <T,>(p: string) => { calls.push(p); return srv.serve(p) as T; }, edge + 30);
   assert.equal(calls.length - n, 1, "only the new 30 s is read");
+});
+
+
+// ---- T-943: the drawer shares the "Selected" sheet with the focus panel, so a selected REGION is
+// the window its questions are about. The explorer's staging session (2026-09-25) had a region at
+// 98.8226–99.0407 MHz headed by 107.816 / 106.997 / 106.159 MHz and "Strongest 106.166 MHz": the
+// drawer had asked about the whole viewed span. ASSERT THE REQUEST THE CLIENT BUILDS (CLAUDE.md:
+// "a client asking the backend for the wrong thing" is what no gate covers), not only the render. ----
+
+/** The explorer's region (journal-20260925.md), with no time extent (a frequency-only stroke). */
+const REGION: Selection = { id: "s1", name: "Region 1", f_lo: 98_822_600, f_hi: 99_040_700, tags: [], links: [], created: 1, updated: 1 };
+
+test("T-943: a focused region is the drawer's scope — the view otherwise", () => {
+  const base = { live: { edgeTS: 1000, view: { loHz: 88e6, hiHz: 108e6 } }, selections: { list: [REGION], sync: "" }, focus: { kind: "none" } };
+  const view = drawerScope(base as never)!;
+  assert.deepEqual([view.loHz, view.hiHz, view.t0, view.t1, view.region], [88e6, 108e6, 1000 - 1800, 1000, null]);
+  const region = drawerScope({ ...base, focus: { kind: "selection", id: "s1" } } as never)!;
+  assert.deepEqual([region.loHz, region.hiHz], [98_822_600, 99_040_700]);
+  assert.equal(region.region?.id, "s1");
+  assert.deepEqual([region.t0, region.t1], [1000 - 1800, 1000], "no time extent: the recent window stands");
+  // A region WITH a time extent carries it (a stroke over the canvas makes one).
+  const timed = drawerScope({ ...base, selections: { list: [{ ...REGION, t_lo: 500, t_hi: 600 }], sync: "" }, focus: { kind: "selection", id: "s1" } } as never)!;
+  assert.deepEqual([timed.t0, timed.t1], [500, 600]);
+  // A focused region the page no longer holds falls back to the view, never to nothing.
+  assert.equal(drawerScope({ ...base, focus: { kind: "selection", id: "gone" } } as never)!.region, null);
+  assert.notEqual(scopeKey(view), scopeKey(region), "a re-scope is visible to the mount");
+  assert.match(scopeLine(region), /selected region 98\.823 MHz – 99\.041 MHz only/);
+  assert.match(scopeLine(view), /viewed span/);
+});
+
+test("T-943: with a region selected, EVERY request the drawer builds carries the region's bounds", async () => {
+  const { calls } = await mountedDrawer({ region: REGION, edge: 1000 });
+  const band = (path: string) => {
+    const q = new URLSearchParams(path.split("?")[1]);
+    return [Number(q.get("f_lo")), Number(q.get("f_hi"))];
+  };
+  const asked = calls.filter((c) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c));
+  assert.deepEqual(asked.length, 4, `all four questions asked, got ${JSON.stringify(calls)}`);
+  for (const c of asked) {
+    assert.deepEqual(band(c), [98_822_600, 99_040_700], `${c} was not scoped to the selected region`);
+  }
+  // The defect's shape: the viewed span (400–500 MHz here) is not what any request asked about.
+  assert.ok(!asked.some((c) => /f_lo=400000000/.test(c)), "a request still asked about the whole viewed span");
+});
+
+test("T-943: selecting a region re-asks at once, and the drawer states the window it is showing", async () => {
+  const m = await mountedDrawer({ edge: 1000 });
+  const before = m.calls.length;
+  assert.match(m.el.all().find((e) => e.className === "drawer-scope")!.textContent, /viewed span 400\.000 MHz – 500\.000 MHz/);
+  m.store.set(() => ({ selections: { list: [REGION], sync: "" }, focus: { kind: "selection", id: "s1" } }));
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(m.calls.length > before, "the scope changed and nothing was re-asked until the 30 s poll");
+  assert.ok(m.calls.slice(before).every((c) => !/f_lo=400000000/.test(c)));
+  assert.match(m.el.all().find((e) => e.className === "drawer-scope")!.textContent, /selected region/);
+});
+
+test("T-943: a row outside the selected region is not listed, whatever the backend answers", async () => {
+  // The server answers with the explorer's four far-away unknowns plus one inside the region; only
+  // the inside one may be listed. (A route that ignores `f_lo`/`f_hi` is exactly this case.)
+  const far = [107.816e6, 106.997e6, 106.159e6, 107.662e6];
+  const events = {
+    events: [...far, 98.9e6].map((hz, i) => ({ emitter_id: `e${i}`, t_start_s: 90 + i, t_end_s: null, open: true, count: 1 })),
+    emitters: [...far, 98.9e6].map((hz, i) => ({ id: `e${i}`, state: "candidate", f_center_hz: hz, bandwidth_hz: 180e3, known_status: "unknown", explanations: [] })),
+  };
+  const { el } = await mountedDrawer({ region: REGION, edge: 1000, events });
+  const titles = el.all().filter((e) => e.className === "f").map((e) => e.textContent);
+  assert.deepEqual(titles, ["98.900 MHz · 180.0 kHz"], `only the region's own signal, got ${JSON.stringify(titles)}`);
+  // Without a region the drawer is "places to go": a row in another band is the whole point of it.
+  const elsewhere: DrawerItem[] = [{ group: "surveys", tag: "survey · observed then", title: "430–440 MHz", why: "", hz: 435e6, spanHz: 10e6 }];
+  assert.equal(itemsInScope(elsewhere, drawerScope({ live: { edgeTS: 1000, view: { loHz: 88e6, hiHz: 108e6 } }, selections: { list: [], sync: "" }, focus: { kind: "none" } } as never)).length, 1);
 });
