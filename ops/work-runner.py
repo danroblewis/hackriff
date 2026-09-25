@@ -111,6 +111,8 @@ DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 CLONE_TARGET = os.environ.get("WORK_CLONE_TARGET", "1") != "0"   # clone main's target/ into a new worktree
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 IDLE_TARGET_H = float(os.environ.get("WORK_IDLE_TARGET_H", "2"))     # a kept worktree's target/ untouched this long is reclaimed
+LOW_DISK_GB = int(os.environ.get("WORK_LOW_DISK_GB", "60"))          # under this much free, the idle wait drops to LOW_DISK_IDLE_MIN
+LOW_DISK_IDLE_MIN = 15
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # A branch that fails its merge gate goes back to the SAME worker: `claude -p --resume <session>`
@@ -126,6 +128,7 @@ TIMEOUT_RESUMES = 1
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
 RELEASE_AFTER_H = float(os.environ.get("WORK_RELEASE_AFTER_H", "4"))
+REAP_ERRORS = 3   # consecutive reap exceptions before a claim is stopped as 'reap-error'
 MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
 MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
@@ -454,6 +457,15 @@ def _probe_age(h):
         return None
 
 
+def _probe_stats(h):
+    """The host's last probe (PROBE_STATS), for the status file's hosts[h] - {} when there is none."""
+    try:
+        rec = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        return {}
+    return {k: rec[k] for k in PROBE_STATS if k in rec}
+
+
 _ORPHANS_SAID = set()
 
 
@@ -766,6 +778,53 @@ def _proj_dir(path):
     return re.sub(r"[/.]", "-", path)
 
 
+# The per-tick host probe (user via supervisor, 2026-09-25 14:02: the dashboard showed system stats for the Mac only):
+# load, cores, disk, memory and the aggregate CPU counters, in the one ssh call the probe already made.
+PROBE_CMD = ("cat /proc/loadavg; nproc; df -BG --output=avail,size $HOME | tail -1; "
+             "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; head -1 /proc/stat")
+# What the status file's hosts[h]["stats"] carries from the probe (cpu_ticks is only the next delta's baseline).
+PROBE_STATS = ("at", "reachable", "interval_s", "cores", "load1", "load5", "load15", "cpu_pct",
+               "mem_used_gb", "mem_total_gb", "mem_pct", "disk_free_gb", "disk_total_gb")
+
+
+def parse_probe(out, prev, now):
+    """PROBE_CMD's output -> the host record. CPU % is a delta of /proc/stat's aggregate counters against the previous
+    record's `cpu_ticks` (the first sample has none, so no cpu_pct); `interval_s` is the time since that record."""
+    rec = {"at": now, "reachable": True}
+    if prev.get("at"):
+        rec["interval_s"] = now - int(prev["at"])
+    lines = out.splitlines()
+    try:
+        la = lines[0].split()
+        rec.update(load1=float(la[0]), load5=float(la[1]), load15=float(la[2]), cores=int(lines[1]))
+        df = lines[2].split()
+        rec["disk_free_gb"] = int(df[0].rstrip("G"))
+        if len(df) > 1:
+            rec["disk_total_gb"] = int(df[1].rstrip("G"))
+    except (IndexError, ValueError):
+        pass
+    mem = {}
+    for line in lines[3:]:
+        f = line.split()
+        try:
+            if f and f[0] in ("MemTotal:", "MemAvailable:"):
+                mem[f[0]] = int(f[1]) * 1024
+            elif f and f[0] == "cpu":
+                ticks = [int(x) for x in f[1:9]]          # user nice system idle iowait irq softirq steal
+                rec["cpu_ticks"] = [sum(ticks), ticks[3] + ticks[4]]
+        except (IndexError, ValueError):
+            pass
+    if mem.get("MemTotal:") and "MemAvailable:" in mem:
+        total, used = mem["MemTotal:"], mem["MemTotal:"] - mem["MemAvailable:"]
+        rec.update(mem_total_gb=round(total / 1e9), mem_used_gb=round(used / 1e9, 1), mem_pct=round(100 * used / total))
+    pt = prev.get("cpu_ticks")
+    if rec.get("cpu_ticks") and pt:
+        dt, di = rec["cpu_ticks"][0] - pt[0], rec["cpu_ticks"][1] - pt[1]
+        if dt > 0:
+            rec["cpu_pct"] = round(100 * (dt - di) / dt)
+    return rec
+
+
 def sync_remote_view(claims, dry):
     """Every tick (user via supervisor, 2026-09-25 00:40: a remote worker must show on the dashboard like a local one):
     per remote host, ONE ssh that reports reachability, load, disk and its running claude sessions to
@@ -775,14 +834,12 @@ def sync_remote_view(claims, dry):
         return
     os.makedirs(f"{S}/hosts", exist_ok=True)
     for h in hosts():
-        rc, out = remote_sh(h, "cat /proc/loadavg; nproc; df -BG --output=avail $HOME | tail -1", timeout=20)
-        rec = {"at": int(time.time()), "reachable": rc == 0}
-        if rc == 0:
-            try:
-                parts = out.split()
-                rec.update(load1=float(parts[0]), cores=int(parts[5]), disk_free_gb=int(parts[6].rstrip("G")))
-            except (IndexError, ValueError):
-                pass
+        rc, out = remote_sh(h, PROBE_CMD, timeout=20)
+        try:
+            prev = json.load(open(f"{S}/hosts/{h}.json"))
+        except (OSError, ValueError):
+            prev = {}
+        rec = parse_probe(out, prev, int(time.time())) if rc == 0 else {"at": int(time.time()), "reachable": False}
         with open(f"{S}/hosts/{h}.json.tmp", "w") as f:
             json.dump(rec, f)
         os.replace(f"{S}/hosts/{h}.json.tmp", f"{S}/hosts/{h}.json")
@@ -1200,189 +1257,219 @@ def hand_back_reds(hb):
     return red, [t for t in red if not not_own_red(t)]
 
 
+def _reap_one(claims, tid, c, dry, killed):
+    """One claim's reap; True when it changed the claims. Split out of reap() so one claim's exception cannot abort
+    the tick before save_claims (2026-09-25 13:33-13:37: T-977's missing worktree raised every tick, so T-970's
+    reap - a result commit and a review launch - was thrown away and redone 47 times)."""
+    changed = False
+    if c.get("state") not in ("running", "sync-error"):
+        return changed
+    held = c["state"] == "sync-error"           # its run is over and its pid may be recycled: never signal it
+    pid = c["pid"]
+    age_min = (time.time() - c["started"]) / 60
+    limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
+    if not held and alive(pid) and not c.get("detached"):
+        if track_usage(c):                      # the only chance to see this run's CPU time
+            changed = True
+        if age_min > limit:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            if c.get("host"):
+                remote_stop(c)
+            c["state"] = "timeout"
+            c["ended"] = time.time()
+            record_done(c, "timeout", {})
+            changed = True
+            if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
+                    and os.path.isdir(c.get("wt", "")) and _gone(pid)):
+                claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped", claims=claims)
+                log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
+            else:
+                attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
+        return changed
+    # finished - for a remote claim (a review runs on this Mac), the LOCAL ssh ended: ask the box first
+    if c.get("host") and c["kind"] != "review":
+        state = "gone" if held else remote_run_state(c)
+        if state == "running":
+            c["pid"], c["detached"] = remote_attach(c), False
+            log(f"REMOTE {tid}: connection to {c['host']} dropped, run still going there - re-attached (pid {c['pid']})")
+            changed = True
+            return changed
+        if state == "unknown" or not sync_back(c):
+            if state == "unknown" and not c.get("detached"):
+                log(f"REMOTE {tid}: {c['host']} unreachable - the claim waits, polled on the host (stage 4 re-dispatches)")
+                c["detached"] = True           # its local pid is dead: never signal it again (pids recycle)
+                changed = True
+            return changed
+        if held:
+            log(f"SYNC {tid}: host, mirror and this Mac agree again - judged now")
+            c.pop("sync_error_said", None)
+            c.pop("sync_error_detail", None)
+        c["detached"], c["state"] = False, "running"
+        if not os.path.isdir(c.get("wt", "")):
+            # Its Mac worktree was reaped while the run was on the host; the branch is synced now, and the result
+            # commit and the review both run here (2026-09-25 13:33: launch_review's cwd did not exist).
+            sh(["git", "worktree", "prune"])
+            sh(["git", "worktree", "add", c["wt"], c["branch"]], check=True)
+            log(f"WORKTREE {tid}: recreated {c['wt']} from {c['branch']} (reaped while the run was on {c['host']})")
+    changed = True
+    # The root is gone; anything of this run still running is a LEAK, holding cores and disk
+    # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
+    # run for hours beside the gate, which is the 2026-09-22 contention in another form.
+    try:
+        leaked = leaked_processes(c)
+        if leaked:
+            c["leaked"] = len(leaked)
+            log(f"LEAKED {tid}: {len(leaked)} process(es) outlived the run: "
+                + ", ".join(f"{r['pid']} {r['cmd'][:60]}" for r in leaked[:5]))
+            if not dry:
+                kill_leaked(leaked)
+            attention(tid, c["branch"], "LEAKED",
+                      f"{len(leaked)} process(es) outlived the run and were killed (SIGTERM then SIGKILL): "
+                      + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in leaked[:5]))
+    except Exception as e:
+        log(f"leak check error for {tid}: {e}")
+    if c.get("deflake"):
+        reap_deflake(claims, tid, c)       # its own outcomes: not a board ticket, no result: block
+        return changed
+    d = f"{WORKDIR}/{tid}"
+    if c["kind"] == "review":
+        res = result_of(f"{d}/review.json")
+        text = str(res.get("result", ""))
+        if "VERDICT: PASS" in text:
+            c["state"] = "queued"
+            record_done(c, "review-pass", res)
+            enqueue(c["branch"], c.get("wt"))
+        else:
+            fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "no verdict line")
+            record_done(c, "review-fail", res)
+            # A review FAIL names a concrete defect; the worker that wrote the code fixes it with
+            # its context intact, same path as a gate failure, same attempt cap.
+            if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+                claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {d}/review.json)", claims=claims)
+            else:
+                c["state"] = "review-failed"
+                attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
+        return changed
+    res = result_of(c.get("out") or f"{d}/out.json")
+    text = str(res.get("result", ""))
+    if res.get("session_id"):
+        c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
+    if res.get("is_error") and _USAGE_LIMIT.search(text):
+        out_f = c.get("out") or f"{d}/out.json"
+        until = max(usage_limit_until(text, os.path.getmtime(out_f) if os.path.exists(out_f) else time.time()),
+                    time.time() + USAGE_LIMIT_FLOOR_S)
+        if until > usage_limited():
+            open(f"{S}/usage-limited", "w").write(f"{until:.0f}\n")
+            attention(tid, c["branch"], "USAGE_LIMIT", f"the account usage limit stopped this run; nothing launches "
+                      f"until {time.strftime('%H:%M', time.localtime(until))}, then limited runs resume (lift early: rm {S}/usage-limited) "
+                      f"({text[:120]})")
+        c["state"], c["limited_until"] = "limited", until
+        record_done(c, "limited", res)
+        return changed
+    hb, hb_err = load_handback(d, tid)
+    outcome, why = handback_outcome(hb, text)
+    red, own = hand_back_reds(hb)
+    if hb and outcome == "done" and own:
+        bad = own[0]
+        outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+    elif hb and outcome == "done" and red:
+        attention(tid, c["branch"], "NOTE", "queued with a red the worker marks not its own (the gate arbitrates): "
+                  + "; ".join(f"{t.get('cmd')} exit {t.get('exit')}" for t in red)[:300])
+    # How the hand-back arrived is the contract's own reliability measure: `json` is the
+    # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
+    # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
+    # `jq -r .how handbacks.jsonl | sort | uniq -c`, and `briefed` says whether the brief asked.
+    how = "json" if hb else ("line" if any(l.startswith("HANDBACK:") for l in text.splitlines()) else "none")
+    if hb_err:
+        log(f"HANDBACK {tid}: {hb_err} - {'falling back to the text line' if how == 'line' else 'NO_HANDBACK, judged by commits alone'} ({outcome})")
+    with open(f"{S}/handbacks.jsonl", "a") as f:
+        f.write(json.dumps({"ts": int(time.time()), "ticket": tid, "how": how, "outcome": outcome,
+                            "briefed": os.path.exists(f"{d}/brief.md") and "handback.json" in open(f"{d}/brief.md").read()}) + "\n")
+    ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
+    dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
+    if c.get("host"):
+        dirty = c.get("remote_dirty", [])        # this Mac's copy was just reset to the pushed branch
+    if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
+        write_result(c, hb)                    # the board line the worker used to write by hand
+        ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
+    if not hb and not res:
+        # No result JSON and no handback: the run did not finish, it was KILLED (a signal - 04:07
+        # on 2026-09-24 a pkill took five workers; they were logged "NO_HANDBACK ... (done)", parked
+        # as uncommitted/no-work and never run again). Keep the worktree and resume the session.
+        record_done(c, "killed", res)
+        if c.get("session_id") and c.get("kill_resumes", 0) < KILL_RESUMES and os.path.isdir(c.get("wt", "")):
+            claims[tid] = launch_fix(dict(c, kind="work"), f"KILLED your run ended after {age_min:.0f} min with no result - "
+                                     f"it was killed by a signal, not failed; {len(dirty)} modified files and {ahead} commits "
+                                     f"are in {c['wt']}: check them and continue the ticket from there", claims=claims)
+            killed.append(f"{tid} ({'fix held' if claims[tid].get('state') == 'fix-held' else 'resumed'})")
+        else:
+            c["state"] = "killed"
+            attention(tid, c["branch"], "KILLED", f"killed after {age_min:.0f} min with no session to resume; "
+                      f"worktree kept ({len(dirty)} modified files, {ahead} commits) - redispatch it")
+            killed.append(f"{tid} (needs a redispatch)")
+        return changed
+    if res.get("is_error"):
+        c["state"] = "error"
+        attention(tid, c["branch"], "ERROR", f"claude -p reported an error after {age_min:.0f} min; see {d}/run.log")
+        record_done(c, "error", res)
+    elif outcome == "blocked":
+        c["state"] = "blocked"
+        attention(tid, c["branch"], "BLOCKED", (why or "")[:220])
+        record_done(c, "blocked", res)
+    elif outcome == "cancel":
+        if ahead > 0 and not dirty:
+            # The worker recorded the cancellation on its branch: an Opus reviewer confirms the
+            # evidence whatever the worker's model, then it lands through the gate like code.
+            record_done(c, "cancel-to-review", res)
+            claims[tid] = dict(launch_review(dict(c, cancel_reason=why)), state="running")
+        else:
+            c["state"] = "cancel-proposed"
+            attention(tid, c["branch"], "CANCEL_PROPOSED", why or "no reason given")
+            record_done(c, "cancel-proposed", res)
+    elif dirty:
+        record_done(c, "uncommitted", res)
+        if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS:
+            claims[tid] = launch_fix(dict(c, kind="work"), f"UNCOMMITTED {len(dirty)} modified files left uncommitted in {c['wt']} (ahead={ahead}): finish and COMMIT them if they are the ticket's work and tests pass, otherwise `git checkout -- .` and hand back BLOCKED with why", claims=claims)
+        else:
+            c["state"] = "uncommitted"
+            attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
+    elif ahead == 0:
+        c["state"] = "no-work"
+        attention(tid, c["branch"], "NO_WORK", f"worker exited after {age_min:.0f} min with no commits; see {d}/out.json")
+        record_done(c, "no-work", res)
+    elif c.get("review"):
+        record_done(c, "done-to-review", res)
+        claims[tid] = dict(launch_review(c), state="running")
+    else:
+        c["state"] = "queued"
+        record_done(c, "done", res)
+        enqueue(c["branch"], c.get("wt"))
+    return changed
+
+
 def reap(claims, dry):
     changed = False
     killed = []
     for tid, c in list(claims.items()):
-        if c.get("state") not in ("running", "sync-error"):
-            continue
-        held = c["state"] == "sync-error"           # its run is over and its pid may be recycled: never signal it
-        pid = c["pid"]
-        age_min = (time.time() - c["started"]) / 60
-        limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
-        if not held and alive(pid) and not c.get("detached"):
-            if track_usage(c):                      # the only chance to see this run's CPU time
-                changed = True
-            if age_min > limit:
-                try:
-                    os.killpg(pid, signal.SIGTERM)
-                except OSError:
-                    pass
-                if c.get("host"):
-                    remote_stop(c)
-                c["state"] = "timeout"
-                c["ended"] = time.time()
-                record_done(c, "timeout", {})
-                changed = True
-                if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
-                        and os.path.isdir(c.get("wt", "")) and _gone(pid)):
-                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped", claims=claims)
-                    log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
-                else:
-                    attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
-            continue
-        # finished - for a remote claim (a review runs on this Mac), the LOCAL ssh ended: ask the box first
-        if c.get("host") and c["kind"] != "review":
-            state = "gone" if held else remote_run_state(c)
-            if state == "running":
-                c["pid"], c["detached"] = remote_attach(c), False
-                log(f"REMOTE {tid}: connection to {c['host']} dropped, run still going there - re-attached (pid {c['pid']})")
-                changed = True
-                continue
-            if state == "unknown" or not sync_back(c):
-                if state == "unknown" and not c.get("detached"):
-                    log(f"REMOTE {tid}: {c['host']} unreachable - the claim waits, polled on the host (stage 4 re-dispatches)")
-                    c["detached"] = True           # its local pid is dead: never signal it again (pids recycle)
-                    changed = True
-                continue
-            if held:
-                log(f"SYNC {tid}: host, mirror and this Mac agree again - judged now")
-                c.pop("sync_error_said", None)
-                c.pop("sync_error_detail", None)
-            c["detached"], c["state"] = False, "running"
-        changed = True
-        # The root is gone; anything of this run still running is a LEAK, holding cores and disk
-        # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
-        # run for hours beside the gate, which is the 2026-09-22 contention in another form.
         try:
-            leaked = leaked_processes(c)
-            if leaked:
-                c["leaked"] = len(leaked)
-                log(f"LEAKED {tid}: {len(leaked)} process(es) outlived the run: "
-                    + ", ".join(f"{r['pid']} {r['cmd'][:60]}" for r in leaked[:5]))
-                if not dry:
-                    kill_leaked(leaked)
-                attention(tid, c["branch"], "LEAKED",
-                          f"{len(leaked)} process(es) outlived the run and were killed (SIGTERM then SIGKILL): "
-                          + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in leaked[:5]))
+            changed |= _reap_one(claims, tid, c, dry, killed)
         except Exception as e:
-            log(f"leak check error for {tid}: {e}")
-        if c.get("deflake"):
-            reap_deflake(claims, tid, c)       # its own outcomes: not a board ticket, no result: block
-            continue
-        d = f"{WORKDIR}/{tid}"
-        if c["kind"] == "review":
-            res = result_of(f"{d}/review.json")
-            text = str(res.get("result", ""))
-            if "VERDICT: PASS" in text:
-                c["state"] = "queued"
-                record_done(c, "review-pass", res)
-                enqueue(c["branch"], c.get("wt"))
-            else:
-                fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "no verdict line")
-                record_done(c, "review-fail", res)
-                # A review FAIL names a concrete defect; the worker that wrote the code fixes it with
-                # its context intact, same path as a gate failure, same attempt cap.
-                if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
-                    claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {d}/review.json)", claims=claims)
-                else:
-                    c["state"] = "review-failed"
-                    attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
-            continue
-        res = result_of(c.get("out") or f"{d}/out.json")
-        text = str(res.get("result", ""))
-        if res.get("session_id"):
-            c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
-        if res.get("is_error") and _USAGE_LIMIT.search(text):
-            out_f = c.get("out") or f"{d}/out.json"
-            until = max(usage_limit_until(text, os.path.getmtime(out_f) if os.path.exists(out_f) else time.time()),
-                        time.time() + USAGE_LIMIT_FLOOR_S)
-            if until > usage_limited():
-                open(f"{S}/usage-limited", "w").write(f"{until:.0f}\n")
-                attention(tid, c["branch"], "USAGE_LIMIT", f"the account usage limit stopped this run; nothing launches "
-                          f"until {time.strftime('%H:%M', time.localtime(until))}, then limited runs resume (lift early: rm {S}/usage-limited) "
-                          f"({text[:120]})")
-            c["state"], c["limited_until"] = "limited", until
-            record_done(c, "limited", res)
-            continue
-        hb, hb_err = load_handback(d, tid)
-        outcome, why = handback_outcome(hb, text)
-        red, own = hand_back_reds(hb)
-        if hb and outcome == "done" and own:
-            bad = own[0]
-            outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
-        elif hb and outcome == "done" and red:
-            attention(tid, c["branch"], "NOTE", "queued with a red the worker marks not its own (the gate arbitrates): "
-                      + "; ".join(f"{t.get('cmd')} exit {t.get('exit')}" for t in red)[:300])
-        # How the hand-back arrived is the contract's own reliability measure: `json` is the
-        # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
-        # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
-        # `jq -r .how handbacks.jsonl | sort | uniq -c`, and `briefed` says whether the brief asked.
-        how = "json" if hb else ("line" if any(l.startswith("HANDBACK:") for l in text.splitlines()) else "none")
-        if hb_err:
-            log(f"HANDBACK {tid}: {hb_err} - {'falling back to the text line' if how == 'line' else 'NO_HANDBACK, judged by commits alone'} ({outcome})")
-        with open(f"{S}/handbacks.jsonl", "a") as f:
-            f.write(json.dumps({"ts": int(time.time()), "ticket": tid, "how": how, "outcome": outcome,
-                                "briefed": os.path.exists(f"{d}/brief.md") and "handback.json" in open(f"{d}/brief.md").read()}) + "\n")
-        ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
-        dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
-        if c.get("host"):
-            dirty = c.get("remote_dirty", [])        # this Mac's copy was just reset to the pushed branch
-        if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
-            write_result(c, hb)                    # the board line the worker used to write by hand
-            ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
-        if not hb and not res:
-            # No result JSON and no handback: the run did not finish, it was KILLED (a signal - 04:07
-            # on 2026-09-24 a pkill took five workers; they were logged "NO_HANDBACK ... (done)", parked
-            # as uncommitted/no-work and never run again). Keep the worktree and resume the session.
-            record_done(c, "killed", res)
-            if c.get("session_id") and c.get("kill_resumes", 0) < KILL_RESUMES and os.path.isdir(c.get("wt", "")):
-                claims[tid] = launch_fix(dict(c, kind="work"), f"KILLED your run ended after {age_min:.0f} min with no result - "
-                                         f"it was killed by a signal, not failed; {len(dirty)} modified files and {ahead} commits "
-                                         f"are in {c['wt']}: check them and continue the ticket from there", claims=claims)
-                killed.append(f"{tid} ({'fix held' if claims[tid].get('state') == 'fix-held' else 'resumed'})")
-            else:
-                c["state"] = "killed"
-                attention(tid, c["branch"], "KILLED", f"killed after {age_min:.0f} min with no session to resume; "
-                          f"worktree kept ({len(dirty)} modified files, {ahead} commits) - redispatch it")
-                killed.append(f"{tid} (needs a redispatch)")
-            continue
-        if res.get("is_error"):
-            c["state"] = "error"
-            attention(tid, c["branch"], "ERROR", f"claude -p reported an error after {age_min:.0f} min; see {d}/run.log")
-            record_done(c, "error", res)
-        elif outcome == "blocked":
-            c["state"] = "blocked"
-            attention(tid, c["branch"], "BLOCKED", (why or "")[:220])
-            record_done(c, "blocked", res)
-        elif outcome == "cancel":
-            if ahead > 0 and not dirty:
-                # The worker recorded the cancellation on its branch: an Opus reviewer confirms the
-                # evidence whatever the worker's model, then it lands through the gate like code.
-                record_done(c, "cancel-to-review", res)
-                claims[tid] = dict(launch_review(dict(c, cancel_reason=why)), state="running")
-            else:
-                c["state"] = "cancel-proposed"
-                attention(tid, c["branch"], "CANCEL_PROPOSED", why or "no reason given")
-                record_done(c, "cancel-proposed", res)
-        elif dirty:
-            record_done(c, "uncommitted", res)
-            if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS:
-                claims[tid] = launch_fix(dict(c, kind="work"), f"UNCOMMITTED {len(dirty)} modified files left uncommitted in {c['wt']} (ahead={ahead}): finish and COMMIT them if they are the ticket's work and tests pass, otherwise `git checkout -- .` and hand back BLOCKED with why", claims=claims)
-            else:
-                c["state"] = "uncommitted"
-                attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
-        elif ahead == 0:
-            c["state"] = "no-work"
-            attention(tid, c["branch"], "NO_WORK", f"worker exited after {age_min:.0f} min with no commits; see {d}/out.json")
-            record_done(c, "no-work", res)
-        elif c.get("review"):
-            record_done(c, "done-to-review", res)
-            claims[tid] = dict(launch_review(c), state="running")
-        else:
-            c["state"] = "queued"
-            record_done(c, "done", res)
-            enqueue(c["branch"], c.get("wt"))
+            # isolate it: the other claims are reaped and saved; this one stops, once, for a person
+            # a one-off (a git call timing out under load) is retried next tick; the third in a row stops it
+            changed = True
+            cur = claims.get(tid) or c
+            n = cur.get("reap_errors", 0) + 1
+            log(f"REAP_ERROR {tid} ({n}/{REAP_ERRORS}): {type(e).__name__}: {e}")
+            if n < REAP_ERRORS:
+                claims[tid] = dict(cur, reap_errors=n)
+                continue
+            claims[tid] = dict(cur, state="reap-error", reap_errors=n, reap_error=f"{type(e).__name__}: {e}"[:300])
+            attention(tid, c.get("branch", ""), "REAP_ERROR", f"reaping this claim raised {type(e).__name__}: {e} {n} ticks in a "
+                      f"row - claim set 'reap-error' (released like an error claim after {RELEASE_AFTER_H:.0f} h), the tick "
+                      f"went on; see work-runner.log")
     if killed:
         alert("amber", f"{len(killed)} worker(s) killed", ", ".join(killed) + " - worktrees kept", "wr:killed:" + ",".join(sorted(killed)))
     changed |= handle_gate_failures(claims, dry)
@@ -1600,7 +1687,7 @@ def release_stale_claims(claims, tasks_by_id):
                 f"(landed as a rebuilt branch) - claim closed")
             c["state"] = "merged"; c["ended"] = time.time(); changed = True
     for tid, c in list(claims.items()):
-        if c.get("state") in ("no-work", "error", "timeout", "killed") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
+        if c.get("state") in ("no-work", "error", "timeout", "killed", "reap-error") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
                 log(f"RELEASE {tid}: claim ended {c['state']} {RELEASE_AFTER_H:.0f}h+ ago and the ticket is still todo - eligible again")
                 del claims[tid]; changed = True
@@ -2362,13 +2449,16 @@ def reclaim_idle_targets(claims, dry):
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
     live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited", "sync-error")}
+    # Short of disk, the wait drops to minutes (supervisor 2026-09-25 13:31: free hit 22 GB, floor 20, and idle
+    # targets were reaped by hand): the same no-claim, no-process rules still decide what goes.
+    wait_s = LOW_DISK_IDLE_MIN * 60 if disk_free_gb() < LOW_DISK_GB else IDLE_TARGET_H * 3600
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
         if wt in live or os.path.islink(wt) or os.path.islink(t) or not os.path.isdir(t):
             continue
         written = _target_written(t)
-        if time.time() - written >= IDLE_TARGET_H * 3600:
+        if time.time() - written >= wait_s:
             idle.append((wt, time.time() - written))
     if not idle:
         return
@@ -2377,17 +2467,22 @@ def reclaim_idle_targets(claims, dry):
     if not re.search(r"^p\d+", cwds, re.M):
         return   # lsof said nothing: no evidence the worktrees are unused, so no delete
     seen = sh(["ps", "-axo", "command"]) + "\n" + cwds
+    doomed = []
     for wt, age in idle:
         if re.search(re.escape(wt) + r"(/|\s|$)", seen, re.M):
             continue
         if dry:
             log(f"DRY-RUN would reclaim {wt}/target (idle {age / 3600:.1f} h)")
             continue
-        # Renamed first: a build that starts during a long delete finds no target, never half of one.
+        # Renamed first: a build that starts during a long delete finds no target, never half of one. Every rename
+        # happens before any delete (review: the process snapshot above is minutes old by the last of several
+        # 4-8 GB deletes, and short of disk many targets qualify in one pass).
         gone = os.path.join(wt, f"target.reclaim-{int(time.time())}")
         os.rename(os.path.join(wt, "target"), gone)
-        shutil.rmtree(gone, ignore_errors=True)
+        doomed.append(gone)
         log(f"RECLAIM {wt}/target (idle {age / 3600:.1f} h, no running claim or process; source kept)")
+    for gone in doomed:
+        shutil.rmtree(gone, ignore_errors=True)
 
 
 # ---------- deflake dispatch (user, 2026-09-23) ----------
@@ -2857,7 +2952,7 @@ def tick(dry):
               # remote host's running workers against its own cap, and whether its probe says it can take work.
               "hosts": {"mac": {"running": busy_workers(claims), "cap": dispatch_cap(), "held": host_room(claims, None)},
                         **{h: {"running": busy_workers(claims, h), "cap": slot_cap(h), "ready": host_ready(h),
-                               "held": host_room(claims, h), "probe_age_s": _probe_age(h),
+                               "held": host_room(claims, h), "probe_age_s": _probe_age(h), "stats": _probe_stats(h),
                                **({"refs_in_sync": _REPOSYNC[h]["refs_in_sync"], "drifting": _REPOSYNC[h]["drifting"],
                                    "branches": {b: {k: e.get(k) for k in ("mirror", "local", "behind", "ahead", "state")}
                                                 for b, e in _REPOSYNC[h]["branches"].items()}} if h in _REPOSYNC else {})}

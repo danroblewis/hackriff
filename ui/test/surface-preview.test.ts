@@ -1188,6 +1188,46 @@ test("T-445 INVERTS T-450's ADDITIVE CLAIM: the app mounts THIS host, and there 
 });
 
 /**
+ * **T-982: the frozen preview says where the live edge actually is.**
+ *
+ * FOUND 2026-09-25: opened on a live server, this page reads "historical · the edge does not
+ * advance" with both panes stuck at "0 tiles" — accurate (T-450's design, unchanged: see the test
+ * above), but a dead end for whoever expected `/surface.html` to behave like `/`. It never will by
+ * itself — `SurfacePreview` only follows the live edge when handed an `edge`/`windows` supplier
+ * (`PreviewOptions`), and those need the app's own device/session state (`centre/capture-clock.ts`,
+ * the active-window store) that this page's bundle is kept apart from on purpose, so it can build
+ * and ship without the app (the route allowlist above: exactly `GET /api/coverage` and
+ * `GET /api/navigation`, nothing that would let it grow that state itself). So the fix is not to
+ * teach this page to follow live — that would mean importing the app's state machinery into the one
+ * bundle T-450 built to NOT need it — it is to say so, in words, and hand over a working link to the
+ * page that already does.
+ */
+test("T-982: the historical badge is answered by a live link to /, not left to be read as a fault", () => {
+  const html = SRC("src/surface/preview.html");
+  // The badge itself still reads "historical" (it is true), but its title now says this is by
+  // design rather than leaving that to be inferred.
+  assert.match(html, /historical · the edge does not advance/);
+  assert.match(html, /class="sp-badge"[^>]*title="[^"]*by design, not a fault/,
+    "the badge's title must say this is deliberate, not a broken live-edge read");
+  // The live link: a real anchor to the root page, inside the header bar next to the badge, with a
+  // slot the mount can find and a title that says what it is and why it differs from this page.
+  const link = /<a class="sp-live" data-slot="live-link" href="\/"[^>]*>([^<]+)<\/a>/.exec(html);
+  assert.ok(link, "no live link to / found beside the historical badge");
+  assert.match(link[1], /live/i, "the link's visible text must say what it does");
+  assert.match(html, /class="sp-live"[^>]*title="[^"]*edge/, "the link's title must explain the difference");
+  // It must sit in the header bar, not buried in the footer prose where a scan of the page would
+  // miss it — the badge and the link are read together or not at all.
+  const bar = /<header class="sp-bar">([\s\S]*?)<\/header>/.exec(html);
+  assert.ok(bar && /class="sp-badge"/.test(bar[1]) && /class="sp-live"/.test(bar[1]),
+    "the badge and the live link must both be in the header bar");
+  // The stale T-450 claim this replaces: pre-T-445 it was literally true that the app shared no
+  // state with this page. T-445 made `app/centre/surface.ts` import `SurfacePreview` from this same
+  // module, so the old wording is simply wrong now — it must be gone, not just supplemented.
+  assert.ok(!html.includes("shares no state with this page, and imports\n     nothing from it"),
+    "the stale pre-cutover \"additive\" claim is still verbatim in the page's own header comment");
+});
+
+/**
  * **T-456: whoever hosts this surface, the wheel means the same thing.**
  *
  * This is a claim about *every* host, not about the one that exists today, and it is written as a
