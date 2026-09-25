@@ -29176,7 +29176,8 @@ tasks:
   - id: T-996
     milestone: MMAP
     title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
-    status: todo
+    status: in-progress
+    branch: task-t996
     priority: high
     deps: []
     parallel_group: MAP-SCALE
@@ -29787,7 +29788,8 @@ tasks:
   - id: T-1028
     milestone: MMAP
     title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
-    status: todo
+    status: in-progress
+    branch: task-t1028
     priority: high
     deps:
     - T-1000
