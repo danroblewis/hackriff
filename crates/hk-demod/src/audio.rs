@@ -13,7 +13,7 @@
 //! | Mode | Channel | Audio |
 //! |---|---|---|
 //! | WFM | 200 kHz at 240 kS/s | [`WfmDemod`] mono, 75 µs de-emphasis, deviation-scaled (no AGC) |
-//! | NBFM | OBW99 × 1.25, 6–25 kHz | discriminator / 5 kHz, 3.5 kHz low-pass, DC removed (no AGC) |
+//! | NBFM | OBW99 × 1.25, 6–25 kHz | discriminator / 5 kHz, 3.5 kHz low-pass, DC removed (no AGC); CTCSS/DCS identified blind on the discriminator ([`AudioDemod::subaudible`], T-988) |
 //! | AM | OBW99 × 1.1, 5–20 kHz | envelope, DC removed, 5 kHz low-pass, AGC |
 //! | SSB | OBW99, 2.4–4 kHz | sideband (from spectral symmetry) shifted to 0 Hz, real part, AGC |
 //! | CW | 500 Hz | carrier shifted to a 700 Hz tone, AGC |
@@ -33,11 +33,13 @@ use hk_estimate::{
     EstimatorConfig, Hints, ParamEstimator, ParameterSet, SnippetConfig, SnippetExtractor,
     SnippetRequest,
 };
+use hk_model::Subaudible;
 use num_complex::Complex32;
 
 use crate::dsp::{Discriminator, FirDecimator, lowpass_taps};
 use crate::mode::{AnalogMode, ModeDecision, ModeSelector};
 use crate::receiver::DemodError;
+use crate::subaudible::{SubaudibleConfig, SubaudibleDetector};
 use crate::wfm::{MPX_RATE_HZ, WfmConfig, WfmDemod};
 
 /// Audio output rate, Hz.
@@ -232,6 +234,10 @@ enum Kind {
         lp: FirDecimator<f32>,
         scale: f32,
         dc: f32,
+        /// Blind CTCSS/DCS identification on the discriminator (T-988).
+        sub: Box<SubaudibleDetector>,
+        /// Discriminator output of the current block, Hz (reused; no steady-state allocation).
+        hz: Vec<f32>,
     },
     Am {
         lp: FirDecimator<f32>,
@@ -292,6 +298,8 @@ impl AudioDemod {
                 ),
                 scale: (1.0 / cfg.nbfm_deviation_hz) as f32,
                 dc: 0.0,
+                sub: Box::new(SubaudibleDetector::new(SubaudibleConfig::default(), rate)?),
+                hz: Vec::new(),
             },
             (AnalogMode::Am, _) => Kind::Am {
                 lp: FirDecimator::new(
@@ -391,14 +399,20 @@ impl AudioDemod {
                 lp,
                 scale,
                 dc,
+                sub,
+                hz,
             } => {
+                hz.clear();
                 for &s in x {
-                    let f = disc.push(s) * *scale;
-                    if let Some(y) = lp.push(f) {
+                    let f_hz = disc.push(s);
+                    hz.push(f_hz);
+                    if let Some(y) = lp.push(f_hz * *scale) {
                         *dc += 0.001 * (y - *dc);
                         self.out.push(y - *dc);
                     }
                 }
+                // Only on-air audio is analysed: squelch-closed noise would dilute a tone.
+                sub.push(hz, self.squelch_open);
             }
             Kind::Am { lp, dc } => {
                 for &s in x {
@@ -508,6 +522,26 @@ impl AudioDemod {
     /// Moves the audio produced so far into `out`.
     pub fn drain_audio_into(&mut self, out: &mut Vec<f32>) {
         out.append(&mut self.out);
+    }
+
+    /// Blind sub-audible squelch identification (T-988): `Some` on an NBFM channel — a CTCSS
+    /// tone, a DCS code, `none` once enough on-air audio found neither, or `measuring` before —
+    /// and `None` on every other mode (nobody looked).
+    pub fn subaudible(&mut self) -> Option<Subaudible> {
+        match &mut self.kind {
+            Kind::Nbfm { sub, .. } => Some(sub.report()),
+            _ => None,
+        }
+    }
+
+    /// Carries the sub-audible analysis over from the demodulator this one replaces (a refined
+    /// retune of the same NBFM channel), so a rebuild does not restart the measurement.
+    pub fn inherit_subaudible(&mut self, old: &mut AudioDemod) {
+        if let (Kind::Nbfm { sub, .. }, Kind::Nbfm { sub: prev, .. }) =
+            (&mut self.kind, &mut old.kind)
+        {
+            std::mem::swap(sub, prev);
+        }
     }
 
     /// Squelch state.

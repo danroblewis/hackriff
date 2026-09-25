@@ -152,7 +152,7 @@ A label on a Detection / Emitter / Recording / time-freq box: `author` (`user` /
 - **Tests:** assert a valid CRC decode writes a `ground-truth` annotation on the Emitter; assert export produces a valid labelled SigMF set.
 
 ### 2.14 Demodulation  [C19, C20]
-A demod session on a channel derived from an Emitter/Detection: `demod_id`, `emitter_ref`, `mode`/family, estimated params (symbol rate, deviation, CFO, mod order, roll-off, bandwidth, and for WFM the measured stereo pilot frequency `pilot_hz`, *T-037b*), `lock_quality`/EVM, outputs (`audio_ref` / `symbol_stream_ref` / `bitstream_ref`), `demod_version`.
+A demod session on a channel derived from an Emitter/Detection: `demod_id`, `emitter_ref`, `mode`/family, estimated params (symbol rate, deviation, CFO, mod order, roll-off, bandwidth, and for WFM the measured stereo pilot frequency `pilot_hz`, *T-037b*; for NBFM the blind sub-audible squelch identification `subaudible` — CTCSS tone, DCS code, or an explicit `none`, *T-988*), `lock_quality`/EVM, outputs (`audio_ref` / `symbol_stream_ref` / `bitstream_ref`), `demod_version`.
 - **Identity & lifecycle:** `demod_id`; re-runnable over a Recording (offline) or live; params come from C13/C14; version recorded.
 - **Relationships:** child of Emitter; produces Decode/Bitstream; the estimated params also refine the Emitter fingerprint.
 - **Retention & size:** small metadata; audio/symbol/bit outputs are Recording-like files under quota.
