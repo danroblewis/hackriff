@@ -2,7 +2,10 @@
 //!
 //! The chain keeps a rolling copy of the ring from the track's start and receives the track's
 //! member boxes. Boxes that overlap in time are one burst (the detector emits one box per 2-FSK
-//! tone lobe). A burst is demodulated (`FskReceiver`: snippet → C13 → C14, prior-led trials below
+//! tone lobe) — **and a box only counts as a burst if it shows an on/off energy contrast against
+//! its own pads** ([`MIN_BURST_CONTRAST_DB`], T-980): a steady carrier, a receiver line and plain
+//! noise all measure the same on as off, and demodulating one mints a burst out of something that
+//! never happened. A burst is demodulated (`FskReceiver`: snippet → C13 → C14, prior-led trials below
 //! the trust floor with the standard-rate table) once a later burst has started or the chain is
 //! detached, and once its samples plus pads are in the buffer. At detach (track closed, stream
 //! end) framing is inferred across the bursts and `write_framed_bursts` stores Emitter,
@@ -17,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use hk_core::Discontinuity;
 use hk_core::ProvenanceHandle;
+use hk_demod::DemodError;
 use hk_demod::fsk::{
     DemodPriors, EmitterClassification, FramedRecordContext, FskBurst, FskReceiver,
     FskReceiverConfig, WrittenFraming, write_framed_bursts,
@@ -84,6 +88,24 @@ fn add_member(groups: &mut Vec<Group>, m: MemberBox, missed: &std::sync::atomic:
 /// (`fsk_boxes_missed`) rather than a new failure mode.
 pub(crate) const MAX_RETAIN_SAMPLES: usize = 16 << 20;
 
+/// T-980: least on/off energy contrast a member box must show against its own pads for this chain
+/// to call it a burst, dB — the chain's half of
+/// [`FskReceiverConfig::min_burst_contrast_db`](hk_demod::fsk::FskReceiverConfig::min_burst_contrast_db),
+/// which is off by default because the test belongs to whoever chose the box. These boxes come
+/// from a **blind detector**, so nothing else has asked whether the emission started and stopped.
+///
+/// **Why it exists.** The chain demodulates one box per member of a track and counts what comes
+/// back as a burst. Nothing checked that the box was a burst, so a track that is not bursty at all
+/// still produced one per member: in the field (T-980, TPMS 315 MHz, live HackRF) a single steady
+/// CW carrier at 314.988 MHz with **no bursts in it** yielded 169–186 "fsk bursts", 0 framed, with
+/// symbol-rate guesses from 1200 to 9600 Bd — each one a trial rate fitted to noise. Reproduced
+/// through the mock SDR (`tests/cw_carrier_is_not_a_burst_train.rs`) the same scene mints 973.
+///
+/// **3 dB is measured** (the table on the config field): the 973 false boxes span −0.5…1.4 dB, and
+/// bursts the detector actually hands over are 6.5 dB and up. Refusals are counted in
+/// `chains/fsk_not_a_burst`, never in `chains/errors`: the chain asked and got an answer.
+const MIN_BURST_CONTRAST_DB: f64 = 3.0;
+
 /// Most pending burst groups one chain queues (T-558). A group is only drained once its samples
 /// have arrived, so a chain whose member boxes outrun its reader would otherwise grow one entry
 /// per box for as long as it lives. The oldest go first: their samples are the ones the ring is
@@ -118,7 +140,10 @@ pub(crate) fn run(
     let mut bursts: Vec<FskBurst> = Vec::new();
     let mut first_det = cand.detection;
     let (mut f_lo, mut f_hi) = (cand.f_lo_hz, cand.f_hi_hz);
-    let mut receiver = FskReceiver::new(FskReceiverConfig::default());
+    let mut receiver = FskReceiver::new(FskReceiverConfig {
+        min_burst_contrast_db: MIN_BURST_CONTRAST_DB,
+        ..FskReceiverConfig::default()
+    });
     let priors = DemodPriors {
         standard_rates: true,
         ..Default::default()
@@ -219,6 +244,9 @@ pub(crate) fn run(
                     first_det.get_or_insert(g.detection);
                     bursts.push(b);
                 }
+                // T-980: a box with no on/off contrast is not a burst and not an error — the
+                // chain asked and got an answer.
+                Err(DemodError::NotABurst { .. }) => inc(&c.fsk_not_a_burst),
                 Err(_) => inc(&c.errors),
             }
         }

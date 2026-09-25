@@ -260,6 +260,10 @@ counter_group!(
         fsk_bursts,
         /// FSK boxes whose samples had left the chain buffer.
         fsk_boxes_missed,
+        /// T-980: FSK boxes refused because they carried no on/off energy contrast against their
+        /// own pads — a steady carrier, a receiver line or noise, never a burst
+        /// (`hk_demod::DemodError::NotABurst`). Not an error: the chain asked and got an answer.
+        fsk_not_a_burst,
         /// CRC-valid frames.
         crc_valid,
         /// T-247: M3 classification rows the C15 cascade wrote (`crate::classify`).

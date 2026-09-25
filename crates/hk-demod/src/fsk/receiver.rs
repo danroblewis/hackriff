@@ -1,5 +1,17 @@
 //! [`FskReceiver`]: one detection box → snippet → C13 (FSK hint) → C14 → FSK demodulation,
 //! with **prior-led trial demodulation** below the C14 trust floor (spike S5 §5 "T-013").
+//!
+//! # A burst has to have been a burst (T-980)
+//!
+//! Before any of that, the box has to be an emission that **started and stopped**. The receiver
+//! measures the in-channel energy inside the box against the same channel in the snippet's own
+//! pads either side and refuses the box when the two agree
+//! ([`FskReceiverConfig::min_burst_contrast_db`]): a steady carrier, a receiver line and plain
+//! noise all look the same on and off, and demodulating one mints a "burst" out of something that
+//! never happened. Field evidence (T-980, TPMS 315 MHz): a single steady CW carrier on an 8-bit
+//! front end produced 169–186 "fsk bursts", 0 framed, with symbol-rate guesses from 1200 to 9600
+//! Bd — every one of them a trial fit to noise. The test is on the **channel-filtered snippet**,
+//! not the wideband slice, so a neighbour on another frequency neither raises nor hides it.
 
 use hk_dsp::{InputInfo, IqSample};
 use hk_estimate::blind::{BlindConfig, BlindEstimator, SymbolParameters};
@@ -9,16 +21,60 @@ use hk_estimate::{
     SnippetRequest,
 };
 use hk_model::{EstimatedParams, SampleTime, TimeRange, Timestamp};
+use num_complex::Complex32;
 use serde::{Deserialize, Serialize};
 
 use super::demod::{FSK_DEMOD_VERSION, FskDemod, FskDemodConfig, FskDemodRequest, FskSymbols};
 use crate::DemodError;
+
+/// Fewest pad samples (both sides together, at the snippet rate) that make the on/off contrast of
+/// [`FskReceiverConfig::min_burst_contrast_db`] answerable. Below it the snippet is essentially all
+/// box, there is no "off" to compare with, and the box is refused rather than guessed at.
+pub const MIN_CONTRAST_PAD_SAMPLES: usize = 64;
+
+/// Cells the pads are cut into for the median "off" level of [`burst_contrast_db`].
+pub const CONTRAST_PAD_CELLS: usize = 16;
 
 /// Standard symbol rates tried when nothing better is known, Bd.
 pub const STANDARD_RATES_BD: &[f64] = &[
     1_200.0, 2_400.0, 4_800.0, 9_600.0, 19_200.0, 38_400.0, 50_000.0, 57_600.0, 76_800.0,
     100_000.0, 115_200.0, 150_000.0, 200_000.0, 250_000.0, 300_000.0,
 ];
+
+/// The box's in-channel power over its pads', dB — the on/off contrast that makes a box a burst
+/// (T-980). `None` when the snippet holds fewer than [`MIN_CONTRAST_PAD_SAMPLES`] pad samples, or
+/// no box, or the pads carry no power at all: a question that cannot be answered is not answered.
+///
+/// Both sides' pads count as one "off" measurement. A burst whose pad happens to hold the tail of
+/// a neighbouring burst in a dense train loses some contrast, which is why the threshold is a
+/// factor of four in power rather than a hair over one.
+fn burst_contrast_db(snip: &hk_estimate::ChannelSnippet) -> Option<f64> {
+    let x = &snip.samples;
+    let b = snip.box_range.start.min(x.len())..snip.box_range.end.min(x.len());
+    if b.is_empty() {
+        return None;
+    }
+    let pad_samples = x.len() - b.len();
+    if pad_samples < MIN_CONTRAST_PAD_SAMPLES {
+        return None;
+    }
+    let mean = |s: &[Complex32]| {
+        s.iter().map(|z| f64::from(z.norm_sqr())).sum::<f64>() / s.len().max(1) as f64
+    };
+    let on = mean(&x[b.clone()]);
+    let cell = (pad_samples / CONTRAST_PAD_CELLS).max(MIN_CONTRAST_PAD_SAMPLES / 4);
+    let mut cells: Vec<f64> = x[..b.start]
+        .chunks_exact(cell)
+        .chain(x[b.end..].chunks_exact(cell))
+        .map(mean)
+        .collect();
+    if cells.is_empty() {
+        cells.push(mean(&x[..b.start]).max(0.0) + mean(&x[b.end..]));
+    }
+    cells.sort_by(f64::total_cmp);
+    let off = cells[cells.len() / 2];
+    (on.is_finite() && off.is_finite() && off > 0.0).then(|| 10.0 * (on / off).log10())
+}
 
 /// Rate, deviation and channel raster from trusted C14 results of one emitter cluster.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,6 +313,30 @@ pub struct FskReceiverConfig {
     pub use_trusted: bool,
     /// Most trials per burst.
     pub max_trials: usize,
+    /// T-980: least in-channel power the box must hold **over its own pads** to be a burst, dB;
+    /// `f64::NEG_INFINITY` (the default) demodulates a box whatever its shape.
+    ///
+    /// **The default is off because the test belongs to whoever chose the box.** A caller that
+    /// already holds its own evidence that each box is a burst — a fixture's truth annotations,
+    /// a recording's emission list — has nothing to ask, and asking anyway refuses real bursts:
+    /// over the 54 annotated boxes of the recorded 915 MHz FHSS fixture the contrast runs
+    /// −0.0 … 15.4 dB, with 12 under 3 dB, because at 2 ms of pad a dense hopping band's "off"
+    /// is another emission. It is
+    /// [`crate::chains::fsk`](../../../hk_pipeline/chains/fsk/index.html)'s boxes — a blind
+    /// detector's — that need it, and the chain sets it.
+    ///
+    /// **Where it is set, 3 dB is measured, not chosen.** A factor of two in power, between:
+    ///
+    /// | boxes | contrast |
+    /// |---|---|
+    /// | every box a steady CW carrier and its 8-bit quantisation lines produced through the mock SDR (973 of them, T-980's reproduction) | −0.5 … **1.4** dB, median 0.3 |
+    /// | the 20 dB synthetic burst train, and the 915 MHz fixture's isolated bursts | **6.5** … 15.4 dB |
+    ///
+    /// A 4 dB-SNR synthetic burst measures 1.8–2.4 dB and is refused: at 2 dB over the band
+    /// around it, a box is not distinguishable from one a detector picked *because* the noise
+    /// there was momentarily high, and refusing it — counted, in `chains/fsk_not_a_burst` — is
+    /// the honest call rather than a symbol rate fitted to noise.
+    pub min_burst_contrast_db: f64,
 }
 
 impl Default for FskReceiverConfig {
@@ -269,6 +349,7 @@ impl Default for FskReceiverConfig {
             demod: FskDemodConfig::default(),
             use_trusted: true,
             max_trials: 20,
+            min_burst_contrast_db: f64::NEG_INFINITY,
         }
     }
 }
@@ -290,6 +371,10 @@ pub struct FskBurst {
     pub anchor: SampleTime,
     /// Snippet rate, Hz.
     pub snippet_rate_hz: f64,
+    /// T-980: the on/off energy contrast that admitted this box as a burst — its in-channel power
+    /// over its pads', dB. `None` when the snippet held too little pad to measure it and the
+    /// caller had the test switched off.
+    pub burst_contrast_db: Option<f64>,
     /// C13.
     pub params: ParameterSet,
     /// C14.
@@ -545,6 +630,16 @@ impl FskReceiver {
             ..self.config.snippet
         });
         let snip = extractor.extract(info, iq, request)?;
+        // T-980: the box has to have been a burst before anything else is asked of it.
+        let contrast_db = burst_contrast_db(&snip);
+        if self.config.min_burst_contrast_db.is_finite()
+            && !contrast_db.is_some_and(|db| db >= self.config.min_burst_contrast_db)
+        {
+            return Err(DemodError::NotABurst {
+                contrast_db,
+                required_db: self.config.min_burst_contrast_db,
+            });
+        }
         let hints = Hints {
             family: FamilyHint::Fsk { levels: 2 },
             ..self.config.hints
@@ -740,6 +835,7 @@ impl FskReceiver {
             channel_offset_hz: snip.center_offset_hz,
             anchor: snip.time.time,
             snippet_rate_hz: snip.sample_rate_hz,
+            burst_contrast_db: contrast_db,
             params,
             blind,
             seed,

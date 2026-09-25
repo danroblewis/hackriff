@@ -3039,12 +3039,13 @@ impl RunSummary {
             c("/chains/plugin_restarts")
         ));
         line(format!(
-            "rejected:    {} outside window, {} duplicate channel, {} mode rejected ({} recorded), {} FSK boxes missed",
+            "rejected:    {} outside window, {} duplicate channel, {} mode rejected ({} recorded), {} FSK boxes missed, {} FSK boxes with no on/off contrast",
             c("/chains/outside_window"),
             c("/chains/duplicate_channel"),
             c("/chains/mode_rejected"),
             c("/chains/declined_measurements"),
-            c("/chains/fsk_boxes_missed")
+            c("/chains/fsk_boxes_missed"),
+            c("/chains/fsk_not_a_burst")
         ));
         line(format!(
             "emitters:    {} in inventory at stop (open tracks closed), {} labels; recordings {}",
