@@ -20,10 +20,17 @@
 //! read (the weak 98.1 MHz station in the 98.5 MHz capture) is not an RDS station and is not
 //! counted either way. The ratio — decoded / RDS stations — is printed, and must be 1.
 //!
-//! What this does **not** cover, and why the fix is still measured live: this replay is lossless,
-//! so a chain is never lapped and no trigger track closes under it before its window is read. On
-//! live air both happened (T-926: every full WFM window written on 2026-09-25 was the probe's
-//! 0.5 s), and the unit tests beside `chains::analog::collect` pin that behaviour.
+//! **Served as the air serves it.** The device delivers the captures in a live HackRF's
+//! 65 536-sample transfers, not the replay's 5 ms blocks. On 2026-09-25 every full WFM window the
+//! chain wrote on live air was 0.5 s or 1.0 s — the probe or the leading window — because a chunk
+//! that crossed a collection stage's end was cut there and the next stage read the gap as a
+//! discontinuity; 5 ms blocks divide every stage length, so a default replay decoded both stations
+//! while live air decoded one of nineteen. With HackRF-sized transfers this test fails on that
+//! defect (A4FF is lost).
+//!
+//! What it does **not** cover: the replay is lossless, so a chain is never lapped and no trigger
+//! track closes under it before its window is read. The unit tests beside
+//! `chains::analog::collect` pin those.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +47,11 @@ use crate::common::*;
 const SIGNAL_062: &str = "SIGNAL-062";
 /// The per-station capture set.
 const SET_DIR: &str = "fixtures/hackrf/fm-stations";
+/// Samples per transfer the device serves the captures in: a live HackRF's (131 072 bytes of
+/// ci8). The replay's default 5 ms blocks divide every stage length a chain collects (0.5 s is
+/// 100 of them), and hid the T-926 defect that dropped the rest of a chunk at each stage boundary
+/// and cut every live WFM window to 0.5 s.
+const HACKRF_TRANSFER_SAMPLES: usize = 65_536;
 
 /// Every capture of the set whose LFS data is fetched (a missing one skips, or fails under
 /// `HK_REQUIRE_FIXTURES=1`, exactly as [`real_fixture_in`] decides).
@@ -115,7 +127,11 @@ fn ps_decoded_at(t: &TruthItem, all: &[InventoryEntry], repo: &Repository, ps: &
 fn run_capture(meta: &Path) -> Vec<Station> {
     let name = meta.file_stem().unwrap().to_string_lossy().into_owned();
     let fx = Fixture::load(meta).unwrap();
-    let BlindRun { dir, summary, .. } = blind_replay(meta, "fmsta", BlindSource::default());
+    let source = BlindSource {
+        transfer_len: Some(HACKRF_TRANSFER_SAMPLES),
+        ..BlindSource::default()
+    };
+    let BlindRun { dir, summary, .. } = blind_replay(meta, "fmsta", source);
     assert_eq!(
         summary.always_on_lost_samples, 0,
         "[{SIGNAL_062}] {name}: the lossless replay lost samples"

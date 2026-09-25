@@ -55,7 +55,7 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 
 use hk_context::signature::FeatureObservation;
-use hk_core::{Discontinuity, ProvenanceHandle};
+use hk_core::{Discontinuity, ProvenanceHandle, ReadChunk};
 use hk_demod::refine::{IqWindow, RefineStart, RefinementOutcome, Tuning};
 use hk_demod::{
     AnalogMode, AnalogReceiver, AnalogSession, ReceiverConfig, RecordContext, write_declined,
@@ -161,6 +161,18 @@ struct Window {
     restarts: u32,
 }
 
+/// What [`Window::push`] did with a chunk.
+#[derive(Debug, PartialEq, Eq)]
+enum Push {
+    /// The chunk continues the window and was appended whole.
+    Appended,
+    /// A gap or a provenance change at the same tune: the committed window started again at this
+    /// chunk (T-926).
+    Restarted,
+    /// The chunk does not continue the window, and the window cannot restart; why.
+    Ended(&'static str),
+}
+
 /// What a window does when its reader reports an overrun.
 #[derive(Debug, PartialEq, Eq)]
 enum OnLost {
@@ -177,6 +189,45 @@ impl Window {
     /// committed one (T-926, see [`collect`]).
     fn ends_on_detach(&self) -> bool {
         !self.committed && !self.iq.is_empty()
+    }
+
+    /// Appends a read chunk **whole**.
+    ///
+    /// **Never a part of it (T-926).** Collection runs in stages — the probe, the early
+    /// identification's leading window, the full window — and a stage's target almost never falls
+    /// on a chunk boundary: 0.5 s is 1.2 M samples at 2.4 Msps and 10 M at 20 Msps, while a live
+    /// HackRF delivers 65 536-sample transfers. Collection used to copy only up to the stage's
+    /// target and drop the rest of the chunk, so the *next* stage's first chunk no longer continued
+    /// the window: it read as a discontinuity and ended it. That is exactly the shape measured on
+    /// live air (every full WFM window 0.5 s or 1.0 s: the probe or the leading window). A replay
+    /// hid it whenever its blocks happened to divide the stage lengths. Callers take the length
+    /// they need from the front of the window instead.
+    ///
+    /// A chunk that does not continue the window — a gap, or a new provenance — restarts a
+    /// committed window at the same tune ([`Self::restart`]; the front end's sticky overload flag
+    /// or a gain step leave the channel where it was) and ends it otherwise.
+    fn push(&mut self, c: &ReadChunk, samples: &[Complex<i8>]) -> Push {
+        let mut out = Push::Appended;
+        if let Some((t, p)) = &self.head
+            && (c.first_sample() != t.sample_index + self.iq.len() as u64
+                || c.provenance.id() != p.id())
+        {
+            let (a, b) = (&c.provenance.get().tune, &p.get().tune);
+            let same_tune = a.center_hz == b.center_hz && a.sample_rate_hz == b.sample_rate_hz;
+            if !(same_tune && self.restart()) {
+                return Push::Ended(if same_tune {
+                    "a discontinuity"
+                } else {
+                    "a retune"
+                });
+            }
+            out = Push::Restarted;
+        }
+        if self.head.is_none() {
+            self.head = Some((c.time, c.provenance.clone()));
+        }
+        self.iq.extend_from_slice(samples);
+        out
     }
 
     /// Empties a committed window so a fresh contiguous one is collected, at most
@@ -230,7 +281,7 @@ const MAX_WINDOW_RESTARTS: u32 = 2;
 ///   held. A committed window instead **restarts** inside the retained history
 ///   ([`ChainReader::restart_in_history`]) — RDS needs a contiguous window, not that particular
 ///   one — at most [`MAX_WINDOW_RESTARTS`] times.
-fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target: usize) {
+fn collect(cr: &mut impl WindowSource, rx: &Receiver<ChainMsg>, w: &mut Window, target: usize) {
     while w.iq.len() < target && !w.ended {
         while !w.detached {
             match rx.try_recv() {
@@ -245,41 +296,23 @@ fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target
             break;
         }
         match cr.next() {
-            Next::Data(c) => {
-                if let Some((t, p)) = &w.head
-                    && (c.first_sample() != t.sample_index + w.iq.len() as u64
-                        || c.provenance.id() != p.id())
-                {
-                    // A gap or a new provenance at the **same** tune (the front end's sticky
-                    // overload flag, a gain step) leaves the channel where it was: a committed
-                    // window starts again at this chunk. A retune moved the channel away.
-                    let (a, b) = (&c.provenance.get().tune, &p.get().tune);
-                    let same_tune =
-                        a.center_hz == b.center_hz && a.sample_rate_hz == b.sample_rate_hz;
-                    if !(same_tune && w.restart()) {
-                        ended_early(
-                            w,
-                            if same_tune {
-                                "a discontinuity"
-                            } else {
-                                "a retune"
-                            },
-                        );
-                        w.ended = true;
-                        break;
-                    }
-                    inc(&cr.shared.counters.chains.window_restarts);
+            Next::Data(c) => match w.push(&c, cr.chunk(c.len)) {
+                Push::Appended => cr.release_to(c.end_sample()),
+                Push::Restarted => {
+                    cr.count_restart();
+                    restarted(w, "a gap or a provenance change at the same tune");
+                    cr.release_to(c.end_sample());
                 }
-                if w.head.is_none() {
-                    w.head = Some((c.time, c.provenance.clone()));
+                Push::Ended(why) => {
+                    ended_early(w, why);
+                    w.ended = true;
+                    break;
                 }
-                let take = (target - w.iq.len()).min(c.len);
-                w.iq.extend_from_slice(&cr.buf[..take]);
-                cr.release_to(c.end_sample());
-            }
+            },
             Next::Lost => match w.on_lost() {
                 OnLost::Restart => {
-                    inc(&cr.shared.counters.chains.window_restarts);
+                    cr.count_restart();
+                    restarted(w, "an overrun");
                     cr.restart_in_history();
                 }
                 OnLost::End => {
@@ -294,6 +327,52 @@ fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target
                 w.ended = true;
             }
         }
+    }
+}
+
+/// What [`collect`] reads from: the chain's ring reader, or a scripted one in the tests.
+trait WindowSource {
+    /// The next read.
+    fn next(&mut self) -> Next;
+    /// The samples of the chunk [`Self::next`] just returned (`len` of them).
+    fn chunk(&self, len: usize) -> &[Complex<i8>];
+    /// Samples before `sample` are no longer needed.
+    fn release_to(&self, sample: u64);
+    /// Reads on from inside the retained history after an overrun.
+    fn restart_in_history(&mut self);
+    /// Counts one window restart (`chains.window_restarts`).
+    fn count_restart(&self);
+}
+
+impl WindowSource for ChainReader {
+    fn next(&mut self) -> Next {
+        ChainReader::next(self)
+    }
+
+    fn chunk(&self, len: usize) -> &[Complex<i8>] {
+        &self.buf[..len]
+    }
+
+    fn release_to(&self, sample: u64) {
+        ChainReader::release_to(self, sample);
+    }
+
+    fn restart_in_history(&mut self) {
+        ChainReader::restart_in_history(self);
+    }
+
+    fn count_restart(&self) {
+        inc(&self.shared.counters.chains.window_restarts);
+    }
+}
+
+/// `HK_PIPELINE_DEBUG`: why a committed window started again.
+fn restarted(w: &Window, why: &str) {
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: analog window restarted after {why} (restart {})",
+            w.restarts
+        );
     }
 }
 
@@ -943,7 +1022,8 @@ fn collect_and_write(
         && identify_samples < want
     {
         collect(&mut cr, rx, &mut w, identify_samples);
-        if w.iq.len() == identify_samples {
+        // `collect` appends whole chunks, so the leading window may run a chunk past its length.
+        if w.iq.len() >= identify_samples {
             let refined = refine_leading(&w, m);
             // T-071: one chain per emission, even when a neighbour's chain refined to it too.
             let emission = refined
@@ -963,6 +1043,8 @@ fn collect_and_write(
     }
     collect(&mut cr, rx, &mut w, want);
     drop(cr);
+    // Nothing is read after this, so the chunk the last read ran past the window can go.
+    w.iq.truncate(want);
     if (w.iq.len() as f64) < 0.25 * fs {
         return;
     }
@@ -1114,6 +1196,152 @@ mod tests {
             !window(1200, true).ends_on_detach(),
             "the probe accepted the channel: the window is a bounded commitment"
         );
+    }
+
+    fn provenance(center_hz: f64) -> ProvenanceHandle {
+        use hk_model::{BiasTee, ClockSource, Provenance, TimestampMethod, Tune};
+        ProvenanceHandle::new(Provenance {
+            device_id: "synthetic:t926".into(),
+            tune: Tune {
+                center_hz,
+                sample_rate_hz: 2.4e6,
+                lna_db: 32.0,
+                vga_db: 30.0,
+                amp_on: true,
+                bandwidth_hz: 1.75e6,
+            },
+            quantisation_limited: false,
+            noise_sigma_lsb: None,
+            overload: false,
+            temperature_c: None,
+            antenna_port: None,
+            bias_tee: BiasTee::Unknown,
+            clock_source: ClockSource::Internal,
+            clock_locked: true,
+            calibration_state_ref: None,
+            spur_mask_ref: None,
+            timestamp_method: TimestampMethod::Synthetic,
+            timestamp_error_budget_ns: Some(0),
+            capture_artefacts: Vec::new(),
+        })
+    }
+
+    /// A reader that serves a scripted sequence of reads.
+    struct Scripted {
+        reads: std::collections::VecDeque<Next>,
+        buf: Vec<Complex<i8>>,
+        restarts: std::cell::Cell<u32>,
+    }
+
+    impl Scripted {
+        /// Contiguous `chunk`-sample reads from sample 0 under `prov`, `n` of them.
+        fn contiguous(prov: &ProvenanceHandle, chunk: usize, n: usize) -> Self {
+            let reads = (0..n)
+                .map(|k| Next::Data(read(prov, (k * chunk) as u64, chunk)))
+                .collect();
+            Self {
+                reads,
+                buf: vec![Complex::new(3, -3); chunk],
+                restarts: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    fn read(prov: &ProvenanceHandle, at: u64, len: usize) -> ReadChunk {
+        ReadChunk {
+            time: SampleTime {
+                sample_index: at,
+                host_time: hk_model::Timestamp::from_unix_nanos(1_000 + at as i64),
+            },
+            len,
+            block_start: true,
+            discontinuity: Discontinuity::NONE,
+            dropped_before: 0,
+            provenance: prov.clone(),
+        }
+    }
+
+    impl WindowSource for Scripted {
+        fn next(&mut self) -> Next {
+            self.reads.pop_front().unwrap_or(Next::Closed)
+        }
+        fn chunk(&self, len: usize) -> &[Complex<i8>] {
+            &self.buf[..len]
+        }
+        fn release_to(&self, _sample: u64) {}
+        fn restart_in_history(&mut self) {}
+        fn count_restart(&self) {
+            self.restarts.set(self.restarts.get() + 1);
+        }
+    }
+
+    /// **The live 0.5 s windows (T-926).** Collection runs in stages — probe, leading window, full
+    /// window — whose lengths do not divide into the reader's chunks (1.2 M samples of probe
+    /// against a live HackRF's 65 536-sample transfers). Copying a chunk only up to a stage's
+    /// target dropped the rest of it, and the next stage's first chunk then read as a
+    /// discontinuity: every live WFM window ended at the probe or the leading window.
+    #[test]
+    fn a_stage_boundary_inside_a_chunk_does_not_end_the_window() {
+        let prov = provenance(98.5e6);
+        let chunk = 64;
+        let mut src = Scripted::contiguous(&prov, chunk, 20);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut w = window(0, false);
+        // The three stages, none a multiple of the chunk.
+        for (stage, target) in [
+            ("probe", 150),
+            ("leading window", 300),
+            ("full window", 1000),
+        ] {
+            collect(&mut src, &rx, &mut w, target);
+            assert!(!w.ended, "the window ended at the {stage} boundary");
+            assert!(w.iq.len() >= target, "{stage}: {} of {target}", w.iq.len());
+            w.committed = true;
+        }
+        assert_eq!(w.iq.len(), 1024, "every chunk read is in the window, whole");
+        assert_eq!(
+            src.restarts.get(),
+            0,
+            "a contiguous stream never restarts the window"
+        );
+    }
+
+    /// A gap or a provenance change at the same tune restarts a committed window at the new chunk
+    /// (the front end's sticky overload flag, a gain step); a retune ends it, committed or not.
+    #[test]
+    fn a_gap_restarts_a_committed_window_and_a_retune_ends_it() {
+        let prov = provenance(98.5e6);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut src = Scripted::contiguous(&prov, 64, 2);
+        src.reads.push_back(Next::Data(read(&prov, 1000, 64)));
+        let mut w = window(0, true);
+        collect(&mut src, &rx, &mut w, 1000);
+        assert_eq!(src.restarts.get(), 1, "the gap restarted the window");
+        assert_eq!(w.head.as_ref().map(|(t, _)| t.sample_index), Some(1000));
+
+        let mut src = Scripted::contiguous(&prov, 64, 2);
+        src.reads
+            .push_back(Next::Data(read(&provenance(100.9e6), 128, 64)));
+        let mut w = window(0, true);
+        collect(&mut src, &rx, &mut w, 1000);
+        assert!(w.ended, "a retune ends even a committed window");
+        assert_eq!(w.iq.len(), 128);
+        assert_eq!(src.restarts.get(), 0);
+    }
+
+    /// End to end over [`collect`]: a detach after the probe accepted leaves the window to be
+    /// collected in full.
+    #[test]
+    fn a_detach_after_the_probe_accepted_does_not_end_the_window() {
+        let prov = provenance(98.5e6);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut src = Scripted::contiguous(&prov, 64, 20);
+        let mut w = window(0, false);
+        collect(&mut src, &rx, &mut w, 150);
+        w.committed = true;
+        tx.send(ChainMsg::Detach).unwrap();
+        collect(&mut src, &rx, &mut w, 1000);
+        assert!(w.iq.len() >= 1000 && w.detached, "{} samples", w.iq.len());
     }
 
     /// T-926: a chain lapped while it computed its probe used to demodulate the fragment it
