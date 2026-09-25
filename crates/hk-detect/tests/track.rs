@@ -1816,18 +1816,120 @@ fn track_batch_write_rolls_back_on_failure_and_keeps_the_batch() {
     let (tracks, links) = (batch.upserts.len(), batch.links.len());
     let members = batch.links.iter().filter(|l| l.0 == id).count();
     assert!(members > 0);
-    // The member detections were never written: the first link fails after the upserts ran.
-    assert!(batch.write(&mut repo).is_err());
-    assert!(repo.track(id).is_err(), "upserts rolled back");
-    assert_eq!((batch.upserts.len(), batch.links.len()), (tracks, links));
     let mut writer = DetectionWriter::new(64);
     for r in &recs {
         writer.push(&mut repo, r).unwrap();
     }
     writer.flush(&mut repo).unwrap();
+    // A segment boundary on a track that does not exist: the write fails after the upserts and
+    // links ran. (A link to a detection that is not stored is skipped rather than failing —
+    // T-904 — so it can no longer be the trigger.)
+    let bogus = hk_model::TrackSegment {
+        track: TrackId::new(),
+        at: Timestamp::from_unix_nanos(1),
+        kind: SegmentKind::GainChange,
+    };
+    batch.segments.push(bogus);
+    let segments = batch.segments.len();
+    assert!(batch.write(&mut repo).is_err());
+    assert!(repo.track(id).is_err(), "upserts rolled back");
+    assert!(
+        repo.track_detections(id).unwrap().is_empty(),
+        "links rolled back"
+    );
+    assert_eq!(
+        (batch.upserts.len(), batch.links.len(), batch.segments.len()),
+        (tracks, links, segments)
+    );
+    batch.segments.retain(|s| s.track != bogus.track);
     assert_eq!(batch.write(&mut repo).unwrap(), (tracks, links));
     assert!(batch.is_empty());
     assert_eq!(repo.track_detections(id).unwrap().len(), members);
+}
+
+/// T-904 review, blocker 1: the tracker holds a tentative track's links in memory until a
+/// second burst confirms it. If detection retention ages the first burst's row out in between (a
+/// future-stamped row pinning the survey's watermark, a clock step), the drained link names a row
+/// that is gone. That must cost the one link, never the batch: before the fix the foreign-key
+/// failure failed `TrackBatch::write` whole, the caller retried it every drain, and from then on
+/// no track upsert, link or close was ever saved.
+#[test]
+fn a_held_link_to_a_pruned_detection_does_not_wedge_track_persistence() {
+    let (mut repo, survey) = test_repo();
+    let prov = provenance(915e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut writer = DetectionWriter::new(64);
+    let mut batch = TrackBatch::new();
+    let burst = |frame0: u64, fc: f64| {
+        let mut r = rec(&prov, frame0, 2, fc, 20e3, CloseReason::Ended, false);
+        r.detection.survey_id = survey;
+        r
+    };
+    // One burst: a tentative track, its link held in memory; the row is stored.
+    let first = burst(0, 915.5e6);
+    tr.push_detection(&first, &mut |_| {});
+    writer.push(&mut repo, &first).unwrap();
+    writer.flush(&mut repo).unwrap();
+    tr.drain_into(&mut batch);
+    assert!(
+        !batch.links.iter().any(|l| l.1 == first.detection.id),
+        "the first burst's link is held until the track confirms"
+    );
+    batch.write(&mut repo).unwrap();
+    // A row two hours ahead pins the survey's watermark; a pass ages the held row out.
+    let ahead = burst(720_000, 925e6);
+    writer.push(&mut repo, &ahead).unwrap();
+    writer.flush(&mut repo).unwrap();
+    let report = repo
+        .prune_detections(&hk_model::DetectionRetention::default(), || true)
+        .unwrap();
+    assert!(
+        repo.detection(first.detection.id).is_err(),
+        "the held row was pruned: {report:?}"
+    );
+    // More bursts confirm the track; the drain carries the held link to the pruned row.
+    for k in 1..20u64 {
+        let r = burst(10 * k, 915.5e6);
+        tr.push_detection(&r, &mut |_| {});
+        writer.push(&mut repo, &r).unwrap();
+    }
+    tr.finish(&mut |_| {});
+    writer.flush(&mut repo).unwrap();
+    tr.drain_into(&mut batch);
+    assert!(
+        batch.links.iter().any(|l| l.1 == first.detection.id),
+        "the drain names the pruned row"
+    );
+    let id = batch
+        .links
+        .iter()
+        .find(|l| l.1 == first.detection.id)
+        .unwrap()
+        .0;
+    let members = batch.links.iter().filter(|l| l.0 == id).count();
+    batch
+        .write(&mut repo)
+        .expect("a link to a pruned row does not fail the batch");
+    assert!(batch.is_empty());
+    assert_eq!(repo.track(id).unwrap().id, id, "the track was saved");
+    assert_eq!(
+        repo.track_detections(id).unwrap().len(),
+        members - 1,
+        "every link but the pruned row's"
+    );
+    // And persistence continues: a later, unrelated track is saved too.
+    let mut tr2 = Tracker::new(TrackerConfig::default());
+    for k in 0..20u64 {
+        let r = burst(1_000 + 10 * k, 918.0e6);
+        tr2.push_detection(&r, &mut |_| {});
+        writer.push(&mut repo, &r).unwrap();
+    }
+    tr2.finish(&mut |_| {});
+    writer.flush(&mut repo).unwrap();
+    tr2.drain_into(&mut batch);
+    let later = batch.upserts[0].id;
+    batch.write(&mut repo).unwrap();
+    assert!(repo.track(later).is_ok());
 }
 
 /// T-035 benchmark: rows/s of the per-call write path (one transaction per upsert and per

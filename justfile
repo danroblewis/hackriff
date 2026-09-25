@@ -299,6 +299,14 @@ nextest-config-check:
 # recipe's pid; the runner does not count a worker whose wait is declared here, and drops a
 # marker whose pid is gone.
 #
+# Release candidate on demand: the acceptance phase (acceptance-ci + the browser tier) over main's landed tip,
+# run by the merge runner at its next gap between gates; green tags rc-YYYYMMDD, each red is a P1 item.
+rc:
+    #!/usr/bin/env bash
+    S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+    date +%s > "$S/rc-requested"
+    echo "rc: requested - the merge runner runs it at its next gap between gates; follow: grep -E '\] RC ' $S/merge-runner.log"
+
 # Block until no merge gate is running, telling the merge runner this worker is idle meanwhile
 wait-for-gate:
     #!/usr/bin/env bash

@@ -237,9 +237,12 @@ pub(super) fn link_detections_on(
     detections: &[DetectionId],
     linked_at: Timestamp,
 ) -> Result<(), RepoError> {
+    // T-904: a link whose detection is gone (aged out by retention while the tracker held it
+    // tentatively) is skipped, not an error: `OR IGNORE` does not cover a foreign-key failure, and
+    // one failed link would fail — and so wedge — every later write of its batch.
     let mut stmt = conn.prepare_cached(
         "INSERT OR IGNORE INTO track_detection (track_id, detection_id, linked_at) \
-         VALUES (?1, ?2, ?3)",
+         SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM detection WHERE detection_id = ?2)",
     )?;
     for d in detections {
         stmt.execute(params![blob(track_id), blob(*d), linked_at.as_unix_nanos()])?;
@@ -376,7 +379,8 @@ impl Repository {
         )
     }
 
-    /// Appends detections to a track's membership (idempotent).
+    /// Appends detections to a track's membership (idempotent). A detection that is not stored
+    /// (never written, or aged out by retention, T-904) is skipped, never an error.
     pub fn link_detections_to_track(
         &mut self,
         track_id: TrackId,

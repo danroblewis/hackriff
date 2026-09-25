@@ -1,9 +1,14 @@
 name: ci
 
 # No hardware and no network beyond toolchain/package installs. The `gpu` feature stays off.
+# T-912: the merge gate is the check tier only. `test` (check phase) runs on every push and PR;
+# `acceptance` runs nightly and on demand (release-candidate run), not per push.
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +26,7 @@ env:
 
 jobs:
   test:
+    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 so `just gate` can find the merge base with the PR's base branch.
@@ -31,9 +37,10 @@ jobs:
           lfs: true
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Toolchain comes from rust-toolchain.toml (1.93.1 + clippy, rustfmt), so CI cannot drift
+      # from the local gate. `rustup toolchain install` with no argument reads that file.
+      - name: install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -103,6 +110,9 @@ jobs:
   # The milestone exit gates are `just acceptance-milestones`, run deliberately at milestone
   # boundaries rather than per push — the justfile says why.
   #
+  # T-912: this job runs nightly (schedule) and on workflow_dispatch only, not per push; the `test`
+  # job is the per-push/PR merge gate. nextest is installed because hk-e2e runs under it (T-631).
+  #
   # LFS checkout supplies the real fixtures; uv generates the synthetic scenarios. The recipe sets
   # HK_REQUIRE_FIXTURES=1 and HK_E2E_REQUIRE_SYNTH=1 itself — a missing one fails instead of
   # skipping — so this job holds no copy of that either. readsb is not installed, so only the
@@ -110,14 +120,14 @@ jobs:
   #
   # T-396 reached it through `just gate --phase acceptance` rather than folding it into the `test`
   # job's gate call. It stays a separate job deliberately: the two run on separate runners in
-  # parallel, so merging them would roughly double the critical path; this one needs no Node and
-  # no nextest while that one does; and "the acceptance census/harness is red" is a different
+  # parallel, so merging them would roughly double the critical path; this one needs no Node while that one does; and "the acceptance census/harness is red" is a different
   # signal from "a unit test is red" and deserves its own check mark. Splitting the *execution*
   # costs nothing in consistency because the *decision* is not split — both jobs call the same
   # classifier on the same diff and differ only in which half of its answer they run, so they
   # cannot disagree about what changed. A ui-only or docs-only PR makes this job a fast no-op
   # that prints why.
   acceptance:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 for the gate's merge-base lookup, as in the `test` job.
@@ -126,14 +136,17 @@ jobs:
           lfs: true
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain comes from rust-toolchain.toml (1.93.1 + clippy, rustfmt), so CI cannot drift
+      # from the local gate. `rustup toolchain install` with no argument reads that file.
+      - name: install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
       # ubuntu-latest has no `just`; same pinned prebuilt download the test job uses (T-353).
       - uses: taiki-e/install-action@v2
         with:
-          tool: just@1.58.0
+          tool: just@1.58.0,nextest@0.9.144
 
       # uv must exist before the recipe: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6

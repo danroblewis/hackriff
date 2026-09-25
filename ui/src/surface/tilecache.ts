@@ -162,9 +162,9 @@ import {
   extentOf, fCellHz, fTileHz, inLattice, intersects, keyOf, tCellNs, tTileNs, tilesFor,
   type Box, type Lattice, type TileAddr,
 } from "./lattice";
-import { BYTES_PER_CELL, TileBusyError, TileDecodeError, type TileData } from "./tile";
+import { BYTES_PER_CELL, TileBusyError, TileDecodeError, weakerTier, type TileData } from "./tile";
 import { CELL } from "./cellrule";
-import { RowAccumulator, type ColumnAddr, type GapBlock, type RowBlock, type TileRows, type WantedColumn } from "./rowfeed";
+import { RowAccumulator, type ColumnAddr, type GapBlock, type RowBlock, type RowResolution, type TileRows, type WantedColumn } from "./rowfeed";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
 export interface TileTextures<T> {
@@ -454,6 +454,20 @@ const AHEAD_OWNER = -2;
  * feed that stalls or closes hands its column back to the polling lane within seconds (T-893). */
 const FEED_FRESH_MS = 2000;
 /** A tile's column key: its address without the time index. */
+/**
+ * The resolution claim a tile built from pushed rows makes (T-902): exactly what the rows' blocks
+ * stated, merged to the weaker — and `unknown` where no block stated one. Never inferred.
+ */
+function claimOf(r: RowResolution | null, cells: number): Pick<TileData, "tier" | "answeredLevel" | "fold" | "measured"> {
+  if (!r) return { tier: "unknown", answeredLevel: -1, fold: { frequency: "exact", time: "exact" }, measured: { nf: cells, nt: cells } };
+  return {
+    tier: r.tier,
+    answeredLevel: r.answeredLevel,
+    fold: r.fold,
+    measured: { nf: r.measuredNf, nt: Math.max(1, Math.min(cells, Math.round(cells / r.timeStretch))) },
+  };
+}
+
 const columnOf = (a: TileAddr): string => keyOf({ ...a, tIndex: -1 });
 
 /**
@@ -1213,6 +1227,7 @@ export class TileCache<T> {
           maxDb: new Float32Array(cells * cells).fill(NaN),
           coverage: new Array<string | null>(cells * cells).fill("unobserved"),
           rowsSeen: new Uint8Array(cells).map((_, y) => (y >= lo - t0 && y < hi - t0 ? 1 : 0)),
+          resolution: null,
         };
         this.patchEntry(lat, e, grey);
       }
@@ -1272,8 +1287,14 @@ export class TileCache<T> {
       const reach = Math.min(ext.t1Ns, ext.t0Ns + y * cell);
       if (reach > h) asOf = reach;
     }
+    // The tile states what its drawn rows were measured at (T-902): a tile built from pushed rows
+    // carries their merged claim outright; an answered tile patched past its horizon keeps the
+    // answer's claim unless the pushed rows state a weaker one, which then wins.
+    const pushed = hi >= 0 ? rows.resolution : null;
+    const tier = !pushed ? d.tier : e.synthetic ? pushed.tier : weakerTier(d.tier, pushed.tier);
     if (hi < 0 && asOf === h) return e;
-    const data: TileData = asOf === h ? d : { ...d, asOfNs: asOf };
+    let data: TileData = asOf === h && tier === d.tier ? d : { ...d, asOfNs: asOf, tier };
+    if (pushed && e.synthetic) data = { ...data, ...claimOf(pushed, c) };
     let tex = e.tex;
     if (hi >= 0) {
       if (this.tex.patch) this.tex.patch(tex, data, lo, hi - lo + 1);
@@ -1288,17 +1309,14 @@ export class TileCache<T> {
   private synthesize(lat: Lattice, addr: TileAddr, rows: TileRows): void {
     const c = addr.cells, n = c * c;
     const ext = extentOf(lat, addr);
-    // What the route would say about this tile's resolution, borrowed from the row below it in the
-    // same column when that is in hand — and otherwise the weaker claim (`spectrum-history`, which
-    // is what the tile route itself answers for a detail tile, T-484), never an over-claim.
-    const below = this.map.get(keyOf({ ...addr, tIndex: addr.tIndex - 1 }))?.data;
+    // **What the pushed rows themselves say they were measured at** (T-902) — the route states it on
+    // every block, by the tile route's own rule. Never borrowed from the tile below (T-893's first
+    // cut did that, and the pane then stated a level it was not drawn at), and never defaulted:
+    // rows with no stated claim say `unknown`.
     const data: TileData = {
       addr, key: keyOf(addr), nf: c, nt: c, t1Ns: ext.t1Ns, asOfNs: ext.t0Ns,
       value: new Float32Array(n).fill(NaN), state: new Uint8Array(n).fill(CELL.NO_LEVEL),
-      tier: below?.tier ?? "spectrum-history",
-      answeredLevel: below?.answeredLevel ?? addr.levelT,
-      fold: below?.fold ?? { frequency: "exact", time: "exact" },
-      measured: below?.measured ?? { nf: c, nt: c },
+      ...claimOf(rows.resolution, c),
       rangeDb: null, bytes: n * BYTES_PER_CELL,
       serverInFlightLimit: null, serverInFlightShare: null,
     };

@@ -391,7 +391,7 @@ fn stft_for(shared: &Shared, plan: &RowPlan) -> anyhow::Result<StftProcessor> {
 
 /// Replaces the STFT for `plan`, carrying its counters into `bases` (frames, resets). Rows still
 /// in flight on an asynchronous provider belong to the old plan: they are published under it
-/// first (T-056).
+/// first (T-056), and so is the averaging in progress (T-915, [`finish`]).
 fn rebuild(
     shared: &Shared,
     plan: RowPlan,
@@ -399,7 +399,7 @@ fn rebuild(
     out: &mut Output<'_>,
     bases: &mut (u64, u64),
 ) -> anyhow::Result<()> {
-    stft.flush(|frame| out.row(frame));
+    finish(stft, out);
     let st = stft.stats();
     bases.0 += st.frames;
     bases.1 += st.resets;
@@ -408,10 +408,33 @@ fn rebuild(
     Ok(())
 }
 
+/// Ends `stft`'s stream into `out`: rows in flight, then the averaging in progress as a partial
+/// row when it holds T-139's minimum (T-915).
+///
+/// **Why the partial row.** A re-plumbing retune ends this segment's ring, and this reader's
+/// stream with it; the samples since the last full row — up to one row period, and on average
+/// half of one — were captured, are in the IQ ring, and are what the coverage map calls observed.
+/// These frames are the view lattice's finest node (T-484), so discarding them left the departed
+/// band's last row observed and never measured: the dotted `AWAITING` strip T-911 photographed at
+/// the top of every band the radio left. The row carries its true `n_avg` and span, exactly as a
+/// T-139 partial does.
+///
+/// Cost: at most one frame per segment end or plan change, on the reader's own thread — nothing
+/// per arriving row (T-453).
+fn finish(stft: &mut StftProcessor, out: &mut Output<'_>) {
+    let min = crate::history::partial_min_segments(out.plan.stft.averages);
+    stft.finish(min, |frame| out.row(frame));
+}
+
 /// Runs reader 3 until the ring closes.
+///
+/// `_view_producer` is this reader's claim on the view queue ([`crate::history::ViewProducer`],
+/// T-915): held until this returns — on every path, errors and unwinding included — so the view
+/// writer ends only after the last row this reader pushes.
 pub(crate) fn run(
     shared: Arc<Shared>,
     attention: Option<Arc<AttentionService>>,
+    _view_producer: Option<crate::history::ViewProducer>,
 ) -> anyhow::Result<()> {
     let class = shared.cfg.source_class;
     let display = Arc::clone(&shared.display);
@@ -538,8 +561,9 @@ pub(crate) fn run(
         set(&rc.frames, bases.0 + st.frames);
         set(&rc.stft_resets, bases.1 + st.resets);
     }
-    // Stream end or detach: rows still in flight are published before the publisher finishes.
-    stft.flush(|frame| out.row(frame));
+    // Stream end or detach: rows still in flight, and the averaging in progress (T-915), are
+    // published before the publisher finishes.
+    finish(&mut stft, &mut out);
     let st = stft.stats();
     set(&rc.frames, bases.0 + st.frames);
     set(&rc.stft_resets, bases.1 + st.resets);

@@ -635,14 +635,14 @@ defect these guards exist to catch.
 
 ### 13.4 Paint order and defaults
 
-Within `overlay`, ascending `z`: `rules` (10) → `detections` (20) → `research` (30) →
+Within `overlay`, ascending `z`: `rules` (10) → `detections` (20) → `paths` (25, T-897) → `research` (30) →
 `collection:*` (40) → `artifacts` (50) → `priors` (60). Suggestions sit on top so they never obscure a
 measurement; rules sit at the bottom so a box that crosses one is drawn over it (the existing
 `ringQuads`-before-`markQuads` order, preserved).
 
 | Layer | Default |
 |---|---|
-| `base`, `coverage`, `detections`, `rules`, `pins` | **visible** |
+| `base`, `coverage`, `detections`, `paths`, `rules`, `pins` | **visible** |
 | `collection:*` | the collection's own stored `visible` |
 | `tier`, `artifacts`, `priors`, `research` | hidden until asked |
 
@@ -675,6 +675,20 @@ correctly when storage is unavailable.
 ## 14. Pins (normative)
 
 *The contract MAP-09 and MAP-10 build to. Rationale: [ADR-0023](adr/0023-map-ui-and-research-state.md) §3.*
+
+> **Superseded in part by docs/23 §10.6 rule 6 (user, 2026-09-24; built by T-910).** The map is GIS:
+> a detection is drawn as its **(t, f) polygon** in the overlay pass, in a class symbology carried by
+> outline and fill — Confirmed solid + hatch fill, Candidate dashed, unexplained plain + a `?`
+> label, artifact thin grey, curated double — never by glyph shape. Under ~6 CSS px in **both** axes
+> it generalizes to a small square symbol in the same symbology (one small axis is a thin bar at its
+> true extent on the other, so a single-frame impulse keeps its bandwidth). §14.2's glyph table
+> therefore no longer applies to detections, and the §14.1 DOM elements draw nothing: each is an
+> invisible hit/focus target over the visible part of its polygon (or at its symbol), kept in
+> reading order (newest time, then frequency) for Tab, beside a label layer placed and thinned by
+> priority. Code: `ui/src/surface/marks.ts` (symbology, generalization), `ui/src/surface/pins.ts`
+> (hit areas, reading order, `placeLabels`), `ui/src/surface/overlay.ts` (the screen-door pattern
+> that cuts dashes and hatch without washing a measurement). The MapTip, the cap and the quadtree
+> (for generalized symbols) are unchanged.
 
 ### 14.1 Pins are DOM, in band 1, laid out in the render frame
 

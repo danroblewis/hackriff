@@ -899,6 +899,8 @@ struct Common {
     compute: hk_dsp::compute::Compute,
     /// Occupancy engine and series (T-118), closed when the run ends.
     occupancy: Arc<crate::occupancy::OccupancyService>,
+    /// T-904: the detection-retention thread, stopped when the run ends (`None`: not configured).
+    retention: Option<Arc<crate::retention::RetentionService>>,
     /// T-128: the run's C12 attention service (baselines, candidates), fed by the occupancy
     /// thread and the scheduler; `None` when it could not open.
     attention: Option<Arc<crate::attention::AttentionService>>,
@@ -1294,25 +1296,35 @@ impl Pipeline {
                     &dir,
                     crate::history::view_config(view_f_cell_hz, view_t_cell),
                 )
+                // T-901: a seal only indexes and queues; the view writer does the file work with
+                // the lock released, so a live row push never waits out a seal.
+                .and_then(|mut p| p.set_deferred_writes(true).map(|()| p))
                 .map(|p| Arc::new(Mutex::new(p)))
                 .map_err(|e| eprintln!("view-scheme history disabled: {e}"))
                 .ok()
             })
             .flatten();
+        // T-322: the C36 L1 dwell service, configured from the plan's `extra.gnss`.
+        let gnss = Arc::new(crate::gnss::GnssDwell::new(crate::gnss::gnss_config(
+            &cfg.plan,
+        )?));
+        // T-904: detection retention runs on its own thread and connection, off the real-time
+        // path. Started after the last fallible step above, so a failed start leaks no thread.
+        let retention = cfg.retention.map(|s| {
+            crate::retention::RetentionService::start(db_path.clone(), s, Arc::clone(&counters))
+        });
         let common = Common {
             view,
             iq_buffer,
             receiver: Arc::default(),
-            // T-322: the C36 L1 dwell service, configured from the plan's `extra.gnss`.
-            gnss: Arc::new(crate::gnss::GnssDwell::new(crate::gnss::gnss_config(
-                &cfg.plan,
-            )?)),
+            gnss,
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
             counters,
             compute,
             occupancy,
+            retention,
             attention,
             alarms,
             product,
@@ -1397,6 +1409,9 @@ impl Pipeline {
                         }
                         devices::finish(&common, &mut errors);
                         common.occupancy.finish();
+                        if let Some(r) = &common.retention {
+                            r.finish();
+                        }
                         if !errors.is_empty() {
                             eprintln!("hk-pipeline: while ending the run: {}", errors.join("; "));
                         }
@@ -1658,6 +1673,11 @@ fn start_segment(
     // (T-508) — the source is already back in the slot by then, because whatever held it has been
     // dropped with this closure.
     let spawned = (|| -> anyhow::Result<()> {
+        // T-915: the spectrum reader's claim on the view queue, taken before ANY reader starts —
+        // the history reader (spawned first) must not be able to end the view writer ahead of the
+        // rows the spectrum reader has yet to push. If this closure fails before that reader is
+        // spawned, the claim drops with it and the writer is not left waiting.
+        let mut view_producer = shared.view_queue.as_ref().map(|q| q.producer());
         // T-541: every reader goes through `guarded`, so none of them can die unnoticed.
         let spawn = |name: &'static str,
                      f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
@@ -1704,10 +1724,14 @@ fn start_segment(
             )?);
         }
         {
-            let (s, a) = (Arc::clone(&shared), common.attention.clone());
+            let (s, a, vp) = (
+                Arc::clone(&shared),
+                common.attention.clone(),
+                view_producer.take(),
+            );
             workers.push(spawn(
                 "hk-spectrum",
-                Box::new(move || crate::spectrum::run(s, a)),
+                Box::new(move || crate::spectrum::run(s, a, vp)),
             )?);
         }
         {
@@ -2157,6 +2181,9 @@ fn end_run(
     // reader finished first. A no-op on a single-device run.
     devices::finish(&sup.common, &mut errors);
     sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
+    if let Some(r) = &sup.common.retention {
+        r.finish(); // T-904
+    }
     st.finished = true;
     st.recovering = false;
     // A requested stop or a recording's end carries no note, whatever an earlier, recovered

@@ -425,3 +425,34 @@ def test_a_bisected_culprit_is_failed_and_the_rest_go_back_as_one_batch():
     assert '{ printf \'%s\\n\' "${others[@]}"; cat "$QUEUE"' in block   # others at the FRONT
     assert "GATE_FAIL\" >> \"$NEEDS\"" in block
     assert "isolate by merging each individually" in block             # the fallback is kept
+
+
+def test_a_landing_pushes_main_to_every_mirror_in_the_background_never_forced(tmp_path):
+    """User, 2026-09-25 00:15: the merge runner pushes main to each remote host's mirror after every landing,
+    logging 'PUSHED <host> <sha>'; never --force (a push that is not a fast-forward fails and says so)."""
+    text = RUNNER.read_text()
+    assert text.count("    push_mirrors") == 2
+    single = text[text.index('log "MERGED $branch ✓"'):]
+    assert single.index("board_sync_now") < single.index("push_mirrors") < single.index("worktree_of")
+    bulk = text[text.index('log "BULK MERGED ✓ $tickets"'):]
+    # review 2026-09-25: never while the bulk marker stands (a killed runner's startup still rewinds the batch)
+    assert bulk.index('rm -f "$BULKMARK"') < bulk.index("board_sync_now") < bulk.index("push_mirrors") < bulk.index("notify_ok")
+    fn = _function("push_mirrors")
+    assert "-f" not in fn.split() and "--force" not in fn
+    repo, mirror = tmp_path / "repo", tmp_path / "mirror.git"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "init", "-q", "--bare", str(mirror)], check=True)
+    for a in (["config", "user.email", "t@t"], ["config", "user.name", "t"], ["commit", "-q", "--allow-empty", "-m", "x"],
+              ["remote", "add", "node2", str(mirror)]):
+        subprocess.run(["git", "-C", str(repo), *a], check=True)
+    (tmp_path / "hosts.json").write_text('{"node2": {"ssh": "u@h"}}')
+    script = f"""
+S={tmp_path}; REPO={repo}; LOG={tmp_path}/log
+log(){{ echo "LOG $*" >> {tmp_path}/log; }}
+{fn}
+push_mirrors; wait
+"""
+    subprocess.run(["bash", "-c", script], check=True, timeout=60)
+    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=8", "HEAD"], capture_output=True, text=True).stdout.strip()
+    assert f"LOG PUSHED node2 {sha}" in (tmp_path / "log").read_text()
+    assert subprocess.run(["git", "-C", str(mirror), "rev-parse", "main"], capture_output=True, text=True).stdout.strip().startswith(sha)

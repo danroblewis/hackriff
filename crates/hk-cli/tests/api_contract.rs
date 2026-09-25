@@ -869,6 +869,87 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     }
     assert_eq!(compute["provider_changes"], json!(0), "{v}");
 
+    // T-904: `storage` — the detection store's size and the retention policy in force, refreshed
+    // by the run's retention thread (its first refresh is at start-up, so wait for it rather than
+    // race it). The composed daemon prunes by default: 1 hour, rolled up, the full 256-row tail.
+    wait_for(
+        "the storage figures in /api/status",
+        Duration::from_secs(30),
+        || get(addr, "/api/status").1["storage"]["measured_s"].is_f64(),
+    );
+    let (_, v) = get(addr, "/api/status");
+    let storage = &v["storage"];
+    for field in [
+        "db_bytes",
+        "free_bytes",
+        "detection_rows",
+        "rollup_rows",
+        "passes",
+    ] {
+        assert!(storage[field].is_u64(), "storage.{field}: {storage}");
+    }
+    assert!(storage["db_bytes"].as_u64().unwrap() > 0, "{storage}");
+    assert!(
+        storage["wal_bytes"].is_u64(),
+        "a file database in WAL mode has a -wal file: {storage}"
+    );
+    for field in ["oldest_detection_s", "newest_detection_s"] {
+        assert!(
+            storage[field].is_null() || storage[field].is_f64(),
+            "storage.{field}: {storage}"
+        );
+    }
+    let measured = storage["measured_s"].as_f64().unwrap();
+    assert!(
+        (before - 60.0..=unix_now() + 1.0).contains(&measured),
+        "{storage}"
+    );
+    // Pruning is on, so a next pass is always scheduled, never in the past of the snapshot.
+    // How far ahead depends on whether the first pass (one minute in) has run yet, which is the
+    // wall clock's business, not this test's: the server's own `last_prune` says which.
+    let next = storage["next_prune_s"]
+        .as_f64()
+        .expect("next_prune_s: {storage}");
+    assert!(next >= measured - 1.0, "{storage}");
+    assert_eq!(
+        storage["retention"],
+        json!({
+            "enabled": true,
+            "max_age_s": 3_600.0,
+            "min_age_s": 600.0,
+            "clamped_from_s": null,
+            "rollup": true,
+            "keep_per_emitter": 256,
+            "batch": 100,
+            "interval_s": 600.0,
+            "rollup_gap_s": 10.0,
+            "rollup_span_s": 60.0,
+        }),
+        "{storage}"
+    );
+    // Either no pass has run yet (`null`, and the first is due within its one-minute delay of
+    // the snapshot), or one has and reports itself whole; which, is read off the server's report.
+    let last = &storage["last_prune"];
+    if last.is_null() {
+        assert_eq!(storage["passes"], json!(0), "{storage}");
+        assert!(next <= measured + 61.0, "the first pass is due: {storage}");
+    } else {
+        assert!(
+            storage["passes"].as_u64().is_some_and(|n| n >= 1),
+            "{storage}"
+        );
+        assert!(last["error"].is_null(), "{storage}");
+        for field in ["t_s", "duration_s", "lock_ms_max", "wait_ms_max"] {
+            assert!(last[field].is_f64(), "last_prune.{field}: {storage}");
+        }
+        for field in ["examined", "deleted", "batches"] {
+            assert!(last[field].is_u64(), "last_prune.{field}: {storage}");
+        }
+        assert!(last["complete"].is_boolean(), "{storage}");
+        // The next pass is one interval (600 s) after the last.
+        assert!(next <= measured + 601.0, "{storage}");
+    }
+
     // /api/history over the fixture's band: cell grid.
     let t1 = unix_now() + 5.0;
     let (st, v) = get(
@@ -1789,6 +1870,118 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     stop_server(serving);
 }
 
+/// T-904: a window whose per-frame detection rows have been pruned still answers
+/// `/api/inventory`, `/api/events` and each listed emitter's `/api/inventory/{id}/presence` (the
+/// durable catalogue: presence intervals, `measured`, relations) **exactly** as before the prune. A finished, unpaced replay makes the store stable,
+/// so the two answers can be compared whole. The prune here is harsher than the product's: every
+/// row older than one second of the recording, keeping only each emitter's newest **one** — the
+/// one `/api/inventory`'s `measured` reads (`Repository::prune_detections` keeps 256 by default,
+/// every per-emitter query's cap; `hk-model`'s retention tests hold that bound).
+#[test]
+fn a_pruned_window_still_answers_inventory_and_events_as_before() {
+    let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
+    let Serving { server, handle, .. } = start(&ServeOptions {
+        source: ServeSource::Replay {
+            path: fixture_path(),
+            loop_replay: false,
+            realtime: false,
+        },
+        data_dir: Some(dir.clone()),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: Default::default(),
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = server.local_addr();
+    handle.wait().expect("the replay runs to its end");
+
+    let db = dir.join("hackriff.db");
+    let mut repo = hk_model::Repository::open(&db).unwrap();
+    let rows = repo.detection_storage().unwrap();
+    let newest = rows
+        .newest_detection_end
+        .expect("the replay detected something");
+    let t1 = newest.as_unix_nanos() as f64 / 1e9 + 1.0;
+    let t0 = t1 - 3600.0;
+    let (f_lo, f_hi) = (STATION_HZ - 1.2e6, STATION_HZ + 1.2e6);
+    let window = format!("f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}");
+    let read = || {
+        let (st, inv) = get(addr, &format!("/api/inventory?{window}&limit=500"));
+        assert_eq!(st, 200, "{inv}");
+        let (st, ev) = get(addr, &format!("/api/events?{window}"));
+        assert_eq!(st, 200, "{ev}");
+        // Each listed emitter's own presence track (`/api/inventory/{id}/presence`).
+        let presence: Vec<Value> = inv["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let id = e["id"].as_str().expect("an inventory entry has an id");
+                // Windowed, so liveness derives against `t1` rather than the wall clock.
+                let (st, track) = get(
+                    addr,
+                    &format!("/api/inventory/{id}/presence?t0={t0}&t1={t1}"),
+                );
+                assert_eq!(st, 200, "{track}");
+                track
+            })
+            .collect();
+        (inv, ev, presence)
+    };
+    let (inv_before, ev_before, presence_before) = read();
+    assert!(
+        presence_before
+            .iter()
+            .any(|p| p["intervals"].as_array().is_some_and(|i| !i.is_empty())),
+        "some listed emitter has a presence track: {presence_before:?}"
+    );
+    assert!(
+        !inv_before["entries"].as_array().unwrap().is_empty(),
+        "the blind FM station is in the inventory: {inv_before}"
+    );
+    assert!(
+        ev_before["total"].as_u64().is_some_and(|n| n > 0),
+        "{ev_before}"
+    );
+
+    let report = repo
+        .prune_detections(
+            &hk_model::DetectionRetention {
+                max_age_ns: 1_000_000_000,
+                keep_per_emitter: 1,
+                batch: 64,
+                ..hk_model::DetectionRetention::default()
+            },
+            || true,
+        )
+        .unwrap();
+    assert!(
+        report.deleted > rows.detection_rows / 2,
+        "most per-frame rows went: {report:?} of {rows:?}"
+    );
+    let after = repo.detection_storage().unwrap();
+    assert_eq!(after.detection_rows, rows.detection_rows - report.deleted);
+    assert!(after.rollup_rows > 0, "{after:?}");
+
+    let (inv_after, ev_after, presence_after) = read();
+    assert_eq!(inv_after, inv_before, "the inventory answer did not move");
+    assert_eq!(ev_after, ev_before, "the event catalogue did not move");
+    assert_eq!(
+        presence_after, presence_before,
+        "every listed emitter's presence track did not move"
+    );
+    drop(repo);
+    drop(server);
+}
+
 /// T-264 (ADR-0017 stage TM-8): the History surface's two routes — the durable catalogue of
 /// events in a region over a time range, and one emitter's presence track.
 ///
@@ -2149,6 +2342,292 @@ fn events_and_presence_serve_the_durable_catalogue() {
     assert_eq!(st, 404, "{e}");
     let (st, e) = post(addr, &format!("/api/inventory/{id}/presence"), "{}");
     assert_eq!(st, 405, "read-only route: {e}");
+
+    stop_server(serving);
+}
+
+/// T-812 (MAP-12, docs/24 §7): `GET /api/priors` serves the band plan over a viewport as **ranked
+/// suggestions, never truth**. Asserted by value:
+///
+/// - over the blind FM station's window, the `fm-broadcast` allocation is served, backed by the
+///   measured emission (`in-band`/`cited`, never `context`), ranked above every context-only row,
+///   and — the station sitting on its 200 kHz raster — not flagged off-raster;
+/// - over a band nothing was detected in, the allocation is **context only**, and asking for priors
+///   there adds **no inventory row** (the database never pre-populates the inventory);
+/// - the box is required and validated like `/api/events`, the route is read-only, and it is
+///   token-gated.
+#[test]
+fn priors_serve_ranked_band_plan_suggestions_never_truth() {
+    let (_guard, serving, addr) = start_server();
+    let (f_lo, f_hi) = (87e6, 109e6);
+    // Detection is blind and comes first: wait until the station is in the catalogue.
+    wait_for(
+        "an event in the catalogue for the blind FM station",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(
+                addr,
+                &format!(
+                    "/api/events?f_lo={}&f_hi={}&t0={}&t1={t1}",
+                    STATION_HZ - 400e3,
+                    STATION_HZ + 400e3,
+                    t1 - 3600.0
+                ),
+            )
+            .1["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(
+        addr,
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "kind",
+        "source",
+        "region",
+        "priors",
+        "total",
+        "truncated",
+        "emitters_considered",
+        "emitters_truncated",
+        "statement",
+    ] {
+        assert!(v.get(field).is_some(), "priors answer missing {field}: {v}");
+    }
+    assert_eq!(v["kind"], json!("suggestion"), "{v}");
+    assert!(
+        v["statement"].as_str().unwrap().contains("never truth"),
+        "{v}"
+    );
+    let priors = v["priors"].as_array().expect("priors");
+    assert_eq!(v["total"].as_u64(), Some(priors.len() as u64), "{v}");
+    for (i, p) in priors.iter().enumerate() {
+        assert_eq!(
+            p["rank"].as_u64(),
+            Some(i as u64 + 1),
+            "ranks run 1..n: {v}"
+        );
+        for field in [
+            "f_lo_hz",
+            "f_hi_hz",
+            "service",
+            "allocation",
+            "source",
+            "reason",
+            "support",
+            "off_raster_hz",
+        ] {
+            assert!(p.get(field).is_some(), "prior missing {field}: {p}");
+        }
+        let hz = |k: &str| {
+            p[k].as_f64()
+                .unwrap_or_else(|| panic!("{k} is a number: {p}"))
+        };
+        assert!(
+            hz("f_hi_hz") >= f_lo && hz("f_lo_hz") <= f_hi,
+            "every prior intersects the box: {p}"
+        );
+        assert!(
+            p["reason"].as_str().unwrap().contains("never truth"),
+            "every reason is worded as a suggestion: {p}"
+        );
+    }
+    let fm = priors
+        .iter()
+        .position(|p| p["id"] == json!("fm-broadcast"))
+        .unwrap_or_else(|| panic!("the FM broadcast allocation intersects 87–109 MHz: {v}"));
+    let fm_row = &priors[fm];
+    assert!(
+        matches!(fm_row["support"].as_str(), Some("cited" | "in-band")),
+        "the blind station lies in the FM allocation, so it is measured support, not context: {fm_row}"
+    );
+    assert!(fm_row["emitters_in_band"].as_u64() >= Some(1), "{fm_row}");
+    assert!(
+        priors[..fm]
+            .iter()
+            .all(|p| p["support"] != json!("context")),
+        "a measured-backed allocation outranks every context-only one: {v}"
+    );
+    // The off-raster flag, read from the emitters' own stored raster fits: the station on its
+    // 200 kHz odd-tenth channel is never flagged; anything flagged lies in the allocation, off its
+    // nearest channel by what the entry says, and is FLAGGED rather than snapped (its centre is
+    // served as measured, not as the channel).
+    let off = fm_row["off_raster"].as_array().expect("off_raster");
+    let mut worst: Option<f64> = None;
+    for o in off {
+        let (fc, near, dx, step) = (
+            o["f_center_hz"].as_f64().unwrap(),
+            o["nearest_channel_hz"].as_f64().unwrap(),
+            o["offset_hz"].as_f64().unwrap(),
+            o["raster_hz"].as_f64().unwrap(),
+        );
+        assert!(
+            (fc - STATION_HZ).abs() > 50e3,
+            "{STATION_HZ} Hz sits on the 200 kHz odd-tenth raster and must not be flagged: {o}"
+        );
+        assert!((88e6..=108e6).contains(&fc), "{o}");
+        assert!(
+            ((fc - near) - dx).abs() < 1.0 && dx != 0.0 && dx.abs() <= step / 2.0 + 1.0,
+            "an off-raster entry states its own offset from its nearest channel: {o}"
+        );
+        if worst.is_none_or(|w| dx.abs() > w.abs()) {
+            worst = Some(dx);
+        }
+    }
+    assert_eq!(
+        fm_row["off_raster_hz"].as_f64(),
+        worst,
+        "off_raster_hz is the furthest flagged offset, or null when nothing is flagged: {fm_row}"
+    );
+    if !off.is_empty() {
+        assert!(
+            fm_row["reason"]
+                .as_str()
+                .unwrap()
+                .contains("flagged, not snapped"),
+            "{fm_row}"
+        );
+    }
+
+    // A band nothing was detected in: context only — and asking adds no inventory row.
+    let quiet = format!("f_lo=1e9&f_hi=1.0001e9&t0={t0}&t1={t1}");
+    let inventory_total = || {
+        let (st, inv) = get(addr, &format!("/api/inventory?{quiet}&relations=all"));
+        assert_eq!(st, 200, "{inv}");
+        inv["total"].as_u64().expect("total")
+    };
+    let before = inventory_total();
+    let (st, q) = get(addr, &format!("/api/priors?{quiet}"));
+    assert_eq!(st, 200, "{q}");
+    let qp = q["priors"].as_array().expect("priors");
+    assert!(
+        qp.iter()
+            .any(|p| p["id"] == json!("aero-radionav-960-1215")),
+        "1 GHz lies in the 960–1215 MHz aeronautical allocation: {q}"
+    );
+    for p in qp {
+        assert_eq!(p["support"], json!("context"), "nothing measured here: {p}");
+        assert!(
+            p["reason"].as_str().unwrap().contains("context only"),
+            "{p}"
+        );
+    }
+    assert_eq!(
+        inventory_total(),
+        before,
+        "the band plan never pre-populates the inventory"
+    );
+
+    // Validation, read-only, gated.
+    let (st, e) = get(
+        addr,
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+    );
+    assert_eq!(st, 400, "the box is required, like /api/events: {e}");
+    let (st, e) = get(
+        addr,
+        &format!("/api/priors?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 400, "{e}");
+    let (st, e) = post(
+        addr,
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+        "{}",
+    );
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, e) = call(
+        addr,
+        "GET",
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+        None,
+        None,
+    );
+    assert_eq!(st, 401, "{e}");
+
+    stop_server(serving);
+}
+
+/// T-897 (docs/23 §10.6 rule 2): `GET /api/paths` answers as `docs/api.md` documents it, on a live
+/// `hk serve` over the mock device's FM window. By value, not only shape: the fixture's one
+/// emitter is a **steady** broadcast station, so once the run has stored detections of it the
+/// route must have read them (`detections_read > 0`) and traced **no** path through them — a
+/// carrier cut into segments is not a chirp. The chirp/sweep/hop producers are asserted blind, with
+/// hidden truth, through the mock device in `hk-pipeline/tests/paths_blind.rs`.
+#[test]
+fn paths_route_answers_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    let (f_lo, f_hi) = (STATION_HZ - 400e3, STATION_HZ + 400e3);
+    let url = |t0: f64, t1: f64, extra: &str| {
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}{extra}")
+    };
+    wait_for(
+        "the station's detections to reach the paths route",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(addr, &url(t1 - 3600.0, t1, "")).1["detections_read"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(addr, &url(t0, t1, ""));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "context",
+        "paths",
+        "total",
+        "limit",
+        "truncated",
+        "detections_read",
+        "detections_truncated",
+        "method",
+    ] {
+        assert!(v.get(field).is_some(), "paths answer missing {field}: {v}");
+    }
+    assert_eq!(v["method"], json!("hk-model/path@1"), "{v}");
+    assert_eq!(v["limit"], json!(200), "{v}");
+    assert_eq!(v["window"]["f_lo_hz"].as_f64(), Some(f_lo), "{v}");
+    assert_eq!(v["window"]["f_hi_hz"].as_f64(), Some(f_hi), "{v}");
+    // The context is the window widened by its own span, the time margin capped at 600 s.
+    assert_eq!(v["context"]["f_lo_hz"].as_f64(), Some(f_lo - 800e3), "{v}");
+    assert_eq!(v["context"]["f_hi_hz"].as_f64(), Some(f_hi + 800e3), "{v}");
+    let ct0 = v["context"]["t0_s"].as_f64().unwrap();
+    assert!((ct0 - (t0 - 600.0)).abs() < 1e-3, "{v}");
+    assert_eq!(v["paths"], json!([]), "a steady station draws no path: {v}");
+    assert_eq!(v["total"], json!(0), "{v}");
+    assert_eq!(v["truncated"], json!(false), "{v}");
+    // `kind` and `limit` narrow; malformed ones refuse.
+    let (st, k) = get(addr, &url(t0, t1, "&kind=hop&limit=5"));
+    assert_eq!(st, 200, "{k}");
+    assert_eq!(k["limit"], json!(5), "{k}");
+    for bad in ["&kind=radar", "&limit=0", "&limit=5000"] {
+        let (st, e) = get(addr, &url(t0, t1, bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // A viewport route needs the whole viewport.
+    for q in [
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+        format!("/api/paths?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),
+        "/api/paths".to_owned(),
+    ] {
+        let (st, e) = get(addr, &q);
+        assert_eq!(st, 400, "{q}: {e}");
+    }
+    let (st, e) = post(addr, "/api/paths", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(t0, t1, ""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
 
     stop_server(serving);
 }
@@ -9010,6 +9489,43 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         (0..n).filter(|&r| covered[r * n + station_col]).count(),
         sh["search"]
     );
+    // T-911: which search answered each before-tile value, and what the own-level one read.
+    for s in sh["sources"].as_array().unwrap() {
+        if s["from"] == json!("before-tile") {
+            assert!(
+                s["search"] == json!("own-level") || s["search"] == json!("ladder"),
+                "a before-tile source names no search: {s}"
+            );
+            assert!(s["store"].is_string(), "{s}");
+        }
+    }
+    let own = &sh["search"]["own_level"];
+    assert!(
+        own.is_null() || own.is_object(),
+        "search.own_level is an object, or null when no level is affordable: {own}"
+    );
+    if own.is_object() {
+        assert!(own["store"].is_string(), "{own}");
+        assert!(own["level"].is_u64(), "{own}");
+        assert!(own["stages"].is_array(), "{own}");
+        let (found, used) = (
+            own["columns_found"].as_u64().unwrap(),
+            own["columns_used"].as_u64().unwrap(),
+        );
+        assert!(used <= found, "{own}");
+        assert!(
+            own["source_cells"].as_u64().unwrap() <= sh["search"]["source_cells"].as_u64().unwrap(),
+            "{}",
+            sh["search"]
+        );
+    }
+    // T-523/T-911: the budget binds what was READ, over both searches.
+    assert!(
+        sh["search"]["source_cells"].as_u64().unwrap()
+            <= sh["search"]["max_source_cells"].as_u64().unwrap(),
+        "{}",
+        sh["search"]
+    );
     assert!(
         sh["rule"]
             .as_str()
@@ -9395,6 +9911,36 @@ fn row_push_route_serves_an_address_range_growing_or_sealed() {
         }
         assert_eq!(v["row0"], json!(row), "{v}");
         let n = v["rows"].as_i64().unwrap();
+        if v["type"] == "rows" {
+            // T-902: every block states the honesty tier its rows were measured at, and it is the
+            // tier `/api/tiles` states for the same address when the same level answered — one
+            // rule, so a client never has to infer a pushed-row tile's tier.
+            let res = &v["resolution"];
+            let src = res["source"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no tier: {v}"));
+            assert!(
+                ["live-iq", "spectrum-history", "survey-overview"].contains(&src),
+                "{v}"
+            );
+            assert_eq!(res["live"], json!(src == "live-iq"), "{v}");
+            assert_eq!(res["fold"]["time"]["served"], json!(n), "{v}");
+            assert_eq!(res["fold"]["frequency"]["served"], json!(N), "{v}");
+            let t_index = v["tile"]["t_index"].as_i64().unwrap();
+            let (st, tile) = get(
+                addr,
+                &format!(
+                    "/api/tiles?level_f=0&level_t=0&f_index={f_index}&t_index={t_index}&cells={N}"
+                ),
+            );
+            assert_eq!(st, 200, "{tile}");
+            if tile["resolution"]["answered"]["level"] == v["answered"]["level"] {
+                assert_eq!(
+                    tile["resolution"]["source"], res["source"],
+                    "the row feed and the tile route disagree on a tier: {v} vs {tile}"
+                );
+            }
+        }
         if v["type"] == "rows" && v["final"] == json!(true) {
             let db = v["max_db"].as_array().unwrap();
             for r in 0..n {
@@ -12024,6 +12570,116 @@ fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
     );
 
     stop_server(serving);
+}
+
+/// T-823 (MAP-23, RESEARCH-003): `/api/research/export` as `docs/api.md` documents it — one bundle
+/// holding the collections, markers, annotations and measurements as their own routes serve them,
+/// a SigMF-adjacent annotation block with the authored marker, a per-collection filter, and the
+/// usual errors.
+#[test]
+fn research_export_bundles_the_durable_objects_as_documented() {
+    let (_dir_guard, _serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let (st, c) = post(
+        addr,
+        "/api/collections",
+        &json!({"name": "t823-export"}).to_string(),
+    );
+    assert_eq!(st, 201, "{c}");
+    let cid = c["id"].as_str().unwrap().to_owned();
+    let (st, a) = post(
+        addr,
+        "/api/annotations",
+        &json!({
+            "kind": "box", "f_lo_hz": f - 1e5, "f_hi_hz": f + 1e5, "t0_s": 1000.0, "t1_s": 1002.0,
+            "label": "t823-note", "body": "off raster", "collection_id": cid, "view": view,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201, "{a}");
+    let (st, _) = post(
+        addr,
+        "/api/annotations",
+        &json!({
+            "kind": "text", "f_lo_hz": f, "f_hi_hz": f, "t0_s": 1005.0, "t1_s": 1005.0,
+            "label": "t823-unfiled", "view": view,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201);
+    let (st, m) = post(addr, "/api/measurements", &json!({
+        "kind": "bandwidth", "collection_id": cid,
+        "cursors": [{"f_hz": f - 1e5, "t_s": 1000.0}, {"f_hz": f + 1e5, "t_s": 1001.0}], "view": view,
+    }).to_string());
+    assert_eq!(st, 201, "{m}");
+    let (st, mk) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &json!({"name": "t823-marker", "f_center_hz": f, "view": view}).to_string(),
+    );
+    assert_eq!(st, 201, "{mk}");
+
+    let (st, all) = get(addr, "/api/research/export");
+    assert_eq!(st, 200, "{all}");
+    assert_eq!(all["format"], "hackriff-research-export@1");
+    assert_eq!(all["truncated"], false);
+    assert_eq!(all["counts"]["annotations"], 2);
+    assert_eq!(all["counts"]["measurements"], 1);
+    assert_eq!(all["counts"]["markers"], 1);
+    assert!(
+        all["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == cid.as_str())
+    );
+    // The objects are the routes' own JSON, carrying their server-stamped provenance.
+    assert_eq!(all["measurements"][0]["id"], m["id"]);
+    assert_eq!(all["measurements"][0]["value"], m["value"]);
+    assert_eq!(all["annotations"].as_array().unwrap().len(), 2);
+    // SigMF-adjacent: a standard annotation with the authored block, anchored at the earliest start.
+    let sg = &all["sigmf"];
+    assert_eq!(sg["global"]["core:sample_rate"].as_f64(), Some(1e6));
+    assert_eq!(sg["recording_start_s"].as_f64(), Some(1000.0));
+    let ann = sg["annotations"].as_array().unwrap();
+    assert_eq!(ann.len(), 2);
+    let boxed = ann
+        .iter()
+        .find(|x| x["core:label"] == "t823-note")
+        .expect("the box note");
+    assert_eq!(boxed["core:sample_start"], 0);
+    assert_eq!(boxed["core:sample_count"], 2_000_000);
+    assert_eq!(boxed["core:comment"], "off raster");
+    assert_eq!(boxed["hackriff:annotation"]["authored"], true);
+    assert!(boxed.get("hackriff:truth").is_none());
+
+    // One collection: only its own members.
+    let (st, one) = get(
+        addr,
+        &format!("/api/research/export?collection={cid}&rate=2e6"),
+    );
+    assert_eq!(st, 200, "{one}");
+    assert_eq!(one["counts"]["annotations"], 1);
+    assert_eq!(one["collections"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        one["sigmf"]["annotations"][0]["core:sample_count"],
+        4_000_000
+    );
+
+    for bad in ["collection=nope", "rate=0", "rate=x"] {
+        let (st, e) = get(addr, &format!("/api/research/export?{bad}"));
+        assert_eq!(
+            (st, e["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {e}"
+        );
+    }
+    let (st, e) = get(
+        addr,
+        "/api/research/export?collection=00000000-0000-7000-8000-00000000dead",
+    );
+    assert_eq!((st, e["code"].as_str()), (404, Some("not_found")), "{e}");
 }
 
 /// T-818 (MAP-18, RESEARCH-003): `/api/measurements` as `docs/api.md` documents it — the

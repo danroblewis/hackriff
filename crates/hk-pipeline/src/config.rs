@@ -315,6 +315,11 @@ pub struct PipelineConfig {
     /// Filesystem probes of the IQ capture buffer (`None`: the real filesystem); tests inject a
     /// full disk or a slow writer.
     pub iq_buffer_hooks: Option<Arc<dyn hk_store::iqbuffer::IqBufferHooks>>,
+    /// T-904: per-frame detection retention ([`crate::retention`]). `None` ([`Self::new`]'s
+    /// default) runs no retention thread at all, so a library or test run is what it was; the
+    /// `hk`/`hackriffd` composition sets [`crate::retention::RetentionSettings::from_env`], whose
+    /// thread prunes (unless `HK_DETECTION_RETENTION=off`) and serves `/api/status` `storage`.
+    pub retention: Option<crate::retention::RetentionSettings>,
 }
 
 /// Smallest display FFT size.
@@ -483,6 +488,7 @@ impl PipelineConfig {
                 ..hk_store::iqbuffer::IqBufferConfig::default()
             },
             iq_buffer_hooks: None,
+            retention: None,
         })
     }
 }

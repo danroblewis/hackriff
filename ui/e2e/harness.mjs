@@ -574,6 +574,17 @@ export class Page {
   async $count(selector) {
     return this.eval(`document.querySelectorAll(${JSON.stringify(selector)}).length`);
   }
+  /**
+   * T-918: the insets the app's surface keeps its CONTENT clear of on its full-bleed canvas — the
+   * floating top bar above and the dock below (CSS px, `data-inset-top/-bottom` on `.sf-canvas`,
+   * set by `centre/surface.ts`'s `fit`). The canvas is 100vw x 100vh (docs/23 §10.1); the panes and
+   * map strip are laid out between these. 0/0 where the page states none (the `/surface` preview).
+   */
+  async canvasInsets(selector = ".sf-canvas") {
+    return this.eval(`(() => { const d = document.querySelector(${JSON.stringify(selector)})?.dataset ?? {};
+      return { top: Number(d.insetTop ?? 0) || 0, bottom: Number(d.insetBottom ?? 0) || 0 }; })()`);
+  }
+
   /** An element's CSS box, in page coordinates. */
   async $rect(selector) {
     return this.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)});

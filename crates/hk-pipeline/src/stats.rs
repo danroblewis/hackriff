@@ -1052,6 +1052,9 @@ pub struct Counters {
     pub compute: crate::compute::ComputeReport,
     /// Observation log producers (T-115).
     pub observations: ObservationCounters,
+    /// T-904: the detection store's size and the retention thread's last pass
+    /// (`/api/status` `storage`).
+    pub storage: crate::retention::StorageCounters,
 }
 
 impl Counters {
@@ -1102,6 +1105,7 @@ impl Counters {
             "tune": { "center_hz": center, "sample_rate_hz": rate },
             "compute": self.compute.to_json(),
             "observations": self.observations.to_json(),
+            "storage": self.storage.to_json(),
         })
     }
 
