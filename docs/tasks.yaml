@@ -27462,6 +27462,22 @@ tasks:
     notes: |
       FOUND BY T-575 delta Opus review 2026-09-25.
     core_interface: true
+  - id: T-929
+    milestone: M2-hardening
+    title: "hk-pipeline listen_lifecycle fifty_sessions_closed_cleanly: 504 probe-timeout before Session::run (1/3 alone pre-T-917; T-868 saw it too) - triage and fix"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-25 by the T-917 worker (task-t917) and the T-868 worker: hk-pipeline listen_lifecycle `fifty_sessions_closed_cleanly_...` fails with a 504 PROBE-TIMEOUT - 1 of 3 ALONE on the pre-T-917 survey.rs (so not caused by T-917's fix), and T-868's worker saw the same 504 probe-timeout in listen_lifecycle at load ~30 (3/3 with main's chains/listen.rs); the probe runs before Session::run. T-917 fixed the separate re-plumb defect (the survey measurement blocking the segment worker) but did not chase this one.
+      DELIVER: triage alone on a quiet box first (deflake-triage): fails alone => a real defect in session setup/teardown (what makes the pre-run probe time out: a session slot not released, a listener backlog, a lock held across fifty open/close cycles?) - root-cause and fix; passes alone only under load => make the probe wait on a server-reported readiness event instead of a wall-clock deadline (docs/10 §3.6), no timeout change. Red-on-regression proof either way. No retry, skip or quarantine.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-917 + T-868 workers 2026-09-25.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
