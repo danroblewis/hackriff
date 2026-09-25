@@ -1144,12 +1144,14 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
         let v = tiles_json(&state, &q).expect("the tile is servable");
         eprintln!(
             "tile ({lf}, {lt}): answered level {} exact_node {} source_cells {} chunks {} \
-             build_ms {} (printed, never asserted) candidates {} tried {}",
+             build_ms {} of which shadow search {} (printed, never asserted) candidates {} \
+             tried {}",
             v["resolution"]["answered"]["level"],
             v["resolution"]["answered"]["exact_node"],
             v["cost"]["source_cells"],
             v["cost"]["chunks"],
             v["cost"]["build_ms"],
+            v["shadow"]["search"]["build_ms"],
             v["resolution"]["candidates"],
             v["resolution"]["tried"],
         );
@@ -1158,6 +1160,8 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
 
     // ---- 1. on-node: the exact node answers, cells² source cells, one lock hold ----
     let on = tile(3, 1);
+    // Both reads before any assertion, so a red run still prints what each one cost.
+    let off = tile(6, 1);
     let observed = on["grid"]["observed_cells"].as_u64().unwrap();
     assert!(
         observed > 0,
@@ -1228,7 +1232,6 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
     );
 
     // ---- 3. off-lattice: the cheapest candidate that folds, never the finest ----
-    let off = tile(6, 1);
     assert!(
         off["grid"]["observed_cells"].as_u64().unwrap() > 0,
         "{}",
