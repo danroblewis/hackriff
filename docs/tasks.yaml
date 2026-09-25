@@ -28274,7 +28274,7 @@ tasks:
   - id: T-959
     milestone: MLIVE
     title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
-    status: todo
+    status: in-progress
     priority: P2
     deps: []
     parallel_group: TILE-CLIENT
@@ -28341,6 +28341,8 @@ tasks:
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
+
+      2026-09-25 13:48 coordinator: T-962 is behind two reds of the 13:07 bulk. (1) hk-api hk_api_never_calls_the_ungated_emitter_getters - decode.rs's provisional_decodes walked repo.emitter_links: FIXED eb293ff6 (Repository::provisional_decodes_of_emitter in the gated layer; inventory_api + decode_api 18/18). (2) hk-pipeline listen_recipe_parity legacy_listen_and_the_analog_wfm_recipe_agree_on_the_same_iq FAILS ALONE on task-t962 (252 s, listen_recipe_parity.rs:650): the recipe 'station' messages never carry identity.value within the test window under the 10-votes-in-5-s rule, and ps_of() requires it. Real defect, not load; Opus fix round after the 14:20 usage-limit reset.
     core_interface: true
   - id: T-963
     milestone: MAUTO
