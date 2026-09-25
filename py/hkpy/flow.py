@@ -39,6 +39,8 @@ _SUITE = re.compile(r"^gate: (just [\w-]+) took (\d+)s \(exit (-?\d+)\)")
 _GATE_BEGIN = re.compile(r"^(?:BULK gate \(|GATE (\S+) \(just gate-merge)")
 _GATE_END_OK = re.compile(r"^(?:BULK MERGED ✓(.*)|MERGED (\S+) ✓)")
 _GATE_END_BAD = re.compile(r"^(?:BULK gate FAILED|GATE FAILED|GATE TIMEOUT|BULK gate TIMED OUT)")
+#: The daily release candidate: not a merge gate - its suites belong to no gate here.
+_RC_BEGIN = re.compile(r"^RC gate \(")
 _ATTEMPT = re.compile(r"^BULK attempt \((\d+)\): (.*)$")
 _CONFLICT = re.compile(r"^BULK conflict merging (\S+)")
 _WAIT = re.compile(r"^WAIT: ")
@@ -225,6 +227,9 @@ def gates_from(events: list[Ev]) -> list[Gate]:
         m = _CONFLICT.match(s)
         if m:
             pending_conflicts.append(m.group(1))
+            continue
+        if _RC_BEGIN.match(s):
+            cur = None
             continue
         if _GATE_BEGIN.match(s):
             if cur is not None and cur.end is None:   # a gate that never reported (killed runner)

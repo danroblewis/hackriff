@@ -454,6 +454,60 @@ One row per `(decoder, frame_model)` pair the emitter's decoded identity has pro
 - **`coverage` keeps three answers apart, and never collapses them.** `statement` is backend-rendered and is what a client shows beside an empty catalogue: with no spectrum history on the server, coverage is **unknown** and an empty answer is evidence of nothing; with `observed_cells: 0` it reads *no data for this period, not a quiet band*; with `gaps[]` it says how much was observed and that the gaps are no data; only a box observed throughout says an empty catalogue means nothing was on the air. Unobserved is never reported as quiet (C26), and `gaps` are the fully unobserved time runs of `/api/history`'s own grid.
 - **Bounds, disclosed rather than silent.** At most 500 emitters are expanded per answer (`emitters_truncated` when more matched the box); `total` is the events found over those emitters, and `limit`/`cursor` page them newest first. `emitters_no_interval` counts rows the box selected that carry **no presence interval at all** (a legacy writer's row, matched on its `first_seen`/`last_seen` hull): they contribute no event, because a hull is not a timespan and inventing one would fabricate a measurement — so the count is disclosed instead.
 
+### `GET /api/priors` — band-plan priors over a viewport, as ranked suggestions (T-812, MAP-12)
+
+`GET /api/priors?f_lo&f_hi&t0&t1` (Hz, Hz, Unix s, Unix s; all four required, validated exactly as
+`/api/events` validates them — `400 invalid` otherwise). Gated like every `/api/*` GET (bearer header
+or `?token=`), never audited, read-only. It answers **the band-plan allocations that intersect the
+box, ranked as explanations** for what the receiver measured there — the exploration-first rule as a
+route ([docs/24 §3f/§7](24-canvas-as-data-surface.md)): **a suggestion, never truth**. It never adds a
+row to the inventory, never sets a family, and never overrides a measurement; a measured emission off
+its allocation's channel raster is **flagged, not snapped**. Computed **on demand** from the bundled
+C17 allocation table (`us-47cfr2106-compact`) and the explanations the pipeline already stored on the
+window's emitters — it is not a tile channel (priors are mutable reference data, and the ranking
+depends on what this window measured).
+
+```json
+{
+  "window": {"f_lo_hz": 87e6, "f_hi_hz": 109e6, "t0_s": 1790000000.0, "t1_s": 1790003600.0},
+  "kind": "suggestion",
+  "source": "us-47cfr2106-compact",
+  "region": "us",
+  "priors": [{
+    "rank": 1, "id": "fm-broadcast", "f_lo_hz": 88e6, "f_hi_hz": 108e6,
+    "viewport_fraction": 0.909,
+    "service": "broadcasting", "primary_services": ["broadcasting"], "secondary_services": [],
+    "allocation": "non-federal", "tags": ["fm-broadcast"],
+    "source": "us-47cfr2106-compact:fm-broadcast", "unverified": false,
+    "support": "cited", "emitters_in_band": 3, "emitters_citing": 2,
+    "off_raster_hz": 150000.0,
+    "off_raster": [{"emitter_id": "…", "f_center_hz": 98.25e6, "offset_hz": 150000.0,
+                    "nearest_channel_hz": 98.1e6, "raster_hz": 200000.0}],
+    "reason": "fm-broadcast is allocated primary to broadcasting 88.000 MHz–108.000 MHz (non-federal, us-47cfr2106-compact). 3 measured emissions in this window lie in it; 2 ranked it among their explanations. 1 emission sits off the 200.0 kHz raster (largest 150.0 kHz from 98.100 MHz): flagged, not snapped. A suggestion, never truth."
+  }],
+  "total": 2, "truncated": false,
+  "emitters_considered": 3, "emitters_truncated": false,
+  "statement": "Band-plan priors are suggestions, never truth: …"
+}
+```
+
+- **Ranking, best first:** allocations the window's own emitters **cited** in their ranked
+  explanations (more citing emitters, then the better rank they gave it); then allocations holding
+  measured emissions (`support: "in-band"`); then context-only rows (`support: "context"`). Ties go
+  to the **narrower** (more specific) allocation, then the lower edge. `support: "no-inventory"` on
+  every row when the server keeps no inventory — the rows are then context only, and
+  `emitters_truncated` is `null`.
+- **Measured side is read, never recomputed.** An emitter is *in band* when its centre lies in the
+  allocation; it *cites* the allocation when its stored ranked explanations (`explanations` on its
+  `/api/inventory` row) carry this row's `prior_ref`; `off_raster` lists the raster evidence those
+  explanations recorded with `on_raster: false`. So this route cannot disagree with the explanation
+  beside an inventory row.
+- `f_lo_hz`/`f_hi_hz` are the **allocation's** edges (not clipped); `viewport_fraction` is the share of
+  the requested width it covers. `reason` and `statement` are backend-rendered — a client shows them
+  as written and labels every drawn band a **prior**, never a detection.
+- Capped at 64 allocations (`truncated`); at most 500 window emitters are read to rank them
+  (`emitters_truncated`, a cap on work, never a claim).
+
 ### `GET /api/inventory/{id}/presence` — one emitter's presence track (T-264, ADR-0017 TM-8)
 
 The row's `presence` object is a *projection through a window* (how many intervals intersect it, time on air inside it, the latest one, liveness). This is the **track itself** — every interval with its own timespan — which History needs for one row and a live list must never carry.
@@ -1219,7 +1273,7 @@ The backend half of the map's `paths` layer ([ADR-0023](adr/0023-map-ui-and-rese
 
 WebSocket; token as for every `/ws/` route. Query: the tile address **without** `t_index` — `level_f`, `level_t`, `f_index` (required), `scheme` (`view` default, `overview`, or a store scheme id), `device` (`any` default), `cells` (8…256, default 256) — and the **row range**: `t_from` (**required**) and `t_to` (optional). Row `r` at `level_t` is the time cell `[r·t_cell, (r+1)·t_cell)` from the Unix epoch, which is row `r mod cells` of the tile `t_index = r div cells` that [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) serves at the same address — so a client files every row under the tile key it already uses.
 
-**The subscription is a range, never "the live stream", and there is no way to spell "now".** A request without `t_from` is refused, and nothing defaults it; so is one carrying `t_index` (a tile, not a range) or a `t_to` not after `t_from`. Historical playback (T-463) is a reader walking forward through **sealed** history at a rate of its choosing; a route that could only mean "the live stream" could not serve it and playback would grow a second mechanism beside this one — the two-implementations drift of T-420/T-388/T-397/T-412. "Live" is only what happens when a range's end is past the data edge: the route sends what is complete at once, then **waits and pushes** the rest as it is recorded. The same cursor serves a range sealed a month ago and one still being written; nothing in it knows which. To follow the growing edge, start at the row you have and leave `t_to` open. **Each subscription carries its own edge**, so one client can hold one per pane — a following pane and a playback pane advance on their own rows (`ui/src/surface/rowfeed.ts`).
+**The subscription is a range, never "the live stream", and there is no way to spell "now".** A request without `t_from` is refused, and nothing defaults it; so is one carrying `t_index` (a tile, not a range) or a `t_to` not after `t_from`. Historical playback (T-463) is a reader walking forward through **sealed** history at a rate of its choosing; a route that could only mean "the live stream" could not serve it and playback would grow a second mechanism beside this one — the two-implementations drift of T-420/T-388/T-397/T-412. "Live" is only what happens when a range's end is past the data edge: the route sends what is complete at once, then **waits and pushes** the rest as it is recorded. The same cursor serves a range sealed a month ago and one still being written; nothing in it knows which. To follow the growing edge, start at the row you have and leave `t_to` open. **Each subscription carries its own edge**, so independent readers never share one: the shipped client (`ui/src/surface/rowfeed.ts`, `LiveRowFeeds`, T-893) keeps one open-ended subscription per tile **column** a following pane draws near the live edge (the renderer's own wanted columns, centre first, at most 12 of the 16 the server allows), each starting where that column's rows in hand stop; frozen panes and the minimap open none, and a playback reader would hold its own.
 
 Messages are JSON text, in order:
 
@@ -1253,6 +1307,7 @@ Messages are JSON text, in order:
 - **`unobserved`** — a client should keep it as a **row range**, never expand it into tiles (`ui/src/surface/rowfeed.ts` does) — is a stretch the coverage map calls uniformly unobserved for the selected device, answered from the map alone (T-461's short-circuit, over a range): no `max_db`, no level. It may span many tiles. While consecutive probes keep finding grey the probe span doubles from 4096 rows, so a range starting at `t_from=0` reaches the first recorded row in a few dozen messages.
 - **The level that answered** is the tile read's own rule: finest affordable first, walking coarser only when a level holds nothing (T-426), stated per block in `answered`.
 - **The honesty tier those rows were measured at is stated per block, in `resolution`** (T-902) — `source` (`live-iq` / `spectrum-history` / `survey-overview`), `live`, `statement` and per-axis `fold`, computed by **the tile route's own rule** (`tiles::tier_of`) over the level in `answered`: a tile wider than a capture window is `survey-overview`, so is an answering level coarser than the address on either axis (`fold.<axis>.direction` `replicated`), and otherwise it is the tile route's `spectrum-history`. `fold.time.served` is the block's row count, not `cells`. A client that builds a tile out of pushed rows before `/api/tiles` has answered for it states **this** tier — the weakest of the blocks it holds — and never borrows one from a neighbouring tile (the implied-detail defect T-893 found); a block without a recognised `source` is refused, not defaulted.
+- **Cadence (T-901).** At the live edge rows go out as they are recorded — in blocks of the few rows the tune record has reached, never a 64-row burst after a stall. The view store's seals do their file work (encode, zstd, fsync, rename) on a writer I/O thread **outside** the store's lock and fold no backlog of held-back rows, so no push waits out a seal; what a push can still wait for is the tune record's reach (above, up to a control tick). Measured through the mock SDR (`hk-cli/tests/row_push_cadence.rs`, `timing` tier): max gap 0.29 s over 240 rows, where the old path stalled 1.2-4.3 s once per 64-row block.
 - **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never holds the history mutex longer than one tile chunk. A subscription holds **no** `/api/tiles` in-flight slot (it is long-lived; a slot is the unit of a request); instead at most **16** are open per server and the seventeenth is refused `503`. The server never paces a sealed range — it writes as fast as the socket takes it; a reader that wants to walk slower asks for a shorter range.
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
 - **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
@@ -2619,7 +2674,7 @@ four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023]
 | GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | **served (T-818)** — `{cursors?, n?, note?, collection_id?, view?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
 | GET/POST | `/api/views` | MAP-19 | **served (T-819)** — see [Saved views](#saved-views-t-819-map-19); `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
 | GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | **served (T-819)** — any create field but `id` | `SavedView` / `{deleted}` |
-| GET | `/api/priors` | MAP-12 | `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
+| GET | `/api/priors` | MAP-12 | **served (T-812)** — see [`GET /api/priors`](#get-apipriors--band-plan-priors-over-a-viewport-as-ranked-suggestions-t-812-map-12); `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
 
 **Rules every one of them inherits** (`docs/25 §10`):
 

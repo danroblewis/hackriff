@@ -11,6 +11,7 @@ use hk_model::{FreqRange, TileKey, TimeRange, Timestamp};
 use super::StoreError;
 use super::codec;
 use super::config::{Geometry, PyramidConfig, RetentionOverride};
+use super::deferred::{Body, EncodeArgs, Job, PendingWrites, SmallFile, Unwritten, WrittenBatch};
 use super::frame::{FrameInput, NoiseShape, RegridPlan};
 use super::live::{LiveTile, ROW_ACC_BYTES_PER_CELL, RowAcc};
 use super::stats::{db, hist_percentile};
@@ -308,6 +309,18 @@ pub struct Pyramid {
     preview_rows: std::sync::atomic::AtomicU64,
     buf: Vec<u8>,
     payload: Vec<u8>,
+    /// T-901: seals queue their file work instead of doing it (see [`super::deferred`]).
+    defer_writes: bool,
+    /// T-901: sealed tiles whose file has not landed yet, `(level, f_block, t_block)`. Every read
+    /// of a sealed tile consults this before the disk, so a tile is never unreadable between its
+    /// seal and its write.
+    pub(super) unwritten: HashMap<(usize, i64, i64), Unwritten>,
+    /// T-901: the queued file work, in the order it must be performed.
+    write_queue: Vec<Job>,
+    /// T-901: a batch has been taken and not landed. While it is out, [`Pyramid::take_writes`]
+    /// hands out nothing, so two flushers (a multi-device run has one view writer per front end)
+    /// can never perform writes of one tile out of order, or share a temp file.
+    writes_in_flight: bool,
     /// Front-end state and resolved cell shape of the last folded frame **per source** (step
     /// detection, T-116; keyed and persisted per source, T-126).
     last_state: HashMap<u64, (FrontEndState, Option<f32>)>,
@@ -468,6 +481,10 @@ impl Pyramid {
             preview_rows: std::sync::atomic::AtomicU64::new(0),
             buf: Vec::new(),
             payload: Vec::new(),
+            defer_writes: false,
+            unwritten: HashMap::new(),
+            write_queue: Vec::new(),
+            writes_in_flight: false,
             last_state: HashMap::new(),
             state_dirty: false,
             due: (0..n).map(|_| BTreeSet::new()).collect(),
@@ -514,6 +531,18 @@ impl Pyramid {
         let tmp = self
             .root
             .join(format!("{RECORDING_BEGAN_FILE}.tmp{}", std::process::id()));
+        if self.defer_writes {
+            self.write_queue.push(Job {
+                path,
+                tmp,
+                body: Body::Bytes {
+                    what: SmallFile::RecordingBegan,
+                    bytes: t.as_unix_nanos().to_le_bytes().to_vec(),
+                },
+            });
+            self.began_persisted = true;
+            return Ok(());
+        }
         let write = || -> std::io::Result<()> {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(&t.as_unix_nanos().to_le_bytes())?;
@@ -598,6 +627,18 @@ impl Pyramid {
         let tmp = self
             .root
             .join(format!("{SOURCE_STATE_FILE}.tmp{}", std::process::id()));
+        if self.defer_writes {
+            self.write_queue.push(Job {
+                path,
+                tmp,
+                body: Body::Bytes {
+                    what: SmallFile::SourceStates,
+                    bytes,
+                },
+            });
+            self.state_dirty = false;
+            return Ok(());
+        }
         let write = || -> std::io::Result<()> {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(&bytes)?;
@@ -886,7 +927,20 @@ impl Pyramid {
             // column has already closed — are in the tile by now, so a row folded here carries
             // them. Taken out and put back so `fold_finished_rows` may borrow `self` mutably;
             // it reuses the buffer's capacity, so ingest stays allocation-free.
-            let touched = std::mem::take(&mut self.touched);
+            //
+            // **T-901: every open level-0 tile, not only the ones this frame landed in.** Once
+            // frames cross into the next time block, the previous tile is never touched again,
+            // so the `seal_lag` of rows it still held back (2 s — ~50 rows at the display rate)
+            // used to wait for its SEAL and fold through the whole cascade in one go: measured
+            // at 0.8-1.8 s of a seal on the view lattice, under the lock every row push takes.
+            // Folded here instead, each row goes up the frame after the clock leaves it, oldest
+            // tile first, so the fold stays O(one row) per frame and the seal finds ~nothing
+            // left. The rows and their order within a tile are exactly the same; only *when*
+            // the older tile's last rows fold changes, and it moves earlier.
+            let mut touched = std::mem::take(&mut self.touched);
+            touched.clear();
+            touched.extend(self.open[0].keys().copied());
+            touched.sort_unstable_by_key(|&(fb, tb)| (tb, fb));
             let through = now.saturating_sub(lag_ns);
             for &(fb, tb) in &touched {
                 self.fold_finished_rows(fb, tb, through);
@@ -1000,6 +1054,10 @@ impl Pyramid {
                 let Some(open) = self.open[level].remove(&(fb, tb)) else {
                     continue;
                 };
+                if self.defer_writes {
+                    self.seal_deferred(level, open, margin, pct);
+                    continue;
+                }
                 // T-585: a live coarse node is materialised into pooled scratch for its one
                 // write — the tile is still the write unit — and the scratch goes back below.
                 let (mut tile, live_tile) = match open {
@@ -1064,6 +1122,36 @@ impl Pyramid {
         self.save_source_states()?;
         self.save_recording_began()?;
         self.enforce_budget()
+    }
+
+    /// T-901: one tile of [`Pyramid::seal_through_ns`]'s loop with deferred writes — the inline
+    /// path's steps in its order, minus the file: the tile is indexed and queued, and a live coarse
+    /// node is queued in its live form rather than materialised here, under the caller's lock.
+    /// The consumers are folded without waiting for the write, which is the one difference from
+    /// the inline path (there a failed write skips them); a failed write is still reported, by
+    /// [`Pyramid::land_writes`].
+    fn seal_deferred(&mut self, level: usize, open: OpenTile, margin: f32, pct: (f32, f32)) {
+        match open {
+            OpenTile::Live(l) => {
+                if self.cfg.coarse_live {
+                    self.fold_prov_into_consumers(level, &l.prov, l.key);
+                }
+                self.queue(level, Unwritten::Live(Arc::from(l)), true);
+            }
+            OpenTile::Full(mut t) => {
+                if level == 0 {
+                    t.close_column(margin, pct, &mut self.scratch);
+                    self.update_floor(&t);
+                }
+                if !self.cfg.coarse_on_demand && !self.cfg.coarse_live {
+                    self.fold_into_consumers(level, &t);
+                }
+                if self.cfg.coarse_live {
+                    self.fold_prov_into_consumers(level, &t.prov, t.key);
+                }
+                self.queue(level, Unwritten::Full(Arc::from(t)), true);
+            }
+        }
     }
 
     /// Feeds a sealed level-0 tile's low percentile into **its own** front end's floor track
@@ -1994,7 +2082,200 @@ impl Pyramid {
         any && self.covered(level, fb, tb)
     }
 
+    /// **T-901: defer every file write a seal or checkpoint makes** to [`Pyramid::take_writes`],
+    /// so a caller can do the encode and the disk work with its lock released — see
+    /// [`super::deferred`] for the stall this removes and what it costs. A sealed tile stays
+    /// readable from memory until it lands. Turning the mode off flushes what is queued, inline;
+    /// do that with no batch out ([`Pyramid::take_writes`]), or the rest lands on the next take.
+    pub fn set_deferred_writes(&mut self, on: bool) -> Result<(), StoreError> {
+        if !on && self.defer_writes {
+            self.defer_writes = false;
+            return self.flush_writes();
+        }
+        self.defer_writes = on;
+        Ok(())
+    }
+
+    /// Whether seals queue their writes ([`Pyramid::set_deferred_writes`]).
+    pub fn deferred_writes(&self) -> bool {
+        self.defer_writes
+    }
+
+    /// Files queued and not yet taken.
+    pub fn queued_writes(&self) -> usize {
+        self.write_queue.len()
+    }
+
+    /// Sealed tiles held in memory because their file has not landed yet.
+    pub fn unwritten_tiles(&self) -> usize {
+        self.unwritten.len()
+    }
+
+    /// Takes the queued file work — a move, no I/O — to be [performed](PendingWrites::perform)
+    /// **outside** the lock and handed back to [`Pyramid::land_writes`]. **Empty while an earlier
+    /// batch is still out**: one batch performs at a time, so writes land in the order they were
+    /// queued whichever thread performs them. What is left waits for the next take.
+    pub fn take_writes(&mut self) -> PendingWrites {
+        if self.writes_in_flight || self.write_queue.is_empty() {
+            return PendingWrites::default();
+        }
+        self.writes_in_flight = true;
+        PendingWrites {
+            jobs: std::mem::take(&mut self.write_queue),
+        }
+    }
+
+    /// Books a performed batch: bytes into the budget, each landed tile out of memory, a file
+    /// written for a tile evicted in the meantime removed. Returns the first write error, after
+    /// booking everything else; a tile whose write failed is dropped from the index, as a failed
+    /// inline write never enters it.
+    pub fn land_writes(&mut self, batch: WrittenBatch) -> Result<(), StoreError> {
+        if !batch.results.is_empty() {
+            self.writes_in_flight = false;
+        }
+        let mut first_err = None;
+        for (job, result) in batch.results {
+            match job.body {
+                Body::Tile {
+                    level,
+                    tile,
+                    sealed,
+                    ..
+                } => {
+                    let k = tile.key();
+                    let (fb, tb) = (k.f_block, k.t_block);
+                    let key = (level, fb, tb);
+                    // Still the newest version of this tile? A retention rewrite queued behind it
+                    // does its own booking when it lands.
+                    let current = self.unwritten.get(&key).is_some_and(|t| t.same(&tile));
+                    if current {
+                        self.unwritten.remove(&key);
+                    }
+                    let (bytes, raw) = match result {
+                        Ok(v) => v,
+                        Err(source) => {
+                            if sealed
+                                && current
+                                && let Some(b) = self.sealed[level].remove(&(tb, fb))
+                            {
+                                self.disk_bytes -= b;
+                                self.level_bytes[level] -= b;
+                                self.unprotected[level].remove(&(tb, fb));
+                            }
+                            first_err.get_or_insert(StoreError::Io {
+                                path: job.path,
+                                source,
+                            });
+                            continue;
+                        }
+                    };
+                    self.stats.bytes_written += bytes;
+                    self.stats.raw_bytes_written += raw;
+                    if !sealed {
+                        self.stats.checkpoints_written += 1;
+                        let old = self.checkpoints.insert((fb, tb), bytes);
+                        self.disk_bytes = self.disk_bytes - old.unwrap_or(0) + bytes;
+                        continue;
+                    }
+                    match self.sealed[level].get_mut(&(tb, fb)) {
+                        // Evicted while its write was in flight: the file must not outlive it.
+                        None => {
+                            let _ = fs::remove_file(&job.path);
+                        }
+                        Some(b) if current => {
+                            let old = std::mem::replace(b, bytes);
+                            self.level_bytes[level] = self.level_bytes[level] - old + bytes;
+                            self.disk_bytes = self.disk_bytes - old + bytes;
+                            if level == 0
+                                && let Some(cp) = self.checkpoints.remove(&(fb, tb))
+                            {
+                                self.disk_bytes -= cp;
+                            }
+                        }
+                        Some(_) => {}
+                    }
+                }
+                Body::Bytes { what, .. } => {
+                    if let Err(source) = result {
+                        match what {
+                            SmallFile::SourceStates => self.state_dirty = true,
+                            SmallFile::RecordingBegan => self.began_persisted = false,
+                        }
+                        first_err.get_or_insert(StoreError::Io {
+                            path: job.path,
+                            source,
+                        });
+                    }
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+
+    /// Performs and lands whatever is queued, **inline** — the lock-holding path, for the end of a
+    /// run or a caller with no lock to release. A no-op while another batch is out (its flusher
+    /// takes the rest next).
+    pub fn flush_writes(&mut self) -> Result<(), StoreError> {
+        let done = self.take_writes().perform();
+        self.land_writes(done)
+    }
+
+    /// [`Pyramid::flush_writes`] for an owner — [`Pyramid::close`] and drop — that no other
+    /// thread can be flushing for, because nothing else holds the pyramid. A batch still marked
+    /// out was taken and never landed, so it is gone; what is queued behind it is not.
+    fn flush_owned(&mut self) -> Result<(), StoreError> {
+        self.writes_in_flight = false;
+        self.flush_writes()
+    }
+
+    /// T-901: [`Pyramid::write_tile`]'s deferred half. A sealed tile is indexed now, with 0
+    /// bytes until it lands, so retention and every read see it as sealed from this instant.
+    fn queue_tile(&mut self, level: usize, tile: &Tile, sealed: bool) {
+        self.queue(level, Unwritten::Full(Arc::new(tile.clone())), sealed);
+    }
+
+    /// Queues `tile`'s file; a sealed one is indexed and readable from memory until it lands.
+    fn queue(&mut self, level: usize, tile: Unwritten, sealed: bool) {
+        let k = tile.key();
+        let (fb, tb) = (k.f_block, k.t_block);
+        if sealed {
+            self.unwritten.insert((level, fb, tb), tile.clone());
+            if let std::collections::btree_map::Entry::Vacant(e) =
+                self.sealed[level].entry((tb, fb))
+            {
+                e.insert(0);
+                self.stats.tiles_written += 1;
+                self.index_sealed(level, tb, fb);
+            }
+        }
+        let path = self.path(level, fb, tb);
+        let tmp = path.with_file_name(format!("t{tb}.tile.tmp{}", std::process::id()));
+        let enc = EncodeArgs {
+            unit: self.cfg.unit,
+            geom: self.geom.levels[level],
+            hist: self.cfg.histogram,
+            pct: self.pct(),
+            compression: self.cfg.compression_level,
+            nf: self.geom.nf,
+            bins: usize::from(self.cfg.histogram.bins),
+        };
+        self.write_queue.push(Job {
+            path,
+            tmp,
+            body: Body::Tile {
+                level,
+                tile,
+                sealed,
+                enc,
+            },
+        });
+    }
+
     fn write_tile(&mut self, level: usize, tile: &Tile, sealed: bool) -> Result<(), StoreError> {
+        if self.defer_writes {
+            self.queue_tile(level, tile, sealed);
+            return Ok(());
+        }
         let (fb, tb) = (tile.key.f_block, tile.key.t_block);
         let raw_bytes = codec::encode(
             tile,
@@ -2068,6 +2349,9 @@ impl Pyramid {
             self.level_bytes[level] -= bytes;
             self.stats.bytes_evicted += bytes;
         }
+        // T-901: a tile evicted before its file landed; `land_writes` removes the file it finds
+        // written for a tile no longer indexed.
+        self.unwritten.remove(&(level, fb, tb));
         self.unprotected[level].remove(&(tb, fb));
         self.stats.tiles_evicted += 1;
         // A parent waiting for its children to go is re-checked from its first deadline.
@@ -2426,7 +2710,8 @@ impl Pyramid {
     /// Checkpoints and closes. Dropping without `close` loses at most one checkpoint interval of
     /// level-0 data (the crash case).
     pub fn close(mut self) -> Result<(), StoreError> {
-        self.checkpoint()
+        self.checkpoint()?;
+        self.flush_owned()
     }
 
     fn scan(&mut self) -> Result<(), StoreError> {
@@ -2551,6 +2836,9 @@ impl Pyramid {
         if !self.sealed[level].contains_key(&(tb, fb)) {
             return Ok(None);
         }
+        if let Some(t) = self.unwritten.get(&(level, fb, tb)) {
+            return Ok(Some(t.prov().clone()));
+        }
         let path = self.path(level, fb, tb);
         match codec::read_header(&path) {
             Ok(h) => Ok(h.map(|(h, _)| h.prov)),
@@ -2567,6 +2855,14 @@ impl Pyramid {
     ) -> Result<Option<Tile>, StoreError> {
         if !self.sealed[level].contains_key(&(tb, fb)) {
             return Ok(None);
+        }
+        if let Some(t) = self.unwritten.get(&(level, fb, tb)) {
+            let bins = usize::from(self.cfg.histogram.bins);
+            return Ok(Some(t.to_tile(
+                self.geom.nf,
+                &self.geom.levels[level],
+                bins,
+            )));
         }
         let path = self.path(level, fb, tb);
         match codec::decode(
@@ -2756,4 +3052,14 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
         (a, b) = (b, a.rem_euclid(b));
     }
     a.abs().max(1)
+}
+
+/// T-901: a pyramid dropped with writes still queued performs them, so deferring can lose no more
+/// than an inline seal would. The error has nowhere to go; [`Pyramid::close`] returns it.
+impl Drop for Pyramid {
+    fn drop(&mut self) {
+        if !self.write_queue.is_empty() {
+            let _ = self.flush_owned();
+        }
+    }
 }

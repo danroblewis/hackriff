@@ -18563,7 +18563,7 @@ tasks:
   - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: W
     model: opus
@@ -18631,6 +18631,7 @@ tasks:
       leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
       ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    branch: task-t575
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
@@ -24026,7 +24027,7 @@ tasks:
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
-    status: in-progress
+    status: done
     branch: task-t812
     priority: normal
     parallel_group: MAP-LAYERS
@@ -24059,6 +24060,16 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a band-plan layer that shades allocations in the viewport as suggestions (labelled as priors, never as detections), from the new /api/priors route. Say in your handback exactly what to open on staging to see it.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 22:05).
+      Conflict fix (attempt 2): merged gated main fc7cb7d2 into task-t812 as 5e8083b3. The only conflict: T-807 added a coverage-fog readout (fogEl) after the ring readout, in the same place T-812's priors readout goes. Kept both, so the order under the stage is ring, fog, priors. T-882's stage-first assertion keeps fogEl and allows priorsEl after it. docs/tasks.yaml taken from main with T-812's result re-applied. Earlier attempt 1 (e8ac77cd) resolved against T-809 pins, T-882 toolbar removal and T-807 artifacts. Backend: new read-only GET /api/priors?f_lo&f_hi&t0&t1 (crates/hk-api/src/priors.rs), parsed and gated exactly like /api/events. It ranks the bundled C17 allocation rows (us-47cfr2106-compact) that intersect the box as EXPLANATIONS. Order: rows the window's own emitters cited in their stored ranked explanations, then rows holding measured emissions, then context-only rows; narrower rows break ties. Every row has a backend-written reason ending 'A suggestion, never truth', plus off_raster_hz/off_raster read from the raster fit the pipeline already stored, so it cannot disagree with the inventory row. Computed on demand, not a tile channel, writes nothing (the contract test checks that asking adds no inventory row). hk-context moved from dev-dependency to dependency of hk-api (no cycle). docs/api.md has a full section and the reserved-table row is marked served; api_contract.rs has a new test (T-079). Frontend: the MAP-06 'priors' layer now draws. Each allocation gets dashed lavender full-height edges and a dashed top bracket (strokes only, new 'prior-band' quad kind). Labels read 'prior #n · <allocation>' with an orange off-raster flag, and a ranked-reasoning readout under the canvas shows the backend's own reasons. Off by default, never hides a detection, fetched on the existing 1 s poll per priors-on pane window, never inside the render frame; toggling reaches no route. TO SEE IT ON STAGING: open Explore, open the Layers menu in the floating map-controls cluster over the canvas and tick 'Band-plan priors · suggestions, never truth'. Over the FM fixture (88-108 MHz) you get a dashed band labelled 'prior #1 · fm-broadcast' with a flag like '⚑ 100.0 kHz off raster — flagged, not snapped', and a readout under the stage headed 'Band-plan priors — suggestions, never truth' listing the ranked reasons. Raw route: GET /api/priors?f_lo=87e6&f_hi=109e6&t0=<now-3600>&t1=<now> with the bearer token.
+      Tests: cargo nextest run -p hk-cli -E 'binary(api_contract) & (test(priors) | test(mmap_research_routes) | test(every_route_in_the_route_table))' -> exit 0 (3 passed after merging fc7cb7d2); cargo nextest run -p hk-api -E 'binary(hk_api) | binary(control_api)' -> exit 0 (199 passed after merging fc7cb7d2); just test-ui -> exit 0 (build + typecheck + 75/75 test files passed after merging fc7cb7d2)
+      precheck exit 0
+      Commits: 4858d447, e8ac77cd, 5e8083b3
+      Observed, not chased: just test-crate hk-api: 288/289 passed. The failure was hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay (crates/hk-api/tests/ondemand.rs:365, 'assert!(records > 20)' panicked with '9 records'). It also failed 3/3 when run alone, but at load average 28-45, so this was not a quiet machine. It is a wall-clock throughput bound (records received in 1500 ms from a ticking test opener) in code this diff does not touch: on-demand WebSocket, not /api/priors. Candidate for the timing tier or the deflaker; I did not confirm on a quiet box. | The FM fixture (fm_100p8M...) holds emitters at 99.78, 100.44 and 100.80 MHz that the pipeline's US 200 kHz odd-tenth raster flags off-raster (100.8 is an even tenth, which suggests a non-US / 100 kHz-step recording). /api/priors reports them as flagged, as designed. A non-US band table / raster (ITU R1) is the existing C17 'future work'.
+      Use cases: AWARE-042
+      Resources: 235 CPU-s, peak 2.1 GB
+    commit: 13c6e86e
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
@@ -24517,7 +24528,8 @@ tasks:
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
-    status: todo
+    status: in-progress
+    branch: task-t824
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -26664,7 +26676,7 @@ tasks:
   - id: T-901
     milestone: MLIVE
     title: Server row pushes on /ws/tiles/rows stall 0.35-5 s every ~64 rows (and /api/navigation with them) - live rows are not steady (T-893 finding)
-    status: in-progress
+    status: done
     branch: task-t901
     priority: high
     deps:
@@ -26683,6 +26695,15 @@ tasks:
 
       2026-09-24 coordinator: T-893's live-edge e2e case had a wall-clock bound (median live-edge shortfall <= 0.5 s under a slowed tile route) that measured THIS server push cadence, not the client; it was removed from the gated suite (task-t893 5ca4ce59, still printed as a diagnostic) because the 'timing' tier (docs/10 §3.6) only runs Rust tests via nextest - there is no browser-spec timing home. This ticket owns that bound now: restore it as a timing-tier measurement once the push stall is fixed (a Rust-side push-cadence bound in the timing tier, and/or a browser timing-tier runner if the pipeline manager adds one - the gap is reported to them).
     effort_reason: "hard debugging of a periodic stall on the live serving path shared with navigation (T-453: measure, do not assume)"
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 22:24).
+      Merge fix (attempt 1): merged the gated main d7a8ec42 into task-t901 as 5cf9df6d. Both conflicts were keep-both. In .config/nextest.toml, T-904's a_prune_batch_holds_the_write_lock_briefly and T-901's live_row_pushes_... are now both in the default-filter exclusion and in the timing profile, and the tier comment names both. In docs/api.md, T-902's per-block `resolution` bullet and T-901's Cadence bullet are both kept. docs/tasks.yaml is main's copy. The auto-merged run.rs still opens the view store with set_deferred_writes(true). just nextest-config-check passes. Original work: Root cause: the view pyramid's writer (hk-pipeline history.rs view_writer) held Mutex<Pyramid> across every seal. Pyramid::ingest encoded, zstd-compressed, fsync'd and renamed ~24 tiles inline, measured at 1.0-4.5 s per seal once per 64-row level-0 block. Every /ws/tiles/rows step takes that mutex (edges(), record_reach through coverage history_began, read_rows), so pushes stalled 1.2-4.3 s every ~64 rows and then burst 45-64 rows. The seal also folded the tile's seal_lag backlog (~50 rows, 0.8-1.8 s) through the live cascade in one go. Fix (hk-store): opt-in deferred writes. A seal indexes the tile and keeps it readable from memory (read_sealed, query sources and tile_provenance all consult it). The file work goes to PendingWrites, which the caller performs outside the lock and books with land_writes. Live coarse nodes are queued unmaterialised. An in-flight guard keeps multi-writer ordering, and close/drop flush. ingest now folds the finished rows of every open level-0 tile, so a seal has no backlog. Fix (hk-pipeline): the view store opens deferred. The writer locks per frame, yields between backlog frames (std's mutex is unfair on macOS), and sends writes to a scoped hk-view-io thread, so the data edge keeps advancing during file writes. Measured through hk serve at load ~44: max gap 0.8 s, p99 0.43 s over 400 rows, where the old path gave gaps of 1.2-4.7 s. The new timing-tier test through the mock SDR measured max 0.29 s over 240 rows. Gate tests (hk-store history::tests::deferred, deterministic): a deferred ingest creates no file; reads and on-disk bytes are identical to the inline store; take/land ordering holds; drop keeps queued seals; no seal-backlog fold. The last goes red with the ingest fold reverted: 1632 vs 160 cells. The timing bound (max gap 1.0 s, p99 0.6 s) is registered in .config/nextest.toml's timing tier. docs/api.md /ws/tiles/rows now names LiveRowFeeds (one subscription per column, T-893) and states the cadence. No route contract changed, so api_contract.rs is untouched. /api/navigation locks the main history, not the view store, and showed no slow responses in the probes.
+      Tests: cargo nextest run -p hk-store --lib -E 'test(/tests::deferred::|live_coarse/)' (after merge) -> exit 0 (14 passed); cargo nextest run -p hk-cli --profile timing -E 'binary(row_push_cadence)' (after merge) -> exit 0 (240 rows via mock SDR: p50 0.048 s, p99 0.265 s, max 0.267 s); just nextest-config-check -> exit 0 (6 packages visible to 3 gate runs; timing names resolve); cargo build -p hk-pipeline -p hk-cli --tests (after merge) -> exit 0 (clean, no warnings)
+      precheck exit 0
+      Commits: 64dd2ab7, 5cf9df6d
+      Observed, not chased: PRE-EXISTING, fails alone 3/3, not touched by this diff (decoded.rs has no history-store reference): hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at decoded.rs:1529 with dropped_records: 0. | PRE-EXISTING, fails alone and ALSO fails with the base's (4432fcc7) hk-store+hk-pipeline checked out: hk-pipeline runtime_attach::chains_attached_and_detached_mid_run_drop_no_always_on_samples panics at runtime_attach.rs:69 with 'attached 11'. | Load flakes in `just test-crate hk-pipeline` at load ~25-45 (all pass alone): listen_conformance listen_freeze_discovery_header..., listen_lifecycle fifty_sessions..., listen_lifecycle requests_during_a_replumb.... receiver_survey_cadence t399_... failed at 253 s in the loaded run and was not re-run alone. | Residual sub-second push cadence is the tune-record horizon: rows.rs record_reach holds a row until the record reaches it, and the open dwell trails the spectrum by up to a control tick (measured p50 0.16 s, max 0.50 s). This is by design (T-468 review, T-596); a finer open-dwell publish would smooth it further. | The T-893 browser e2e live-edge shortfall bound is still diagnostic-only: there is no browser timing-tier runner (pipeline manager's gap). The Rust-side bound now lives in the timing tier. | Dev builds compile zstd-sys C at -O0 (no profile.dev.package override), so tile encodes cost 100-370 ms each in dev. With the writes off the lock this is no longer on the push path, but `[profile.dev.package.zstd-sys] opt-level = 3` would cut dev/test seal cost a lot. | The control run of main's 18:33 hk binary never answered the second /ws/tiles/rows handshake within 150 s on port 9940. Not chased; the old-code numbers above are from this worktree's own pre-fix builds.
+      Resources: 266 CPU-s, peak 3.5 GB — LEAKED 1 processes (killed at reap)
+    commit: e66b215b
   - id: T-902
     milestone: MLIVE
     title: Tiles built from pushed rows guess their honesty tier - carry the tier on the row record, never infer it (T-893 finding)
@@ -27043,6 +27064,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-911 worker 2026-09-24.
+  - id: T-917
+    milestone: M2-hardening
+    title: "hk-pipeline: requests_during_a_replumb (survey thread outlives its segment by 8 s) and chains_attached_and_detached_mid_run (wall-clock attach cycles) fail on main under load - triage and make deterministic"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-915 worker (handback ~/.hackriff-ops/work/T-915/handback.json), reproduced ON MAIN at load ~30:
+      1. hk-pipeline listen_lifecycle `requests_during_a_replumb_are_refused_503_replumbing_never...`: main 3/3 FAIL (a T-915 branch 2/3), message "hk-survey: still running 8s after its segment ended; left behind" - either a real teardown defect (the survey thread outliving its segment) or an 8 s wall-clock deadline that load exceeds. Triage alone on a quiet box first (deflake-triage): fails alone = real defect, fix the teardown.
+      2. hk-pipeline runtime_attach `chains_attached_and_detached_mid_run_drop_no_always_on_sa...`: fails on main too ("attached 10") - wall-clock attach/detach cycles inside a 3 s real-time replay, so the count depends on scheduling. A test that uses the wall clock to decide what it asserts is a bug (docs/10 §3.6): drive the cycles by events/sample positions, not wall time; a throughput bound, if any, goes to the `timing` tier.
+      Both pass in the merge gate today (serialised heavy group), so they surface as load reds in worker runs and would surface in the RC run.
+      DELIVER: triage each alone; make both deterministic (or fix the real defect), with red-on-regression proof; no retry, skip or quarantine.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-915 worker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

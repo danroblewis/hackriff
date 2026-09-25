@@ -276,8 +276,9 @@ def disk_free_gb():
 def gate_running():
     # `gate-wanted` is the merge runner waiting for the running workers to drain so the gate can
     # run alone: to dispatch it is the same as a gate in progress, or the drain never completes.
+    # `rc-in-progress`: the daily release candidate (the acceptance phase on main) holds the gate's reserve too.
     return (os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
-            or os.path.exists(f"{S}/gate-wanted"))
+            or os.path.exists(f"{S}/gate-wanted") or os.path.exists(f"{S}/rc-in-progress"))
 
 
 # THE GATE SHARES THE BOX AGAIN (user, 2026-09-23 13:30). "The gate runs alone" (2026-09-22) was

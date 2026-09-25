@@ -46,3 +46,13 @@ def test_every_card_scrolls_and_the_column_is_the_backstop():
 def test_below_1000px_the_page_itself_scrolls():
     mid = CSS[CSS.index("@media(max-width:1000px)"):CSS.index("@media(max-width:640px)")]
     assert "body{overflow:auto" in mid and "height:auto" in mid
+
+
+def test_the_task_map_opens_on_todo_with_done_collapsed_unless_this_browser_chose_otherwise():
+    """User via supervisor, 2026-09-24 23:20: the graph DEFAULTS to 'collapse done' ON and 'todo' selected; the
+    other filters keep their defaults; a remembered choice (localStorage) overrides."""
+    page = M.GRAPH_PAGE
+    assert "flt={done:false,todo:true,blocked:false,collapse:true}" in page
+    assert "Object.assign(flt, JSON.parse(localStorage.getItem('graph.flt')||'{}'))" in page
+    assert page.count("saveFlt();") == 2                                  # every toggle is remembered
+    assert "document.getElementById('f-'+k).classList.toggle('on',flt[k]);" in page   # buttons show the state
