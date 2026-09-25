@@ -26359,7 +26359,7 @@ tasks:
   - id: T-884
     milestone: MAUTO
     title: "T-860 follow-ups: wire ConfirmPolicy.synthesized config, republish synthesized decodes to the stream, provenance strings, TemplateFixed seeding, withheld-row leak"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-860
@@ -26392,6 +26392,7 @@ tasks:
       Observed, not chased: Item 4 second half (production seeding sets CheckOrigin::TemplateFixed) has no home yet: `grep -rn 'Root {' crates --include=*.rs` matches only crates/hk-synth/tests/search_engine.rs:367 and crates/hk-pipeline/tests/analyze_jobs.rs:356 - no production code builds a hk_synth::engine::Root, so there is no seeding-to-root path to copy check_origin into. It needs the M-2 root builder, and a way for a template to declare that it fixes the whole check (ADR-0022 5.1's condition), since AuthorKind builtin/user alone does not imply it when the template has free parameters over the check. Same for notes item 12's first half. | Item 5 (L_j is the job-wide per-stage count, not the winning path's - ADR-0022 2.3 pt 2) left as the ticket allows: it is conservative (over-charges) and pre-existing, and correcting it means deciding in ADR-0022 text what 'the winning prefix's own count' is for a memoised prefix. The new item-4 test documents the interaction: crates/hk-synth/tests/search_engine.rs t884_a_template_fixed_check_pays_no_look_elsewhere_however_much_the_job_searched needs a second, searching root purely to make the job-wide count non-zero. | Notes items 8-13 cannot be worked on this branch: `find . -name 'confirm_rate*' -not -path './.git/*'` and `grep -rn decision_rate crates --include=*.rs` both return nothing, so confirm_rate.rs:48-56, attach.rs:467-474's decision_rate, load_dir's template 'kind' trust, discovery_look_elsewhere_bits and the device-wide decision counter are all T-575 code that has not merged. They should be re-pointed at T-575's branch or held until it lands. | hk-api's inventory_api::hk_api_never_calls_the_ungated_emitter_getters greps whole .rs files including their #[cfg(test)] modules, so a unit test in hk-api that legitimately seeds a repository trips a guard aimed at served paths. I worked around it rather than narrowing the guard; if this recurs, scanning only the text before `#[cfg(test)]\nmod tests` would keep the guard's full strength over production code.
       Use cases: RESEARCH-002
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 670a160b
   - id: T-885
     milestone: MAUTO
     title: "Rule on synthesized confirm with zero in-window detections: T-860 fails closed, narrowing ADR-0015 §6's one-burst confirm (ADR clarification)"
