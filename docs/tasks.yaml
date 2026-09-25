@@ -26683,6 +26683,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-24 19:35 on staging.
+
+      2026-09-24 coordinator, from T-909's quick fix (task-t809 780b449d): hover/select placement still keys on the box CENTRE - a large box whose centre frequency is outside the pane but which overlaps it gets no hit area. Place the hit area from the box's visible intersection with the pane (clip the polygon), not from its centre.
     effort_reason: a symbolization model on the per-frame render pass (shared-time-axis invariant) across box, generalization, hit-test and labels
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
