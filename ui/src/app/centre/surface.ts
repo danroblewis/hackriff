@@ -87,7 +87,7 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
-import { densityAddrs, densityQuads, densityUrl, parseDensityTile, type DensityTile } from "../../surface/density";
+import { densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile, type DensityTile } from "../../surface/density";
 import { addrSpelling } from "../../surface/lattice";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
@@ -473,15 +473,21 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const artifactQuads: OverlayLayerFn = (pane, edge) =>
     artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
   // T-810 (MAP-10): the coarse-zoom density layer — `GET /api/tiles/events` counts, laid out here
-  // through the SAME `toClip` and drawn only where a box there would already generalize to a
-  // symbol (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for its
-  // CURRENT address; it never positions anything (T-388's rule, followed by every layer here).
+  // through the SAME `toClip` and drawn only where `isCoarseZoom` says this pane is genuinely
+  // coarse-zoomed (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for
+  // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
+  // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
   const densityByPane = new Map<string, DensityTile[]>();
   const densityKeyByPane = new Map<string, string>();
   const densityInflight = new Set<string>();
-  const densityQuadsFn: OverlayLayerFn = (pane) =>
-    densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
-  /** Ask for each density-on pane's tile(s) when its address changed. A `GET` of an inventory
+  const densityQuadsFn: OverlayLayerFn = (pane) => {
+    const lat = preview?.view.surface.lat;
+    if (!lat) return [];
+    return densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
+  };
+  /** Ask for each density-on pane's tile(s) when its address changed AND the pane is coarse-zoomed
+   * (`isCoarseZoom`, the same gate `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane
+   * would draw nothing with is a request this layer has no use for). A `GET` of an inventory
    * aggregate — never a device route — and only for panes whose layer is on; a pane whose current
    * address needs no tile (a degenerate box) is simply left empty. */
   const refreshDensity = () => {
@@ -491,7 +497,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ids = new Set(p.view.panes.list().map((x) => x.id));
     for (const id of [...densityByPane.keys()]) if (!ids.has(id)) { densityByPane.delete(id); densityKeyByPane.delete(id); }
     for (const pane of p.view.panes.views(p.view.panes.lastEdgeNs)) {
-      if (!isLayerVisible(layersFor(pane.id), "density")) { densityKeyByPane.delete(pane.id); continue; }
+      const on = isLayerVisible(layersFor(pane.id), "density") && isCoarseZoom(lat, pane.box, pane.rect.w, pane.rect.h);
+      if (!on) { densityKeyByPane.delete(pane.id); densityByPane.set(pane.id, []); continue; }
       const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
       if (addrs.length === 0) { densityByPane.set(pane.id, []); continue; }
       const key = addrs.map(addrSpelling).join(",") + "|" + (pane.device ?? "any");

@@ -10,11 +10,24 @@
 // level (the same `levelsFor`/`tilesFor` the base tile pass resolves a pane's address with,
 // `./lattice.ts`), and reads back a count grid over exactly that tile's `nt × nf` cells.
 //
-// A cell is drawn ONLY where [[isGeneralized]] says a feature there would already collapse to a
-// symbol (under `GENERALIZE_BELOW_CSS_PX` in BOTH axes, the same predicate `marks.ts`/`pins.ts`
-// decide generalization by) — so zooming in past that threshold makes this layer draw nothing and
-// leaves the picture to the `detections` boxes, exactly the "drilling in resolves to boxes" rule.
-// It is never a numbered bubble: the mark is a filled cell, its darkness a function of the count.
+// The layer draws ONLY at genuinely coarse zoom — [[isCoarseZoom]]. It is NOT built on measuring
+// any per-pixel cell size against a fixed px threshold (`isGeneralized`, `GENERALIZE_BELOW_CSS_PX`):
+// the tile pyramid is "constant pixel density" by construction (`./lattice.ts`'s own header), so
+// `densityAddrs`' own tile — chosen to match screen resolution the way the base tile pass's tile is
+// — is ALWAYS close to one pixel on a side, at every zoom, and even the LATTICE's fixed, un-adapted
+// level-0 cell reduces to an algebraically IDENTICAL px-threshold test once clamped (both are the
+// same `f0Hz / hzPerPx` ratio compared against the same px bound) — a review caught exactly this
+// (T-810, fix 1: gating on the tile's own cell "is always 1-2 px, so isGeneralized is always true").
+//
+// What genuinely varies with zoom, and cannot degenerate to a constant, is a **ratio with no px
+// bound in it at all**: how many level-0 lattice cells — the finest grid this system addresses —
+// are being compressed into ONE screen pixel, on either axis ([[DENSITY_MIN_CELLS_PER_PX]]). A wide
+// viewport compresses thousands of level-0 cells per pixel; a viewport narrow enough to show real
+// boxes compresses only a handful. This is a presentation/aggregation constant, like
+// `VIEWPORT_TILE_BUDGET` — never a claim about how wide any real signal is (no signal logic here).
+// Past the threshold this layer draws nothing at all, leaving the picture to the `detections` boxes
+// — "drilling in resolves to boxes". It is never a numbered bubble: the mark is a filled cell, its
+// darkness a function of the count.
 //
 // It is a **stroke, never a wash**: like every overlay, it is submitted to `overlay.ts`'s pattern
 // shader with a hatch, so off-pattern pixels are discarded and the measurement under it is
@@ -26,7 +39,6 @@
 // the tiles are drawn with, and never reaches a device route.
 
 import { addrSpelling, levelsFor, tilesFor, type Box, type Lattice, type TileAddr } from "./lattice";
-import { GENERALIZE_BELOW_CSS_PX, isGeneralized } from "./marks";
 import type { OverlayQuad } from "./minimap";
 import { toClip, type PaneRect } from "./surface";
 
@@ -64,6 +76,37 @@ export function densityAddrs(lat: Lattice, box: Box, wPx: number, hPx: number, d
 }
 
 /**
+ * How many level-0 lattice cells — the finest grid this system addresses at all — must compress
+ * into ONE screen pixel, on AT LEAST ONE axis, before a pane reads as "coarse zoom".
+ *
+ * Deliberately **not** a pixel-SIZE bound (`isGeneralized`-style): a bound of that shape is, once
+ * algebra is done on it, the exact tautology a review caught (T-810, fix 1) — `f0Hz / hzPerPx`
+ * compared against a px threshold is what the removed per-tile check reduced to as well, since
+ * `densityAddrs`' own tile is chosen to match screen resolution and lands in the same few px
+ * regardless of zoom. A **ratio of cells to a pixel** carries no px bound to collapse to: it grows
+ * without limit as the pane widens and shrinks toward zero as it narrows, so [[isCoarseZoom]]
+ * genuinely crosses this threshold exactly once, at a real span, and stays crossed on one side.
+ */
+export const DENSITY_MIN_CELLS_PER_PX = 50;
+
+/**
+ * **The coarse-zoom test** (T-810, fix 2 after review caught the pixel-size version as
+ * tautological): does viewing `box` at `wPx x hPx` compress at least [[DENSITY_MIN_CELLS_PER_PX]]
+ * level-0 lattice cells into one screen pixel, on either axis? A pure presentation/aggregation
+ * constant, like `VIEWPORT_TILE_BUDGET` — it says nothing about how wide any real signal is, only
+ * how much the lattice's own finest addressable grid is being compressed on screen. TRUE over a
+ * viewport spanning a wide slice of the addressable range; FALSE once the pane is narrow enough
+ * that a real feature would draw as a legible box rather than vanish into the aggregate.
+ */
+export function isCoarseZoom(lat: Lattice, box: Box, wPx: number, hPx: number, minCellsPerPx = DENSITY_MIN_CELLS_PER_PX): boolean {
+  const fSpan = box.f1Hz - box.f0Hz, tSpan = box.t1Ns - box.t0Ns;
+  if (!(fSpan > 0) || !(tSpan > 0) || !(wPx > 0) || !(hPx > 0) || !(lat.f0Hz > 0) || !(lat.t0Ns > 0)) return false;
+  const cellsPerPxF = fSpan / (wPx * lat.f0Hz);
+  const cellsPerPxT = tSpan / (hPx * lat.t0Ns);
+  return cellsPerPxF >= minCellsPerPx || cellsPerPxT >= minCellsPerPx;
+}
+
+/**
  * The request for one tile address (`docs/api.md` "GET /api/tiles/events"). Deliberately its own
  * builder, not `./lattice.ts`'s `tileUrl`: that route's allowed parameters are `device`, `scheme`,
  * `level_f`, `level_t`, `f_index`, `t_index`, `cells`, `state`, `token` — no `planes` and, unlike
@@ -97,7 +140,8 @@ export function parseDensityTile(addr: TileAddr, body: unknown): DensityTile | n
 }
 
 export interface DensityStyle {
-  readonly generalizeBelowPx?: number;
+  /** [[DENSITY_MIN_CELLS_PER_PX]]'s override, for tests. */
+  readonly minCellsPerPx?: number;
   readonly dpr?: number;
   readonly rgba?: readonly [number, number, number, number];
   /** The count at/above which a cell reaches [[maxAlpha]]; below it, alpha scales linearly. */
@@ -117,15 +161,15 @@ export const DENSITY_HATCH_ON_CSS_PX = 2;
 
 /**
  * `tiles` drawn into one pane: one hatch-filled quad per non-empty cell, its darkness a function of
- * the count, and ONLY for a tile whose cell is under `generalizeBelowPx` in BOTH axes on screen —
- * [[isGeneralized]], the same predicate a box collapses to a symbol by. A tile whose cells are
- * already big enough to be boxes draws nothing here at all: this layer never competes with the
- * `detections` boxes it exists to stand in for.
+ * the count — but ONLY when [[isCoarseZoom]] says this pane is genuinely coarse-zoomed. Past that
+ * this draws nothing at all: this layer never competes with the `detections` boxes it exists to
+ * stand in for.
  */
-export function densityQuads(tiles: readonly DensityTile[], paneBox: Box, rect: PaneRect, style: DensityStyle = {}): OverlayQuad[] {
-  const belowPx = style.generalizeBelowPx ?? GENERALIZE_BELOW_CSS_PX;
+export function densityQuads(
+  tiles: readonly DensityTile[], paneBox: Box, rect: PaneRect, lat: Lattice, style: DensityStyle = {},
+): OverlayQuad[] {
+  if (!isCoarseZoom(lat, paneBox, rect.w, rect.h, style.minCellsPerPx)) return [];
   const k = style.dpr && style.dpr > 0 ? style.dpr : 1;
-  const W = Math.max(1, rect.w), H = Math.max(1, rect.h);
   const rgb = style.rgba ?? DENSITY_MARK;
   const capCount = Math.max(1, style.capCount ?? DENSITY_CAP_COUNT);
   const maxAlpha = style.maxAlpha ?? DENSITY_MAX_ALPHA;
@@ -133,13 +177,6 @@ export function densityQuads(tiles: readonly DensityTile[], paneBox: Box, rect: 
   const hatchOnPx = style.hatchOnPx ?? DENSITY_HATCH_ON_CSS_PX;
   const out: OverlayQuad[] = [];
   for (const tile of tiles) {
-    // The cell size is uniform across one tile: one on-screen measurement decides the whole tile.
-    const [ccx0, ccy0, ccx1, ccy1] = toClip(
-      { f0Hz: tile.fLoHz, f1Hz: tile.fLoHz + tile.fCellHz, t0Ns: tile.t0Ns, t1Ns: tile.t0Ns + tile.tCellNs }, paneBox,
-    );
-    const cellWpx = (Math.abs(ccx1 - ccx0) / 2) * W / k;
-    const cellHpx = (Math.abs(ccy1 - ccy0) / 2) * H / k;
-    if (!isGeneralized(cellWpx, cellHpx, belowPx)) continue;
     for (let r = 0; r < tile.nt; r++) {
       for (let c = 0; c < tile.nf; c++) {
         const count = tile.counts[r * tile.nf + c] ?? 0;
