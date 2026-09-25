@@ -70,7 +70,7 @@ C01 is substrate; docs/06 §3 lists it only where a use case is specifically abo
 ## Open questions
 - In-process real-time source, or a capture process with shared memory? Tied to "change pipelines without stopping capture" (CLAUDE.md).
 - Are non-SDR sensors (Wi-Fi/BLE scanners, AWARE-028) C01 sources or C29 feeds? docs/06 is silent.
-- Who owns the real-time clip-avoidance gain loop: C01, C03 or C05? docs/06 puts the gain table in C05 and the clip count in C01.
+- ~~Who owns the real-time clip-avoidance gain loop: C01, C03 or C05?~~ **Answered by T-945 ([docs/28](../28-front-end-gain-management.md)):** nobody, because clip avoidance is the wrong objective — the field evidence is a flagged, clipping state that decoded 106 RDS groups while the "safe" state it was reduced to decoded none. What exists instead is a **gain-management policy closed on the processed output** (`hk_core::gain`), a control-plane object beside the C04 scheduler, actuated through the one gated `DeviceAction::Gains` path (`hk_api::gain`). C01 still owns the clip count and the capabilities descriptor the policy's state space is derived from; C05 still owns the target/table. Off by default until HIL.
 - Accessory/antenna configuration isn't a named object in docs/06. Suggest adding it to provenance.
 - Spike: libhackrf drop reporting and host-timestamp latency.
 
