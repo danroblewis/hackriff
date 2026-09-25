@@ -29887,7 +29887,7 @@ tasks:
   - id: T-1028
     milestone: MMAP
     title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
-    status: in-progress
+    status: done
     branch: task-t1028
     priority: high
     deps:
@@ -29921,6 +29921,7 @@ tasks:
       Commits: a9897059, 1703bfb9, 23c0dbdd
       Observed, not chased: Still no ui/e2e spec, as in the first hand-back and as the reviewer noted under 'minor'. The mode's browser-level path is covered by source-wiring guards plus the FakeEl chip test; an e2e would need a live hk serve and a tunable device, and a spec I did not run would be worse than none. | The new key/blur listeners are never removed on teardown. The reviewer noted this is not new: the mount's existing Escape listener has the same pattern and `detach` is a `void detach` no-op in ui/src/app/centre/surface.ts:~1880. | The map double-click (goToOnMap) moves the ACTIVE pane's window from the minimap and is still deliberately not reported as a gesture, so it does not retune in the mode - it is a jump on the map strip rather than a pan/zoom on a pane. One line in input.ts's onDbl if the user wants it to follow.
       Resources: 4 CPU-s, peak 0.3 GB
+    commit: 1784639e
   - id: T-1029
     milestone: MAUTO
     title: "test_explorer_launcher.py (T-983) is red on main under load: wall-clock polls for the launcher's log lines (reap, crash release) - make them deterministic or fix the launcher; blocks every py-class gate"
