@@ -15,7 +15,7 @@
 // which are authoring acts the server audits with no `device` key.
 import type { AppState } from "../state";
 import type { LayerId, PaneLayers } from "../../surface/layers";
-import type { MarkBox } from "../../surface/marks";
+import { SYMBOLOGY, type MarkBox } from "../../surface/marks";
 import type { Box } from "../../surface/lattice";
 
 // ---- wire shapes (docs/api.md), only the fields read ----
@@ -227,6 +227,9 @@ export function researchMarkBoxes(
       id: r.key, kind: "research-box", f0Hz: f0, f1Hz: f1, t0Ns: t0, t1Ns: t1,
       rgba: sel ? RESEARCH_SELECTED_MARK : colors.get(r.collectionId ?? "") ?? MINE_MARK,
       open: false, strokePx: sel ? 3 : 1,
+      // T-910: curated/human marks carry their own outline style (double), distinct from every
+      // detection class — a person's mark is never mistaken for what the backend found.
+      symbology: SYMBOLOGY.curated,
     });
   }
   return out;

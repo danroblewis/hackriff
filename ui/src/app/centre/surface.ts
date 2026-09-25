@@ -44,12 +44,12 @@ import { newClientId, setTileClientId } from "../../surface/clientid";
 import { markSurface } from "../../surface/mounted";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
-  markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
+  GENERALIZE_BELOW_CSS_PX, markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
   selectionMarkBoxes, signalMarkBoxes,
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
-import { PinLayer, detectionPins, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
+import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
@@ -397,7 +397,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
-    return markQuads(signalMarkBoxes(Object.values(s.inventory.rows), focusId), edge, pane.box, pane.rect);
+    // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
+    // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
+    const rows = Object.values(s.inventory.rows);
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
+      { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
   // through the pane's own box. The frame only records which window the pane showed; the fetch is on
@@ -515,8 +519,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
     const s = store.get();
     const all = detectionPins(Object.values(s.inventory.rows));
+    // T-910: the feature layer (hit areas, focus, labels) is over the DETECTIONS it identifies, so a
+    // pane that hides its detections has none of it either — no invisible target for an undrawn box.
     const layouts = panes
-      .filter((v) => isLayerVisible(layersFor(v.id), "pins"))
+      .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
     pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
     placeTip();

@@ -15,11 +15,17 @@
 //     ramp stays `CMAP_GLSL`'s and the one grey stays `CELL_RULE_GLSL`'s (T-397/T-440's pattern).
 //   - **Only strokes are submitted.** Geometry comes from ui/src/surface/minimap.ts, which emits
 //     rectangle *edges* and a thin bar — nothing that covers the interior of a region.
+//   - **T-910: a pattern is still a stroke.** GIS symbology asks for a dashed outline (a Candidate)
+//     and a light fill (a Confirmed box). Both are cut by this shader from one quad with a
+//     screen-door [[OverlayPattern]]: fragments off the pattern are *discarded*, so every pixel
+//     between two hatch lines or two dashes is the measurement, untouched — never a translucent
+//     wash over it. The pattern's inputs are a mode, two lengths and an anchor; there is still no
+//     sampler, no ramp and no cell state for it to express a measurement with.
 //
 // The flag still exists, because a user may want a bare map; it is just not what keeps the surface
 // honest.
 
-import type { OverlayQuad } from "./minimap";
+import type { OverlayQuad, OverlayPattern } from "./minimap";
 import type { PaneRect } from "./surface";
 
 type GL = WebGL2RenderingContext;
@@ -32,12 +38,27 @@ void main() {
   gl_Position = vec4(mix(uQuad.xy, uQuad.zw, q), 0.0, 1.0);
 }`;
 
-// No sampler, no ramp, no state byte: this shader is incapable of drawing a measurement.
+// No sampler, no ramp, no state byte: this shader is incapable of drawing a measurement. `uPat` is
+// T-910's screen-door pattern (mode, period px, on px): off-pattern fragments are DISCARDED, never
+// blended, so what is between two hatch lines or two dashes is the data exactly as the data pass
+// drew it. `uPatOrigin` anchors the pattern to the feature (window px), so it moves with the box.
 const FS = `#version 300 es
 precision highp float;
 out vec4 frag;
 uniform vec4 uInk;
-void main() { frag = uInk; }`;
+uniform vec4 uPat;
+uniform vec2 uPatOrigin;
+void main() {
+  if (uPat.x > 0.5) {
+    vec2 d = gl_FragCoord.xy - uPatOrigin;
+    float s = uPat.x < 1.5 ? d.x - d.y : (uPat.x < 2.5 ? d.x : d.y);
+    if (mod(s, uPat.y) >= uPat.z) discard;
+  }
+  frag = uInk;
+}`;
+
+/** `uPat.x` per [[OverlayPattern]] mode; 0 = a plain stroke. */
+const PATTERN_MODE = { hatch: 1, "dash-x": 2, "dash-y": 3 } as const;
 
 function compile(gl: GL, type: number, src: string): WebGLShader {
   const s = gl.createShader(type)!;
@@ -52,6 +73,8 @@ export class OverlayPass {
   private readonly prog: WebGLProgram;
   private readonly uQuad: WebGLUniformLocation | null;
   private readonly uInk: WebGLUniformLocation | null;
+  private readonly uPat: WebGLUniformLocation | null;
+  private readonly uPatOrigin: WebGLUniformLocation | null;
   drawCalls = 0;
 
   constructor(private readonly gl: GL) {
@@ -63,6 +86,8 @@ export class OverlayPass {
     this.prog = p;
     this.uQuad = gl.getUniformLocation(p, "uQuad");
     this.uInk = gl.getUniformLocation(p, "uInk");
+    this.uPat = gl.getUniformLocation(p, "uPat");
+    this.uPatOrigin = gl.getUniformLocation(p, "uPatOrigin");
   }
 
   /**
@@ -83,6 +108,13 @@ export class OverlayPass {
     for (const q of quads) {
       gl.uniform4f(this.uQuad, q.clip[0], q.clip[1], q.clip[2], q.clip[3]);
       gl.uniform4f(this.uInk, q.rgba[0], q.rgba[1], q.rgba[2], q.rgba[3]);
+      const pat: OverlayPattern | undefined = q.pattern;
+      if (pat) {
+        gl.uniform4f(this.uPat, PATTERN_MODE[pat.mode], Math.max(1, pat.periodPx), Math.max(0, pat.onPx), 0);
+        gl.uniform2f(this.uPatOrigin, rect.x + ((pat.origin[0] + 1) / 2) * rect.w, rect.y + ((pat.origin[1] + 1) / 2) * rect.h);
+      } else {
+        gl.uniform4f(this.uPat, 0, 1, 1, 0);
+      }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       n++;
     }

@@ -31,9 +31,29 @@
 //
 // Thin client: this file fetches nothing and commands nothing. Hovering, focusing and selecting a
 // pin change presentation state only (the spy-client empty-call-list rule).
+//
+// ## T-910: this is the FEATURE layer now, and a pin is only a generalization
+//
+// User decision 2026-09-24 (docs/23 §10.6 rule 6): the map is GIS, not Google Maps. A feature is
+// its (t, f) polygon — the box `marks.ts` draws in the overlay pass, in its class's symbology — and
+// this file draws NO glyph for a detection at all. What it owns is everything about a feature that
+// has to be DOM:
+//
+//  - **Identify = hit-test the polygon.** Each placed feature is an invisible, focusable button
+//    over the VISIBLE PART of its box (the box clipped to the pane — never keyed on the centre, so a
+//    wide emitter whose centre is off the pane is still hit where it is on it). A box too thin to
+//    point at (a bar) gets a hit area padded about its own axis; a generalized feature (under the
+//    size [[isGeneralized]] decides, the SAME predicate the overlay pass draws its symbol by) is
+//    hit through the quadtree at its symbol.
+//  - **Keyboard.** Tab walks features in READING order — newest time first (the top of the pane),
+//    then frequency, left to right — because the buttons are kept in that DOM order.
+//  - **Labels by placement rules** ([[placeLabels]]): `freq · bw · class` inside a box that fits it
+//    or just above one wide enough; colliding labels are thinned by priority (Confirmed > Candidate
+//    > unexplained), and an unexplained feature's label leads with '?' so the short form survives.
 
 import type { Box } from "./lattice";
 import type { PaneRect } from "./surface";
+import { isGeneralized, type FeatureClass } from "./marks";
 
 const S_TO_NS = 1e9;
 
@@ -49,12 +69,13 @@ export const PIN_EDGE_INSET_PX = 10;
 
 /**
  * GIS scale-dependent generalization (user decision 2026-09-24: "a signal has a frequency width
- * and a duration, that's a rectangle"). A feature whose box is at least this many CSS px on screen
- * in BOTH axes is represented by its box — the detections layer (T-808) strokes it — and the pin
- * draws NO glyph there, only an invisible hit area over the box. Below it in either axis the box is
- * too small to read, and the feature generalizes to the glyph at its centre.
+ * and a duration, that's a rectangle"). The threshold lives in `marks.ts` with the predicate
+ * ([[isGeneralized]]: under it in BOTH axes), so what is drawn and what is hit decide alike.
  */
-export const PIN_GENERALIZE_BELOW_PX = 6;
+export { GENERALIZE_BELOW_CSS_PX as PIN_GENERALIZE_BELOW_PX } from "./marks";
+/** A feature's hit area is never thinner than this, CSS px, on either axis: a bar a pointer cannot
+ * land on is not identifiable. Padded about the bar's own centre line; never drawn. */
+export const MIN_HIT_CSS_PX = 12;
 
 /** docs/24 §14.2's glyph vocabulary. Shape carries the kind, so state is never hue alone. */
 export type PinKind = "confirmed" | "candidate" | "unknown" | "curated";
@@ -115,6 +136,26 @@ export interface PinMarker {
   readonly t_s: number;
 }
 
+/** The backend's family, else its top-ranked explanation's label — a suggestion, never truth. */
+function familyOf(r: Pick<PinRow, "family" | "explanations">): string | null {
+  return r.family ?? r.explanations?.[0]?.label ?? null;
+}
+
+/**
+ * An UNEXPLAINED feature: a Candidate the backend offered neither a family nor an explanation for.
+ * A Confirmed row is never demoted to it (the stronger claim stands). This is the one place the
+ * surface asks — `marks.ts`'s symbology takes it as `signalMarkBoxes`' third argument — and it is a
+ * presentation of "nothing was offered", not a judgement made here.
+ */
+export function isUnexplained(r: Pick<PinRow, "state" | "family" | "explanations">): boolean {
+  return r.state !== "confirmed" && familyOf(r) === null;
+}
+
+/** A pin's kind as the symbology's feature class. */
+export const PIN_CLASS: Readonly<Record<PinKind, FeatureClass>> = {
+  confirmed: "confirmed", candidate: "candidate", unknown: "unexplained", curated: "curated",
+};
+
 /**
  * The detection pins for `rows`. The same filter the detections layer's boxes use
  * (`marks.ts`'s `signalMarkBoxes`): only Candidate/Confirmed rows with a stated interval, and a
@@ -128,8 +169,8 @@ export function detectionPins(rows: readonly PinRow[]): Pin[] {
     if (!iv) continue;
     const rel = r.relation?.kind;
     if (rel === "suppressed-by" || rel === "duplicate-of") continue;
-    const family = r.family ?? r.explanations?.[0]?.label ?? null;
-    const kind: PinKind = r.state === "confirmed" ? "confirmed" : family === null ? "unknown" : "candidate";
+    const family = familyOf(r);
+    const kind: PinKind = r.state === "confirmed" ? "confirmed" : isUnexplained(r) ? "unknown" : "candidate";
     const centreHz = r.user_band
       ? (r.user_band.f_lo + r.user_band.f_hi) / 2
       : r.refined?.center_hz ?? r.f_center_hz;
@@ -166,10 +207,15 @@ export interface PlacedPin {
    * [[PIN_GENERALIZE_BELOW_PX]] in both axes: then there is NO glyph, and this rectangle is the
    * invisible hit/focus area. Absent/null = generalized to the glyph at `(x, y)`. */
   readonly area?: { readonly x0: number; readonly y0: number; readonly x1: number; readonly y1: number } | null;
+  /** T-910: the VISIBLE part of the feature's box as drawn (CSS px), before any hit padding — the
+   * rectangle a label is placed against. Absent for a generalized feature and a hand-built pin. */
+  readonly drawn?: { readonly x0: number; readonly y0: number; readonly x1: number; readonly y1: number } | null;
 }
 
 export interface PaneLayout {
   readonly placed: PlacedPin[];
+  /** The pane's rectangle, CSS px from the canvas's top-left — where its labels may go. */
+  readonly bounds?: { readonly x0: number; readonly y0: number; readonly x1: number; readonly y1: number };
   /** Pins in the pane beyond [[PIN_CAP_PER_PANE]]: counted, stated, never silently dropped. */
   readonly overCap: number;
 }
@@ -182,10 +228,15 @@ const PRIORITY: Record<PinKind, number> = { curated: 0, confirmed: 1, unknown: 2
  * y up, as `PaneView.rect`); the result is CSS px from the canvas's top-left, the coordinate the
  * HUD labels use (`hud.ts`'s `hudLabels`).
  *
- * A pin whose frequency or interval does not intersect the pane is not placed — a pin clamped to
- * the pane's border would claim a place the object is not. A detection's interval that does
- * intersect is clamped to the visible part of itself, so an ongoing signal that began off-screen
- * still has its pin on the screen, inside its own box.
+ * A feature whose box does not intersect the pane is not placed — one clamped to the pane's border
+ * would claim a place the object is not. One that does intersect is placed on the VISIBLE PART of
+ * its box (T-910: the polygon clipped to the pane, not its centre — a wide emitter whose centre
+ * frequency is off the pane is still hit where it is on it), so an ongoing signal that began
+ * off-screen still has its hit area on the screen, inside its own box.
+ *
+ * Generalization is decided on the box's TRUE on-screen size by [[isGeneralized]] — the predicate
+ * `marks.ts` draws its symbol by — so a feature is hit exactly as it is drawn: over its box, or at
+ * its symbol (the centre of the visible part).
  */
 export function layoutPanePins(
   pins: readonly Pin[], paneId: string, box: Box, rect: PaneRect,
@@ -196,25 +247,136 @@ export function layoutPanePins(
   const w = rect.w / k, h = rect.h / k;
   const fSpan = box.f1Hz - box.f0Hz, tSpan = box.t1Ns - box.t0Ns;
   if (!(fSpan > 0) || !(tSpan > 0) || !(w > 0) || !(h > 0)) return { placed: [], overCap: 0 };
+  const bounds = { x0: left, y0: top, x1: left + w, y1: top + h };
   // Newest time is at the TOP of the pane (clip y = +1 at t1Ns).
   const yOf = (tNs: number) => top + h * (1 - (tNs - box.t0Ns) / tSpan);
+  const xOf = (f: number) => left + w * ((f - box.f0Hz) / fSpan);
   const inPane: PlacedPin[] = [];
   for (const p of pins) {
-    if (p.fHz < box.f0Hz || p.fHz > box.f1Hz) continue;
+    const lo = Math.min(p.f0Hz, p.f1Hz), hi = Math.max(p.f0Hz, p.f1Hz);
+    if (hi < box.f0Hz || lo > box.f1Hz) continue;
     const t1 = p.t1Ns ?? edgeNs;
     const vis0 = Math.max(p.t0Ns, box.t0Ns), vis1 = Math.min(t1, box.t1Ns);
     if (vis1 < vis0) continue;
     const yTop = yOf(vis1), yBot = yOf(vis0);
-    const y = Math.min(yTop + PIN_EDGE_INSET_PX, (yTop + yBot) / 2);
-    const xOf = (f: number) => left + w * ((f - box.f0Hz) / fSpan);
-    const x0 = xOf(Math.max(Math.min(p.f0Hz, p.f1Hz), box.f0Hz)), x1 = xOf(Math.min(Math.max(p.f0Hz, p.f1Hz), box.f1Hz));
-    const big = x1 - x0 >= PIN_GENERALIZE_BELOW_PX && yBot - yTop >= PIN_GENERALIZE_BELOW_PX;
-    inPane.push({ pin: p, paneId, x: xOf(p.fHz), y, area: big ? { x0, y0: yTop, x1, y1: yBot } : null });
+    const x0 = xOf(Math.max(lo, box.f0Hz)), x1 = xOf(Math.min(hi, box.f1Hz));
+    // The TRUE size, not the visible sliver: generalization is scale-dependent, never pan-dependent.
+    const wFull = w * ((hi - lo) / fSpan), hFull = h * ((t1 - p.t0Ns) / tSpan);
+    const xc = (x0 + x1) / 2, yc = (yTop + yBot) / 2;
+    if (isGeneralized(wFull, hFull)) {
+      inPane.push({ pin: p, paneId, x: xc, y: yc, area: null, drawn: null });
+      continue;
+    }
+    // A bar too thin to point at is padded about its own centre line — for the hit area only.
+    const pad = (a: number, b: number, c: number) => (b - a >= MIN_HIT_CSS_PX ? [a, b] : [c - MIN_HIT_CSS_PX / 2, c + MIN_HIT_CSS_PX / 2]);
+    const [ax0, ax1] = pad(x0, x1, xc), [ay0, ay1] = pad(yTop, yBot, yc);
+    inPane.push({
+      pin: p, paneId, x: xc, y: Math.min(yTop + PIN_EDGE_INSET_PX, yc),
+      area: { x0: ax0, y0: ay0, x1: ax1, y1: ay1 }, drawn: { x0, y0: yTop, x1, y1: yBot },
+    });
   }
-  if (inPane.length <= cap) return { placed: inPane, overCap: 0 };
+  if (inPane.length <= cap) return { placed: inPane, overCap: 0, bounds };
   inPane.sort((a, b) => PRIORITY[a.pin.kind] - PRIORITY[b.pin.kind]);
-  return { placed: inPane.slice(0, cap), overCap: inPane.length - cap };
+  return { placed: inPane.slice(0, cap), overCap: inPane.length - cap, bounds };
 }
+
+/** Tab order (T-910): reading order — newest time first (top of the pane), then frequency left to
+ * right; panes in the order they were laid out. Returns a new array. */
+export function readingOrder(placed: readonly PlacedPin[]): PlacedPin[] {
+  const paneRank = new Map<string, number>();
+  for (const p of placed) if (!paneRank.has(p.paneId)) paneRank.set(p.paneId, paneRank.size);
+  const top = (p: PlacedPin) => (p.drawn ? p.drawn.y0 : p.y);
+  const leftOf = (p: PlacedPin) => (p.drawn ? p.drawn.x0 : p.x);
+  return [...placed].sort((a, b) => (paneRank.get(a.paneId)! - paneRank.get(b.paneId)!)
+    || (top(a) - top(b)) || (leftOf(a) - leftOf(b)) || (a.pin.id < b.pin.id ? -1 : a.pin.id > b.pin.id ? 1 : 0));
+}
+
+// ---- labels by placement rules (T-910, docs/23 §10.6 rule 6) ----
+
+/** Label metrics, CSS px: a 10 px monospace face (`centre.css`'s `.sf-flabel`). */
+export const LABEL_CHAR_PX = 6.1;
+export const LABEL_H_PX = 13;
+export const LABEL_PAD_PX = 3;
+
+export interface PlacedLabel {
+  readonly key: string;
+  readonly pinId: string;
+  readonly paneId: string;
+  readonly text: string;
+  readonly cls: FeatureClass;
+  /** `inside` the box's top-left, `above` its top edge, or `beside` a generalized symbol. */
+  readonly where: "inside" | "above" | "beside";
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/** Label priority: Confirmed > Candidate > unexplained (docs/23 §10.6 rule 6). Lower wins. */
+const LABEL_PRIORITY: Record<PinKind, number> = { confirmed: 0, candidate: 1, unknown: 2, curated: 1 };
+
+/** A feature's label text: `freq · bw · class`. An unexplained feature leads with '?'. */
+export function labelText(p: Pin): string {
+  const bw = p.tip.bandwidthHz != null && p.tip.bandwidthHz > 0 ? fmtBw(p.tip.bandwidthHz) : null;
+  const cls = p.kind === "unknown" ? null : p.tip.family ?? (p.kind === "confirmed" ? "confirmed" : p.kind === "curated" ? p.tip.name ?? "marker" : "candidate");
+  const body = [fmtMHz(p.tip.centreHz, 3), bw, cls].filter(Boolean).join(" · ");
+  return p.kind === "unknown" ? `? ${body}` : body;
+}
+
+const labelW = (t: string) => t.length * LABEL_CHAR_PX + 2 * LABEL_PAD_PX;
+
+/**
+ * Where each feature's label goes, if anywhere. The rules, in order, per feature (highest priority
+ * first, the selected one before all):
+ *
+ *  1. **Inside** the top-left of its visible box, when the box fits the full label.
+ *  2. **Just above** the box's top edge, when the box is at least as wide as the label (and there is
+ *     room under the pane's top).
+ *  3. An unexplained feature too small for either keeps its **'?'** alone, inside or beside.
+ *  4. A label that would overlap one already placed, or leave its pane, is **thinned** (dropped).
+ *
+ * Pure layout over [[layoutPanePins]]' output: no text is measured, so the width is the monospace
+ * estimate [[LABEL_CHAR_PX]] — a label is dropped rather than risk overrunning its box.
+ */
+export function placeLabels(layouts: readonly PaneLayout[], selectedId: string | null = null): PlacedLabel[] {
+  const out: PlacedLabel[] = [];
+  for (const l of layouts) {
+    const b = l.bounds;
+    if (!b) continue;
+    const taken: PlacedLabel[] = [];
+    const fits = (r: { x: number; y: number; w: number; h: number }) =>
+      r.x >= b.x0 && r.y >= b.y0 && r.x + r.w <= b.x1 && r.y + r.h <= b.y1
+      && !taken.some((q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h);
+    const order = [...l.placed].sort((a, c) => (a.pin.id === selectedId ? -1 : 0) - (c.pin.id === selectedId ? -1 : 0)
+      || LABEL_PRIORITY[a.pin.kind] - LABEL_PRIORITY[c.pin.kind]
+      || area(c) - area(a));
+    for (const p of order) {
+      const cls = PIN_CLASS[p.pin.kind];
+      const key = `${p.paneId}|${p.pin.id}`;
+      const mk = (text: string, where: PlacedLabel["where"], x: number, y: number): PlacedLabel =>
+        ({ key, pinId: p.pin.id, paneId: p.paneId, text, cls, where, x, y, w: labelW(text), h: LABEL_H_PX });
+      const tries: PlacedLabel[] = [];
+      const d = p.drawn;
+      const full = labelText(p.pin);
+      if (d) {
+        const bw = d.x1 - d.x0, bh = d.y1 - d.y0;
+        if (bw >= labelW(full) + 2 && bh >= LABEL_H_PX + 2) tries.push(mk(full, "inside", d.x0 + 1, d.y0 + 1));
+        if (bw >= labelW(full)) tries.push(mk(full, "above", d.x0, d.y0 - LABEL_H_PX - 1));
+        if (p.pin.kind === "unknown") {
+          if (bw >= labelW("?") + 2 && bh >= LABEL_H_PX + 2) tries.push(mk("?", "inside", d.x0 + 1, d.y0 + 1));
+          tries.push(mk("?", "above", d.x0, d.y0 - LABEL_H_PX - 1));
+        }
+      } else if (p.pin.kind === "unknown") {
+        tries.push(mk("?", "beside", p.x + 7, p.y - LABEL_H_PX / 2));
+      }
+      const got = tries.find(fits);
+      if (got) { taken.push(got); out.push(got); }
+    }
+  }
+  return out;
+}
+
+const area = (p: PlacedPin) => (p.drawn ? (p.drawn.x1 - p.drawn.x0) * (p.drawn.y1 - p.drawn.y0) : 0);
 
 // ---- picking: a point quadtree over the laid-out set (docs/24 §14.4) ----
 
@@ -361,9 +523,16 @@ export class PinLayer {
   private readonly els = new Map<string, HTMLButtonElement>();
   private readonly byEl = new WeakMap<HTMLElement, PlacedPin>();
   private readonly overEl: HTMLElement;
+  private readonly labelsEl: HTMLElement;
+  private readonly labelEls = new Map<string, HTMLElement>();
   private placed: PlacedPin[] = [];
   private index = new PinIndex([]);
   private focusedKey: string | null = null;
+  /** The button keys in the DOM order last applied — reading order (T-910). */
+  private domOrder: string[] = [];
+  /** Set while buttons are being re-ordered, so the blur/focus a move causes is not reported. */
+  private reordering = false;
+  private labelsNow: PlacedLabel[] = [];
 
   constructor(private readonly root: HTMLElement, private readonly hooks: PinLayerHooks = {}) {
     this.overEl = root.ownerDocument.createElement("div");
@@ -371,6 +540,12 @@ export class PinLayer {
     this.overEl.setAttribute("role", "status");
     this.overEl.hidden = true;
     root.appendChild(this.overEl);
+    // T-910: the feature labels — text only, never a pointer or focus target (the button beside it
+    // carries the accessible name), laid out in the same per-frame pass as the buttons.
+    this.labelsEl = root.ownerDocument.createElement("div");
+    this.labelsEl.className = "sf-flabels";
+    this.labelsEl.setAttribute("aria-hidden", "true");
+    root.appendChild(this.labelsEl);
   }
 
   /** Re-lay the layer out for this frame. `hoveredId`/`selectedId` style the states. */
@@ -388,15 +563,24 @@ export class PinLayer {
         el.type = "button";
         el.dataset.pin = p.pin.id;
         el.dataset.pane = p.paneId;
-        el.addEventListener("focus", () => { this.focusedKey = key; const q = this.byEl.get(el!); if (q) this.hooks.onFocus?.(q); });
-        el.addEventListener("blur", () => { if (this.focusedKey === key) this.focusedKey = null; this.hooks.onFocus?.(null); });
+        el.addEventListener("focus", () => {
+          if (this.reordering) return;
+          this.focusedKey = key; const q = this.byEl.get(el!); if (q) this.hooks.onFocus?.(q);
+        });
+        el.addEventListener("blur", () => {
+          if (this.reordering) return;
+          if (this.focusedKey === key) this.focusedKey = null; this.hooks.onFocus?.(null);
+        });
         el.addEventListener("click", () => { const q = this.byEl.get(el!); if (q) this.hooks.onSelect?.(q); });
         el.addEventListener("keydown", (e) => this.onKey(e, el!));
         this.root.appendChild(el);
         this.els.set(key, el);
       }
       this.byEl.set(el, p);
-      const cls = `sf-pin ${p.pin.kind} ${p.pin.source}${p.area ? " area" : ""}`
+      // T-910: a detection never draws a DOM glyph — the overlay pass draws its box or, generalized,
+      // its symbol. `area` = a hit area over the box; `symbol` = the hit/focus point over the symbol.
+      const form = p.area ? " area" : p.pin.source === "detection" ? " symbol" : "";
+      const cls = `sf-pin ${p.pin.kind} ${p.pin.source}${form}`
         + (p.pin.id === hoveredId ? " hovered" : "") + (p.pin.id === selectedId ? " selected" : "");
       if (el.className !== cls) el.className = cls;
       const label = pinLabel(p.pin);
@@ -419,11 +603,59 @@ export class PinLayer {
       el.remove();
       this.els.delete(key);
     }
+    this.applyReadingOrder();
+    this.updateLabels(layouts, selectedId);
     const over = layouts.reduce((n, l) => n + l.overCap, 0);
     const text = over > 0 ? `${over} more marker${over === 1 ? "" : "s"} in view than can be pinned — zoom in to resolve them` : "";
     if (this.overEl.textContent !== text) this.overEl.textContent = text;
     this.overEl.hidden = over === 0;
   }
+
+  /**
+   * Keep the buttons in reading order in the DOM, so a native Tab walks features newest-first, then
+   * left to right (T-910). Under a pan or zoom every feature moves together and the order does not
+   * change, so this touches the DOM only when features appear, go, or cross — and it restores the
+   * focus a move would drop without reporting a blur/focus pair for it.
+   */
+  private applyReadingOrder(): void {
+    const want = readingOrder(this.placed).map((p) => `${p.paneId}|${p.pin.id}`);
+    if (want.length === this.domOrder.length && want.every((k, i) => k === this.domOrder[i])) return;
+    const focused = this.focusedKey ? this.els.get(this.focusedKey) ?? null : null;
+    this.reordering = true;
+    try {
+      for (const k of want) { const el = this.els.get(k); if (el) this.root.appendChild(el); }
+      if (focused) focused.focus({ preventScroll: true });
+    } finally { this.reordering = false; }
+    this.domOrder = want;
+  }
+
+  private updateLabels(layouts: readonly PaneLayout[], selectedId: string | null): void {
+    const doc = this.root.ownerDocument;
+    this.labelsNow = placeLabels(layouts, selectedId);
+    const seen = new Set<string>();
+    for (const l of this.labelsNow) {
+      seen.add(l.key);
+      let el = this.labelEls.get(l.key);
+      if (!el) {
+        el = doc.createElement("span");
+        this.labelsEl.appendChild(el);
+        this.labelEls.set(l.key, el);
+      }
+      const cls = `sf-flabel ${l.cls} ${l.where}${l.pinId === selectedId ? " selected" : ""}`;
+      if (el.className !== cls) el.className = cls;
+      if (el.textContent !== l.text) el.textContent = l.text;
+      el.dataset.pin = l.pinId;
+      el.style.transform = `translate(${l.x.toFixed(1)}px, ${l.y.toFixed(1)}px)`;
+    }
+    for (const [key, el] of this.labelEls) {
+      if (seen.has(key)) continue;
+      el.remove();
+      this.labelEls.delete(key);
+    }
+  }
+
+  /** The labels placed this frame (tests). */
+  get labels(): readonly PlacedLabel[] { return this.labelsNow; }
 
   /** The feature under a pointer, CSS px from the canvas's top-left — not the DOM. A generalized
    * glyph (the quadtree) wins, being the more specific target; otherwise anywhere inside a box
@@ -461,6 +693,8 @@ export class PinLayer {
   dispose(): void {
     for (const el of this.els.values()) el.remove();
     this.els.clear();
+    this.labelEls.clear();
+    this.labelsEl.remove();
     this.overEl.remove();
   }
 }
