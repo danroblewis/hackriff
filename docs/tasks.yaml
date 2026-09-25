@@ -26633,7 +26633,7 @@ tasks:
   - id: T-905
     milestone: MCANVAS
     title: "fog-of-war: the pane sometimes requests a tile over never-swept band C - T-580's coverage short-circuit races the coverage survey (fails alone 1 in 9)"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: UI
@@ -26646,6 +26646,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY fog-of-war shadow-race deflaker 2026-09-24.
+    commit: 5fb165d6
   - id: T-906
     milestone: MMAP
     title: "Past-surveys drawer follow-ups: Go restores the frequency SPAN too; honest 'nothing looked at' text; sweep records (T-815 review)"
