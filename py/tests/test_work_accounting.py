@@ -1544,6 +1544,7 @@ def test_a_named_remote_ticket_never_falls_back_to_the_mac_and_alone_mode_holds_
 def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_named_not_dispatchable(tmp_path, monkeypatch):
     """Supervisor 2026-09-25 03:56: the status said 'dispatchable=1 (T-844)' while candidates() skips a branch with commits,
     and had no host dimension. Now: T-844-like tickets are 'held_by_branch' + one ORPHAN_BRANCH attention; hosts listed."""
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (1.0, 1.0, 1.0))         # the Mac row's held is load-dependent
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
     (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 5}}))
@@ -1571,7 +1572,7 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
     assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
     assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0}
-    assert st["hosts"]["mac"] == {"running": 0, "cap": 2}
+    assert st["hosts"]["mac"] == {"running": 0, "cap": 2, "held": None}
     assert [a[2] for a in seen] == ["ORPHAN_BRANCH"]
     R.tick(dry=False)
     assert len(seen) == 1                                                  # once per runner process
@@ -1630,3 +1631,30 @@ def test_a_remote_host_over_its_load_bound_takes_no_new_work(tmp_path, monkeypat
     cfg["node2"]["max_load1"] = 24
     (tmp_path / "hosts.json").write_text(json.dumps(cfg))
     assert R.host_room({}, "node2") == "no 1-min load reading (bound 24)"
+
+
+def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(monkeypatch):
+    """Supervisor 2026-09-25 07:17: the Mac ran 4 at cap 3 - a local fix run bypassed the cap exactly as node2's did.
+    A local fix waits under the Mac's dispatch cap and WORK_LOAD_MAX, and the held-fix pass relaunches it first."""
+    notes = []
+    monkeypatch.setattr(R, "attention", lambda *a: notes.append(a))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 2)
+    monkeypatch.setattr(R, "fix_reason", lambda line, b: ("GATE_FAIL", "x"))
+    load = [5.0]
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (load[0], 0.0, 0.0))
+    busy = {f"T-{i}": {"state": "running", "kind": "work"} for i in (1, 2)}
+    fixme = {"ticket": "T-844", "branch": "task-t844", "wt": "/w", "state": "queued", "kind": "work", "session_id": "s"}
+    claims = {**busy, "T-844": fixme, "T-7": {"state": "running", "kind": "work", "host": "node2"}}   # remote: not the Mac's
+    held = R.launch_fix(dict(fixme), "GATE_FAIL x", claims=claims)
+    assert held["state"] == "fix-held" and "2/2 running" in notes[-1][3] and "this Mac" in notes[-1][3]
+    claims["T-844"] = held
+    relaunched = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: relaunched.append(c["ticket"]) or dict(c, state="running", kind="fix"))
+    assert R.relaunch_held_fixes(claims) is False and relaunched == []
+    claims["T-2"]["state"] = "done"
+    load[0] = R.LOAD_MAX + 1
+    assert R.host_room(claims, None, exclude="T-844") == f"1-min load {R.LOAD_MAX + 1:.0f} > {R.LOAD_MAX:.0f}"
+    assert R.relaunch_held_fixes(claims) is False                              # the load bound holds it too
+    load[0] = 5.0
+    assert R.relaunch_held_fixes(claims) is True and relaunched == ["T-844"]
