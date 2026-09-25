@@ -86,6 +86,7 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
+import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 
 const S_TO_NS = 1e9;
 /** The map strip along the bottom of the canvas, device px. */
@@ -159,7 +160,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // every render frame by `SurfaceView` from the same ruler its ticks were stroked from. Never read
   // by the pointer: a label must not steal a pan from the surface underneath it.
   const hudEl = h("div", { class: "sf-hud", "aria-hidden": "true" });
-  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, captureEl);
+  // T-812 (MAP-12): the band-plan priors' labels — band 2 like the HUD's, placed per frame from the
+  // pane's own box, and pointer-transparent. The ranked reasoning itself is in `priorsEl` below.
+  const priorsLabelEl = h("div", { class: "sf-priors-labels", "aria-hidden": "true" });
+  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, priorsLabelEl, captureEl);
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -168,6 +172,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
+  // T-812 (MAP-12): the active pane's band-plan priors, ranked, each with the backend's own reason —
+  // shown only while that pane's priors layer is on. Suggestions, never truth.
+  const priorsEl = h("div", { class: "sf-priors", role: "status", hidden: true });
   const liveBtn = h("button", { class: "mini sf-live", type: "button" }, "Live");
   const traceBtn = h("button", {
     class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
@@ -231,7 +238,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", onclick: () => splitActive() }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => closeActive() }, "Close"),
     h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", onclick: () => preview?.fitToSurface() }, "Whole surface"));
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, chrome, note);
+  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, priorsEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
@@ -396,7 +403,66 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     return markQuads(signalMarkBoxes(Object.values(s.inventory.rows), focusId), edge, pane.box, pane.rect);
   };
-  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads };
+  // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
+  // through the pane's own box. The frame only records which window the pane showed; the fetch is on
+  // the poll below (`refreshPriors`), never in the frame.
+  const priorsByPane = new Map<string, PriorsAnswer>();
+  const priorBoxes = new Map<string, Box>();
+  const priorsInflight = new Set<string>();
+  let priorsError: string | null = null;
+  const priorLayer = new PriorLabelLayer(priorsLabelEl);
+  const priorsQuads: OverlayLayerFn = (pane) => {
+    priorBoxes.set(pane.id, pane.box);
+    const a = priorsByPane.get(pane.id);
+    return a ? priorQuads(a.rows, pane.box, pane.rect) : [];
+  };
+  /** Ask for each priors-on pane's window when it changed (quantized by `priorsPath`). A `GET` of
+   * reference data — never a device route — and only for panes whose layer is on. */
+  const refreshPriors = () => {
+    const p = preview;
+    if (!p) return;
+    const ids = new Set(p.view.panes.list().map((x) => x.id));
+    priorLayer.retain(ids);
+    for (const id of [...priorsByPane.keys()]) if (!ids.has(id)) priorsByPane.delete(id);
+    for (const [id, box] of [...priorBoxes]) {
+      if (!ids.has(id) || !isLayerVisible(layersFor(id), "priors")) { priorBoxes.delete(id); continue; }
+      const path = priorsPath(box);
+      if (!path || priorsByPane.get(id)?.path === path || priorsInflight.has(id)) continue;
+      priorsInflight.add(id);
+      client.get<unknown>(path)
+        .then((body) => {
+          const a = parsePriors(path, body);
+          if (a) priorsByPane.set(id, a);
+          priorsError = a ? null : "the server's answer was not a priors list";
+        })
+        .catch((e: unknown) => { priorsError = e instanceof Error ? e.message : String(e); })
+        .finally(() => { priorsInflight.delete(id); });
+    }
+  };
+  let priorsShown = "";
+  /** The active pane's ranked priors in words, rebuilt only when what it would say changes. */
+  const renderPriorsReadout = (paneId: string) => {
+    const on = isLayerVisible(layersFor(paneId), "priors");
+    if (priorsEl.hidden === on) priorsEl.hidden = !on;
+    if (!on) { priorsShown = ""; return; }
+    const a = priorsByPane.get(paneId);
+    const key = a ? `${paneId}|${a.path}` : `${paneId}|${priorsError ?? "loading"}`;
+    if (key === priorsShown) return;
+    priorsShown = key;
+    if (!a) {
+      priorsEl.replaceChildren(h("b", {}, priorsError ? `Band-plan priors unavailable: ${priorsError}` : "Band-plan priors: loading…"));
+      return;
+    }
+    const head = h("b", { title: a.statement }, "Band-plan priors — suggestions, never truth");
+    if (a.rows.length === 0) {
+      priorsEl.replaceChildren(head, h("span", {}, " · no allocation in the bundled table intersects this window."));
+      return;
+    }
+    const items = a.rows.slice(0, 6).map((r) => h("li", { class: r.offRasterHz !== null ? "off-raster" : "" }, r.reason));
+    const more = a.rows.length > items.length || a.truncated ? h("span", {}, ` · ${a.rows.length - items.length} more drawn, not listed`) : null;
+    priorsEl.replaceChildren(head, ...(more ? [more] : []), h("ol", {}, ...items));
+  };
+  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, priors: priorsQuads };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. */
   const drawnLayers = new Set<LayerId>(Object.keys(overlayFns) as LayerId[]);
@@ -842,6 +908,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
               setText(ringEl, "Capture rules (retention bound, oldest IQ) are hidden on this pane — Layers menu to show them");
             }
           }
+          // T-812: the priors' labels, placed from this very frame's pane box (never on the poll).
+          const priorsOn = isLayerVisible(layersFor(pane.id), "priors");
+          const pa = priorsOn ? priorsByPane.get(pane.id) : undefined;
+          priorLayer.update(pane.id, pa ? priorLabels(pane.id, pa.rows, pane.box, pane.rect, canvas.height, window.devicePixelRatio || 1) : []);
+          if (pane.id === preview?.activePane) renderPriorsReadout(pane.id);
           return [...composeOverlays(layersFor(pane.id), overlayFns, pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)];
         },
         trace: traceFor, tracePx: TRACE_PX,
@@ -1003,7 +1074,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
-    startPoll(async () => { mirror(); }, 1000);
+    startPoll(async () => { mirror(); refreshPriors(); }, 1000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
     store.select((s) => s.nav.gotoHz, (hz) => {

@@ -123,3 +123,20 @@
 .sf-hud-label.freq { margin-top: -30px; translate: -50% 0; }
 /* Time: just right of the tick, vertically centred on it. */
 .sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }
+
+/* T-812 (MAP-12): band-plan priors. The canvas labels are band 2 like the HUD's — placed per frame
+   by `surface/priors.ts` from the pane's own box, pointer-transparent so a label never takes a pan,
+   italic lavender and always prefixed "prior", so a suggestion can never read as a detection. The
+   ranked reasoning is the readout under the stage (`.sf-priors`), in the backend's own words. */
+.sf-priors-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.sf-prior-label {
+  position: absolute; left: 0; top: 0; white-space: nowrap; font: italic 11px var(--mono); line-height: 1.25;
+  color: #a395e0; text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+}
+.sf-prior-label span { display: block; font-size: 10px; color: #8a80b8; }
+.sf-prior-label.off-raster span { color: #f0a542; }
+.sf-priors {
+  font: 10.5px var(--mono); color: #a395e0; padding: 4px 12px; overflow-wrap: anywhere;
+}
+.sf-priors ol { margin: 2px 0 0 18px; padding: 0; color: var(--muted); }
+.sf-priors li.off-raster { color: #f0a542; }
