@@ -309,6 +309,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/anomalies/{id}/reopen"),
     // T-273 trunking load index (metadata only, AWARE-067)
     ("GET", "/api/trunking/load"),
+    // T-977 the control-channel hunt's last pass, with the verdict on every channel it looked at
+    ("GET", "/api/trunking/cc-candidates"),
     // T-891 VLF/LF science on the accessory-fed source (SPACE-001, SPACE-041, PROP-019)
     ("GET", "/api/vlf"),
 ];
@@ -427,6 +429,10 @@ pub struct ApiState {
     /// T-891: the run's accessory-fed VLF services behind `GET /api/vlf` ([`crate::vlf`]); `None`
     /// answers 503, an attached-but-empty set answers an empty `accessories` list.
     pub vlf: Option<Arc<dyn crate::vlf::VlfControl>>,
+    /// T-977: the run's control-channel hunt behind `GET /api/trunking/cc-candidates`
+    /// ([`crate::trunk_cc`]); `None` on a server with no pipeline, which answers `503` rather than
+    /// an empty channel list.
+    pub cc_hunt: Option<Arc<dyn crate::trunk_cc::CcHuntControl>>,
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
@@ -1327,6 +1333,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::schedule::route(state, &ctl)) // T-120
         .or_else(|| crate::reports::route(state, &ctl)) // T-121
         .or_else(|| crate::trunking::route(state, &ctl)) // T-273
+        .or_else(|| crate::trunk_cc::route(state, &ctl)) // T-977
         .or_else(|| crate::vlf::route(state, &ctl)) // T-891
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122

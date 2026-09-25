@@ -65,6 +65,7 @@ pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)
 pub mod timeline; // T-338: the capture window, and the compressed overview drawn on it
+pub mod trunk_cc; // T-977: the control-channel hunt's last pass, with per-channel verdicts
 pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
 pub mod vlf; // T-891: VLF/LF science on the accessory-fed source

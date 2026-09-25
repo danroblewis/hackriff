@@ -37,6 +37,7 @@
 //!   channel class; spectrum is gated by the publisher.
 //! - **Observability:** [`stats::Counters`], the [`RunSummary`] and `/api/status`.
 
+pub mod ccverdict; // T-977: the control-channel hunt's per-channel verdicts
 pub mod chains;
 pub mod characterise; // T-242
 pub mod class;

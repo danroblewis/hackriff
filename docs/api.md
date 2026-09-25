@@ -2568,6 +2568,38 @@ A derived view over the [`GrantEvent`](07-data-model.md) stream (`hk_model::trun
 
 Errors: `400 invalid` (missing/non-numeric `t0`/`t1`, `t1 <= t0`, or `system` not a UUID), `405` for other methods, `500 failed` for a store error, `503 unavailable` without a trunking store.
 
+## Control-channel candidates (T-977; C23, SIGNAL-085)
+
+**What the control-channel hunt last looked at, and what each channel came to.** `/api/status`'s `chains.cc_*` are counts: `cc_demods: 12, cc_confirmed: 0` says twelve channels were demodulated and none was a control channel, and says nothing about **which** twelve or **why** each lost. This route is that answer for one pass.
+
+**It is the ephemeral half of a verdict; the durable half is on the emitter.** For every channel the hunt demodulated and could file against an inventory emitter, the same pass writes an `emitter_synthesis` row: that is what a client should read for a *signal's* verdict, through `GET /api/inventory`'s `resolution` and `POST /api/analyze`'s `{emitter_id}` form (the full ADR-0021 trace, with every framing's sync and CRC counts). A row exists — so the emitter reads `resolution.kind: "unknown"` with the sentence that says why, and **never `not-searched`**: a channel that was demodulated and rejected has been looked at. This route exists for what no durable row can hold: a channel the per-pass admission cap refused, a channel with no emitter at that frequency, and a verdict that has not changed since the pass that first filed it (an unchanged verdict is not re-written per pass — the hunt runs every `period_s` for the life of the run).
+
+**Two ways onto the list.** `candidacy: "occupancy"` is the C23 test: frequency-channel occupancy over the pass's window at or above `MIN_CC_FCO` (0.95). `candidacy: "detected-emitter"` is T-977's second rule: blind detection already has an emitter on that raster channel, so the run has already decided there is an emission there and the demodulation is spent on *what it is*. An intermittent burst train never reaches the occupancy floor and is never a control channel; before this the hunt walked past every one of them, which is how a P25 C4FM voice channel came to read `family: unknown, resolution: not-searched` in a band where the chain had run twelve demodulations. Neither rule reads a band plan. **Only an occupancy candidate can be confirmed** (`CcCandidate` cannot be constructed below the floor), so the second rule cannot promote anything.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/trunking/cc-candidates` | The last completed hunt pass, with the verdict on every channel it looked at |
+
+- **Response:** `{pass}`. `pass` is **`null`** when no hunt has completed a pass on this run — the band never triggered one, or the first window is still filling. That is deliberately *not* `{"channels": []}`, which would say the hunt looked and chose nothing: not-yet-looked and looked-and-found-nothing are different states and neither may be rendered as the other (ADR-0021 §7A.4), the decode-side statement of the canvas's grey rule.
+- A pass is `{pass, t_start, t_end, device_id, tune_center_hz, raster_hz, grid_offset_hz, channels_swept, channels}`. `pass` is the 1-based pass number in that chain's life; `t_start`/`t_end` bound the window analysed (Unix seconds, absolute capture time); `device_id` is whose window it was; `grid_offset_hz` is the receiver's own **fitted** clock offset against the raster, so the channel grid's origin is `tune_center_hz + grid_offset_hz` (docs/19 §7.6a: a HackRF One at −9.6 ppm puts every 800 MHz channel 8.2 kHz low, and an unfitted grid rejects the whole band); `channels_swept` is how many raster channels had their occupancy measured.
+- A channel is `{k, center_hz, bandwidth_hz, fco, candidacy, outcome, reason, framings, levels, symbol_rate_bd, symbols, emitter_id}`. `k` is the raster index against the fitted origin; `fco` is measured occupancy 0–1; `levels`/`symbol_rate_bd` are the **blind** symbol-structure measurement (`null` when it abstained — never a plausible default); `emitter_id` is the inventory emitter the verdict was filed against, `null` when blind detection had no row there.
+- **`outcome`** is a closed enum, and each value is a measurement rather than a shrug:
+
+  | `outcome` | Means |
+  |---|---|
+  | `confirmed` | frame sync **and** CRC-valid blocks: a control channel |
+  | `sync-without-check` | a framing's frame sync at the expected spacing, too few CRC-valid blocks to confirm. The air interface is **recognised** and the channel is not a control channel — on P25 that is exactly what a voice or data channel looks like, since an LDU frame carries the same 48-bit sync as a TSBK frame |
+  | `no-sync` | demodulated, and no framing in the catalogue found sync |
+  | `not-demodulated` | the down-conversion or the symbol recovery produced nothing to scan |
+  | `admission-refused` | candidacy held, but the pass's demodulation slots were already spent. **Nothing was measured about this channel beyond its occupancy** |
+
+- `framings` carries what every framing in the build scored on that channel: `[{framing, sync_hits, crc_valid, crc_checked}]` — so "why P25 and not DMR" is answered from measurements. Empty when nothing was demodulated.
+- A `sync-without-check` channel also earns **family evidence** on its emitter under its own decoder id (`p25-frame-sync` / `dmr-frame-sync` / `nxdn-frame-sync`) at confidence 0.8, mapping to the `public-safety` service family: "P25-like" is a weaker statement than the 0.97 a CRC-valid `p25-tsbk` decode earns, and it is a different id so a reader can tell which was measured.
+- **Metadata only**, exactly like the load index: a verdict about a channel is not its traffic. No audio, no vocoder frame, no payload.
+- **One pass, replaced each time.** Nothing accumulates: a hunt runs every `period_s` forever, and a caller that wants history reads the synthesis rows, which are durable by construction.
+
+Errors: `405` for other methods, `503 unavailable` on a server with no pipeline running (no hunt exists to have looked — which is not the same as one that looked and found nothing, hence not a `200` with an empty list).
+
 ## VLF accessory (T-891; SPACE-001, SPACE-041, PROP-019)
 
 VLF/LF science on an **accessory-fed source**: a VLF/LF E-field or loop receiver into a soundcard, attached as its own device behind the generic source interface (`hk_core::source::accessory`). The HackRF tunes no lower than 1 MHz, so all three use cases stay `needs-accessory`; a run with no accessory answers an empty list, and the analysis service refuses any stream whose provenance does not say it came through an accessory.
