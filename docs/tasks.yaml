@@ -26748,7 +26748,7 @@ tasks:
   - id: T-898
     milestone: MMAP
     title: Retune history drawn as a traced directions-style path per device, from the recorded tune intervals (user P2)
-    status: in-progress
+    status: done
     branch: task-t898
     priority: normal
     deps:
@@ -26773,6 +26773,7 @@ tasks:
       Observed, not chased: Main's T-810 `density` layer is absent from ADR-0023 §2's LayerId union and from docs/24 §13.4's paint order and defaults table (evidence: `git show b7e9dc03:docs/adr/0023-map-ui-and-research-state.md` lists base/coverage/tier/detections/paths/artifacts/priors/rules/research/collection/pins with no `density`, and §13.4's order reads rules 10 -> detections 20 -> paths 25 -> research 30 with no 15). My edits to both files added only `tune`, so nothing of main's was lost - but the density row is still undocumented. | A route is drawn at the TUNED CENTRE, so a pane whose band covers a dwell's sampled window but not its centre shows no line; evidence: crates/hk-cli/tests/api_contract.rs:tune_history_route_answers_as_documented had to use FIXTURE_CENTER_HZ rather than STATION_HZ. Correct for 'the device's centre-frequency timeline', but a follow-up could add the sampled-band ribbon (each vertex already carries sample_rate_hz). | The route is not hit-testable or selectable on the canvas (no MapTip naming the device, dwell length or rate at a vertex); T-897's paths have the same gap, and the records carry stable ids (tune:<device>:<first instant>) for that follow-up. | Only the first five front ends get distinct inks (TUNE_INKS wraps); with six radios two routes would share a colour, distinguishable only by the key. Not reachable today, stated in ui/src/surface/tunepath.ts.
       Use cases: AWARE-011
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: d4d4ce7d
   - id: T-899
     milestone: MMAP
     title: "Size inversely proportional to influence: big panels never jump the map or offer a retune on a bare row click - re-spec T-814/T-815/T-821/T-804 + T-825 guard (user P4)"
