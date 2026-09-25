@@ -188,7 +188,7 @@ def test_a_single_branch_red_that_main_shares_is_not_charged_and_stops_an_isolat
     assert "return 1" in single and "MAIN_RED_STOP=1" in single           # re-queued by the caller, no attempt
     assert '>> "$S/main-red-parked"' in single                               # ... and parked until main moves
     loop = text[text.index('        MAIN_RED_STOP=""'):]
-    assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:600]
+    assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:loop.index("\n        done")]
 
 
 def _park_block() -> str:
