@@ -23931,7 +23931,7 @@ tasks:
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -23971,6 +23971,7 @@ tasks:
       Observed, not chased: app-dismiss.e2e.mjs 'bottom sheet covers no canvas rows' failed in the same gate batch; file not in this branch
       Use cases: AWARE-042
       Resources: 52 CPU-s, peak 0.6 GB
+    commit: 0726f714
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
