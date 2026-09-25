@@ -340,12 +340,12 @@ mod tests {
 
     #[test]
     fn frames_mode_lsb_reverses_destuffed_octets() {
-        // Air order: octet 0xA1 LSB first (1000 0101), then 0xFF LSB first (five ones, a
+        // Air order: octet 0x21 LSB first (1000 0100), then 0xFF LSB first (five ones, a
         // stuffed zero, three ones), then a 3-bit tail.
         let mut b = mk("bitstuff", json!({ "bit_order": "lsb" }), PortType::Frames);
-        let f = Owned::from_bits(&bits("10000101 11111 0 111 001"), 0, 0);
+        let f = Owned::from_bits(&bits("10000100 11111 0 111 001"), 0, 0);
         let out = run_frames(&mut *b, &[f], 1, false);
-        assert_eq!(out[0].bits, bits("10100001 11111111 100"));
+        assert_eq!(out[0].bits, bits("00100001 11111111 100"));
         assert_eq!(out[0].info.bit_len, 19);
     }
 

@@ -75,7 +75,10 @@ fn ais_recipe_uses_gmsk_9600_nrzi_hdlc_and_crc16_x25() {
     assert_eq!(destuff["direction"], "destuff");
     assert_eq!(destuff["stuff_after"].as_u64(), Some(5));
     assert_eq!(destuff["abort_ones"].as_u64(), Some(7));
-    assert_eq!(destuff["bit_order"], "lsb", "HDLC sends every octet LSB first");
+    assert_eq!(
+        destuff["bit_order"], "lsb",
+        "HDLC sends every octet LSB first"
+    );
     // The flag search runs on the stuffed line: destuffed data can contain 0x7E.
     let pos = |id: &str| r.nodes.iter().position(|n| n.id == id).unwrap();
     assert!(pos("sync") < pos("destuff") && pos("destuff") < pos("crc"));

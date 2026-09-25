@@ -498,7 +498,10 @@ fn ais_hdlc_sync_destuff_and_crc16_x25() {
         .find(|d| has_flag(&air(d)))
         .unwrap();
     let messages = [GPSD_AIVDM_OCTETS.to_vec(), with_flag];
-    assert!(has_flag(&air(&messages[1])), "the second message holds 0x7E after destuffing");
+    assert!(
+        has_flag(&air(&messages[1])),
+        "the second message holds 0x7E after destuffing"
+    );
 
     // On air: idle ones, then two independent AIS bursts (own flag pair each, idle between).
     let mut stream = vec![1u8; 40];
@@ -534,15 +537,31 @@ fn ais_hdlc_sync_destuff_and_crc16_x25() {
         let mut bad = frames[1].clone();
         bad.bits[100] ^= 1;
         let mut crc = build("crc", crc_params.clone(), PortType::Frames);
-        let out = run_frames(crc.as_mut(), &[frames[0].clone(), frames[1].clone(), bad], 2, false);
+        let out = run_frames(
+            crc.as_mut(),
+            &[frames[0].clone(), frames[1].clone(), bad],
+            2,
+            false,
+        );
         for (k, m) in messages.iter().enumerate() {
-            assert_eq!(out[k].info.check, CrcStatus::Valid, "message {k}, chunk {chunk}");
+            assert_eq!(
+                out[k].info.check,
+                CrcStatus::Valid,
+                "message {k}, chunk {chunk}"
+            );
             // Stripped: data, then the trimmed trailing flag (padding past the field map).
             let mut want = bytes_bits(m);
             want.extend(&flag);
-            assert_eq!(out[k].bits, want, "FCS stripped, message {k}, chunk {chunk}");
+            assert_eq!(
+                out[k].bits, want,
+                "FCS stripped, message {k}, chunk {chunk}"
+            );
         }
-        assert_eq!(out[2].info.check, CrcStatus::Invalid, "corrupted, chunk {chunk}");
+        assert_eq!(
+            out[2].info.check,
+            CrcStatus::Invalid,
+            "corrupted, chunk {chunk}"
+        );
     }
 }
 
