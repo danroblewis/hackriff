@@ -18,6 +18,7 @@ import annotate  # noqa: E402
 import fetch  # noqa: E402
 import flex_ref  # noqa: E402
 import fxlib  # noqa: E402
+import p25_ref  # noqa: E402
 import rds_ref  # noqa: E402
 import trim  # noqa: E402
 import verify  # noqa: E402
@@ -284,6 +285,68 @@ def test_flex_reference_oracle_finds_no_sync_in_noise():
     x = np.exp(1j * phase)
     got = flex_ref.decode(x, fs)
     # random bits should essentially never match a specific 32-bit pattern within Hamming 3
+    assert got["n_syncs"] <= 1
+
+
+def test_p25_reference_oracle_finds_synthetic_sync():
+    """A synthetic C4FM frame -- preamble + the 48-bit frame sync ``0x5575F5FF77FF`` sent as a
+    2-level (sign) pattern at its own outer C4FM deviation, followed by an NID-length run of
+    random 2-level symbols -- should be recovered at the natural bit order with zero Hamming
+    distance, at (about) the expected bit position."""
+    fs = 48_000.0
+    sps = fs / p25_ref.SYNC_RATE_BD  # 10, exact for a clean synthetic signal
+    dev = 1800.0  # C4FM outer deviation level
+    preamble = [i % 2 for i in range(48)]
+    sync_bits = [(p25_ref.P25_SYNC >> (p25_ref.SYNC_BITS - 1 - i)) & 1 for i in range(p25_ref.SYNC_BITS)]
+    nid_bits = int(round(0.18 * p25_ref.SYNC_RATE_BD))  # about one NID (64 bits) plus margin
+    rng = np.random.default_rng(7)
+    payload = rng.integers(0, 2, size=nid_bits).tolist()
+    bits = np.array(preamble + sync_bits + payload, dtype=np.uint8)
+    inst_freq = np.repeat(np.where(bits == 1, dev, -dev), int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+
+    got = p25_ref.decode(x, fs)
+    assert got["n_syncs"] >= 1
+    assert got["sync_hex"] == "5575F5FF77FF"
+    assert any(h["order"] == "natural" and h["hamming"] == 0 for h in got["syncs"])
+    natural_hits = [h["bit"] for h in got["syncs"] if h["order"] == "natural"]
+    assert min(abs(b - len(preamble)) for b in natural_hits) <= 1
+
+
+def test_p25_reference_oracle_reports_four_level_payload():
+    """A synthetic 4-level C4FM payload trace, sliced at the sync's own 4800 Bd symbol clock,
+    should be reported as (up to) 4 levels rather than 2."""
+    rng = np.random.default_rng(9)
+    fs = 48_000.0
+    sps = fs / p25_ref.SYNC_RATE_BD
+    n_sym = int(round(p25_ref.LEVEL_WINDOW_S * p25_ref.SYNC_RATE_BD)) + 50
+    levels = np.array([-1800.0, -600.0, 600.0, 1800.0])
+    symbols = levels[rng.integers(0, 4, size=n_sym)]
+    inst_freq = np.repeat(symbols, int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    freq = p25_ref.fm_discriminate(x, fs)
+
+    got = p25_ref.level_count(freq, syncs=[{"bit": 0}], off=0.0, sps=sps)
+    assert 2 <= got["n_levels"] <= 4
+    mags = sorted(abs(c) for c in got["level_centres_hz"])
+    assert abs(mags[-1] - 1800.0) < 500.0
+
+
+def test_p25_reference_oracle_finds_no_sync_in_noise():
+    """A pure-noise instantaneous-frequency trace should not spuriously report a sync (guards
+    against the Hamming tolerance being so loose it always fires)."""
+    rng = np.random.default_rng(13)
+    fs = 48_000.0
+    n_bits = 2000
+    sps = fs / p25_ref.SYNC_RATE_BD
+    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
+    inst_freq = np.repeat(np.where(bits == 1, 1800.0, -1800.0), int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    got = p25_ref.decode(x, fs)
+    # random bits should essentially never match a specific 48-bit pattern within Hamming 4
     assert got["n_syncs"] <= 1
 
 

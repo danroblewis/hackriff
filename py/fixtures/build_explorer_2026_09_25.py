@@ -1,15 +1,17 @@
-"""Build the 2026-09-25 explorer-agent FM/RDS fixture pair's truth annotations and manifest rows.
+"""Build the 2026-09-25 explorer-agent FM/RDS/FLEX/P25 fixtures' truth annotations and manifest
+rows.
 
     uv run --project py python py/fixtures/build_explorer_2026_09_25.py
 
 Inputs (read-only): ``fixtures/hackrf/explorer-2026-09-25/*.sigmf-{meta,data}`` (already placed,
 clipped live via ``POST /api/iqbuffer/clip`` on the explorer agent's staging build, 2026-09-25
-~04:00-04:11 PDT, SF) and the explorer's own hidden-truth claim at
-``~/.hackriff-ops/explorer/captures/20260925/*.truth.json``. Cross-checks every station against
-the independent oracle ``py/fixtures/rds_ref.py`` and writes what the oracle found alongside the
-explorer's claim — it does not silently "fix" either one.
+~04:00-04:11 PDT, SF; the P25 capture ~06:19 PDT the same session) and the explorer's own
+hidden-truth claim at ``~/.hackriff-ops/explorer/captures/20260925/*.truth.json``. Cross-checks
+every station/channel against an independent oracle (``rds_ref.py``, ``flex_ref.py``,
+``p25_ref.py``) and writes what the oracle found alongside the explorer's claim — it does not
+silently "fix" either one.
 
-Outputs: rewrites ``hackriff:truth`` annotations into the two ``.sigmf-meta`` files (via
+Outputs: rewrites ``hackriff:truth`` annotations into the ``.sigmf-meta`` files (via
 ``annotate.annotate``) and appends/refreshes their rows in ``fixtures/manifest.json``.
 
 Legal: receive-only capture; RDS PI/PS/PTY are public broadcast station identity, not third-party
@@ -27,6 +29,7 @@ from typing import Any
 import annotate
 import flex_ref
 import fxlib
+import p25_ref
 import rds_ref
 from fxlib import CLIP_COUNT_KEY, sigmf
 
@@ -52,6 +55,14 @@ FLEX_USE_CASE = "SIGNAL-088"
 #: clip", "0xA6C6AAAA x1 in this clip (x3 in a 30 s window)"); parsed rather than trusted, so a
 #: mismatch against the independent oracle below is reported, not silently fixed.
 FLEX_CLAIM_RE = re.compile(r"x(\d+) in this clip")
+
+#: The P25 C4FM capture (T-975): 5 s at 2.4 Msps, 24 MB -- under the committed cap, unlike FLEX.
+P25_NAME = "p25-852p86-2p4M"
+P25_USE_CASE = "SIGNAL-085"
+P25_ALSO_USE_CASES = ["SIGNAL-080", "SIGNAL-087"]
+#: "... N frame sync(s) ..." / "4x in this 5 s clip" style count in the explorer's evidence prose;
+#: parsed rather than trusted (same discipline as ``FLEX_CLAIM_RE``).
+P25_CLAIM_RE = re.compile(r"(\d+)x in this \d+ s clip")
 
 
 def db(x: float) -> float:
@@ -379,6 +390,188 @@ def build_flex() -> dict[str, Any]:
     }
 
 
+def build_p25() -> dict[str, Any]:
+    """Builds the P25 C4FM capture (T-975) into the committed fixture directory (24 MB, under the
+    25 MB cap, so unlike FLEX this stays in Git LFS rather than the external store). Cross-checks
+    the explorer's frame-sync-count claim against the independent oracle ``p25_ref.py`` and
+    records the explorer's own re-grading of the channel (control vs conventional/voice) rather
+    than asserting either identification as fact -- this capture is blind-detection-only, no
+    TSBK/NID decode."""
+    name = P25_NAME
+    meta_path = OUT / f"{name}.sigmf-meta"
+    data_path = OUT / f"{name}.sigmf-data"
+    explorer_truth = json.loads((EXPLORER_HOME / f"{name}.truth.json").read_text())
+
+    meta = sigmf.read_meta(meta_path)
+    meta["global"]["core:license"] = LICENSE
+    meta["global"]["core:description"] = f"hk-pipeline IQ capture buffer clip ({P25_USE_CASE}, {name})"
+    fs = float(meta["global"]["core:sample_rate"])
+    fc = float(meta["captures"][0]["core:frequency"])
+    n = fxlib.n_samples(data_path, meta["global"]["core:datatype"])
+    prov = meta["global"][sigmf.PROVENANCE_KEY]
+
+    # this capture's placed-by-hand source (unlike the FM/RDS pair's) carries no
+    # ``hackriff:clip_count`` yet -- measure it directly, same as the capture-agent skill would.
+    if CLIP_COUNT_KEY not in meta["captures"][0]:
+        meta["captures"][0][CLIP_COUNT_KEY] = fxlib.count_clipped(
+            data_path, meta["global"]["core:datatype"], 0, n)
+    clip_count = int(sum(c.get(CLIP_COUNT_KEY, 0) for c in meta["captures"]))
+    clip_fraction = clip_count / n
+
+    em = explorer_truth["emissions"][0]
+    f_center = float(em["f_center_hz"])
+    offset_hz = f_center - fc
+    oracle = p25_ref.decode_ci8(str(data_path), fs, offset_hz, duration_s=n / fs)
+
+    claim_match = P25_CLAIM_RE.search(em["evidence"])
+    claimed_syncs = int(claim_match.group(1)) if claim_match else None
+    agrees = claimed_syncs is not None and claimed_syncs == oracle["n_syncs"]
+    disagreements: list[str] = []
+    if not agrees:
+        disagreements.append(
+            f"{f_center / 1e6:.4f} MHz: explorer claims {claimed_syncs} frame sync(s) in this "
+            f"clip, oracle found {oracle['n_syncs']} (Hamming <= {oracle['max_hamming']}/"
+            f"{oracle['sync_symbols']} symbols, >= {p25_ref.MIN_PHASE_CORROBORATION}/"
+            f"{oracle['n_timing_phases']} timing-phase corroboration)"
+        )
+
+    p25_truth = {
+        "sync_hex": oracle["sync_hex"],
+        "sync_rate_bd": oracle["sync_rate_bd"],
+        "n_syncs": oracle["n_syncs"],
+        "syncs": [
+            {"t_s": round(s["sample"] / (fs / max(1, int(fs // 48_000.0))), 4),
+             "hamming": s["hamming"], "order": s["order"], "n_phases": s["n_phases"]}
+            for s in oracle["syncs"]
+        ],
+        "levels": oracle["levels"],
+        "decoder": oracle["decoder"],
+        "oracle_agrees_with_explorer_sync_count": agrees,
+        "explorer_claim": {
+            "kind": em["kind"],
+            "decoded": em.get("decoded"),
+            "claimed_syncs_in_clip": claimed_syncs,
+            "evidence": em["evidence"],
+            "source": "app blind detection (candidate 852.8586 9.3 kHz SNR 14.7, family unknown "
+                      "0.999) + the explorer's own numpy oracle tools/oracle_p25.py, 2026-09-25 "
+                      "~06:19 PDT (journal-20260925.md)",
+        },
+        # The explorer's own re-grading of the channel identity, recorded as an opinion with its
+        # reasoning, never as fact: this fixture carries no TSBK/control-channel confirmation.
+        "channel_classification": {
+            "verdict": "most likely a conventional or voice P25 channel, not an established "
+                      "control channel",
+            "reasoning": "intermittent frame syncs (a handful over 5 s, not the near-continuous "
+                        "cadence of a control channel's repeating TSBK stream) plus a companion "
+                        "wideband capture at this same nominal frequency (852.86 MHz, "
+                        "p25-cc-852p86, not committed here) that itself did not resolve a "
+                        "confirmed control channel (cc chain 7 passes/0 confirmed/0 TSBK)",
+        },
+    }
+    items = [dict(
+        sample_start=0, sample_count=n,
+        freq_lower_edge=f_center - float(em["bandwidth_hz"]) / 2,
+        freq_upper_edge=f_center + float(em["bandwidth_hz"]) / 2,
+        label=f"P25 {f_center / 1e6:.4f} MHz",
+        comment=em["kind"],
+        truth=dict(
+            role="emission", kind="p25-c4fm", modulation="C4FM",
+            center_hz=f_center, offset_hz=offset_hz, bandwidth_hz=float(em["bandwidth_hz"]),
+            channel_hz=f_center, decoded=False,
+            decode_note="Not decoded: blind detection + frame-sync identification only; no "
+                        "TSBK/NID decode attempted on this capture.",
+            p25=p25_truth,
+        ),
+    ), dict(
+        sample_start=0, sample_count=n, label="overload",
+        truth=dict(
+            role="artefact", kind="overload", clipped_samples=clip_count,
+            clip_fraction=clip_fraction,
+            overload_rule=f"clip_fraction > {fxlib.OVERLOAD_CLIP_FRACTION:g} (component at -128 or 127)",
+            note="LNA 40 / VGA 30 / amp on (raised from 32 after an earlier weaker pass); "
+                "provenance reports overload=false for this capture.",
+        ),
+    )]
+
+    scenario = dict(
+        role="scenario", kind="capture", recording=name,
+        use_cases=[P25_USE_CASE, *P25_ALSO_USE_CASES],
+        generator=BUILDER,
+        source={
+            "capture": "explorer agent live clip",
+            "method": "POST /api/iqbuffer/clip on the explorer agent's staging build",
+            "captured": explorer_truth.get("captured", "2026-09-25T13:19:26.000000333Z"),
+            "device": "hackrf:0000000000000000d2b861dc263bc293",
+        },
+        datatype=meta["global"]["core:datatype"], sample_rate_hz=fs, n_samples=n, duration_s=n / fs,
+        dbfs_reference="full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        calibration="uncalibrated (no dBm): antenna unknown, as attached by the user",
+        clip_count=clip_count, clip_fraction=clip_fraction, overload=prov["overload"],
+        quantisation_limited=prov["quantisation_limited"],
+        quantisation_noise_dbfs_per_hz=fxlib.quantisation_floor_dbfs_per_hz(fs),
+        capture_settings={
+            "lna_db": 40.0, "vga_db": 30.0, "amp": True,
+            "bias_tee": "off",
+            "antenna": "unknown",
+        },
+        identification_source=explorer_truth["source"],
+        not_signals=explorer_truth.get("not_signals"),
+        annotation_completeness=(
+            "partial: the P25 channel named in the explorer's truth file, plus the whole-file "
+            "overload artefact; the 800 MHz public-safety band around it was chosen from FCC 47 "
+            "CFR 90.617, never from a frequency lookup that then tuned there"
+        ),
+        legal=LEGAL,
+    )
+    truth = {"annotations": [dict(sample_start=0, sample_count=n, label="capture", truth=scenario),
+                             *items]}
+    annotate.apply(meta, truth["annotations"], n)
+    sigmf.write_meta(meta, meta_path)
+
+    syncs_txt = ", ".join(f"{s['t_s']:.3f}s (H{s['hamming']})" for s in p25_truth["syncs"])
+    return {
+        "name": name,
+        "clip_count": clip_count,
+        "clip_fraction": clip_fraction,
+        "truth_summary": (
+            f"{f_center / 1e6:.4f} MHz: oracle {oracle['n_syncs']} frame sync(s) [{syncs_txt}], "
+            f"0 on every neighbouring channel tried; overload clip_fraction {clip_fraction:.3f}"
+        ),
+        "disagreements": disagreements,
+        "n": n,
+        "size_bytes": data_path.stat().st_size,
+        "sha256_data": fxlib.sha256_file(data_path),
+        "sha256_meta": fxlib.sha256_file(meta_path),
+    }
+
+
+def update_manifest_p25(row: dict[str, Any]) -> None:
+    manifest = json.loads(fxlib.MANIFEST.read_text())
+    entries = manifest["entries"]
+    name = row["name"]
+    for kind, path, size, sha in (
+        ("sigmf-data", f"hackrf/explorer-{DATE}/{name}.sigmf-data", row["size_bytes"], row["sha256_data"]),
+        ("sigmf-meta", f"hackrf/explorer-{DATE}/{name}.sigmf-meta",
+         (fxlib.FIXTURES / f"hackrf/explorer-{DATE}/{name}.sigmf-meta").stat().st_size,
+         row["sha256_meta"]),
+    ):
+        entries[:] = [e for e in entries if not (e.get("name") == name and e.get("kind") == kind)]
+        entry = {
+            "name": name, "status": "committed", "path": path, "size_bytes": size, "sha256": sha,
+            "kind": kind, "use_cases": [P25_USE_CASE, *P25_ALSO_USE_CASES], "license": LICENSE,
+            "truth_summary": row["truth_summary"],
+            "purpose": "explorer-agent captured live P25 C4FM channel (800 MHz public-safety), "
+                      "blind truth cross-checked against the independent p25_ref.py frame-sync "
+                      "oracle (T-975)",
+            "datetime": "2026-09-25",
+            "clip_count": row["clip_count"],
+        }
+        if kind == "sigmf-data":
+            entry["lfs"] = True
+        entries.append(entry)
+    fxlib.MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n")
+
+
 def update_manifest_external(row: dict[str, Any], name: str, use_case: str,
                              purpose: str) -> None:
     manifest = json.loads(fxlib.MANIFEST.read_text())
@@ -442,6 +635,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"{flex_row['name']}: {flex_row['truth_summary']}")
     for d in flex_row["disagreements"]:
+        print(f"  DISAGREEMENT: {d}")
+
+    p25_row = build_p25()
+    update_manifest_p25(p25_row)
+    print(f"{p25_row['name']}: {p25_row['truth_summary']}")
+    for d in p25_row["disagreements"]:
         print(f"  DISAGREEMENT: {d}")
     return 0
 

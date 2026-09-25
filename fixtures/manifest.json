@@ -748,6 +748,43 @@
       "purpose": "explorer-agent captured live FLEX paging channels, blind truth cross-checked against the independent flex_ref.py sync-word oracle (T-949)",
       "datetime": "2026-09-25",
       "clip_count": 0
+    },
+    {
+      "name": "p25-852p86-2p4M",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/p25-852p86-2p4M.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "8a8feef967decd674ccf66be36317362063440ae3014171c6a206d11ca7061bb",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-085",
+        "SIGNAL-080",
+        "SIGNAL-087"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "852.8587 MHz: oracle 3 frame sync(s) [0.672s (H2), 2.584s (H1), 4.107s (H1)], 0 on every neighbouring channel tried; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live P25 C4FM channel (800 MHz public-safety), blind truth cross-checked against the independent p25_ref.py frame-sync oracle (T-975)",
+      "datetime": "2026-09-25",
+      "clip_count": 0,
+      "lfs": true
+    },
+    {
+      "name": "p25-852p86-2p4M",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/p25-852p86-2p4M.sigmf-meta",
+      "size_bytes": 7533,
+      "sha256": "dac94cfb5830bac338c1865e252b516c7dde538678fbb7f689a2ef152741fc81",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-085",
+        "SIGNAL-080",
+        "SIGNAL-087"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "852.8587 MHz: oracle 3 frame sync(s) [0.672s (H2), 2.584s (H1), 4.107s (H1)], 0 on every neighbouring channel tried; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live P25 C4FM channel (800 MHz public-safety), blind truth cross-checked against the independent p25_ref.py frame-sync oracle (T-975)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
     }
   ]
 }
