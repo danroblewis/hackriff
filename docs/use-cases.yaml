@@ -8797,3 +8797,53 @@ use_cases:
   - marginal-8bit
   fit_note: 'Receive-only at 851-854 MHz on an ordinary whip. Three honest caveats. (1) 8-bit, no preselector: 851-869 MHz sits directly below the 869-894 MHz cellular downlink, so an urban capture is dynamic-range-limited and gain state must be recorded and checked for clipping. (2) Both BART sites are simulcast, and simulcast delay spread smears C4FM; a decode gap in an overlap zone is a propagation artefact, not a decoder bug. (3) Voice on this system is P25 Phase 2 TDMA with the proprietary AMBE+2 vocoder, so the acceptance target is the FDMA control channel''s BITSTREAM and message fields, not audio - which is also what SIGNAL-086 (metadata-only) wants. Not offline-synth: T-300 established that this repo''s synthetic P25 framing is simplified in five ways and is self-consistent with its own decoder, so only a real off-air capture can test the claim.'
   test_tier: offline-recorded
+- id: SIGNAL-088
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: Paging & Amateur Packet Radio
+  name: Terrestrial paging (FLEX/POCSAG)
+  summary: 'Blind-detect 929-932 MHz paging carriers as time-frequency regions, classify FLEX vs POCSAG from sync-word search (FLEX 0xA6C6AAAA, POCSAG preamble) and measured symbol rate/level count (2FSK/4FSK at 1600/3200/512/1200/2400 bps), and decode messages once a bitstream decoder is wired in. Added 2026-09-25 from a live 930.8 MHz explorer-agent capture (T-935/T-949) that found three FLEX channels the app detected but does not yet decode.'
+  band: 929-932 MHz (FCC 47 CFR Part 22 Subpart E paging allocation)
+  tx: none
+  receiver_hint: RTL-SDR/HackRF
+  refs:
+  - label: FCC 47 CFR Part 22 Subpart E
+    url: https://www.ecfr.gov/current/title-47/chapter-I/subchapter-B/part-22/subpart-E
+  - label: sigidwiki FLEX
+    url: https://www.sigidwiki.com/wiki/FLEX
+  - label: sigidwiki POCSAG
+    url: https://www.sigidwiki.com/wiki/POCSAG
+  capabilities:
+  - cfar-detection
+  - modulation-classifier
+  - blind-symbol-estimation
+  - digital-demod
+  - decoder-plugins
+  - signal-inventory
+  hardware_fit: native
+  accessory: null
+  fit_flags: null
+  fit_note: 'No existing use case covered terrestrial paging directly (only SIGNAL-023 Iridium ring-alert paging and RESEARCH-002''s generic rtl_433 flex-spec example mention paging in passing). FLEX''s 4-level FSK payload after a 2-level sync is a useful blind-classification stress case: level count changes mid-burst.'
+  test_tier: offline-recorded
+- id: SIGNAL-089
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: Paging & Amateur Packet Radio
+  name: Terrestrial APRS (AFSK1200/AX.25)
+  summary: 'Decode the primary North American APRS frequency: AFSK1200 demodulated to AX.25 frames carrying station callsign/SSID, position, course/speed, weather telemetry and free-text status, direct and digipeated (WIDE1-1/WIDE2-1). The same modem SIGNAL-036 uses for the ISS digipeater, without satellite Doppler.'
+  band: 144.390 MHz (Americas primary APRS frequency; 144.800 MHz Europe)
+  tx: none
+  receiver_hint: RTL-SDR
+  refs:
+  - label: aprs.org
+    url: http://www.aprs.org
+  - label: sigidwiki APRS
+    url: https://www.sigidwiki.com/wiki/APRS
+  capabilities:
+  - decoder-plugins
+  - analog-demod
+  - digital-demod
+  - signal-inventory
+  hardware_fit: native
+  accessory: null
+  fit_flags: null
+  fit_note: 'SIGNAL-036 is the ISS APRS digipeater relay specifically (with Doppler tracking); this is the everyday terrestrial APRS network heard directly from ground stations and digipeaters, same AFSK1200/AX.25 decode with no satellite pass or Doppler correction needed.'
+  test_tier: offline-recorded
