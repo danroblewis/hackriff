@@ -29287,6 +29287,27 @@ tasks:
       FOUND BY supervisor 2026-09-25 11:34 (merge gate reds x3): sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point
     high_effort_reason: "three bulk reds on a CPU-budget invariant (the run-wide chain cap): real admission race vs racy count must be told apart and fixed deterministically on the real-time scheduling path"
     dispatch: manual
+  - id: T-1017
+    milestone: MAUTO
+    title: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+    status: todo
+    priority: medium
+    deps:
+    - T-967
+    parallel_group: IDENTITY-LABEL
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus review of T-967 (2026-09-25). T-967 serves identity_label / identity_confidence on /api/inventory rows. Its first implementation guessed the label from field NAMES (IDENTITY_LABEL_KEYS ["ps","callsign","flight","station"], IDENTITY_CONFIDENCE_KEYS ["pi_share","share"] in crates/hk-model/src/decode.rs:243,248), which silently made any plugin's `station`/`share` field an identity label/confidence - an implicit plugin-output contract. The T-967 fix round narrows it to decoders with a known summary (RDS) and serves null otherwise. THIS TICKET designs the real contract:
+      1. A DECLARED label + confidence per decoder: the decoder/recipe manifest (and the built-in chains) state which output field is the human-readable identity label (e.g. RDS PS voted most-frequent, ADS-B callsign, AIS vessel name, FLEX/POCSAG capcode alias) and which is its confidence, with the confidence's meaning (vote share, CRC-valid rate). Plugin/stream contract (ADR-0010/0011, docs/stream-contract.md) + docs/api.md + api_contract.rs together (T-079). Pluggable decoders are consumers (CLAUDE.md), so a plugin opts in by declaring, never by naming a field a certain way.
+      2. Show the label on the other surfaces that carry identity: /api/events rows and the Selected/focus panel's identity box (T-967 worker's GAP 3).
+      3. Window scoping: today the label (like identity_value) is the all-time latest committed one; when a pane is scrubbed into the past the row can show a label decoded after the window. Either scope the label to the viewed window (the inventory is time-scoped to the view - CLAUDE.md signal model) or state the rule in docs/api.md; prefer scoping.
+      ACCEPTANCE: a plugin that declares no label shows none; RDS, AIS (T-963) and FLEX (T-950) show their declared labels via the manifest path; a scrubbed pane shows the label known within its window; contract tests for each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-model/hk-api/hk-plugins binaries you touch, api_contract, just test-ui, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-967 2026-09-25: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
