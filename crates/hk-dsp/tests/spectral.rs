@@ -444,6 +444,56 @@ fn partial_frames_emit_short_steps_once_armed() {
     assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
 }
 
+/// T-915: `finish` emits the stream's last, incomplete averaging as a partial frame — its own
+/// time, tuning, `n_avg` and span — where `flush` keeps it back. No arming is needed: nothing
+/// follows the end of a stream, so the partial frame is the only measurement those samples get.
+/// Under the minimum it is still discarded.
+#[test]
+fn finish_emits_the_streams_last_partial_frame() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let mut rng = Rng::new(15);
+    let prov = provenance(100e6, fs);
+    // Two full frames, then 5 segments and 100 samples short of a sixth.
+    let len = 2 * k * n + 5 * n + 100;
+    let x = synth::complex_noise(&mut rng, len, 0.1);
+    let h = header(0, &prov, Discontinuity::STREAM_START);
+
+    let mut p = StftProcessor::new(history_like(n, k)).unwrap();
+    let mut frames = Vec::new();
+    p.push(InputInfo::from(&h), &x, |f| frames.push(f.clone()));
+    assert_eq!(
+        p.flush(|f| frames.push(f.clone())),
+        0,
+        "flush keeps it back"
+    );
+    assert_eq!(frames.len(), 2);
+    assert_eq!(p.finish(2, |f| frames.push(f.clone())), 1);
+    let last = &frames[2];
+    assert_eq!(last.t.sample_index, (2 * k * n) as u64);
+    assert_eq!(last.spectrum.resolution.n_avg, 5);
+    assert_eq!(last.sample_count, (5 * n) as u64);
+    assert_eq!(last.provenance, prov);
+    assert_eq!(last.seq, 2);
+    assert!((db(mean(&last.spectrum.psd)) - db(0.1 / fs)).abs() < 0.5);
+    assert_eq!((p.stats().frames, p.stats().partial_frames), (3, 1));
+    assert_eq!(
+        p.finish(2, |f| frames.push(f.clone())),
+        0,
+        "a second finish has nothing left to emit"
+    );
+
+    // Under the minimum: discarded, exactly as a reset would.
+    let mut q = StftProcessor::new(history_like(n, k)).unwrap();
+    let mut few = Vec::new();
+    q.push(InputInfo::from(&h), &x, |f| few.push(f.clone()));
+    assert_eq!(q.finish(6, |f| few.push(f.clone())), 0);
+    assert_eq!(few.len(), 2);
+
+    // A processor that never saw a sample has nothing to finish.
+    let mut empty = StftProcessor::new(history_like(n, k)).unwrap();
+    assert_eq!(empty.finish(1, |_| panic!("no frame")), 0);
+}
+
 /// T-139 no-regression: a stream that never retunes (stream start, gaps, a gain step) emits
 /// bit-identical frames with partial frames enabled, so fixed-tune history tiles are unchanged.
 #[test]

@@ -76,6 +76,12 @@ pub(crate) const HISTORY_QUEUE_FRAMES: usize = 600;
 /// T-139: a partial row needs at least `K / PARTIAL_MIN_DIVISOR` segments (10 ms at 10 rows/s).
 pub(crate) const PARTIAL_MIN_DIVISOR: usize = 10;
 
+/// T-139's minimum for a partial row of a `k`-segment STFT; also the minimum a stream's last
+/// averaging needs to be emitted at the stream's end ([`hk_dsp::StftProcessor::finish`], T-915).
+pub(crate) fn partial_min_segments(k: usize) -> usize {
+    k.div_ceil(PARTIAL_MIN_DIVISOR)
+}
+
 /// Updates the tile counters from the product.
 pub(crate) fn update_tiles(shared: &Shared, product: &FloorProduct) {
     update_tile_counters(&shared.counters, product);
@@ -93,12 +99,8 @@ pub(crate) fn update_tile_counters(counters: &Counters, product: &FloorProduct) 
     set(&h.bytes_written, c.bytes_written + u.bytes_written);
 }
 
-/// Updates the view-scheme tile counters (T-439).
-pub(crate) fn update_view_tiles(shared: &Shared, view: &Pyramid) {
-    update_view_tile_counters(&shared.counters, view);
-}
-
-/// [`update_view_tiles`] into any run's counters (T-510).
+/// Updates the view-scheme tile counters (T-439) in any run's counters (T-510; since T-915 the view
+/// writer takes the counters rather than the whole `Shared`).
 pub(crate) fn update_view_tile_counters(counters: &Counters, view: &Pyramid) {
     let s = view.stats();
     set(&counters.history.view_tiles_written, s.tiles_written);
@@ -599,6 +601,46 @@ struct ViewQueueState {
     pending: VecDeque<(SpectrumFrame, FrameOrigin)>,
     /// Set once the reader has handed over everything; `Some(true)` also asks for the final seal.
     finish: Option<bool>,
+    /// Producers still able to push ([`ViewProducer`]s alive). T-915: the writer finishes only
+    /// once this is zero.
+    producers: usize,
+    /// The owning reader is unwinding ([`ViewWriter`]'s `Drop`): finish without waiting for the
+    /// producers, which may be waiting on a stop that unwinding has not yet raised.
+    abandon: bool,
+}
+
+impl ViewQueueState {
+    /// The writer may end: asked to, and nothing can push again (or the run is unwinding).
+    fn may_end(&self) -> bool {
+        self.finish.is_some() && (self.producers == 0 || self.abandon)
+    }
+}
+
+/// **A producer's claim on a [`ViewQueue`] (T-915): the writer does not end while one is alive.**
+///
+/// The queue has two ends owned by two readers that finish independently: [`crate::spectrum`]'s
+/// reader pushes, and this module's reader ends the writer ([`ViewWriter::finish`]) when *its*
+/// ring read closes. Both drain the same ring to `Closed`, but not at the same pace: a spectrum
+/// reader running behind (an FFT per hop, on a loaded box) was still turning its backlog into rows
+/// after the history reader had finished the writer, and every row it pushed then sat in a queue
+/// nobody would read again — dropped, uncounted, at every segment end. A re-plumbing retune is a
+/// segment end, so the rows lost were the departed band's newest: T-915's never-filled strip.
+///
+/// So the producer holds one of these for as long as it can push, and the writer's end waits for
+/// the last to drop. It is taken **before any reader is spawned** (`run::start_segment`), so a
+/// segment whose spectrum reader never started — a failed spawn — drops it with the half-built
+/// segment instead of leaving the writer waiting for a producer that does not exist. A queue with
+/// no producer at all (a further front end's, T-510, which runs no spectrum reader) ends exactly
+/// as before.
+pub(crate) struct ViewProducer(Arc<ViewQueue>);
+
+impl Drop for ViewProducer {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        st.producers = st.producers.saturating_sub(1);
+        drop(st);
+        self.0.wake.notify_all();
+    }
 }
 
 /// The hand-off itself, created with the segment so the **producer** does not have to wait for the
@@ -622,6 +664,15 @@ impl ViewQueue {
             wake: Condvar::new(),
             capacity: capacity.max(1),
         }
+    }
+
+    /// A [`ViewProducer`] claim: the writer will not end until it is dropped.
+    pub(crate) fn producer(self: &Arc<Self>) -> ViewProducer {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .producers += 1;
+        ViewProducer(Arc::clone(self))
     }
 
     /// Hands `frame` to the writer. Never blocks, never waits on the pyramid.
@@ -648,19 +699,20 @@ impl ViewWriter {
     pub(crate) fn start(
         q: Arc<ViewQueue>,
         view: Arc<Mutex<Pyramid>>,
-        shared: Arc<Shared>,
+        counters: Arc<Counters>,
     ) -> anyhow::Result<Self> {
-        let (qt, st) = (Arc::clone(&q), Arc::clone(&shared));
+        let qt = Arc::clone(&q);
         let thread = std::thread::Builder::new()
             .name("hk-view".into())
-            .spawn(move || view_writer(&qt, &view, &st))?;
+            .spawn(move || view_writer(&qt, &view, &counters))?;
         Ok(Self {
             queue: q,
             thread: Some(thread),
         })
     }
 
-    /// Drains what is queued, seals when `seal` (T-446's **one** decision, passed in rather than
+    /// Drains what is queued — including everything a live [`ViewProducer`] still pushes, which
+    /// it waits for (T-915) — seals when `seal` (T-446's **one** decision, passed in rather than
     /// recomputed), checkpoints, and joins.
     pub(crate) fn finish(mut self, seal: bool) {
         {
@@ -690,6 +742,7 @@ impl Drop for ViewWriter {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 st.finish.get_or_insert(false);
+                st.abandon = true;
             }
             self.queue.wake.notify_all();
             let _ = t.join();
@@ -718,8 +771,8 @@ impl Drop for ViewWriter {
 /// thread yields: `std`'s mutex is not fair on every platform (macOS's `os_unfair_lock`), and a
 /// thread that re-locks in a tight loop can keep a waiting reader out for the whole backlog.
 /// Nothing here can reach the ring.
-fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, shared: &Shared) {
-    let h = &shared.counters.history;
+fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, counters: &Counters) {
+    let h = &counters.history;
     let lock = || view.lock().unwrap_or_else(PoisonError::into_inner);
     let (to_io, io_rx) = std::sync::mpsc::channel::<PendingWrites>();
     std::thread::scope(|sc| {
@@ -731,7 +784,7 @@ fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, shared: &Shared) {
                         // What an inline seal would have returned from its frame's `ingest`.
                         inc(&h.view_rejected);
                     }
-                    update_view_tiles(shared, &lock());
+                    update_view_tile_counters(counters, &lock());
                 }
             });
         // No I/O thread (the OS refused one): write on this thread, as the lock-free fallback.
@@ -752,13 +805,15 @@ fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, shared: &Shared) {
         };
         let mut batch: Vec<(SpectrumFrame, FrameOrigin)> = Vec::new();
         loop {
+            // `may_end` is read in the same critical section as the drain, so once it is true
+            // every frame any producer pushed is in `batch` (T-915).
             let finish = {
                 let mut st = q.state.lock().unwrap_or_else(PoisonError::into_inner);
-                while st.pending.is_empty() && st.finish.is_none() {
+                while st.pending.is_empty() && !st.may_end() {
                     st = q.wake.wait(st).unwrap_or_else(PoisonError::into_inner);
                 }
                 batch.extend(st.pending.drain(..));
-                st.finish
+                st.may_end().then_some(st.finish).flatten()
             };
             if !batch.is_empty() {
                 let (mut folded, mut late, mut rejected) = (0u64, 0u64, 0u64);
@@ -781,7 +836,7 @@ fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, shared: &Shared) {
                 add(&h.view_frames, folded);
                 add(&h.view_late, late);
                 add(&h.view_rejected, rejected);
-                update_view_tiles(shared, &lock());
+                update_view_tile_counters(counters, &lock());
             }
             if let Some(seal) = finish {
                 let writes = {
@@ -827,7 +882,7 @@ fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, shared: &Shared) {
     // has one, and then its own next take, `devices::finish` or the pyramid's drop lands it.
     let mut p = lock();
     let _ = p.flush_writes();
-    update_view_tiles(shared, &p);
+    update_view_tile_counters(counters, &p);
 }
 
 /// T-901: performs `writes` with the view lock **released**, then books them under it. `false`
@@ -863,7 +918,7 @@ pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> S
     stft_cfg.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
     // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
     stft_cfg.partial = Some(PartialFrames {
-        min_segments: k.div_ceil(PARTIAL_MIN_DIVISOR),
+        min_segments: partial_min_segments(k),
         arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
     });
     stft_cfg
@@ -895,7 +950,7 @@ pub(crate) fn run(
     // product, `/api/history`, `/api/timeline`, `/api/coverage` — is still fed from here, with
     // T-397's max-hold intact.
     let view_writer = match (view, shared.view_queue.clone()) {
-        (Some(v), Some(q)) => Some(ViewWriter::start(q, v, Arc::clone(&shared))?),
+        (Some(v), Some(q)) => Some(ViewWriter::start(q, v, Arc::clone(&shared.counters))?),
         _ => None,
     };
     let mut reader = shared.ring.reader_at(0);
@@ -963,7 +1018,18 @@ pub(crate) fn run(
         set(&rc.partial_frames, st.partial_frames);
     }
     // Stream end or detach: frames still in flight are folded in before the queue drains.
-    stft.flush(&mut on_frame);
+    //
+    // T-915: when the segment ends in a **re-plumbing retune** (`continues`), so is the averaging
+    // in progress — the departed band's last row, captured and otherwise never measured. That is
+    // T-139's partial row for a retune, which this reader's own STFT would have emitted had the
+    // retune reached it in place; a re-plumb ends the stream instead, so the reset never comes. A
+    // stream that simply ENDS (a replay, a stop) keeps T-139's other rule: a fixed tune folds whole
+    // rows only (`scheduler_history_fixed_tune_emits_no_partial_rows`).
+    if shared.continues.load(Ordering::SeqCst) {
+        stft.finish(partial_min_segments(stft_cfg.averages), &mut on_frame);
+    } else {
+        stft.flush(&mut on_frame);
+    }
     account_cpu();
     let st = stft.stats();
     set(&rc.frames, st.frames);
@@ -1329,5 +1395,80 @@ mod tests {
             notched.iter().all(|&d| d < 6.0),
             "stored history still shows a spike at a hop centre: {notched:?} dB over the median"
         );
+    }
+
+    /// **T-915: the view writer ends after its producer, not after the reader that ends it.**
+    ///
+    /// The history reader ends the writer when its own ring read closes; the spectrum reader,
+    /// which pushes the rows, can still be draining its backlog then. The shape is forced here
+    /// deterministically: the end is requested *before* the writer has seen anything, the writer
+    /// folds the first row, and only then does the producer push the rest — the departed band's
+    /// newest rows. Before the fix the writer returned with the first row and the rest were
+    /// never folded (`view_frames` stayed at 1); now it waits for the producer's claim to drop.
+    #[test]
+    fn t915_the_view_writer_folds_every_row_its_producer_pushes_before_ending() {
+        const ROWS: usize = 4;
+        const KV: usize = 4;
+        let dir = TempDir::new("t915-view-writer");
+        let welch = WelchConfig::new(N);
+        let t_cell = Duration::from_nanos((KV * welch.hop()) as u64 * 1_000_000_000 / FS as u64);
+        let view = Arc::new(Mutex::new(
+            Pyramid::open(&dir.0, view_config(FS / N as f64, t_cell)).unwrap(),
+        ));
+        let counters = Arc::new(Counters::default());
+        let prov = provenance();
+        let mut stft = hk_dsp::StftProcessor::new(StftConfig::new(welch, KV)).unwrap();
+        let samples: Vec<Complex32> = (0..ROWS * KV * welch.hop() + N)
+            .map(|i| Complex32::new(((i * 7919) % 13) as f32 * 0.01, 0.0))
+            .collect();
+        let mut frames = Vec::new();
+        stft.push(
+            InputInfo {
+                time: SampleTime {
+                    sample_index: 0,
+                    host_time: Timestamp::from_unix_nanos(T0),
+                },
+                discontinuity: Discontinuity::STREAM_START,
+                dropped_before: 0,
+                provenance: &prov,
+            },
+            &samples,
+            |f: &SpectrumFrame| frames.push(f.clone()),
+        );
+        assert_eq!(frames.len(), ROWS);
+        let origin = FrameOrigin {
+            source: source_key("synthetic:t397"),
+            site: None,
+        };
+
+        let q = Arc::new(ViewQueue::new(64));
+        let producer = q.producer();
+        q.push(&counters.history, &frames[0], origin);
+        // The history reader's end, requested before the writer has looked at the queue.
+        q.state.lock().unwrap().finish = Some(false);
+        let w =
+            ViewWriter::start(Arc::clone(&q), Arc::clone(&view), Arc::clone(&counters)).unwrap();
+        let folded = || counters.history.view_frames.load(Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while folded() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer never folded"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The producer, still draining, pushes the rest and only then lets go.
+        for f in &frames[1..] {
+            q.push(&counters.history, f, origin);
+        }
+        drop(producer);
+        w.finish(false);
+        assert_eq!(
+            folded(),
+            ROWS as u64,
+            "the writer ended before its producer: rows pushed after the end was requested were \
+             never folded"
+        );
+        assert_eq!(counters.history.view_dropped.load(Ordering::Relaxed), 0);
     }
 }

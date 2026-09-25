@@ -28,7 +28,7 @@ use hk_model::sigmf::SigmfMeta;
 use hk_stream::{GATED_SPECTRUM_MAX_ROW_RATE_HZ, StreamHeader, StreamKind};
 use serde::{Deserialize, Serialize};
 
-use hk_dsp::{StftConfig, WelchConfig, WindowKind};
+use hk_dsp::{PartialFrames, StftConfig, WelchConfig, WindowKind};
 
 /// Datatype of spectrum rows: `fft_size` little-endian f32 PSD values, dBFS/Hz, ascending
 /// frequency.
@@ -366,6 +366,17 @@ pub fn row_plan(
     // the DC notch the header declares (`dc_excluded_hz`), so the LO spike at each tune centre is not drawn as a signal.
     let mut stft = StftConfig::new(welch, k);
     stft.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
+    // T-915: a retune in place (same class, same rate) resets this STFT, and without a partial
+    // frame the averaging in progress — the departed band's last row, up to one row period of
+    // captured samples — was discarded, so the view lattice's finest node held the band's time
+    // as observed and never measured. T-139's rule, as the history reader already has it: once a
+    // retune or rate change arms the stream, the reset emits that averaging as a row with its true
+    // `n_avg`, under the tuning it measured. A tune held for a full row disarms it, so gaps on a
+    // held tune discard exactly as before.
+    stft.partial = Some(PartialFrames {
+        min_segments: crate::history::partial_min_segments(k),
+        arm_on: hk_core::Discontinuity::RETUNE | hk_core::Discontinuity::RATE_CHANGE,
+    });
     RowPlan {
         stft,
         row_rate_hz,
