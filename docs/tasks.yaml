@@ -23846,6 +23846,8 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): detections drawn as their own layer: confirmed signals prominent, candidates visibly weaker, and neither ever drawn over the grey fog. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): T-808's boxes are now the PRIMARY geometry for every feature (docs/23 §10.6 rule 6). Hover/select hit-testing on the box (MapTip anywhere inside, click selects, keyboard reading order) is carried by T-909 (quick) and T-910 (full).
     branch: task-t808
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 15:13).
@@ -23890,15 +23892,17 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): signals and events appear as pins; hovering one shows a tooltip (MapTip), and clicking selects it with a visible selected state. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): the user judged the pins 'awful, much worse than the boxes' on staging (a provisional batch at 19:27 put task-t809 there). T-809 lands as pins.ts + the quick fix T-909 (box >= 6 px draws no glyph; pin only as scale-dependent generalization; hit area = the box), done on task-t809 before its gate. The full re-scope into feature symbolization (polygons with class symbology, generalization, hit-test/select, labels) is T-910.
   - id: T-810
     milestone: MMAP
-    title: 'Pin clustering at coarse zoom from /api/tiles/events, resolving to individuals on zoom-in'
+    title: Density layer at coarse zoom (features per cell from /api/tiles/events) instead of numbered cluster bubbles; drilling in resolves to boxes (re-scoped from pin clustering, user 19:35)
     status: todo
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-809]
+    depends_on: [T-809, T-910]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -23921,6 +23925,8 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): zoomed out, nearby pins merge into numbered clusters; zooming in splits them back into individual pins. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): RE-SCOPED: not pin clustering. Where many features would generalize at coarse zoom, draw a DENSITY/heat layer (features per cell, from /api/tiles/events) - the GIS 'aggregate at small scale' - toggleable per pane in the layers menu, stroke/fill that never tints a measurement (keep the overlays on/off byte-identical guard); zooming in resolves to T-910's boxes. No numbered cluster bubbles. WHAT THE USER WILL SEE ON STAGING: zoomed far out, busy regions glow by how many signals are there; zoom in and they resolve into rectangles.
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
@@ -23996,7 +24002,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-807, T-808, T-809]
+    depends_on: [T-807, T-808, T-809, T-910]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -24019,6 +24025,8 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): every layer stays legible over the waterfall (figure-ground) and distinguishable under a colour-blind simulation; no two layers share a colour meaning. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): ADDED: (a) the SYMBOLOGY TABLE on the polygon - Confirmed = solid outline + light fill; Candidate = dashed outline, no/very light fill; unexplained = outline + '?' label; curated/human = distinct outline style; class carried by fill/outline/label, never glyph shape; colour-blind safe; (b) LABEL PLACEMENT - freq · bw · class inside or just above a box wide enough to hold it, overlapping labels thinned by priority (Confirmed > Candidate), GIS-style. Coordinate with T-910 (which draws the polygons).
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
@@ -26633,6 +26641,49 @@ tasks:
       FOUND BY T-815 Opus review 2026-09-24.
 
       2026-09-24 coordinator: item 2 (honest drawer text) is DONE in T-815's fix fa8ba25a ('the log records this band looked at X ago for Y'). Remaining: item 1 (restore the frequency span) and item 3 (sweep records - the route has no filter that excludes them without dropping dwells). ADDED item 4 (T-815 fix worker): if an older day's slice fails on first load (network), the 'not fully loaded' row sticks until that day ages out of the 7-day window - retry failed older slices on refresh.
+  - id: T-909
+    milestone: MMAP
+    title: "Quick fix: draw the box, not the centre glyph, when a feature's box is >= 6 px (pins only as generalization) - staging not worse than before T-809 (user 19:35)"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER 2026-09-24 19:35, looking at staging (handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): T-809's pins are "awful, much much worse than the boxes we had before. A point doesn't represent something meaningful on a waterfall graph. A signal has a frequency width and a duration, that's a rectangle." Staging showed them because a batch provisionally merged task-t809 at 19:27; T-809 had not landed on main.
+      QUICK FIX so staging is never worse than before T-809, implemented ON task-t809 before its gate (so T-809 lands already fixed): a feature whose box is >= 6 px on screen in both axes draws NO centre glyph - the box (T-808) is the representation - and the pin glyph remains only as the scale-dependent generalization below that; hover/select still work by an invisible hit area covering the box, laid out in the same per-frame pass. Fallback if unsafe in the time: the Pins layer defaults OFF. Tests: >=6 px draws no glyph; <6 px draws the symbol; hover/click inside a large box hits the feature - each red on the pre-fix code.
+      WHAT THE USER WILL SEE ON STAGING: the boxes, as before T-809; tiny far-zoomed signals show a small symbol; hovering a box shows its tip.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 19:35 on staging.
+    branch: task-t809
+  - id: T-910
+    milestone: MMAP
+    title: "GIS feature symbolization: signals as (t, f) polygons with class symbology, scale-dependent generalization below ~6 px, hit-test/select on the polygon, labels (re-scope of T-809's pins)"
+    status: todo
+    priority: high
+    deps:
+    - T-809
+    - T-909
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER DECISION 2026-09-24 19:35 (docs/23 §10.6 rule 6; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): the map is GIS, not Google Maps - features are drawn at their true extent; markers are a generalization, never the representation. This ticket is the full re-scope of T-809 ("Pins") into FEATURE SYMBOLIZATION, building on T-808's box layer (the primary geometry) and T-809's pins.ts (which becomes the generalization path only):
+      1. GEOMETRY: every detection/emitter/event is a polygon in (t, f) - its box - in content space through the pane's capture-time mapping, in the same render pass as the tiles (docs/23 §10.1). A single-frame impulse is a thin bar of its measured bandwidth. An ongoing box runs to the live edge by assumption; drawn at the pane's resolution tier.
+      2. SCALE-DEPENDENT GENERALIZATION: below ~6 px (either axis) a feature collapses to a small centre symbol with the same symbology; at or above, it is the box again (T-909's quick fix is the start of this).
+      3. SYMBOLOGY BY ATTRIBUTE ON THE POLYGON: Confirmed = solid outline + light fill; Candidate = dashed outline, no/very light fill; unexplained = outline + '?' label; curated/human = distinct outline style. Class carried by fill/outline/label, not glyph shape (palette: T-813).
+      4. IDENTIFY = HIT-TEST THE POLYGON: hover anywhere inside shows the MapTip; click selects (thicker outline + corner handles; the sheet rises); keyboard Tab walks features in reading order (time, then frequency). Confirm T-808's boxes carry this.
+      5. LABELS by placement rules (freq · bw · class inside or just above a wide-enough box; overlapping labels thinned by priority Confirmed > Candidate) - with T-813.
+      Thin client: presentation only; symbology reads already-served attributes. Tests: polygon at true extent moves with the tile rows under scroll/zoom (drift = invariant violation); generalization threshold both ways; symbology per class; hit-test inside/outside; keyboard order.
+      WHAT THE USER WILL SEE ON STAGING: signals are rectangles at their true time-frequency extent, styled by class, selectable by clicking inside them; far-zoomed tiny ones become small symbols and turn back into boxes as you zoom in.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 19:35 on staging.
+    effort_reason: a symbolization model on the per-frame render pass (shared-time-axis invariant) across box, generalization, hit-test and labels
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
