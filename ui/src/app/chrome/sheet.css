@@ -1,0 +1,56 @@
+/* T-803 (MAP-03): the bottom sheet (`chrome/sheet.ts`). Band 3 of docs/23 §10.1: screen space,
+   above the floating chrome, laid out on interaction. Its height is set by the script from one
+   definition (`snapHeights`); only the width, dock position and look live here.
+   NEVER MODAL: no backdrop, no overlay element, nothing outside `.sheet`'s own box — the canvas
+   beneath keeps every pointer event that does not start on the sheet. Never faded (docs/23 §10.2). */
+.sheet { position: fixed; z-index: 6; bottom: var(--sheet-bottom, 70px); height: 56px; box-sizing: border-box;
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(8px);
+  border: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 30px var(--shadow);
+  transition: height .28s cubic-bezier(.2,.8,.2,1); }
+.sheet.dragging { transition: none; }
+/* T-824: the handle is a >= 24 px target (docs/23 §10.5); the title strip gave up the 4 px, so peek stays 56. */
+.sheet .sheet-grab { flex: none; height: 24px; width: 100%; display: grid; place-items: center; padding: 0;
+  border: 0; background: none; cursor: ns-resize; touch-action: none; }
+.sheet .sheet-grab i { width: 40px; height: 4px; border-radius: 2px; background: var(--dim); }
+.sheet .sheet-grab:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
+.sheet .sheet-head { flex: none; height: 30px; display: flex; align-items: center; padding: 0 16px 4px;
+  border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+.sheet .sheet-close { margin-left: auto; flex: none; min-width: 28px; min-height: 28px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.sheet .sheet-close:hover, .sheet .sheet-close:focus-visible { border-color: var(--line); color: inherit; }
+.sheet .sheet-close[hidden] { display: none; }
+.sheet .sheet-title { font-size: 12px; letter-spacing: .04em; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Content reflows per state: the body takes whatever height the snap leaves and scrolls inside it. */
+.sheet .sheet-body { flex: 1; min-height: 0; overflow: auto; }
+.sheet .sheet-body > .focus { border: 0; background: none; overflow: visible; min-height: 0; }
+.sheet[data-snap="peek"] .sheet-body { visibility: hidden; }
+.sheet[data-snap="peek"] .sheet-head { border-bottom-color: transparent; }
+/* Wide screens: width-capped and docked to the right (docs/23 §10.3), where the focus column it
+   replaces used to float; the inventory column still holds the left until MAP-14 moves it into
+   this sheet's Explore tab.
+   T-802 x T-803: it stops short of the right edge by `--sheet-gutter`, the column the floating
+   zoom control and the follow-live FAB (`map-controls.css`: 8 px inset, the 48 px FAB the widest)
+   sit in, plus a gap. The sheet grows upward, so any overlap at the bottom-right would hide the FAB
+   at half and full; a gutter keeps both reachable at every snap height and on every width. */
+.sheet { --sheet-gutter: 64px; right: var(--sheet-gutter); width: min(520px, calc(100vw - 8px - var(--sheet-gutter))); }
+/* Narrow screens: as wide as the gutter allows, for one-handed reach. */
+@media (max-width: 900px) {
+  .sheet { left: 8px; width: auto; }
+}
+@media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
+
+/* T-814 (MAP-14): the Explore drawer inside the sheet body (mockup `.poi`). */
+.explore-drawer { padding: 12px 16px 8px; }
+.explore-drawer .drawer-peek { margin: 0 0 8px; color: var(--muted); font-size: 11.5px; }
+.explore-drawer h4 { margin: 12px 0 6px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.explore-drawer ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
+.explore-drawer li { display: flex; gap: 4px; align-items: stretch; }
+.explore-drawer li button.row { flex: 1; min-width: 0; text-align: left; border: 1px solid var(--line); background: var(--panel-2, none); color: inherit; border-radius: 8px; padding: 8px 10px; display: grid; gap: 2px; cursor: pointer; }
+.explore-drawer li button.row:hover { border-color: var(--muted); }
+.explore-drawer li.selected button.row { border-color: var(--amber); }
+/* docs/23 §10.6 P4: the one control that moves the map is small and explicit (>= 24 px target). */
+.explore-drawer li button.go { flex: none; align-self: center; min-width: 28px; min-height: 28px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: none; color: inherit; font-size: 11px; cursor: pointer; }
+.explore-drawer li button.go:hover, .explore-drawer li button.go:focus-visible { border-color: var(--amber); }
+.explore-drawer .f { font-family: var(--mono, monospace); }
+.explore-drawer .why { color: var(--muted); font-size: 11.5px; }
+.explore-drawer .tag { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); }

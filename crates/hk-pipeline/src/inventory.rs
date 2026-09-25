@@ -94,6 +94,10 @@ pub const TRACK_PRODUCER: &str = "hk-track";
 /// Actor of automatic confirmations (rule id and version) in the lifecycle history.
 pub const CONFIRM_RULE: &str = "hk-pipeline/confirm@1";
 
+/// Actor of confirmations by a **synthesized** pipeline's decode (ADR-0015 §5.5 as derived by
+/// ADR-0022 §6; MAUTO M-9). `@2`: ADR-0022's gate, not §5.5's 64 bits / 3 frames / width 16.
+pub const CONFIRM_SYNTH_RULE: &str = "hk-pipeline/confirm-synth@2";
+
 /// Actor of automatic retractions of provisional live entries (T-109) in the lifecycle history.
 pub const RETRACT_RULE: &str = "hk-pipeline/retract@1";
 
@@ -204,6 +208,18 @@ pub trait Inventory: Send {
         Ok(())
     }
 
+    /// The `ConfirmPolicy.synthesized` clause this inventory confirms under (T-884 item 1).
+    ///
+    /// The run's inventory holds the configured [`ConfirmPolicy`], but MAUTO's attach step
+    /// ([`crate::synth::attach`]) runs outside it, over its own repository connection — so it has
+    /// to be told. Reading it from here rather than building a fresh [`SynthesizedConfirm`] is
+    /// what makes the configured field mean something on the one path that gates an irreversible
+    /// transition. The default is the default policy's, so an inventory that has no policy of its
+    /// own (the null inventory, a test double) is no weaker than the shipped rule.
+    fn synthesized_confirm(&self) -> SynthesizedConfirm {
+        ConfirmPolicy::default().synthesized
+    }
+
     /// The emitter whose inventory row `track`'s observations are recorded against, when this
     /// inventory has given it one (T-388).
     ///
@@ -214,6 +230,19 @@ pub trait Inventory: Send {
     ///
     /// Read-only and cheap: an answer already worked out when the row was written, never a query.
     fn emitter_of_track(&self, _track: TrackId) -> Option<EmitterId> {
+        None
+    }
+
+    /// T-878: the emitter `track`'s observations were **last recorded against**, whether the track
+    /// is still open or has closed — unlike [`Self::emitter_of_track`], which stops answering at
+    /// the close so the live push publishes nothing further.
+    ///
+    /// This is how a measuring chain ([`crate::chains::classify`]) finds the entry for the region
+    /// it measured without looking a frequency up anywhere: the answer is the row this inventory
+    /// itself wrote for that track. `None` when it wrote none (an in-band fragment, a hop-set
+    /// member, a merged-away track) or has forgotten it past its bound; the caller then records
+    /// nothing rather than guessing.
+    fn recorded_emitter_of_track(&self, _track: TrackId) -> Option<EmitterId> {
         None
     }
 }
@@ -302,6 +331,270 @@ pub struct ConfirmPolicy {
     /// Largest offset of the measured subcarrier from [`Self::pilot_nominal_hz`], Hz. Default 100
     /// — the pilot PLL's own pull-in range, so anything outside it never locked here at all.
     pub pilot_tolerance_hz: f64,
+    /// MAUTO M-9: the confirm-by-decode rule for a synthesized pipeline ([`SynthesizedConfirm`]).
+    pub synthesized: SynthesizedConfirm,
+}
+
+/// `ConfirmPolicy.synthesized` (ADR-0015 §5.5, **as derived by ADR-0022 §6**; actor
+/// [`CONFIRM_SYNTH_RULE`]).
+///
+/// It gates an **irreversible** transition — nothing returns to candidate, so a wrong confirm is
+/// undone only by a user delete — and every clause is a positive measurement that must be present:
+/// a missing or NaN one refuses. The numbers are ADR-0022's, derived from the user's budget of
+/// one wrong Confirmed emitter per unattended week; they are guesses on a one-way door
+/// everywhere ADR-0022 says so (the 8-bit width floor, the 9.7-bit margin inside 24), and only
+/// ever tighten.
+///
+/// The gate, in order (ADR-0022 §6):
+/// 1. the rank-1 result is `solved` on hold-out (a partial verdict never changes lifecycle
+///    state), and the profile is not `quick`;
+/// 2. `width ≥ min_check_width`;
+/// 3. `check_bits = width × differences − L_check ≥ hard_check_floor_bits` (a confirmation always
+///    carries a check, never sync excess alone);
+/// 4. `analytic_holdout_bits ≥ min_analytic_holdout_bits` — only analytic-null bits pay, each net
+///    of its own stage's look-elsewhere; the job-total `look_elsewhere_bits` is **not** an input
+///    (ADR-0022 §2.3);
+/// 5. a **searched** check (open search, or a template discovered by an earlier search): ADR-0021
+///    §8.2's null control ran and did not cap;
+/// 6. front-end trust: at most `max_suspect_detection_fraction` suspect detections and no overload
+///    in the analysed window. **No detection in the window refuses** — zero suspect detections out
+///    of zero is not a measurement — and so does an unknown overload state.
+///
+/// Not here: ADR-0022 §8's rolling decision-rate counter against `assumed_decisions_per_week`
+/// (T-575). The field is carried so the configuration states the denominator the thresholds
+/// assume.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SynthesizedConfirm {
+    /// Run this rule at all.
+    pub enabled: bool,
+    /// ADR-0022 §4.1: 24 (= 14.3 bits of budget + 9.7 of stated model margin).
+    pub min_analytic_holdout_bits: f64,
+    /// ADR-0022 §4.3: at least this much from a check stage. Derived.
+    pub hard_check_floor_bits: f64,
+    /// ADR-0022 §4.3: a degenerate-null floor. **Assumed, not derived** (T-577).
+    pub min_check_width: u32,
+    /// ADR-0022 §1.2: the budget's denominator. Monitored, not trusted (§8, T-575).
+    pub assumed_decisions_per_week: u32,
+    /// ADR-0022 §5.3: ADR-0021 §8.2's control must have run and passed for a searched check.
+    pub require_null_control_when_searched: bool,
+    /// ADR-0015 §5.5 condition 4, unchanged: 0.5.
+    pub max_suspect_detection_fraction: f64,
+    /// ADR-0015 §5.5 condition 4, unchanged: no overload in the window.
+    pub forbid_overload_in_window: bool,
+}
+
+impl Default for SynthesizedConfirm {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_analytic_holdout_bits: 24.0,
+            hard_check_floor_bits: 16.0,
+            min_check_width: 8,
+            assumed_decisions_per_week: 20_000,
+            require_null_control_when_searched: true,
+            max_suspect_detection_fraction: 0.5,
+            forbid_overload_in_window: true,
+        }
+    }
+}
+
+/// What [`SynthesizedConfirm::decide`] reads: the rank-1 result of a finished job and the window's
+/// front-end trust. Everything here is also stored on the `emitter_synthesis` row and the Decode
+/// provenance, so the decision is reconstructible without the job.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SynthesizedEvidence<'a> {
+    /// The job's profile.
+    pub profile: hk_synth::Profile,
+    /// The rank-1 result.
+    pub result: &'a hk_synth::PipelineResult,
+    /// The pipeline's name for the reason text (`generic-fsk-framed`, a template id).
+    pub pipeline: String,
+    /// Share of the emitter's detections in the window that were suspect; `None` when no
+    /// detection of the emitter overlaps the window, which refuses: with nothing measured, the
+    /// front end's trust is unknown, not clean (a CRC-valid image of a real signal is exactly the
+    /// ghost this clause exists for, and only a detection's flags can say so).
+    pub suspect_fraction: Option<f64>,
+    /// Whether any acquired IQ was recorded under an overloaded front end. `None` (not known)
+    /// refuses.
+    pub overload: Option<bool>,
+}
+
+/// The outcome served as `confirm.outcome` (ADR-0015 §5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SynthConfirmOutcome {
+    /// The rule confirmed the emitter.
+    Confirmed,
+    /// The rule would confirm, and the emitter already was (or a user decision stands).
+    Already,
+    /// The evidence does not meet the rule; the reason says which clause.
+    Insufficient,
+    /// Nothing to confirm: no emitter was attached.
+    NotAttached,
+}
+
+/// A decision, with the backend-rendered reason naming the arithmetic (ADR-0022 §6).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SynthConfirmDecision {
+    /// `hk-pipeline/confirm-synth@2`.
+    pub rule: &'static str,
+    /// What happened.
+    pub outcome: SynthConfirmOutcome,
+    /// The analytic hold-out bits the gate read, when there were any.
+    pub evidence_bits: Option<f64>,
+    /// Why — on a confirm, the lifecycle reason itself.
+    pub reason: String,
+}
+
+impl SynthesizedConfirm {
+    /// ADR-0022 §4.2: the differences a check of `width` bits must show for its own bits alone to
+    /// reach the threshold, `max(1, ⌈(min_analytic + L_check) / width⌉)`. Derived per job; never
+    /// stored as a constant.
+    pub fn min_differences(&self, width: u32, l_check: f64) -> u64 {
+        if width == 0 {
+            return u64::MAX;
+        }
+        ((self.min_analytic_holdout_bits + l_check) / f64::from(width))
+            .ceil()
+            .max(1.0) as u64
+    }
+
+    /// `Ok(reason)` when the gate passes (the lifecycle reason), `Err(reason)` naming the first
+    /// clause that refused. Never looks at the emitter's state: [`crate::synth::attach`] does.
+    pub fn decide(&self, ev: &SynthesizedEvidence<'_>) -> Result<String, String> {
+        use hk_synth::{Profile, Verdict};
+        if !self.enabled {
+            return Err("the synthesized confirm rule is disabled".into());
+        }
+        let r = ev.result;
+        if r.verdict != Verdict::Solved {
+            return Err(format!(
+                "the best result is `{}`, not solved on hold-out: a partial verdict never changes \
+                 lifecycle state",
+                serde_json::to_value(r.verdict)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            ));
+        }
+        if ev.profile == Profile::Quick {
+            return Err("`quick` never confirms".into());
+        }
+        let Some(h) = &r.holdout else {
+            return Err("no hold-out evidence".into());
+        };
+        let Some(width) = h.check_width else {
+            return Err("no check width: a confirmation always carries a check".into());
+        };
+        if width < self.min_check_width {
+            return Err(format!(
+                "a {width}-bit check is under the {}-bit floor",
+                self.min_check_width
+            ));
+        }
+        let Some(l_check) = h.l_check.map(f64::from).filter(|l| l.is_finite()) else {
+            return Err(
+                "the look-elsewhere of the search that discovered this check was not recorded; \
+                 an unknown charge is not a zero one"
+                    .into(),
+            );
+        };
+        // ADR-0022 §4.2: a check can be worth no more than `width × differences − L_check`,
+        // whatever the evaluator reports — `differences` counts a repeated payload once, so a
+        // beacon repeating one frame earns one frame's bits. The excess is taken off the analytic
+        // total too, since the S5 bits are part of it.
+        let reported = h.check_bits.map(f64::from).unwrap_or(f64::NAN);
+        let bound = f64::from(width) * f64::from(h.differences) - l_check;
+        // `f64::min` drops a NaN: a missing report must stay missing, and refuse below.
+        let check_bits = if reported.is_nan() {
+            f64::NAN
+        } else {
+            reported.min(bound)
+        };
+        let excess = if reported.is_nan() {
+            0.0
+        } else {
+            (reported - check_bits).max(0.0)
+        };
+        if check_bits.is_nan() || check_bits < self.hard_check_floor_bits {
+            return Err(format!(
+                "the check carries {check_bits:.1} bits after L_check {l_check:.1}, under the \
+                 {:.0}-bit hard check floor ({} differing frames of {width} bits; {} needed)",
+                self.hard_check_floor_bits,
+                h.differences,
+                self.min_differences(width, l_check),
+            ));
+        }
+        let analytic = f64::from(h.analytic_bits) - excess;
+        if analytic.is_nan() || analytic < self.min_analytic_holdout_bits {
+            return Err(format!(
+                "{analytic:.1} analytic hold-out bits against a {:.0}-bit threshold",
+                self.min_analytic_holdout_bits
+            ));
+        }
+        let searched = h.check_origin.searched();
+        let null_text = match h.null_control {
+            Some(nc) if nc.passed() => {
+                format!(
+                    "; null control passed with a {:.1}-bit margin",
+                    nc.margin_bits
+                )
+            }
+            Some(nc) if searched && self.require_null_control_when_searched => {
+                return Err(if nc.ran {
+                    format!(
+                        "the null control capped it: the null windows came within {:.1} bits",
+                        nc.margin_bits
+                    )
+                } else {
+                    "the null control could not run, and a searched check needs it".into()
+                });
+            }
+            None if searched && self.require_null_control_when_searched => {
+                return Err("a searched check needs the null control, which did not run".into());
+            }
+            _ => String::new(),
+        };
+        let Some(fraction) = ev.suspect_fraction else {
+            return Err(
+                "no detection of this emitter overlaps the analysed window, so the front end's \
+                 trust over it is unknown"
+                    .into(),
+            );
+        };
+        if fraction.is_nan() || fraction > self.max_suspect_detection_fraction {
+            return Err(format!(
+                "{:.0} % of the window's detections are suspect (limit {:.0} %)",
+                fraction * 100.0,
+                self.max_suspect_detection_fraction * 100.0
+            ));
+        }
+        if self.forbid_overload_in_window && ev.overload != Some(false) {
+            return Err(match ev.overload {
+                Some(true) => "the front end was overloaded during the window".into(),
+                _ => "the front end's overload state over the window is unknown".into(),
+            });
+        }
+        let check = r
+            .check
+            .as_ref()
+            .map_or_else(|| format!("{width}-bit check"), |c| c.model.clone());
+        let origin = if searched {
+            "searched"
+        } else {
+            "template-fixed"
+        };
+        Ok(format!(
+            "decoded by synthesized pipeline `{}`: {check} ({origin}), {} differing frame(s) valid \
+             on hold-out without correction, {:.1} − {l_check:.1} = {check_bits:.1} check bits, \
+             {analytic:.1} analytic bits against a {:.0}-bit threshold{null_text}",
+            ev.pipeline,
+            h.differences,
+            check_bits + l_check,
+            self.min_analytic_holdout_bits,
+        ))
+    }
 }
 
 impl Default for ConfirmPolicy {
@@ -325,6 +618,7 @@ impl Default for ConfirmPolicy {
             verified_bandwidth_hz: [50e3, 400e3],
             pilot_nominal_hz: 19_000.0,
             pilot_tolerance_hz: 100.0,
+            synthesized: SynthesizedConfirm::default(),
         }
     }
 }
@@ -661,6 +955,12 @@ pub struct TrackInventory {
     /// reach an entry — and removed when the track ends, so a closed track publishes nothing
     /// further. Bounded like [`Self::run`].
     bound: HashMap<TrackId, EmitterId>,
+    /// T-878: which emitter each track's observations were last recorded against, open or closed,
+    /// for [`Inventory::recorded_emitter_of_track`]. Written with [`Self::bound`] and at a track's
+    /// closing sighting; removed only when the track's entry is withdrawn. Bounded like
+    /// [`Self::run`]: past the cap the map is cleared, which costs a measurement its entry (it is
+    /// then counted and dropped), never a wrong one.
+    recorded: HashMap<TrackId, EmitterId>,
     /// T-416: declined chain measurements written for a track that had no entry yet, waiting for
     /// [`Self::bind`]. Bounded like [`Self::bound`]: past the cap the map is cleared, which costs
     /// a refusal its link, never a wrong one.
@@ -737,6 +1037,7 @@ impl TrackInventory {
             characterised: HashMap::new(),
             provisional: HashMap::new(),
             bound: HashMap::new(),
+            recorded: HashMap::new(),
             awaiting: HashMap::new(),
             retune_centres: 0,
             retuned: HashSet::new(),
@@ -775,12 +1076,22 @@ impl TrackInventory {
             self.bound.clear();
         }
         self.bound.insert(track, emitter);
+        self.remember_track(track, emitter);
         // T-416: this is the moment a track first has somewhere to file things, so any declined
         // measurement that arrived before it is attached here.
         for (demod, at) in self.awaiting.remove(&track).unwrap_or_default() {
             attach_measurement(repo, emitter, demod, at)?;
         }
         Ok(())
+    }
+
+    /// T-878: records `emitter` as `track`'s entry for [`Inventory::recorded_emitter_of_track`],
+    /// bounded like [`Self::bind`].
+    fn remember_track(&mut self, track: TrackId, emitter: EmitterId) {
+        if self.recorded.len() >= RUN_MEMORY && !self.recorded.contains_key(&track) {
+            self.recorded.clear();
+        }
+        self.recorded.insert(track, emitter);
     }
 
     /// Whether `id` may be linked to another entry of its emission: not when it carries a
@@ -1053,6 +1364,10 @@ impl TrackInventory {
 }
 
 impl Inventory for TrackInventory {
+    fn synthesized_confirm(&self) -> SynthesizedConfirm {
+        self.policy.synthesized.clone()
+    }
+
     fn capture_name(&mut self, name: &str) {
         self.capture = Some(name.to_owned());
     }
@@ -1074,12 +1389,14 @@ impl Inventory for TrackInventory {
                     Some(mut s) => {
                         s.classification = track_family(summary).classification(s.seen.end);
                         let (emitter, _) = self.offer(repo, &s, Some(TrackTrust::of(summary)))?;
+                        self.remember_track(track, emitter);
                         for (demod, at) in awaiting {
                             attach_measurement(repo, emitter, demod, at)?;
                         }
                     }
                     // An in-band fragment or hop-set member after all: withdraw its live entry.
                     None => {
+                        self.recorded.remove(&track);
                         if let Some(emitter) = provisional {
                             self.retract(repo, track, emitter, summary.track.time.end)?;
                         }
@@ -1090,6 +1407,7 @@ impl Inventory for TrackInventory {
                 // Channels offered before the set formed now belong to the set's entry.
                 for &m in &h.members {
                     self.bound.remove(&m);
+                    self.recorded.remove(&m);
                     // T-416: the member's entry is being withdrawn in favour of the set's, so
                     // there is nothing left for a waiting refusal to be filed against.
                     self.awaiting.remove(&m);
@@ -1104,6 +1422,7 @@ impl Inventory for TrackInventory {
             }
             TrackEvent::Merged { from, at, .. } => {
                 self.bound.remove(from);
+                self.recorded.remove(from);
                 self.awaiting.remove(from);
                 if let Some(emitter) = self.provisional.remove(from) {
                     self.retract(repo, *from, emitter, *at)?;
@@ -1208,6 +1527,10 @@ impl Inventory for TrackInventory {
 
     fn emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
         self.bound.get(&track).copied()
+    }
+
+    fn recorded_emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
+        self.recorded.get(&track).copied()
     }
 }
 

@@ -2,7 +2,8 @@
 // Pure (no DOM): unit-tested in ui/test/listen.test.ts.
 //
 // Over `/ws/open/listen` the first text message is either the stream header (kind `audio`,
-// datatype `ri16_le`, 48 kS/s mono, `audio` profile) or a refusal `{"type":"refused",...}`
+// datatype `ri16_le`, 48 kS/s, `audio` profile with `channels` 1 — or 2, interleaved L, R, only
+// when the client asked with `channels=2`, T-874) or a refusal `{"type":"refused",...}`
 // followed by a close with code 4000 + status. Every later message is one binary record: a
 // 32-byte little-endian header (type, flags, reserved, payload length, seq, t ns, sample index)
 // and its payload. Types: 1 PCM data, 2 "dropped N" marker, 3 status JSON (metadata only).
@@ -13,7 +14,10 @@ export const FLAG_GATED = 1, FLAG_DISCONTINUITY = 2;
 
 export interface AudioParams { bandwidth_hz?: number; cfo_hz?: number; deviation_hz?: number; pilot_hz?: number }
 export interface AudioInfo {
-  channels: number; frame_samples: number; mode: string; mode_confidence: number; mode_rules?: string;
+  /** 1 (mono) or 2 (interleaved L, R — only on a stream that asked for stereo). */
+  channels: number;
+  /** Sample frames per record (a frame is one sample of every channel). */
+  frame_samples: number; mode: string; mode_confidence: number; mode_rules?: string;
   params: AudioParams; snr_db?: number;
   squelch: { open_snr_db: number; hysteresis_db: number; noise_dbfs?: number };
   agc: { enabled: boolean; target_dbfs: number; max_gain_db: number };
@@ -27,6 +31,27 @@ export interface Refusal { type: "refused"; status: number; code: string; reason
 export interface AudioStatus {
   level_dbfs: number; snr_db?: number; squelch_open: boolean; agc_gain_db: number; frames: number;
   squelched_frames: number; lost_samples: number; latency_ms: number; backlog_s: number;
+  /** Two-channel streams only (T-874): L−R is decoded now (pilot locked); false = both channels mono. */
+  stereo?: boolean;
+  /** Two-channel streams only: pilot lock losses since the stream began. */
+  stereo_lock_losses?: number;
+}
+
+/** Channels a playable header carries (1 when the profile omits it). */
+export function headerChannels(h: AudioHeader): number {
+  return h.audio?.channels ?? 1;
+}
+
+/** Averages interleaved `channels`-channel samples to mono (presentation: a scope trace). */
+export function mixToMono(samples: Float32Array, channels: number): Float32Array {
+  if (channels <= 1) return samples;
+  const out = new Float32Array(Math.floor(samples.length / channels));
+  for (let i = 0; i < out.length; i++) {
+    let acc = 0;
+    for (let c = 0; c < channels; c++) acc += samples[i * channels + c];
+    out[i] = acc / channels;
+  }
+  return out;
 }
 
 export type TextMessage = { kind: "header"; header: AudioHeader } | { kind: "refused"; refusal: Refusal } | { kind: "other" };
@@ -48,7 +73,8 @@ export function audioHeaderProblem(h: AudioHeader): string | null {
   if (h.kind !== "audio") return `not an audio stream (${h.kind})`;
   if (h.datatype !== "ri16_le") return `unsupported datatype ${h.datatype}`;
   if (!(Number(h.sample_rate_hz) > 0)) return "missing sample rate";
-  if ((h.audio?.channels ?? 1) !== 1) return "only mono is supported";
+  const channels = headerChannels(h);
+  if (channels !== 1 && channels !== 2) return `unsupported channel count ${channels}`;
   return null;
 }
 

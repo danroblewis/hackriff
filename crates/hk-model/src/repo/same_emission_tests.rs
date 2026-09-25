@@ -300,6 +300,51 @@ fn t082_decoder_entry_of_a_tracked_emission_merges_into_one_entry_with_all_evide
     );
 }
 
+/// **T-879: a framing signature is a device type, not a unit.** Three units of one sensor type on
+/// three channels 1.5 MHz apart carry the same blind-framer signature. Before T-879 the second and
+/// third resolved to the first unit's emitter by that signature — one emitter over three
+/// appearances, with its centre dragged to whichever unit spoke last. Each is its own emitter now;
+/// the first keeps the (unique) identity, the others are created without it, and nothing reports
+/// an identity conflict, because a structural claim is not a transmitter claim.
+#[test]
+fn t879_one_framing_signature_on_three_channels_is_three_emitters() {
+    assert!(IdentityScheme::Other(FRAMING_IDENTITY_SCHEME.into()).is_structural());
+    assert!(!IdentityScheme::SensorId.is_structural());
+    let mut r = repo();
+    let units: Vec<Resolution> = [433.97e6, 435.47e6, 436.97e6]
+        .iter()
+        .map(|&f| {
+            r.record_sighting(&framed(f, 30e3, tr(0.0, 1.1), 10), None)
+                .unwrap()
+        })
+        .collect();
+    let ids: Vec<EmitterId> = units.iter().map(|u| u.emitter_id).collect();
+    assert!(
+        units
+            .iter()
+            .all(|u| u.created && u.conflict.is_none() && u.merge.is_none()),
+        "each unit is created, with no conflict and no merge: {units:?}"
+    );
+    assert_eq!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        3,
+        "three channels, three emitters"
+    );
+    for (id, f) in ids.iter().zip([433.97e6, 435.47e6, 436.97e6]) {
+        let e = r.emitter(*id).unwrap();
+        assert!(
+            (e.f_center_hz - f).abs() < 1.0,
+            "each keeps its own centre: {e:?}"
+        );
+    }
+    assert!(matches!(
+        r.emitter(ids[0]).unwrap().identity,
+        Identity::Decoded(_)
+    ));
+    assert_eq!(r.emitter(ids[1]).unwrap().identity, Identity::Unknown);
+    assert_eq!(r.emitter(ids[2]).unwrap().identity, Identity::Unknown);
+}
+
 #[test]
 fn t082_framer_entry_joins_the_sensor_track_and_confirmed_wins() {
     let mut r = repo();

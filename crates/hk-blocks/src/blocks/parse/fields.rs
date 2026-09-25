@@ -20,8 +20,10 @@ use serde_json::Value;
 
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::{ChunkMeta, PortSlice, PortVec};
+use crate::evidence::{emit, saturate};
 use crate::registry::{BlockFactory, BuildCtx};
 use crate::status::Status;
+use hk_model::synth::{Evidence, EvidenceSet, GroupId, MetricId, Stage};
 
 /// Builds [`Fields`].
 pub struct FieldsFactory {
@@ -56,6 +58,7 @@ impl BlockFactory for FieldsFactory {
             skip_invalid,
             invalid: 0,
             counts: [0; 3],
+            ev: [0; 2],
             status: Status::default(),
         }))
     }
@@ -100,6 +103,8 @@ pub struct Fields {
     invalid: u64,
     /// Frames ok, partial, failed since the map was (re)compiled.
     counts: [u64; 3],
+    /// Evidence (T-853): frames fitting fully, and frames evaluated, since `reset()`.
+    ev: [u64; 2],
     status: Status,
 }
 
@@ -175,6 +180,10 @@ impl Block for Fields {
                 continue;
             }
             let tree = self.evaluator.eval(f.bytes, f.info.bit_len);
+            self.ev[1] += 1;
+            if matches!(tree.fit, FitStatus::Ok) {
+                self.ev[0] += 1;
+            }
             match tree.fit {
                 FitStatus::Ok | FitStatus::None => self.counts[0] += 1,
                 FitStatus::Partial => self.counts[1] += 1,
@@ -191,7 +200,31 @@ impl Block for Fields {
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.ev = [0; 2];
+    }
+
+    /// S6 `field_fit`: `raw` = frames the map fits fully, `n` = frames evaluated. **0 bits**:
+    /// the analytic null is a binomial against the chance a *random* frame fits the map, and a
+    /// field map does not state that rate (a map with no value constraints fits any frame of
+    /// the right length). A template's `plausibility` (M-5) is where a stated chance rate
+    /// arrives; until then the fit is reported and never credited.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev[1] == 0 {
+            return;
+        }
+        emit(
+            out,
+            Evidence::new(
+                Stage::S6,
+                MetricId::FieldFit,
+                GroupId::Undeclared,
+                self.ev[0] as f32,
+                saturate(self.ev[1]),
+                0.0,
+            ),
+        );
+    }
 
     fn update_params(
         &mut self,
@@ -391,5 +424,52 @@ mod tests {
             input_types: &[PortType::Frames],
         };
         assert!(b.update_params(&params(), &ctx3).is_err());
+    }
+
+    /// T-552 (ADR-0015 §3.3 measurement): S6 `fields` release timing over many frames with a
+    /// multi-field map (4 fields spanning 32 of a 64-bit frame).
+    /// `cargo test --release -p hk-blocks --lib blocks::parse::fields::tests::s6_fields_throughput_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing bench, release builds"]
+    fn s6_fields_throughput_bench() {
+        use std::time::Instant;
+
+        let m: FieldMap = serde_json::from_value(json!({
+            "unit": "bits",
+            "fields": [
+                {"name": "a", "type": "uint", "length": 8},
+                {"name": "b", "type": "uint", "length": 8},
+                {"name": "c", "type": "uint", "length": 8},
+                {"name": "d", "type": "uint", "length": 8},
+            ]
+        }))
+        .unwrap();
+        let maps = BTreeMap::from([("m".to_owned(), m)]);
+        let ctx = BuildCtx {
+            field_maps: &maps,
+            input_types: &[PortType::Frames],
+        };
+        let mut b = crate::Registry::builtin()
+            .build("fields", &params(), &ctx)
+            .unwrap();
+        b.init(&[frames_port()]).unwrap();
+
+        let n = 200_000;
+        let mut frames = FrameBuf::with_capacity(n, 8 * n);
+        for i in 0..n as u64 {
+            let mut info = FrameInfo::new(i, i * 64, 0);
+            info.check = CrcStatus::Valid;
+            let bits: Vec<u8> = (0..64).map(|b| ((i >> (b % 20)) & 1) as u8).collect();
+            frames.push_bits(&bits, info);
+        }
+        let t0 = Instant::now();
+        let out = run(b.as_mut(), &frames);
+        let secs = t0.elapsed().as_secs_f64();
+        assert_eq!(out.data.as_slice().len(), n);
+        eprintln!(
+            "fields 4x8bit over 64-bit frames: {:>12.3e} frames/s  {:.1} ns/frame",
+            n as f64 / secs,
+            secs * 1e9 / n as f64
+        );
     }
 }

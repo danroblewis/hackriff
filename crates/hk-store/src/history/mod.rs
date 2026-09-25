@@ -130,6 +130,7 @@
 
 mod codec;
 mod config;
+mod deferred;
 mod export;
 pub mod frame;
 mod live;
@@ -149,6 +150,7 @@ pub use config::{
     Geometry, HistogramConfig, LevelConfig, LevelGeometry, MAX_LEVELS, PyramidConfig,
     RetentionOverride, ViewLattice,
 };
+pub use deferred::{PendingWrites, WrittenBatch};
 pub use export::{
     HistoryStat, PNG_UNOBSERVED_RGB, SweepCsvImport, SweepCsvOptions, import_sweep_csv,
     waterfall_index, waterfall_png, waterfall_range, write_sweep_csv,
@@ -159,8 +161,8 @@ pub use frame::{
 pub use query::{
     CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, FilterSummary,
     LAST_KNOWN_MAX_TOP_ROWS, LastKnown, LastKnownCell, LastKnownSearch, LastKnownStage,
-    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, Overview, OverviewCell, RegionHistory, RegionQuery,
-    Resolution, ShadowFill, ShadowRun, StraddleGuard, burst_histogram,
+    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, Overview, OverviewCell, PINNED_REACH_BLOCKS, RegionHistory,
+    RegionQuery, Resolution, ShadowFill, ShadowRun, StraddleGuard, burst_histogram,
 };
 pub use shape::NoiseShapeEstimator;
 pub use store::{IngestOutcome, MAX_MATERIALIZE_TILES, Pyramid, PyramidStats, ResidentBytes};

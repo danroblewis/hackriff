@@ -32,6 +32,8 @@ hk-blocks.workspace = true
 hk-recipe.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
+# T-859 (MAUTO M-8): the analyze job manager runs the hk-synth engine (ADR-0015 §9).
+hk-synth.workspace = true
 # T-071: per-chain thread CPU time (clock_gettime CLOCK_THREAD_CPUTIME_ID).
 libc.workspace = true
 num-complex.workspace = true

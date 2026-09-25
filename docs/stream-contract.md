@@ -1,4 +1,4 @@
-# Stream-output contract (v1.3)
+# Stream-output contract (v1.5)
 
 **Status:** Engineering (T-016, T-014, T-022a, T-043, T-060). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
 
@@ -12,6 +12,7 @@ One contract serves two uses:
 - **1.2 added the `presence` stream (§15, T-388)**: a new `messages` stream, additive — a reader that does not know it simply does not subscribe to it.
 - **1.3 changes what that stream carries (§15, T-410, [ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md))**: presence becomes an **interval with endpoints**, so the records are `presence-start` / `presence-reopen` / `presence-end` and `presence-extension` is retired. This is **not** additive — it replaces record kinds on an existing stream — so the stream's own `message_schema` is bumped from `hackriff.presence/1` to `hackriff.presence/2` rather than the document's minor version pretending nothing moved. A contract-A consumer then sees a schema it does not know, instead of silently ignoring every endpoint. The stream's *framing* is untouched, which is why this is a minor document version and a per-stream schema major.
 - **1.4 makes the detected end revocable (§15, T-413, [ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md) §6.1)**: `presence-revoke` is added, `presence.last_interval` gains `revoked_s`, and `message_schema` goes to `hackriff.presence/3`. The added kind and field are additive; the schema major is for what is not — **`presence-end` becomes provisional** for one idle gap, so a consumer that files an END as final is now wrong about a record it already understands, and must see a schema it does not know rather than be quietly mistaken.
+- **1.5 lets an audio stream carry two channels (§12.2, T-874, [ADR-0015 §12.13](adr/0015-decoder-synthesis.md))**: `audio.channels` may be **2**, and each data record is then `frame_samples` sample frames of interleaved `L, R` `i16` values; two-channel status records add `stereo` and `stereo_lock_losses`. It is additive and **opt-in** — only a client that asks (`listen?…&channels=2`) ever receives two channels, so a reader that ignores `channels` keeps getting exactly the mono stream it always got. **Headers now carry the document's version:** 1.3 and 1.4 changed only the presence stream's own `message_schema`, and the header `version` stayed `"1.2"` through both; from 1.5 the header says `"1.5"`. Readers refuse only a different *major* version, so the jump is harmless — and a mono audio stream is otherwise unchanged byte for byte (every other header value, every record).
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -573,27 +574,32 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
 ### 12.2 Audio profile
 
 - **Header:**
-  - `kind: "audio"`, `datatype: "ri16_le"` (mono), `sample_rate_hz: 48000`;
+  - `kind: "audio"`, `datatype: "ri16_le"` (channel-interleaved; mono unless `audio.channels` is 2), `sample_rate_hz: 48000`;
   - `center_hz`/`bandwidth_hz`: the demodulated RF channel;
   - `emitter_id` when an emitter was requested;
   - `audio`: `{channels, frame_samples, mode, mode_confidence, mode_rules, params, snr_db, squelch, agc, deemphasis_s, demod}`.
     - `mode` is chosen by auto-mode selection (`wfm`, `nbfm`, `am`, `usb`, `lsb`, `cw`); there is no manual mode.
+    - `channels` (1.5, T-874): **1** unless the client asked for stereo **and** the demodulator can deliver it, then **2**. Stereo is opt-in: `listen?…&channels=2` (`channels=1` is the default, anything else is `400 bad-request`). Only broadcast FM (`mode: "wfm"`) has a second channel, so a stereo request on any other mode is served — and labelled — mono; the header says what the stream carries, never what was asked. Fixed for the stream's life. `max_frame_len` is `32 + 4 × 960 × channels` (a record header plus two frames), so a mono header is unchanged.
+    - **Stereo is labelled by the status, not the header.** A two-channel stream keeps its shape whether or not L−R is being decoded: while the 19 kHz pilot is unlocked (absent, fading, just rebuilt after a retune) both channels carry the same mono audio, bit for bit — never an L−R guessed from an unlocked carrier — and the status record's `stereo` is `false`. Every locked → unlocked transition increments `stereo_lock_losses`, so a loss between two status records is still reported.
     - `params` is docs/07 `EstimatedParams`.
     - `squelch` is `{open_snr_db, hysteresis_db, noise_dbfs}`; `agc` is `{enabled, target_dbfs, max_gain_db}`.
+    - Recipe audio (optional, additive; ADR-0011 §8.2, T-866; mono — `channels: 1` — until a recipe's `audio_out` takes two inputs): on a recipe pipeline's `audio` output (`audio/<pipeline>/<output>`) the `audio` object also carries `pipeline_id`, `recipe` (`<id>@<version>`), `output_id` and `edit_rev` (the revision the stream was offered at); its `mode` is the recipe's declared `profile.mode` with `mode_rules: "recipe-declared"` and `mode_confidence: 0` — a declaration, not an estimate. Listen's own chain omits the four keys. Readers that ignore unknown fields are unaffected.
     - `refinement` (optional, T-070): present when the channel was refined from the demodulator's own output (`hk_pipeline::refine`). `{provenance: "refined by output analysis", objective, center_hz, bandwidth_hz, start_center_hz, start_bandwidth_hz, quality, converged, iterations, evaluations, elapsed_s, mode_params, labels}`. The header's `center_hz`/`bandwidth_hz` and `params.bandwidth_hz`/`cfo_hz`/`pilot_hz` are then the refined values; the start values are the selection or detection. Readers that ignore unknown fields are unaffected.
 - **Data records** (type 1):
-  - payload: `frame_samples` (960, i.e. 20 ms) `i16` LE samples;
-  - `sample_index`: audio samples since the stream start;
+  - payload: `frame_samples` (960, i.e. 20 ms) sample frames of `channels` `i16` LE samples each — mono 1920 bytes; stereo 3840 bytes, interleaved `L, R, L, R, …`;
+  - `sample_index`: audio sample *frames* (time, not interleaved values) since the stream start;
   - `t`: time of the first sample.
   - A jump in `sample_index` is a gap (squelch closed, or samples skipped to stay live), and the next record is flagged `DISCONTINUITY`. A `seq` gap is loss.
 - **Status records** (type 3):
   - 32-byte header; the payload is a flat JSON object of numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`, enforced by `Publisher::publish_status`), so no free text rides on it.
   - Audio fields: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`, sent about every 250 ms.
   - Refinement fields (T-070): `refined_center_hz` and `refined_bandwidth_hz` (the refined channel in force, absent when not refined) and `refine_updates` (background re-refinements that retuned the channel after passing the hysteresis).
+  - Stereo fields (1.5, T-874; two-channel streams only, absent on mono): `stereo` (boolean: L−R is being decoded now, i.e. the pilot is locked) and `stereo_lock_losses` (locked → unlocked transitions since the stream began, including a demodulator rebuilt by an in-place retune or refinement while locked).
+  - Recipe audio (T-866): the same record also carries the pipeline's per-node `<node>.<metric>` batch (§14.3 keys) on the same tick — one record, two vocabularies.
   - They take a `seq`. The reference `StreamReader` returns them as `Record::Unknown`; `record::parse_status_record` decodes them.
 - **Gating:**
   - Audio payloads are content: under a class that forbids content the egress gate withholds them (§6), as for any audio stream.
-  - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
+  - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. A recipe with an `audio` output runs the same rule on its channel when it starts (T-866). Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
 
 ### 12.3 IQ profile (T-165, ADR-0013 §4.9 gap 8)
 
@@ -1096,6 +1102,29 @@ a record to a row it already holds, and refuses (`ui/src/presence.ts`, ADR-0019 
 T-388's third refusal — *a span starting after the end held is refused, and the box waits for the
 poll* — is **removed**, replaced by REOPEN (§15.4). The silence is still never claimed; it is now
 drawn as a gap between two boxes rather than hidden behind a box that quietly stopped moving.
+
+## 16. The analyze stream: `hackriff.analyze/1` (T-859, ADR-0015 §5.2, ADR-0021 §4.3)
+
+**On-demand opener `analyze`**, served at `/ws/analyze/{id}` (and `/ws/open/analyze?id=<id>`, TCP
+`open/analyze?id=<id>`): one region-analyze job's progress (docs/api.md "Analyze"). A `messages`
+stream, `message_schema` **`hackriff.analyze/1`**, `content_class` `unrestricted`, published by
+`hk-pipeline` (`crates/hk-pipeline/src/synth/jobs.rs`). It is **additive** — a new opener name, a new
+schema — so it changes nothing an existing reader reads, and the document stays 1.4.
+
+- **Everything is metadata.** Each record's `metadata` is `{type, job_id, …}`; `content` is never set.
+  The one content-bearing field a job has, a result's `frames_preview`, is emptied **before** the job is
+  visible anywhere unless the acquired IQ's class permits content (ADR-0015 §5.3), so the stream cannot
+  carry it and needs no per-record gate.
+- **Records are idempotent snapshots and drop, never block** (ADR-0015 §5.2). Each subscriber has a
+  bounded queue (64 records) in front of the publisher's own §7 queue; a full queue loses the record,
+  never the job's time. `GET /api/analyze/{id}` is always authoritative.
+- **Record types** (`metadata.type`): `progress` (`{job}`; the first record of every stream, then on
+  each state change and at most once a second), `stage` (`{stage, job}` when the deepest stage reached
+  rises), `best` (`{results}`, the top 3), `trace` (`{stage, tried, not_tried, by_outcome, nodes}`, once
+  per stage, ≤ 8 nodes — ADR-0021 §4.3, never per decision), `done` (`{job}`, the final job).
+- **Lifetime.** The stream ends after `done`. Opening it for a finished job yields exactly one `done`.
+  An unknown id is refused `404 not_found`; a forgotten one `410 gone` (ADR-0021 §4.2: *we forgot* is
+  not *it never ran*).
 
 ## Sources
 

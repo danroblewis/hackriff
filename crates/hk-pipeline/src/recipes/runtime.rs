@@ -44,7 +44,9 @@ use hk_blocks::{ChunkFlags, ChunkMeta, Input, PortInfo, PortSlice, Registry, Tap
 use hk_core::{Discontinuity, ReadChunk};
 use hk_dsp::{Ddc, DdcSpec, InputInfo};
 use hk_model::{ContentClass, EmitterId, SelectionId, Timestamp};
-use hk_recipe::{ChannelsSpec, Endpoint, OutputKind, PortType, RECIPE_SCHEMA, Recipe, RecipeError};
+use hk_recipe::{
+    ChannelsSpec, Endpoint, Liveness, OutputKind, PortType, RECIPE_SCHEMA, Recipe, RecipeError,
+};
 use hk_stream::inspector::InspectorRecordType;
 use hk_stream::{OpenRefusal, PublisherHandle, StreamHeader};
 use serde_json::{Map, Value, json};
@@ -54,6 +56,7 @@ use crate::chains::listen::{ListenConfig, SegmentFn};
 use crate::chains::{ChainReader, Next};
 use crate::class::{classify_emitter, is_restricted, restricted_band};
 use crate::config::ListenSettings;
+use crate::recipes::audio::{self, AudioSink};
 use crate::recipes::graph::{self, Graph, OutputBinding, Shape, Src, StageError, Staged};
 use crate::recipes::hops;
 use crate::recipes::messages::MessagesSink;
@@ -326,6 +329,9 @@ pub struct PipelineStats {
     discontinuity_pair: AtomicU64,
     /// Samples skipped to the live edge.
     pub skipped_samples: AtomicU64,
+    /// Seeks to the live edge a `live-edge` reader made to stay within its backlog bound
+    /// (ADR-0011 §8.5; a `throughput` reader's ring-protection skips are not counted here).
+    pub live_edge_seeks: AtomicU64,
     /// Hot edits applied.
     pub edits: AtomicU64,
     /// Status records published (ticks).
@@ -361,6 +367,7 @@ impl PipelineStats {
             "discontinuities": discontinuities,
             "source_discontinuities": source_discontinuities,
             "skipped_samples": g(&self.skipped_samples),
+            "live_edge_seeks": g(&self.live_edge_seeks),
             "edits": g(&self.edits),
             "status_ticks": g(&self.status_ticks),
             "decodes": g(&self.decodes),
@@ -391,6 +398,11 @@ pub(crate) struct ControlState {
     pub shape: Shape,
     pub outputs: Vec<OutputBinding>,
     pub input: PortInfo,
+    /// The channel in force, RF Hz: the target's at start, moved by an `input` edit's bandwidth
+    /// and by an applied refinement's centre (T-870). A follow-hops pipeline's is its extent.
+    pub center_hz: f64,
+    /// Its bandwidth, Hz.
+    pub bandwidth_hz: f64,
 }
 
 // Unboxed on purpose: a staged output stream is moved into place at the swap, and a box would
@@ -412,13 +424,24 @@ pub(crate) struct SinkEdit {
 pub(crate) struct PipelineEdit {
     staged: Staged,
     sinks: SinkEdit,
-    /// New channel DDC, tune it was planned at, bandwidth and input port (an `input` edit).
-    channel: Option<(Ddc, (f64, f64), f64)>,
+    /// New channel DDC and where it was planned (an `input` edit or an applied refinement).
+    channel: Option<ChannelEdit>,
     /// Follow-hops: the upstream sub-recipe staged per channel.
     lanes: Option<hops::LaneEdit>,
     input: PortInfo,
+    /// The draft's reader liveness (ADR-0011 §8.5); an edit of it alone re-plumbs nothing.
+    liveness: Liveness,
     new_rev: u32,
     reply: SyncSender<EditDone>,
+}
+
+/// A re-plumbed channel: the DDC, the tune `(centre, rate)` it was planned at, and the channel's
+/// RF centre and bandwidth.
+pub(crate) struct ChannelEdit {
+    ddc: Ddc,
+    tune: (f64, f64),
+    center_hz: f64,
+    bandwidth_hz: f64,
 }
 
 /// The pipeline thread's answer: the edit (holding what was retired) and what happened.
@@ -456,9 +479,19 @@ pub(crate) struct PipelineCtl {
     pub stats: Arc<PipelineStats>,
     /// Follow-hops pipelines: channel set and per-channel sub-recipe (T-093).
     pub hops: Option<hops::HopsCtl>,
+    /// A recipe with `refine.objective.builtin`: its refinement state (T-870,
+    /// [`crate::recipes::refine`]). Fixed at start: an edit that adds or drops the objective
+    /// takes effect when the pipeline is started again.
+    pub refine: Option<crate::recipes::refine::RefineCtl>,
 }
 
 impl PipelineCtl {
+    /// The channel in force, `(centre, bandwidth)` Hz.
+    pub(crate) fn channel(&self) -> (f64, f64) {
+        let cs = lock(&self.control);
+        (cs.center_hz, cs.bandwidth_hz)
+    }
+
     /// Drops the taps the pipeline thread retired (outside the lock).
     pub(crate) fn drop_retired_taps(&self) {
         let retired = std::mem::take(&mut *lock(&self.retired_taps));
@@ -482,6 +515,8 @@ pub struct RecipeRuntime {
     pub(crate) captures: std::sync::OnceLock<hk_store::decoded::DecodedCaptures>,
     /// Capture replays streaming now (T-092; capped at `capture::MAX_CAPTURE_REPLAYS`).
     pub(crate) capture_replays: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// This runtime: a pipeline's refinement worker applies its results through it (T-870).
+    me: Weak<RecipeRuntime>,
 }
 
 pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -586,6 +621,16 @@ fn pipeline_class(shared: &Shared, recipe: &Recipe, lo: f64, hi: f64) -> Content
     hk_stream::gate::clamp(source, recipe.output_policy.content_class)
 }
 
+/// A pipeline's reader liveness as the API serves it.
+fn liveness_json(l: Liveness) -> Value {
+    match l {
+        Liveness::LiveEdge { max_backlog_s } => {
+            json!({"mode": "live-edge", "max_backlog_s": max_backlog_s})
+        }
+        Liveness::Throughput => json!({"mode": "throughput"}),
+    }
+}
+
 /// Builds the stream of one recipe output. It is not offered in the run's stream registry yet:
 /// [`offer_streams`] does that once the graph it serves is running, so a failed start or edit
 /// never replaces a running output's registry entry.
@@ -595,9 +640,16 @@ fn build_sink(
     ctx: &StreamCtx,
     recipe: &Recipe,
     b: &OutputBinding,
+    edit_rev: u32,
 ) -> Result<(OutputSink, Option<StreamEntry>), RuntimeError> {
     let fail = |_| RuntimeError::new(500, "failed", "creating an output stream");
     let (sink, kind, header, handle) = match b.spec.kind {
+        OutputKind::Audio => {
+            let header = audio::audio_header(ctx, recipe, &b.spec, edit_rev);
+            let s = AudioSink::new(header.clone()).map_err(fail)?;
+            let h = s.handle();
+            (OutputSink::Audio(s), "audio", header, h)
+        }
         OutputKind::Messages => {
             let (s, stream) = MessagesSink::spawn(shared, ctx, recipe, &b.spec, Arc::clone(stats))
                 .map_err(|m| RuntimeError::new(500, "failed", m))?;
@@ -629,7 +681,7 @@ fn build_sink(
             );
             let max = match b.src {
                 Src::Node { .. } => (b.rate_hz.max(1.0) as usize).max(READER_BUF),
-                Src::Input => READER_BUF,
+                Src::Input | Src::Sink { .. } => READER_BUF,
             };
             let p =
                 TapPublisher::new(header.clone(), output_config(), recipe, max).map_err(fail)?;
@@ -695,8 +747,8 @@ impl RecipeRuntime {
         segment: SegmentFn,
         listen: Arc<Mutex<ListenSettings>>,
         store: RecipeStore,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|me| Self {
             counters,
             segment,
             listen,
@@ -707,7 +759,8 @@ impl RecipeRuntime {
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
             captures: std::sync::OnceLock::new(),
             capture_replays: std::sync::Arc::default(),
-        }
+            me: me.clone(),
+        })
     }
 
     /// Sets how long later edits wait for the pipeline thread's chunk boundary.
@@ -893,6 +946,12 @@ impl RecipeRuntime {
             });
         }
         let (lo, hi, emitter) = self.resolve(&shared, &target)?;
+        // Audio is content: Listen's pre-attach gate runs on the target before any channel or
+        // ring reader exists (ADR-0011 §8.3), and again on the planned channel below.
+        let audio_out = recipe.has_audio_output();
+        if audio_out {
+            audio::gate(&shared, lo, hi)?;
+        }
         let center = 0.5 * (lo + hi);
         let tune = planning_tune(&shared, center);
         // Follow-hops (T-093): per-channel lanes run everything upstream of the merge node; the
@@ -929,6 +988,9 @@ impl RecipeRuntime {
                 "outside_window",
                 "the target channel is not inside the tuned window",
             ));
+        }
+        if audio_out {
+            audio::gate(&shared, clo.min(lo), chi.max(hi))?;
         }
         let class = pipeline_class(&shared, &recipe, clo.min(lo), chi.max(hi));
         let cfg = ListenConfig::from_settings(&lock(&self.listen));
@@ -967,7 +1029,7 @@ impl RecipeRuntime {
         let mut sinks = Vec::with_capacity(g.outputs.len());
         let mut streams = Vec::new();
         for b in &g.outputs {
-            let (s, e) = build_sink(&shared, &stats, &streams_ctx, &recipe, b)?;
+            let (s, e) = build_sink(&shared, &stats, &streams_ctx, &recipe, b, 0)?;
             sinks.push(s);
             streams.extend(e);
         }
@@ -1004,6 +1066,8 @@ impl RecipeRuntime {
                 shape,
                 outputs: g.outputs.clone(),
                 input: graph_input,
+                center_hz: center,
+                bandwidth_hz,
             }),
             pending: Mutex::new(None),
             edit_pending: AtomicBool::new(false),
@@ -1014,8 +1078,16 @@ impl RecipeRuntime {
             streams: Mutex::new(streams),
             warnings: Mutex::new(warnings),
             stats,
+            refine: hops_ctl
+                .is_none()
+                .then(|| crate::recipes::refine::RefineCtl::for_recipe(&recipe))
+                .flatten(),
             hops: hops_ctl,
         });
+        // T-870: `refine.objective.builtin` refines the channel on its own worker, with Listen's
+        // settings, and applies each accepted result as a hot edit.
+        let refiner =
+            crate::recipes::refine::Refiner::start(&ctl, self.me.clone(), &cfg.refine, shared.fs);
         let mut runner = Runner {
             ctl: Arc::clone(&ctl),
             decoder: format!("recipe:{}@{}", recipe.id, recipe.version),
@@ -1037,6 +1109,10 @@ impl RecipeRuntime {
             disc: true,
             disc_source: false,
             hops: hops_rt,
+            liveness: recipe.liveness(),
+            backlog_s: 0.0,
+            read_at: Instant::now(),
+            refiner,
         };
         runner.retap();
         // Held until the streams are offered, so an edit can't offer its streams first.
@@ -1107,8 +1183,8 @@ impl RecipeRuntime {
             "end_reason": *lock(&ctl.end),
             "target": ctl.target.to_json(),
             "channel": {
-                "center_hz": ctl.streams_ctx.center_hz,
-                "bandwidth_hz": ctl.streams_ctx.bandwidth_hz,
+                "center_hz": cs.center_hz,
+                "bandwidth_hz": cs.bandwidth_hz,
                 "sample_rate_hz": cs.input.rate_hz,
             },
             "content_class": ctl.streams_ctx.class,
@@ -1123,6 +1199,8 @@ impl RecipeRuntime {
             "stats": ctl.stats.to_json(),
             "warnings": graph::errors_json(&lock(&ctl.warnings)),
             "follow_hops": ctl.hops.as_ref().map(hops::HopsCtl::json),
+            "liveness": liveness_json(cs.recipe.liveness()),
+            "refinement": ctl.refine.as_ref().map(crate::recipes::refine::RefineCtl::json),
         })
     }
 
@@ -1151,6 +1229,61 @@ impl RecipeRuntime {
 
     /// Hot-edits pipeline `id` to `draft`: `{edit_rev, applied_at_sample, plan, swap, warnings}`.
     pub fn edit(&self, id: &str, draft: Recipe) -> Result<Value, RuntimeError> {
+        self.edit_with(id, |_| Ok((draft, None)))
+    }
+
+    /// Applies a refinement as an ordinary hot edit (ADR-0015 §12.6, T-870): the refined
+    /// bandwidth is written into the running revision's `input.bandwidth_hz` and the refined
+    /// centre becomes the channel centre — only the axes `refine.tune` lists — so the channel is
+    /// re-plumbed and every node rebuilt at a chunk boundary (ADR-0011 §2.3, "`input` changed")
+    /// while capture and the ring reader carry on. The draft is made from the revision running
+    /// when the edit lock is held, so a user's edit is never overwritten. Returns the new
+    /// `edit_rev`.
+    pub(crate) fn apply_refinement(
+        &self,
+        id: &str,
+        outcome: &hk_demod::refine::RefinementOutcome,
+    ) -> Result<u32, RuntimeError> {
+        if !outcome.locked {
+            return Err(RuntimeError::new(
+                409,
+                "unlocked",
+                "nothing retunes to an unlocked refinement",
+            ));
+        }
+        const UNCHANGED: &str = "unchanged";
+        let edited = self.edit_with(id, |cs| {
+            let spec = cs.recipe.refine.as_ref().ok_or_else(|| {
+                RuntimeError::new(409, "conflict", "the running revision declares no refine")
+            })?;
+            let mut draft = (*cs.recipe).clone();
+            if spec.tunes_bandwidth() {
+                draft.input.bandwidth_hz = Some(outcome.tuning.bandwidth_hz);
+            }
+            let center = spec.tunes_center().then_some(outcome.tuning.center_hz);
+            if draft.input == cs.recipe.input && center.is_none_or(|c| c == cs.center_hz) {
+                // Accepted on an axis the recipe does not tune: nothing to re-plumb, and an
+                // empty edit would only bump `edit_rev`.
+                return Err(RuntimeError::new(200, UNCHANGED, "nothing to apply"));
+            }
+            Ok((draft, center))
+        });
+        match edited {
+            Ok(v) => Ok(v["edit_rev"].as_u64().unwrap_or(0) as u32),
+            Err(e) if e.code == UNCHANGED => Ok(self
+                .pipeline(id)
+                .map_or(0, |c| c.edit_rev.load(Ordering::SeqCst))),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The hot edit: `make` builds the draft (and optionally a new channel centre, RF Hz) from
+    /// the running revision, under the pipeline's edit lock.
+    fn edit_with(
+        &self,
+        id: &str,
+        make: impl FnOnce(&ControlState) -> Result<(Recipe, Option<f64>), RuntimeError>,
+    ) -> Result<Value, RuntimeError> {
         let ctl = self.found(id)?;
         let ended = || RuntimeError::new(409, "ended", "the pipeline has ended");
         if !ctl.running.load(Ordering::SeqCst) {
@@ -1158,6 +1291,7 @@ impl RecipeRuntime {
         }
         let _serial = lock(&ctl.edit_lock);
         let cs = lock(&ctl.control).clone();
+        let (draft, center) = make(&cs)?;
         if draft.id != cs.recipe.id {
             return Err(RuntimeError {
                 errors: vec![RecipeError {
@@ -1177,7 +1311,8 @@ impl RecipeRuntime {
                 "a running pipeline keeps a single iq input",
             ));
         }
-        if follow && draft.input != cs.recipe.input {
+        let moved = center.is_some_and(|c| c != cs.center_hz);
+        if follow && (moved || !draft.input.same_channel(&cs.recipe.input)) {
             return Err(RuntimeError::new(
                 422,
                 "unsupported_input",
@@ -1186,10 +1321,11 @@ impl RecipeRuntime {
         }
         let registry = self.registry();
         let shared = ctl.shared.upgrade().ok_or_else(ended)?;
-        let (channel, input) = if draft.input != cs.recipe.input {
-            // An input edit re-plumbs the channel (every node rebuilds); capture continues.
+        let (channel, input) = if moved || !draft.input.same_channel(&cs.recipe.input) {
+            // An input edit (or a refined centre) re-plumbs the channel (every node rebuilds);
+            // capture continues.
             let tune = shared.counters.tune();
-            let c = ctl.streams_ctx.center_hz;
+            let c = center.unwrap_or(cs.center_hz);
             let plan = channel_plan(&draft, c, ctl.streams_ctx.bandwidth_hz, tune)?;
             let (lo, hi) = (c - 0.5 * plan.bandwidth_hz, c + 0.5 * plan.bandwidth_hz);
             if !in_window(tune.0, tune.1, lo, hi) {
@@ -1199,10 +1335,27 @@ impl RecipeRuntime {
                     "the edited channel is not inside the tuned window",
                 ));
             }
-            (Some((plan.ddc, plan.tune, plan.bandwidth_hz)), plan.input)
+            let edit = ChannelEdit {
+                ddc: plan.ddc,
+                tune: plan.tune,
+                center_hz: c,
+                bandwidth_hz: plan.bandwidth_hz,
+            };
+            (Some(edit), plan.input)
         } else {
             (None, cs.input)
         };
+        let (center_hz, bandwidth_hz) = channel
+            .as_ref()
+            .map_or((cs.center_hz, cs.bandwidth_hz), |c| {
+                (c.center_hz, c.bandwidth_hz)
+            });
+        if draft.has_audio_output() {
+            // An edit that adds or keeps audio is gated like a start, on the channel it will
+            // demodulate (ADR-0011 §8.3).
+            let half = 0.5 * bandwidth_hz;
+            audio::gate(&shared, center_hz - half, center_hz + half)?;
+        }
         let recipe = Arc::new(draft);
         let hops_edit = match &ctl.hops {
             Some(h) => Some(h.stage_edit(&recipe, &registry)?),
@@ -1212,10 +1365,21 @@ impl RecipeRuntime {
             Some(h) => (Arc::clone(&h.old_down), Arc::clone(&h.new_down)),
             None => (Arc::clone(&cs.recipe), Arc::clone(&recipe)),
         };
-        let staged = graph::stage(Some((&base, &cs.shape)), next, &registry, input)?;
+        let staged = graph::stage_moved(Some((&base, &cs.shape)), next, &registry, input, moved)?;
         let (lanes, hops_commit) = match hops_edit {
             Some(h) => (Some(h.lanes), Some(h.commit)),
             None => (None, None),
+        };
+        let new_rev = ctl.edit_rev.load(Ordering::SeqCst) + 1;
+        // New streams' headers state the channel they will carry.
+        let streams_ctx = StreamCtx {
+            center_hz,
+            bandwidth_hz: if follow {
+                ctl.streams_ctx.bandwidth_hz
+            } else {
+                bandwidth_hz
+            },
+            ..ctl.streams_ctx.clone()
         };
         // Output streams: unchanged outputs keep their publishers (consumers and seq); changed or
         // new ones get new streams; removed ones finish.
@@ -1236,7 +1400,8 @@ impl RecipeRuntime {
                     entries.push(None);
                 }
                 None => {
-                    let (s, e) = build_sink(&shared, &ctl.stats, &ctl.streams_ctx, &recipe, b)?;
+                    let (s, e) =
+                        build_sink(&shared, &ctl.stats, &streams_ctx, &recipe, b, new_rev)?;
                     plan.push(SinkSlot::New(Some(s)));
                     entries.push(e);
                 }
@@ -1247,7 +1412,6 @@ impl RecipeRuntime {
         let new_outputs = staged.outputs.clone();
         let edit_plan = staged.plan.clone();
         let warnings = staged.warnings.clone();
-        let new_rev = ctl.edit_rev.load(Ordering::SeqCst) + 1;
         let (tx, rx) = mpsc::sync_channel(1);
         *lock(&ctl.pending) = Some(PipelineEdit {
             staged,
@@ -1259,6 +1423,7 @@ impl RecipeRuntime {
             channel,
             lanes,
             input,
+            liveness: recipe.liveness(),
             new_rev,
             reply: tx,
         });
@@ -1309,6 +1474,8 @@ impl RecipeRuntime {
             shape: new_shape,
             outputs: new_outputs,
             input,
+            center_hz,
+            bandwidth_hz,
         };
         *lock(&ctl.warnings) = warnings.clone();
         Ok(json!({
@@ -1454,6 +1621,14 @@ struct Runner {
     disc_source: bool,
     /// Follow-hops: the per-channel lanes feeding `graph` (T-093).
     hops: Option<hops::Hops>,
+    /// Reader liveness (ADR-0011 §8.5).
+    liveness: Liveness,
+    /// How far behind the writer the latest chunk was, s.
+    backlog_s: f64,
+    /// When the latest chunk was read (audio latency origin).
+    read_at: Instant,
+    /// `refine.objective.builtin`: offers ring windows to the pipeline's refinement worker.
+    refiner: Option<crate::recipes::refine::Refiner>,
 }
 
 impl Runner {
@@ -1467,6 +1642,7 @@ impl Runner {
             self.boundary();
             match self.reader.next() {
                 Next::Data(chunk) => {
+                    self.read_at = Instant::now();
                     if let Err(reason) = self.chunk(&chunk) {
                         break reason;
                     }
@@ -1557,7 +1733,8 @@ impl Runner {
         if let Some(h) = self.hops.as_mut()
             && h.flush(at, &mut self.graph).is_ok()
         {
-            self.publish_outputs();
+            // A follow-hops recipe has no audio output, the only one that can fail.
+            let _ = self.publish_outputs();
         }
     }
 
@@ -1622,13 +1799,16 @@ impl Runner {
                 }
                 std::mem::swap(&mut self.sinks, new);
             }
-            if let Some((ddc, tune, bw)) = e.channel.as_mut() {
-                std::mem::swap(&mut self.ddc, ddc);
-                self.tune = *tune;
-                self.bandwidth_hz = *bw;
+            if let Some(c) = e.channel.as_mut() {
+                std::mem::swap(&mut self.ddc, &mut c.ddc);
+                self.tune = c.tune;
+                self.center_hz = c.center_hz;
+                self.bandwidth_hz = c.bandwidth_hz;
+                self.stat.set_channel(c.center_hz, c.bandwidth_hz);
                 self.disc = true;
             }
             self.graph.input = e.input;
+            self.liveness = e.liveness;
             self.edit_rev = e.new_rev;
             self.ctl.edit_rev.store(e.new_rev, Ordering::SeqCst);
             inc(&self.ctl.stats.edits);
@@ -1703,7 +1883,17 @@ impl Runner {
         if !self.shared.gate.enabled() {
             let head = self.shared.ring.next_sample().unwrap_or(0);
             let behind = head.saturating_sub(chunk.end_sample());
-            if behind as f64 / self.shared.fs > MAX_BACKLOG_S {
+            self.backlog_s = behind as f64 / self.shared.fs;
+            // `live-edge` (an audio output's default) bounds the backlog tightly: latency is its
+            // contract. `throughput` keeps the ring-protection bound every pipeline has.
+            let bound = match self.liveness {
+                Liveness::LiveEdge { max_backlog_s } => max_backlog_s.min(MAX_BACKLOG_S),
+                Liveness::Throughput => MAX_BACKLOG_S,
+            };
+            if self.backlog_s > bound {
+                if matches!(self.liveness, Liveness::LiveEdge { .. }) {
+                    inc(&st.live_edge_seeks);
+                }
                 add(&st.skipped_samples, behind);
                 add(&self.stat.lost_samples, behind);
                 let cursor = self.shared.gate.register(head);
@@ -1728,6 +1918,9 @@ impl Runner {
         self.anchor = (chunk.time.sample_index, chunk.time.host_time);
         add(&st.samples, chunk.len as u64);
         inc(&st.chunks);
+        if let Some(r) = self.refiner.as_mut() {
+            r.feed(chunk.time, &chunk.provenance, &self.reader.buf[..chunk.len]);
+        }
         let Runner {
             ddc,
             graph,
@@ -1747,8 +1940,7 @@ impl Runner {
             *disc = false;
             h.process(chunk, &reader.buf[..chunk.len], flags, graph)?;
             reader.release_to(chunk.end_sample());
-            self.publish_outputs();
-            return Ok(());
+            return self.publish_outputs();
         }
         let block = ddc
             .process(InputInfo::from(chunk), &reader.buf[..chunk.len])
@@ -1779,11 +1971,12 @@ impl Runner {
             }
         }
         reader.release_to(chunk.end_sample());
-        self.publish_outputs();
-        Ok(())
+        self.publish_outputs()
     }
 
-    fn publish_outputs(&mut self) {
+    /// Publishes every output's current chunk. An error is a gated audio record: the pipeline
+    /// stops (fail closed, as Listen does).
+    fn publish_outputs(&mut self) -> Result<(), String> {
         let version = self.ctl.recipe_version.load(Ordering::Relaxed);
         if version != self.recipe_version {
             self.recipe_version = version;
@@ -1825,6 +2018,29 @@ impl Runner {
             add(&self.ctl.stats.frames, frames);
             add(&self.stat.records, frames);
         }
+        let Runner {
+            graph,
+            sinks,
+            read_at,
+            stat,
+            ..
+        } = self;
+        // By index: `Src` is `Copy`, so nothing is cloned on the pipeline thread per chunk.
+        for k in 0..graph.outputs.len() {
+            let src = graph.outputs[k].src;
+            if let (Some(OutputSink::Audio(a)), Some(f)) =
+                (sinks.get_mut(k), graph.audio_frames(src))
+            {
+                let n = a
+                    .publish(f, &t_of, *read_at)
+                    .map_err(|_| "error: an audio record was gated (fail closed)".to_owned())?;
+                if n > 0 {
+                    add(&stat.records, n);
+                    stat.latency(read_at.elapsed().as_micros() as u64);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn status_tick(&mut self) {
@@ -1835,9 +2051,19 @@ impl Runner {
         *lock(&self.ctl.status) = Value::Object(m.clone());
         let at = self.next_sample.unwrap_or(self.anchor.0);
         let t = Self::time_of(self.anchor, self.shared.fs, at as f64);
+        let lost = self.stat.lost_samples.load(Ordering::Relaxed);
+        let refined = self
+            .ctl
+            .refine
+            .as_ref()
+            .map_or((None, 0), crate::recipes::refine::RefineCtl::readout);
         for s in &mut self.sinks {
-            if let OutputSink::Frames(f) = s {
-                let _ = f.record(t, InspectorRecordType::Status, m.clone());
+            match s {
+                OutputSink::Frames(f) => {
+                    let _ = f.record(t, InspectorRecordType::Status, m.clone());
+                }
+                OutputSink::Audio(a) => a.status(t, &self.graph, &m, lost, self.backlog_s, refined),
+                _ => {}
             }
         }
         inc(&self.ctl.stats.status_ticks);

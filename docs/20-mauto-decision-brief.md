@@ -1,6 +1,6 @@
 # 20 — MAUTO decision brief: every open ADR-0015 question, in one sitting
 
-**Decision brief for the user (T-553, 2026-09-20). Nothing here is decided; no ADR status has moved.**
+**Decision brief for the user (T-553, 2026-09-20). Decided by the user 2026-09-23 — see the decision table's "Decision" column: U1–U4 took the recommendation, U5 overrode it (stereo audio is wanted). ADR-0015 is ACCEPTED on these answers (its §16).**
 **The table at the end is the document. Everything above it is why.**
 
 ---
@@ -161,6 +161,10 @@ version bump, and it buys a nicer broadcast-FM listen.
 **Recommendation: no — and remove the question from the ADR.** If you ever miss it on a broadcast
 station, it is an ordinary ticket filed then, not a contract decision made now.
 
+**Decided (user, 2026-09-23): yes — against this recommendation.** Stereo audio is part of decoding
+the signal; it stays in ADR-0015 (§12.13: a `stereo_decode` block and the `channels` wire change,
+placeholder ids LP-9/LP-10).
+
 **Blocks.** Nothing.
 
 ---
@@ -236,13 +240,15 @@ The only part of §10 Q2 that was ever yours is the battery policy, which is fol
 
 Five questions. Say "yes" to take all five recommendations, or name the ones you want changed.
 
-| # | The question, in one line | Recommended answer | What it blocks |
-|---|---|---|---|
-| **U1** | Does one clean burst (an ADS-B squitter passing CRC-24) confirm a signal by itself? | **Yes — but only when the check was template-fixed and ≥ 24 bits.** Searched checks keep the three-frame rule. Plus: set the false-confirm budget at **≤ 1 wrong Confirmed emitter per week unattended** | M-9, CP-4, T-548. All three can proceed on this as a stated assumption |
-| **U2** | May the device start analyze jobs on its own, and may `deep` run on battery? | **Yes, auto-queue at `quick` only, on mains only, one job at a time. `deep` stays user-triggered.** Not A — a device that only explains what you pointed at is a workbench | M-3, M-11. M-3 can proceed with an `auto_profile` field defaulted off |
-| **U3** | You labelled it; a valid CRC decode disagrees. Who wins? | **You win (rank 0); the decode is recorded and shown beside your label, not applied.** This closes ADR-0016 Q3 too | CP-4, ADR-0016's ladder. Nothing is stalled — this is what the code already does |
-| **U4** | Fund blocks for generic PSK, SSB and CW, or accept the gaps? | **Fund PSK only** (M-14 becomes required — without it MAUTO can never reach bits on PSK). **SSB/CW stay on the legacy chain permanently**, written in as a decision | M-14's priority, LP-8's scope, D6 |
-| **U5** | Do you want stereo audio? | **No.** Re-file it as an ordinary ticket if you ever miss it | Nothing |
+**Decided 2026-09-23 (user, relayed by the supervisor): U1 B, U2 B, U3 A, U4 A, U5 yes — U5 against the recommendation.**
+
+| # | The question, in one line | Recommended answer | What it blocks | Decision (user 2026-09-23) |
+|---|---|---|---|---|
+| **U1** | Does one clean burst (an ADS-B squitter passing CRC-24) confirm a signal by itself? | **Yes — but only when the check was template-fixed and ≥ 24 bits.** Searched checks keep the three-frame rule. Plus: set the false-confirm budget at **≤ 1 wrong Confirmed emitter per week unattended** | M-9, CP-4, T-548. All three can proceed on this as a stated assumption | **B, as recommended** — one frame confirms only on a template-fixed check ≥ 24 bits; budget ≤ 1 wrong Confirmed emitter per unattended week (already in ADR-0022) |
+| **U2** | May the device start analyze jobs on its own, and may `deep` run on battery? | **Yes, auto-queue at `quick` only, on mains only, one job at a time. `deep` stays user-triggered.** Not A — a device that only explains what you pointed at is a workbench | M-3, M-11. M-3 can proceed with an `auto_profile` field defaulted off | **B, as recommended** — auto-queue at `quick` only, mains only, one job at a time; `deep` user-triggered and refused on battery |
+| **U3** | You labelled it; a valid CRC decode disagrees. Who wins? | **You win (rank 0); the decode is recorded and shown beside your label, not applied.** This closes ADR-0016 Q3 too | CP-4, ADR-0016's ladder. Nothing is stalled — this is what the code already does | **A, as recommended** — the user wins (rank 0); the decode is recorded and shown beside the label. ADR-0016 Q3 closed |
+| **U4** | Fund blocks for generic PSK, SSB and CW, or accept the gaps? | **Fund PSK only** (M-14 becomes required — without it MAUTO can never reach bits on PSK). **SSB/CW stay on the legacy chain permanently**, written in as a decision | M-14's priority, LP-8's scope, D6 | **A, as recommended** — fund `psk_demod`, M-14 required (its block already landed as T-609); SSB/CW legacy permanently |
+| **U5** | Do you want stereo audio? | **No.** Re-file it as an ordinary ticket if you ever miss it | Nothing | **Yes — overrides the recommendation.** The user wants stereo audio; it is part of decoding the signal. Kept in ADR-0015 (§12.13) |
 
 **Decided in this brief, not asked:** D1 templates stay local files · D2 pipeline rows are lazy ·
 D3 `output_kinds` is a set (two duplicate questions deleted) · D4 artifacts hidden behind the existing
@@ -250,7 +256,8 @@ filter · D5 retune still ends the audio stream · D6 legacy chain kept (follows
 **Sent to measurement:** M1 the 4-bit margin and 0.6 overlap → T-547 · M2 the search budgets → T-552.
 
 **Once the five are answered:** ADR-0015 can go to review for ACCEPTED, which is M-1's gate, which is
-the whole MAUTO engine graph.
+the whole MAUTO engine graph. **Answered 2026-09-23; ADR-0015 is ACCEPTED (§16), and the MAUTO
+M-1/M-3 chain proceeds.**
 
 ---
 

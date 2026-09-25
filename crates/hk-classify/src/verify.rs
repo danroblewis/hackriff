@@ -55,37 +55,39 @@
 //!   ALRT, and it is self-normalising: a larger constellation buys its extra flexibility with the
 //!   `1/M` prior, so no complexity penalty is needed or applied.
 //! - **fsk — GLRT over the frequency-pulse shape.** The instantaneous-frequency trajectory is fitted
-//!   as `A·Σ_k a_k·g(t − τ − kT)`, with `g` rectangular (CPFSK: `2fsk`, `4fsk`) or Gaussian
-//!   (`gfsk`), symbols hard-decided and `A` by least squares. This is the one thing that actually
+//!   as `A·Σ_k a_k·g(t − τ − kT)`, with `g` a rectangle as the receive channel leaves it (CPFSK:
+//!   `2fsk`, `4fsk`; the channel's smoothing a fitted nuisance, [`CHANNEL_BT_GRID`]) or a Gaussian
+//!   pulse (`gfsk`), symbols hard-decided and `A` by least squares. Where the channel has smoothed
+//!   a rectangle into the deployed Gaussian range the two hypotheses share that shape
+//!   ([`SHARED_BT`]) and tie, so the stage moves nothing (T-908). This is the one thing that actually
 //!   separates 2-FSK from GFSK at the same modulation index: the *shape of the transition*, which
 //!   the tree can only see indirectly through the smearing of an IF histogram. A GLRT maximises over
 //!   its free parameters, so hypotheses are compared by description length ([`mdl_penalty`]) rather
 //!   than by raw fit — otherwise `4fsk`, whose alphabet contains the binary one, could never lose
 //!   to `2fsk`.
 //!
-//! # Three classes this stage does not rank, and why (T-422)
+//! # One class this stage does not rank, and why (T-422, T-590)
 //!
-//! Both tests above are correct **given what they are told**, and for three labels what they are
-//! told is wrong at this geometry. Each declines by returning `None` from its model lookup, which
-//! leaves the label out of the hypothesis set entirely; [`bounded_update`] then carries its tree
-//! prior through untouched, so declining costs nothing and claims nothing.
+//! Both tests above are correct **given what they are told**, and for one label what it is told is
+//! wrong at this geometry. It declines by returning `None` from its model lookup, which leaves the
+//! label out of the hypothesis set entirely; [`bounded_update`] then carries its tree prior through
+//! untouched, so declining costs nothing and claims nothing.
 //!
-//! - **`qam16` and `qam64`** ([`constellation`]) — the ALRT's `N₀` comes from the SNR meter, but the
-//!   residual of an interpolated symbol sample here is dominated by filter and timing error, which
-//!   does not shrink with SNR. Sweeping *only* the assumed SNR flips both truths together, at the
-//!   same value, from "always `qam64`" to "always `qam16`": the ratio is a function of the
-//!   assumption, not of the data. It cost `qam16` class top-1 0.833 → 0.083 and bought nothing on
-//!   the PSK orders.
 //! - **`msk`** ([`fsk_model`]) — its peak deviation was fixed at `π/(2·sps)`, the *transmitter's*
 //!   `h = 0.5`. Its own free-deviation twin `2fsk` beat it on genuine MSK 22 times in 22, after the
 //!   MDL charge for that freedom, so the constraint is on the wrong quantity; the GLRT's arg-max
 //!   was `gfsk` 19 times in 22 and class top-1 fell 0.917 → 0.375.
 //!
-//! In each case the evidence that *does* name the class is elsewhere and already measured — the
-//! fitted densities for the QAM orders, C14's modulation index for MSK — which is the same shape of
-//! conclusion T-249 reached about `cw` and `ssb`. Note what let all three hide: `verifier_gain`
-//! measures the two pairs ADR-0016 §4.5 names, `2fsk`/`gfsk` and `bpsk`/`qpsk`, and none of the
-//! three is in either pair.
+//! The evidence that *does* name it is elsewhere and already measured — C14's modulation index —
+//! which is the same shape of conclusion T-249 reached about `cw` and `ssb`.
+//!
+//! T-422 declined `qam16` and `qam64` as well, because sweeping only the ALRT's assumed SNR flipped
+//! both truths together. That was the constellation ring T-246 later traced to residual carrier
+//! offset and removed; re-measured with it gone (T-590), the two orders separate over a wide band
+//! of assumed SNR that contains the measured one, so they are scored again — see [`constellation`]
+//! for the numbers, and `t590_*` in this module's tests for the false-label cost. Note what let
+//! all three hide in the first place: `verifier_gain` measures the two pairs ADR-0016 §4.5 names,
+//! `2fsk`/`gfsk` and `bpsk`/`qpsk`, and none of the three is in either pair.
 //!
 //! # Bounded evidence, on purpose
 //!
@@ -158,27 +160,71 @@ const TAU_STEPS: usize = 8;
 /// hypothesis, by the strength of the symbol-rate timing line — never per hypothesis.
 const ALPHA_GRID: [f64; 3] = [0.2, 0.35, 0.5];
 
-/// Gaussian `BT` products searched for the `gfsk` hypothesis: the **deployed** range and nothing
-/// wider (GSM 0.3, Bluetooth 0.5).
+/// Gaussian `BT` products searched for the `gfsk` hypothesis: the deployed range's sharpest shaping
+/// (0.3 in this module's units, where GSM and Bluetooth sit) and the band [`SHARED_BT`] it has in
+/// common with a receiver-smoothed rectangle — and nothing sharper.
 ///
-/// The upper end matters more than it looks. A Gaussian at `BT` 0.7 and above is very nearly a
-/// rectangle, so admitting it lets the `gfsk` hypothesis impersonate the CPFSK one and win on every
-/// input by sheer flexibility — measured: with 0.7 in this grid, `gfsk` beat `2fsk` on 100 % of
-/// snippets, by a *larger* margin on genuine 2-FSK (+3.3 to +8.9 nats/symbol) than on genuine GFSK
-/// (+2.3 to +3.8). A hypothesis set has to contain distinguishable hypotheses.
-const BT_GRID: [f64; 2] = [0.3, 0.5];
+/// The upper end matters more than it looks. A Gaussian at `BT` 0.85 and above is very nearly a
+/// rectangle, and no genuine GFSK on the dev grid was ever fitted best there (T-908, below), so
+/// admitting it would let the `gfsk` hypothesis impersonate the CPFSK one by sheer flexibility.
+/// That is exactly what T-200 measured when this grid reached 0.7 while the CPFSK hypotheses were
+/// pinned at `BT` 1.0: `gfsk` beat `2fsk` on 100 % of snippets, by a *larger* margin on genuine
+/// 2-FSK (+3.3 to +8.9 nats/symbol) than on genuine GFSK (+2.3 to +3.8). A hypothesis set has to
+/// contain distinguishable hypotheses — and since T-908 the CPFSK hypotheses reach into the same
+/// band, so there the two now tie instead of one out-fitting the other.
+const BT_GRID: [f64; 5] = [0.3, SHARED_BT[0], SHARED_BT[1], SHARED_BT[2], SHARED_BT[3]];
 
-/// The `BT` standing for "rectangular, as this receiver sees it".
+/// The smoothings at which a GFSK pulse and a rectangle **as this receiver sees it** are the same
+/// shape, so the pulse-shape test can say nothing (T-908). Both [`BT_GRID`] and
+/// [`CHANNEL_BT_GRID`] contain this whole band, so a trajectory whose best fit lies in it fits both
+/// hypotheses identically, the GLRT reports a tie, and [`bounded_update`] moves nothing.
+///
+/// Measured, not chosen: on the dev grid (seeds 0–59 × 20/25/30 dB, every snippet C14 locked, a
+/// rectangle-plus-Gaussian fitted over a `BT` scan of 0.2 … 3.0 and the bare rectangle), the
+/// smoothing that fits **genuine 2-FSK** best fell at 0.4 (6), 0.5 (9), 0.6 (21), 0.7 (41),
+/// 0.85 (22), 1.0 (42) and 1.5 (36); that of **genuine GFSK** at 0.3 (16), 0.4 (43), 0.5 (87),
+/// 0.6 (17) and 0.7 (6). The two ranges overlap on exactly 0.4 … 0.7. Only outside it does a
+/// trajectory name its class: smoother than any receiver-smoothed rectangle (0.3) is `gfsk`,
+/// sharper than any genuine GFSK (0.85 and up) is CPFSK.
+const SHARED_BT: [f64; 4] = [0.4, 0.5, 0.6, 0.7];
+
+/// The `BT`s standing for "rectangular, as this receiver sees it": a **nuisance** fitted per
+/// snippet, like the timing phase, and never a constant.
 ///
 /// A CPFSK transmitter keys its frequency abruptly, but nothing downstream of the antenna ever sees
-/// that edge: C13 hands the classifier a snippet filtered to ±0.75 × OBW99 and decimated, which is
-/// a channel roughly one symbol rate wide, and that filter smooths the instantaneous-frequency
-/// trajectory of *every* emission it passes. Comparing an ideal rectangle against a Gaussian
-/// therefore does not compare two transmitters; it measures the receive filter, and the smoother
-/// hypothesis wins whatever was transmitted. Giving the CPFSK hypotheses this fixed, mild smoothing
-/// makes the test what it is supposed to be: is the transition *sharper* than the channel alone
-/// would leave it?
-const CHANNEL_BT: f64 = 1.0;
+/// that edge: C13 hands the classifier a snippet filtered to ±0.75 × OBW99 and decimated, and that
+/// filter smooths the instantaneous-frequency trajectory of *every* emission it passes. Comparing an
+/// ideal rectangle against a Gaussian therefore does not compare two transmitters; it measures the
+/// receive filter, and the smoother hypothesis wins whatever was transmitted. So the CPFSK
+/// hypotheses carry the channel's smoothing, and the test is what it is supposed to be: is the
+/// transition *sharper* than a deployed Gaussian pulse would leave it?
+///
+/// **How much the channel smooths is not one number (T-908).** Until T-908 it was a fixed `BT` 1.0,
+/// and that is what made this stage prefer `gfsk` on genuine 2-FSK. The channel's width is set by
+/// OBW99, and OBW99 grows with the modulation index, so the room the channel leaves beyond the tones
+/// — `0.75·OBW99 − Δf`, which is what passes the transitions — runs from about 0.6 Rs at `h` 0.4
+/// to about 2 Rs at `h` 3, and the smoothing that fits genuine 2-FSK best runs with it from `BT`
+/// 0.4 to 1.5 ([`SHARED_BT`] has the histogram). Pinned at 1.0, every narrow-deviation draw sat
+/// nearer the `gfsk` grid than its own hypothesis and the GLRT called it `gfsk`: on the dev grid
+/// 32 of 168 genuine 2-FSK snippets, by up to 4.2 nats/symbol, and **never once the other way**
+/// (0 of 104 genuine GFSK called `2fsk`). A one-sided error is the signature of a mis-specified
+/// hypothesis, not of noise. The acceptance draw that exposed it (`2fsk` seed 1 307 003, `h` 0.63,
+/// OBW99 1.18 Rs) was one of them: `gfsk` by 1.4 nats/symbol, confirmed at p 0.906 as soon as the
+/// tree's prior let the stage run (T-887).
+///
+/// The grid's smooth end is [`SHARED_BT`] and not below it: going lower would put the `gfsk`
+/// grid's own 0.3 inside the CPFSK hypothesis, and the stage could never name `gfsk`. The sharp
+/// end, 1.5, is the sharpest trajectory a wide-deviation draw was fitted best at; a sharper one only
+/// strengthens a CPFSK call that `gfsk` could not have matched anyway.
+const CHANNEL_BT_GRID: [f64; 7] = [
+    SHARED_BT[0],
+    SHARED_BT[1],
+    SHARED_BT[2],
+    SHARED_BT[3],
+    0.85,
+    1.0,
+    1.5,
+];
 
 /// SNR range the ALRT's `N₀` is taken from, dB. Outside it the measured in-band SNR says more about
 /// the analysis band than about `E_s/N₀`, and an unclamped `N₀` would make the likelihood either
@@ -287,6 +333,15 @@ impl VerifyOutcome {
 /// It mutates **only** `c.class`, and only ever by reordering probability within the candidate set
 /// the tree produced. See the module docs for what it is forbidden to do.
 pub fn verify(c: &mut Classification, input: &VerifyInput<'_>) -> VerifyOutcome {
+    verify_with(c, input, constellation)
+}
+
+/// [`verify`] over an explicit `psk-qam` constellation lookup (T-590's measurement arm).
+fn verify_with(
+    c: &mut Classification,
+    input: &VerifyInput<'_>,
+    model: fn(&str) -> Option<Vec<Complex64>>,
+) -> VerifyOutcome {
     if c.family == UNKNOWN {
         return VerifyOutcome::Skipped(SkipReason::Abstained);
     }
@@ -329,7 +384,7 @@ pub fn verify(c: &mut Classification, input: &VerifyInput<'_>) -> VerifyOutcome 
     }
 
     let scores = match c.family.as_str() {
-        "psk-qam" => psk_qam_loglikelihoods(&candidates, &x, sps, input.snr_db),
+        "psk-qam" => psk_qam_loglikelihoods_with(&candidates, &x, sps, input.snr_db, model),
         "fsk" => fsk_loglikelihoods(&candidates, &x, sps),
         _ => return VerifyOutcome::Skipped(SkipReason::NoModel),
     };
@@ -468,47 +523,51 @@ fn constellation(label: &str) -> Option<Vec<Complex64>> {
         "bpsk" => psk(2),
         "qpsk" => psk(4),
         "8psk" => psk(8),
-        // **The QAM orders are not scored by this stage** (T-422). The ALRT below is a known-SNR
-        // test: it takes `N₀` from C13's in-band SNR and uses it as the symbol-decision noise
-        // variance. At this analysis geometry that is not what the residual is — a smoothed,
-        // interpolated symbol sample carries filter and timing error that does not shrink when the
-        // SNR rises — and the `qam16` / `qam64` ratio is decided by the assumption rather than by
-        // the data.
+        // **The QAM orders are scored again (T-590)**, after T-422 had declined them. T-422's
+        // measurement was right about what it saw: sweeping only the assumed SNR over 35 blind
+        // snippets flipped both truths together — above ~12 dB every genuine `qam16` *and* `qam64`
+        // was called `qam64`, below ~10 dB every one `qam16` — so no `N₀` was right on both and the
+        // ratio was a function of the assumption. Its explanation (filter and timing error that
+        // does not shrink with SNR) was not: T-246 measured the clock exact and the residual
+        // CARRIER 0.4–3.6 % of the symbol rate, i.e. a ring, and [`remove_residual_cfo`] removed
+        // it. A ring fits the denser lattice best at any small `N₀`, which is the whole of what
+        // T-422 recorded.
         //
-        // Measured directly, by sweeping only the assumed SNR over the same 35 blind snippets and
-        // changing nothing else:
+        // Re-measured on the same stage with the correction in place (`t590_*` tests), assumed SNR
+        // swept with nothing else changed, 6 seeds per cell, count called `qam64`:
         //
         // ```text
-        // assumed SNR   genuine qam16 -> qam64   genuine qam64 -> qam64
-        //     30 dB            21 / 21                  14 / 14
-        //     20 dB            21 / 21                  14 / 14
-        //     15 dB            21 / 21                  14 / 14
-        //     12 dB            10 / 21                  14 / 14
-        //     10 dB             0 / 21                  10 / 14
-        //      6 dB             0 / 21                   0 / 14
+        // true SNR   truth    assumed 30  20  15  12  10   6
+        //   20 dB    qam16            0   0   0   0   0   0
+        //   20 dB    qam64            6   6   6   5   0   0
+        //   30 dB    qam16            0   0   0   0   0   0
+        //   30 dB    qam64            6   6   6   2   1   0
         // ```
         //
-        // Both truths flip **together**, at the same assumed SNR, from "always the denser
-        // constellation" to "always the sparser one", and no value is right on both. That is the
-        // signature of a test with no discriminating power for alphabet order here: above the
-        // crossover the tiny `N₀` turns the mixture into a nearest-point distance and the denser
-        // lattice wins by construction; below it the `−ln M` alphabet term dominates and the
-        // sparser one wins by construction. Neither regime reads the data.
-        //
-        // What it cost: `qam16` class top-1 **0.833 from the tree's densities down to 0.083** after
-        // this stage, wrong-label 0.917, every one of them named `qam64`. What it bought: nothing —
-        // `bpsk`, `qpsk` and `8psk` are called identically with and without it (1.000, 0.875,
-        // 1.000). The pair ADR-0016 §4.5 names and `verifier_gain` measures is `bpsk`/`qpsk`, which
-        // is why this was never seen.
-        //
-        // Returning `None` leaves both labels out of the hypothesis set, and [`bounded_update`]
-        // carries their tree priors through untouched. Restoring the stage for them needs a
-        // residual estimated from the symbols rather than assumed from the SNR meter (and then the
-        // `1/(π N₀)` normaliser this function's caller may currently omit, because with a common
-        // `N₀` it cancels and with a fitted one it does not).
-        "qam16" | "qam64" => return None,
+        // The two truths now separate over a wide band of assumptions, and the measured SNR sits
+        // inside it; the ratio reads the data. Over all five `psk-qam` hypotheses at the measured
+        // SNR the arg-max is the truth on 148 of 150 snippets (10–30 dB); both misses are at 10 dB,
+        // below the class gate.
+        "qam16" => square_qam(16),
+        "qam64" => square_qam(64),
         _ => return None,
     })
+}
+
+/// Unit-average-energy square `m`-QAM, `m` a perfect square.
+fn square_qam(m: usize) -> Vec<Complex64> {
+    let side = (m as f64).sqrt().round() as i32;
+    let levels: Vec<f64> = (0..side).map(|i| f64::from(2 * i - side + 1)).collect();
+    let mut points: Vec<Complex64> = levels
+        .iter()
+        .flat_map(|i| levels.iter().map(move |q| Complex64::new(*i, *q)))
+        .collect();
+    let e = points.iter().map(Complex64::norm_sqr).sum::<f64>() / points.len() as f64;
+    let g = 1.0 / e.sqrt();
+    for p in &mut points {
+        *p *= g;
+    }
+    points
 }
 
 /// Root-raised-cosine taps at `sps` samples per symbol, `span` symbols either side.
@@ -613,9 +672,10 @@ fn symbol_samples(x: &[Complex64], sps: f64) -> Option<Vec<Complex64>> {
     Some(out.into_iter().map(|s| s * g).collect())
 }
 
-/// Order the residual-carrier line is raised to. 8 is the least common multiple of the alphabet
-/// sizes this stage scores (2, 4, 8), so one line serves every hypothesis and no hypothesis is
-/// fitted a frequency of its own — the same rule the roll-off and the timing phase already obey.
+/// Order the residual-carrier line is raised to. 8 is the least common multiple of the PSK alphabet
+/// sizes this stage scores (2, 4, 8), and square QAM's four-fold symmetry gives it a line at the
+/// eighth power too (T-590), so one line serves every hypothesis and no hypothesis is fitted a
+/// frequency of its own — the same rule the roll-off and the timing phase already obey.
 const CFO_ORDER: u32 = 8;
 
 /// How finely the [`CFO_ORDER`]-th power line is searched, as a multiple of the DFT bin width over
@@ -703,11 +763,24 @@ fn remove_residual_cfo(y: &[Complex64]) -> Vec<Complex64> {
 }
 
 /// Mean per-symbol log-likelihood of each candidate `psk-qam` class.
+#[cfg(test)]
 fn psk_qam_loglikelihoods(
     candidates: &[LabelP],
     x: &[Complex64],
     sps: f64,
     snr_db: Option<f64>,
+) -> Option<Vec<(String, f64)>> {
+    psk_qam_loglikelihoods_with(candidates, x, sps, snr_db, constellation)
+}
+
+/// [`psk_qam_loglikelihoods`] over an explicit constellation lookup, so a measurement can score
+/// hypotheses the production lookup declines (T-590) without a second copy of the likelihood.
+fn psk_qam_loglikelihoods_with(
+    candidates: &[LabelP],
+    x: &[Complex64],
+    sps: f64,
+    snr_db: Option<f64>,
+    model: fn(&str) -> Option<Vec<Complex64>>,
 ) -> Option<Vec<(String, f64)>> {
     let y = symbol_samples(x, sps)?;
     // Known-SNR ALRT: N₀ from the measurement, clamped to the range where an in-band SNR is
@@ -721,7 +794,7 @@ fn psk_qam_loglikelihoods(
 
     let mut out = Vec::new();
     for lp in candidates {
-        let Some(points) = constellation(&lp.label) else {
+        let Some(points) = model(&lp.label) else {
             continue;
         };
         let m = points.len();
@@ -769,11 +842,10 @@ fn psk_qam_loglikelihoods(
 struct FskModel {
     /// Alphabet size.
     levels: usize,
-    /// `Some(bt)` for a Gaussian frequency pulse, `None` for an ideal rectangular one.
-    bt: Option<f64>,
-    /// Whether `bt` is a free parameter fitted over [`BT_GRID`] (the `gfsk` hypothesis) or fixed by
-    /// the class (the CPFSK ones, at [`CHANNEL_BT`]).
-    free_bt: bool,
+    /// Gaussian `BT`s the frequency pulse is fitted over: the deployed range for `gfsk`
+    /// ([`BT_GRID`]), the receive channel's for the CPFSK classes ([`CHANNEL_BT_GRID`]). Either
+    /// way one free parameter, so neither hypothesis buys flexibility the other lacks.
+    bts: &'static [f64],
     /// Peak frequency deviation in rad/sample when the modulation index is fixed by the class
     /// (`msk`: `h = 0.5`), or `None` when it is a free parameter fitted by least squares.
     fixed_peak: Option<f64>,
@@ -783,8 +855,7 @@ fn fsk_model(label: &str) -> Option<FskModel> {
     Some(match label {
         "2fsk" => FskModel {
             levels: 2,
-            bt: Some(CHANNEL_BT),
-            free_bt: false,
+            bts: &CHANNEL_BT_GRID,
             fixed_peak: None,
         },
         // **`msk` is not testable here, so this stage does not test it** (T-422).
@@ -796,7 +867,7 @@ fn fsk_model(label: &str) -> Option<FskModel> {
         // and those are not the same number.
         //
         // The proof does not need the true value, only its own twin: `2fsk` is the identical
-        // hypothesis — two levels, rectangular pulse at [`CHANNEL_BT`] — differing *only* in fitting
+        // hypothesis — two levels, a rectangle through [`CHANNEL_BT_GRID`] — differing *only* in fitting
         // the deviation instead of fixing it. On the blind acceptance grid at gate+5/+10, `2fsk`
         // beat `msk` on genuine MSK on 22 of 22 snippets, by 0.13–0.92 nats/symbol, **after** the
         // [`mdl_penalty`] that charges it half a `ln n` for that extra freedom. A constraint that
@@ -818,14 +889,12 @@ fn fsk_model(label: &str) -> Option<FskModel> {
         "msk" => return None,
         "gfsk" => FskModel {
             levels: 2,
-            bt: Some(BT_GRID[0]),
-            free_bt: true,
+            bts: &BT_GRID,
             fixed_peak: None,
         },
         "4fsk" => FskModel {
             levels: 4,
-            bt: Some(CHANNEL_BT),
-            free_bt: false,
+            bts: &CHANNEL_BT_GRID,
             fixed_peak: None,
         },
         _ => return None,
@@ -842,15 +911,11 @@ fn instantaneous_frequency(x: &[Complex64]) -> Vec<f64> {
     f
 }
 
-/// The sampled frequency pulse, centred on zero: a rectangle of one symbol, optionally smoothed by
-/// a Gaussian of the given `BT` (the standard GFSK definition).
-fn frequency_pulse(sps: f64, bt: Option<f64>) -> (Vec<f64>, usize) {
+/// The sampled frequency pulse, centred on zero: a rectangle of one symbol smoothed by a Gaussian
+/// of the given `BT` (the standard GFSK definition). Every hypothesis is smoothed — the CPFSK ones
+/// by the receive channel ([`CHANNEL_BT_GRID`]) — so there is no bare-rectangle case.
+fn frequency_pulse(sps: f64, bt: f64) -> (Vec<f64>, usize) {
     let half_rect = (sps / 2.0).round().max(1.0) as isize;
-    let Some(bt) = bt else {
-        let taps: Vec<f64> = (-half_rect..half_rect).map(|_| 1.0).collect();
-        let half = taps.len() / 2;
-        return (taps, half);
-    };
     let sigma = (sps * 0.5 / (std::f64::consts::TAU * bt)).max(0.3);
     let half_g = (3.0 * sigma).ceil() as isize;
     let half = half_rect + half_g;
@@ -900,14 +965,9 @@ fn fsk_loglikelihoods(
         let Some(model) = fsk_model(&lp.label) else {
             continue;
         };
-        let bts: Vec<Option<f64>> = if model.free_bt {
-            BT_GRID.iter().map(|b| Some(*b)).collect()
-        } else {
-            vec![model.bt]
-        };
         let mut best = f64::NEG_INFINITY;
-        for bt in bts {
-            let (pulse, centre) = frequency_pulse(sps, bt);
+        for bt in model.bts {
+            let (pulse, centre) = frequency_pulse(sps, *bt);
             let energy: f64 = pulse.iter().map(|w| w * w).sum();
             if energy <= 0.0 {
                 continue;
@@ -920,7 +980,7 @@ fn fsk_loglikelihoods(
                 // parameters and of the symbol alphabet (MDL): without the alphabet term a
                 // four-level model, whose alphabet contains the binary one, could never lose.
                 let ll = -0.5 * sigma2.max(1e-18).ln() * n as f64;
-                let penalty = mdl_penalty(&model, n, n_sym, model.free_bt);
+                let penalty = mdl_penalty(&model, n, n_sym);
                 best = best.max((ll - penalty) / n_sym);
             }
         }
@@ -934,13 +994,13 @@ fn fsk_loglikelihoods(
 /// Description length, in nats, of what a hypothesis fitted rather than predicted: half a
 /// `ln n` per free continuous nuisance parameter (BIC), plus `ln levels` per symbol for the
 /// alphabet a GLRT hard-decides for free.
-fn mdl_penalty(model: &FskModel, n: usize, n_sym: f64, free_bt: bool) -> f64 {
+fn mdl_penalty(model: &FskModel, n: usize, n_sym: f64) -> f64 {
     let mut free = 1.0; // the timing phase, always fitted
     if model.fixed_peak.is_none() {
         free += 1.0; // the deviation
     }
-    if free_bt {
-        free += 1.0; // the Gaussian BT
+    if model.bts.len() > 1 {
+        free += 1.0; // the Gaussian BT (the pulse's for `gfsk`, the channel's for CPFSK)
     }
     0.5 * free * (n as f64).ln() + n_sym * (model.levels as f64).ln()
 }
@@ -1666,5 +1726,448 @@ mod tests {
                 (2.0 * sps).ceil() % sps
             );
         }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // T-590: re-measuring T-422's decline of qam16/qam64 after T-246's carrier recovery.
+    // -------------------------------------------------------------------------------------
+
+    /// The arm T-422 shipped: production's lookup with the two QAM orders declined.
+    fn t590_declined(label: &str) -> Option<Vec<Complex64>> {
+        match label {
+            "qam16" | "qam64" => None,
+            other => constellation(other),
+        }
+    }
+
+    const T590_PSK_QAM: [(Class, &str); 5] = [
+        (Class::Bpsk, "bpsk"),
+        (Class::Qpsk, "qpsk"),
+        (Class::Psk8, "8psk"),
+        (Class::Qam16, "qam16"),
+        (Class::Qam64, "qam64"),
+    ];
+
+    fn t590_labels(labels: &[&str]) -> Vec<LabelP> {
+        labels
+            .iter()
+            .map(|l| LabelP {
+                label: (*l).to_owned(),
+                p: 1.0 / labels.len() as f64,
+            })
+            .collect()
+    }
+
+    fn t590_argmax(scores: &[(String, f64)]) -> String {
+        scores
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("non-empty")
+            .0
+            .clone()
+    }
+
+    /// **T-422's signature, re-measured.** T-422 swept only the ALRT's assumed SNR and found both
+    /// QAM truths flipping together — every genuine `qam16` and `qam64` called `qam64` from 15 dB
+    /// up, no assumed value right on both — and declined the two orders. With T-246's carrier
+    /// recovery in [`symbol_samples`], the same sweep must separate them at the measured SNR *and*
+    /// either side of it, and the five-way arg-max must be the truth on every snippet.
+    ///
+    /// Measured when written: 60/60 five-way, and 24/24 at every one of the three assumptions.
+    /// Removing the `"qam16"`/`"qam64"` arms of [`constellation`] makes this fail on the first
+    /// assertion (the hypotheses are no longer scored), and removing [`remove_residual_cfo`]
+    /// reproduces T-422's flip exactly: five-way 16/60, and the pair 12/24 at every assumption —
+    /// every snippet of both truths called `qam64`.
+    #[test]
+    fn t590_the_qam_orders_separate_on_the_data_not_on_the_assumed_snr() {
+        let five = t590_labels(&["bpsk", "qpsk", "8psk", "qam16", "qam64"]);
+        let pair = t590_labels(&["qam16", "qam64"]);
+        let (mut n5, mut right5) = (0usize, 0usize);
+        let mut wrong: Vec<String> = Vec::new();
+        // [measured, 30 dB, 15 dB] assumed: (ran, right).
+        let mut sweep = [(0usize, 0usize); 3];
+        for (class, truth) in T590_PSK_QAM {
+            for snr in T246_SNRS {
+                for k in 0..T246_SEEDS {
+                    let seed = ACCEPTANCE_SEED_BASE + 900 + k;
+                    let c = t246_case(class, snr, seed);
+                    let scores =
+                        psk_qam_loglikelihoods_with(&five, &c.x, c.sps, Some(snr), constellation)
+                            .expect("five hypotheses scored");
+                    assert_eq!(scores.len(), 5, "{truth} {snr} {seed}: hypotheses scored");
+                    n5 += 1;
+                    let best = t590_argmax(&scores);
+                    if best == truth {
+                        right5 += 1;
+                    } else {
+                        wrong.push(format!("{truth} {snr} dB seed {seed} -> {best}"));
+                    }
+                    if !truth.starts_with("qam") {
+                        continue;
+                    }
+                    for (i, assumed) in [snr, 30.0, 15.0].into_iter().enumerate() {
+                        let scores = psk_qam_loglikelihoods_with(
+                            &pair,
+                            &c.x,
+                            c.sps,
+                            Some(assumed),
+                            constellation,
+                        )
+                        .expect("pair scored");
+                        sweep[i].0 += 1;
+                        if t590_argmax(&scores) == truth {
+                            sweep[i].1 += 1;
+                        } else {
+                            wrong.push(format!(
+                                "{truth} {snr} dB seed {seed}, assumed {assumed} dB -> qam pair wrong"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "T-590: five-way arg-max right {right5}/{n5}; qam16-vs-qam64 right at assumed \
+             measured/30/15 dB: {sweep:?}"
+        );
+        assert_eq!(n5, 60, "grid size");
+        assert_eq!(right5, n5, "five-way arg-max wrong: {wrong:#?}");
+        for (ran, right) in sweep {
+            assert_eq!(ran, 24, "qam grid size");
+            assert_eq!(
+                right, ran,
+                "the qam16/qam64 ratio follows the assumption again: {wrong:#?}"
+            );
+        }
+    }
+
+    /// **The decision, through the production path, with its false-label cost counted.** Blind
+    /// `qam16`/`qam64` through the tree, then the verifier once with the orders declined (T-422's
+    /// arm) and once as shipped. Restoring them may only turn wrong names right: no rerank may land
+    /// off the truth, the wrong count may not rise, and nothing may be named wrongly at p >= 0.9.
+    /// The two held-out constellations nearest QAM (`apsk16`, `pi/4-dqpsk`) are run through the
+    /// shipped path too, because a forced pair with no truth in it is where the ALRT *can* be
+    /// wrong (`t590_a_forced_pair_is_resolved_to_the_truth_whenever_the_truth_is_in_it`): they must
+    /// never come out with a QAM name at p >= 0.9.
+    ///
+    /// Measured when written, 20/25/30 dB x 12 seeds: `qam16` wrong 3 -> 0 (all three reranks
+    /// correct it), `qam64` 1 -> 1 (a snippet C14 did not lock, so the verifier never ran on it);
+    /// the verifier ran on 55 of 69 where it had run on 0; held-outs 72/72 family `unknown`.
+    #[test]
+    fn t590_restoring_the_qam_orders_only_turns_wrong_names_right() {
+        // [declined, shipped]: (n, right, wrong, confidently wrong, ran, reranked onto a wrong label)
+        let mut arms = [(0usize, 0usize, 0usize, 0usize, 0usize, 0usize); 2];
+        let mut held_reached = 0usize;
+        let mut held_confident_qam = 0usize;
+        let classes = [
+            (Class::Qam16, "qam16"),
+            (Class::Qam64, "qam64"),
+            (Class::Apsk16, "held-out"),
+            (Class::Pi4Dqpsk, "held-out"),
+        ];
+        for snr in [20.0, 25.0, 30.0] {
+            for (class, truth) in classes {
+                for k in 0..12u64 {
+                    let seed = ACCEPTANCE_SEED_BASE + 590_000 + k + 100 * class as u64;
+                    let s = generate(class, &SynthConfig::new(snr, seed));
+                    let mut c14 = SymbolEstimator::new();
+                    let symbols = c14.from_samples(
+                        &s.symbol_samples,
+                        s.symbol_sample_rate_hz,
+                        Some(s.obw_hz),
+                        Some(snr),
+                    );
+                    let mut req =
+                        ClassifyRequest::new(&s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+                    req.obw_hz = Some(s.obw_hz);
+                    req.snr_db = Some(snr);
+                    req.symbols = symbols.as_ref();
+                    if truth == "held-out" {
+                        req.symbol_samples = Some(&s.symbol_samples);
+                        req.symbol_sample_rate_hz = Some(s.symbol_sample_rate_hz);
+                        let c = Classifier::new().classify(&req);
+                        if let Some(call) = c.class.as_ref() {
+                            held_reached += usize::from(call.stage == Stage::Verifier);
+                            if call.label.starts_with("qam") && call.p >= 0.9 {
+                                held_confident_qam += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    let tree = Classifier::new().classify(&req);
+                    if tree.family != "psk-qam" || tree.class.is_none() {
+                        continue;
+                    }
+                    let input = VerifyInput {
+                        samples: &s.symbol_samples,
+                        sample_rate_hz: s.symbol_sample_rate_hz,
+                        symbols: symbols.as_ref(),
+                        snr_db: Some(snr),
+                    };
+                    for (arm, shipped) in [(0, false), (1, true)] {
+                        let mut c = tree.clone();
+                        let o = if shipped {
+                            verify(&mut c, &input)
+                        } else {
+                            verify_with(&mut c, &input, t590_declined)
+                        };
+                        let call = c.class.as_ref().expect("class call kept");
+                        let a = &mut arms[arm];
+                        a.0 += 1;
+                        if call.label == truth {
+                            a.1 += 1;
+                        } else {
+                            a.2 += 1;
+                            a.3 += usize::from(call.p >= 0.9);
+                            a.5 += usize::from(o.reranked());
+                        }
+                        a.4 += usize::from(o.ran());
+                    }
+                }
+            }
+        }
+        let [declined, shipped] = arms;
+        println!(
+            "T-590 (n, right, wrong, confidently wrong, ran, reranked-to-wrong): declined \
+             {declined:?}, shipped {shipped:?}; held-outs reaching the verifier {held_reached}"
+        );
+        assert_eq!(declined.0, shipped.0);
+        assert!(
+            shipped.0 >= 60,
+            "too few psk-qam class calls to judge: {}",
+            shipped.0
+        );
+        assert!(
+            shipped.4 >= 40,
+            "the verifier ran on only {} QAM snippets — a green run that never exercised the \
+             restored hypotheses is the failure this test exists to prevent",
+            shipped.4
+        );
+        assert_eq!(
+            shipped.5, 0,
+            "the verifier reranked a QAM snippet onto a wrong label"
+        );
+        assert_eq!(shipped.3, 0, "a QAM snippet was named wrongly at p >= 0.9");
+        assert!(
+            shipped.2 <= declined.2,
+            "restoring the QAM orders raised the wrong count {} -> {}",
+            declined.2,
+            shipped.2
+        );
+        assert!(
+            shipped.2 < declined.2,
+            "restoring the QAM orders corrected nothing ({} -> {}) — then T-422's decline costs \
+             nothing and the restoration should be re-argued",
+            declined.2,
+            shipped.2
+        );
+        assert_eq!(
+            held_confident_qam, 0,
+            "a held-out constellation was named qam16/qam64 at p >= 0.9"
+        );
+    }
+
+    /// **The false-label cost where the stage actually decides**: a tree call left level between
+    /// two candidates, forced as T-246's test forces it, for every pair that mixes a QAM order with
+    /// its nearest rival. Whenever the truth is one of the two, the verifier must name it.
+    ///
+    /// Measured when written (ALRT alone, 20/25/30 dB): 100 % in every such pair — `qam16` 17/17
+    /// against `qam64`, 8-PSK and QPSK; `qam64` 12/12 against `qam16`; 8-PSK and QPSK 18/18
+    /// against `qam16`. The ALRT *can* only be wrong where the truth is absent from the pair (genuine
+    /// QPSK offered only `qam16`/`qam64` goes to `qam64` 18/18; held-out π/4-DQPSK splits 8/10) —
+    /// which needs the tree to have offered two wrong labels, and the held-outs abstain at the
+    /// family level before that (previous test).
+    #[test]
+    fn t590_a_forced_pair_is_resolved_to_the_truth_whenever_the_truth_is_in_it() {
+        let cases: [(Class, &str, &[&str]); 4] = [
+            (Class::Qam16, "qam16", &["qam64", "8psk", "qpsk"]),
+            (Class::Qam64, "qam64", &["qam16"]),
+            (Class::Psk8, "8psk", &["qam16"]),
+            (Class::Qpsk, "qpsk", &["qam16"]),
+        ];
+        let mut ran = 0usize;
+        let mut forced = 0usize;
+        for (class, truth, rivals) in cases {
+            for snr in T246_SNRS {
+                for k in 0..T246_SEEDS {
+                    let seed = ACCEPTANCE_SEED_BASE + 900 + k;
+                    let s = generate(class, &SynthConfig::new(snr, seed));
+                    let mut c14 = SymbolEstimator::new();
+                    let symbols = c14.from_samples(
+                        &s.symbol_samples,
+                        s.symbol_sample_rate_hz,
+                        Some(s.obw_hz),
+                        Some(snr),
+                    );
+                    let mut req =
+                        ClassifyRequest::new(&s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+                    req.obw_hz = Some(s.obw_hz);
+                    req.snr_db = Some(snr);
+                    req.symbols = symbols.as_ref();
+                    let tree = Classifier::new().classify(&req);
+                    if tree.family != "psk-qam" || tree.class.is_none() {
+                        continue;
+                    }
+                    for rival in rivals {
+                        forced += 1;
+                        let mut c = tree.clone();
+                        if let Some(call) = c.class.as_mut() {
+                            call.dist = vec![
+                                LabelP {
+                                    label: truth.to_owned(),
+                                    p: 0.5,
+                                },
+                                LabelP {
+                                    label: (*rival).to_owned(),
+                                    p: 0.5,
+                                },
+                            ];
+                            // Start from the wrong name, so keeping it would be visible.
+                            call.label = (*rival).to_owned();
+                            call.p = 0.5;
+                        }
+                        let outcome = verify(
+                            &mut c,
+                            &VerifyInput {
+                                samples: &s.symbol_samples,
+                                sample_rate_hz: s.symbol_sample_rate_hz,
+                                symbols: symbols.as_ref(),
+                                snr_db: Some(snr),
+                            },
+                        );
+                        let VerifyOutcome::Ran { scores, to, .. } = &outcome else {
+                            assert_eq!(
+                                outcome,
+                                VerifyOutcome::Skipped(SkipReason::NoClockLock),
+                                "{truth} vs {rival} {snr} {seed}"
+                            );
+                            continue;
+                        };
+                        ran += 1;
+                        assert_eq!(
+                            to, truth,
+                            "{truth} vs {rival} {snr} dB seed {seed}: verifier chose {to} with \
+                             {scores:?}"
+                        );
+                        let call = c.class.as_ref().expect("class call");
+                        assert!(call.p <= MAX_CONFIDENCE + 1e-9);
+                    }
+                }
+            }
+        }
+        println!("T-590: the verifier ran on {ran} of {forced} forced QAM pairs");
+        assert!(
+            ran >= 50,
+            "the verifier only ran {ran} of {forced} times — the pairs were not exercised"
+        );
+    }
+
+    /// **T-908: the `fsk` pulse-shape test never argues for the wrong binary class.**
+    ///
+    /// Forced to choose between `2fsk` and `gfsk` at 50/50, starting from the wrong name, the stage
+    /// may keep the tie (a receiver-smoothed rectangle and a deployed Gaussian share
+    /// [`SHARED_BT`]) or move towards the truth; it may never score the rival higher. Blind:
+    /// acceptance draws from `verifier_gain`'s own seed range, never the dev grid the channel
+    /// grid was measured on.
+    ///
+    /// The two `2fsk` draws are the ones the fixed `BT` 1.0 channel lost, at every SNR of that
+    /// test: `1 307 003` is T-887's (`h` 0.63, OBW99 1.18 Rs; `gfsk` by 1.38 nats/symbol at 25 dB,
+    /// confirmed at p 0.906 once the tree's prior let the stage run) and `1 307 005` its twin
+    /// (`h` 0.43; by 1.30). Both go red here on the pre-T-908 grid. The twelve `gfsk` draws are
+    /// the whole cell, so the fix cannot have bought them by leaning the other way.
+    #[test]
+    fn t908_the_fsk_pulse_test_never_prefers_the_wrong_binary_class() {
+        let snr = 25.0;
+        let base = ACCEPTANCE_SEED_BASE + 300_000;
+        let cases: Vec<(Class, &str, &str, u64)> = [3u64, 5]
+            .iter()
+            .map(|t| {
+                (
+                    Class::Fsk2,
+                    "2fsk",
+                    "gfsk",
+                    base + 1_000 * Class::Fsk2 as u64 + t,
+                )
+            })
+            .chain((0..12u64).map(|t| {
+                (
+                    Class::Gfsk,
+                    "gfsk",
+                    "2fsk",
+                    base + 1_000 * Class::Gfsk as u64 + t,
+                )
+            }))
+            .collect();
+        let mut ran = 0usize;
+        for (class, truth, rival, seed) in cases {
+            let s = generate(class, &SynthConfig::new(snr, seed));
+            let mut c14 = SymbolEstimator::new();
+            let symbols = c14.from_samples(
+                &s.symbol_samples,
+                s.symbol_sample_rate_hz,
+                Some(s.obw_hz),
+                Some(snr),
+            );
+            let mut req = ClassifyRequest::new(&s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+            req.obw_hz = Some(s.obw_hz);
+            req.snr_db = Some(snr);
+            req.symbols = symbols.as_ref();
+            let mut c = Classifier::new().classify(&req);
+            if c.family != "fsk" || c.class.is_none() {
+                continue;
+            }
+            if let Some(call) = c.class.as_mut() {
+                call.dist = vec![
+                    LabelP {
+                        label: truth.to_owned(),
+                        p: 0.5,
+                    },
+                    LabelP {
+                        label: rival.to_owned(),
+                        p: 0.5,
+                    },
+                ];
+                call.label = rival.to_owned();
+                call.p = 0.5;
+            }
+            let outcome = verify(
+                &mut c,
+                &VerifyInput {
+                    samples: &s.symbol_samples,
+                    sample_rate_hz: s.symbol_sample_rate_hz,
+                    symbols: symbols.as_ref(),
+                    snr_db: Some(snr),
+                },
+            );
+            let VerifyOutcome::Ran { scores, .. } = &outcome else {
+                continue;
+            };
+            ran += 1;
+            let score = |l: &str| {
+                scores
+                    .iter()
+                    .find(|(k, _)| k == l)
+                    .map(|(_, v)| *v)
+                    .expect("both scored")
+            };
+            assert!(
+                score(rival) <= score(truth) + 1e-9,
+                "{truth} seed {seed} at {snr} dB: the pulse test preferred {rival} ({scores:?})"
+            );
+            let p_truth = c
+                .class
+                .as_ref()
+                .and_then(|k| k.dist.iter().find(|lp| lp.label == truth))
+                .map_or(0.0, |lp| lp.p);
+            assert!(
+                p_truth >= 0.5 - 1e-9,
+                "{truth} seed {seed}: demoted to {p_truth}"
+            );
+        }
+        println!("T-908: the pulse test ran on {ran} of 14 forced 2fsk/gfsk pairs");
+        assert!(
+            ran >= 10,
+            "only {ran} forced pairs ran: the property was not exercised"
+        );
     }
 }

@@ -279,6 +279,18 @@ export function sampleFrame(fr: LiveFrame, box: Box, n: number): Float32Array {
 }
 
 /**
+ * How far apart two absolute times may be and still be the same instant, given that each is a
+ * double of epoch nanoseconds: a few ulps of the largest magnitude involved (2^-48 relative, ~6 µs
+ * at today's epoch), which covers the rounding of `k * cell` products and of a non-integer cell
+ * recovered from `cell_s * 1e9`. Nothing the lattice resolves is that short.
+ */
+export function timeSlackNs(...ts: number[]): number {
+  let m = 0;
+  for (const t of ts) if (Number.isFinite(t)) m = Math.max(m, Math.abs(t));
+  return m * 2 ** -48;
+}
+
+/**
  * The column-wise maximum over `box`, from the tiles the pane is **already** drawing.
  *
  * `levelF`/`levelT` are the levels the frame actually resolved (`PaneReport`), not a second
@@ -312,8 +324,14 @@ export function maxHoldColumns(
     const cellHz = (ext.f1Hz - ext.f0Hz) / d.nf;
     const cellNs = (ext.t1Ns - ext.t0Ns) / d.nt;
     if (!(cellHz > 0) || !(cellNs > 0)) continue;
-    const r0 = Math.max(0, Math.floor((box.t0Ns - ext.t0Ns) / cellNs));
-    const r1 = Math.min(d.nt, Math.ceil((box.t1Ns - ext.t0Ns) / cellNs));
+    // T-880: the edges are epoch nanoseconds (~1.8e18, past 2^53), so a double holds them only to
+    // ~256 ns, and a window snapped to a cell edge by `sliceWindow` lands a few ulps either side of
+    // the edge this tile's own arithmetic puts there. A raw floor/ceil then pulls in the NEIGHBOURING
+    // row — a slice that is the max of two cells. Edges within the representable error of a cell
+    // edge are that edge; the slack is capped far below a cell so a genuine partial row still counts.
+    const slack = Math.min(cellNs / 64, timeSlackNs(box.t0Ns, box.t1Ns, ext.t0Ns));
+    const r0 = Math.max(0, Math.floor((box.t0Ns - ext.t0Ns + slack) / cellNs));
+    const r1 = Math.min(d.nt, Math.ceil((box.t1Ns - ext.t0Ns - slack) / cellNs));
     if (!(r1 > r0)) continue;
     for (let j = 0; j < d.nf; j++) {
       const f0 = ext.f0Hz + j * cellHz;

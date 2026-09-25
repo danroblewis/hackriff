@@ -58,6 +58,7 @@ mod harmonic_tests;
 pub mod hash;
 pub mod ids;
 pub mod multipath; // T-222 (C40): content-correlated multipath
+pub mod path; // T-897 (docs/23 §10.6 rule 2): traced (t, f) paths derived from detections
 pub mod plan;
 pub mod presence; // T-262 (ADR-0017 TM-5): presence intervals, close and revive
 pub mod provenance;
@@ -88,8 +89,8 @@ pub use context::{
     CorrelationType, Evidence, Explanation, ExternalEvent, Geo,
 };
 pub use decode::{
-    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, DecodeEvidence, DecodeView,
-    Demodulation, EstimatedParams, Framing, WITHHELD_LABEL,
+    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, DecodeEvidence,
+    DecodeProvenance, DecodeView, Demodulation, EstimatedParams, Framing, WITHHELD_LABEL,
 };
 pub use detection::{
     BurstLengths, Detection, DetectionFlags, MAX_TRACK_PAGE, PageRequest, SegmentKind,
@@ -97,8 +98,8 @@ pub use detection::{
 };
 pub use emitter::{
     Appearance, Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation,
-    Identity, IdentityScheme, KnownStatus, KnownStatusChange, LifecycleAuthor, LifecycleChange,
-    LifecycleState, LinkTarget, Recurrence, StatusAuthor,
+    FRAMING_IDENTITY_SCHEME, Identity, IdentityScheme, KnownStatus, KnownStatusChange,
+    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, Recurrence, StatusAuthor,
 };
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,
@@ -118,6 +119,10 @@ pub use ids::{
 pub use multipath::{
     ContentCorrelation, ContentKind, IdentityAgreement, MultipathFinding, MultipathRow,
     MultipathVerdict, content_multipath,
+};
+pub use path::{
+    PATH_METHOD, PathConfig, PathKind, PathProvenance, PathVertex, TracedPath, VertexAt,
+    derive_paths,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -156,6 +161,10 @@ pub use repo::{
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS,
     Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
     TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
+};
+// T-904 per-frame detection retention and rollup (docs/07 §2.9).
+pub use repo::{
+    DetectionRetention, DetectionRollup, DetectionStorage, KEEP_PER_EMITTER, PruneReport,
 };
 // T-818 MAP-18 saved measurements (docs/25 §4).
 pub use repo::{

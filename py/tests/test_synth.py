@@ -33,6 +33,7 @@ SMALL: dict[str, dict] = {
     "nbfm_voice": {"duration_s": 0.3},
     "am_voice": {"duration_s": 0.3},
     "fsk_burst_train": {"duration_s": 0.3},
+    "c4fm_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
     # T-222's scenario reached main (2026-09-23 03:41) without this entry: sorted(SCENARIOS) is the
     # parametrisation, so every registered scenario needs a SMALL row or the suite KeyErrors.
@@ -59,6 +60,7 @@ SMALL: dict[str, dict] = {
     "ofdm_nonstandard_cp": {"duration_s": 0.1},
     "dsss_m_sequence": {"duration_s": 0.4, "n_bits": 100},
     "qam16_unframed": {"duration_s": 0.1},
+    "generic_fsk_sweep": {"duration_s": 0.2, "symbol_rate_bd": 20000.0},
 }
 
 
@@ -1591,3 +1593,49 @@ def test_retune_diversity_refuses_a_layout_whose_lines_would_merge(tmp_path):
     signal."""
     with pytest.raises(ValueError, match="minimum separation"):
         gen(tmp_path, "retune_diversity", lo_spur_offset_hz=20e3)
+
+
+# ---- c4fm_burst_train check parameterisation (T-850) -------------------------------------------
+
+
+def _crc_ok(t):
+    c = t["check"]
+    payload = bytes.fromhex(t["frame"]["payload_hex"])
+    crc = fsk_mod.crc_generic(payload, c["width"], int(c["poly"], 16), int(c["init"], 16),
+                              c["refin"], c["refout"], int(c["xorout"], 16))
+    assert f"0x{crc:0{c['width'] // 4}x}" == c["value"]
+    assert t["frame"]["body_hex"] == t["frame"]["payload_hex"] + c["value"][2:]
+
+
+@pytest.mark.parametrize("width", [8, 16, 24, 32])
+def test_c4fm_crc_width_round_trips(tmp_path, width):
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", check_width=width))
+    bursts = truths(meta, kind="c4fm-burst")
+    assert len(bursts) >= 2
+    assert scenario_truth(meta)["emitter"]["crc"]["width"] == width
+    for _, t in bursts:
+        assert t["modulation"] == "c4fm" and t["levels"] == 4
+        _crc_ok(t)
+
+
+def test_c4fm_searched_crc_is_in_catalogue_and_random_poly_is_not(tmp_path):
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", crc_source="searched", seed=3))
+    _, t = truths(meta, kind="c4fm-burst")[0]
+    assert t["check"]["in_reveng_catalogue"] and t["check"]["source"] == "searched"
+    _crc_ok(t)
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", crc_source="random", check_width=24))
+    _, t = truths(meta, kind="c4fm-burst")[0]
+    assert t["check"]["in_reveng_catalogue"] is False and t["check"]["catalogue_name"] is None
+    _crc_ok(t)
+
+
+def test_c4fm_bch_and_none_and_constant_payload(tmp_path):
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", check_kind="bch"))
+    for _, t in truths(meta, kind="c4fm-burst"):
+        words = [int(w, 16) for w in t["check"]["codewords_hex"]]
+        assert all(pocsag_mod.bch_encode(w >> 11) == w for w in words)
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", check_kind="nocheck"))
+    assert all(t["check"] is None for _, t in truths(meta, kind="c4fm-burst"))
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", constant_payload=True))
+    bursts = truths(meta, kind="c4fm-burst")
+    assert len(bursts) >= 3 and len({t["frame"]["body_hex"] for _, t in bursts}) == 1

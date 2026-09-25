@@ -9,6 +9,7 @@ use super::inventory::{
     emitter_id_by_identity, identity_label, insert_status, link_kind, link_target,
 };
 use super::lifecycle;
+use super::synthesis::ResolutionKind;
 use super::{
     RepoError, Repository, blob, bump_extent, enum_parse, enum_text, finite, int, region_bounds,
 };
@@ -860,6 +861,14 @@ fn decide(
         None => None,
     };
     if let Some(claim) = &s.identity {
+        // T-879: a structural identity (the blind framer's signature) names a device *type*, not
+        // a unit, so it is never a resolution key — another unit of the type holding it is not
+        // this emitter. It shares a channel, so (as for any such scheme) neither the context nor
+        // a fingerprint folds it into an entry either: the sighting starts its own, and the
+        // pipeline's same-emission link joins it to the track it was demodulated from.
+        if claim.identity.scheme.is_structural() {
+            return Ok((None, Assignment::Created));
+        }
         let holder = match emitter_id_by_identity(conn, &claim.identity)? {
             Some(h) => active_id(conn, h)?,
             None => None,
@@ -929,7 +938,15 @@ fn decide(
 fn create(conn: &Connection, s: &Sighting, why: &str) -> Result<EmitterId, RepoError> {
     let id = EmitterId::new();
     let freq = FreqRange::centered(s.f_center_hz, s.bandwidth_hz);
-    let (scheme, value, class) = match &s.identity {
+    // T-879: a structural identity another live emitter already holds stays with it (the
+    // identity index is unique); this unit of the same type is created without it.
+    let held_elsewhere = match &s.identity {
+        Some(c) if c.identity.scheme.is_structural() => {
+            emitter_id_by_identity(conn, &c.identity)?.is_some()
+        }
+        _ => false,
+    };
+    let (scheme, value, class) = match s.identity.as_ref().filter(|_| !held_elsewhere) {
         Some(c) => (
             Some(c.identity.scheme.as_string()),
             Some(c.identity.value.clone()),
@@ -1045,6 +1062,10 @@ fn apply_identity(
                 .execute(params![enum_text(&class)?, blob(target)])?;
             Ok(None)
         }
+        // T-879: a structural claim is never a conflict. It describes the device type, so another
+        // unit of that type already holding it (or this emitter holding a different one) says
+        // nothing about who this is; the emitter keeps what it has.
+        Some(_) if claim.identity.scheme.is_structural() => Ok(None),
         Some(_) => Ok(conflict(
             vec![target],
             ConflictReason::ContextHoldsOtherIdentity,
@@ -1053,6 +1074,9 @@ fn apply_identity(
             if let Some(h) = emitter_id_by_identity(conn, &claim.identity)?
                 && h != target
             {
+                if claim.identity.scheme.is_structural() {
+                    return Ok(None);
+                }
                 return Ok(conflict(
                     vec![h, target],
                     ConflictReason::ContextHoldsOtherIdentity,
@@ -1634,12 +1658,14 @@ impl Repository {
     pub fn query_inventory(&self, q: &InventoryQuery) -> Result<InventoryPage, RepoError> {
         let limit = q.limit.clamp(1, MAX_INVENTORY_PAGE);
         let tx = self.read_tx()?;
-        let (where_sql, mut p, tag_needs_gate) = inventory_where(&tx, q)?;
+        let (where_sql, mut p, needs_gate) = inventory_where(&tx, q)?;
         let mut sql = format!("SELECT emitter_id FROM emitter{where_sql}");
         sql.push_str(" ORDER BY last_seen DESC, emitter_id");
         // T-036/T-038: a tag outside the vocabulary never matches a row whose identity is
-        // withheld (such tags are hidden there), so such a filter is paged after gating.
-        if !tag_needs_gate {
+        // withheld (such tags are hidden there), so such a filter is paged after gating. T-566:
+        // a `resolution` filter is read per row from the same call `/api/inventory` serves the
+        // field from, so the filter and the field can never disagree.
+        if !needs_gate {
             sql.push_str(" LIMIT ? OFFSET ?");
             p.push(SqlValue::Integer(i64::from(limit) + 1));
             p.push(SqlValue::Integer(
@@ -1652,12 +1678,18 @@ impl Repository {
                 .collect::<Result<_, _>>()?
         };
         let mut entries = Vec::with_capacity(ids.len().min(limit as usize + 1));
-        let mut skip = if tag_needs_gate { q.offset } else { 0 };
+        let mut skip = if needs_gate { q.offset } else { 0 };
         for raw in ids {
-            let emitter = self.emitter_ungated(eid(raw))?;
+            let id = eid(raw);
+            let emitter = self.emitter_ungated(id)?;
             let entry = gate_entry(&tx, emitter, q.access)?;
-            if tag_needs_gate {
+            if needs_gate {
                 if matches!(entry.identity, InventoryIdentity::Withheld { .. }) {
+                    continue;
+                }
+                if let Some(kind) = q.resolution
+                    && !self.resolution_is(id, kind)?
+                {
                     continue;
                 }
                 if skip > 0 {
@@ -1692,8 +1724,8 @@ impl Repository {
     /// single-tag match.
     pub fn count_inventory(&self, q: &InventoryQuery) -> Result<u64, RepoError> {
         let tx = self.read_tx()?;
-        let (where_sql, p, tag_needs_gate) = inventory_where(&tx, q)?;
-        if !tag_needs_gate {
+        let (where_sql, p, needs_gate) = inventory_where(&tx, q)?;
+        if !needs_gate {
             let sql = format!("SELECT COUNT(*) FROM emitter{where_sql}");
             let n: i64 = tx.query_row(&sql, params_from_iter(p), |r| r.get(0))?;
             return Ok(n.max(0) as u64);
@@ -1710,13 +1742,34 @@ impl Repository {
         };
         let mut n: u64 = 0;
         for raw in ids {
-            let emitter = self.emitter_ungated(eid(raw))?;
+            let id = eid(raw);
+            let emitter = self.emitter_ungated(id)?;
             let entry = gate_entry(&tx, emitter, q.access)?;
-            if !matches!(entry.identity, InventoryIdentity::Withheld { .. }) {
-                n += 1;
+            if matches!(entry.identity, InventoryIdentity::Withheld { .. }) {
+                continue;
             }
+            if let Some(kind) = q.resolution
+                && !self.resolution_is(id, kind)?
+            {
+                continue;
+            }
+            n += 1;
         }
         Ok(n)
+    }
+
+    /// T-566 (ADR-0021 §7A.4): whether `id`'s **latest** analysis resolves as `kind`.
+    ///
+    /// It reads [`Self::synthesis`] — the same row `/api/inventory` serves the row's `resolution`
+    /// from — so the filter and the served field are one answer. An emitter with **no**
+    /// `emitter_synthesis` row is [`ResolutionKind::NotSearched`]: un-looked-at is a state, not an
+    /// absence of one. A row whose search **solved** carries no resolution and matches nothing.
+    fn resolution_is(&self, id: EmitterId, kind: ResolutionKind) -> Result<bool, RepoError> {
+        let actual = match self.synthesis(id)? {
+            None => Some(ResolutionKind::NotSearched),
+            Some(row) => row.resolution.map(|r| r.kind),
+        };
+        Ok(actual == Some(kind))
     }
 }
 
@@ -1727,8 +1780,10 @@ pub const MAX_INVENTORY_COUNT_SCAN: u64 = 5_000;
 
 /// The `WHERE` clause (leading space, starting `WHERE merged_into IS NULL`) and bound parameters
 /// for `q`'s filters over the `emitter` table, shared by [`Repository::query_inventory`] and
-/// [`Repository::count_inventory`]; also reports whether the `tag` filter needs post-gating
-/// (T-036/T-038: a tag outside the vocabulary never matches a withheld row).
+/// [`Repository::count_inventory`]; also reports whether the query needs per-row post-gating —
+/// a `tag` outside the vocabulary (T-036/T-038: such a tag never matches a withheld row), or a
+/// `resolution` filter (T-566: read per row from the stored analysis, and never matching a
+/// withheld row, which serves no resolution).
 fn inventory_where(
     tx: &Connection,
     q: &InventoryQuery,
@@ -1806,6 +1861,7 @@ fn inventory_where(
         sql.push_str(" AND NOT ");
         sql.push_str(super::relate::DEFERS_SQL);
     }
-    let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t));
-    Ok((sql, p, tag_needs_gate))
+    let needs_gate =
+        q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t)) || q.resolution.is_some();
+    Ok((sql, p, needs_gate))
 }

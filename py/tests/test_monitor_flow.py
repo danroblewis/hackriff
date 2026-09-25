@@ -174,19 +174,58 @@ def test_hkpy_import_failure_degrades_to_an_error_body(monitor, tmp_path, monkey
 
 
 def test_flow_panel_cached_reuses_within_the_window(monitor, tmp_path):
+    """One build per window. The build runs in a child process since 2026-09-24 (the dashboard's
+    heap grew ~6 MB per in-process build), so the count is taken where every build goes through."""
     ops = _ops(tmp_path)
     monitor._FLOW_CACHE.update(at=0.0, data=None)
     calls = []
-    real = monitor.build_flow_panel
+    real = monitor._child_json
 
-    def counting(*a, **k):
+    def counting(code, timeout=90):
         calls.append(1)
-        return real(*a, **k)
-    monitor.build_flow_panel = counting
+        return {"built": len(calls)}
+    monitor._child_json = counting
     try:
         d1 = monitor.flow_panel_cached(ops, max_age=30.0)
         d2 = monitor.flow_panel_cached(ops, max_age=30.0)
         assert d1 is d2 and len(calls) == 1
     finally:
-        monitor.build_flow_panel = real
+        monitor._child_json = real
         monitor._FLOW_CACHE.update(at=0.0, data=None)
+
+
+def test_heavy_builds_run_in_a_child_and_errors_surface(monitor):
+    assert monitor._child_json("import json, os; print(json.dumps({'pid': os.getpid()}))")["pid"] != __import__("os").getpid()
+    try:
+        monitor._child_json("raise SystemExit('the board is not strict YAML')")
+    except RuntimeError as e:
+        assert "the board is not strict YAML" in str(e)
+    else:
+        raise AssertionError("a failing child must raise")
+
+
+
+def test_the_dashboard_re_executes_itself_above_its_rss_limit(monitor):
+    seen = {}
+    readings = iter([400.0, 900.0, 1300.0])
+    out = monitor._rss_guard(limit_mb=1200, every_s=0, rss=lambda: next(readings),
+                             execv=lambda exe, argv: seen.update(exe=exe, argv=argv) or "re-executed",
+                             sleep=lambda s: None)
+    assert out == "re-executed" and seen["argv"][0] == seen["exe"]
+
+
+def test_flow_shows_which_tests_were_blamed_on_a_branch(monitor, tmp_path, monkeypatch):
+    """Supervisor for the user, 2026-09-24 14:55: make the ledger's branch_defects visible on /flow."""
+    (tmp_path / "flakes.json").write_text(json.dumps({"tests": {
+        "canvas-journey.e2e.mjs": {"branch_defects": 3, "failed_alone": 0, "passed_alone": 2},
+        "app-trace.e2e.mjs": {"branch_defects": 1, "failed_alone": 2, "passed_alone": 11},
+        "quiet.e2e.mjs": {"branch_defects": 0}}}))
+    monkeypatch.setattr(monitor, "SCRATCH", str(tmp_path))
+    assert [(r["test"], r["blamed"]) for r in monitor.blamed_alone()] == [("canvas-journey.e2e.mjs", 3), ("app-trace.e2e.mjs", 1)]
+
+
+def test_flow_panel_carries_the_queue_depth(monitor, tmp_path):
+    (tmp_path / "merge-queue.txt").write_text("task-a\n")
+    (tmp_path / "isolate-remaining").write_text("task-b task-c\n")
+    d = monitor.build_flow_panel(str(tmp_path))
+    assert d.get("queue_depth", {}).get("now", {}).get("waiting") == 3, d.get("error")

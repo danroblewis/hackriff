@@ -97,6 +97,8 @@ pub struct Run {
     pub rows: Vec<serde_json::Value>,
     /// The fixture, truth included — **only this test process may read it**.
     pub fx: Fixture,
+    /// The id the device reported, which C05 calibration state is keyed by (T-560).
+    pub device_id: String,
 }
 
 impl Run {
@@ -169,6 +171,7 @@ fn blind_run(tag: &'static str, seed: u64, clock_error: bool) -> Option<Run> {
         ..BlindSource::default()
     };
     let cfg = blind_config(&fx.meta_path, tag, source, serde_json::json!({}));
+    let device_id = cfg.cfg.device_id.clone();
     let dir = cfg.dir;
     let handle = start(cfg.cfg, cfg.replay);
     let counters = handle.counters();
@@ -180,6 +183,7 @@ fn blind_run(tag: &'static str, seed: u64, clock_error: bool) -> Option<Run> {
         summary,
         rows,
         fx,
+        device_id,
     })
 }
 
@@ -1088,11 +1092,87 @@ fn g_a_grant_is_followed_off_grid_once_the_receiver_alias_is_resolved() {
     );
 }
 
+/// **The receiver's clock is recorded as C05 calibration state, blind, once (T-560).**
+///
+/// (F) and (G) prove the hunt copes with the −9.6 ppm HackRF: the raster is fitted rather than
+/// assumed, and the alias is settled by measurement. What they leave per-pass is the *estimate*:
+/// `docs/19 §7.6a`'s correction is a property of the receiver, so it belongs in the device's
+/// calibration state with its provenance — method, device, time, and the version it replaces —
+/// where every later query reads it instead of re-deriving it, and where a band-plan comparison
+/// can remove it before calling anything off-raster.
+///
+/// Blind: nothing here tells the system the error. The run is the (F) scene shifted by the
+/// measured constant; the ppm must come back out of the IQ alone. Sign: emissions landing 9.6 ppm
+/// LOW is an oscillator 9.6 ppm FAST, which is what `CalibrationState::ppm` (positive = fast)
+/// records. And the clean run must be *measured* on frequency, not merely left unrecorded.
+#[test]
+fn h_the_measured_receiver_clock_is_recorded_once_as_calibration_state() {
+    let Some(shifted) = clk_run() else { return };
+    let Some(clean) = run() else { return };
+    let latest = |r: &Run| {
+        repo(&r.dir.0)
+            .latest_calibration_state_for_device(
+                &r.device_id,
+                &hk_model::CalibrationMethod::LmrRaster,
+            )
+            .unwrap()
+    };
+    let tune_hz = 0.5 * (shifted.cc_truth().f_lo_hz + shifted.cc_truth().f_hi_hz);
+    // The raster tolerance, in ppm at this centre: the precision a raster assignment needs.
+    let tol_ppm = 1e6 * hk_detect::trunk::RASTER_TOLERANCE_HZ / tune_hz;
+
+    let cal = latest(&shifted).unwrap_or_else(|| {
+        panic!(
+            "[{T545}] (H) THE RECEIVER CLOCK WAS NOT RECORDED. A {:.0} Hz ({:.1} ppm) error was \
+             imposed and (G) resolves it per pass, but device {:?} has no lmr-raster \
+             CalibrationState: every query would have to re-derive it from raw IQ, and nothing \
+             outside the trunk hunt can remove it before a raster comparison.",
+            apriori::CLOCK_ERROR_HZ,
+            apriori::CLOCK_ERROR_PPM,
+            shifted.device_id,
+        )
+    });
+    eprintln!("[{T545}] (H) recorded receiver calibration: {cal:?}");
+    let want_ppm = -1e6 * apriori::CLOCK_ERROR_HZ / tune_hz;
+    assert!(
+        (cal.ppm - want_ppm).abs() <= tol_ppm,
+        "[{T545}] (H) recorded {:+.2} ppm, but emissions landing {:.0} Hz low is an oscillator \
+         {want_ppm:+.2} ppm fast (tolerance {tol_ppm:.2} ppm): {cal:?}",
+        cal.ppm,
+        -apriori::CLOCK_ERROR_HZ,
+    );
+    assert_eq!(cal.device_id, shifted.device_id);
+    // Recorded once, not per pass: walk the version chain back to its root.
+    let db = repo(&shifted.dir.0);
+    let mut versions = 1;
+    let mut at = cal.supersedes;
+    while let Some(id) = at {
+        versions += 1;
+        at = db.calibration_state(id).unwrap().supersedes;
+    }
+    let passes = shifted.summary.counter("/chains/cc_alias_resolved");
+    assert!(
+        versions <= 2 && passes >= 1,
+        "[{T545}] (H) {versions} calibration versions over {passes} resolved passes: the \
+         estimate is re-recorded per pass instead of once",
+    );
+
+    // The control: a perfect clock is measured as one, within the same tolerance.
+    let clean_cal = latest(&clean).unwrap_or_else(|| {
+        panic!("[{T545}] (H) CONTROL: the unshifted run recorded no receiver calibration")
+    });
+    assert!(
+        clean_cal.ppm.abs() <= tol_ppm,
+        "[{T545}] (H) CONTROL: an exact clock recorded as {:+.2} ppm",
+        clean_cal.ppm
+    );
+}
+
 /// An API server over a finished run wired for **control** routes as well as reads: the audit log
 /// is present, so `POST /api/analyze` reaches its own answer instead of being refused with
 /// `503 control is disabled: this server has no audit log`. Without this, assertion (3) would fail
 /// for a harness reason and teach T-546 nothing — the exact trap this ticket names.
-fn serve_api_with_control(dir: &std::path::Path) -> hk_api::Server {
+pub fn serve_api_with_control(dir: &std::path::Path) -> hk_api::Server {
     let config = hk_api::ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         hk_api::Token::from_config(API_TOKEN).unwrap(),
@@ -1109,7 +1189,7 @@ fn serve_api_with_control(dir: &std::path::Path) -> hk_api::Server {
 }
 
 /// An authenticated POST; returns `(status, body)`. Mirrors [`api_get`].
-fn api_post(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, Vec<u8>) {
+pub fn api_post(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, Vec<u8>) {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(std::time::Duration::from_secs(30)))

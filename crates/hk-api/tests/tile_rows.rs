@@ -431,3 +431,85 @@ fn rows_wait_for_the_tune_record_and_are_never_greyed_ahead_of_it() {
     }
     assert_eq!(next(&mut ws).expect("end")["type"], "end");
 }
+
+/// `GET path` with the token, as JSON: `(status, body)`.
+fn get(addr: SocketAddr, path: &str) -> (u16, Value) {
+    use std::io::{Read, Write};
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n").expect("an HTTP response");
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, serde_json::from_str(body).unwrap_or(Value::Null))
+}
+
+/// **T-902: a pushed block states the honesty tier its rows were measured at, by the tile
+/// route's own rule** — so a client building a tile out of pushed rows before `/api/tiles` has
+/// answered for it states the tier the backend states, never one borrowed from a neighbouring tile.
+/// Asserted as equality with the tile route for the same address at the same answering level, at
+/// the finest address and at a coarser time level.
+#[test]
+fn every_block_states_the_tier_the_tile_route_states_for_its_address() {
+    let fx = Fixture::build("tier", 32, Some(32));
+    for level_t in [0, 1] {
+        let col = format!("token={TOKEN}&level_f=0&level_t={level_t}&f_index=0&cells={CELLS}");
+        let mut ws = connect(
+            fx.addr(),
+            &format!("/ws/tiles/rows?{col}&t_from=0&t_to={}", 2 * CELLS),
+        );
+        subscribed(&mut ws);
+        let mut blocks = 0;
+        loop {
+            let v = next(&mut ws).expect("a message");
+            if v["type"] == "end" {
+                break;
+            }
+            if v["type"] != "rows" {
+                continue;
+            }
+            blocks += 1;
+            let res = &v["resolution"];
+            let src = res["source"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a block without a tier: {v}"));
+            assert!(
+                ["live-iq", "spectrum-history", "survey-overview"].contains(&src),
+                "{v}"
+            );
+            assert_eq!(res["live"], src == "live-iq", "{v}");
+            assert!(res["statement"].is_string(), "{v}");
+            assert_eq!(res["fold"]["time"]["served"], v["rows"], "{v}");
+            assert_eq!(res["fold"]["frequency"]["served"], CELLS, "{v}");
+            let t_index = v["tile"]["t_index"].as_i64().unwrap();
+            let (st, tile) = get(
+                fx.addr(),
+                &format!(
+                    "/api/tiles?level_f=0&level_t={level_t}&f_index=0&t_index={t_index}&cells={CELLS}"
+                ),
+            );
+            assert_eq!(st, 200, "{tile}");
+            assert_eq!(
+                tile["resolution"]["answered"]["level"], v["answered"]["level"],
+                "same address, same finest-first walk: {v} vs {tile}"
+            );
+            assert_eq!(
+                tile["resolution"]["source"], res["source"],
+                "level_t={level_t}: the row feed and the tile route disagree on a tier"
+            );
+            for axis in ["frequency", "time"] {
+                assert_eq!(
+                    tile["resolution"]["fold"][axis]["direction"], res["fold"][axis]["direction"],
+                    "{axis}: {v} vs {tile}"
+                );
+            }
+        }
+        assert!(blocks > 0, "level_t={level_t}: no rows block at all");
+    }
+}

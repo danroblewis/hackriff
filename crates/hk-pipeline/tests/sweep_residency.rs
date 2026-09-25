@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use hk_core::Pacing;
-use hk_pipeline::{Candidate, builtin_chains};
+use hk_pipeline::chains::MAX_RUNTIME_CHAINS;
+use hk_pipeline::{Candidate, ChainShape, builtin_chains};
 use serde_json::json;
 
 /// Threads in this process (macOS/Linux, via `ps`).
@@ -140,6 +141,38 @@ fn measure_chain_residency_over_a_sustained_survey() {
 /// or by luck; only the comparison shows the count is not a function of how long the survey ran.
 /// Before the cap this read `threads 43 -> 68` at 25 attaches and `43 -> 219` at 400, and the
 /// running-chain count was the attach count exactly.
+/// The built-in classifier's own concurrency cap (T-878), from its spec rather than a literal.
+fn classify_cap() -> usize {
+    builtin_chains()
+        .iter()
+        .find_map(|s| match s.shape() {
+            Ok(ChainShape::Classify { max_chains, .. }) => Some(max_chains),
+            _ => None,
+        })
+        .expect("the classifier ships in the built-in registry")
+}
+
+/// `(classifying, everything else)` among the running chains in `chain_stats`. A chain's `kind`
+/// is its spec id; anything that is not a built-in classify spec counts against the run-wide cap,
+/// so no other kind can escape it unnoticed.
+fn running(chain_stats: &serde_json::Value) -> (usize, usize) {
+    let classify: Vec<String> = builtin_chains()
+        .into_iter()
+        .filter(|s| matches!(s.shape(), Ok(ChainShape::Classify { .. })))
+        .map(|s| s.id)
+        .collect();
+    let list = chain_stats.as_array().expect("chain_stats is a list");
+    let classifying = list
+        .iter()
+        .filter(|c| {
+            c["kind"]
+                .as_str()
+                .is_some_and(|k| classify.iter().any(|id| id == k))
+        })
+        .count();
+    (classifying, list.len() - classifying)
+}
+
 #[test]
 fn a_sustained_survey_holds_a_bounded_number_of_chain_threads() {
     let dir = TempDir::new("t558-bound");
@@ -158,8 +191,8 @@ fn a_sustained_survey_holds_a_bounded_number_of_chain_threads() {
         .unwrap();
     let base = threads();
 
-    let mut at_25 = (0usize, 0u64);
-    let mut at_400 = (0usize, 0u64);
+    let mut at_25 = (0usize, 0usize, 0usize);
+    let mut at_400 = (0usize, 0usize, 0usize);
     for i in 1..=400usize {
         let at = handle.ring_position().saturating_sub(4096);
         let f = center - 500e3 + 1e3 * (i % 900) as f64;
@@ -178,18 +211,32 @@ fn a_sustained_survey_holds_a_bounded_number_of_chain_threads() {
         if i == 25 || i == 400 {
             // Let the control thread drain the attaches it was sent.
             std::thread::sleep(Duration::from_millis(600));
-            let row = (threads(), handle.counters().chain_stats.len() as u64);
-            println!("attaches {i}: threads {} running {}", row.0, row.1);
+            let (classifying, counted) = running(&handle.counters().chain_stats.to_json());
+            let row = (threads(), counted, classifying);
+            println!(
+                "attaches {i}: threads {} running {} under the run-wide cap + {} classifying",
+                row.0, row.1, row.2
+            );
             if i == 25 { at_25 = row } else { at_400 = row }
         }
     }
 
-    let cap: usize = 16; // chains::MAX_RUNTIME_CHAINS
+    // Two bounds since T-878: every chain but the classifier's is under the run-wide cap, and the
+    // classifier's chains (which a track attaches *before* its decode chain, so they must never
+    // take a decode chain's slot) are under their own spec's `max_chains` instead.
+    let cap = MAX_RUNTIME_CHAINS;
+    let classify_cap = classify_cap();
     assert!(
-        at_400.1 <= cap as u64,
-        "400 attaches left {} chains running, above the {cap} cap",
+        at_400.1 <= cap,
+        "400 attaches left {} chains (classifying chains excluded) running, above the {cap} cap",
         at_400.1
     );
+    assert!(
+        at_400.2 <= classify_cap,
+        "400 attaches left {} classifying chains running, above their {classify_cap} cap",
+        at_400.2
+    );
+    let cap = cap + classify_cap;
     assert!(
         at_400.0 <= base + 2 * cap + 8,
         "400 attaches took the process from {base} threads to {}: the thread count is a \

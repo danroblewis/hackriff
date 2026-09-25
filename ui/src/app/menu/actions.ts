@@ -10,6 +10,7 @@ import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
 import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row } from "../explore/inventory";
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
+import { watchAnalyzeJob } from "../explore/analyze-slice";
 import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setBandEdit } from "../explore/slice";
 import { setMode, toast } from "../state";
 import type { MenuItem } from "./model";
@@ -25,7 +26,7 @@ function listenIdFor(ctx: AppContext, emitterId: string): string | null {
 }
 
 export type AnalyzeTarget = { kind: "emitter" | "selection"; id: string };
-export type AnalyzeResult = { ok: true; message: string } | { ok: false; notImplemented: boolean; message: string };
+export type AnalyzeResult = { ok: true; message: string; jobId?: string } | { ok: false; notImplemented: boolean; message: string };
 
 /** The client surface [[analyzeTarget]] needs (a test double only has to implement `post`, like
  * `explore/selections.ts`'s `PostClient`). */
@@ -39,8 +40,9 @@ export interface PostClient { post<T>(path: string, body?: unknown): Promise<T> 
 export async function analyzeTarget(client: PostClient, target: AnalyzeTarget): Promise<AnalyzeResult> {
   const body = target.kind === "emitter" ? { emitter_id: target.id } : { selection_id: target.id };
   try {
-    await client.post("/api/analyze", body);
-    return { ok: true, message: "Analyze: requested" };
+    const r = await client.post<{ job?: { id?: string } } | undefined>("/api/analyze", body);
+    const jobId = r?.job?.id;
+    return jobId ? { ok: true, message: "Analyze: requested", jobId } : { ok: true, message: "Analyze: requested" };
   } catch (e) {
     if (e instanceof ControlError && (e.status === 404 || (e.status === 501 && e.code === "not_implemented"))) {
       return { ok: false, notImplemented: true, message: "Analyze: not implemented yet" };
@@ -66,7 +68,7 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
     },
     {
       id: "analyze", label: "Analyze", hint: "synthesize decoder",
-      onSelect: () => { void analyzeTarget(ctx.client, { kind: "emitter", id: r.id }).then((res) => ctx.store.set(toast(res.message))); },
+      onSelect: () => { void analyzeTarget(ctx.client, { kind: "emitter", id: r.id }).then((res) => { if (res.ok && res.jobId) ctx.store.set(watchAnalyzeJob(res.jobId)); ctx.store.set(toast(res.message)); }); },
     },
     {
       id: "export", label: "Export clip", hint: "from the buffer",
@@ -149,7 +151,7 @@ export function selectionMenuItems(ctx: AppContext, s: Selection, rowsInside: re
     },
     {
       id: "analyze", label: "Analyze", hint: "synthesize decoder",
-      onSelect: () => { void analyzeTarget(ctx.client, { kind: "selection", id: s.id }).then((res) => ctx.store.set(toast(res.message))); },
+      onSelect: () => { void analyzeTarget(ctx.client, { kind: "selection", id: s.id }).then((res) => { if (res.ok && res.jobId) ctx.store.set(watchAnalyzeJob(res.jobId)); ctx.store.set(toast(res.message)); }); },
     },
     {
       id: "export", label: "Export clip", hint: "from the buffer",

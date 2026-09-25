@@ -1,13 +1,19 @@
 // Explore sidebar (inventory, selections) and focus panel mounts (ADR-0013 §8, T-151). Renders
 // only what the API served; explanations are always shown as ranked suggestions, never as truth
 // (CLAUDE.md "Product vision" §4).
+import { analyzeWatched } from "./analyze-slice";
 import { sameCursor, toast } from "../state";
 // T-386: the sidebar filters selections against the *same* frequency view the centre pane places
 // its boxes in — one definition, so a header-less session cannot list one set and draw another.
 import { centreView, centreViewKey } from "../centre/view";
+import { mountFocusSheet } from "../chrome/focus-sheet";
+import { mountExploreDrawer } from "../chrome/explore-drawer";
+import { mountSideChip } from "../chrome/side-chip";
+import { mountResearch } from "../map/research";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
-import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
+import { bindContextTrigger, openSelectionMenu, openSignalMenu, signalMenuItems } from "../menu";
+import { detailActions, detailFreq, livenessLine, measuredBlock, type DetailRow } from "./detail";
 import { startPoll } from "../net";
 import {
   apiErrorText, classificationDistribution, explanationWhy, fmtBandwidth, fmtMHz, rasterText,
@@ -20,7 +26,7 @@ import {
 import {
   clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, loadInventoryRows,
   nextInventorySort, promoteEntry, recurrenceDots, renderedInventory, rowChips, rowSeenText,
-  sortInventoryRows, viewWindow, windowKey, type Row,
+  liveEdgeS, sortInventoryRows, viewWindow, windowKey, type Row,
 } from "./inventory";
 import { mountPresenceStream } from "./presence-stream";
 import {
@@ -226,24 +232,29 @@ const mountSelections: MountFn = (el, ctx) => {
 
 function stateBadge(state: string): HTMLElement { return h("span", { class: `state ${state}` }, state); }
 
-function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch | null>, cluster: Loaded<Cluster | null>): HTMLElement {
+export function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch | null>, cluster: Loaded<Cluster | null>): HTMLElement {
   // T-587: same artefact chip and visible reason as the sidebar row — the focus panel is the same
   // row, so it must say the same thing.
   const artifact = explanationChip(r);
   const reasonText = explanationReasonText(r);
   const chips = [
-    stateBadge(r.state), ...rowChips(r).map((c) => h("span", { class: `chip ${c.cls}` }, c.text)),
+    ...rowChips(r).map((c) => h("span", { class: `chip ${c.cls}` }, c.text)),
     ...(artifact ? [h("span", { class: `chip ${artifact.cls}` }, artifact.text)] : []),
   ];
   const flags = r.explanations[0]?.flags ?? [];
-  const centerHz = r.refined?.center_hz ?? r.f_center_hz;
-  const bwHz = r.refined?.bandwidth_hz ?? r.bandwidth_hz;
+  const { centerHz } = detailFreq(r);
+  const edgeS = liveEdgeS(ctx.store.get());
+  const live = livenessLine(r, edgeS);
+  const measured = measuredBlock(r as DetailRow, edgeS);
 
+  // T-804: the measurements with the time they were measured over (`measured`, T-350) — a level is
+  // never shown without its time, and "nothing measured" is said, never drawn as a zero.
   const kv = h("dl", { class: "kv" },
-    h("dt", {}, "Bandwidth"), h("dd", {}, fmtBandwidth(bwHz)),
+    ...measured.lines.flatMap((l) => [h("dt", {}, l.label), h("dd", {}, l.value)]),
     h("dt", {}, "Seen"), h("dd", {}, rowSeenText(r)),
     h("dt", {}, "Channel raster"), h("dd", { class: flags.includes("off-raster") ? "flag" : undefined }, rasterText(r.explanations[0]?.evidence ?? [])),
   );
+  const measuredAt = h("div", { class: "at" }, measured.at ?? "No level measured yet — no linked detection.");
 
   // T-207: unknown score shown prominently (unknown signals are the priority to surface —
   // CLAUDE.md "Product vision" §4), reading `classification.open_set_score` off the row, never
@@ -263,7 +274,9 @@ function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch
         ))))
     : null;
 
-  const explanations = h("ol", { class: "expl" }, ...r.explanations.map((e) => h("li", {},
+  const explanations = r.explanations.length === 0
+    ? h("p", { class: "hint" }, "No explanation suggested yet — an unknown signal, which is the interesting kind.")
+    : h("ol", { class: "expl" }, ...r.explanations.map((e) => h("li", { class: e.flags.length ? "flagged" : undefined },
     h("span", { class: "rank" }, String(e.rank)),
     h("div", {}, h("b", {}, e.label), h("span", { class: "conf" }, e.score.toFixed(2))),
     h("div", { class: "why" }, explanationWhy(e.evidence)),
@@ -298,25 +311,44 @@ function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch
         h("dl", { class: "kv" }, h("dt", {}, r.identity_scheme), h("dd", {}, r.identity_value ?? (r.withheld ? "withheld" : "—"))))
     : null;
 
-  // Actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band)
-  // moved to the right-click/long-press context menu (T-192); this panel keeps only measurements
-  // and explanations, freeing the space for per-signal output panels (T-195).
-  return h("div", {},
-    h("div", {}, h("div", { class: "eyebrow" }, ...chips), h("div", { class: "bigf" }, fmtMHz(centerHz), h("small", {}, " MHz")), h("div", { class: "sub" }, refinedNote(r.refined))),
+  // T-804: the sheet's device actions (the mockup's Listen … Delete), built from the context
+  // menu's own items so a button calls exactly what the menu item calls; the menu stays for the rest
+  // (Adjust band, Reset band) and for right-click on the surface.
+  // docs/23 §10.6 P4: size inversely proportional to influence. The sheet is the largest surface,
+  // so it only shows; every action that reaches the device or moves the map is one SMALL labelled
+  // button in this compact, keyboard-reachable cluster, and nothing else in the body carries a
+  // handler (ui/test/app-sheet-principles.test.ts goes red otherwise).
+  const actions = h("div", { class: "actions", role: "toolbar", "aria-label": "Signal actions" },
+    ...detailActions(signalMenuItems(ctx, r)).map((a) => h("button", {
+      type: "button", "data-action": a.id, title: a.hint ? `${a.label} — ${a.hint}` : a.label, "aria-label": a.label,
+      class: [a.primary ? "primary" : "", a.danger ? "danger" : ""].filter(Boolean).join(" ") || undefined,
+      disabled: a.disabled ? "" : undefined,
+      onclick: () => a.onSelect(),
+    }, a.label)));
+
+  return h("div", { class: "detail" },
+    h("div", { class: "head" },
+      h("div", { class: "bigf" }, fmtMHz(centerHz), h("small", {}, " MHz")),
+      stateBadge(r.state),
+      h("span", { class: `liveness ${live.kind}` }, live.text)),
+    h("div", { class: "eyebrow" }, ...chips),
+    h("div", { class: "sub" }, refinedNote(r.refined)),
     // T-587: the reason in words, next to the chip that names it, never hover-only.
     reasonText ? h("p", { class: "artifact-reason" }, reasonText) : null,
+    actions,
+    h("div", { class: "cols" },
+      h("div", {}, h("div", { class: "section-h" }, "Measured"), kv, measuredAt),
+      h("div", {}, h("div", { class: "section-h" }, "Possible explanations ", h("em", {}, "ranked suggestions, never truth")), explanations)),
     unknownBanner,
-    kv,
     distSection,
-    h("div", {}, h("div", { class: "section-h" }, "Possible explanations ", h("em", {}, "ranked suggestions")), explanations),
     matchSection,
     clusterSection,
-    h("div", { class: "hint" }, "Right-click or long-press the signal for actions: Listen, Decode, Analyze, Export clip, Stream out, Promote, Delete, Adjust band."),
+    h("div", { class: "hint" }, "Right-click or long-press the signal for more: Adjust band, Reset band."),
     identityBox,
   );
 }
 
-function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement {
+export function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement {
   const rows = foundInside(s, Object.values(ctx.store.get().inventory.rows));
   const inside = h("div", { class: "list", style: "padding:0" }, ...(rows.length ? rows.map((r) => h("div", {
     class: "row", tabindex: "0", "data-id": r.id, role: "button",
@@ -426,22 +458,43 @@ const mountFocus: MountFn = (el, ctx) => {
         outputPanelsEl,
       );
       ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
       return;
     }
     if (focus.kind === "selection") {
       const sel = s.selections.list.find((x) => x.id === focus.id);
       el.replaceChildren(sel ? renderSelectionFocus(ctx, sel) : h("div", { class: "empty" }, "Select a signal or a selection."), outputPanelsEl);
+      // T-862: a selection Analyze starts a job; its section lives in the output panels.
+      ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
       return;
     }
     el.replaceChildren(h("div", { class: "empty" }, "Select a signal or drag a region to focus it."), outputPanelsEl);
+    if (analyzeWatched(s.analyze.jobId)) {
+      // A watched analyze job keeps the panel (progress/results) on screen with nothing focused.
+      ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
+      return;
+    }
+    // T-801 round 3: nothing is focused, so this panel is just the placeholder sentence — mark it
+    // so `map-layout.css` can hide it instead of covering the canvas's right edge with an empty
+    // box. `.focus:empty` never fired: `render()` always fills the slot with *something* (a real
+    // focus, a "not found" explanation, or this placeholder), so the element is never literally
+    // empty. This class is the one case that should collapse; a real focus or an explanatory
+    // "not here" state (the two branches above, which both `return` before reaching here) keeps it
+    // shown, unchanged.
+    el.classList.add("is-empty");
+    return;
   }
   // `inventory.window` is selected too (T-385): the window is what turns "not among the rows" into
   // a sentence, and it changes without the rows changing (a re-ask that returned the same set).
   ctx.store.select(
-    (s) => [s.focus, s.inventory.rows, s.inventory.window, s.selections.list, s.outputs] as const,
+    (s) => [s.focus, s.inventory.rows, s.inventory.window, s.selections.list, s.outputs, s.analyze.jobId] as const,
     render,
-    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] },
+    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] && a[5] === b[5] },
   );
 };
 
-export const mounts: AreaMounts = { inventory: mountInventory, selections: mountSelections, focus: mountFocus };
+// T-803: `sheet` wraps `focus` (index.html nests the slot), so it mounts after it and never replaces
+// the focus panel's subtree.
+export const mounts: AreaMounts = { inventory: mountInventory, selections: mountSelections, focus: mountFocus, sheet: mountFocusSheet, drawer: mountExploreDrawer, side: mountSideChip, research: mountResearch };

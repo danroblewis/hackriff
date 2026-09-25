@@ -12,3 +12,8 @@
 @import "./history/history.css";
 @import "./menu/menu.css";
 @import "../surface/surface.css";
+@import "./chrome/map-layout.css";
+@import "./chrome/sheet.css";
+@import "./chrome/map-controls.css";
+@import "./map/research.css";
+@import "./chrome/phone.css";

@@ -19,6 +19,27 @@ Rebuilds the `hk` binary and restarts the "bears" demo on every **code** commit 
 (ignores docs/tasks-only commits), smoke-tests it, and keeps a cloudflared tunnel up. Prefers
 the live HackRF; falls back to a looping SigMF replay when the device is busy. Also self-heals:
 if the live spectrum stream dies it restarts.
+
+**The radio lock (T-922).** One owner of the HackRF at a time, recorded in
+**`$HACKRIFF_OPS/radio-lock`** — `key=value` lines `owner=`, `since=` and `until=` (epoch seconds),
+`why=`. Past `until` a lock is **stale**. It is managed only through `just radio`
+(`py/hkpy/radio.py`, tested in `py/tests/test_radio.py`):
+```bash
+just radio take <owner> <duration e.g. 3h|90m|2h30m> <why...>   # refuses while a live lock is held (even your own)
+just radio release <owner>                                       # releases only <owner>'s lock
+just radio status                                                # holder, until, and the staging mode
+```
+`stage.sh` respects it. While the lock is held by anyone other than `stage` it **never opens the
+HackRF** and serves its looping SigMF replay; each 45 s tick it notices a lock taken while live
+(stops the live server, restarts on replay — so a new owner waits up to ~1 min, until `just radio
+status` shows `staging: replay (radio-lock: …)`) and a lock released while on a lock-driven replay
+(back to **LIVE**). Both transitions are logged in `stage.log`, and the mode is in
+`$HACKRIFF_OPS/hk-serve-source` (`live`, `replay (radio-lock: <owner> until HH:MM)`, `replay (hackrf
+busy)`), which the dashboard and `just radio status` show. Its busy check reads **`hackrf_info`'s
+output, not its exit status**: the tool exits 0 even when the open fails (`Found HackRF … hackrf_open()
+failed: Access denied`, T-356's HIL), so the radio counts as free only with `Found HackRF` and no
+`failed`/`Access denied`/`busy`/`No HackRF` line. The watchdog releases a stale lock (rule g, below);
+the capture-agent and the explorer take and release it.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup bash ops/stage.sh >/dev/null 2>&1 & disown
 # demo:      http://127.0.0.1:8899   (token in $HACKRIFF_OPS/hk-token-bears)
@@ -44,6 +65,26 @@ in `$HACKRIFF_OPS/role-sessions.json`; a role session started any other way — 
 the user's own terminal — is added there by hand: `{"<session id>": {"role": "supervisor",
 "source": "manual"}}`. Transcripts are parsed once, then incrementally. Data: `/worklog.json`.
 
+**Preview a dashboard branch — `bash ops/preview-dashboard.sh <branch> [PATH ...]`** (user,
+2026-09-24: he does not wait behind a merge batch to see a dashboard change). Copies the branch's
+committed `ops/` + `py/` out of git into `$HACKRIFF_OPS/preview` (`PREVIEW_DIR`) and runs that copy
+on **:8902** (`PREVIEW_PORT`; :8901 is refused) with `MONITOR_PREVIEW=1`, which makes its child
+builds run the copy's code, keeps its metrics cache in the preview directory and writes no daily
+`metrics.jsonl` sample. It replaces whichever dashboard holds the port (one preview at a time; a
+tunnel pointed at :8902 shows the newest), refuses a port held by anything else, verifies that ITS
+pid is the listener, and prints `OK`/`FAIL` with the size for each PATH (a JSON route's own
+`"error"` is a FAIL). The real :8901 restarts from main when the branch lands.
+
+**`/metrics` — code metrics** (`ops/metricspage.py` + `py/hkpy/codemetrics.py`, linked "metrics ↗"
+in the top bar): lines per language / crate / area (product vs test), churn per area over 24h/7d/30d
+and the hottest files, tests and test-seconds per crate from the gate's kept JUnit (seconds per 1k
+lines), the largest files and longest Rust functions (a brace-depth proxy), hygiene (unsafe,
+TODO/FIXME/XXX, the last lint's clippy warnings, `#[ignore]` by reason, quarantine) and daily
+trends. All of it at committed main (the bulk base while a batch gates), rebuilt in a child
+process only when that sha moves, cached in `$HACKRIFF_OPS/metrics-cache.json`; the first build
+each day appends a sample to `$HACKRIFF_OPS/metrics.jsonl`. Each section prints its method's caveat.
+`python -m hkpy.codemetrics` prints the same summary. Data: `/metrics.json`.
+
 **`/flow` — the Flow panel** (linked from the top bar) gives the pipeline manager throughput
 visibility without waiting on `flow.jsonl` to accumulate: landings/h as a rolling 6h/24h line
 chart backfilled hourly from `hkpy.flow.hourly()` (with any real `flow.jsonl` ticks overlaid as
@@ -61,6 +102,13 @@ an uncached build took ~1.2 s in testing, a cached one ~13 ms. Tests: `py/tests/
 re-executes the repo's copy of itself at the top of its loop, the only point with no gate running and
 no merge staged, and logs `RESTART: requested (<why>)`. Use it after a runner change lands; never
 kill the runner mid-gate for that.
+
+**CHEAP FIRST (user, 2026-09-24):** when the queue holds both kinds, the branches whose diff
+classifies as anything but `full` (`hkpy.gatepri`, the gate's own `classify`) — a dashboard or
+pipeline branch is `py+ops`, a UI one `ui` — are the next attempt, by themselves, and the rest go
+back in queue order: a two-minute py+ops gate no longer waits for, or rides, a 30-minute full batch.
+It narrows no gate (the attempt is `just gate`, classified as always); it logs `CHEAP FIRST: …` with
+each branch's class, and forms the batch as before whenever classification fails.
 
 **Red triage (the user's rule, 2026-09-23):** on a red, the failing tests or browser specs are re-run
 ALONE. Pass alone **twice** → a load flake: that suite passes on the evidence, and the gate resumes
@@ -269,13 +317,23 @@ ancestors are all gone can be unowned. Five rules:
 | c | more than one merge gate running | red |
 | d | `ops/monitor.py` >200 % CPU or >1.5 GB for >120 s | amber |
 | e | load1 over the plan (owners' budgets, capped at the core count, +4) for >5 min | amber + top 5 |
+| g | `$HACKRIFF_OPS/radio-lock` past its `until` (T-922) | **release the lock** + red |
 
-**Rule (b) is the only thing it kills**, and only on that signature, only when unowned, only
+**Rule (b) is the only thing it kills** (rule g removes a file, never a process: an owner that overran
+its window or died holding the radio would otherwise keep staging on replay indefinitely), and only on that signature, only when unowned, only
 sustained: a live agent's shell has a live parent, so it is *owned* and can never match. Every
 kill is logged to `watchdog.log` with its full command line. Everything else is an alert through
 `ops/alert.py` (deduped 30 min per key). The last tick is `$HACKRIFF_OPS/watchdog.json`, which
 `ops/monitor.py` renders as the **Box** line in the System card — owners with CPU, unowned in red,
 and "no watchdog running" when the file is missing or stale.
+**Role-session liveness (incident 2026-09-24 04:07: a `pkill` took `dev` and `flow` down unnoticed
+for 5.5 h).** At most once a minute it checks each `LIVE_ROLES` session in `ops/roles.py` (coordinator
+`dev`, pipeline manager `flow`): alive = `tmux has-session -t =<s>` and a `claude` process at or below a
+live pane pid; `#{pane_dead}`=1 is dead, a pane pid missing from ps is unknown (skipped). Each miss is red
+(`watchdog:liveness:<role>`); the 2nd consecutive miss re-reads ps, logs the pane's last 40 lines, kills a
+claude-less session and runs `ops/launch.sh <role>` (red `watchdog:relaunch:<role>`), at most once per role
+per 10 min and never while `$HACKRIFF_OPS/roles-stopped` or `dispatch-paused` exists (a deliberate stop:
+alert only). After 3 relaunches that came back dead it gives up and keeps alerting. `--dry-run` only logs.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/watchdog.py >/dev/null 2>&1 & disown
 python3 ops/watchdog.py --once --print --dry-run   # one tick to stdout; never kills, never alerts
@@ -386,8 +444,14 @@ tail -2 $HACKRIFF_OPS/stage.log                          # "started (live)" — 
 curl -s http://127.0.0.1:8901/burndown.json | head -c 80 # dashboard answers
 python3 -c 'import json;d=json.load(open("'"$HACKRIFF_OPS"'/watchdog.json"));print(d["load"],d["budget"],list(d["owners"])[:5])'
 ```
-If a script's newest version is only on an unmerged branch, start it from that branch's worktree
-(`.claude/worktrees/<name>/ops/<script>`) and restart it from `main` once the branch lands.
+**Never start an ops script from a worktree** - not even to try a change that has not landed.
+The runner removes a worktree when its branch lands, and a script running from one loses its own
+files: on 2026-09-24 the dashboard, started from `pm-dashmem`, answered /flow with
+`FileNotFoundError: .../worktrees/pm-dashmem/ops/monitor.py`. Restart with `/dev-env restart
+<script>`, which runs `REPO/ops/<script>`; a change reaches the running script by landing first.
+Each script logs `PATH: <where it runs from>` at start, and refuses (exit 2, `REFUSED:`) under
+`.claude/worktrees/` (`ops/launchpath.py`, `ops/launch-guard.sh`). That includes the one-shot diagnostics (`watchdog.py --once --print`,
+`work-runner.py --once --dry-run`): run them from the repo too.
 
 ### 3. The coordinator, last
 ```bash
@@ -399,3 +463,17 @@ it starts spawning workers for `todo` tickets, its role file is stale: stop it a
 `.claude/roles/coordinator.md` on `main` carries the "Dispatch is … the work runner's job" paragraph.
 
 Then, if needed: `nohup cloudflared tunnel --url http://127.0.0.1:8901 &` for the dashboard.
+
+### The explorer window (T-923, on demand, Mac Studio only)
+```bash
+ops/launch.sh explorer --window 3h --dry-run   # validate: window, one instance, the commands it will run
+ops/launch.sh explorer --window 3h             # tmux session 'explore'
+```
+The pane runs `ops/explorer-window.sh`, which takes the radio lock (`just radio take explorer 3h …`),
+waits (≤ 150 s) for `just radio status` to show staging on replay, then runs
+`claude --agent explorer` (`.claude/agents/explorer.md`). It warns the agent 15 min before the end
+(`$HACKRIFF_OPS/explorer/wrap-up`), stops it at the deadline, stops any `hk serve` left on :8897,
+and releases the lock from an EXIT/INT/TERM/HUP trap. A crash or `tmux kill-session -t explore`
+releases it too; only a SIGKILL of the window script doesn't, and then the lock's `until` makes it stale.
+A second window is refused. The watchdog never relaunches it (`explorer` is not in `LIVE_ROLES`).
+Log: `$HACKRIFF_OPS/explorer/window.log`; journal: `$HACKRIFF_OPS/explorer/journal-YYYYMMDD.md`.

@@ -41,7 +41,7 @@
 //! | `/api/views[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-819 saved views: named, restorable (time × frequency) window extents; view-arithmetic state, never a device command ([`crate::views`]) |
 //! | `/api/selections/<id>/watch` | GET | token | T-166 the selection's region-watch alerts and the activity it did not alert on, with reasoning ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
-//! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
+//! | `/api/analyze`, `/api/analyze/{id}[/trace]` | GET, POST, DELETE | token | T-859 region-analyze jobs, and a bare `{emitter_id}`'s persisted analysis (T-546) ([`crate::analyze`]) |
 //! | `/api/iqbuffer[?…]`, `/api/iqbuffer/clip` | GET, POST | token (header only for mutating) | T-157 rolling IQ capture buffer and clip export ([`crate::iqbuffer`]) |
 //! | `/api/datasets[/<id>]` | GET, POST | token (header only for mutating) | T-205 labelled-capture dataset export (CRC-valid decodes and user labels) ([`crate::datasets`]) |
 //! | `/api/taxonomy` | GET | token | T-218 the modulation taxonomy `hk-mod@1` and `thresholds@1`, as data ([`crate::taxonomy`]). Reference data, never a measurement |
@@ -123,6 +123,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // emitter's presence track
     ("GET", "/api/events"),
     ("GET", "/api/inventory/{id}/presence"),
+    // T-812 (MAP-12): ranked band-plan allocations over a viewport, as explanations - suggestions,
+    // never truth, never a tile channel, never pre-populating the inventory
+    ("GET", "/api/priors"),
     ("GET", "/api/analysis/strongest"),
     // T-341: the achievable (centre, span) grid, and which tier answers for a requested state
     ("GET", "/api/navigation"),
@@ -136,6 +139,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // coarse-zoom event aggregate that a tile deliberately does not carry (docs/16 §5.3)
     ("GET", "/api/tiles"),
     ("GET", "/api/tiles/events"),
+    // T-897: traced (t, f) paths - chirps, sweeps, hop sequences - over a viewport (the map's
+    // `paths` layer, docs/23 §10.6 rule 2)
+    ("GET", "/api/paths"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
     // T-463: the one playhead of historical playback (view state over recorded history; audio at
@@ -179,6 +185,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/measurements/{id}"),
     ("PUT", "/api/measurements/{id}"),
     ("DELETE", "/api/measurements/{id}"),
+    // T-823 MAP-23 research export
+    ("GET", "/api/research/export"),
     // T-816 MAP-16 human-authored annotations
     ("GET", "/api/annotations"),
     ("POST", "/api/annotations"),
@@ -207,8 +215,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
     ("GET", "/api/outputs/{id}/files/{name}"),
-    // T-190 analyze stub
+    // T-190/T-546/T-859 (MAUTO M-8): region-analyze jobs, and an emitter's persisted analysis
     ("POST", "/api/analyze"),
+    ("GET", "/api/analyze"),
+    ("GET", "/api/analyze/{id}"),
+    ("DELETE", "/api/analyze/{id}"),
+    ("GET", "/api/analyze/{id}/trace"),
     // T-157 rolling IQ capture buffer
     ("GET", "/api/iqbuffer"),
     ("POST", "/api/iqbuffer/clip"),
@@ -230,6 +242,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/ml/shadow"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
+    // T-859: an analyze job's `hackriff.analyze/1` stream (the `analyze` on-demand opener)
+    ("GET", "/ws/analyze/{id}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
     ("GET", "/ws/tiles/rows"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
@@ -416,6 +430,10 @@ pub struct ApiState {
     /// T-157: the rolling IQ capture buffer for `/api/iqbuffer*` ([`crate::iqbuffer`]); `None`
     /// answers 503.
     pub iq_buffer: Option<Arc<dyn crate::iqbuffer::IqBufferControl>>,
+    /// T-859 (MAUTO M-8): the region-analyze job manager behind `/api/analyze` jobs
+    /// ([`crate::analyze`]); `None` answers a job request `503 unavailable` (a bare
+    /// `{emitter_id}` read still works).
+    pub analyze: Option<Arc<dyn crate::analyze::AnalyzeControl>>,
     /// T-205: labelled-capture dataset export for `/api/datasets*` ([`crate::datasets`]); `None`
     /// answers 503.
     pub datasets: Option<Arc<dyn crate::datasets::DatasetControl>>,
@@ -1213,6 +1231,22 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
         return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
     }
+    // T-859: `/ws/analyze/{id}` is the `analyze` on-demand opener with the id as its parameter.
+    if let Some(id) = req.path.strip_prefix("/ws/analyze/")
+        && req.method == "GET"
+    {
+        let mut query = req.query.clone();
+        query.retain(|(k, _)| k != "id");
+        query.push(("id".to_owned(), id.to_owned()));
+        return crate::ondemand::serve(
+            stream,
+            &shared.state.on_demand,
+            "analyze",
+            &query,
+            &req.headers,
+            &shared.config,
+        );
+    }
     if let Some(name) = req.path.strip_prefix("/ws/open/")
         && req.method == "GET"
     {
@@ -1264,15 +1298,17 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::measurements::route(state, &ctl)) // T-818
         .or_else(|| crate::annotations::route(state, &ctl)) // T-816
         .or_else(|| crate::views::route(state, &ctl)) // T-819
+        .or_else(|| crate::research_export::route(state, &ctl)) // T-823 (MAP-23)
         .or_else(|| crate::collections::route(state, &ctl)) // T-817 (MAP-17)
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
+        .or_else(|| crate::paths::route(state, &ctl)) // T-897
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
         .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
-        .or_else(|| crate::analyze::route(state, &ctl)) // T-190
+        .or_else(|| crate::analyze::route(state, &ctl)) // T-190, T-859
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         .or_else(|| crate::datasets::route(state, &ctl)) // T-205
         .or_else(|| crate::ml::route(state, &ctl)) // T-844
@@ -1293,11 +1329,19 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122
     {
-        let allow = r
+        let mut extra = r
             .allow
             .map(|a| format!("Allow: {a}\r\n"))
             .unwrap_or_default();
-        return respond_json_with(&mut stream, r.status, &r.body, &allow);
+        // T-859: an accepted job names where it lives (ADR-0015 §5.1 `Location`).
+        if r.status == 202
+            && let Some(href) = r.body["job"]["href"].as_str()
+            && href.starts_with("/api/")
+            && href.bytes().all(|b| b.is_ascii_graphic())
+        {
+            extra.push_str(&format!("Location: {href}\r\n"));
+        }
+        return respond_json_with(&mut stream, r.status, &r.body, &extra);
     }
     let get = req.method == "GET";
     let result = match req.path.as_str() {
@@ -1306,6 +1350,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/floor"
         | "/api/inventory"
         | "/api/events"
+        | "/api/priors"
         | "/api/analysis/strongest"
         | "/api/navigation"
         | "/api/timeline"
@@ -1348,6 +1393,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/inventory" => inventory(state, &req),
         // T-264 (ADR-0017 TM-8): the durable all-time catalogue, where Explore is window-scoped.
         "/api/events" => events(state, &req),
+        // T-812 (MAP-12): the band plan as ranked suggestions for this box, computed on demand.
+        "/api/priors" => crate::priors::priors_json(state, &req.query),
         "/api/analysis/strongest" => strongest(state, &req),
         // T-341: the backend owns which capture states are realizable; the client snaps against
         // this grid rather than deciding for itself what the front end can do.

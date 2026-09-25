@@ -1,6 +1,6 @@
 # ADR-0015 — Decoder synthesis contracts: candidate pipelines, stage evidence, search, templates, region analyze
 
-**Status:** PROVISIONAL (T-208, core interface). **Acceptance review prepared, not accepted — §16 (T-848, 2026-09-23); the decision is the user's.** The M-1 scaffold (`crates/hk-synth`, `hk_model::synth`: types and stubs, no engine) exists; the engine lands in M-2…M-12.
+**Status:** ACCEPTED (2026-09-23, user decisions U1–U5). Written PROVISIONAL (T-208, core interface); accepted on the §16 review (T-848) with the user's answers to [docs/20](../20-mauto-decision-brief.md)'s U1–U5 — U1 B, U2 B, U3 A, U4 A, and **U5 yes (stereo audio in scope, overriding the brief's recommendation)**. §16.2's eight engineering corrections are folded into the sections they amend; §16.8 lists what the acceptance did **not** decide and still stands open. The M-1 scaffold (`crates/hk-synth`, `hk_model::synth`: types and stubs, no engine) exists; the engine lands in M-2…M-12. Changing this ADR now goes to Fable plus the user.
 **Amended by:** [ADR-0022](0022-false-confirm-budget.md) (§5.5, §11.5, §1.3 — the confirm gate) and **§13 below** (T-616/T-617/T-618, 2026-09-21 — evidence-bit dependence, calibration reach, ADC-fill conditioning); **§14 below** (T-557, 2026-09-22 — template fact provenance, the fact/implementation line, bulk import).
 **Touches:** C13/C14 estimation, C15 classifier, C18 signatures, C20 digital demod, C21 bit framing, C22 decoders, C27 inventory; Emitter, Decode ([docs/07 §2.11, §2.15](../07-data-model.md)).
 **Builds on:** [docs/15](../15-decoder-synthesis.md) (the design brief), [ADR-0011](0011-decoder-workbench-contracts.md) (blocks, recipes, stream), [ADR-0012](0012-attention-memory-contracts.md) (chain tiers), ADR-0014 (IQ capture ring; T-178, `docs/adr/0014-iq-capture-ring.md` lands with it), ADR-0016 (M3 classification; T-198, written in parallel).
@@ -30,7 +30,7 @@ Constraints carried in: **blind-first** (templates and priors only order the sea
 | M3 interface | Reads the `Classification` family distribution (including `unknown`) and `SignatureMatch`. Writes a decode label and a signature proposal back. Open search keeps a budget floor. |
 | Analyze API | `POST /api/analyze` → `202` job. Get, list and cancel. `hackriff.analyze/1` messages stream. Results attach to the emitter. Save as template. |
 | Confirm-by-decode | New `ConfirmPolicy.synthesized` rule: hold-out validation, evidence ≥ 64 bits, check width ≥ 16. Decodes are provenance-marked `synthesized`. |
-| Bursts | Burst sets from the ring (ADR-0014), joined with `DISCONTINUITY`. Pin-on-analyze clip. No single-frame auto-confirm by default. |
+| Bursts | Burst sets from the ring (ADR-0014), joined with `DISCONTINUITY`. Pin-on-analyze clip. A single frame confirms only through ADR-0022's one inequality — in practice a template-fixed check of ≥ 24 bits (U1 = B, user 2026-09-23); searched checks never on one frame. |
 | Evaluation | Blind through the mock SDR, with hidden truth. Templates-on and templates-off runs. A-priori solve and over-claim floors. |
 
 ## 1. Candidate pipelines and the staged objective
@@ -49,7 +49,7 @@ Constraints carried in: **blind-first** (templates and priors only order the sea
 | S5 check | `crc`, `bch`, `parity`, `checksum` | RevEng model, BCH (n, k, poly), span | distinct valid frames × check width (assist `evidence_bits`) | check blocks |
 | S6 fields | `fields`, `text` | field map | fit ok/partial share, identity recurrence across frames, template plausibility ranges | `fields` |
 
-**Catalogue gap:** there is no `psk_demod`/Costas block, so generic PSK stops at S1 until one is added. That addition is an additive ADR-0011 §1.5 change (MAUTO task M-14, optional).
+**Catalogue gap — closed (C5, U4).** Generic PSK is funded: M-14 is **required** (U4 = A, user 2026-09-23), and its block landed as **T-609** — `psk_demod` in `hk-blocks` (BPSK/DBPSK, QPSK/DQPSK, π/4-DQPSK, OQPSK, 8PSK/D8PSK; carrier recovery, matched filter, soft per-bit output; additive to ADR-0011 §1.5), with T-610 `viterbi` and T-611 `reed_solomon` as the rest of the same investment. What M-14 still owes beyond T-609 is listed in §10's M-14 row. **SSB and CW get no blocks**: they stay on the legacy Listen chain permanently (§12.5), as a decision, not a gap.
 
 ### 1.2 Candidate representation
 
@@ -80,6 +80,8 @@ For a prefix reaching stage k:
 - The **search order** key is `evidence_bits + prior_bits + optimistic_remaining`.
 - The **result rank** key is `(stage_reached, evidence_bits)`. Prior bits are reported but never rank a result and never confirm one.
 - **Floors** prune: a node whose stage-j `b_j` < `floor_j` (default 6 bits S0–S3, 10 bits S4–S5) is pruned. Pruning is never total: the best pruned node is kept as a partial result.
+  - **S6 has no floor** (C7): `default_floor_bits(S6) = None`; S6 evidence only ranks (§4.1, "plausibility … ranking evidence only").
+  - **A floor is never lowered to fit a table** (C8): `Threshold` snaps **up** to an expressible level; a floor above a table's `admissible_bits` is `floor_unreachable` and is reported, not relaxed. (Whether 6 bits at S3 is reachable at all under §13.1's maximum rule is open — §16.8 item 1.)
 - **Why bits.** An SNR in dB, an eye opening and a CRC pass rate aren't comparable. Their tail probabilities under a null are. Caps stop a very strong carrier (S0) from outranking a weaker signal that actually frames. The look-elsewhere term keeps a search that tried 10⁴ CRC hypotheses from "finding" one by chance, the failure the assist docs describe for three Mode-S frames.
 
 ## 2. Evidence-metric API
@@ -126,6 +128,13 @@ pub struct Evidence { stage: Stage, metric: MetricId, raw: f32, n: u32, bits: f3
 
 Recipe `refine.objective` gains `{"evidence": "deepest"}`. That is a new optional key, so `schema_version` 3 (ADR-0011 §2.4 rule). A running synthesized pipeline then keeps tuning from the same evidence.
 
+**Proposed amendment (T-858 = M-7, 2026-09-24) — PENDING THE USER; not accepted, not implemented.** `hk_synth::objective` implements §2.3 as written (S0 counted in `quality`; any prefix accepted). One exception is proposed for the user to accept or reject (the coordinator raises it), with one reading of the text and one measured limit:
+- **Proposed exception (not in the code) — report S0 but do not count it in `quality` or the lock.** Every calibration null is white noise at the prefix's input rate fed to its own S0 filter, and the tables are tight (`lowpass@1` credits 6 bits at +0.1 dB, n = 16 384). Measured: a channeliser whose passband rolls off at the band edges made pure noise score 6 bits at S0 — so S0, a whiteness test of the objective's own channel output, is not evidence about the emission. The proposal would also refuse a prefix reaching only S0. Consequence of the code as accepted: S0's ~6 noise bits are added to every tuning's `quality` (roughly constant, so comparisons hold), and an S0-only prefix locks on S0's floor on pure noise; deeper prefixes lock on their deepest stage and are unaffected.
+- **Reading — the bandwidth axis is the S0 channel filter's width, behind a flat channeliser.** Measured: a channeliser narrower than the S0 filter's support coloured the noise the S1/S2 blocks saw, and noise locked at S2 **on hold-out**. So the down-converter is fixed at a flat 0.9 × the prefix rate and `ParameterSpace.bandwidth` moves the prefix's first `lowpass` node's `cutoff_hz` (width = 2 × cutoff), kept inside the flat passband — "maps the candidate's free parameters to centre and bandwidth", with the S0 cutoff as the bandwidth parameter. Recipe schema 3 accepts `bandwidth_hz` in `refine.tune` with the same meaning. (A filter cutoff other than the 6 kHz the tables were drawn at scores against a mismatched null, §2.2 — not measured here.)
+- **As written, no change:** `EvalDepth::{Acquire, Track, Validate}` read the short leading part of the search window, the whole search window, and the hold-out only; the objective enforces the split, so `locked` means locked on hold-out. "Deepest" is fixed at construction (the candidate's deepest stage, or the result's `stage_reached`; S6 locks on S5's floor, §16.2 C7). Calibrated supports are aligned per block (each measurement re-runs the prefix over leading sub-slices sized to land each calibrated block on a table support, ≤ 1 + 2 × blocks runs).
+
+**Measured limit, for the same decision.** Calibrated S1–S3 metrics saturate at 6 bits each, so for a strong unshaped 2-FSK the objective is flat as soon as one tone passes the S0 filter (and at low SNR the true centre scored *lower* than a one-tone tuning); a refinement at S2 finds the emission, not its centre — only analytic S4/S5 evidence ranks finer tunings. §3.1 step 6's "refine at the first S2 lock" should be weighed against that before M-3's engine calls it; the engine-side call (`refined_into`) needs an IQ-backed `Evaluator` and is not wired yet.
+
 ## 3. Search strategy
 
 ### 3.1 Loop
@@ -168,11 +177,12 @@ Each suggestion's `fragment` becomes a child node's parameters. Suggestion `scor
 | `standard` | 20 s | 40 s | 2 | "Analyze" default |
 | `deep` | 120 s | 400 s | 4 | opt-in; open search |
 
-The numbers are **unverified guesses**, measured in M-3 on the Mac and later on the Jetson.
+The numbers are **unverified guesses**, measured in M-3 on the Mac and later on the Jetson. **Open (§16.8 item 2):** T-552's measurement (docs/27, in flight) finds proposal-operator calls (0.3–2.4 s each) dominate wall time, and recommends budgeting search by operation/evaluation count with wall time kept only as a backstop; the profile *shape* is therefore not settled by this acceptance.
 - **Chain kind `synth`** in the per-run chain budget (ADR-0011 §1.4 rule 5). Search threads run at lower OS priority than ring readers.
   - If the run's `lost_samples` rises while a job runs, the job throttles (`state: throttled`, threads halved) before capture is hurt.
 - **One running job** by default and a queue of ≤ 4. Beyond that: `503 busy`.
-- **Power.** The job reads the run's power policy (ADR-0007/0009): `battery` refuses `deep` (`422 power`) and halves threads, `low` allows only `quick`, and a thermal-throttle flag pauses expansion. (No such policy input exists in code yet; M-3 adds a minimal one.)
+- **Power.** The job reads the run's power policy (ADR-0007/0009): `battery` refuses `deep` (`422 power`) and halves threads, `low` allows only `quick`, and a thermal-throttle flag pauses expansion. (No such policy input exists in code yet; M-3 adds a minimal one, and U2 makes it a real input — below.)
+- **Auto-analyze (U2 = B, user 2026-09-23).** The device **may start analyze jobs itself**: the ADR-0012 attention scheduler auto-queues unexplained (unknown) candidates at **`quick` only**, **on mains only**, **one auto job at a time**, sharing the one-running-job / queue-of-4 admission above (an auto job never displaces a user job). `standard` and `deep` stay **user-triggered**; `deep` stays refused on battery. The policy is a config field `auto_profile: quick | none`, product default `quick`; M-3 may ship it `none` until the attention→queue wiring and the power-policy object exist, and flipping it is configuration, not code. M-11 gets the queue view and a stop control.
 - **Stopping** (first to hit): `solved` (§5.5); `plateau` (no best-score gain > 1 bit over 25 % of the budget); `budget`; `exhausted` (beam and deferred queue empty); `cancelled`; `source_ended` or `evicted`.
 - **ML slot.** `trait NodeHeuristic { fn prior_bits(&self, node: &NodeView) -> f32 }`. The classical default is used, and an ML value function (via the ADR-0016 ml-runtime) may replace it later. It only reorders; it never scores evidence.
 
@@ -205,6 +215,7 @@ The numbers are **unverified guesses**, measured in M-3 on the Mac and later on 
 - **Built-ins:** one per shipped recipe (`rds`, `pocsag`, `acars`, `adsb`) plus generic skeletons: `generic-fsk-framed`, `generic-ook-pwm`, `generic-ook-manchester`, `generic-msk`, `generic-ppm`.
 - `priors` is a superset of recipe `match` (ADR-0011 §2.2), read the same way: against **measured** parameters. `bands_hz` only raises rank for an emitter already detected there. Nothing tunes to it.
 - `plausibility` and `evidence_targets` contribute S6 ranking evidence only when met by measured frames. A template can never confirm a signal on its own.
+- **`output_policy` is the recipe's typed map** (C4): `Template.output_policy` is `hk_recipe::OutputPolicy`, the same object §4.3 clamps (see `recipes/pocsag.recipe.json`). The `metadata_keys` list in the example above is shorthand for that map, not a second schema.
 
 ### 4.2 Seeding and pruning from M3 (MAUTO side of ADR-0016)
 
@@ -218,12 +229,12 @@ The prior for hypothesis h is:
 
 **Rules:**
 - **Open-search floor.** Open skeletons always get ≥ max(P(unknown), 0.2) of the evaluation budget. Priors never starve unknowns.
-- **Defer, don't delete.** A family with posterior < 0.02 is deferred: it runs after higher-ranked hypotheses, if budget remains. Evidence found under a deferred family ranks exactly like any other.
+- **Defer, don't delete — and only the likelihood defers** (C2, per ADR-0016 §8 / T-215). A family is deferred exactly when ADR-0016's `Hypothesis::prune` says so, which reads the **likelihood**, never the prior: a posterior below 0.02 reorders a family (it runs later) but never defers it on its own. Deferred families run after higher-ranked hypotheses, if budget remains, and evidence found under one ranks exactly like any other. (ADR-0021's `deferred_prior` detail still reports the posterior.)
 - **Signature fast path:**
   - a `full` match with a pipeline binding is tried first, at the signature's parameter values;
   - a `partial` match narrows its template's free ranges to the signature tolerances;
   - a known `cluster_id` warm-starts the beam from that cluster's last attached result (§5.5).
-- **Feedback (writes, through M3 APIs only).** A solved result emits a decode label `{source: decode, family, template, job_id}` to C15 (a CRC-valid decode overrides classification, C15 card), proposes a C18 `Signature` from the solved parameters (provenance `decoder-confirmed`, T-201 route), and feeds its hold-out snippets to T-205's labelled-capture path.
+- **Feedback (writes, through M3 APIs only).** A solved result emits a decode label `{source: decode, family, template, job_id}` to C15 (a CRC-valid decode overrides *automatic* classification, C15 card — but **never a user label**: U3 = A, §5.5), proposes a C18 `Signature` from the solved parameters (provenance `decoder-confirmed`, T-201 route), and feeds its hold-out snippets to T-205's labelled-capture path.
 
 ### 4.3 Save as template
 
@@ -295,7 +306,8 @@ It appends an **`emitter_synthesis`** row (hk-model, append-only like `emitter_r
 
   The lifecycle reason is backend-rendered, e.g. "decoded by synthesized pipeline `generic-fsk-framed`: 5 distinct CRC-16 frames valid on hold-out, 88 bits".
 - **Trust rules.** Partial verdicts never change lifecycle state. The rule never demotes, and a user delete wins. A template-bound decode that yields a real identity (e.g. `adsb-icao`) is still marked `synthesized`, and `/api/inventory` shows that provenance next to the identity: a successful decode is strong evidence, never an unexplained fact.
-- **Single frames** (§6) don't auto-confirm by default: the emitter stays a candidate with `verdict: solved` and the user can promote. (Open question 1.)
+- **User authority (U3 = A, user 2026-09-23; also closes ADR-0016 open question 3).** A user label or user-promoted pipeline is rank 0 and **wins** over a CRC-valid decode that disagrees. The contradicting decode is **recorded** (its Decode rows and pipeline stay) and **shown beside the label** in the inventory and output panel; it is outranked, never applied, never discarded. This is `effective_rank_sql!` as it already stands.
+- **Single frames** (§6) — U1 = B (user 2026-09-23): one frame auto-confirms **only when its check was template-fixed and ≥ 24 bits**; searched checks keep the multi-frame requirement. ADR-0022 realises this as one inequality, not a predicate (ADR-0022 §4.2): a template-fixed CRC-24 squitter satisfies it, a searched check on one frame cannot. The false-confirm budget is **≤ 1 wrong Confirmed emitter per week unattended** (ADR-0022 §1.1).
 - **Superseded by [ADR-0022](0022-false-confirm-budget.md) (T-548).** The 64 bits / 3 frames / width 16 above are guesses on a one-way door; ADR-0022 derives the gate from the user's budget of one wrong Confirmed emitter per unattended week — **24 analytic hold-out bits**, payable only in analytic-null bits each net of *its own stage's* look-elsewhere, a frame count that is a formula rather than a constant, a width floor of 8 with a 16-bit hard check floor, and the searched-generator discount that [ADR-0021](0021-search-trace-and-negative-result.md) §7A.5 deferred here. T-575 applies it to this section and to §11.5.
 
 ## 6. Burst and one-off path
@@ -307,7 +319,7 @@ It appends an **`emitter_synthesis`** row (hk-model, append-only like `emitter_r
   - Evidence `n` accumulates across bursts, and hold-out is the odd bursts.
 - **Pin on analyze.** At job start the acquired ranges are exported as a pinned clip (`Recording` kind `iq-snippet`, trigger `analyze`) before the search, so ring eviction can't race the job. The clip id is in `window`, and a re-run can target it.
 - **Search changes.** The S0 seed is the burst's short-FFT centre (±1.2 kHz, T-075); there is no tracking refinement across time; S2 seeds come from the preamble (assist `periods`); `ppm_demod` skeletons are tried first for ms-scale bursts at ≥ 1 Msps.
-- **One burst.** It can reach `solved` (e.g. one ADS-B frame passing CRC-24 under the `adsb` template). It attaches but does not auto-confirm (§5.5).
+- **One burst.** It can reach `solved` (e.g. one ADS-B frame passing CRC-24 under the `adsb` template). It attaches, and confirms on its own only through §5.5's single-frame rule (U1 = B, via ADR-0022's inequality): template-fixed and ≥ 24 bits.
 
 ## 7. Evaluation (blind; a priori)
 
@@ -333,7 +345,7 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 - **Channel hopping and trunking.** Synthesis works on one channel; `follow_hops` recipes stay hand-started. That is M4.
 - **Encrypted or proprietary payloads.** No key search or cryptanalysis. A high-entropy payload behind a valid frame is characterised ("framed, CRC-16 valid, payload entropy 7.9 bits/byte: probably encrypted or compressed") and left there.
 - **OFDM, DSSS, CSS and QAM structures** (no blocks). The classification's `unsupported-structure` is reported as the verdict reason.
-- **Automatic analysis of every detection.** v1 is user- or API-triggered. Queueing jobs from the ADR-0012 attention scheduler is a later policy (open question 3).
+- **Automatic analysis of every detection.** Not every detection, and not at every profile: per U2 (§3.3) the attention scheduler auto-queues unexplained candidates at `quick` only, on mains, one at a time; `standard`/`deep` stay user- or API-triggered.
 - **ML on the critical path** (§3.3 slot only).
 - **Transmit or active probing.**
 
@@ -341,14 +353,16 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 
 | Crate | Holds | Depends on |
 |---|---|---|
-| `hk-synth` (new) | `Stage`, `Evidence` scoring and nulls, candidate and skeleton types, search engine, proposal adapters, `EvidenceObjective`, template schema, loader and seeding | hk-recipe, hk-blocks, hk-estimate, hk-demod, hk-model |
-| `hk-blocks` | `Block::evidence`, `EvidenceSet`, per-block evidence, the batch `run_window` driver | (existing) |
+| `hk-synth` (new) | re-exports the evidence vocabulary from `hk_model::synth` (so `hk_synth::Stage` still resolves); `Evidence` scoring and nulls, candidate and skeleton types, search engine, proposal adapters, `EvidenceObjective`, template schema, loader and seeding | hk-recipe, hk-blocks, hk-estimate, hk-demod, hk-model |
+| `hk-blocks` | `Block::evidence` (returning `hk_model::synth::EvidenceSet`), per-block evidence, the batch `run_window` driver | (existing) |
 | `hk-pipeline::synth` | job manager, acquisition (ring/live/burst set, pin clip), `synth` chain kind, attach, the `ConfirmPolicy.synthesized` rule | + hk-synth |
 | `hk-store` | `IqBufferService::read` backing (ADR-0014 format, read-only) | (existing) |
-| `hk-model` | `emitter_synthesis` table, Decode provenance, template store paths | (existing) |
+| `hk-model` | **the evidence vocabulary `hk_model::synth`** (`Stage`, `MetricId`, `GroupId`, `Evidence`, `EvidenceSet`), `emitter_synthesis` table, Decode provenance, template store paths | (existing) |
 | `hk-api` (`analyze.rs`) | the routes in §5 | (existing) |
 
-**Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`).
+**Why the vocabulary is in `hk-model`** (D1, found by T-848): `hk-blocks` must name `Evidence`/`EvidenceSet`/`Stage` for `Block::evidence`, and `hk-synth` depends on `hk-blocks`, so placing them in `hk-synth` as first written was a dependency cycle. Same pattern as ADR-0016's types in `hk_model::classify`.
+
+**Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`; **done: T-858**, ADR-0011 §2.4).
 
 ## 10. MAUTO task graph (sketch; ids TBD; not in tasks.yaml)
 
@@ -356,7 +370,7 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 
 | Id | Task | Deps | Model | Group |
 |---|---|---|---|---|
-| M-1 | `hk-synth` scaffold: Stage/Evidence/candidate/skeleton/template types, pre-added modules and stubs, ADR-0015 → ACCEPTED review | T-206, ADR-0016 accepted | Opus (core) | SYN-0 |
+| M-1 | `hk-synth` scaffold: Stage/Evidence/candidate/skeleton/template types, pre-added modules and stubs, ADR-0015 → ACCEPTED review | T-206, ADR-0016 accepted — **waived at acceptance** (§16.5): hk-synth consumes only ADR-0016 §8's landed `SearchSeed` | Opus (core) | SYN-0 — **done: T-848; accepted 2026-09-23** |
 | M-2 | `Block::evidence` + evidence for S0–S6 blocks, analytic nulls, calibration tables + py generator, `run_window` | M-1 | Opus (core) | SYN-B |
 | M-3 | Search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle | M-1 | Opus | SYN-E |
 | M-4 | Proposal operators over assist (sync/codes/fields) with budget charging | M-1 | Sonnet (reviewed) | SYN-P |
@@ -369,7 +383,7 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 | M-11 | MUI: Analyze progress, ranked results, evidence ladder, "start as pipeline" and "save template" in the output panel | M-8, T-192, T-195 | Sonnet | MUI-X1 |
 | M-12 | `acceptance_mauto` blind suite (§7), generic-FSK synthetic generator in `py/` | M-4, M-5, M-7, M-9 | Opus | M-E |
 | M-13 | Jetson budget/power measurement and profile re-baseline (interactive, needs the Jetson) | M-12 | Opus | JETSON |
-| M-14 | Optional `psk_demod`/Costas block (ADR-0011 catalogue addition) | M-2 | Opus | SYN-B |
+| M-14 | **Required** (U4 = A, user 2026-09-23) `psk_demod` block (ADR-0011 catalogue addition). **The block is delivered by T-609** (superseding this row's narrower "optional Costas" scope; T-610 `viterbi` + T-611 `reed_solomon` complete the CCSDS path). **Not covered by T-609, and owed before PSK reaches bits in a search:** `psk_demod`'s `Block::evidence()` S1 metric (EVM/lock) and its calibration table — M-2's contract, which must include `psk_demod`; a linear-modulation (PSK) S1 alternative in the open skeletons and seeding (M-3/M-5; §4.1's built-in skeleton list has none); and a burst/preamble-driven acquisition mode (T-609 needs a 512–1024-symbol window, so short PSK bursts lose their start) — **delivered by T-875** (`burst: true`, feed-forward acquisition over each burst's own samples; ADR-0011 §9 notes). | M-2 | Opus | SYN-B |
 
 **Waves** (≤ 4 Rust builders at once): (1) M-1; (2) M-2, M-3, M-4, M-6, with M-5 once T-199/T-201 are done; (3) M-7, M-8, M-5; (4) M-9, M-10, M-11; (5) M-12, then M-13.
 
@@ -394,6 +408,8 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 ## Open questions (for the user)
 
 **All fifteen of the questions below — these five, §11.10's five and §12.12's five — are consolidated, costed and given a recommendation in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553). Five survive as questions for the user; the rest are decided or sent to measurement there. Answer them from that table, not from these lists.**
+
+**Answered 2026-09-23 (user, from docs/20's table):** Q1 → U1 = B; Q2 → budgets sent to measurement (T-552), battery half → U2 = B; Q3 → U2 = B; Q4 → docs/20 D1 (local JSON); Q5 → U4 = A. Kept below as the record of what was asked.
 
 1. **Single-burst confirmation.** Should one frame passing a template-fixed ≥ 24-bit check (e.g. an ADS-B squitter) auto-confirm, or only attach, leaving promotion to you (proposed)?
 2. **Budget defaults and battery.** Are `quick` 3 s / `standard` 20 s / `deep` 120 s right for a handheld? Should `deep` be refused on battery?
@@ -501,8 +517,8 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 
 ### 11.7 docs/07 delta (sketch, applied by the implementing task)
 
-- **§2.11 Emitter:** an Emitter owns 0..N **candidate decode pipelines** (§2.28), ranked by evidence; its measured `f`/`BW` are never overwritten by a pipeline's channel; confirm-by-decode promotes a pipeline and confirms the emitter. Add the `duplicate_of` / `artifact_of` / `suppressed_by` links from §11.4.
-- **New §2.28 CandidatePipeline:** the §11.1 object — identity, append-only event lifecycle, ranking and supersession, relation to Recipe/Classification/Decode, retention (kept with the emitter; superseded rows summarised, never deleted), and tests.
+- **§2.11 Emitter:** an Emitter owns 0..N **candidate decode pipelines** (the new CandidatePipeline section below), ranked by evidence; its measured `f`/`BW` are never overwritten by a pipeline's channel; confirm-by-decode promotes a pipeline and confirms the emitter. Add the `duplicate_of` / `artifact_of` / `suppressed_by` links from §11.4.
+- **New CandidatePipeline section — the next free docs/07 number (§2.33 today; §2.28 is `TrunkSystem`, T-266 — C6):** the §11.1 object — identity, append-only event lifecycle, ranking and supersession, relation to Recipe/Classification/Decode, retention (kept with the emitter; superseded rows summarised, never deleted), and tests.
 - **§2.15 Decode:** `candidate_pipeline_id`, and the T-210 rule that corrected frames are not CRC-valid evidence.
 - **§2.21 Classification:** one clarifying sentence — pipelines carry evidence, Classification carries family; a promoted pipeline writes a rank-1 `decoder` row and wins the family through the existing ladder, not around it.
 
@@ -539,6 +555,8 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 ### 11.10 Open questions (for the user)
 
 *Consolidated with §10's and §12.12's lists in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553): Q1, Q2/Q3 and Q4 are decided there as engineering defaults or measurements; only Q5 (merged with ADR-0016 open question 3) goes to the user.*
+
+**Answered 2026-09-23:** Q1 → docs/20 D2 (lazy); Q2 → D3 (a set of output kinds); Q3 → D4 (hidden by default); Q4 → measurement (T-547, still a first guess); **Q5 → U3 = A, user: the user wins (rank 0), the decode is recorded and shown beside the label** (§5.5).
 
 1. **Lazy or eager rows.** Materialise a bare `energy` pipeline only on demand (proposed), or give every emitter one from creation so the inventory is uniform, at the cost of a row per box?
 2. **Two promoted pipelines.** Is "one promoted decode plus one promoted audio pipeline per emitter" right, or should exactly one pipeline ever be promoted?
@@ -603,7 +621,7 @@ A Listen chain is owned by its consumer; a recipe pipeline is a named object wit
 
 ### 12.5 Per-mode cutover (why nothing has to break)
 
-Blocks exist, or are specified by ADR-0011 §8.4, for **WFM / NBFM / AM**. **None exist for USB / LSB / CW**, which Listen serves today. So the chooser returns either a recipe **or** `legacy`, and `legacy` runs today's chain unchanged. The migration flips modes one at a time as each recipe proves parity, and SSB/CW may legitimately stay `legacy` **forever** — that is an acceptable end state, not a failure.
+Blocks exist, or are specified by ADR-0011 §8.4, for **WFM / NBFM / AM**. **None exist for USB / LSB / CW**, which Listen serves today. So the chooser returns either a recipe **or** `legacy`, and `legacy` runs today's chain unchanged. The migration flips modes one at a time as each recipe proves parity, and SSB/CW may legitimately stay `legacy` **forever** — that is an acceptable end state, not a failure. **Decided (U4 = A, user 2026-09-23):** SSB and CW stay `legacy` permanently; no `ssb_demod`/`cw_demod` is funded, and `chains/listen.rs` stays in the build for those two modes (LP-8 retires the chain for cut-over modes only; docs/20 D6).
 
 ### 12.6 Retune and refinement
 
@@ -640,7 +658,7 @@ Ordered, each stage independently revertible, with the user live-testing between
 | **4. Opener switch, flag-gated (default off)** | `HK_LISTEN_PIPELINE=1` makes `/ws/open/listen` run chooser → ephemeral pipeline. Stage 0's conformance test runs in **both** modes. | Identical audio and UI with the flag on; instant revert by unsetting it. **This is the stage the user live-tests.** |
 | **5. Default flip, WFM/NBFM/AM only** | The flag defaults on; SSB/CW keep `legacy` (§12.5); the legacy chain stays in the build. | Dock entries carry `pipeline_id`; audio pipelines appear in `GET /api/pipelines`; a `listen`-origin row exists once §11's table has landed. Reverting is one environment variable. |
 | **6. One output model in the UI** | Dock entries become `{pipeline_id, output_id, kind}`; the FM panel reads RDS from the sibling `messages` output. | Several outputs per signal stack in one dock; RDS text comes from the pipeline that produces the audio. |
-| **7. Retire the chain (never the opener)** | Delete `ChainKind::Listen`'s producer for the cut-over modes; map listener-budget accounting onto audio pipelines. **Only after stage 5 has been live-tested**, and only for those modes. | `/api/status` `listen.budget` still reports; `/ws/open/listen` unchanged. `chains/listen.rs` survives for SSB/CW unless those blocks land. |
+| **7. Retire the chain (never the opener)** | Delete `ChainKind::Listen`'s producer for the cut-over modes; map listener-budget accounting onto audio pipelines. **Only after stage 5 has been live-tested**, and only for those modes. | `/api/status` `listen.budget` still reports; `/ws/open/listen` unchanged. `chains/listen.rs` survives for SSB/CW permanently (U4 = A). |
 
 ### 12.10 Where the framing breaks down (honest objections)
 
@@ -648,8 +666,8 @@ Ordered, each stage independently revertible, with the user live-testing between
 2. **Latency is a contract for audio and a statistic for decoding** (ADR-0011 §8.5). Without `live-edge`, moving Listen onto the recipe runtime degrades live listening in a way no existing test would catch: everything still decodes, it just lags. **Highest-risk item in this plan.**
 3. **The refinement objective is not a node metric** (ADR-0011 §8.7). Two objective forms is a wart; the alternative is a worse objective.
 4. **Per-consumer versus named object** (§12.3). Two ownership modes are irreducible, and the attach-don't-duplicate rule is load-bearing rather than an optimisation.
-5. **SSB/CW have no blocks** (§12.5) and writing them well is real DSP work this amendment does not fund. A permanent legacy path for them is an acceptable outcome.
-6. **Stereo is a wire change**, not a block (ADR-0011 §8.4): `ri16_le` mono is baked into every client. Out of scope.
+5. **SSB/CW have no blocks** (§12.5) and writing them well is real DSP work this amendment does not fund. A permanent legacy path for them is the decided outcome (U4 = A).
+6. **Stereo is a wire change *and* a block** (ADR-0011 §8.4): `ri16_le` mono is baked into every client. **In scope (U5 = yes, user 2026-09-23, overriding docs/20's "no"):** the user treats stereo as part of decoding the signal — the 19 kHz pilot and the 38 kHz L−R subcarrier are signal content the device should recover, not a listening nicety. See §12.13.
 7. **What should *not* be done: retiring the opener.** `/ws/open/listen` should never be deprecated. The task title says "retire the special-cased Listen path", and the *chain* is worth retiring — the *verb* is not. Keeping a target-shaped one-shot entry point is what makes the product feel like a radio rather than a build system.
 8. **And not yet: none of stages 2+ should start before M1's blocks and runtime are real.** `hk-blocks` and `hk-pipeline::recipes` are contracts with unmerged tasks; adding a second consumer of an unbuilt runtime is speculative. This is a contract now; code when the workbench runs.
 
@@ -674,13 +692,29 @@ This section therefore uses placeholder ids **LP-1…LP-8**, mapping onto §12.9
 
 *Consolidated with §10's and §11.10's lists in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553): Q1, Q3 and Q5 are decided there (Q5 duplicates §11.10 Q2 and is already answered by §12.8); Q2 is merged with §10 Q5 and Q4 stands, both for the user.*
 
+**Answered 2026-09-23:** Q1 → docs/20 D5 (retune still ends the stream); Q2/Q3 → U4 = A + D6 (SSB/CW legacy permanently, chain kept for them); **Q4 → U5 = yes, stereo in scope (§12.13)**; Q5 → D3.
+
 1. **Retune behaviour.** Keep "a class-changing retune ends the audio stream and the client reconnects" (proposed — it is today's tested behaviour), or make audio pipelines survive a retune (nicer, but a live-visible change with no coverage)?
 2. **SSB/CW.** Fund `ssb_demod`/`cw_demod` blocks so every mode is a recipe, or accept a permanent legacy path for them (proposed)?
 3. **Keep the legacy chain indefinitely** as a simple, dependency-free live-audio fallback for when a recipe misbehaves, or delete it once WFM/NBFM/AM are cut over (stage 7)?
-4. **Stereo audio.** Wanted at all? It is a wire change (`channels`, interleaved `ri16_le`) plus a `stereo_decode` block, and nothing asks for it today.
+4. **Stereo audio.** Wanted at all? It is a wire change (`channels`, interleaved `ri16_le`) plus a `stereo_decode` block, and nothing asks for it today. — **Answered: yes** (U5, user 2026-09-23; §12.13).
 5. **Promotion.** Confirm §12.8's reading: a pipeline claims a *set* of output kinds and promotion conflicts per kind (this supersedes §11.10 open question 2's phrasing).
 
 *Unverified in this amendment: that a recipe chain reaches the current Listen path's audio quality and CPU cost (stage 3 measures it); the 0.6 s `max_backlog_s`; that `squelch`-as-a-block's zero-item chunks are indistinguishable at the UI from today's `sample_index` gaps; and whether the wrapped chooser's mode decisions match today's exactly (stage 0's test pins the behaviour it must reproduce).*
+
+### 12.13 Stereo audio is in scope (U5, user 2026-09-23)
+
+The user's answer to §12.12 Q4 is **yes**, contrary to docs/20's recommendation. Stereo is part of decoding a broadcast-FM signal, so it belongs to the pipeline, not to a later nicety. What that commits, stated so the implementing tickets can be sized (placeholder ids; the coordinator allocates real ones):
+
+| Id | Task | Deps | Model |
+|---|---|---|---|
+| LP-9 | `stereo_decode` block: 19 kHz pilot PLL, 38 kHz L−R demodulation, matrix to L/R, a pilot-lock `Status` (and S1 `evidence()` via the pilot lock the refinement loop already reads); mono fallback when the pilot is absent or unlocked, never a silent mono labelled stereo | LP-2 | Opus, core_interface |
+| LP-10 | Wire change: `audio` stream header gains `channels` (1 or 2) with interleaved `ri16_le` frames, a stream-contract version bump, and every client updated in the same change (UI dock/`AudioSession`, `py/examples/hk_audio_wav.py`, the documented TCP one-liners) plus `docs/api.md` and `api_contract` tests. A mono stream stays byte-identical to today's. | LP-9, LP-1 (the conformance freeze must pin mono first) | Opus, core_interface |
+
+- **The mono contract does not break silently.** A client that ignores `channels` must still get mono unless it asks for stereo (opt-in on the opener or the output), so LP-1's frozen behaviour holds.
+- **Honesty.** A stream is labelled stereo only while the pilot is locked; losing lock mid-stream is reported (a status change), not hidden. This is the same rule as never implying resolution the front end did not deliver.
+- ADR-0011 §8.4's "Stereo is also out" is superseded by this section.
+- **LP-10 implemented (T-874, 2026-09-24).** Stream contract **1.5** (§12.2): `listen?…&channels=2` is the opt-in (absent or `1` = mono, anything else `400`); `audio.channels` is what the demodulator delivers — 2 only on a WFM channel, whose records are 960 interleaved `L, R` frames, with `sample_index` still counting frames; two-channel status records carry `stereo` (pilot locked, L−R decoded) and `stereo_lock_losses`. The legacy chain decodes L−R in `hk_demod::WfmDemod` (pilot-PLL `2θ`, a copy of the mono path's own filter and de-emphasis, `L = R = M` exactly while unlocked); a mono stream is unchanged apart from the header `version` string (1.2 → 1.5, which re-syncs it with the document). Clients updated together: the UI dock asks for stereo and plays two channels (`AudioSession`, `jitter.ts`, the worklet) and says "stereo" only from the status; `py/examples/hk_audio_wav.py --stereo`; the documented TCP one-liner (docs/api.md). Frozen in `crates/hk-pipeline/tests/listen_conformance.rs` §9. **Not yet:** a recipe `audio` output stays mono (`audio_out` takes one input) — the recipe side of stereo (`stereo_decode` → a two-input `audio_out`) is the next step, and the `playback` opener is mono.
 
 ---
 
@@ -1483,13 +1517,14 @@ runs in §7.*
 
 ---
 
-## 16. Acceptance review (T-848 = MAUTO M-1, 2026-09-23) — prepared for the user, **not accepted**
+## 16. Acceptance review (T-848 = MAUTO M-1, 2026-09-23) — **ACCEPTED 2026-09-23 (user decisions U1–U5)**
 
-**Status of this section:** a review, not a decision. Accepting an ADR is the user's call; this ADR
-stays **PROVISIONAL** until the user says otherwise. What follows is everything the review found,
-each item either **resolved** (an engineering correction, applied in code and proposed for the ADR
-text) or **for the user** (with a proposal). The M-1 scaffold it was checked against is the new
-`hk-synth` crate plus `hk_model::synth`.
+**Status of this section:** the review T-848 prepared, and the record of its acceptance. The user
+answered docs/20's five questions on 2026-09-23 (relayed by the supervisor) and said "accept
+ADR-0015 accordingly, and let the MAUTO M-1/M-3 chain proceed". §16.2's corrections are now folded
+into the sections they amend; §16.3 records the decisions; **§16.8 lists what the acceptance did
+not decide — those stay open and are not resolved by it.** The M-1 scaffold the review was checked
+against is the `hk-synth` crate plus `hk_model::synth`.
 
 ### 16.1 What was checked, and against what
 
@@ -1507,74 +1542,97 @@ validates against the real `hk_blocks::Registry::builtin()` catalogue
 asserted. **No engine behaviour exists**: M-2…M-12 fill the modules, each named in
 `crates/hk-synth/src/lib.rs`.
 
-### 16.2 Resolved while implementing (engineering corrections; proposed for the ADR text)
+### 16.2 Engineering corrections — folded into the normative text at acceptance
 
-| # | Where | Finding | Resolution in the scaffold |
-|---|---|---|---|
-| **D1** | §9 crate placement, §2.1 | `Evidence`/`EvidenceSet`/`Stage` must be nameable by `hk-blocks` (`Block::evidence`, M-2), but §9 has `hk-synth` depend on `hk-blocks` — as written, a dependency cycle. | The evidence vocabulary lives in **`hk_model::synth`** and `hk-synth` re-exports it (`hk_synth::Stage` still resolves). Same pattern as ADR-0016's types in `hk_model::classify`. |
-| **C2** | §4.2 "a family with posterior < 0.02 is deferred" | Contradicts ADR-0016 §8 / T-215: **only the likelihood** prunes; a prior may reorder, never defer. §4.2's own "priors never veto evidence" agrees with ADR-0016. | `hk_synth::seed` defers exactly when ADR-0016's `Hypothesis::prune` says so. A test pins a family with posterior 0.01 and likelihood 0.3 staying active. ADR-0021's `deferred_prior` detail keeps reporting the posterior. |
-| **C3** | ADR-0021 §1 rule 3 vs §2.2 | Rule 3: a memoised hit "carries no measurement"; §2.2's tried table: every tried node's `measured` is non-null. | `TraceNode::check` requires a measurement on every tried node **except** `memoised`, which may carry none. |
-| **C4** | §4.1 example `output_policy.metadata_keys` | Written as a list; the recipe `output_policy` it is "read the same way" as (and that §4.3 clamps) is a typed **map** (`recipes/pocsag.recipe.json`). | `Template.output_policy` is `hk_recipe::OutputPolicy`; the list form is treated as shorthand. |
-| **C5** | §1.1 catalogue gap, §10 M-14, docs/20 §U4 | "There is no `psk_demod`/Costas block" is stale: **T-609 landed `psk_demod`** and superseded M-14. | No scaffold change. docs/20 §U4's PSK half is already funded; only the SSB/CW half remains a question (§16.3). |
-| **C6** | §11.7 "new §2.28 CandidatePipeline" | docs/07 §2.28 is now `TrunkSystem` (T-266). | CP-1 takes the next free docs/07 number (§2.33 today). |
-| **C7** | §1.3 floors | S6 has no stated floor. | `default_floor_bits(S6) = None`: S6 evidence ranks only (§4.1 "plausibility … ranking evidence only"). |
-| **C8** | §13.2 levels vs §1.3 floor | None; noted for T-660. | `Threshold` snaps **up** and refuses; a floor above `admissible_bits` is `floor_unreachable`, never lowered. |
-
-### 16.3 For the user — the questions docs/20 left open
-
-docs/20 put five questions to the user. The repo records an answer to **one**:
-
-| # | Question | Recorded answer / proposal |
+| # | Finding | Now stated in |
 |---|---|---|
-| **U1** | Single-burst confirm, and the false-confirm budget | **Answered** — the budget line (≤ 1 wrong Confirmed emitter per unattended week) is recorded in ADR-0022, whose single inequality subsumes the single-burst branch (ADR-0022 §4.2). Nothing further needed for ADR-0015. |
-| **U2** | May the device start analyze jobs itself; may `deep` run on battery? | **Unanswered.** Proposal (docs/20): auto-queue at `quick` only, mains only, one job at a time; `deep` stays user-triggered. Blocks M-3's `auto_profile` default only — M-3 can start with it off. |
-| **U3** | User label vs a CRC-valid decode that disagrees | **Unanswered.** Proposal: the user wins (rank 0); the decode is recorded and shown beside the label. Also closes ADR-0016 Q3. Matches today's code. |
-| **U4** | Fund PSK / SSB / CW blocks? | **PSK: moot** (C5 — T-609 done). Remaining: **SSB/CW stay on the legacy Listen chain permanently** (proposal). |
-| **U5** | Stereo audio? | **Unanswered.** Proposal: no. |
+| **D1** | `Evidence`/`EvidenceSet`/`Stage` must be nameable by `hk-blocks` (`Block::evidence`, M-2), but §9 had `hk-synth` depend on `hk-blocks` — a dependency cycle. The vocabulary lives in **`hk_model::synth`**; `hk-synth` re-exports it. | §9 (crate table + the paragraph under it) |
+| **C2** | §4.2's "posterior < 0.02 is deferred" contradicted ADR-0016 §8 / T-215: only the **likelihood** defers; a prior reorders. `hk_synth::seed` defers exactly when `Hypothesis::prune` says so (test: posterior 0.01, likelihood 0.3 stays active). | §4.2 "Defer, don't delete" |
+| **C3** | ADR-0021 §1 rule 3 (a memoised hit carries no measurement) vs §2.2 (every tried node's `measured` is non-null). `TraceNode::check` requires a measurement on every tried node **except** `memoised`. | ADR-0021 §2.2 (note added) |
+| **C4** | §4.1's `output_policy.metadata_keys` list vs the recipe's typed **map**. `Template.output_policy` is `hk_recipe::OutputPolicy`; the list is shorthand. | §4.1 |
+| **C5** | "There is no `psk_demod`" was stale: T-609 landed it. | §1.1 catalogue gap; §10 M-14 row |
+| **C6** | §11.7's "new §2.28 CandidatePipeline": docs/07 §2.28 is `TrunkSystem` (T-266). CP-1 takes the next free number (§2.33 today). | §11.7 |
+| **C7** | S6 had no stated floor. `default_floor_bits(S6) = None`: S6 ranks only. | §1.3 Floors |
+| **C8** | `Threshold` snaps **up** and refuses; a floor above `admissible_bits` is `floor_unreachable`, never lowered. | §1.3 Floors |
 
-The two numbers docs/20 sent to measurement stay provisional **by design** and do not block
-acceptance: the 4-bit supersession margin / 0.6 overlap (T-547, done — still first guesses for
-§11.3) and the `quick`/`standard`/`deep` budgets (**T-552, todo**). §7's thresholds are "fixed
-before implementation" and may only tighten.
+### 16.3 The user's decisions on docs/20 (2026-09-23)
 
-### 16.4 For the user — one amendment the measurement has already triggered
+| # | Question | Decision (user 2026-09-23) | Applied in |
+|---|---|---|---|
+| **U1** | Does one clean burst confirm a signal? | **B** (the recommendation): auto-confirm on one frame only when the check was **template-fixed and ≥ 24 bits**; searched checks never. False-confirm budget **≤ 1 wrong Confirmed emitter per unattended week**. ADR-0022 already realises this as one inequality (ADR-0022 §4.2), so no extra predicate is added. | Decision summary "Bursts"; §5.5; §6 |
+| **U2** | May the device analyze on its own; may `deep` run on battery? | **B** (the recommendation): auto-queue unknown candidates at **`quick` only, mains only, one job at a time**; `standard`/`deep` user-triggered; `deep` refused on battery. `auto_profile: quick \| none`, product default `quick`. | §3.3 "Auto-analyze"; §8 |
+| **U3** | User label vs a CRC-valid decode that disagrees | **A** (the recommendation): **the user wins (rank 0)**; the decode is recorded and shown beside the label. Closes ADR-0016 open question 3. | §4.2 feedback; §5.5; §11.10 Q5; ADR-0016 Q3 |
+| **U4** | Fund PSK / SSB / CW blocks? | **A** (the recommendation): **fund `psk_demod`; M-14 is required** — its block is delivered by T-609 (residue in §10's M-14 row). **SSB/CW stay on the legacy Listen chain permanently.** | §1.1; §10 M-14; §12.5; §12.10 item 5; §12.12 |
+| **U5** | Stereo audio? | **Yes — overriding the brief's recommendation ("no").** Stereo is part of decoding the signal and stays in the ADR. | §12.10 item 6; §12.12 Q4; **§12.13** (LP-9, LP-10) |
+
+The two numbers docs/20 sent to measurement stay provisional **by design**: the 4-bit supersession
+margin / 0.6 overlap (T-547 — still first guesses for §11.3) and the `quick`/`standard`/`deep`
+budgets (T-552 — §16.8 item 2). §7's thresholds are "fixed before implementation" and may only
+tighten.
+
+### 16.4 The fill-bucket amendment T-619 triggered — **still pending** (not decided at acceptance)
 
 **§13.3's single `nominal` bucket is falsified on paper.** §13.5 item 4 named its own trigger, and
 **T-619 fired it** (docs/21 §10): the AM/OOK metrics over-claim 5–6 bits at high clip, the measured
 safe region is σ ≥ 1.0 LSB **and** clip ≤ 10 %, and the runtime rule must read the **noise
-floor's** fill, not the window's. §13.5 records this and says "that amendment is not taken here".
-The scaffold implements §13.3 as written (`hk_synth::calibration::FillBucket`) and says so.
-**Proposal:** accept ADR-0015 with this listed as a pending amendment owned by **T-660** (the
-calibration loader and generator), which must take it before M-2 generates any table — no
-calibration table exists yet, so nothing is invalidated by deferring the text.
+floor's** fill, not the window's. The acceptance did not take this amendment. **T-660** (done)
+deliberately did not either: `hk_synth::calibration::FillBucket` and `hk_model::provenance::FillBucket`
+both keep §13.3's as-written bounds (0.5 / 0.30) so the two crates stay in step, and the py
+generator takes the bounds as a parameter (`ADR_NOMINAL_BOUNDS` default, `TIGHT_NOMINAL_BOUNDS`
+available). **Standing constraint:** the amendment must be written, or M-2's first real calibration
+generation must pass `TIGHT_NOMINAL_BOUNDS` explicitly, **before any calibration table is generated**
+— no table exists yet, so nothing is invalidated by the deferral. §16.8 item 3.
 
-### 16.5 For the user — the ADR-0016 dependency
+### 16.5 The ADR-0016 dependency — waived by the acceptance
 
-§10 makes M-1 depend on "ADR-0016 accepted". ADR-0016 is **PROVISIONAL** with open questions 1
-(M3 exit floors / OTA captures), 2 (tract in the default build), 3 (= U3), 4 (cluster novelty →
-ADR-0012) and 5 (answered by docs/20 D1: local only). T-206's gate result also records M3 **not
-closing** on two blockers (unknown recall 0.778 vs 0.80; no end-to-end classification row).
+§10 made M-1 depend on "ADR-0016 accepted". ADR-0016 is **PROVISIONAL** with open questions 1
+(M3 exit floors / OTA captures), 2 (tract in the default build), 3 (= U3, now answered), 4 (cluster
+novelty → ADR-0012) and 5 (answered by docs/20 D1: local only). T-206's gate result also records M3
+**not closing** on two blockers (unknown recall 0.778 vs 0.80; no end-to-end classification row).
 
-What `hk-synth` actually consumes from ADR-0016 is **§8's `SearchSeed` only**, which is landed code
-(T-215, `hk_model::classify::seed`) and is read by the one adapter (`hk_synth::seed`). Priors only
-order the search, so M3's accuracy floors cannot change any hk-synth contract — a weaker classifier
-costs search budget, not correctness.
-**Proposal: waive the ADR-0016 dependency for ADR-0015 acceptance**, keeping ADR-0016's own review
-separate (its Q1/Q2/Q4 are M3 decisions, not MAUTO ones).
+What `hk-synth` consumes from ADR-0016 is **§8's `SearchSeed` only**, which is landed code (T-215,
+`hk_model::classify::seed`) read by one adapter (`hk_synth::seed`). Priors only order the search, so
+M3's accuracy floors cannot change any hk-synth contract — a weaker classifier costs search budget,
+not correctness. The ask (§16.7) bundled this waiver with acceptance and ADR-0016 was not accepted,
+so **accepting ADR-0015 waives the dependency**; ADR-0016's own review (Q1, Q2, Q4) stays separate.
 
 ### 16.6 Not blocking, listed for completeness
 
 - ADR-0021's five open questions (false-label budget, null-control cost, 8-bit null margin, trace
   retention, auto-retry) and ADR-0022's Q1 are parameters of M-3/M-9/M-12, not of the contracts
-  M-1 fixes. Proposal: they stay with those ADRs.
+  M-1 fixes. They stay with those ADRs.
 - The §9 deltas (docs/07 §2.11 `synthesis`, §2.15 Decode `provenance`, a Template object; docs/api
   "Analyze"; stream `hackriff.analyze/1`; recipe `schema_version` 3) are still unwritten; each lands
-  with the ticket that first serves or stores it (M-8, M-9, M-7, CP-1), per the T-079 rule.
+  with the ticket that first serves or stores it (M-8, M-9, M-7, CP-1), per the T-079 rule. U5 adds
+  one: the `audio` stream's `channels` field and version bump (LP-10).
 
-### 16.7 The ask
+### 16.7 The ask (as put to the user; answered 2026-09-23)
 
 > **"Accept ADR-0015"** — with U2, U3 and U5 answered (or "take the recommendations"), SSB/CW as
 > proposed, §16.4's amendment deferred to T-660, and the ADR-0016 dependency **waived** (or ADR-0016
 > accepted). On that word the status line changes to ACCEPTED and §16.2's corrections are folded
 > into the sections they amend. Until then M-2…M-7 can start against the scaffold: none of them
 > needs an answer above except M-3's `auto_profile` default, which starts off.
+
+**Answer (user, 2026-09-23):** U1 B, U2 B, U3 A, U4 A (M-14 required), U5 **yes** (against the
+recommendation); accept ADR-0015 accordingly; the MAUTO M-1/M-3 chain proceeds.
+
+### 16.8 Still open after acceptance (the user did not decide these; the acceptance does not resolve them)
+
+1. **S3 cannot reach `floor_j = 6` under the maximum rule (T-660).** Combining docs/21 §2's published
+   per-metric realised bits through §13.1's rule with the M1 FSK ladder's declared groups: S2 goes
+   17.1 → 8.2 bits and still clears 6; **S3 goes 8.8 → 4.5 bits and does not** — S3 has one declared
+   group (`bit_shape{line_violations, bit_structure}`), so `b_3` is its best single metric, and
+   neither clears 6 alone. §13.1 predicted this in words. The rule stands: **restate S3's floor
+   (T-660 suggests roughly 4–5 bits) beside that measurement, never return to the sum.** Until an
+   amendment does, `hk_synth::stage::default_floor_bits` keeps 6 (documented there), and §1.3's
+   "pruning is never total" means the cost is search recall, not silent loss. Needs a floor
+   amendment; not decided here.
+2. **The budget unit (T-552, docs/27 — in flight, not yet on `main`).** Per-stage DSP is cheap and
+   dominated by S0 channelisation (memoisation amortises it), but **proposal-operator calls cost
+   0.3–2.4 s each** and dominate wall time, so a `wall_s` budget buys wildly different amounts of
+   search. docs/27 §6 recommends §3.3's 3 / 20 / 120 s wall budgets become **operation/evaluation-count
+   budgets** (e.g. `max_proposal_calls` or a shared `assist::Budget{max_ops}`), with **wall time kept
+   only as a backstop** for the API and power story, and `quick`'s 3 s re-examined before it ships in
+   the public API. Not decided here; M-3 should not freeze `SynthBudget`'s public shape before it is.
+3. **The fill-bucket amendment (T-619 → §16.4).** Pending; binds M-2's first calibration generation.

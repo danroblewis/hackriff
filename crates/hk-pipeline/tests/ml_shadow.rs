@@ -2,10 +2,11 @@
 //!
 //! This is the *wiring* half of T-844's non-vacuity pair (the T-287/T-297 pattern). An operator
 //! installs a model and puts it in `shadow`; a scene of 2-FSK bursts replays through the device
-//! interface; the fsk chain classifies each emission at the classifier's single call site; and
+//! interface; the classify chain (`chains/classify.rs`, T-878) classifies each confirmed track at
+//! the classifier's single call site; and
 //! the test asserts that shadow records **reached hk-store** — read back from disk by a store
 //! opened afresh, not believed from a counter. Remove the `MlStage::observe` call from
-//! `chains/fsk.rs` and this fails, while the sink half (`src/ml.rs`,
+//! `chains/classify.rs` and this fails, while the sink half (`src/ml.rs`,
 //! `a_shadow_prediction_is_durable_in_hk_store_and_survives_the_stage`) still passes; replace the
 //! hk-store sink with the in-memory one and that test fails while this one's counters still move.
 //!
@@ -72,10 +73,14 @@ fn ml_rows(repo: &Repository) -> Vec<MlAttributedRow> {
 
 #[test]
 fn a_shadow_model_records_every_classified_fsk_emission_in_hk_store_and_changes_nothing() {
+    // 25 dB, not 20: over its OBW99 the 20 dB scene measures 18.3-19.1 dB, below the fsk family's
+    // a-priori 20 dB gate (ADR-0016 §2), so the cascade correctly holds every row `BelowGate` and
+    // names no family for the C38 gate to admit (T-852's measurement). 25 dB is the lowest level
+    // `device_fsk_classify.rs` measures above the gate; the scene is chosen, no threshold moved.
     let out = synth_or_skip!(
         SynthRequest::new("fsk_burst_train")
             .seed(844)
-            .param("snr_db", 20.0)
+            .param("snr_db", 25.0)
             .param("duration_s", 1.2)
     );
     let meta = out.fixture(0).unwrap().meta_path;

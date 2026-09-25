@@ -1605,19 +1605,37 @@ mod tests {
         // 2026-09-23 on the small grid. Read it as: at the family gate the class gate withholds a class
         // call (`no_class_call`); five dB above it the tree is decisive (`single_candidate`) and the
         // stage does not run. On clean psk-qam it ran on 0 of 30 — correct behaviour (T-589), and the
-        // exact number a more decisive tree would push further from the shipped path unnoticed.
+        // exact number a more decisive tree would push further from the shipped path unnoticed —
+        // until T-590 returned the QAM orders to its hypothesis set (3 of 30, below).
         const EXPECT: &[(&str, i64, usize, usize, &str)] = &[
             ("psk-qam", -5, 10, 0, "abstained_upstream=10"),
             ("psk-qam", 0, 10, 0, "no_class_call=10"),
+            // T-590 re-pinned `ran 0, geometry=3` → `ran 3, confirmed=1 reranked=2`, and it is a
+            // RISE, not a re-labelling of the same skips. Those three were the two `qam16` snippets
+            // and one `qam64` whose tree prior split between the two QAM orders: with the orders
+            // declined (T-422) fewer than two hypotheses were scored, and that surfaced as
+            // `geometry`. With them restored the stage runs on all three; both `qam16` are reranked
+            // and both land on the truth (class top-1 1.000, wrong 0.000 in this cell), and the
+            // `qam64` is confirmed.
             (
                 "psk-qam",
                 5,
                 10,
-                0,
-                "geometry=3 no_clock_lock=1 single_candidate=6",
+                3,
+                "confirmed=1 no_clock_lock=1 reranked=2 single_candidate=6",
             ),
             ("fsk", -5, 8, 0, "abstained_upstream=8"),
             ("fsk", 0, 8, 0, "no_class_call=8"),
+            // T-852 re-pinned `confirmed=1` → `reranked=1`: the run count is unchanged (1 of 8).
+            // Widening the `2fsk` generator's modulation index (h up to 5, `synth::waveform`)
+            // redrew which waveform each acceptance seed produces, so the one snippet the stage
+            // runs on here is a different 2-FSK emission, and the verifier re-ranks its class
+            // instead of agreeing.
+            // T-888 re-pinned `reranked=1` → `confirmed=1`, run count again unchanged (1 of 8).
+            // `blind_qpsk`/`blind_bpsk` are now absent where C14 cannot look past a lower-order
+            // line, so the refitted fsk densities no longer carry the veto-floor spike those rows
+            // read (0.200 / 0.300 exactly); the tree's own top class for that snippet is now the
+            // one the verifier agrees with, rather than one it had to re-rank.
             (
                 "fsk",
                 5,

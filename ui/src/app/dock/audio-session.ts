@@ -4,12 +4,19 @@
 // jitter buffer (`../../jitter.ts`) and the built `dist/audio-worklet.js` (from
 // `../../audio-worklet.ts`, unchanged — shared with the old page). No DOM; a thin client over the
 // stream contract, not signal logic.
-import { type AudioHeader, type AudioStatus, SeqTracker, audioHeaderProblem, parseRecord, parseText } from "../../audio-frames";
+import { type AudioHeader, type AudioStatus, SeqTracker, audioHeaderProblem, headerChannels, mixToMono, parseRecord, parseText } from "../../audio-frames";
 import { JitterBuffer } from "../../jitter";
 import type { ListenTarget } from "./api";
 import { listenQuery } from "./outputs";
 
-type Output = { node: AudioNode; post: (pcm: Float32Array) => void; reset: () => void };
+type Output = { node: AudioNode; post: (pcm: Float32Array) => void; reset: () => void; setChannels: (n: number) => void };
+
+/** The listen socket's query (T-874): the dock asks for stereo — `channels=2` — and plays whatever
+ * the header says it got (a stereo request on a non-FM mode is served mono). The TCP one-liner the
+ * dock shows (`listenTcpTarget`) stays the plain mono request. */
+export function listenSocketQuery(target: ListenTarget): string {
+  return `${listenQuery(target)}&channels=2`;
+}
 
 export interface AudioSessionEvents {
   /** The stream's header arrived: mode/bandwidth known, entry moves to `live`. */
@@ -87,14 +94,21 @@ export class AudioSession {
     if (ctx.audioWorklet) {
       try {
         await ctx.audioWorklet.addModule("audio-worklet.js");
-        const node = new AudioWorkletNode(ctx, "hk-listen", { numberOfInputs: 0, outputChannelCount: [1] });
-        return { node, post: (pcm) => node.port.postMessage({ pcm }, [pcm.buffer]), reset: () => node.port.postMessage({ reset: true }) };
+        const node = new AudioWorkletNode(ctx, "hk-listen", { numberOfInputs: 0, outputChannelCount: [2] });
+        return {
+          node, post: (pcm) => node.port.postMessage({ pcm }, [pcm.buffer]), reset: () => node.port.postMessage({ reset: true }),
+          setChannels: (channels) => node.port.postMessage({ channels }),
+        };
       } catch { /* insecure context or no worklet support: fall back */ }
     }
-    const jb = new JitterBuffer({ inputRate: 48_000, outputRate: ctx.sampleRate, targetMs: 200 });
-    const node = ctx.createScriptProcessor(2048, 0, 1);
-    node.onaudioprocess = (e) => jb.pull(e.outputBuffer.getChannelData(0));
-    return { node, post: (pcm) => jb.push(pcm), reset: () => jb.reset() };
+    const make = (channels: number) => new JitterBuffer({ inputRate: 48_000, outputRate: ctx.sampleRate, targetMs: 200, channels });
+    let jb = make(1);
+    const node = ctx.createScriptProcessor(2048, 0, 2);
+    node.onaudioprocess = (e) => {
+      const l = e.outputBuffer.getChannelData(0), r = e.outputBuffer.getChannelData(1);
+      if (jb.channels === 2) jb.pull(l, r); else { jb.pull(l); r.set(l); }
+    };
+    return { node, post: (pcm) => jb.push(pcm), reset: () => jb.reset(), setChannels: (n) => { if (n !== jb.channels) jb = make(n); } };
   }
 
   private async connect(id: string, target: ListenTarget, gain: GainNode) {
@@ -104,12 +118,13 @@ export class AudioSession {
     if (!this.ctx) return; // stopAll() ran while the output was being set up
     out.node.connect(gain);
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/open/listen?${listenQuery(target)}&token=${encodeURIComponent(this.token)}`);
+    const ws = new WebSocket(`${proto}://${location.host}/ws/open/listen?${listenSocketQuery(target)}&token=${encodeURIComponent(this.token)}`);
     ws.binaryType = "arraybuffer";
     const entry: Entry = { ws, gain, out };
     this.entries.set(id, entry);
     const seq = new SeqTracker();
     let header: AudioHeader | null = null;
+    let channels = 1;
     ws.onmessage = (ev) => {
       if (this.entries.get(id) !== entry) return;
       if (typeof ev.data === "string") {
@@ -117,7 +132,8 @@ export class AudioSession {
         if (m.kind === "refused") this.events.onRefused(id, m.refusal.status, m.refusal.reason);
         else if (m.kind === "header") {
           const problem = audioHeaderProblem(m.header);
-          if (problem) { this.events.onRefused(id, 0, problem); ws.close(); } else { header = m.header; this.events.onHeader(id, m.header); }
+          if (problem) { this.events.onRefused(id, 0, problem); ws.close(); }
+          else { header = m.header; channels = headerChannels(m.header); out.setChannels(channels); this.events.onHeader(id, m.header); }
         }
         return;
       }
@@ -129,7 +145,8 @@ export class AudioSession {
         // Notify scope subscribers before `out.post`: the AudioWorklet output path transfers
         // `r.samples.buffer` to the worklet thread (a zero-copy `postMessage` transfer), which
         // detaches it in this thread — reading it after that would see a zero-length array.
-        for (const cb of this.sampleSubs.get(id) ?? []) cb(r.samples);
+        const subs = this.sampleSubs.get(id);
+        if (subs?.size) { const scope = mixToMono(r.samples, channels); for (const cb of subs) cb(scope); }
         out.post(r.samples);
       } else if (r.type === "status") this.events.onStatus(id, r.status);
     };

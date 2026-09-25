@@ -58,8 +58,8 @@ use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_model::{ContentClass, EmitterId, SampleTime, Timestamp};
 use hk_stream::audio::{
-    AUDIO_DATATYPE, AUDIO_FRAME_SAMPLES, AUDIO_MAX_FRAME_LEN, AUDIO_SAMPLE_RATE_HZ, AgcInfo,
-    AudioInfo, AudioStatus, ListenTarget, SquelchInfo, encode_pcm,
+    AUDIO_DATATYPE, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ, AgcInfo, AudioInfo, AudioStatus,
+    ListenRequest, ListenTarget, SquelchInfo, audio_max_frame_len, encode_pcm,
 };
 use hk_stream::{
     BinaryRecord, OpenRefusal, OpenRequest, OpenedStream, Publisher, PublisherConfig,
@@ -424,7 +424,11 @@ impl ListenManager {
     fn open_inner(&self, req: &OpenRequest) -> Result<OpenedStream, OpenRefusal> {
         let cfg = &self.config();
         publish_limits(&self.counters, cfg);
-        let target = ListenTarget::from_request(req)?;
+        // T-874: `channels=2` asks for stereo (opt-in); absent, the stream is today's mono.
+        let ListenRequest {
+            target,
+            channels: want_channels,
+        } = ListenRequest::from_request(req)?;
         let shared = (self.segment)().ok_or_else(|| {
             OpenRefusal::new(
                 503,
@@ -579,13 +583,17 @@ impl ListenManager {
                 "the demodulated channel is not inside the tuned window",
             ));
         }
-        let demod = AudioDemod::new(
+        let demod = build_demod(
             plan.clone(),
-            cfg.audio.clone(),
+            &cfg.audio,
             tune.sample_rate_hz,
             tune.center_hz,
+            want_channels,
         )
         .map_err(|e| OpenRefusal::new(500, "demod", e.to_string()))?;
+        // What the stream carries is what the demodulator delivers, not what was asked: only
+        // broadcast FM has a second channel (T-874).
+        let channels = demod.channels();
 
         slot.set_mcores(cfg.chain_mcores(
             tune.sample_rate_hz,
@@ -619,9 +627,9 @@ impl ListenManager {
         header.bandwidth_hz = Some(plan.channel_bandwidth_hz);
         header.emitter_id = emitter;
         header.provenance_ref = Some(prov.id());
-        header.max_frame_len = AUDIO_MAX_FRAME_LEN;
+        header.max_frame_len = audio_max_frame_len(channels);
         header.audio = Some(AudioInfo {
-            channels: 1,
+            channels,
             frame_samples: AUDIO_FRAME_SAMPLES as u32,
             mode: plan.mode_name().into(),
             mode_confidence: pr.mode.confidence,
@@ -641,6 +649,7 @@ impl ListenManager {
             deemphasis_s: plan.deemphasis_s,
             demod: LISTEN_DEMOD_VERSION.into(),
             refinement: refined.as_ref().map(crate::refine::audio_refinement),
+            ..AudioInfo::default()
         });
         let publisher = Publisher::new(
             header.clone(),
@@ -672,6 +681,8 @@ impl ListenManager {
             shared: Arc::clone(shared),
             reader,
             demod,
+            channels: want_channels,
+            stereo_losses: 0,
             publisher,
             handle: handle.clone(),
             stop: Arc::clone(&stop),
@@ -731,20 +742,39 @@ impl StreamOpener for ListenManager {
             "kind": "audio",
             "datatype": AUDIO_DATATYPE,
             "sample_rate_hz": AUDIO_SAMPLE_RATE_HZ,
-            "params": ["emitter", "detection", "f_lo", "f_hi"],
+            "params": ["emitter", "detection", "f_lo", "f_hi", "channels"],
             "records": format!(
-                "data (type 1, {AUDIO_FRAME_SAMPLES} i16 LE mono samples) and status (type 3: \
-                 level_dbfs, snr_db, squelch_open, agc_gain_db, ...); mode and parameters are \
-                 estimated (header audio profile)"
+                "data (type 1, {AUDIO_FRAME_SAMPLES} i16 LE samples per channel; mono unless \
+                 channels=2 was asked and the header's audio.channels is 2, then interleaved L, R) \
+                 and status (type 3: level_dbfs, snr_db, squelch_open, agc_gain_db, ..., stereo \
+                 on two-channel streams); mode and parameters are estimated (header audio profile)"
             ),
         })
     }
+}
+
+/// The demodulator for `plan`, with the L−R path when `channels` is 2 (T-874; a no-op on modes
+/// with no second channel).
+fn build_demod(
+    plan: hk_demod::audio::AudioPlan,
+    cfg: &AudioConfig,
+    rate_hz: f64,
+    center_hz: f64,
+    channels: u32,
+) -> Result<AudioDemod, hk_demod::DemodError> {
+    let d = AudioDemod::new(plan, cfg.clone(), rate_hz, center_hz)?;
+    Ok(if channels == 2 { d.with_stereo() } else { d })
 }
 
 struct Session {
     shared: Arc<Shared>,
     reader: ChainReader,
     demod: AudioDemod,
+    /// Channels the client asked for (T-874): every rebuilt demodulator gets the same.
+    channels: u32,
+    /// Pilot lock losses of demodulators already replaced (a rebuild that drops a locked pilot is
+    /// one), so the status count covers the whole stream.
+    stereo_losses: u64,
     publisher: Publisher,
     handle: PublisherHandle,
     stop: Arc<AtomicBool>,
@@ -777,11 +807,16 @@ impl Session {
         if !in_window(self.tune.0, self.tune.1, lo, hi) || gate(&self.shared, lo, hi).is_err() {
             return;
         }
-        let Ok(demod) = AudioDemod::new(plan, self.config.audio.clone(), self.tune.1, self.tune.0)
-        else {
+        let Ok(demod) = build_demod(
+            plan,
+            &self.config.audio,
+            self.tune.1,
+            self.tune.0,
+            self.channels,
+        ) else {
             return;
         };
-        self.demod = demod;
+        self.replace_demod(demod);
         self.refined = Some((next.tuning.center_hz, next.tuning.bandwidth_hz));
         *gap = true;
         if self.refine_emitter.is_some() {
@@ -793,6 +828,14 @@ impl Session {
                 t,
             );
         }
+    }
+
+    /// Swaps in a rebuilt demodulator, carrying its stereo lock losses over (T-874): the new one
+    /// starts unlocked, so dropping a locked pilot is itself a loss.
+    fn replace_demod(&mut self, demod: AudioDemod) {
+        self.stereo_losses +=
+            self.demod.stereo_lock_losses() + u64::from(self.demod.stereo_locked());
+        self.demod = demod;
     }
 
     /// Why this chain stopped when its session guard was dropped (T-633).
@@ -822,7 +865,10 @@ impl Session {
         let counters = Arc::clone(&self.shared.counters);
         let lc = &counters.listen;
         let fs = self.shared.fs;
-        let frame = AUDIO_FRAME_SAMPLES;
+        // A record is AUDIO_FRAME_SAMPLES sample frames of `channels` interleaved samples each;
+        // `sample_index` counts frames (time), whatever the channel count (T-874).
+        let channels = self.demod.channels() as usize;
+        let frame = AUDIO_FRAME_SAMPLES * channels;
         let mut pending: Vec<f32> = Vec::with_capacity(4 * frame);
         let mut payload: Vec<u8> = Vec::with_capacity(2 * frame);
         let mut audio_index: u64 = 0;
@@ -870,13 +916,14 @@ impl Session {
                             inc(&lc.retune_ends);
                             break End::Retune;
                         }
-                        match AudioDemod::new(
+                        match build_demod(
                             self.demod.plan().clone(),
-                            self.config.audio.clone(),
+                            &self.config.audio,
                             tune.1,
                             tune.0,
+                            self.channels,
                         ) {
-                            Ok(d) => self.demod = d,
+                            Ok(d) => self.replace_demod(d),
                             Err(_) => {
                                 inc(&lc.errors);
                                 break End::Error;
@@ -932,7 +979,7 @@ impl Session {
                         let samples = &pending[offset..offset + frame];
                         offset += frame;
                         let index = audio_index;
-                        audio_index += frame as u64;
+                        audio_index += AUDIO_FRAME_SAMPLES as u64;
                         if !self.demod.squelch_open() {
                             squelched += 1;
                             inc(&lc.squelched_frames);
@@ -1012,6 +1059,10 @@ impl Session {
                     refined_center_hz: self.refined.map(|r| r.0),
                     refined_bandwidth_hz: self.refined.map(|r| r.1),
                     refine_updates: self.refiner.as_ref().map_or(0, LiveRefiner::updates),
+                    // T-874: two-channel streams say whether L−R is really being decoded.
+                    stereo: (channels == 2).then(|| self.demod.stereo_locked()),
+                    stereo_lock_losses: (channels == 2)
+                        .then(|| self.stereo_losses + self.demod.stereo_lock_losses()),
                 };
                 let t = self.t0.saturating_add_nanos(
                     (audio_index as f64 * 1e9 / AUDIO_SAMPLE_RATE_HZ).round() as i64,

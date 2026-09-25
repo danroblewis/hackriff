@@ -356,6 +356,7 @@ fn graph() -> Graph {
         identity: None,
         content_class: ContentClass::Unrestricted,
         t: t(10),
+        provenance: None,
     };
     b.repo.insert_decode(&decode).unwrap();
 
@@ -694,6 +695,62 @@ fn db_round_trips_every_persisted_object() {
             ..
         })
     ));
+}
+
+/// T-560: a caller reads back the most recent calibration for its device and method, rather than
+/// re-deriving it, and never sees another device's or another method's row.
+#[test]
+fn latest_calibration_state_for_device_reads_back_the_newest_matching_row() {
+    let mut repo = Repository::open_in_memory().unwrap();
+
+    // A different device, and a different method on the SAME device, must never shadow it.
+    let mut other_device = sample_cal();
+    other_device.id = CalibrationStateId::new();
+    other_device.device_id = "synthetic:other".into();
+    other_device.method = CalibrationMethod::LmrRaster;
+    other_device.ppm = 42.0;
+    repo.insert_calibration_state(&other_device).unwrap();
+
+    let mut older = sample_cal();
+    older.id = CalibrationStateId::new();
+    older.device_id = "synthetic:t-560".into();
+    older.method = CalibrationMethod::LmrRaster;
+    older.measured_at = t(-120);
+    older.ppm = -3.0;
+    repo.insert_calibration_state(&older).unwrap();
+
+    let mut different_method = sample_cal();
+    different_method.id = CalibrationStateId::new();
+    different_method.device_id = "synthetic:t-560".into();
+    different_method.method = CalibrationMethod::FmPilot;
+    different_method.measured_at = t(-10);
+    different_method.ppm = 0.2;
+    repo.insert_calibration_state(&different_method).unwrap();
+
+    let mut newest = sample_cal();
+    newest.id = CalibrationStateId::new();
+    newest.device_id = "synthetic:t-560".into();
+    newest.method = CalibrationMethod::LmrRaster;
+    newest.measured_at = t(-1);
+    newest.ppm = -9.6;
+    repo.insert_calibration_state(&newest).unwrap();
+
+    let got = repo
+        .latest_calibration_state_for_device("synthetic:t-560", &CalibrationMethod::LmrRaster)
+        .unwrap()
+        .expect("a stored raster calibration for this device");
+    assert_eq!(got, newest, "the newest LmrRaster row for THIS device");
+    assert_eq!(got.ppm, -9.6);
+
+    assert_eq!(
+        repo.latest_calibration_state_for_device(
+            "synthetic:unknown",
+            &CalibrationMethod::LmrRaster
+        )
+        .unwrap(),
+        None,
+        "a device with no calibration history gets None, not a guess"
+    );
 }
 
 #[test]
@@ -1417,7 +1474,7 @@ fn batch_is_one_transaction_and_rolls_back_on_failure() {
     let mut b = base();
     let d = det(b.survey.id, b.prov_id, 915.0e6, 40e3, tr(10, 11));
     let track = channel_track(915.0e6, 40e3, tr(10, 11), 1);
-    let unknown = DetectionId::new();
+    let unknown_track = TrackId::new();
     let err = b
         .repo
         .batch(|tx| {
@@ -1429,8 +1486,10 @@ fn batch_is_one_transaction_and_rolls_back_on_failure() {
                 vec![d.id],
                 "own writes visible"
             );
-            // Foreign key: the detection was never written.
-            tx.link_detections_to_track(track.id, &[unknown], t(12))
+            // Foreign key: the track was never written. (A link to a detection that was never
+            // written is skipped, not an error — T-904: retention can age a row out while the
+            // tracker holds its link.)
+            tx.link_detections_to_track(unknown_track, &[d.id], t(12))
         })
         .unwrap_err();
     assert!(matches!(err, RepoError::Engine(_)), "{err}");
@@ -1853,6 +1912,7 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         identity: Some(pi.clone()),
         content_class: ContentClass::Unrestricted,
         t: t(30),
+        provenance: None,
     };
     b.repo.insert_decode(&decode).unwrap();
     let label = Annotation {

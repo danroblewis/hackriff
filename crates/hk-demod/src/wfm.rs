@@ -3,9 +3,15 @@
 //! - pilot PLL (lock indicator, pilot frequency and deviation; stereo flag),
 //! - mono audio: 15 kHz FIR low-pass and ÷5 to 48 kS/s, de-emphasis (75 µs Americas default,
 //!   50 µs configurable), scaled so ±75 kHz deviation is ±1,
-//! - RDS on the 57 kHz subcarrier, phase-locked to 3 × the pilot.
+//! - RDS on the 57 kHz subcarrier, phase-locked to 3 × the pilot,
+//! - optionally ([`WfmDemod::enable_stereo`], T-874, ADR-0015 §12.13) the L−R channel: the
+//!   38 kHz DSB-SC subcarrier brought to baseband on the pilot PLL's `2θ`, through a copy of the
+//!   mono path's own low-pass and de-emphasis (identical delay), so `L = M + S`, `R = M − S`.
+//!   **Honest mono fallback:** while the PLL is unlocked nothing is fed to the L−R path, so it
+//!   decays to zero and `L = R = M` — never an L−R guessed from an unlocked carrier. The mono
+//!   path is untouched by it: a demodulator that never enables stereo computes exactly what it
+//!   did before.
 //!
-//! Stereo L−R decoding is not implemented (optional in T-012): the stereo flag reports the pilot.
 //! State carries across [`WfmDemod::process`] calls; allocation is per call (output buffers),
 //! never per sample.
 
@@ -89,6 +95,18 @@ pub struct WfmReport {
     pub rds_timing_contrast: Option<f64>,
 }
 
+/// The L−R path of a stereo [`WfmDemod`].
+#[derive(Clone, Debug)]
+struct Side {
+    /// A copy of the mono path's low-pass (same taps, same decimation phase).
+    fir: FirDecimator<f32>,
+    deemph: Deemphasis,
+    out: Vec<f32>,
+    /// The pilot PLL was locked at the last sample.
+    locked: bool,
+    lock_losses: u64,
+}
+
 const DEV_BINS: usize = 256;
 const DEV_BIN_HZ: f64 = 1000.0;
 
@@ -109,6 +127,8 @@ pub struct WfmDemod {
     /// timestamps read from the stream's true start (see [`Self::take_rds_groups`]).
     rds_start: Option<u64>,
     audio: Vec<f32>,
+    /// The L−R path, when stereo is enabled.
+    side: Option<Box<Side>>,
     n: u64,
     mean_sum: f64,
     mean_prev: f64,
@@ -143,6 +163,7 @@ impl WfmDemod {
             rds,
             rds_start: None,
             audio: Vec::new(),
+            side: None,
             n: 0,
             mean_sum: 0.0,
             mean_prev: 0.0,
@@ -162,6 +183,47 @@ impl WfmDemod {
     }
 
     /// Demodulates contiguous baseband samples.
+    /// Also decodes the L−R channel from now on (see the module docs): [`Self::take_side`]
+    /// then yields one `S = (L−R)/2` sample per mono sample, aligned with it. Idempotent.
+    pub fn enable_stereo(&mut self) {
+        if self.side.is_some() {
+            return;
+        }
+        let mut fir = self.audio_fir.clone();
+        fir.clear_history();
+        self.side = Some(Box::new(Side {
+            fir,
+            deemph: Deemphasis::new(self.config.deemphasis_tau_s, self.audio_rate_hz()),
+            out: Vec::new(),
+            locked: false,
+            lock_losses: 0,
+        }));
+    }
+
+    /// Whether the L−R channel is decoded ([`Self::enable_stereo`]).
+    pub fn is_stereo(&self) -> bool {
+        self.side.is_some()
+    }
+
+    /// Stereo only: L−R is being decoded right now (the pilot PLL is locked at the last sample).
+    pub fn stereo_locked(&self) -> bool {
+        self.side.as_ref().is_some_and(|s| s.locked)
+    }
+
+    /// Stereo only: locked → unlocked transitions of the pilot since stereo was enabled.
+    pub fn stereo_lock_losses(&self) -> u64 {
+        self.side.as_ref().map_or(0, |s| s.lock_losses)
+    }
+
+    /// `S = (L−R)/2` samples produced since the last call, one per [`Self::take_audio`] sample
+    /// (empty unless stereo is enabled). Zero while the pilot is unlocked.
+    pub fn take_side(&mut self) -> Vec<f32> {
+        self.side
+            .as_mut()
+            .map(|s| std::mem::take(&mut s.out))
+            .unwrap_or_default()
+    }
+
     pub fn process(&mut self, iq: &[Complex32]) {
         self.audio
             .reserve(iq.len() / self.audio_fir.factor().max(1) + 1);
@@ -180,6 +242,23 @@ impl WfmDemod {
             }
             if let Some(a) = self.audio_fir.push(f) {
                 self.audio.push(self.deemph.push((a - mean) * scale));
+            }
+            if let Some(side) = self.side.as_deref_mut() {
+                // 2·x·sin 2ωt with sin 2ωt = −sin 2θ = −2 sin θ cos θ (as `stereo_decode`).
+                let locked = self.pll.is_locked();
+                let v = if locked {
+                    let (sn, c) = theta.sin_cos();
+                    (-4.0 * f64::from(f - mean) * sn * c) as f32
+                } else {
+                    0.0
+                };
+                if side.locked && !locked {
+                    side.lock_losses += 1;
+                }
+                side.locked = locked;
+                if let Some(s) = side.fir.push(v) {
+                    side.out.push(side.deemph.push(s * scale));
+                }
             }
             let bin = ((f - mean).abs() as f64 / DEV_BIN_HZ) as usize;
             self.dev_hist[bin.min(DEV_BINS - 1)] += 1;

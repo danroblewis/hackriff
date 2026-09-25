@@ -2,10 +2,10 @@
 //! call site, writing what it saw into hk-store's durable shadow log.
 //!
 //! ```text
-//! fsk chain ─▶ classify::classify_box ─▶ Classification (published, unchanged)
-//!                    │                              │
-//!                    └─ dl_input ─▶ MlStage::observe ┴─▶ ModelHost::observe ─▶ StoreShadowSink
-//!                                                                              └▶ <data>/ml/shadow/
+//! classify chain ─▶ classify::classify_box_observed ─▶ Classification (published, unchanged)
+//!                          │                                  │
+//!                          └─ dl_input ─▶ MlStage::observe ────┴─▶ ModelHost::observe ─▶ StoreShadowSink
+//!                                                                                      └▶ <data>/ml/shadow/
 //! ```
 //!
 //! # What turns it on, and what cannot
@@ -35,11 +35,11 @@
 //!
 //! # Cost, and where it runs
 //!
-//! On the chain writer thread, **after** the repository lock is released (the host batches for up
-//! to 20 ms, so observing under the lock would stall every other writer). One `dl_input` vector
-//! per classification, computed only when a model is in a non-`off` mode for the family the
-//! cascade named ([`MlStage::wants`]); an idle stage costs a mutex read. Never on the ring or a DSP
-//! thread (ADR-0007).
+//! On the classify chain's own thread (`chains/classify.rs`, T-878), **after** the repository lock
+//! is released (the host batches for up to 20 ms, so observing under the lock would stall every
+//! other writer). One `dl_input` vector per classification, computed only when a model is in a
+//! non-`off` mode for the family the cascade named ([`MlStage::wants`]); an idle stage costs a
+//! mutex read. Never on the ring or a DSP thread (ADR-0007).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

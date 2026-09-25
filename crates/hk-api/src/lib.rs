@@ -26,7 +26,7 @@
 //! thread's writer with no second queue and no runtime; consumer counts are single digits on a
 //! handheld; idle connections cost no CPU.
 
-pub mod analyze; // T-190
+pub mod analyze; // T-190, T-859
 pub mod annotations; // T-816 MAP-16
 pub mod assist;
 pub mod auth;
@@ -50,11 +50,14 @@ pub mod ml; // T-844: C38 models, modes and the durable shadow log
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
+pub mod paths; // T-897: traced (t, f) paths over a viewport (docs/23 §10.6 rule 2)
 pub mod playback; // T-463: the one playhead of historical playback
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
+pub mod priors; // T-812 (MAP-12): band-plan priors over a viewport, suggestions never truth
 pub mod query;
 pub mod recipes;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod research_export; // T-823 (MAP-23): the research objects out as one file
 pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of the tile lattice
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
@@ -77,6 +80,9 @@ pub mod trunking; // T-273
 pub use hk_stream as stream;
 pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 
+pub use analyze::{
+    AnalyzeControl, AnalyzeFailure, AnalyzeStart, AnalyzeTemplates, AnalyzeTraceQuery,
+};
 pub use auth::{Token, default_token_path};
 pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
 pub use control::{

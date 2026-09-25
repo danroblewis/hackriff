@@ -35,8 +35,8 @@ use hk_model::recording::{Annotation, AnnotationAuthor, AnnotationKind, Annotati
 use hk_model::region::TimeRange;
 use hk_model::time::Timestamp;
 use hk_model::{
-    AnnotationId, ContentClass, CrcStatus, EmitterId, InventoryQuery, RecordingId, RepoError,
-    Repository,
+    AnnotationId, ContentClass, CrcStatus, DecodeProvenance, EmitterId, InventoryQuery, LinkTarget,
+    RecordingId, RepoError, Repository,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -313,6 +313,74 @@ fn decoder_emissions(
     Ok(out)
 }
 
+/// Decoder-validated labelled emissions from a **synthesized** decode (MAUTO, ADR-0015 §4.2's
+/// third feedback leg, T-861): one per CRC-valid `Decode` [`hk_pipeline::synth::attach`] linked
+/// directly to `emitter_id` (`EmitterLink`, never a `Demodulation`, since a synthesized decode's
+/// `demodulation_ref` is always `None` — [`decoder_emissions`]'s join finds none of these).
+///
+/// The label is read from `metadata.family`, which `attach::decode_row` stamps with the result's
+/// `hk-mod@1` family at write time (the search's own block choice, not a demodulation's `mode`) —
+/// mapped through [`family_of`] exactly as [`decoder_emissions`]'s label is, so a legacy or
+/// unmapped value is skipped rather than trusted verbatim.
+fn synthesized_emissions(
+    repo: &Repository,
+    emitter_id: EmitterId,
+    filter: &DatasetFilter,
+    pad_pre_s: f64,
+    pad_post_s: f64,
+    band: Option<(f64, f64)>,
+    snr_db: Option<f64>,
+) -> Result<Vec<LabelledEmission>, DatasetError> {
+    let taxonomy = TaxonomyRef::current();
+    let mut out = Vec::new();
+    for link in repo.emitter_links(emitter_id)? {
+        let LinkTarget::Decode(decode_id) = link.target else {
+            continue;
+        };
+        let d = match repo.decode(decode_id) {
+            Ok(d) => d,
+            Err(RepoError::NotFound { .. }) => continue, // merged/evicted between the two reads.
+            Err(e) => return Err(e.into()),
+        };
+        if d.crc_status != CrcStatus::Valid {
+            continue; // never Corrected/Invalid/NoCrc/Unknown (ADR-0016 §7), just like a chain's.
+        }
+        if !matches!(
+            d.provenance,
+            Some(DecodeProvenance::Synthesized { holdout: true, .. })
+        ) {
+            continue; // decoder_emissions already covers every other decode shape.
+        }
+        let Some(label) = d
+            .metadata
+            .get("family")
+            .and_then(|v| v.as_str())
+            .and_then(|f| family_of(f, &taxonomy))
+        else {
+            continue;
+        };
+        if !label_matches_filter(label, filter) {
+            continue;
+        }
+        out.push(LabelledEmission {
+            emitter_id,
+            label: DatasetLabel {
+                taxonomy: taxonomy.clone(),
+                label: label.to_owned(),
+                source: LabelSourceKind::Decoder,
+                provenance: format!("decode:{}", d.id),
+                confidence: 1.0,
+            },
+            t: d.t,
+            window: window_of(d.t, pad_pre_s, pad_post_s),
+            band,
+            snr_db,
+            session: Some(d.id.to_string()),
+        });
+    }
+    Ok(out)
+}
+
 /// The user-labelled emission for `emitter_id`, if its current classification (arbitration rank
 /// [`Stage::User`]) carries a full M3 [`hk_model::classify::Classification`]. An `unknown` call is
 /// not a positive training label and is skipped.
@@ -425,6 +493,9 @@ pub fn find_labelled_emissions(
         let band = Some((emitter.freq().lo_hz, emitter.freq().hi_hz));
         let snr_db = snr_of(repo, emitter_id)?;
         out.extend(decoder_emissions(
+            repo, emitter_id, filter, pad_pre_s, pad_post_s, band, snr_db,
+        )?);
+        out.extend(synthesized_emissions(
             repo, emitter_id, filter, pad_pre_s, pad_post_s, band, snr_db,
         )?);
         if let Some(u) = user_emission(
@@ -608,6 +679,7 @@ mod tests {
             identity: None,
             content_class: ContentClass::MetadataOnly,
             t,
+            provenance: None,
         })
         .unwrap();
         demod.id
@@ -751,6 +823,133 @@ mod tests {
         )
         .unwrap();
         assert!(none.is_empty(), "an invalid CRC must never become a label");
+    }
+
+    /// A synthesized decode (MAUTO, `demodulation_ref: None`) linked directly to the emitter, the
+    /// way `hk_pipeline::synth::attach::decode_row` writes one — T-861's `synthesized_emissions`.
+    fn linked_synth_decode(
+        repo: &mut Repository,
+        emitter_id: EmitterId,
+        family: &str,
+        crc: CrcStatus,
+        t: Timestamp,
+    ) -> hk_model::DecodeId {
+        let decode = Decode {
+            id: hk_model::DecodeId::new(),
+            demodulation_ref: None,
+            recording_ref: None,
+            decoder_id: "synth:generic-fsk-framed".into(),
+            decoder_version: "hk-synth@1+sha256:deadbeef".into(),
+            frame_model: "test-frame".into(),
+            metadata: json!({ "family": family }),
+            content: None,
+            crc_status: crc,
+            identity: None,
+            content_class: ContentClass::MetadataOnly,
+            t,
+            provenance: Some(DecodeProvenance::Synthesized {
+                job_id: "a1".into(),
+                holdout: true,
+                evidence_bits: 40.0,
+                hypotheses: 8,
+                analytic_holdout_bits: 30.0,
+                check_bits: Some(27.0),
+                l_check: Some(21.0),
+                check_searched: true,
+                template_provenance: None,
+            }),
+        };
+        repo.insert_decode(&decode).unwrap();
+        repo.link_emitter(&hk_model::EmitterLink {
+            emitter_id,
+            target: LinkTarget::Decode(decode.id),
+            linked_at: t,
+        })
+        .unwrap();
+        decode.id
+    }
+
+    #[test]
+    fn a_synthesized_decode_becomes_a_decoder_label_via_its_emitter_link() {
+        let mut repo = tmp_repo();
+        let emitter = sight(&mut repo, 145_800_000.0, t(0));
+        linked_synth_decode(&mut repo, emitter, "fsk", CrcStatus::Valid, t(1));
+        let bad_emitter = sight(&mut repo, 145_900_000.0, t(0));
+        linked_synth_decode(&mut repo, bad_emitter, "fsk", CrcStatus::Invalid, t(1));
+
+        let found = find_labelled_emissions(
+            &repo,
+            &DatasetFilter {
+                emitter: Some(emitter),
+                ..Default::default()
+            },
+            0.05,
+            0.05,
+            10,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label.label, "fsk");
+        assert_eq!(found[0].label.source, LabelSourceKind::Decoder);
+        assert_eq!(found[0].label.confidence, 1.0);
+        assert!(found[0].label.provenance.starts_with("decode:"));
+
+        let none = find_labelled_emissions(
+            &repo,
+            &DatasetFilter {
+                emitter: Some(bad_emitter),
+                ..Default::default()
+            },
+            0.05,
+            0.05,
+            10,
+        )
+        .unwrap();
+        assert!(none.is_empty(), "an invalid CRC must never become a label");
+    }
+
+    #[test]
+    fn an_ordinary_decode_link_with_no_family_metadata_is_never_a_label() {
+        let mut repo = tmp_repo();
+        let emitter = sight(&mut repo, 145_800_000.0, t(0));
+        let decode = Decode {
+            id: hk_model::DecodeId::new(),
+            demodulation_ref: None,
+            recording_ref: None,
+            decoder_id: "other".into(),
+            decoder_version: "1".into(),
+            frame_model: "test-frame".into(),
+            metadata: json!({}),
+            content: None,
+            crc_status: CrcStatus::Valid,
+            identity: None,
+            content_class: ContentClass::MetadataOnly,
+            t: t(1),
+            provenance: None,
+        };
+        repo.insert_decode(&decode).unwrap();
+        repo.link_emitter(&hk_model::EmitterLink {
+            emitter_id: emitter,
+            target: LinkTarget::Decode(decode.id),
+            linked_at: t(1),
+        })
+        .unwrap();
+
+        let found = find_labelled_emissions(
+            &repo,
+            &DatasetFilter {
+                emitter: Some(emitter),
+                ..Default::default()
+            },
+            0.05,
+            0.05,
+            10,
+        )
+        .unwrap();
+        assert!(
+            found.is_empty(),
+            "no `provenance: synthesized` and no `metadata.family`: never a label"
+        );
     }
 
     #[test]

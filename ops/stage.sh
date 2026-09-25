@@ -2,6 +2,8 @@
 # Staging watcher for the bears demo (port 8899, tunnel via cloudflared).
 # Rebuilds + restarts on every CODE commit to main and smoke-tests it.
 # Prefers the live HackRF; falls back to a looping SigMF replay when the device is busy.
+# RADIO LOCK (T-922): while $HACKRIFF_OPS/radio-lock is held by anyone but `stage` (and not past its
+# `until`), staging serves the replay and never opens the HackRF; on release it goes back to LIVE.
 set -uo pipefail
 
 REPO=/Users/daniellewis/hackriff
@@ -9,6 +11,12 @@ PORT=8899
 S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"; mkdir -p "$S"
 FIX=$REPO/fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta
 BIN=$S/target-serve/release/hk
+# THE BUILD NEVER READS THE LIVE CHECKOUT (2026-09-24 21:20: the 21:15 build compiled a torn tree - the
+# merge runner merged two batches into main's working tree mid-build, hk-model from one tree, hk-api from
+# another - and the demo served main's ui/dist, which every UI gate rebuilds in place). It builds in its
+# own detached worktree checked out at the LANDED commit, and serves a copy of that build's ui/dist.
+SRC=$S/stage-src
+DIST=$S/stage-dist
 DATA=$S/hk-data
 mkdir -p "$S"
 
@@ -17,12 +25,24 @@ if [ -f "$S/hk-token-bears" ]; then TOKEN=$(cat "$S/hk-token-bears"); else
   TOKEN=$(openssl rand -hex 32); echo "$TOKEN" > "$S/hk-token-bears"; fi
 
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$S/stage.log"; }
+# Never from a worktree (ops/launch-guard.sh): logs PATH:, refuses before any build or server start.
+. "$(dirname "${BASH_SOURCE[0]}")/launch-guard.sh"; launch_guard "${BASH_SOURCE[0]}"
 
-build(){  # $1 = commit
-  log "build: cargo (release) + ui"
-  if ( cd "$REPO" && CARGO_TARGET_DIR="$S/target-serve" \
-       cargo build --release -p hk-cli --bin hk --features hackrf ) > "$S/stage-build.log" 2>&1 \
-     && ( cd "$REPO/ui" && npm run build ) >> "$S/stage-build.log" 2>&1; then
+build(){  # $1 = a landed commit
+  log "build: cargo (release) + ui from a snapshot of $1 ($SRC)"
+  [ -d "$SRC" ] || git -C "$REPO" worktree add -q --detach "$SRC" "$1" > "$S/stage-build.log" 2>&1 \
+    || { log "BUILD FAILED: cannot create $SRC (see stage-build.log)"; return 1; }
+  git -C "$SRC" checkout -q --force --detach "$1" > "$S/stage-build.log" 2>&1 \
+    || { log "BUILD FAILED: cannot check out $1 in $SRC"; return 1; }
+  # node_modules: npm ci whenever the lockfile differs from the one last installed there (and the first time).
+  if ! cmp -s "$SRC/ui/package-lock.json" "$SRC/ui/node_modules/.stage-lock"; then
+    ( cd "$SRC/ui" && npm ci --prefer-offline --no-audit --no-fund ) >> "$S/stage-build.log" 2>&1 \
+      && cp "$SRC/ui/package-lock.json" "$SRC/ui/node_modules/.stage-lock"
+  fi
+  if ( cd "$SRC" && CARGO_TARGET_DIR="$S/target-serve" \
+       cargo build --release -p hk-cli --bin hk --features hackrf ) >> "$S/stage-build.log" 2>&1 \
+     && ( cd "$SRC/ui" && npm run build ) >> "$S/stage-build.log" 2>&1 \
+     && mkdir -p "$DIST" && rsync -a --delete "$SRC/ui/dist/" "$DIST/"; then
     echo "$1" > "$S/hk-serve-built-commit"; return 0
   fi
   log "BUILD FAILED (see stage-build.log)"; return 1
@@ -34,16 +54,47 @@ stop_server(){
   pkill -9 -f "hk serve --bind 127.0.0.1:$PORT" 2>/dev/null; sleep 1
 }
 
-start_replay(){
-  HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$REPO/ui/dist" \
+# The bundle a snapshot build copied out; until one has (the first start after this change), main's - the old
+# behaviour - rather than a directory that does not exist, which serves "UI not built" and still smokes OK.
+ui_dist(){ if [ -f "$DIST/index.html" ]; then echo "$DIST"; else log "no $DIST yet - serving $REPO/ui/dist until a snapshot build" >&2; echo "$REPO/ui/dist"; fi; }
+
+# The radio lock (py/hkpy/radio.py; `just radio take|release|status`). Prints "<owner> until HH:MM" and
+# succeeds while someone other than stage holds a live lock. A lock past its `until` (or unparseable) is
+# stale and ignored here - the watchdog releases it with an alert.
+LOCK=$S/radio-lock
+radio_holder(){
+  [ -f "$LOCK" ] || return 1
+  local owner upto
+  owner=$(sed -n 's/^owner=//p' "$LOCK" | head -1); upto=$(sed -n 's/^until=//p' "$LOCK" | head -1)
+  case "$upto" in ''|*[!0-9]*) return 1;; esac
+  [ "$(date +%s)" -le "$upto" ] || return 1
+  [ "${owner:-?}" = stage ] && return 1
+  echo "${owner:-?} until $(date -r "$upto" '+%H:%M')"
+}
+
+# Is the HackRF free to open? NOT hackrf_info's exit status: it exits 0 when the open FAILS (T-356's HIL:
+# "Found HackRF ... hackrf_open() failed: Access denied"). Judge by what it printed.
+HACKRF_INFO=${HACKRF_INFO:-hackrf_info}
+hackrf_free(){
+  local out; out=$("$HACKRF_INFO" 2>&1)
+  printf '%s\n' "$out" | grep -qiE 'failed|access denied|busy|no hackrf' && return 1
+  printf '%s\n' "$out" | grep -q 'Found HackRF'
+}
+
+start_replay(){  # $1 = why, recorded in hk-serve-source (the dashboard and `just radio status` show it)
+  HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$(ui_dist)" \
     --data-dir "$DATA" --replay "$FIX" --loop > "$S/hk-serve-bears.log" 2>&1 &
-  echo "source: replay" > "$S/hk-serve-source"
+  echo "source: replay${1:+ ($1)}" > "$S/hk-serve-source"
 }
 
 start_server(){
   rm -rf "$DATA"; mkdir -p "$DATA"   # fresh data dir avoids stale-lock startup hangs
-  if hackrf_info >/dev/null 2>&1; then
-    HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$REPO/ui/dist" \
+  local held
+  if held=$(radio_holder); then   # never even probe the radio while someone else holds it
+    log "radio-lock held by $held -> replay"; start_replay "radio-lock: $held"; log "started (replay, radio-lock)"; return
+  fi
+  if hackrf_free; then
+    HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$(ui_dist)" \
       --data-dir "$DATA" --hackrf --center-hz 100800000 --rate 2400000 --lna 32 --vga 30 --amp \
       --iq-retention 30m --iq-buffer-max 9GiB \
       > "$S/hk-serve-bears.log" 2>&1 &
@@ -51,12 +102,12 @@ start_server(){
     for _ in $(seq 1 25); do
       grep -q "listening on" "$S/hk-serve-bears.log" && { log "started (live)"; return; }
       if grep -q "Access denied\|receive failed" "$S/hk-serve-bears.log"; then
-        log "hackrf busy -> replay"; stop_server; start_replay; log "started (replay)"; return; fi
+        log "hackrf busy -> replay"; stop_server; start_replay "hackrf busy"; log "started (replay)"; return; fi
       sleep 1
     done
-    log "live start slow -> replay"; stop_server; start_replay; log "started (replay, live timed out)"
+    log "live start slow -> replay"; stop_server; start_replay "live start timed out"; log "started (replay, live timed out)"
   else
-    log "hackrf busy at start -> replay"; start_replay; log "started (replay)"
+    log "hackrf busy at start (hackrf_info could not open it) -> replay"; start_replay "hackrf busy"; log "started (replay)"
   fi
 }
 
@@ -106,11 +157,13 @@ log "=== staging watcher up (port $PORT) ==="
 while true; do
   ensure_tunnel
   HEAD=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
+  # Read between two looks at the marker: a batch that began while HEAD was read has provisional HEAD.
   # A bulk batch commits its merges to main BEFORE its gate runs and rewinds them if it fails
   # ($S/bulk-in-progress marks that window). Building from that main puts un-landed code on the
   # demo (2026-09-23 00:48: built 4338b62b 25 minutes before its gate passed). Wait it out; the
   # landed HEAD is picked up on the next tick.
   IN_BULK=0; [ -e "$S/bulk-in-progress" ] && IN_BULK=1
+  [ "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)" = "$HEAD" ] || IN_BULK=1
   if [ ! -x "$BIN" ]; then
     log "no binary yet -> building $HEAD"; build "$HEAD" && { stop_server; start_server; smoke; }
     LAST=$HEAD
@@ -127,6 +180,20 @@ while true; do
   elif ! healthy; then
     sleep 3
     if ! healthy; then log "unhealthy (root down or live stream gone, HEAD $HEAD) — restarting"; stop_server; start_server; smoke; fi
+  fi
+  # The radio lock, checked every tick: taken while live -> hand the HackRF over (replay); released
+  # while on a lock-driven replay -> back to LIVE. A busy-fallback replay is relabelled, not restarted.
+  SRCNOW=$(cat "$S/hk-serve-source" 2>/dev/null || true)
+  if HELD=$(radio_holder); then
+    case "$SRCNOW" in
+      *radio-lock*) ;;
+      *live*) log "radio-lock taken by $HELD -> releasing the HackRF, switching to replay"; stop_server; start_server; smoke ;;
+      *replay*) echo "source: replay (radio-lock: $HELD)" > "$S/hk-serve-source"; log "radio-lock taken by $HELD (already on replay)" ;;
+    esac
+  else
+    case "$SRCNOW" in
+      *radio-lock*) log "radio-lock released -> back to LIVE on the HackRF"; stop_server; start_server; smoke ;;
+    esac
   fi
   sleep 45
 done

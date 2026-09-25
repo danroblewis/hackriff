@@ -68,6 +68,7 @@ pub mod observe; // T-115
 pub mod occupancy; // T-118
 pub mod presence; // T-388
 pub mod reports; // T-121
+pub mod retention; // T-904
 
 mod capture;
 mod dc_twin; // T-174

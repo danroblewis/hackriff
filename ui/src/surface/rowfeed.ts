@@ -20,7 +20,7 @@
 //
 // Presentation only: the server decides what a row holds and whether it is grey (each block's
 // `coverage`); this files the numbers where they belong and refuses anything that does not add up.
-import { expandPlane, TileDecodeError } from "./tile";
+import { expandPlane, isTier, TileDecodeError, weakerTier, type FoldDirection, type StatedTier } from "./tile";
 import { keyOf, type TileAddr } from "./lattice";
 
 /** A tile column: a tile address without its time index. */
@@ -59,6 +59,58 @@ export function rowFeedPath(col: ColumnAddr, range: RowRange, path = "/ws/tiles/
 /** The row address holding capture instant `tNs` at a level whose time cell is `tCellNs`. */
 export const rowAt = (tNs: number, tCellNs: number): number => Math.floor(tNs / tCellNs);
 
+/**
+ * **What a block's rows were measured at, as the route states it** (T-902, `resolution` on each
+ * `rows` message): the honesty tier by the tile route's own rule, the level that answered, and the
+ * per-axis fold. A tile built from pushed rows states exactly this — never a tier borrowed from the
+ * tile below it — so the pane's level reads what the newest rows actually were.
+ */
+export interface RowResolution {
+  /** `"unknown"` when the block stated no recognised tier: said, never defaulted. */
+  readonly tier: StatedTier;
+  /** `answered.level`, or -1 when the block did not say. */
+  readonly answeredLevel: number;
+  readonly fold: { readonly frequency: FoldDirection; readonly time: FoldDirection };
+  /** Frequency cells actually measured, `min(fold.frequency.source_cells, nf)`. */
+  readonly measuredNf: number;
+  /** `fold.time.source_cell / tile_cell` — above 1 on a replicated time axis, else 1. */
+  readonly timeStretch: number;
+}
+
+const FOLD_ORDER: readonly FoldDirection[] = ["exact", "folded", "replicated"];
+const weakerFold = (a: FoldDirection, b: FoldDirection): FoldDirection =>
+  FOLD_ORDER.indexOf(a) >= FOLD_ORDER.indexOf(b) ? a : b;
+
+/** Two blocks' claims about one tile, merged to the weaker of each (the tile states the weaker). */
+export function mergeResolution(a: RowResolution | null, b: RowResolution): RowResolution {
+  if (!a) return b;
+  return {
+    tier: weakerTier(a.tier, b.tier),
+    answeredLevel: Math.max(a.answeredLevel, b.answeredLevel),
+    fold: { frequency: weakerFold(a.fold.frequency, b.fold.frequency), time: weakerFold(a.fold.time, b.fold.time) },
+    measuredNf: Math.min(a.measuredNf, b.measuredNf),
+    timeStretch: Math.max(a.timeStretch, b.timeStretch),
+  };
+}
+
+/** Reads a block's `resolution` + `answered`. A missing or unrecognised tier is `"unknown"`. */
+function parseResolution(j: Record<string, unknown>, nf: number): RowResolution {
+  const res = (j.resolution ?? {}) as { source?: unknown; fold?: Record<string, { direction?: unknown; source_cells?: unknown; source_cell?: unknown; tile_cell?: unknown }> };
+  const ans = (j.answered ?? {}) as { level?: unknown };
+  const dir = (d: unknown): FoldDirection => (FOLD_ORDER.includes(d as FoldDirection) ? (d as FoldDirection) : "exact");
+  const ff = res.fold?.frequency, ft = res.fold?.time;
+  const srcNf = ff?.source_cells;
+  const stretch = typeof ft?.source_cell === "number" && typeof ft?.tile_cell === "number" && ft.tile_cell > 0
+    ? Math.max(1, ft.source_cell / ft.tile_cell) : 1;
+  return {
+    tier: isTier(res.source) ? res.source : "unknown",
+    answeredLevel: typeof ans.level === "number" && Number.isInteger(ans.level) ? ans.level : -1,
+    fold: { frequency: dir(ff?.direction), time: dir(ft?.direction) },
+    measuredNf: typeof srcNf === "number" && Number.isFinite(srcNf) && srcNf > 0 ? Math.min(Math.round(srcNf), nf) : nf,
+    timeStretch: Number.isFinite(stretch) ? stretch : 1,
+  };
+}
+
 /** One decoded block of rows, filed under the tile it patches. */
 export interface RowBlock {
   readonly kind: "rows";
@@ -69,6 +121,8 @@ export interface RowBlock {
   readonly maxDb: Float32Array;
   /** One coverage state per cell, from the block's own plane. */
   readonly coverage: readonly string[];
+  /** What these rows were measured at, as the route stated it (T-902). */
+  readonly resolution: RowResolution;
   readonly final: boolean;
 }
 
@@ -106,7 +160,7 @@ export function parseRowMessage(col: ColumnAddr, text: string): RowMessage {
         throw bad("a block's coverage is not on its own axes");
       }
       const coverage = expandPlane({ ...col, tIndex: Math.floor(row0 / col.cells) }, cov.states, cov.plane.runs, rows * nf);
-      return { kind: "rows", row0, rows, nf, maxDb, coverage, final: j.final === true };
+      return { kind: "rows", row0, rows, nf, maxDb, coverage, resolution: parseResolution(j, nf), final: j.final === true };
     }
     case "unobserved":
       if (!isRow(j.row0) || !isRow(j.rows) || j.rows === 0) throw bad("unobserved without a stretch");
@@ -127,6 +181,9 @@ export interface TileRows {
   readonly maxDb: Float32Array;
   readonly coverage: (string | null)[];
   readonly rowsSeen: Uint8Array;
+  /** What the rows filed here were measured at — the weaker of every block's stated claim, or
+   * `null` when no measured block has been filed (a grey stretch makes no claim). T-902. */
+  resolution: RowResolution | null;
 }
 
 /** A column key: a tile key without its time index. */
@@ -172,7 +229,7 @@ export class RowAccumulator {
     let t = this.tiles.get(k);
     if (!t) {
       const n = col.cells * col.cells;
-      t = { addr, maxDb: new Float32Array(n).fill(NaN), coverage: new Array<string | null>(n).fill(null), rowsSeen: new Uint8Array(col.cells) };
+      t = { addr, maxDb: new Float32Array(n).fill(NaN), coverage: new Array<string | null>(n).fill(null), rowsSeen: new Uint8Array(col.cells), resolution: null };
       this.tiles.set(k, t);
     }
     return t;
@@ -191,6 +248,26 @@ export class RowAccumulator {
     this.gaps.set(k, merged);
   }
 
+  /**
+   * Forget the pushed rows of `col` in tiles before `tIndex` (T-893). A live feed walks forward for
+   * as long as a pane follows, so an accumulator that never forgot would grow with the session; a
+   * tile the edge has left is sealed and `GET /api/tiles` is the authority for it from then on.
+   */
+  prune(col: ColumnAddr, tIndex: number): void {
+    const ck = columnKey(col);
+    for (const [k, t] of this.tiles) {
+      if (t.addr.tIndex < tIndex && columnKey(t.addr) === ck) this.tiles.delete(k);
+    }
+    const g = this.gaps.get(ck);
+    if (g) {
+      const keep = g.filter((r) => r[1] > tIndex * col.cells);
+      if (keep.length) this.gaps.set(ck, keep); else this.gaps.delete(ck);
+    }
+  }
+
+  /** Drop one tile's pushed rows (a retune's [[TileCache.invalidate]]). */
+  drop(addr: TileAddr): void { this.tiles.delete(keyOf(addr)); }
+
   /** Files a block; returns the tile addresses whose pushed rows it changed (none for a gap). */
   apply(col: ColumnAddr, m: RowBlock | GapBlock): TileAddr[] {
     if (m.kind === "unobserved") {
@@ -208,6 +285,7 @@ export class RowAccumulator {
       }
       t.rowsSeen[y] = 1;
     }
+    t.resolution = mergeResolution(t.resolution, m.resolution);
     return [t.addr];
   }
 }
@@ -289,4 +367,128 @@ export class PaneFeeds {
   feed(pane: string): RowFeed | undefined { return this.feeds.get(pane)?.feed; }
   /** This pane's own edge, ns, or `null` when it has none yet. */
   edgeNs(pane: string): number | null { return this.feeds.get(pane)?.feed.edgeNs ?? null; }
+}
+
+/** One column a following pane wants rows pushed for, and the row to start from if it is opened. */
+export interface WantedColumn {
+  readonly col: ColumnAddr;
+  readonly fromRow: number;
+}
+
+/**
+ * Row subscriptions opened at once by one client (T-893). The route admits
+ * [`MAX_ROW_FEEDS`](../../../crates/hk-api/src/rows.rs) = 16 per SERVER, shared by every tab; a
+ * full-width pane is six columns, so twelve serves two such panes and leaves room for another client.
+ * Past it the columns in excess are simply not subscribed and keep the polling lane (T-460), which
+ * is what every column had before.
+ */
+export const MAX_CLIENT_ROW_FEEDS = 12;
+/** How long a column the route refused, or whose socket dropped, waits before it is asked again. */
+export const ROW_FEED_RETRY_MS = 5000;
+
+/**
+ * **Rows pushed to the columns a FOLLOWING pane draws** (T-893) — the wiring T-468 left undone.
+ *
+ * The polling lane (`TileCache.refreshEdge`) re-asks a live tile at most once per a share of what
+ * it costs, so on a busy route the top of a short following pane was drawn seconds behind the rows
+ * that existed. Here each wanted column holds one open-ended subscription (`t_to` absent) that
+ * starts at a row the caller names, and every block it pushes goes straight to `sink`, which files
+ * it under the tile address the cache already uses. The subscription is still an ADDRESS RANGE
+ * ([[rowFeedPath]] refuses anything else); "following" is only that the caller keeps it open.
+ *
+ * Keyed by COLUMN, not by pane: two panes over one column share one socket, and a column no
+ * following pane wants any more is closed on the next [[want]]. A frozen pane never appears in a
+ * `want` list — the caller builds it from following viewports only — so pausing closes its feeds,
+ * and nothing here can reach a device route: it only ever reads `/ws/tiles/rows`.
+ */
+export class LiveRowFeeds {
+  private feeds = new Map<string, { feed: RowFeed; conn: { close(): void }; col: ColumnAddr }>();
+  /** Columns whose last subscription was refused or cut, and when they may be asked again. */
+  private retryAt = new Map<string, number>();
+  /** Every path this client has opened, in order — what ui/test asserts the request against. */
+  readonly requests: string[] = [];
+
+  constructor(
+    private readonly open: RowOpener,
+    private readonly sink: (col: ColumnAddr, block: RowBlock | GapBlock) => void,
+    private readonly opts: { max?: number; retryMs?: number; now?: () => number } = {},
+  ) {}
+
+  get size(): number { return this.feeds.size; }
+  /** The columns with an open subscription, by column key. */
+  columns(): string[] { return [...this.feeds.keys()]; }
+
+  /**
+   * Make the open subscriptions exactly `wanted` (first come first served up to the cap): close
+   * the rest, open the missing ones. An already-open column is left alone — its own edge carries on.
+   */
+  want(wanted: readonly WantedColumn[]): void {
+    const now = (this.opts.now ?? Date.now)();
+    const max = this.opts.max ?? MAX_CLIENT_ROW_FEEDS;
+    const keep = new Map<string, WantedColumn>();
+    for (const w of wanted) {
+      const k = columnKey(w.col);
+      if (!keep.has(k) && keep.size < max) keep.set(k, w);
+    }
+    for (const [k, f] of this.feeds) {
+      if (!keep.has(k)) { f.conn.close(); this.feeds.delete(k); }
+    }
+    for (const [k, w] of keep) {
+      if (this.feeds.has(k)) continue;
+      if ((this.retryAt.get(k) ?? 0) > now) continue;
+      this.subscribe(k, w);
+    }
+  }
+
+  private subscribe(k: string, w: WantedColumn): void {
+    const path = rowFeedPath(w.col, { fromRow: w.fromRow, toRow: null });
+    this.requests.push(path);
+    const feed = new RowFeed(w.col, { fromRow: w.fromRow, toRow: null });
+    const entry = { feed, col: w.col, conn: { close: () => {} } };
+    const cut = () => {
+      if (this.feeds.get(k) !== entry) return;
+      entry.conn.close();
+      this.feeds.delete(k);
+      this.retryAt.set(k, (this.opts.now ?? Date.now)() + (this.opts.retryMs ?? ROW_FEED_RETRY_MS));
+    };
+    this.feeds.set(k, entry);
+    entry.conn = this.open(path, (text) => {
+      if (this.feeds.get(k) !== entry) return;
+      let block: RowBlock | GapBlock | null;
+      try {
+        const m = parseRowMessage(w.col, text);
+        block = feed.take(m);
+        // A refusal (the route's cap, above all) ends this column's feed; polling carries it.
+        if (m.kind === "refused") { cut(); return; }
+      } catch {
+        // A protocol error is never patched over: drop the feed and start again later from
+        // wherever the caller then says the rows in hand stop.
+        cut();
+        return;
+      }
+      if (block) this.sink(w.col, block);
+    }, cut);
+  }
+
+  /** Close every subscription. */
+  close(): void {
+    for (const f of this.feeds.values()) f.conn.close();
+    this.feeds.clear();
+  }
+}
+
+/**
+ * The browser transport for [[LiveRowFeeds]]: one WebSocket per subscription, the token as a query
+ * parameter like every `/ws/` route.
+ */
+export function wsRowOpener(token: string, loc: { protocol: string; host: string } = location): RowOpener {
+  return (path, onText, onClose) => {
+    const proto = loc.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${loc.host}${path}&token=${encodeURIComponent(token)}`);
+    let closedByUs = false;
+    ws.onmessage = (ev) => { if (typeof ev.data === "string") onText(ev.data); };
+    ws.onclose = () => { if (!closedByUs) onClose(); };
+    ws.onerror = () => { /* onclose follows */ };
+    return { close: () => { closedByUs = true; ws.close(); } };
+  };
 }

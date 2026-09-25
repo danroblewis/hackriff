@@ -112,6 +112,7 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
         identity: Some(identity.clone()),
         content_class: ContentClass::Unrestricted,
         t,
+        provenance: None,
     };
     let mut out = vec![decode(
         "rds-pi",

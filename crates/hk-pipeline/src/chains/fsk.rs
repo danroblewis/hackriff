@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
-use hk_classify::{Classifier, SymbolEstimator};
 use hk_core::Discontinuity;
 use hk_core::ProvenanceHandle;
 use hk_demod::fsk::{
@@ -83,23 +82,13 @@ fn add_member(groups: &mut Vec<Group>, m: MemberBox, missed: &std::sync::atomic:
 /// (32 MB) is 8 s at 2 Msps and 0.8 s at 20 Msps, both far longer than a burst, and it is the
 /// same shortfall the chain already handles when a box's samples have aged out of the ring
 /// (`fsk_boxes_missed`) rather than a new failure mode.
-const MAX_RETAIN_SAMPLES: usize = 16 << 20;
+pub(crate) const MAX_RETAIN_SAMPLES: usize = 16 << 20;
 
 /// Most pending burst groups one chain queues (T-558). A group is only drained once its samples
 /// have arrived, so a chain whose member boxes outrun its reader would otherwise grow one entry
 /// per box for as long as it lives. The oldest go first: their samples are the ones the ring is
 /// about to lose anyway.
 const MAX_PENDING_GROUPS: usize = 4096;
-
-/// The burst the C15 cascade runs on at detach (T-247): its samples, time, provenance and snippet
-/// request — and (T-844) the CFAR detection it came from, which the C38 gate needs.
-type BestBurst = (
-    Vec<Complex<i8>>,
-    SampleTime,
-    ProvenanceHandle,
-    SnippetRequest,
-    DetectionId,
-);
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -135,12 +124,6 @@ pub(crate) fn run(
         ..Default::default()
     };
     let (mut detach, mut closed) = (false, false);
-    // T-247: the one burst the C15 cascade runs on at detach — the longest the chain demodulated,
-    // which is the most evidence it saw of this emission (ties keep the earlier one, so the choice
-    // is deterministic and blind). Kept as an owned copy of that burst's samples alone, bounded by
-    // one burst, because `buf` is drained as the chain advances.
-    // T-844: with the CFAR detection that burst came from, which the C38 gate needs.
-    let mut best: Option<BestBurst> = None;
     // Bursts already offered to burst taps (T-060) and when framing was last inferred for them.
     let mut streamed = 0usize;
     let mut last_stream: Option<Instant> = None;
@@ -234,9 +217,6 @@ pub(crate) fn run(
                     f_lo = f_lo.min(g.f_lo);
                     f_hi = f_hi.max(g.f_hi);
                     first_det.get_or_insert(g.detection);
-                    if best.as_ref().is_none_or(|(s, ..)| s.len() < slice.len()) {
-                        best = Some((slice.to_vec(), info.time, p.clone(), request, g.detection));
-                    }
                     bursts.push(b);
                 }
                 Err(_) => inc(&c.errors),
@@ -287,14 +267,6 @@ pub(crate) fn run(
         classification,
         ..Default::default()
     };
-    // T-844: the C38 shadow stage, when an operator put a model in a non-`off` mode. The best
-    // burst's detection is waited for like the chain's own (`stored_detection`), but only then —
-    // an idle stage adds no wait to the chain.
-    let ml = shared.ml.as_deref().filter(|m| !m.is_idle());
-    let ml_detection = ml
-        .and(best.as_ref())
-        .and_then(|b| super::stored_detection(&shared, Some(b.4)));
-    let mut shadow: Option<(hk_model::classify::Classification, Option<Vec<f32>>)> = None;
     let written = {
         let mut repo = shared.repo();
         match write_framed_bursts(&mut repo, &bursts, &result, &ctx) {
@@ -310,50 +282,19 @@ pub(crate) fn run(
                 // with a CRC that checked, so its label is **lock-verified**, not a pre-sync
                 // guess. Its row went in through the legacy path, which records no lock and so
                 // derives rank 3 — the classifier's own rank, where "latest among equals" would
-                // let the C15 row below take `2fsk` off the emitter. Stating the rank keeps the
+                // let a later C15 row take `2fsk` off the emitter. Stating the rank keeps the
                 // chain's label and leaves rank 3 free for the posterior.
                 if crc_valid > 0
                     && crate::classify::record_locked_chain_label(&mut repo, w.emitter_id).is_err()
                 {
                     inc(&c.errors);
                 }
-                // T-247: the C15 cascade, once per chain write, on this chain's own thread and its
-                // own copy of the samples (`crate::classify::classify_and_record` states the
-                // bound). Without this call site a run wrote no posterior, no open-set score and
-                // no `unknown`, and ADR-0016 §7's classification floors could not be measured
-                // through the device at all.
-                if let Some((iq, time, prov, request, _)) = &best {
-                    let info = InputInfo {
-                        time: *time,
-                        discontinuity: Discontinuity::NONE,
-                        dropped_before: 0,
-                        provenance: prov,
-                    };
-                    let mut c14 = SymbolEstimator::new();
-                    match crate::classify::classify_and_record_observed(
-                        &mut repo,
-                        w.emitter_id,
-                        &Classifier::new(),
-                        &mut c14,
-                        // T-399: the receiver-line survey measured by the `hk-survey` reader, once
-                        // for this capture state. Read here, never measured here.
-                        shared.receiver.as_ref(),
-                        info,
-                        iq,
-                        request,
-                        time.host_time,
-                        ml,
-                    ) {
-                        Ok(Some((classification, written, input))) => {
-                            if written {
-                                inc(&c.classifications);
-                            }
-                            shadow = Some((classification, input));
-                        }
-                        Ok(None) => {}
-                        Err(_) => inc(&c.errors),
-                    }
-                }
+                // The C15 classifier no longer runs here (T-878): it runs for every confirmed
+                // track in `super::classify`, whether or not this chain matched, attached or
+                // succeeded. This chain's `2fsk` keeps the emitter's family whichever lands
+                // first: a C15 row written before it is outranked by recency, one written after a
+                // CRC lock by rank (above), and one written after an unlocked label restates that
+                // label (`crate::classify::record`).
                 let mut inv = shared
                     .inventory
                     .lock()
@@ -375,13 +316,6 @@ pub(crate) fn run(
             }
         }
     };
-    // T-844: observed after the repository lock is released — the host batches, and a batch must
-    // never stall the other writers. The published row above is final; this only records what a
-    // model in shadow said about it (`crate::ml`).
-    if let (Some(ml), Some((classification, input))) = (ml, &shadow) {
-        let detection = ml_detection.and_then(|d| shared.repo().detection(d).ok());
-        ml.observe(detection.as_ref(), classification, input.as_deref());
-    }
     if let Some(w) = written {
         publish_bits(&shared, &bursts, &w, f_lo, f_hi);
         // Burst taps get the bursts not offered live, under the stored class and emitter.

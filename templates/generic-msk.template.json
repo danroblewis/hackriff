@@ -1,0 +1,152 @@
+{
+  "schema": "hackriff.template",
+  "schema_version": 1,
+  "id": "generic-msk",
+  "version": 1,
+  "name": "Generic MSK",
+  "description": "Generic skeleton: structure alternatives per stage slot, in ADR-0011 blocks. Priors are search-ordering tolerances, never claims.",
+  "provenance": {
+    "kind": "builtin",
+    "facts": [
+      {
+        "fields": [
+          "priors.families"
+        ],
+        "basis": "tolerance",
+        "source": {
+          "kind": "user"
+        }
+      }
+    ]
+  },
+  "skeleton": {
+    "slots": {
+      "S1": [
+        {
+          "id": "msk",
+          "nodes": [
+            {
+              "id": "msk",
+              "block": "msk_demod"
+            }
+          ],
+          "family": "msk"
+        }
+      ],
+      "S2": [
+        {
+          "id": "clock",
+          "nodes": [
+            {
+              "id": "clock",
+              "block": "clock_recovery"
+            },
+            {
+              "id": "slice",
+              "block": "slicer"
+            }
+          ]
+        }
+      ],
+      "S3": [
+        {
+          "id": "none",
+          "nodes": []
+        },
+        {
+          "id": "nrzi",
+          "nodes": [
+            {
+              "id": "nrzi",
+              "block": "nrzi"
+            }
+          ]
+        },
+        {
+          "id": "diff",
+          "nodes": [
+            {
+              "id": "diff",
+              "block": "diff_decode"
+            }
+          ]
+        },
+        {
+          "id": "manchester",
+          "nodes": [
+            {
+              "id": "manchester",
+              "block": "manchester"
+            }
+          ]
+        }
+      ],
+      "S4": [
+        {
+          "id": "sync",
+          "nodes": [
+            {
+              "id": "sync",
+              "block": "sync_search"
+            }
+          ]
+        }
+      ],
+      "S5": [
+        {
+          "id": "none",
+          "nodes": []
+        },
+        {
+          "id": "crc",
+          "nodes": [
+            {
+              "id": "crc",
+              "block": "crc"
+            }
+          ]
+        },
+        {
+          "id": "bch",
+          "nodes": [
+            {
+              "id": "bch",
+              "block": "bch"
+            }
+          ]
+        },
+        {
+          "id": "parity",
+          "nodes": [
+            {
+              "id": "parity",
+              "block": "parity"
+            }
+          ]
+        },
+        {
+          "id": "checksum",
+          "nodes": [
+            {
+              "id": "checksum",
+              "block": "checksum"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "priors": {
+    "families": {
+      "msk": 1.0
+    }
+  },
+  "output_policy": {
+    "content_class": "unrestricted"
+  },
+  "validation": [
+    {
+      "level": "consistency"
+    }
+  ]
+}

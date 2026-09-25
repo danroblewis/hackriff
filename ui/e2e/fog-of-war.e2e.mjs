@@ -69,7 +69,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, clipToUnoccluded, tileAsks } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
@@ -237,22 +237,49 @@ async function waitForCoverage(backend, timeoutMs) {
  * half-drawn frame to measure brightness in — which is exactly how phase 2's live baseline came out
  * dimmer than the shadow it is the baseline for.
  *
- * **Bounded by whether the pane is still WORKING, not by 20 s** (the deflake, 2026-09-22). A fixed
- * deadline here is the same bet `draw()`'s note above already refuses, one layer down: the tile
- * route's service rate moves more than twenty-fold between a quiet box and the gate's pooled lanes,
- * so on a busy box this returned `resident: false` on a pane that was simply mid-fill and the
- * caller then measured a half-drawn frame. `waitWhileWorking` keeps waiting while the pane's own
- * report changes or its requests are on the wire, and gives up when both have been quiet — which is
- * the state "it will not converge" actually looks like.
+ * **Bounded by EVENTS, never by a clock** (T-894, after T-889 did the same to [[draw]]). It first
+ * gave up at a fixed 20 s, then (the deflake, 2026-09-22) after 10 s with neither the pane's report
+ * nor the tile wire moving — both bets on the tile route's service rate, which moves more than
+ * twenty-fold between a quiet box and the gate's pooled lanes. The second bet also failed the other
+ * way: in T-889's red run (band-A tiles refused) the refusals' retries kept the wire busy, so the
+ * wait sat out its whole 120 s backstop on a pane that could never become resident.
+ *
+ * So the unit is `stallOn` — a counter of the answers that move THIS pane, in practice
+ * [[paneAnswers]] for its own band (plus the survey's answers where `surveyMayAnswer`, since there
+ * the survey is what draws it). The wait gives up once `stallAnswers` of them have landed without
+ * the pane's RESIDENT part — its tile and stand-in counts — changing. `pending` is left out of that
+ * on purpose: a refused tile flips it on every retry, which is exactly the churn that kept the old
+ * wait alive. A busy route slows the wait down with it; a refused one runs it out in `stallAnswers`
+ * refusals. `timeoutMs` is only the backstop for a pane whose wire went silent.
  */
-async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 10000, surveyMayAnswer = false } = {}) {
-  const r = await waitWhileWorking(page, async () => (await pane0(page)).counts, (counts) => {
-    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
+async function waitForResident(page, {
+  stallOn, stallAnswers = STALL_ANSWERS, timeoutMs = 120000, everyMs = 400, surveyMayAnswer = false,
+} = {}) {
+  if (!stallOn) throw new Error("waitForResident(): needs an event bound `stallOn` (e.g. paneAnswers) — never a wall-clock stall (T-894)");
+  const t0 = Date.now();
+  const parse = (counts) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts ?? "");
     // `· N never sampled` is the pane saying the survey answered the place — see `draw()`.
-    const surveyed = surveyMayAnswer && /· (\d+) never sampled/.test(counts);
-    return !!m && (Number(m[1]) > 0 || surveyed) && Number(m[2]) === 0 && Number(m[3]) === 0;
-  }, { everyMs, stallMs, timeoutMs });
-  return { resident: r.ok, counts: r.value, ms: r.ms, stalledMs: r.stalledMs };
+    const surveyed = surveyMayAnswer && /· (\d+) never sampled/.test(counts ?? "");
+    return {
+      done: !!m && (Number(m[1]) > 0 || surveyed) && Number(m[2]) === 0 && Number(m[3]) === 0,
+      resident: m ? `${m[1]}/${m[2]}/${surveyed}` : null,
+    };
+  };
+  const events0 = stallOn.count();
+  let counts = (await pane0(page)).counts, p = parse(counts), movedAt = events0, why = "resident";
+  while (!p.done) {
+    const n = stallOn.count();
+    if (n - movedAt >= stallAnswers) { why = `not resident after ${n - movedAt} ${stallOn.what} with no change`; break; }
+    if (Date.now() - t0 > timeoutMs) { why = `backstop ${timeoutMs} ms`; break; }
+    await new Promise((r) => setTimeout(r, everyMs));
+    const was = p.resident;
+    counts = (await pane0(page)).counts; p = parse(counts);
+    if (p.resident !== was) movedAt = stallOn.count();
+  }
+  const d = stallOn.detail?.() ?? { answered: stallOn.count() - events0 };
+  why += ` · ${d.answered} ${stallOn.what} in the wait` + (d.ok !== undefined ? ` (${d.ok} tile(s), ${d.refused} refused)` : "");
+  return { resident: p.done, counts, ms: Date.now() - t0, why };
 }
 
 /**
@@ -493,12 +520,13 @@ async function replay(url, backend) {
 const tileRequests = (page, sinceIdx) => page.requests.slice(sinceIdx)
   .filter((r) => r.url.includes("/api/tiles") && !r.url.includes("/api/tiles/events"));
 
-async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanHz = 80e6 } = {}) {
+async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanHz = 80e6, holdingEdge = false } = {}) {
   const reqs = tileRequests(page, sinceIdx);
   // Counted in ANSWERS, not requests: since T-573/T-700 one batch request carries many tiles, so
   // "18 covered other spectrum" out of "15 requests" would otherwise read as an arithmetic error
   // in the very message someone reads when this goes red.
-  const why = { answers: 0, refused: 0, failed: 0, shapeless: 0, tooWide: 0, elsewhere: 0 };
+  const why = { answers: 0, refused: 0, failed: 0, shapeless: 0, tooWide: 0, elsewhere: 0,
+    ahead: 0, behind: 0, newestEdgeS: null, tileS: null };
   for (let i = reqs.length - 1; i >= 0; i--) {
     let json = null;
     // **A 503 is the route saying "ask again", not "this tile does not cover your band"** (T-690).
@@ -520,7 +548,17 @@ async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanH
       const spanHz = g.nf * g.f_cell_hz;
       if (spanHz > maxSpanHz) { why.tooWide++; continue; }
       if (targetHz < g.f_lo_hz || targetHz >= g.f_lo_hz + spanHz) { why.elsewhere++; continue; }
-      hit = { url: reqs[i].url, json: tile, spanHz };
+      if (holdingEdge) {
+        // See [[findPaneEdgeTileFor]]: only the answer whose time extent holds the server's own
+        // data edge has "rows at the live edge" to read.
+        const edgeS = tile?.shadow?.edge_s;
+        if (Number.isFinite(edgeS)) why.newestEdgeS = Math.max(why.newestEdgeS ?? -Infinity, edgeS);
+        why.tileS = Math.max(why.tileS ?? 0, g.nt * g.t_cell_s);
+        const hold = edgeHold(g, edgeS);
+        if (hold === "ahead") { why.ahead++; continue; }
+        if (hold !== "holds") { why.behind++; continue; }
+      }
+      hit = { url: reqs[i].url, json: tile, spanHz, why };
       break;
     }
     if (hit) return hit;
@@ -535,9 +573,94 @@ function tileOrWhy(found, label) {
     `${found?.why?.refused ?? 0} the route would not answer even after retrying its 503; of the ` +
     `${found?.why?.answers ?? 0} tile answer(s) they carried, ${found?.why?.shapeless ?? 0} had no ` +
     `usable grid, ${found?.why?.tooWide ?? 0} were wider than a pane's and ` +
-    `${found?.why?.elsewhere ?? 0} covered other spectrum. A route that was busy and a band that ` +
-    "was never drawn are different findings.");
+    `${found?.why?.elsewhere ?? 0} covered other spectrum` +
+    (found?.why?.ahead || found?.why?.behind
+      ? `; of those over the band, ${found.why.ahead} lay wholly AHEAD of the server's data edge and ` +
+        `${found.why.behind} wholly behind it (newest edge_s ${found.why.newestEdgeS}` +
+        (found.edgeWait ? `, ${found.edgeWait}` : "") + ")"
+      : "") +
+    ". A route that was busy and a band that was never drawn are different findings.");
   return found;
+}
+
+/**
+ * Where a tile answer's time extent lies against the server's data edge (`shadow.edge_s`, the
+ * store's newest folded frame, stated in that very answer): `"holds"` when the edge falls inside
+ * it, `"ahead"` when the whole tile starts at or after the edge, `"behind"` when it ended before.
+ */
+function edgeHold(grid, edgeS) {
+  if (!Number.isFinite(edgeS) || !Number.isFinite(grid?.t0_s)) return "unknown";
+  if (edgeS <= grid.t0_s) return "ahead";
+  if (edgeS > grid.t0_s + grid.nt * grid.t_cell_s) return "behind";
+  return "holds";
+}
+
+/** One line on which tile [[findPaneEdgeTileFor]] chose, and how many newer answers it passed over. */
+function describeEdgeTile(found) {
+  const g = found.json.grid, e = found.json.shadow.edge_s;
+  return `the tile [${g.t0_s.toFixed(2)}, ${(g.t0_s + g.nt * g.t_cell_s).toFixed(2)}) s holding edge_s ${e.toFixed(2)} ` +
+    `(${found.earlier ? "an address the pane asked for before this phase" : "the pane's own request this phase"}; ` +
+    `${found.why.ahead} newer answer(s) over the band lay wholly ahead of the edge, ${found.why.behind} wholly behind; ` +
+    `${found.replays} replay round(s))`;
+}
+
+/** Consecutive replays in which the server's data edge did not advance before
+ * [[findPaneEdgeTileFor]] reports that the store stopped folding. */
+const EDGE_STILL_REPLAYS = 20;
+
+/**
+ * The pane's own tile answer over `targetHz` **whose time extent holds the server's data edge** —
+ * the only tile that has "rows at the live edge" for [[edgeRowsCoverage]] / [[shadowNearEdge]] to
+ * read.
+ *
+ * **Why the newest answer is not enough (2026-09-24, the deflake after T-889/T-893).** The file
+ * used to read the pane's NEWEST answer over band A, and a following pane can hold a tile that
+ * starts AFTER the store's newest frame: T-890's next-row look-ahead (which T-893 widened to every
+ * column the renderer has asked for, queued and in flight included) asks for it before the edge
+ * arrives, and under load the store's fold can trail the capture clock the pane addresses by. The
+ * server's shadow plane rightly carries no run there — docs/api.md: "rows at or after `edge_s` (the
+ * newest frame) are never covered" — and `rowAt` clamps the edge to row 0, so the file read ONE
+ * future row and reported `{"col":85,"edgeRow":0,"from":0,"to":0,"hits":[]}` as "ADR-0020's
+ * last-known tier did not fire" (the 14:24 gate of task-t814, and its second isolated re-run). It
+ * had fired: replaying the NEXT time row of the tile this function picks reproduces that exact
+ * object, `edge row 0, window [0,0] unobserved 1/1`, in the same run whose edge-holding tile
+ * carries the band's shadow run. Rare alone — no ahead answer was the newest in 28 selections over
+ * 16 isolated runs, while 12 of them passed over a newer answer wholly BEHIND the edge, which the
+ * old reading clamped to its last row — because it takes the edge landing within the look-ahead's
+ * lead (8 x the route's service time) of the end of a 256 x 40 ms = 10.27 s tile, and a busy gate
+ * makes that lead longer.
+ *
+ * So: newest-first over the pane's requests since `sinceIdx`, then over all of them (a replay is
+ * the server's CURRENT answer for that address, so an address the pane asked for earlier still
+ * reads the departed state now), taking the first answer that holds the edge. If none does — every
+ * answer over the band is ahead of the edge (the store trails the pane's addressing) or behind it
+ * (the edge has crossed into a row the pane has not asked for yet) — it **waits on the server**:
+ * re-replays until an answer holds the edge, bounded by the server's own progress. It gives up when
+ * the edge has advanced a whole tile height without any pane answer holding it, or has not advanced
+ * at all over [[EDGE_STILL_REPLAYS]] consecutive replays (the store stopped folding — a finding,
+ * reported with its numbers by [[tileOrWhy]]). Never a clock.
+ */
+async function findPaneEdgeTileFor(page, backend, targetHz, { sinceIdx = 0, everyMs = 250 } = {}) {
+  let firstEdge = null, lastEdge = -Infinity, still = 0, replays = 0;
+  for (;;) {
+    replays++;
+    const recent = await findPaneTileFor(page, backend, targetHz, { sinceIdx, holdingEdge: true });
+    if (!recent.none) return { ...recent, replays, earlier: false };
+    const all = sinceIdx > 0
+      ? await findPaneTileFor(page, backend, targetHz, { sinceIdx: 0, holdingEdge: true })
+      : recent;
+    if (!all.none) return { ...all, replays, earlier: true };
+    const edge = all.why?.newestEdgeS;
+    if (!Number.isFinite(edge)) return all; // nothing over the band at all: tileOrWhy says why
+    firstEdge ??= edge;
+    if (edge > lastEdge) { lastEdge = edge; still = 0; } else still++;
+    const tileS = all.why.tileS ?? 0;
+    if (still >= EDGE_STILL_REPLAYS || (tileS > 0 && edge - firstEdge > tileS)) {
+      return { ...all, edgeWait: `waited ${replays} replay(s): the edge moved ` +
+        `${(edge - firstEdge).toFixed(2)} s (tile height ${tileS.toFixed(2)} s), ${still} replay(s) without moving` };
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
 }
 
 /**
@@ -768,14 +891,27 @@ async function readSwatchRgba(page, mark) {
 
 /** The single flat colour of the "unobserved" swatch — THE grey, however the product defines it
  * today (`CELL_MARKS[UNOBSERVED]`, `ui/src/surface/cellrule.ts`). Any pixel gives it; asserted
- * uniform as a sanity check on the instrument itself. */
-function greyFromSwatch({ w, h, data }) {
+ * uniform as a sanity check on the instrument itself. The "pending" swatch — the pane's own
+ * not-loaded ground (`PENDING`) — is read the same way. */
+function flatFromSwatch({ w, h, data }, mark = "unobserved") {
   const [r, g, b] = [data[0], data[1], data[2]];
   for (let i = 0; i < w * h * 4; i += 4) {
     assert.ok(data[i] === r && data[i + 1] === g && data[i + 2] === b,
-      `the "unobserved" legend swatch is not a flat colour at pixel ${i / 4}: expected [${r},${g},${b}]`);
+      `the "${mark}" legend swatch is not a flat colour at pixel ${i / 4}: expected [${r},${g},${b}]`);
   }
   return [r, g, b];
+}
+const greyFromSwatch = (img) => flatFromSwatch(img, "unobserved");
+
+/** Every colour a swatch carries — for a patterned mark with no ramp in it ("awaiting": a fixed
+ * ground and a fixed ink), that is the whole of what the mark can put on screen. Asserted small, so
+ * a swatch that turned out to be ramp-coloured cannot silently widen what is excluded as not-a-level. */
+function coloursOfSwatch({ w, h, data }, mark) {
+  const set = new Map();
+  for (let i = 0; i < w * h * 4; i += 4) set.set((data[i] << 16) | (data[i + 1] << 8) | data[i + 2], [data[i], data[i + 1], data[i + 2]]);
+  assert.ok(set.size >= 1 && set.size <= 4,
+    `the "${mark}" legend swatch carries ${set.size} colours — expected a fixed ground and ink, not a ramp`);
+  return [...set.values()];
 }
 
 function columnColours({ w, h, data }, col) {
@@ -824,23 +960,43 @@ async function harvestMarks(browser, backend) {
      !!document.querySelector('.sp-legend-row[data-mark="shadow"] canvas')`, { timeoutMs: 15000 });
   const grey = greyFromSwatch(await readSwatchRgba(page, "unobserved"));
   const ink = inkFromSwatch(await readSwatchRgba(page, "shadow"));
-  return { greyRgb: grey, inkRgb: ink };
+  // The two marks a LIVE pane carries that are not a level: its not-loaded ground ("pending") and
+  // "nothing folded yet" ("awaiting"). A live baseline is a brightness OF MEASUREMENTS, so these are
+  // what it must not be averaged over — see [[measuredPart]].
+  const pending = flatFromSwatch(await readSwatchRgba(page, "pending"), "pending");
+  const awaiting = coloursOfSwatch(await readSwatchRgba(page, "awaiting"), "awaiting");
+  return { greyRgb: grey, inkRgb: ink, notLevel: [pending, ...awaiting] };
 }
 
 // ---------------------------------------------------------------------------
 // Pixels
 // ---------------------------------------------------------------------------
 
-function paneRectOf(rect, dpr) {
-  const paneH = rect.h * dpr - MINIMAP_PX;
+function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
+  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  return { x: rect.x, w: rect.w, y: rect.y + traceH / dpr, h: (paneH - traceH) / dpr };
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
 }
+/**
+ * The pane, narrowed to the columns nothing foreign covers (T-801). Since MAP-01 the app's canvas
+ * is full-bleed and its inventory/focus panels float over it by design, so the pane's whole box is
+ * no longer all surface: measured on the first red run, band C read 55.0 % THE grey across the box
+ * and the missing ~45 % was the two panels' own background. Every claim below — never-swept reads
+ * THE grey, departed reads shadow, re-swept reads live — is about what the SURFACE drew, so it is
+ * measured over the columns the browser's own hit test says the surface is on top at
+ * (`Page.unoccludedColumns`), never over a hard-coded panel width. The pane still maps frequency
+ * across the canvas's full width; only the sampled columns narrow.
+ */
 async function paneGeometry(page) {
   const rect = await page.$rect(".sf-canvas");
   assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  return { rect, dpr, pane: paneRectOf(rect, dpr) };
+  const whole = paneRectOf(rect, dpr, await page.canvasInsets());
+  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
+  const pane = clipToUnoccluded(whole, rect, unocc);
+  assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
+  return { rect, dpr, pane };
 }
 /** The pane's data rect, inset a few pixels clear of every edge (a boundary pixel is a rounding
  * question, not a colour question — `surface-colour.e2e.mjs`'s `INSET`). */
@@ -862,6 +1018,121 @@ function inspect(img, rect, greyRgb, inkRgb, tol = 2) {
     }
   }
   return { n, grey, ink, greyShare: n ? grey / n : 0, inkShare: n ? ink / n : 0, census: census(img, rect) };
+}
+
+/**
+ * **The live band's own measurements** inside `rect`: every pixel that is not one of the marks a
+ * live pane draws where it holds no level yet — its not-loaded ground (PENDING) and "nothing folded
+ * yet" (AWAITING) — both harvested from the product's own legend, never hardcoded.
+ *
+ * **Why the live baselines are measured over this and not over [[splitAtDrawnTop]]'s drawn part**
+ * (the deflake, 2026-09-23). A pane following the live edge is drawn only as far as each tile's own
+ * horizon, and above the folded rows the store has not caught up with it draws AWAITING; how much of
+ * each is on screen is a property of how busy the box is, not of the band. The split finds the ONE
+ * row where the drawing starts and assumes everything under it is measurement — true on a quiet box,
+ * false as soon as tiles side by side reach different heights or the fold trails the record. The
+ * gate went red on it twice on 2026-09-23 (13:50 and 18:03): a live baseline of meanLuma 43.9 /
+ * 44.1 against a shadow of 53.3 / 53.6 — "the shadow ceiling is not visibly in effect" — where the
+ * band's measured cells, a real FM carrier at the top of the anchored range, read between 123 and
+ * 142 on every run of this file measured since. Reproduced by simulating a store that trails the record by 3 s
+ * (every observed cell in the newest 3 s before a tile's horizon decoded as AWAITING): the drawn-
+ * part metric read 28.0, 29.8, 74.8 and 112.7 on four runs while this one read 141 on the same
+ * frames, and the old file went red as "band A at boot is not a real render (only 1 distinct
+ * colours)" — the message this file was once quarantined on. Comparing a shadow against how much
+ * of the live pane was still unfolded is a race with the fold; comparing it against the live
+ * band's measurements is the claim.
+ *
+ * `share` is the measured part's share of `rect`, so a caller can refuse to take a baseline from a
+ * pane that has barely drawn (see the phase-1 wait): the exclusion never turns "nothing drawn" into
+ * a bright baseline, because an empty or tiny sample is waited out, then asserted.
+ */
+function measuredPart(img, rect, notLevel, tol = 2) {
+  const x0 = Math.max(0, Math.round(rect.x)), y0 = Math.max(0, Math.round(rect.y));
+  const x1 = Math.min(img.width, Math.round(rect.x + rect.w)), y1 = Math.min(img.height, Math.round(rect.y + rect.h));
+  const isNotLevel = (d) => notLevel.some((c) => Math.abs(img.data[d] - c[0]) <= tol
+    && Math.abs(img.data[d + 1] - c[1]) <= tol && Math.abs(img.data[d + 2] - c[2]) <= tol);
+  const colours = new Map();
+  let n = 0, kept = 0, sum = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const d = (y * img.width + x) * 4;
+      n++;
+      if (isNotLevel(d)) continue;
+      kept++;
+      sum += img.data[d] + img.data[d + 1] + img.data[d + 2];
+      const key = (img.data[d] << 16) | (img.data[d + 1] << 8) | img.data[d + 2];
+      colours.set(key, (colours.get(key) ?? 0) + 1);
+    }
+  }
+  return { n, kept, share: n ? kept / n : 0, meanLuma: kept ? sum / (3 * kept) : 0, distinct: colours.size };
+}
+
+/**
+ * The least share of a pane's ROI that must be the live band's own measurements before a live
+ * baseline is taken from it: a quarter of the pane. A floor on the SAMPLE, not on the claim — the
+ * claim is still the unchanged `shadow < 0.9 x live` below — so a baseline is never a handful of
+ * pixels that happened to be drawn when the shot was taken.
+ */
+const LIVE_MIN_MEASURED = 0.25;
+
+/** How much a wait's `progress` must beat its best to count as getting closer (see [[draw]]): one
+ * percentage point of the pane, well above frame-to-frame jitter in a share of ~300 000 pixels. */
+const PROGRESS_EPS = 0.01;
+
+/**
+ * How many of the pane's OWN tile answers may land without the frame getting any closer before a
+ * [[draw]] wait gives up (T-889). See [[paneAnswers]] for what is counted and why it is the unit.
+ *
+ * Measured alone, 2026-09-24 (load ~14): a healthy band-A wait that took 18 s to converge got
+ * closer every 0-9 answers (median 3), and a settled following pane lands ~3-10 of them a second
+ * on a quiet box. 30 is over three times the worst healthy gap; on a quiet box it is ~3-10 s,
+ * about the old clock, and on a busy one it stretches with the route's service time (the cache
+ * paces its revalidation at a multiple of it) instead of running out underneath the fill.
+ */
+const STALL_ANSWERS = 30;
+
+/**
+ * A counter of **tile answers for the pane's own addresses** over `[centerHz ± spanHz/2]`, landed
+ * since this was made — the event a band-A [[draw]] wait is bounded by (T-889).
+ *
+ * The wait it replaces gave up after a WALL-CLOCK 10 s without the frame getting closer, and a
+ * following pane's frame gets closer as its tile answers land (the app surface has no row feed —
+ * every row it draws came in a tile): its fill, and after that its live-edge revalidation, which
+ * the cache paces at a multiple of the route's own MEASURED service time
+ * (`TileCache.refreshCostOf`). So 10 s was a bet on the service rate, and the gate lost it —
+ * 2026-09-24 10:15, load 20.7, a tile answer took 5062 ms and band A's baseline was shot as "0
+ * distinct colours"; alone on the same branch the same wait already needed 7847 of its 10 000 ms.
+ * Counted in answers, a busy route slows the wait down with it instead of running it out.
+ *
+ * "The pane's own" = the `view` lattice's addresses whose tile intersects the pane's band and is
+ * no wider than a pane's (the minimap asks far wider — the same 80 MHz cut [[findPaneTileFor]]
+ * uses). An address is placed in Hz from the lattice's level-0 cell, read off any answer this page
+ * has had (`fCellHz / 2^level_f`, origin 0 Hz — `lattice.ts`'s `extentOf`). Every ANSWERED address
+ * counts, refusals included: a 503 is the route answering that address, and a pane that is refused
+ * N times without drawing closer is exactly the stuck pane the wait exists to report.
+ */
+function paneAnswers(page, centerHz, spanHz, { maxSpanHz = 80e6 } = {}) {
+  const sinceIdx = page.requests.length;
+  const lo = centerHz - spanHz / 2, hi = centerHz + spanHz / 2;
+  let f0Hz = null;
+  const count = () => {
+    if (f0Hz === null) {
+      const known = tileAsks(page.requests).find((a) => a.scheme === "view" && a.fCellHz > 0);
+      if (!known) return { answered: 0, ok: 0, refused: 0 };
+      f0Hz = known.fCellHz / 2 ** known.levelF;
+    }
+    let ok = 0, refused = 0;
+    for (const a of tileAsks(page.requests.slice(sinceIdx))) {
+      if (a.scheme !== "view" || a.status === null || a.endedMs === null) continue;
+      const fw = f0Hz * 2 ** a.levelF * a.cells;
+      if (!(fw > 0) || fw > maxSpanHz) continue;
+      const f0 = a.fIndex * fw;
+      if (f0 >= hi || f0 + fw <= lo) continue;
+      if (a.status === 200) ok++; else refused++;
+    }
+    return { answered: ok + refused, ok, refused };
+  };
+  return { count: () => count().answered, detail: count, what: "pane tile answers" };
 }
 
 /**
@@ -968,7 +1239,11 @@ function splitAtDrawnTop(img, rect, notGround = null, tol = 2) {
  * strictly weaker than any claim the callers make about it, so their assertions still judge the
  * sample rather than being satisfied by the wait.
  */
-async function draw(page, { settleMs = 600, timeoutMs = 25000, needsRender = false, notGround = null } = {}) {
+async function draw(page, {
+  settleMs = 600, timeoutMs = 25000, needsRender = false, notGround = null,
+  accept = null, progress = null, giveUp = null, stallOn = null, stallAnswers = STALL_ANSWERS,
+  acceptTimeoutMs = 180000,
+} = {}) {
   await page.frames(4);
   const counts = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
   // **A pane over never-swept spectrum holds no tiles and never will** (T-580). The original
@@ -989,13 +1264,54 @@ async function draw(page, { settleMs = 600, timeoutMs = 25000, needsRender = fal
   await new Promise((r) => setTimeout(r, settleMs));
   await page.frames(4);
   let snap = await snapPane(page);
-  if (needsRender) {
+  // `accept` generalises `needsRender` (the deflake, 2026-09-23): keep re-snapping until the frame
+  // holds what the CALLER is about to measure — never weaker than "a drawn part with height", and
+  // for the live baselines "a quarter of the pane is the band's own measurements". It reports; the
+  // caller's assertion judges the frame that comes back.
+  //
+  // **Bounded by whether the frame is still getting CLOSER to acceptable**, not by whether the page
+  // is busy. A following pane is never idle — it re-asks the survey every 2 s and revalidates its
+  // edge tiles every frame — so "the wire moved" never stops and an unmet wait used to run to the
+  // backstop and then to the spec's own 600 s kill, reading as a timeout rather than as the claim
+  // that failed. So a caller states `progress(snap)`, a number that rises as the frame approaches
+  // what it accepts (the measured share, minus the shadow ink left), and the wait gives up once it
+  // has not beaten its best by `PROGRESS_EPS` over `stallAnswers` EVENTS of `stallOn` — a counter
+  // the caller names, in practice [[paneAnswers]]: the pane's own tile answers, which are what moves
+  // its frame. **Never over a stretch of wall-clock** (T-889): that was a bet on the tile route's
+  // service rate, and under gate load the route lost it while the pane was still filling. A defect
+  // that stops the frame from ever getting there stops the number while the answers keep landing,
+  // and the named assertion fires after `stallAnswers` of them. `giveUp` is the other bound — an
+  // event count the caller names from the start of the wait, e.g. survey answers landed — and
+  // `acceptTimeoutMs` only the backstop for a pane that keeps improving without arriving (or whose
+  // wire went silent, which no following pane's does). A wait with neither is refused, so no call
+  // site can fall back to a clock.
+  const want = accept ?? (needsRender ? (s) => splitAtDrawnTop(s.img, s.roi, notGround).drawn.h > 0 : null);
+  if (want) {
+    if (!giveUp && !stallOn) {
+      throw new Error("draw(): a wait needs an event bound — `stallOn` (e.g. paneAnswers) or `giveUp` — never a wall-clock stall (T-889)");
+    }
     const t0 = Date.now();
-    while (splitAtDrawnTop(snap.img, snap.roi, notGround).drawn.h <= 0 && Date.now() - t0 < timeoutMs) {
+    const score = progress ?? ((s) => splitAtDrawnTop(s.img, s.roi, notGround).drawn.h);
+    const events0 = stallOn ? stallOn.count() : 0;
+    let best = score(snap), bestAt = events0, why = "accepted";
+    while (!want(snap)) {
+      if (giveUp) { if (await giveUp()) { why = "gave up (caller's event count)"; break; } }
+      else if (stallOn.count() - bestAt >= stallAnswers) {
+        why = `stopped getting closer over ${stallOn.count() - bestAt} ${stallOn.what} (best ${best.toFixed(3)})`; break;
+      }
+      if (Date.now() - t0 > acceptTimeoutMs) { why = `backstop ${acceptTimeoutMs} ms`; break; }
       await page.frames(6);
       snap = await snapPane(page);
+      const v = score(snap);
+      if (v > best + PROGRESS_EPS) { best = v; bestAt = stallOn ? stallOn.count() : 0; }
     }
     snap.renderWaitMs = Date.now() - t0;
+    snap.acceptedWhy = why;
+    if (stallOn) {
+      const d = stallOn.detail?.() ?? { answered: stallOn.count() - events0 };
+      snap.acceptedWhy += ` · ${d.answered} ${stallOn.what} in the wait` +
+        (d.ok !== undefined ? ` (${d.ok} tile(s), ${d.refused} refused)` : "");
+    }
   }
   const img = snap.img;
   img.drew = drew;
@@ -1003,7 +1319,9 @@ async function draw(page, { settleMs = 600, timeoutMs = 25000, needsRender = fal
   img.pane = snap.g.pane;
   img.movedWhileShooting = snap.moved;
   img.renderWaitMs = snap.renderWaitMs ?? 0;
+  img.acceptedWhy = snap.acceptedWhy ?? null;
   img.counts = await page.eval(counts);
+  img.countsBefore = snap.countsBefore ?? null;
   return img;
 }
 
@@ -1013,16 +1331,22 @@ async function draw(page, { settleMs = 600, timeoutMs = 25000, needsRender = fal
  * The box is read either side of the shot and the pair retaken if it moved, so the pixels and the
  * coordinates they are indexed by come from the same layout. See [[draw]] for what a stale one costs.
  */
+const PANE_COUNTS = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
 async function snapPane(page, { tries = 4 } = {}) {
   let before = await paneGeometry(page), img = null, after = before;
   for (let i = 0; i <= tries; i++) {
+    // The pane's own readout, read immediately BEFORE the shot: it is written in the same frame
+    // pass as the pixels (`SurfaceView.frame`), so this is the statement about the frame being
+    // shot, give or take the one frame the capture takes. `draw()` reads it again AFTER; see the
+    // band-C strip assertion for why a claim about the pixels is checked against both.
+    const countsBefore = await page.eval(PANE_COUNTS);
     img = await page.shot();
     after = await paneGeometry(page);
     const same = ["x", "y", "w", "h"].every((k) => before.rect[k] === after.rect[k]);
-    if (same) return { img, g: after, roi: roiOf(after.pane), moved: false };
+    if (same) return { img, g: after, roi: roiOf(after.pane), moved: false, countsBefore };
     before = after;
   }
-  return { img, g: after, roi: roiOf(after.pane), moved: true };
+  return { img, g: after, roi: roiOf(after.pane), moved: true, countsBefore: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1375,18 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const note = (await page.$text(".sf-note")) ?? "";
   assert.ok(!/could not be addressed|WebGL2 is unavailable/.test(note), `the surface refused to mount: ${note}`);
   await page.waitFor("the per-pane retune control to be on the page", `!!document.querySelector('${PANE_ACTION}')`, { timeoutMs: 20000 });
+  // **The HUD's axis labels are screen-space TEXT over the canvas, not the surface** (T-805), and
+  // every claim in this file is about what the SURFACE drew — the same reason `paneGeometry` narrows
+  // to the columns the floating panels leave uncovered (T-801). The frequency labels sit ~30 px above
+  // the pane's bottom edge, inside every ROI, as ~5 900 px of #d5dee2 text and its dark text-shadow
+  // whatever the pane shows. Measured 2026-09-24 (the deflake after T-889/T-893), band C's
+  // non-grey residue was that same ~5 900 px in every run at every drawn height, so its grey share
+  // was a function of how tall the survey's sawtooth left the drawn part: 346 px read 98.4 % grey,
+  // 85 px 93.4 %, 40 px 86.0 % and 31 px 82.0 % — and the last two failed "band C (never swept)
+  // does not read as mostly grey" with the product drawing THE grey on every surface pixel. So the
+  // labels are hidden for the shots; the canvas-stroked ticks under them are surface pixels and stay.
+  await page.eval(`(() => { const s = document.createElement('style');
+    s.textContent = '.sf-hud { visibility: hidden !important; }'; document.head.appendChild(s); return true; })()`);
   await page.frames(4);
 
   const at = await centre(page);
@@ -1085,8 +1421,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // nothing on it. The baseline was measured there and the run failed as "band A at boot is not a
   // real render", which reads as a product defect and is not one: the pane cannot hold data the
   // server does not have yet.
-  const res0 = await waitForResident(page);
-  t.diagnostic(`pane resident after ${res0.ms} ms: "${res0.counts}"${res0.resident ? "" : " — NEVER became resident, measuring anyway"}`);
+  const res0 = await waitForResident(page, { stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ) });
+  t.diagnostic(`pane resident after ${res0.ms} ms: "${res0.counts}" (${res0.why})${res0.resident ? "" : " — NEVER became resident, measuring anyway"}`);
   // **`needsRender`, and the rectangle read with the pixels.** This is the phase the file was
   // quarantined on: "band A at boot is not a real render (only 0 distinct colours)" at ~8 s, with
   // the pane itself reporting tiles drawn. Zero distinct colours is not a flat pane — it is a
@@ -1094,9 +1430,21 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // to it is not on the pane any more, or when the pane has not yet presented a frame into it. Both
   // are readiness, and both are now waited out on the page's own terms (see [[draw]]); the two
   // assertions below are untouched and still judge the frame that comes back.
-  const imgA0 = await draw(page, { needsRender: true, notGround: marks.greyRgb });
+  //
+  // **And the frame is not taken until a quarter of the pane is the band's own measurements**
+  // (the deflake, 2026-09-23; see [[measuredPart]]). A following pane's newest rows are its
+  // not-loaded ground or "nothing folded yet" for as long as the store trails the record, and how
+  // long that is depends on the box; a baseline shot inside that window measured the lag, not the
+  // band. Waited out on the page's own pixels, bounded by whether the pane is still working.
+  const liveEnough = (s) => splitAtDrawnTop(s.img, s.roi, marks.greyRgb).drawn.h > 0
+    && measuredPart(s.img, s.roi, marks.notLevel).share >= LIVE_MIN_MEASURED;
+  const liveShare = (s) => measuredPart(s.img, s.roi, marks.notLevel).share;
+  const imgA0 = await draw(page, {
+    notGround: marks.greyRgb, accept: liveEnough, progress: liveShare,
+    stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ),
+  });
   const roiA = imgA0.roi;
-  t.diagnostic(`band A's first frame landed in the pane's own rectangle after ${imgA0.renderWaitMs} ms` +
+  t.diagnostic(`band A's first frame landed in the pane's own rectangle after ${imgA0.renderWaitMs} ms (${imgA0.acceptedWhy})` +
     (imgA0.movedWhileShooting ? " — the canvas was still moving when it was shot" : ""));
   // Measured over the part the pane SAYS it drew, never across its ground: the strip a
   // following pane leaves at its top varies with load, and a mean brightness taken across it
@@ -1106,8 +1454,16 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   t.diagnostic(`LIVE A baseline: meanLuma ${liveA.census.meanLuma.toFixed(1)}, grey ${(liveA.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(liveA.inkShare * 100).toFixed(1)}%, distinct ${liveA.census.distinct} · drawn with "${imgA0.counts}"` +
     (imgA0.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
-  assert.ok(liveA.census.distinct >= 4, `band A at boot is not a real render (only ${liveA.census.distinct} distinct colours) — this run proves nothing`);
+  assert.ok(liveA.census.distinct >= 4, `band A at boot is not a real render (only ${liveA.census.distinct} distinct colours; ` +
+    `"${imgA0.counts}", ${imgA0.acceptedWhy}) — this run proves nothing`);
   assert.ok(liveA.greyShare < 0.5, `band A at boot already reads mostly grey (${(liveA.greyShare * 100).toFixed(1)}%) — this run has no live baseline to lose`);
+  // The live baseline the shadow is compared against: the band's own measured cells.
+  const liveLumaA = measuredPart(imgA0, roiA, marks.notLevel);
+  t.diagnostic(`LIVE A measured cells: ${(liveLumaA.share * 100).toFixed(1)}% of the pane, meanLuma ${liveLumaA.meanLuma.toFixed(1)}, ` +
+    `distinct ${liveLumaA.distinct} (the rest is not-loaded ground or nothing-folded-yet)`);
+  assert.ok(liveLumaA.share >= LIVE_MIN_MEASURED,
+    `band A at boot never showed a quarter of the pane as measurement (${(liveLumaA.share * 100).toFixed(1)}%, ` +
+    `"${imgA0.counts}", ${imgA0.acceptedWhy}) — there is no live baseline to compare a shadow against`);
 
   const baseA = await waitForPaneTileObserved(page, backend, A_HZ);
   const tileA0 = tileOrWhy(baseA.found,
@@ -1132,7 +1488,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const sinceB = Date.now() / 1000;
   t.diagnostic(`retuned away: said ${MHz(toB.said.centerHz)} MHz, radio now at ${MHz(toB.tuned.centerHz)} ± ${MHz(toB.tuned.spanHz / 2)} MHz`);
   assert.ok(Math.abs(toB.tuned.centerHz - A_HZ) > 100e6, "the retune to band B did not actually leave band A's neighbourhood");
-  await waitForResident(page);
+  const resB = await waitForResident(page, { stallOn: paneAnswers(page, B_HZ, 200e3) });
+  t.diagnostic(`band B pane resident: ${resB.resident} after ${resB.ms} ms, "${resB.counts}" (${resB.why})`);
   // Wait for the SERVER to say the radio is really producing at B — the premise "we moved away and
   // are now recording somewhere else" — rather than sleeping a constant and hoping (T-690). The
   // shadow search over band A needs a live edge that has moved on; this is that, measured.
@@ -1147,19 +1504,40 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const sinceMoveIdx = page.requests.length;
   await gotoFreq(page, at, A_HZ, A_VIEW_SPAN_HZ); // a VIEW pan only, never a device call
   assertNoDeviceCalls(page, sinceMoveIdx, "panning back to look at departed band A");
-  await waitForResident(page);
-  const imgA1 = await draw(page, { needsRender: true, notGround: marks.greyRgb });
-  // Measured over the part the pane SAYS it drew, never across its ground: the strip a
-  // following pane leaves at its top varies with load, and a mean brightness taken across it
-  // compares how far two panes got as much as it compares their pixels (`splitAtDrawnTop`).
+  const resA1 = await waitForResident(page, { stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ) });
+  t.diagnostic(`departed band A pane resident: ${resA1.resident} after ${resA1.ms} ms, "${resA1.counts}" (${resA1.why})`);
+  // **The shadow's brightness is measured the way the live baseline is: over its own cells**
+  // (review of the deflake, 2026-09-24). Every brightness claim below compares the shadow with a
+  // live band measured over its MEASURED cells only, so a shadow averaged over its not-loaded
+  // ground, nothing-folded-yet or grey would be pulled toward the dark end by whatever the pane had
+  // not drawn — and "dimmer than live" and "re-swept is brighter" would both pass more easily the
+  // less of the shadow was on screen. So the shadow is its own cells: not PENDING, not AWAITING and
+  // not THE grey (grey is a different claim, asserted on its own just below). The shot waits for a
+  // quarter of the pane to be those cells, exactly as the live one does.
+  const shadowNotLevel = [...marks.notLevel, marks.greyRgb];
+  const shadowShare = (s) => measuredPart(s.img, s.roi, shadowNotLevel).share;
+  const imgA1 = await draw(page, {
+    notGround: marks.greyRgb,
+    accept: (s) => splitAtDrawnTop(s.img, s.roi, marks.greyRgb).drawn.h > 0 && shadowShare(s) >= LIVE_MIN_MEASURED,
+    progress: shadowShare,
+    stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ),
+  });
+  // The grey and ink shares are still read over the part the pane SAYS it drew (`splitAtDrawnTop`).
   const cutA1 = splitAtDrawnTop(imgA1, imgA1.roi, marks.greyRgb);
   const shadowA = inspect(imgA1, cutA1.drawn, marks.greyRgb, marks.inkRgb);
+  const shadowLumaA = measuredPart(imgA1, imgA1.roi, shadowNotLevel);
   t.diagnostic(`SHADOW A (departed): meanLuma ${shadowA.census.meanLuma.toFixed(1)}, grey ${(shadowA.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(shadowA.inkShare * 100).toFixed(1)}%, distinct ${shadowA.census.distinct} · drawn with "${imgA1.counts}"` +
-    (imgA1.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
+    (imgA1.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN") +
+    ` · its own cells ${(shadowLumaA.share * 100).toFixed(1)}% of the pane at meanLuma ${shadowLumaA.meanLuma.toFixed(1)} ` +
+    `after ${imgA1.renderWaitMs} ms (${imgA1.acceptedWhy})`);
 
-  const tileA1 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceMoveIdx }),
-    "no pane tile response covers band A after the move — cannot check the server's shadow plane");
+  // The pane's answer that holds the server's data edge, not merely its newest one: the newest is
+  // often the look-ahead row, which lies wholly in the future (see [[findPaneEdgeTileFor]]).
+  const tileA1 = tileOrWhy(await findPaneEdgeTileFor(page, backend, A_HZ, { sinceIdx: sinceMoveIdx }),
+    "no pane tile response over band A holds the server's data edge after the move — cannot check the server's shadow plane");
+  t.diagnostic(`SERVER band A (departed) read from ${describeEdgeTile(tileA1)}`);
+
   const covA1 = decodeCoveragePlane(tileA1.json.coverage);
   const edgeS1 = tileA1.json.shadow.edge_s;
   const nrA1 = edgeRowsCoverage(covA1, A_HZ, edgeS1);
@@ -1184,9 +1562,12 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // one). Relative, not against a hardcoded gain: see this file's header.
   assert.ok(shadowA.greyShare < 0.5,
     `departed band A reads mostly THE grey (${(shadowA.greyShare * 100).toFixed(1)}%) — it should read as shadow, a real measurement, not "never observed": ${JSON.stringify(shadowA.census)}`);
-  assert.ok(shadowA.census.meanLuma < liveA.census.meanLuma * 0.9,
-    `departed band A (meanLuma ${shadowA.census.meanLuma.toFixed(1)}) is not meaningfully dimmer than it was live ` +
-    `(meanLuma ${liveA.census.meanLuma.toFixed(1)}) — the shadow ceiling is not visibly in effect`);
+  assert.ok(shadowLumaA.share >= LIVE_MIN_MEASURED,
+    `departed band A never showed a quarter of the pane as its own cells (${(shadowLumaA.share * 100).toFixed(1)}%, ` +
+    `"${imgA1.counts}", ${imgA1.acceptedWhy}) — there is no shadow to compare with the live baseline`);
+  assert.ok(shadowLumaA.meanLuma < liveLumaA.meanLuma * 0.9,
+    `departed band A (meanLuma ${shadowLumaA.meanLuma.toFixed(1)} over its own cells) is not meaningfully dimmer than it was live ` +
+    `(meanLuma ${liveLumaA.meanLuma.toFixed(1)} over its measured cells) — the shadow ceiling is not visibly in effect`);
 
   // ===========================================================================
   // PHASE 4 — CLAIM 2: band C, never swept at all, stays GREY (and carries NO shadow run at all).
@@ -1198,13 +1579,37 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // The one call site where T-580's short-circuit is the expected answer: this pane's whole window
   // is spectrum the radio never visited, so `0 tiles` here is the product working, not a pane that
   // has not loaded.
-  await waitForResident(page, { surveyMayAnswer: true });
-  // NOT `needsRender`: a band the survey settles as never sampled is drawn flat grey all the way
-  // up, which `splitAtDrawnTop` reports as a zero-height strip and a full-height drawn part only
-  // because `notGround` tells it THE grey is an answer. Waiting for a "drawn" part here would be
-  // waiting for the one thing this phase is asserting is absent. The rectangle still comes back
-  // with the pixels, which is the half of the fix that applies everywhere.
-  const imgC = await draw(page);
+  // Its events are the pane's tile answers over C (none, if T-580 fires) PLUS the survey's answers,
+  // which are what draw a never-sampled pane.
+  const tilesC = paneAnswers(page, C_HZ, C_VIEW_SPAN_HZ), surveyIdx0 = page.requests.length;
+  const surveyC = () => page.requests.slice(surveyIdx0).filter((r) => r.url.includes("/api/coverage") && r.endedMs !== null).length;
+  const resC = await waitForResident(page, {
+    surveyMayAnswer: true,
+    stallOn: { count: () => tilesC.count() + surveyC(), what: "pane tile + survey answers" },
+  });
+  t.diagnostic(`band C pane resident: ${resC.resident} after ${resC.ms} ms, "${resC.counts}" (${resC.why})`);
+  // **Wait for the survey's grey to be ON the pane, counted in survey answers** (the deflake,
+  // 2026-09-23). T-580's rule 4 draws a skipped place grey only as far forward as the survey's
+  // `as_of`, and the surface re-asks every `SURVEY_EVERY_MS` (2 s), so the grey's top trails the
+  // live edge by a sawtooth between one answer's latency and that plus two seconds. A pane opened a
+  // few seconds after `hk serve` spans only ~2-3 s, so a shot taken late in the sawtooth sees NO
+  // grey at all — measured on main, 2026-09-23 23:30 (three lanes, load 20): "drawn to 2.6 s
+  // short of the top" over a pane 2.4 s tall, the whole ROI the pending ground (meanLuma 21.0, one
+  // colour), which is how this phase failed as "band C drew NO grey at all" with the product doing
+  // exactly what rule 4 says. With the survey re-asked every 8 s instead of 2 the old shot failed
+  // that way 2 runs of 2; this wait passed 2 of 2.
+  // So the shot waits for the frame to hold a drawn part (`notGround` makes THE grey count as one:
+  // a flat-grey pane is drawn, not ground), and gives up only after TEN survey answers have landed
+  // with nothing drawn — the event the grey is made of, never a wall-clock budget. What comes back
+  // is then judged exactly as before: grey where drawn, no ink anywhere, no grey in the strip.
+  const surveyIdx = page.requests.length;
+  const surveyAnswers = () => page.requests.slice(surveyIdx)
+    .filter((r) => r.url.includes("/api/coverage") && r.endedMs !== null).length;
+  const imgC = await draw(page, {
+    accept: (s) => splitAtDrawnTop(s.img, s.roi, marks.greyRgb).drawn.h > 0,
+    giveUp: async () => surveyAnswers() >= 10,
+  });
+  t.diagnostic(`band C's grey reached the pane after ${imgC.renderWaitMs} ms and ${surveyAnswers()} survey answer(s) (${imgC.acceptedWhy})`);
   const greyC = inspect(imgC, imgC.roi, marks.greyRgb, marks.inkRgb);
   t.diagnostic(`GREY C (never swept): meanLuma ${greyC.census.meanLuma.toFixed(1)}, grey ${(greyC.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(greyC.inkShare * 100).toFixed(1)}%, distinct ${greyC.census.distinct} · drawn with "${imgC.counts}"` +
@@ -1222,7 +1627,11 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
     (askedC.none ? `, carrying ${askedC.why.answers} tile answer(s), of which ${askedC.why.elsewhere} covered other spectrum` : ""));
   assert.ok(askedC.none,
     "the pane REQUESTED a tile over band C, spectrum the coverage survey settles as never sampled " +
-    "— T-580's short-circuit did not fire, and every grey pixel here cost a round trip");
+    "— T-580's short-circuit did not fire, and every grey pixel here cost a round trip" +
+    (askedC.none ? "" : ` (the request: ${askedC.url}; its tile [${askedC.json.grid.f_lo_hz} Hz + ` +
+      `${askedC.spanHz} Hz] x [${askedC.json.grid.t0_s} s + ${askedC.json.grid.nt * askedC.json.grid.t_cell_s} s], ` +
+      `coverage ${JSON.stringify(askedC.json.coverage?.planes?.[askedC.json.coverage?.selected?.plane]?.runs?.slice(0, 8))} ` +
+      `in states ${JSON.stringify(askedC.json.coverage?.states)})`));
 
   // THE CLAIM, server-side, from the request the pane DID make. The survey is `/api/coverage`'s
   // four-state answer over the same record-derived map the tile route's `coverage` plane comes from
@@ -1283,13 +1692,22 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
       `${(stripC.greyShare * 100).toFixed(1)}%, ink ${(stripC.inkShare * 100).toFixed(1)}%) — ` +
       "it is the pane's not-known-yet ground, and grey there would claim the radio never looked " +
       "over an interval the survey has not spoken about");
-    // ...and the pane must SAY it, rather than leave it to be discovered in the pixels.
-    assert.match(imgC.counts, /drawn to [\d.]+ s short of the top/,
-      `the pane left ${cut.strip.h}px undrawn at the top and its readout does not say so: "${imgC.counts}"`);
+    // ...and the pane must SAY it, rather than leave it to be discovered in the pixels. Checked
+    // against the readout of the frame that was shot — read immediately before the capture — as
+    // well as the one read after it (the deflake, 2026-09-23). The readout is written in the same
+    // frame as the pixels, but a survey answer can land during the capture: measured on main at
+    // load 30, a 105 px strip in the pixels while the readout read a moment AFTER the shot no
+    // longer carried "short of the top" because the grey had just been drawn to the top. A strip
+    // only grows a row at a time (the live edge moving on), so a pane that says nothing about a
+    // strip of this height said nothing in either read; one that did, said it before the shot.
+    const saidShort = (c) => /drawn to [\d.]+ s short of the top/.test(c ?? "");
+    assert.ok(saidShort(imgC.countsBefore) || saidShort(imgC.counts),
+      `the pane left ${cut.strip.h}px undrawn at the top and its readout does not say so: ` +
+      `"${imgC.countsBefore}" just before the shot, "${imgC.counts}" just after`);
   }
-  assert.ok(greyC.census.meanLuma < shadowA.census.meanLuma,
+  assert.ok(greyC.census.meanLuma < shadowLumaA.meanLuma,
     `band C (never observed, meanLuma ${greyC.census.meanLuma.toFixed(1)}) is not darker than departed band A ` +
-    `(meanLuma ${shadowA.census.meanLuma.toFixed(1)}) — grey and shadow are not visually distinct`);
+    `(meanLuma ${shadowLumaA.meanLuma.toFixed(1)} over its own cells) — grey and shadow are not visually distinct`);
 
   // ===========================================================================
   // PHASE 5 — CLAIM 3: re-sweep band A. It returns to full brightness.
@@ -1299,7 +1717,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const sinceResweep = Date.now() / 1000;
   t.diagnostic(`re-swept: said ${MHz(back.said.centerHz)} MHz, radio now at ${MHz(back.tuned.centerHz)} ± ${MHz(back.tuned.spanHz / 2)} MHz`);
   assert.ok(Math.abs(back.tuned.centerHz - A_HZ) < 3e6, `re-sweeping did not bring the radio back near band A: ${JSON.stringify(back.tuned)}`);
-  await waitForResident(page);
+  const resA2 = await waitForResident(page, { stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ) });
+  t.diagnostic(`re-swept band A pane resident: ${resA2.resident} after ${resA2.ms} ms, "${resA2.counts}" (${resA2.why})`);
   // `edgeRowsCoverage` below looks at a real-seconds-wide window ending at the tile's own fold
   // horizon (`shadow.edge_s`), so it needs real capture at the re-swept band to have accumulated
   // and been folded. That used to be a 10 s sleep, tuned up from 3 s when 3 s measured 7/26 = 27 %
@@ -1309,18 +1728,38 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   t.diagnostic(`band A observed again by the server since the re-sweep, after ${backAgain.ms} ms: ` +
     `${backAgain.observed}/${backAgain.known} known cells` +
     (backAgain.reached ? "" : " — NEVER REACHED the premise, measuring anyway"));
-  const imgA2 = await draw(page, { needsRender: true, notGround: marks.greyRgb });
+  // **...and not until the pane's window lies wholly after the re-sweep** (the deflake,
+  // 2026-09-23). A pane that follows the live edge still holds the departed stretch — correctly
+  // drawn as shadow — until it has scrolled a whole window span past the retune, so a shot taken
+  // straight after it measures mostly shadow and compares the shadow with itself: measured
+  // 2026-09-23 with the old shot, "RE-SWEPT A" at 26.5 % ink and meanLuma 81.8 against a 1.15 x 53.9
+  // bar — a pass whose margin shrinks the sooner the shot lands, since a pane still all shadow reads
+  // the shadow's own ~54. Waited out on the pixels: no shadow ink left in the pane (the same 2 %
+  // bound band C's no-ink claim uses) — and then ASSERTED below, so a product whose shadow never
+  // clears from a re-swept band fails as exactly that once the ink stops falling.
+  const inkOf = (s) => inspect(s.img, s.roi, marks.greyRgb, marks.inkRgb).inkShare;
+  const imgA2 = await draw(page, {
+    notGround: marks.greyRgb,
+    accept: (s) => liveEnough(s) && inkOf(s) < 0.02,
+    progress: (s) => Math.min(liveShare(s), LIVE_MIN_MEASURED) - inkOf(s),
+    stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ),
+  });
   // Measured over the part the pane SAYS it drew, never across its ground: the strip a
   // following pane leaves at its top varies with load, and a mean brightness taken across it
   // compares how far two panes got as much as it compares their pixels (`splitAtDrawnTop`).
   const cutA2 = splitAtDrawnTop(imgA2, imgA2.roi, marks.greyRgb);
   const reswptA = inspect(imgA2, cutA2.drawn, marks.greyRgb, marks.inkRgb);
+  const reswptLumaA = measuredPart(imgA2, imgA2.roi, marks.notLevel);
+  const reswptInk = inspect(imgA2, imgA2.roi, marks.greyRgb, marks.inkRgb).inkShare;
   t.diagnostic(`RE-SWEPT A: meanLuma ${reswptA.census.meanLuma.toFixed(1)}, grey ${(reswptA.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(reswptA.inkShare * 100).toFixed(1)}%, distinct ${reswptA.census.distinct} · drawn with "${imgA2.counts}"` +
-    (imgA2.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
+    (imgA2.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN") +
+    ` · measured cells ${(reswptLumaA.share * 100).toFixed(1)}% of the pane at meanLuma ${reswptLumaA.meanLuma.toFixed(1)} ` +
+    `after ${imgA2.renderWaitMs} ms (${imgA2.acceptedWhy})`);
 
-  const tileA2 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceReswIdx }),
-    "no pane tile response covers band A after re-sweeping");
+  const tileA2 = tileOrWhy(await findPaneEdgeTileFor(page, backend, A_HZ, { sinceIdx: sinceReswIdx }),
+    "no pane tile response over band A holds the server's data edge after re-sweeping");
+  t.diagnostic(`SERVER band A (re-swept) read from ${describeEdgeTile(tileA2)}`);
   const covA2 = decodeCoveragePlane(tileA2.json.coverage);
   const nrA2 = edgeRowsCoverage(covA2, A_HZ, tileA2.json.shadow.edge_s);
   t.diagnostic(`SERVER band A (re-swept): edge row ${nrA2.edgeRow}, window [${nrA2.from},${nrA2.to}] observed ${nrA2.observed}/${nrA2.total}`);
@@ -1333,9 +1772,16 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // THE CLAIM, pixel-side: brighter than it was in shadow, by a clear margin — the round trip
   // closes. (Not asserted equal to the ORIGINAL live baseline: a fresh capture instant measures
   // different, real dB values, and the claim is "full brightness restored", not "identical pixels".)
-  assert.ok(reswptA.census.meanLuma > shadowA.census.meanLuma * 1.15,
-    `re-swept band A (meanLuma ${reswptA.census.meanLuma.toFixed(1)}) is not clearly brighter than it was in shadow ` +
-    `(meanLuma ${shadowA.census.meanLuma.toFixed(1)}) — re-sweeping did not restore full brightness`);
+  assert.ok(reswptLumaA.share >= LIVE_MIN_MEASURED,
+    `re-swept band A never showed a quarter of the pane as measurement (${(reswptLumaA.share * 100).toFixed(1)}%, ` +
+    `"${imgA2.counts}", ${imgA2.acceptedWhy})`);
+  assert.ok(reswptInk < 0.02,
+    `re-swept band A still carries the shadow's ink over ${(reswptInk * 100).toFixed(1)}% of the pane ` +
+    `(${imgA2.acceptedWhy}) — a band the radio is observing again must be drawn as live measurement, ` +
+    "not as last-known: the shadow never cleared");
+  assert.ok(reswptLumaA.meanLuma > shadowLumaA.meanLuma * 1.15,
+    `re-swept band A (meanLuma ${reswptLumaA.meanLuma.toFixed(1)} over its measured cells) is not clearly brighter than it was in shadow ` +
+    `(meanLuma ${shadowLumaA.meanLuma.toFixed(1)} over its own cells) — re-sweeping did not restore full brightness`);
   assert.ok(reswptA.greyShare < 0.5,
     `re-swept band A reads mostly grey (${(reswptA.greyShare * 100).toFixed(1)}%) — it should read live again`);
 

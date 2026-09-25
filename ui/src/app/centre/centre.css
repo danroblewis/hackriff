@@ -6,45 +6,104 @@
  * out on a poll while the canvas scrolled per frame, which is T-388.
  *
  * They are now stroked quads inside the render pass (`ui/src/surface/marks.ts`), so what is left
- * here is chrome around the canvas: a bar, a hover readout, the retune offer, the level statement
+ * here is chrome around the canvas: the floating readouts, the retune offer, the level statement
  * and the orientation note. None of it overlaps the picture. */
 .surface [hidden] { display: none !important; }
 
-/* **The bar WRAPS, and the controls never shrink** (T-528).
- *
- * It used to be one un-wrapping row in which `.sf-actions` was `min-width: 0` — so when the bar was
- * narrower than the buttons, the *container* shrank and the buttons overflowed to the right, where
- * `.sf-range` (a later sibling, painted after them) sat on top of them. They were still visible,
- * still focusable, still `offsetParent !== null` — and **not clickable**, because a real click lands
- * on whatever `elementFromPoint` says is on top. Measured on the dev Mac at 1440 × 900 after this
- * ticket added one button: `.sf-actions` content 687 px laid out in 420 px, and `Split ⇔`, `Close`
- * and `Whole surface` all hit-testing to `SPAN.sf-range`. That is how adding a *fourth* toggle
- * silently disabled the *split* — and the bar was already 539 px in 420 px before it, so this was
- * one label away from happening to whoever added the next control.
- *
- * So: the controls are `flex: 0 0 auto` — a button a user can see is a button a user can press, and
- * that is not negotiable against a text readout — and the bar wraps, so a row that cannot fit moves
- * to the next line inside the bar instead of overflowing under its neighbour. The two readouts
- * ellipsise first (`flex: 1 1 …` with `min-width: 0`), and only when the range cannot keep a
- * readable 220 px does it take a line of its own. The bar grows; nothing is ever hidden under
- * anything. */
-.sf-bar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 0 12px;
-  border-bottom: 1px solid var(--line); background: var(--panel);
-  font: 11px var(--mono); color: var(--muted); min-width: 0;
+/* T-882: the toolbar row (`.sf-bar`) is gone. Its controls float over the canvas
+   (`chrome/map-controls.ts`); its two readouts float here, bottom-left above the map strip — the
+   colour scale stated (T-470: a fixed range that clips is only honest if the range is read) and the
+   hover readout. Status text, so it never takes the pointer from the surface under it.
+   T-918: the rows that used to sit UNDER the stage (trace, IQ ring, fog, priors, per-viewport
+   level, orientation note) subtracted ~120 px from the canvas, against docs/23 §10.1 ("no chrome
+   subtracts from it"). They float in the same bottom-left stack now, the readout nearest the map
+   strip, capped below the vertically centred side chip and scrolling past that. Honesty statements:
+   never faded (docs/23 §10.2).
+   T-919: that stack reached ~560 x 184 px — a large PERMANENT overlay, against P1 (§10.6 rule 1:
+   an overlay exists to be closed, and its default state is its smallest). So it is a compact LINE
+   by default (`.sf-status-line`: the viewport's where/level-tier with its Retune, the colour scale,
+   the hover readout) with the paragraphs behind a toggle and a visible dismiss (`.sf-status-body`).
+   Never faded, and never closeable to nothing: the tier/level and the scale are on the picture in
+   every state. */
+.sf-status {
+  position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 110px) + 30px); /* clear of the HUD's frequency labels */
+  /* Clear of the right-edge cluster at every width: at 420 px the zoom stack docks above the FAB
+     (`chrome/phone.css`), and a line run to the window's edge put its own controls under it. */
+  max-width: min(560px, calc(100% - 80px));
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none;
 }
-/* T-506: the actions never shrink (`flex: 0 0 auto`). With `min-width: 0` they did, and the range
-   sentence beside them was then painted over the buttons that overflowed — measured in a browser at
-   1440 px, the centre of "Whole surface" hit-tested to `.sf-range`, so a real click did nothing. The
-   sentence is the thing that yields: it already ellipsises.
-   T-528: and when even the un-shrunk row does not fit, the buttons WRAP rather than overflow. The
-   bar's grid row is `minmax(26px, auto)` (base.css) precisely so a wrapped second line grows the bar
-   instead of painting over the stage. */
-.sf-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; flex: 0 0 auto; }
-/* T-470: the colour scale, stated. It sits next to the actions rather than at the far end because a
-   fixed range that clips is only honest if the range is read, not hunted for. */
-.sf-range { flex: 1 1 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.sf-hover { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* T-919: the SENTENCES, shown on demand. Same stack of statements as before, same never-faded
+   chrome band — what changed is that they are not on the picture until they are asked for. */
+.sf-status-body {
+  pointer-events: auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%;
+  max-height: max(60px, calc(50% - var(--map-strip, 110px) - 66px)); overflow-y: auto;
+}
+.sf-status-body > * { flex: none; border: 1px solid var(--line); border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent); }
+.sf-status-body > :empty { display: none; }
+
+/* The always-visible line: the viewport's level/tier (the honesty statement §10.2 names, and the
+   row carrying T-476's persistent Retune), the colour-scale sentence (T-470), the hover readout,
+   and the two small controls that open and close the detail. ONE row: the level keeps its width and
+   the scale sentence is what gives way, so the tier and the two numbers survive the narrowest case. */
+.sf-status-line {
+  pointer-events: auto; display: flex; flex-wrap: nowrap; align-items: center; gap: 2px 6px;
+  max-width: 100%; min-width: 0; padding: 2px 4px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.sf-status-line > .sf-chrome { border: 0; background: none; padding: 0 4px; flex: 0 1 auto; min-width: 0; max-width: 52%; }
+.sf-status-line > .sf-readout { flex: 1 1 0; min-width: 0; }
+.sf-status-btns { display: flex; align-items: center; gap: 2px; flex: none; margin-left: auto; }
+.sf-status-toggle, .sf-status-close {
+  min-height: 20px; padding: 0 6px; border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--muted); font: 11px var(--ui); line-height: 1; cursor: pointer;
+}
+.sf-status-close { min-width: 22px; font-size: 15px; }
+.sf-status-toggle:hover, .sf-status-toggle:focus-visible,
+.sf-status-close:hover, .sf-status-close:focus-visible { border-color: var(--line); color: var(--text); }
+
+/* Collapsed, the viewport row is ONE LINE: the level/tier it was drawn at, and its Retune. What is
+   put away is either detail (the row's id, the frame's tile counts, the offer's sentence, the
+   intermediate ruler, the width presets) or already stated elsewhere on the picture: the pane's
+   window is the HUD's own frequency and time labels (T-805), and the minimap's level — with the
+   sentence explaining why it legitimately differs from the pane's — belongs with the strip it
+   describes, which is an overview by construction. All of it is one press away. */
+.sf-status:not([data-open="true"]) .sf-chrome { max-height: 46px; } /* the level line, plus the offer's line when one is painted */
+.sf-status:not([data-open="true"]) .hk-surface-viewport { flex-wrap: nowrap; overflow: hidden; }
+.sf-status:not([data-open="true"]) .hk-surface-viewport[data-viewport="minimap"] { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-level-note { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-id { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-where { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-counts { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-ruler { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-widths { display: none; }
+/* The offer's SENTENCE stays with its button, always: the painted-offer discipline (T-476/T-407) is
+   that a press lands where the row SAID, so a pressable control whose destination is not on screen
+   is the one thing this collapse may not do. It takes its own line, clipped to one — the sentence
+   leads with the destination, the button's title carries it whole, and expanding shows it in full. */
+.sf-status:not([data-open="true"]) .hk-surface-why {
+  flex-basis: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+/* The one control on the row keeps its size whatever the width: T-476 made Retune persistent
+   because the user's report was that it appeared only sporadically, and a button squeezed out of a
+   nowrap row is the same absence by another route. The level beside it is what ellipsises. */
+.sf-status:not([data-open="true"]) .hk-surface-action { flex: none; }
+.sf-status:not([data-open="true"]) .hk-surface-level { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* At phone width there is no room for the level and the scale on one row, and ellipsising both
+   would cut the tier out of the one statement that may not be cut. They wrap instead (§10.5). */
+@media (max-width: 600px) {
+  .sf-status-line { flex-wrap: wrap; }
+  .sf-status-line > .sf-chrome { max-width: 100%; }
+}
+.sf-readout {
+  display: flex; flex-direction: column; gap: 2px; border: 0;
+  padding: 3px 8px; pointer-events: none; min-width: 0;
+  background: none;
+  font: 11px var(--mono); color: var(--muted);
+}
+.sf-range, .sf-hover { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sf-hover:empty { display: none; }
 
 .sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }
 /* T-508: capture recovering or ended, said over the picture. A frozen edge that looks live is the
@@ -61,11 +120,6 @@
   /* The surface owns its own pan and zoom, so the browser must not also scroll or pinch it. */
   touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none;
 }
-
-/* T-442/T-347: a viewport following the growing edge, versus one frozen on a past window. Pausing
-   is a view change and reaches nothing — the button says which state this viewport is in, never
-   what the radio is doing. */
-.sf-live.on { color: var(--teal); border-color: var(--teal); }
 
 /* T-444's retune offer used to live in this bar, appearing only when a pan left the tuned window.
    T-476 made it a PERSISTENT PER-PANE control, so it moved to the viewport rows in `.sf-chrome` and
@@ -105,3 +159,97 @@
   font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
   overflow-wrap: anywhere;
 }
+
+/* T-805 (MAP-05): the HUD axes' labels. Band 2 — screen-space text over the canvas — but every label
+   is placed per render frame by `surface/hud.ts` from the same ruler the ticks (band 0, on the canvas)
+   were stroked from, so a label cannot sit anywhere but on its tick. `pointer-events: none` so a
+   label never takes a pan from the surface; a text shadow instead of a backing wash, because a wash
+   would tint the measurement under it. Fades with the floating chrome (`chrome-idle`, docs/23 §10.2). */
+.sf-hud { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; transition: opacity .4s; }
+.sf-hud:is(body.chrome-idle *) { opacity: .45; }
+.sf-hud-label {
+  position: absolute; left: 0; top: 0; white-space: nowrap; font: 11px var(--mono); line-height: 1.2;
+  color: #d5dee2; text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+}
+.sf-hud-label span { color: #8595a0; margin-left: 6px; }
+.sf-hud-label span:empty { display: none; }
+/* Frequency: centred on its tick, sitting just above the pane's bottom edge (the ticks rise from it). */
+.sf-hud-label.freq { margin-top: -30px; translate: -50% 0; }
+/* Time: just right of the tick, vertically centred on it. */
+.sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }
+
+/* T-812 (MAP-12): band-plan priors. The canvas labels are band 2 like the HUD's — placed per frame
+   by `surface/priors.ts` from the pane's own box, pointer-transparent so a label never takes a pan,
+   italic lavender and always prefixed "prior", so a suggestion can never read as a detection. The
+   ranked reasoning is the readout under the stage (`.sf-priors`), in the backend's own words. */
+.sf-priors-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.sf-prior-label {
+  position: absolute; left: 0; top: 0; white-space: nowrap; font: italic 11px var(--mono); line-height: 1.25;
+  color: #a395e0; text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+}
+.sf-prior-label span { display: block; font-size: 10px; color: #8a80b8; }
+.sf-prior-label.off-raster span { color: #f0a542; }
+.sf-priors {
+  font: 10.5px var(--mono); color: #a395e0; padding: 4px 12px; overflow-wrap: anywhere;
+}
+.sf-priors ol { margin: 2px 0 0 18px; padding: 0; color: var(--muted); }
+.sf-priors li.off-raster { color: #f0a542; }
+/* T-809 (MAP-09): pins — band 1, DOM, placed every render frame by `surface/pins.ts`. The container
+   AND each pin are `pointer-events: none`: the pointer reaches a pin through the canvas's own handler
+   and the pin quadtree, so a drag or wheel over a pin still pans and zooms. Each pin is a focusable
+   <button> with a 24 px hit area and an ≥ 11 px glyph whose SHAPE carries the kind (docs/24 §14.2):
+   Confirmed filled square, Candidate open diamond, unexplained open circle with `?`, my marker a
+   filled pennant. Selected adds a ring and hover/focus a scale — never hue alone. */
+.sf-pins { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.sf-pin {
+  position: absolute; left: 0; top: 0; width: 24px; height: 24px; margin: -12px 0 0 -12px; padding: 0;
+  border: 0; background: none; pointer-events: none; display: grid; place-items: center;
+  color: var(--teal); font: 600 9px/1 var(--mono);
+}
+.sf-pin::before { content: ""; display: block; box-sizing: border-box; transition: scale .12s; }
+.sf-pin.confirmed { color: var(--teal); }
+.sf-pin.confirmed::before { width: 11px; height: 11px; background: currentColor; outline: 1px solid rgba(0, 0, 0, .7); }
+.sf-pin.candidate { color: var(--lav); }
+.sf-pin.candidate::before { width: 10px; height: 10px; rotate: 45deg; border: 2px solid currentColor; background: rgba(13, 19, 23, .7); }
+.sf-pin.unknown { color: var(--amber); }
+.sf-pin.unknown::before { width: 12px; height: 12px; border-radius: 50%; border: 2px solid currentColor; background: rgba(13, 19, 23, .7); }
+.sf-pin.unknown::after { content: "?"; position: absolute; }
+.sf-pin.curated { color: var(--cream); }
+.sf-pin.curated::before {
+  width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent;
+  border-bottom: 12px solid currentColor; filter: drop-shadow(0 0 1px rgba(0, 0, 0, .9));
+}
+.sf-pin.hovered::before, .sf-pin:focus-visible::before { scale: 1.3; }
+.sf-pin:focus-visible { outline: 2px dashed var(--fg, #d5dee2); outline-offset: -2px; border-radius: 4px; }
+.sf-pin.selected { border-radius: 50%; box-shadow: inset 0 0 0 2px var(--amber), 0 0 6px var(--amber); }
+/* User decision 2026-09-24 / T-910: a signal is a rectangle, and the map is GIS. A detection draws
+   NO DOM glyph at all: the detections layer draws its box in its class symbology, or — under 6 px in
+   both axes — its generalized symbol. Its button is only an invisible hit/focus target: `area` over
+   the visible box (sized per frame by `PinLayer.update`), `symbol` over the symbol. Selection is the
+   overlay's heavier outline + corner handles, so the button adds no ring of its own. */
+.sf-pin.area { margin: 0; background: none; box-shadow: none; border-radius: 0; }
+.sf-pin.symbol, .sf-pin.symbol.selected { background: none; box-shadow: none; }
+.sf-pin.area::before, .sf-pin.area::after, .sf-pin.symbol::before, .sf-pin.symbol::after { content: none; display: none; }
+/* T-910: feature labels (freq · bw · class), placed and thinned per frame by `placeLabels`. Text
+   only: never a pointer target, never focusable (the button carries the accessible name). */
+.sf-flabels { position: absolute; inset: 0; pointer-events: none; }
+.sf-flabel {
+  position: absolute; left: 0; top: 0; height: 13px; padding: 0 3px; white-space: nowrap;
+  font: 10px/13px var(--mono); color: #e8eef0; background: rgba(13, 19, 23, .62); border-radius: 2px;
+}
+.sf-flabel.confirmed { color: var(--teal); font-weight: 600; }
+.sf-flabel.candidate { color: var(--lav); }
+.sf-flabel.unexplained { color: var(--amber); font-weight: 600; }
+.sf-flabel.selected { outline: 1px solid currentColor; }
+.sf-pins-over {
+  position: absolute; right: 8px; top: 8px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(13, 19, 23, .8); color: var(--lav); font: 10.5px var(--mono);
+}
+/* The MapTip: a lightweight readout beside the hovered/focused pin. Reads loaded state only. */
+.sf-maptip {
+  position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; white-space: pre-line;
+  max-width: 280px; padding: 6px 9px; border-radius: 6px; background: rgba(19, 27, 32, .94);
+  border: 1px solid rgba(255, 255, 255, .12); color: #d5dee2; font: 11px/1.45 var(--mono);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+}
+.sf-maptip::first-line { font-weight: 600; color: #fff; }

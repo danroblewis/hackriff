@@ -44,6 +44,7 @@ import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
+import { LiveRowFeeds, type RowOpener } from "./rowfeed";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
@@ -493,6 +494,40 @@ export function dragIntent(e: PointerLike): "pan" | "region" {
   return e.shiftKey === true ? "region" : "pan";
 }
 
+/**
+ * **Touch has no Shift, so a finger says "region" by waiting** (T-824, docs/23 §10.5: "region
+ * select = the retune *offer*"). A finger that rests at least this long before it travels
+ * [[DRAG_PX]]-worth marks out a region; one that moves sooner pans. It is the phone's own
+ * long-press-then-drag-to-select, and — like shift — it is decided ONCE, at the moment the stroke
+ * first travels, and latched: a stroke that has started panning can never become a region, and a
+ * region stroke never pans. A region still only *offers* a retune (T-444/T-476): nothing here, and
+ * nothing the stroke commits, reaches a device route.
+ */
+export const HOLD_TO_MARK_MS = 450;
+
+/** The touch twin of [[dragIntent]]: what a single finger's stroke means, from how long it rested
+ * at the press before it first travelled. `heldMs` below zero or non-finite is a pan. */
+export function touchIntent(heldMs: number): "pan" | "region" {
+  return Number.isFinite(heldMs) && heldMs >= HOLD_TO_MARK_MS ? "region" : "pan";
+}
+
+/** The smallest finger spread a pinch is credited with, CSS px, so two fingers meeting cannot divide
+ * by zero or fling the zoom (the same guard `navigators.ts` keeps for its strip). */
+export const MIN_PINCH_SPREAD_PX = 12;
+
+/**
+ * **A two-finger pinch is the touch twin of a plain wheel** (T-824, docs/23 §10.5: "pinch = zoom
+ * (view)"): uniform on both axes, so it takes [[SurfacePreview.wheel]]'s aspect lock, anchored at the
+ * fingers' midpoint by the caller. `factor` is `PaneModel`'s convention — `> 1` zooms out — so
+ * fingers spreading apart (`spread > prevSpread`) zoom in. Clamped per event to the same 4x bound as
+ * [[zoomFactor]]. A view change only: it never reaches a route.
+ */
+export function pinchZoom(prevSpread: number, spread: number): { factor: number; axes: { freq: boolean; time: boolean } } {
+  const a = Math.max(MIN_PINCH_SPREAD_PX, Number.isFinite(prevSpread) ? prevSpread : 0);
+  const b = Math.max(MIN_PINCH_SPREAD_PX, Number.isFinite(spread) ? spread : 0);
+  return { factor: Math.min(4, Math.max(0.25, a / b)), axes: { freq: true, time: true } };
+}
+
 export interface PreviewOptions {
   canvas: HTMLCanvasElement;
   probe: SurfaceProbe;
@@ -545,6 +580,8 @@ export interface PreviewOptions {
    * nothing drawn here can tint a measurement.
    */
   marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /** Per-pane coverage-fog visibility (T-807), forwarded to `SurfaceView`'s `fog`. */
+  fog?: ((paneId: string) => boolean) | null;
   /**
    * **The instantaneous spectrum trace** (T-457): quads for the strip carved off the top of each
    * pane. Like `marks`, a function called per frame — but handed the `PaneReport` the data pass just
@@ -556,6 +593,11 @@ export interface PreviewOptions {
   trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of that strip, device px. 0 draws no trace and gives the space back to the pane. */
   tracePx?: number;
+  /** HUD axes (T-805, `./hud.ts`): the label layer, and the chrome's fade asked every frame. */
+  hud?: HTMLElement | null;
+  hudAlpha?: (() => number) | null;
+  /** Band-1 DOM marks laid out in the render frame (T-809, `./pins.ts`). See `SurfaceViewOptions.dom`. */
+  dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
   /**
    * **Ask the coverage map before asking for tiles** (T-580, `./survey.ts`): how this host reads
    * `GET /api/coverage` for the survey. Supplied, no tile is requested until the first survey lands,
@@ -566,6 +608,13 @@ export interface PreviewOptions {
   survey?: ((path: string) => Promise<unknown>) | null;
   /** The clock the survey cadence is measured on, ms. Injected by tests; never a capture time. */
   now?: () => number;
+  /**
+   * **The transport for `GET /ws/tiles/rows`** (T-893, `./rowfeed.ts`'s [[wsRowOpener]] in a
+   * browser). Supplied with an `edge`, every column a FOLLOWING pane draws at its live edge holds a
+   * row subscription and rows reach the screen as they are recorded, instead of when the polling
+   * lane next comes round. Omitted, the live edge advances by polling alone (T-460), as before.
+   */
+  rows?: RowOpener | null;
 }
 
 /**
@@ -598,6 +647,8 @@ export class SurfacePreview {
   private surveyFloorNs = Number.POSITIVE_INFINITY;
   /** The survey requests this host has built, in order — the T-367 guard reads them. */
   readonly surveyRequests: string[] = [];
+  /** Pushed rows for the following panes' columns (T-893); null without a transport or an edge. */
+  readonly rowFeeds: LiveRowFeeds | null;
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
@@ -608,6 +659,10 @@ export class SurfacePreview {
     this.edgeSeen = probe.origin.edgeNs;
     this.surveyFn = opts.survey ?? null;
     this.nowMs = opts.now ?? (() => Date.now());
+    // A historical surface (no edge) follows nothing, so it never opens a feed.
+    this.rowFeeds = opts.rows && this.edgeFn
+      ? new LiveRowFeeds(opts.rows, (col, block) => this.view.surface.cache.applyRows(col, block), { now: this.nowMs })
+      : null;
     this.view = new SurfaceView({
       canvas: opts.canvas,
       lattice: probe.lattice,
@@ -627,8 +682,12 @@ export class SurfacePreview {
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
+      fog: opts.fog ?? null,
       trace: opts.trace ?? null,
       tracePx: opts.tracePx ?? 0,
+      hud: opts.hud ?? null,
+      hudAlpha: opts.hudAlpha ?? null,
+      dom: opts.dom ?? null,
     });
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
@@ -736,15 +795,23 @@ export class SurfacePreview {
    */
   private refreshLiveEdge(f: SurfaceFrame): void {
     const following: Viewport[] = [];
+    const panes: Viewport[] = [];
     for (const r of f.reports) {
       const v = f.views.find((x) => x.id === r.id);
       if (!v) continue;
-      const live = r.id === this.view.minimap.id
-        ? this.view.minimap.following
-        : this.view.panes.isFollowing(r.id);
-      if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
+      const map = r.id === this.view.minimap.id;
+      const live = map ? this.view.minimap.following : this.view.panes.isFollowing(r.id);
+      if (!live) continue;
+      following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
+      if (!map) panes.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
     }
-    if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+    // Called with an EMPTY list too: that is how the cache learns nothing follows any more, and
+    // drops the next-row look-ahead it was holding for a pane that has since frozen (T-890).
+    this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+    // **Rows pushed to the columns a following PANE draws** (T-893). The map is left to the polling
+    // lane: its coarse rows commit every 2^level cells, and the route's feeds are few (16 a server).
+    // A pane that froze drops out of `panes`, which closes its feeds — pausing never follows.
+    this.rowFeeds?.want(this.view.surface.cache.liveColumns(this.view.surface.lat, f.edgeNs, panes));
   }
 
   /**
@@ -851,6 +918,7 @@ export class SurfacePreview {
   dispose(): void {
     this.disposed = true;
     if (this.raf) cancelAnimationFrame(this.raf);
+    this.rowFeeds?.close();
     this.view.dispose();
   }
 

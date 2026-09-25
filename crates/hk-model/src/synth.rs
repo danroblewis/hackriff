@@ -11,11 +11,16 @@
 //! [`crate::classify`] and `hk-classify` re-exports them. `hk-synth` re-exports every item
 //! here, so `hk_synth::Stage` is the name the ADR uses. (Recorded in ADR-0015 §16, delta D1.)
 //!
-//! This module holds data only: no scoring, no nulls, no calibration. A `bits` value in an
-//! [`Evidence`] is whatever the emitting block computed against its own null; the engine (not
-//! the block) subtracts the look-elsewhere cost (ADR-0015 §2.2).
+//! This module holds data plus the **analytic** nulls ([`null`], T-853): no calibration and no
+//! scoring. A `bits` value in an [`Evidence`] is what the emitting block computed against its
+//! own null — the closed-form tail for an analytic metric ([`MetricId::is_analytic`]), and
+//! **0.0** for a calibrated one, which `hk-synth` scores against the block's calibration table
+//! (a block cannot read a table: `hk-synth` owns them). The engine (not the block) subtracts the
+//! look-elsewhere cost (ADR-0015 §2.2).
 
 use serde::{Deserialize, Serialize};
+
+pub mod null;
 
 /// The closed synthesis stage ladder, S0–S6 (ADR-0015 §1.1). Adding a stage is a contract change.
 ///
@@ -25,7 +30,8 @@ use serde::{Deserialize, Serialize};
 pub enum Stage {
     /// Channel: runtime DDC, `mix`, `lowpass`, `resample`.
     S0,
-    /// Demodulation: `fm_demod`, `am_demod`, `fsk_demod`, `msk_demod`, `psk_demod`, `subcarrier`.
+    /// Demodulation: `fm_demod`, `am_demod`, `fsk_demod`, `msk_demod`, `psk_demod`, `subcarrier`,
+    /// `stereo_decode`.
     S1,
     /// Clock recovery: `clock_recovery`.
     S2,
@@ -152,6 +158,25 @@ impl MetricId {
                 | MetricId::FieldFit
                 | MetricId::IdentityRecurrence
                 | MetricId::Plausibility
+        )
+    }
+
+    /// Whether the metric's analytic null is one **ADR-0022 §2.1's table lists as contributing**
+    /// to `analytic_holdout_bits` — the confirm key.
+    ///
+    /// This is deliberately **narrower** than [`Self::is_analytic`], which answers a different
+    /// question (does this metric have a closed-form tail, so no calibration table is consulted).
+    /// §2.1's table names exactly `check_distinct_valid`, `sync_excess`, `field_fit` and
+    /// `identity_recurrence`; `sync_regularity` and `plausibility` are not in it, so they rank,
+    /// prune and report like any other metric but **never pay for an irreversible confirm**. On a
+    /// one-way door a metric the ADR did not price is charged as if it were calibrated.
+    pub const fn pays_for_confirm(self) -> bool {
+        matches!(
+            self,
+            MetricId::SyncExcess
+                | MetricId::CheckDistinctValid
+                | MetricId::FieldFit
+                | MetricId::IdentityRecurrence
         )
     }
 
@@ -384,6 +409,36 @@ mod tests {
         // The S4–S6 metrics, and only those, have analytic nulls.
         let analytic: Vec<_> = MetricId::ALL.iter().filter(|m| m.is_analytic()).collect();
         assert_eq!(analytic.len(), 6);
+    }
+
+    /// T-884 item 7. ADR-0022 §2.1's table lists four metrics as contributing to the confirm key,
+    /// and `sync_regularity`/`plausibility` are not among them — they have closed-form nulls (so
+    /// [`MetricId::is_analytic`], which decides whether a calibration table is consulted, holds)
+    /// but they may not pay for an irreversible confirm.
+    #[test]
+    fn t884_only_adr0022_2_1s_four_metrics_pay_for_a_confirm() {
+        let pays: Vec<&str> = MetricId::ALL
+            .iter()
+            .filter(|m| m.pays_for_confirm())
+            .map(|m| m.as_str())
+            .collect();
+        assert_eq!(
+            pays,
+            [
+                "sync_excess",
+                "check_distinct_valid",
+                "field_fit",
+                "identity_recurrence"
+            ]
+        );
+        // Every payer has an analytic null; not every analytic null pays.
+        for m in MetricId::ALL {
+            assert!(!m.pays_for_confirm() || m.is_analytic(), "{m:?}");
+        }
+        assert!(MetricId::SyncRegularity.is_analytic());
+        assert!(!MetricId::SyncRegularity.pays_for_confirm());
+        assert!(MetricId::Plausibility.is_analytic());
+        assert!(!MetricId::Plausibility.pays_for_confirm());
     }
 
     #[test]

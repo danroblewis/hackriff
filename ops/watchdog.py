@@ -54,6 +54,7 @@ try:
 except Exception:                                  # never let the alert path stop the watchdog
     def notify(level, title, body="", key=None):   # type: ignore[misc]
         return False
+from roles import LIVE_ROLES, ROLE_SESSION        # ops/roles.py, the one role->session map
 
 S = os.environ.get("HACKRIFF_OPS") or os.path.expanduser("~/.hackriff-ops")
 STATE = os.path.join(S, "watchdog.json")
@@ -72,6 +73,11 @@ DASH_CPU = 200.0            # (d) the dashboard's own ceiling
 DASH_RSS_MB = 1536.0
 DASH_FOR = 120
 LOAD_FOR = 300              # (e) load over budget for five minutes
+LIVENESS_EVERY = 60         # (f) check the role sessions at most once a minute ...
+LIVENESS_MISSES = 2         #     ... relaunch after this many consecutive missed checks ...
+RELAUNCH_GAP = 600          #     ... and never the same role twice inside ten minutes
+LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.sh")
+CLAUDE_RE = re.compile(r"(\S*/)?claude(\s|$)")
 
 #: Core budget per owner, from ops/README.md: the gate's reserve is 14, a worker is bounded to 3
 #: by cpulimit, a role session to `ROLE_CPU_PCT` (800 = 8). `sccache` gets the build reserve it
@@ -289,12 +295,15 @@ def attribute(rows: list[dict], claims: dict | None = None) -> dict[int, str]:
     `owners()` reports them as UNOWNED rather than folding them into a neighbour."""
     claims = claims or {}
     claim_pids: dict[int, str] = {}
+    claim_wts: list[tuple[str, str]] = []
     for tid, c in claims.items():
         if isinstance(c, dict) and c.get("state") == "running" and c.get("pid"):
             try:
                 claim_pids[int(c["pid"])] = str(c.get("ticket") or tid)
             except (TypeError, ValueError):
                 pass
+            if c.get("wt"):
+                claim_wts.append((str(c["wt"]).rstrip("/") + "/", str(c.get("ticket") or tid)))
 
     by_pid = {r["pid"]: r for r in rows}
     direct = {r["pid"]: o for r in rows if (o := anchor_owner(r, claim_pids))}
@@ -318,6 +327,11 @@ def attribute(rows: list[dict], claims: dict | None = None) -> dict[int, str]:
         up = owner_of(row["ppid"], depth + 1)
         if up is None and row["pgid"] != pid:
             up = owner_of(row["pgid"], depth + 1)
+        # A worker's background shell is reparented to launchd, so its test binaries and servers lose
+        # the ancestry to the claim; they still RUN FROM its worktree (2026-09-24: T-577's own
+        # degenerate_null test, T-882's and T-901's twice - each alarmed 'unowned, kill it').
+        if up is None:
+            up = next(("worker:" + t for wt, t in claim_wts if wt in row["cmd"]), None)
         if up is None:
             up = fallback_owner(row)
         if up is not None:
@@ -454,10 +468,162 @@ def evaluate(rows: list[dict], agg: dict, unowned: list[dict], load1: float,
                        "body": "Owners: " + ", ".join(f"{k} {v['cpu']:.0f}%" for k, v in
                                                       sorted(agg.items(), key=lambda kv: -kv[1]["cpu"]))
                                + "\nTop 5:\n" + "\n".join(top_consumers(rows, attr))})
+        since.setdefault("ob:start", now)
+        since["ob:peak"] = max(since.get("ob:peak", 0.0), load1)
+    # ONE 'recovered' line per episode (supervisor 2026-09-25 01:52: the user sleeps; an episode is one alarm - the
+    # key's dedupe - and one all-clear). Held under plan as long as the alarm needed to fire; its own key per episode,
+    # outside the prefixes that wake the pipeline manager, so it reaches Discord and pages nobody.
+    live.add("load-ok")
+    if "ob:start" in since and _held(since, "load-ok", load1 <= plan, now, LOAD_FOR):
+        start, peak = since.pop("ob:start"), since.pop("ob:peak", load1)
+        alarms.append({"rule": "recovered", "level": "green", "key": f"recovered:over-budget:{int(start)}",
+                       "title": f"box load recovered: {load1:.1f} vs plan {plan:.0f}",
+                       "body": f"over budget from {time.strftime('%H:%M', time.localtime(start))} for "
+                               f"{(now - start) / 60:.0f} min, peak {peak:.1f}"})
 
     for k in [k for k in since if k.split(":")[0] in ("unowned", "zombie") and k not in live]:
         since.pop(k, None)                          # the process is gone; forget its clock
     return alarms, kills
+
+
+# ---------------------------------------------------------------- role-session liveness
+# WHY (2026-09-24 04:07): a supervisor `pkill` took the coordinator (`dev`) and the pipeline
+# manager (`flow`) down with five workers, and nothing noticed for five and a half hours - every
+# runner kept going, and the alerts they relay were typed into sessions that no longer existed.
+def _tmux(*args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+
+
+def session_missing(session: str, rows: list[dict]) -> str | None:
+    """"" when `session` exists and runs claude; what is missing when it does not; None when we
+    cannot tell. `=` makes the target exact: tmux prefix-matches `-t dev` against any `dev…`.
+    ops/launch.sh `exec`s claude into the pane, so the pane pid is normally claude itself, but a
+    claude below it counts too. A `remain-on-exit` corpse is `#{pane_dead}` = 1. A live pane whose
+    pid is not in this tick's ps table is UNKNOWN: the table is older than the pane."""
+    r = _tmux("has-session", "-t", f"={session}")
+    if r is None:
+        return None
+    if r.returncode != 0:
+        return "no tmux session"
+    r = _tmux("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid} #{pane_dead}")
+    if r is None or r.returncode != 0:
+        return None                                  # a failed query is not a dead session
+    panes = [ln.split() for ln in r.stdout.splitlines() if len(ln.split()) == 2]
+    live = {int(p) for p, dead in panes if dead != "1" and p.isdigit()}
+    if not live:
+        return "pane dead (claude exited; remain-on-exit kept it)" if panes else None
+    by_pid = {row["pid"]: row for row in rows}
+    if any(p not in by_pid for p in live):
+        return None
+    kids: dict[int, list[dict]] = {}
+    for row in rows:
+        kids.setdefault(row["ppid"], []).append(row)
+    todo = [by_pid[p] for p in live]
+    seen: set[int] = set()
+    while todo:
+        row = todo.pop()
+        if row["pid"] in seen:
+            continue
+        seen.add(row["pid"])
+        if CLAUDE_RE.match(row["cmd"]):
+            return ""
+        todo.extend(kids.get(row["pid"], []))
+    return "session exists, no claude process in its pane"
+
+
+def relaunch(role: str, session: str, kill_first: bool, dry: bool) -> str:
+    """Kill a claude-less session (ops/launch.sh refuses an existing one) after saving its last
+    screen to the log - a failed launch's error is on it - then launch the role in its own
+    process group. Returns what happened, for the alert and the log."""
+    steps = [f"tmux kill-session -t ={session}"] if kill_first else []
+    steps.append(f"{LAUNCH} {role}")
+    if dry:
+        logline(f"DRY-RUN would relaunch {role}: " + " && ".join(steps))
+        return "dry-run: would run " + " && ".join(steps)
+    if kill_first:
+        r = _tmux("capture-pane", "-p", "-t", f"={session}")
+        screen = "\n".join((r.stdout.rstrip().splitlines() if r else [])[-40:])
+        logline(f"PANE {session} before kill-session:\n{screen}")
+        _tmux("kill-session", "-t", f"={session}")
+    try:
+        p = subprocess.run([LAUNCH, role], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL, start_new_session=True)
+        rc, out = p.returncode, (p.stdout + p.stderr).strip()
+    except Exception as e:
+        rc, out = -1, f"{type(e).__name__}: {e}"
+    tail = " | ".join(out.splitlines()[-4:])
+    logline(f"RELAUNCH {role} session={session} killed_first={kill_first} rc={rc} -- {tail[:600]}")
+    return f"ran {' && '.join(steps)}: exit {rc}\n{tail}"
+
+
+#: A deliberate stop: `/dev-env stop` writes roles-stopped, the full stop is dispatch-paused.
+#: Either one means the sessions are down on purpose - alert, never relaunch.
+STOP_MARKERS = ("dispatch-paused", "roles-stopped")
+RELAUNCH_TRIES = 3          # relaunches that came back dead on the next check, then give up
+
+
+def liveness(rows: list[dict], since: dict, now: float, dry: bool = False) -> list[dict]:
+    """(f) Red for each LIVE_ROLES session found dead; on the LIVENESS_MISSES-th consecutive miss,
+    relaunch it - at most once per RELAUNCH_GAP, never while a stop marker exists, and not after
+    RELAUNCH_TRIES relaunches that each came back dead. Counts live in `since`, like the rule
+    clocks, so they reset with the watchdog."""
+    if not rows or now - since.get("liveness:at", -1e18) < LIVENESS_EVERY:
+        return []                                    # no ps table is "unknown", never "dead"
+    since["liveness:at"] = now
+    stopped = [m for m in STOP_MARKERS if os.path.exists(os.path.join(S, m))]
+    alarms: list[dict] = []
+    for role in LIVE_ROLES:
+        session = ROLE_SESSION[role]
+        missing = session_missing(session, rows)
+        mk, lk = f"liveness:miss:{role}", f"liveness:launched:{role}"
+        vk, fk = f"liveness:verify:{role}", f"liveness:failed:{role}"
+        if missing is None:
+            continue
+        if not missing:
+            for k in (mk, vk, fk):
+                since.pop(k, None)
+            continue
+        if since.pop(vk, None):                      # the last relaunch came back dead
+            since[fk] = since.get(fk, 0) + 1
+        n = since[mk] = since.get(mk, 0) + 1
+        a = {"rule": "liveness", "level": "red", "key": f"watchdog:liveness:{role}",
+             "title": f"{role} is dead: tmux session '{session}': {missing}",
+             "body": f"Missed check {n} of {LIVENESS_MISSES} before a relaunch."}
+        alarms.append(a)
+        if n < LIVENESS_MISSES:
+            continue
+        if stopped:
+            a["body"] += f" Not relaunching: {', '.join(stopped)} exists (a deliberate stop)."
+            continue
+        if since.get(fk, 0) >= RELAUNCH_TRIES:
+            a["body"] += (f" giving up relaunching {role} after {RELAUNCH_TRIES} attempts - "
+                          f"see watchdog.log")
+            continue
+        ago = now - since.get(lk, -1e18)
+        if ago < RELAUNCH_GAP:
+            a["body"] += (f" Not relaunching: relaunched {ago:.0f}s ago (at most once per "
+                          f"{RELAUNCH_GAP}s). Relaunch by hand: ops/launch.sh {role}")
+            continue
+        kill_first = missing != "no tmux session"
+        if kill_first:                               # this tick's ps may be stale: look again
+            again = session_missing(session, read_ps())
+            if not again:
+                logline(f"LIVENESS {role}: claude present or unknown on re-read ({again!r}); no kill")
+                since.pop(mk, None)
+                alarms.remove(a)
+                continue
+        what = relaunch(role, session, kill_first, dry)
+        since[lk] = now
+        since[vk] = True
+        since.pop(mk, None)
+        alarms.append({"rule": "relaunch", "level": "red", "key": f"watchdog:relaunch:{role}",
+                       "title": f"relaunched {role} in tmux session '{session}'"
+                                + (" (killed the claude-less session first)" if kill_first else ""),
+                       "body": what})
+    return alarms
 
 
 # ---------------------------------------------------------------- tick
@@ -493,6 +659,39 @@ def kill_now(rows: list[dict]) -> list[int]:
     return done
 
 
+# ---------------------------------------------------------------- radio lock (T-922)
+RADIO_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "py", "hkpy", "radio.py")
+
+
+def _radio():
+    """py/hkpy/radio.py by path (stdlib only), so the watchdog needs no uv environment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hk_radio", RADIO_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def radio_stale(now: float, dry: bool = False) -> list[dict]:
+    """(g) A radio lock past its `until` is released, with a red alert: its owner overran its window
+    or died holding the radio, and staging stays on replay until the lock is gone. `--dry-run`
+    reports without removing it."""
+    try:
+        R = _radio()
+        lock = R.read(S)
+        if lock is None or not R.is_stale(lock, now):
+            return []
+        what = R.describe(lock, now)
+        if not dry:
+            R.release_stale(S, now)
+    except Exception as e:  # never let the lock path stop the watchdog
+        logline(f"radio-lock check failed: {e}")
+        return []
+    return [{"rule": "radio-stale", "level": "red", "key": "watchdog:radio-stale",
+             "title": f"stale radio lock {'would be ' if dry else ''}released: {lock['owner']}",
+             "body": f"{what}\nstaging goes back to LIVE on its next tick (ops/stage.sh)."}]
+
+
 def tick(since: dict, dry: bool = False) -> dict:
     rows = read_ps()
     claims = load_claims()
@@ -502,6 +701,8 @@ def tick(since: dict, dry: bool = False) -> dict:
     except Exception:
         load1 = 0.0
     alarms, kills = evaluate(rows, agg, unowned, load1, since, time.time(), claims)
+    alarms += liveness(rows, since, time.time(), dry)
+    alarms += radio_stale(time.time(), dry)
     killed = [] if dry else kill_now(kills)
     snap = {
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -589,6 +790,8 @@ def main(argv: list[str]) -> int:
         open(os.path.expanduser("~/.hackriff-ops/active-ops-dir"), "w").write(S + "\n")
     except Exception:
         pass
+    import launchpath
+    launchpath.check(__file__, logline)
     logline(f"START pid={os.getpid()} interval={INTERVAL}s ops={S}"
             + (" (dry-run)" if a.dry_run else ""))
     since: dict = {}

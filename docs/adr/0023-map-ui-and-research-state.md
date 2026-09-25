@@ -51,6 +51,8 @@ The canvas is `100vw × 100vh` (`position: fixed; inset: 0`). Everything else fl
 | 3 | 30 | screen | sheets and the Research slide-in | on interaction |
 | 4 | 40 | screen | transients: MapTip, retune offer, mode banner, errors | on interaction |
 
+**No overlay is draggable or repositionable; users choose visibility only** (docs/23 §10.6 rule 3, amended 2026-09-24, T-896): each band-2/3 panel has the one dock docs/23 §10.2 assigns it, and no dock position is persisted — only visibility and the sheet's snap (size) state.
+
 **Chrome floats in screen space; data floats in content space.** Band 1 is the only DOM allowed to be content-anchored, and it pays for that by being laid out inside the render frame — never on a data poll, never on a timer. A band-1 element positioned from a poll is the T-388 bug re-introduced, and is a defect, not a style.
 
 HUD axis *rules* (ticks) are band 0 strokes; their *labels* are band 2 text positioned from the same per-frame mapping. Splitting them this way is deliberate: a tick is data geometry, a label is chrome that must remain selectable and legible at any DPR.
@@ -64,6 +66,7 @@ type LayerId =
   | "coverage"        // data   — the four coverage states + shadow, via the one cell rule
   | "tier"            // data   — honesty-tier banding per pane
   | "detections"      // overlay— Confirmed / Candidate boxes
+  | "paths"           // overlay— traced (t, f) routes: chirps, sweeps, hop sequences (T-897)
   | "artifacts"       // overlay— image / harmonic / IMD connectors
   | "priors"          // overlay— band-plan allocations, as explanations
   | "rules"           // overlay— retention bound, IQ horizon, HUD ticks, time cursor
@@ -82,8 +85,9 @@ interface Layer {
 - **Planes render in a fixed order — `data`, then `overlay`, then `dom` — and `z` never crosses a plane.** No toggle, no ordering and no user preference can put a stroke under a measurement's colour or a DOM mark under a stroke.
 - **`overlay` layers are pure `(pane, edge) => OverlayQuad[]`.** They read the store through an accessor, place records through *that pane's own* `Box`/`PaneRect` mapping, and return strokes. They mutate nothing, read no other layer, and touch no global. They are composed — filtered by `visible`, sorted by `z`, concatenated — into the **single existing `marks` hook** (`ui/src/app/centre/surface.ts`, the `marks: (pane, edge) => OverlayQuad[]` callback `SurfacePreview` already takes). There is therefore still exactly one place overlay geometry is produced and one pass that draws it, and **the byte-identical-with-overlays-off guard needs no change and keeps its full force**.
 - **`data` layers are cell-rule/ramp state, not geometry.** They toggle uniforms on the existing single ramp module (T-397) and the single cell rule (`cellrule.ts`, T-440/T-520), which is why the coverage fog can honestly draw grey/`unknown`/`excluded`/shadow at all: it is the plane that owns state, and it remains the only thing that may paint a cell. The layers menu's "coverage fog" switch therefore sets a cell-rule flag; it does not add a quad.
+- **`paths` (T-897, docs/23 §10.6 rule 2)** is an ordinary `overlay` layer at `z` 25, between the boxes it belongs to and the user's research marks. Its records come from `GET /api/paths` — ordered `(t, f)` vertices at absolute capture time, derived server-side from stored detections (`hk_model::path`) — and are laid out per frame through the pane's own box by `ui/src/surface/paths.ts`. A sloped segment is drawn as a run of stroke-thick axis-aligned steps, so the overlay program gains no primitive and stays incapable of expressing a measurement colour; the byte-identical guard covers it unchanged.
 - **The registry is per pane** (a pane is where you look *from*). A new pane inherits the creating pane's registry by value and diverges thereafter.
-- **Default visible:** `base`, `coverage`, `detections`, `rules`, `pins`, and every collection whose stored `visible` is true. **Default hidden:** `tier` badges, `artifacts`, `priors`, `research`. Unknown and Candidate detections are **never** hidden by default, and any "explained-only" filter is an explicit, reversible opt-in that says it is hiding data.
+- **Default visible:** `base`, `coverage`, `detections`, `paths`, `rules`, `pins`, and every collection whose stored `visible` is true. **Default hidden:** `tier` badges, `artifacts`, `priors`, `research`. Unknown and Candidate detections are **never** hidden by default, and any "explained-only" filter is an explicit, reversible opt-in that says it is hiding data.
 
 ### 3. Pins are DOM, bounded by clustering, and never fabricate a timespan
 

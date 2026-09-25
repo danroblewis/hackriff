@@ -511,3 +511,374 @@ fn tm2_presence_and_family_in_window_are_additive_window_scoped_projections() {
         "and yet it was on the air in it: {sensor}"
     );
 }
+
+/// T-860 (ADR-0015 §5.4): an inventory row carries its latest analysis, summarised — `null`
+/// before any (not searched), the job's confirm outcome and confirm key after one — and a
+/// withheld row reads `null` whatever storage holds.
+#[test]
+fn inventory_row_summarises_the_latest_synthesis_and_withholds_it() {
+    use hk_api::query::inventory_entry_json;
+    use hk_model::repo::synthesis::{
+        EmitterSynthesis, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage, SynthPipeline, SynthesisJob,
+        Verdict,
+    };
+    use hk_model::{
+        Fingerprint, IdentityAccess, InventoryIdentity, LinkTarget, Repository, Sighting,
+        TimeRange, Timestamp, TrackId,
+    };
+    use serde_json::{Value, json};
+
+    let t = |s: i64| Timestamp::from_unix_nanos(1_800_000_000_000_000_000 + s * 1_000_000_000);
+    let mut repo = Repository::open_in_memory().unwrap();
+    let id = repo
+        .record_sighting(
+            &Sighting {
+                source: LinkTarget::Track(TrackId::new()),
+                seen: TimeRange::new(t(0), t(5)),
+                count: 3,
+                f_center_hz: 915e6,
+                bandwidth_hz: 12e3,
+                fingerprint: Some(Fingerprint::new(915e6, 12e3)),
+                identity: None,
+                context: None,
+                classification: None,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .unwrap()
+        .emitter_id;
+    let row = |repo: &Repository| {
+        let entry = repo
+            .emitter_with_access(id, IdentityAccess::Standard)
+            .unwrap();
+        inventory_entry_json(repo, &entry).unwrap()
+    };
+    let v = row(&repo);
+    assert_eq!(v["synthesis"], Value::Null, "not searched: {v}");
+    assert_eq!(v["identity_synthesized"], Value::Null, "no identity: {v}");
+
+    repo.insert_synthesis(&EmitterSynthesis {
+        emitter_id: id,
+        provenance: SYNTHESIZED_BY_OUTPUT_ANALYSIS.into(),
+        engine: "hk-synth@1".into(),
+        t: t(4),
+        verdict: Verdict::Solved,
+        stage_reached: Stage::S5Check,
+        pipeline: Some(SynthPipeline {
+            demod: "fsk_demod".into(),
+            decode: Some("crc".into()),
+            params: Vec::new(),
+            summary: "2-FSK at 9.6 kBd, CRC-16 framed".into(),
+        }),
+        evidence: Vec::new(),
+        trace: Vec::new(),
+        resolution: None,
+        receiver: None,
+        job: Some(SynthesisJob {
+            job_id: "a7".into(),
+            profile: "standard".into(),
+            evidence_bits: 60.0,
+            prior_bits: 1.5,
+            analytic_holdout_bits: Some(30.0),
+            template: None,
+            recipe: json!({ "schema": "hackriff.recipe" }),
+            recipe_hash: "sha256:00".into(),
+            check: None,
+            holdout: None,
+            trace_summary: None,
+            replay_key: None,
+            null_control: None,
+            sealed_resolution: None,
+            decodes_stored: 12,
+            decodes_valid: 12,
+            confirm: Some(json!({ "outcome": "confirmed" })),
+        }),
+    })
+    .unwrap();
+    let v = row(&repo);
+    let s = &v["synthesis"];
+    assert_eq!(s["verdict"], json!("solved"), "{v}");
+    assert_eq!(s["stage_reached"], json!("s5-check"), "{v}");
+    assert_eq!(
+        s["summary"],
+        json!("2-FSK at 9.6 kBd, CRC-16 framed"),
+        "{v}"
+    );
+    assert_eq!(s["resolution"], Value::Null, "{v}");
+    assert_eq!(s["job_id"], json!("a7"), "{v}");
+    assert_eq!(s["profile"], json!("standard"), "{v}");
+    assert_eq!(s["analytic_holdout_bits"], json!(30.0), "{v}");
+    assert_eq!(s["decodes_stored"], json!(12), "{v}");
+    assert_eq!(s["confirm"], json!("confirmed"), "{v}");
+    assert_eq!(s["t_s"], json!(1_800_000_004.0), "{v}");
+
+    let mut entry = repo
+        .emitter_with_access(id, IdentityAccess::Standard)
+        .unwrap();
+    entry.identity = InventoryIdentity::Withheld {
+        scheme: hk_model::IdentityScheme::Other("pocsag-capcode".into()),
+        class: None,
+    };
+    let v = inventory_entry_json(&repo, &entry).unwrap();
+    assert_eq!(v["synthesis"], Value::Null, "withheld: {v}");
+    assert_eq!(v["identity_synthesized"], Value::Null, "withheld: {v}");
+}
+
+/// T-860 review B2: a region-analyze job may not target a user-deleted entry — it would link
+/// decodes to it and append analyses under it. Refused at admission with `404`, as every mutating
+/// inventory route answers for a deleted entry; a live entry gets past target resolution (and
+/// this server, with no job manager, then answers `503`).
+#[test]
+fn an_analyze_job_may_not_target_a_deleted_entry() {
+    use hk_model::{LifecycleAuthor, LifecycleState, Timestamp};
+
+    let mut repo = Repository::open_in_memory().unwrap();
+    let seeded = seed::seed(&mut repo, T0).unwrap();
+    repo.change_emitter_lifecycle(
+        seeded.fsk,
+        LifecycleState::Deleted,
+        LifecycleAuthor::User,
+        "tok-test",
+        "not interesting",
+        Timestamp::from_unix_nanos(T0 * 1_000_000_000),
+    )
+    .unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        Token::from_config(TOKEN).unwrap(),
+    );
+    let dir = std::env::temp_dir().join(format!("t860-deleted-target-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = ApiState {
+        inventory: Some(Arc::new(Mutex::new(repo))),
+        audit: Some(Arc::new(
+            hk_api::AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+        )),
+        ..ApiState::default()
+    };
+    let server = Server::start(config, state).unwrap();
+    let addr = server.local_addr();
+    let post = |body: Value| {
+        let body = body.to_string();
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(
+            s,
+            "POST /api/analyze HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut raw = String::new();
+        s.read_to_string(&mut raw).unwrap();
+        let status: u16 = raw[9..12].parse().unwrap();
+        let body = raw.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+        (
+            status,
+            serde_json::from_str::<Value>(body).unwrap_or(Value::Null),
+        )
+    };
+    let (st, v) = post(json!({ "emitter_id": seeded.fsk.to_string(), "profile": "quick" }));
+    assert_eq!(st, 404, "a deleted target is refused: {v}");
+    let (st, v) = post(json!({ "emitter_id": seeded.carrier.to_string(), "profile": "quick" }));
+    assert_eq!(
+        st, 503,
+        "a live target resolves, and only the missing job manager refuses: {v}"
+    );
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T-566 (ADR-0021 §7A.4, §11.1): every inventory row carries a `resolution`, and `?resolution=`
+/// filters on it.
+///
+/// > *Not-yet-analysed and analysed-and-found-nothing are different states, and neither may be
+/// > rendered as the other.*
+///
+/// So an emitter nothing has analysed reads `kind: "not-searched"` with no time — never `null`,
+/// never `unknown` — a finished search that identified nothing reads its own sealed kind and the
+/// time and profile it was measured at, a solved row reads `kind: null` (no unresolved finding),
+/// and a withheld-identity row reads every field `null` with `withheld: true` rather than
+/// borrowing the un-looked-at answer. The filter reads the same stored row the field is served
+/// from, so the two cannot disagree, and it never matches a withheld row.
+#[test]
+fn the_inventory_row_and_filter_keep_not_searched_apart_from_unknown_and_solved() {
+    use hk_api::query::inventory_entry_json;
+    use hk_model::repo::synthesis::{
+        EmitterSynthesis, Resolution, ResolutionKind, ResolutionReason,
+        SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage, SynthPipeline, SynthesisJob, Verdict,
+    };
+    use hk_model::{
+        Fingerprint, IdentityAccess, InventoryIdentity, InventoryQuery, LinkTarget, Repository,
+        Sighting, TimeRange, Timestamp, TrackId,
+    };
+    use serde_json::{Value, json};
+
+    let t = |s: i64| Timestamp::from_unix_nanos(1_800_000_000_000_000_000 + s * 1_000_000_000);
+    let mut repo = Repository::open_in_memory().unwrap();
+    let sight = |f_hz: f64| Sighting {
+        source: LinkTarget::Track(TrackId::new()),
+        seen: TimeRange::new(t(0), t(5)),
+        count: 3,
+        f_center_hz: f_hz,
+        bandwidth_hz: 12e3,
+        fingerprint: Some(Fingerprint::new(f_hz, 12e3)),
+        identity: None,
+        context: None,
+        classification: None,
+        tags: Vec::new(),
+    };
+    // Two emitters: one will be analysed, the other never is.
+    let looked = repo
+        .record_sighting(&sight(915e6), None)
+        .unwrap()
+        .emitter_id;
+    let never = repo
+        .record_sighting(&sight(433.92e6), None)
+        .unwrap()
+        .emitter_id;
+    let row = |repo: &Repository, id| {
+        let entry = repo
+            .emitter_with_access(id, IdentityAccess::Standard)
+            .unwrap();
+        inventory_entry_json(repo, &entry).unwrap()
+    };
+    let listed = |repo: &Repository, kind: Option<ResolutionKind>| {
+        let q = InventoryQuery {
+            resolution: kind,
+            ..InventoryQuery::default()
+        };
+        let ids: Vec<String> = repo
+            .query_inventory(&q)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.emitter.id.to_string())
+            .collect();
+        // T-171: the count past the page answers the same filter.
+        assert_eq!(
+            repo.count_inventory(&q).unwrap(),
+            ids.len() as u64,
+            "{ids:?}"
+        );
+        ids
+    };
+
+    // ---- un-looked-at is a positive state, not an absent field ----
+    for id in [looked, never] {
+        let v = row(&repo, id);
+        let r = &v["resolution"];
+        assert_eq!(r["kind"], json!("not-searched"), "{v}");
+        assert_eq!((&r["reason"], &r["t"]), (&Value::Null, &Value::Null), "{v}");
+        assert_eq!(r["profile"], Value::Null, "{v}");
+        assert_eq!(r["withheld"], json!(false), "{v}");
+    }
+    assert_eq!(listed(&repo, Some(ResolutionKind::NotSearched)).len(), 2);
+    assert!(listed(&repo, Some(ResolutionKind::Unknown)).is_empty());
+    assert_eq!(listed(&repo, None).len(), 2, "no filter lists both");
+
+    // ---- a finished search that identified nothing: `unknown`, with when and how deep ----
+    let base = EmitterSynthesis {
+        emitter_id: looked,
+        provenance: SYNTHESIZED_BY_OUTPUT_ANALYSIS.into(),
+        engine: "hk-synth@1".into(),
+        t: t(4),
+        verdict: Verdict::Framed,
+        stage_reached: Stage::S4Framing,
+        pipeline: None,
+        evidence: Vec::new(),
+        trace: Vec::new(),
+        resolution: Some(Resolution {
+            kind: ResolutionKind::Unknown,
+            deepest_verdict: Some(Verdict::Framed),
+            reason: Some(ResolutionReason::BudgetExhausted),
+            summary: "9 of 11 skeletons tried; more budget is the missing ingredient".into(),
+        }),
+        receiver: None,
+        job: Some(SynthesisJob {
+            job_id: "a7".into(),
+            profile: "deep".into(),
+            evidence_bits: 41.2,
+            prior_bits: 1.5,
+            analytic_holdout_bits: None,
+            template: None,
+            recipe: json!({ "schema": "hackriff.recipe" }),
+            recipe_hash: "sha256:00".into(),
+            check: None,
+            holdout: None,
+            trace_summary: None,
+            replay_key: None,
+            null_control: None,
+            sealed_resolution: None,
+            decodes_stored: 0,
+            decodes_valid: 0,
+            confirm: None,
+        }),
+    };
+    repo.insert_synthesis(&base).unwrap();
+    let v = row(&repo, looked);
+    let r = &v["resolution"];
+    assert_eq!(r["kind"], json!("unknown"), "{v}");
+    assert_eq!(r["reason"], json!("budget-exhausted"), "{v}");
+    assert_eq!(r["t"], json!(1_800_000_004.0), "{v}");
+    assert_eq!(r["profile"], json!("deep"), "{v}");
+    assert_eq!(
+        listed(&repo, Some(ResolutionKind::Unknown)),
+        vec![looked.to_string()],
+        "the searched-and-found-nothing row, and only it"
+    );
+    assert_eq!(
+        listed(&repo, Some(ResolutionKind::NotSearched)),
+        vec![never.to_string()],
+        "the un-looked-at row is never listed as `unknown`"
+    );
+    assert!(listed(&repo, Some(ResolutionKind::StructuredUnidentified)).is_empty());
+
+    // ---- a later analysis that solved: no unresolved finding, and it matches no filter value ----
+    repo.insert_synthesis(&EmitterSynthesis {
+        t: t(9),
+        verdict: Verdict::Solved,
+        stage_reached: Stage::S5Check,
+        pipeline: Some(SynthPipeline {
+            demod: "fsk_demod".into(),
+            decode: Some("crc".into()),
+            params: Vec::new(),
+            summary: "2-FSK at 9.6 kBd, CRC-16 framed".into(),
+        }),
+        resolution: None,
+        ..base.clone()
+    })
+    .unwrap();
+    let v = row(&repo, looked);
+    let r = &v["resolution"];
+    assert_eq!(r["kind"], Value::Null, "solved: {v}");
+    assert_eq!(r["t"], json!(1_800_000_009.0), "the latest row: {v}");
+    for kind in [
+        ResolutionKind::Unknown,
+        ResolutionKind::NotSearched,
+        ResolutionKind::StructuredUnidentified,
+        ResolutionKind::UnsupportedStructure,
+    ] {
+        assert!(
+            !listed(&repo, Some(kind)).contains(&looked.to_string()),
+            "{kind:?}"
+        );
+    }
+
+    // ---- a withheld-identity row says nothing, and that is not `not-searched` ----
+    let mut entry = repo
+        .emitter_with_access(looked, IdentityAccess::Standard)
+        .unwrap();
+    entry.identity = InventoryIdentity::Withheld {
+        scheme: hk_model::IdentityScheme::Other("pocsag-capcode".into()),
+        class: None,
+    };
+    let v = inventory_entry_json(&repo, &entry).unwrap();
+    let r = &v["resolution"];
+    assert_eq!(r["withheld"], json!(true), "{v}");
+    for key in ["kind", "reason", "t", "profile"] {
+        assert_eq!(r[key], Value::Null, "{key}: {v}");
+    }
+}

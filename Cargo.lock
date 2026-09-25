@@ -1027,6 +1027,7 @@ dependencies = [
  "hk-recipe",
  "hk-store",
  "hk-stream",
+ "hk-synth",
  "libc",
  "num-complex",
  "rusqlite",
@@ -1105,10 +1106,13 @@ name = "hk-synth"
 version = "0.1.0"
 dependencies = [
  "hk-blocks",
+ "hk-core",
  "hk-demod",
+ "hk-dsp",
  "hk-estimate",
  "hk-model",
  "hk-recipe",
+ "num-complex",
  "serde",
  "serde_json",
 ]

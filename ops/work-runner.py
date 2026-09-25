@@ -37,11 +37,14 @@ import json
 import zlib
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 
 import yaml
 
@@ -105,7 +108,9 @@ QUEUE_PAUSE = int(os.environ.get("WORK_QUEUE_PAUSE", "6"))
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
+CLONE_TARGET = os.environ.get("WORK_CLONE_TARGET", "1") != "0"   # clone main's target/ into a new worktree
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
+IDLE_TARGET_H = float(os.environ.get("WORK_IDLE_TARGET_H", "2"))     # a kept worktree's target/ untouched this long is reclaimed
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # A branch that fails its merge gate goes back to the SAME worker: `claude -p --resume <session>`
@@ -113,6 +118,10 @@ REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # a fresh agent (or the coordinator) rediscovering everything. Capped like the merge runner's own
 # attempts; the coordinator hears about it only when the cap is spent.
 FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
+KILL_RESUMES = 2   # resumes of a run killed by a signal; not fix attempts - nothing failed
+# A work run that hits MAX_MINUTES is resumed ONCE to wrap up (commit what is done, hand back) instead of parking
+# for a person: five did on 2026-09-24 (T-852, T-878, T-888, T-887, T-904), each finished by hand afterwards.
+TIMEOUT_RESUMES = 1
 # A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
@@ -159,15 +168,22 @@ def attention(ticket, branch, kind, detail=""):
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
     # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
-    # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
-    # coordinator's routine and stay in the file only.
+    # dedupes per key and never raises; NO_WORK / UNCOMMITTED are the coordinator's routine and
+    # stay in the file only.
     level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info",
              "DEFLAKE_BLOCKED": "amber", "DEFLAKE_ERROR": "amber", "DEFLAKE_REVIEW_FAIL": "amber",
              "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
+    # "needs a person" only where no automation will pick it up (user, 2026-09-24 11:40): fix runs spent
+    # or impossible, a cancellation to confirm, a review FAIL no fix round will take (REVIEW_FAIL is only
+    # written then), and a BLOCKED hand-back that asks the user to decide.
+    person = kind in ("CONFLICT_ESCALATE", "GATE_FAIL_ESCALATE", "CONFLICT_NO_SESSION", "GATE_FAIL_NO_SESSION",
+                      "CANCEL_PROPOSED", "REVIEW_FAIL") or (kind == "BLOCKED" and re.search(r"\buser\b|decision", detail, re.I))
+    if person:
+        level = level or "amber"
     if level:
         try:
-            subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
-                            level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
+            subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"),
+                            level, f"{'needs a person - ' if person else ''}{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
                            capture_output=True, timeout=30)
         except Exception:
             pass
@@ -176,6 +192,9 @@ def attention(ticket, branch, kind, detail=""):
         if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:
             subprocess.run(["tmux", "send-keys", "-t", "dev", "-l", f"WORK-RUNNER: {ticket} {kind} - {detail[:160]} See {NEEDS}."], capture_output=True)
             subprocess.run(["tmux", "send-keys", "-t", "dev", "Enter"], capture_output=True)
+        else:   # incident 2026-09-24 04:07: the pane was gone 5.5 h and this returned quietly
+            subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"), "--no-receiver", "dev",
+                            f"WORK-RUNNER: {ticket} {kind} - {detail[:160]}"], capture_output=True, timeout=30)
     except Exception:
         pass
 
@@ -257,8 +276,9 @@ def disk_free_gb():
 def gate_running():
     # `gate-wanted` is the merge runner waiting for the running workers to drain so the gate can
     # run alone: to dispatch it is the same as a gate in progress, or the drain never completes.
+    # `rc-in-progress`: the daily release candidate (the acceptance phase on main) holds the gate's reserve too.
     return (os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
-            or os.path.exists(f"{S}/gate-wanted"))
+            or os.path.exists(f"{S}/gate-wanted") or os.path.exists(f"{S}/rc-in-progress"))
 
 
 # THE GATE SHARES THE BOX AGAIN (user, 2026-09-23 13:30). "The gate runs alone" (2026-09-22) was
@@ -369,7 +389,9 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "observed_but_not_chased": ["<an observed failure outside scope, with the exact evidence>", ...],
    "use_cases": ["<the use-case ids your tests assert on>", ...]}}
 The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
-"done" if any test exit is non-zero. A CANCEL is yours to propose with evidence in the repo; an Opus review
+"done" if any test exit is non-zero - unless that red is not yours: mark it "known_flake": true or
+"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A deliberate red
+proof (your new test on the old code, or the defect re-injected) is marked "expect": "red" and counts only beside a green run. A CANCEL is yours to propose with evidence in the repo; an Opus review
 confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
@@ -378,7 +400,265 @@ TICKET:
 """
 
 
-def launch(t, dry):
+def clone_cmd(wt):
+    """The shell that seeds a new worktree's target/ as an APFS clone of main's - or nothing when
+    WORK_CLONE_TARGET=0 (the worker then builds from sccache). Each clone is a pin that turns exclusive as
+    gates rebuild main's target/ (2026-09-24 18:11: 83 GB still shared across three workers, 101 GB free)."""
+    if not CLONE_TARGET:
+        return ""
+    return f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+
+
+# ---------- remote hosts (user, 2026-09-24 23:35: worker agents on a second computer) ----------
+# A remote host only WORKS - builds, targeted tests, hands back; the Mac alone gates and merges. The host has its own
+# roots (hosts.json `repo`, `ops`); every command, file and path that crosses ssh is rewritten from this Mac's REPO and
+# $HACKRIFF_OPS to them at the boundary (to_remote), so the rest of this runner keeps using its own paths.
+# The claim's pid is a plain local `ssh` running the remote wrapper: while it lives the run lives, and its
+# stdout/stderr stream into this Mac's out.json/run.log as for a local worker. The wrapper also records the remote
+# process group ({d}/remote.pgid) and tees both streams into the box's copy of the work dir, so a dropped
+# connection loses nothing: the reap asks the box whether that group still runs, re-attaches if it does, and
+# copies the complete files back when it ends. Every stop and every resume stops that group EXPLICITLY first.
+# {"node2": {"ssh": "ubuntu@10.198.1.109", "repo": "/home/ubuntu/hk/hackriff", "ops": "/home/ubuntu/hk/ops",
+#            "env": {"CHROME": "/snap/bin/chromium"}}} - the name is also this Mac's git remote for the host's mirror.
+HOSTS_FILE = f"{S}/hosts.json"      # absent = no remote host
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]
+_REMOTE_PATH = 'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; '
+
+
+def hosts():
+    try:
+        return json.load(open(HOSTS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+# Stage 2: a host takes work by itself while it is reachable and below its own cap (hosts.json `cap`); the Mac's
+# cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
+# Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
+REMOTE_DEFAULT_CAP = 2
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+PROBE_FRESH_S = 180
+
+
+def remote_eligible(t):
+    text = " ".join(str(t.get(k) or "") for k in ("title", "notes", "acceptance", "parallel_group"))
+    return t.get("needs") in (None, "", "none") and not _MAC_ONLY.search(text)
+
+
+def host_ready(h):
+    """The host's last per-tick probe is fresh and says reachable."""
+    try:
+        p = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        return False
+    return bool(p.get("reachable")) and time.time() - p.get("at", 0) < PROBE_FRESH_S
+
+
+def named_remote():
+    """Tickets named by hand for a remote host (WORK_REMOTE_TICKETS=T-nnn,...): never run on this Mac."""
+    return {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
+
+
+def slot_cap(host):
+    """How many workers a host takes: this Mac's dispatch cap, or the remote host's hosts.json cap."""
+    return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
+
+
+def host_for(t, claims=None):
+    """The remote host a ticket goes to, or None for this Mac. WORK_REMOTE_TICKETS=T-nnn,... still names tickets
+    by hand (they go to the first host whatever its cap)."""
+    named = named_remote()
+    hs = hosts()
+    if not hs:
+        return None
+    if t.get("id") in named:
+        return next(iter(hs))
+    if claims is None or not remote_eligible(t):
+        return None
+    for h, cfg in hs.items():
+        if host_ready(h) and busy_workers(claims, h) < slot_cap(h):
+            return h
+    return None
+
+
+def to_remote(host, text):
+    """This Mac's paths in `text` -> the host's (its ops dir, its clone)."""
+    h = hosts()[host]
+    return text.replace(S, h["ops"]).replace(REPO, h["repo"])
+
+
+def ssh_argv(host, remote_cmd):
+    # Explicit bash: the wrapper's `>(...)` is bash syntax, whatever the account's login shell is.
+    return ["ssh", *SSH_OPTS, hosts()[host]["ssh"], "bash -c " + shlex.quote(_REMOTE_PATH + to_remote(host, remote_cmd))]
+
+
+def remote_sh(host, remote_cmd, timeout=120, input=None):
+    """(returncode, stdout) of a command on the host; 255 = ssh itself failed (unreachable, key refused)."""
+    try:
+        r = subprocess.run(ssh_argv(host, remote_cmd), input=input, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except (subprocess.TimeoutExpired, KeyError) as e:
+        return 255, str(e)
+
+
+def remote_wrapper(wt, branch, script, env, d, out_name):
+    """The remote side of a run: the worker in its own session, its group id and both streams recorded on the box;
+    the branch pushed to the mirror when it ends, whatever its outcome (the Mac fetches it before the reap)."""
+    q = shlex.quote
+    envs = " ".join(f"{k}={q(str(v))}" for k, v in env.items())
+    inner = f"cd {q(wt)} && exec env {envs} nice -n 5 bash -c {q(script)}"
+    return (f"mkdir -p {q(d)}; "
+            # tee -p: a dropped connection (SIGPIPE on the channel) must not kill the copy on the host, nor the worker.
+            f"setsid bash -c {q(inner)} </dev/null > >(tee -p {q(d + '/' + out_name)}) 2> >(tee -p -a {q(d + '/run.log')} >&2) & p=$!; "
+            f"echo $p > {q(d + '/remote.pgid')}; wait $p; rc=$?; rm -f {q(d + '/remote.pgid')}; "
+            f"git -C {q(wt)} push -q --no-verify -f origin HEAD:refs/heads/{branch} >&2; exit $rc")
+
+
+def remote_run_state(c):
+    """'running' | 'gone' | 'unknown' (the host could not be asked) for a remote claim's recorded process group."""
+    d = f"{WORKDIR}/{c['ticket']}"
+    rc, out = remote_sh(c["host"], f"pg=$(cat {shlex.quote(d + '/remote.pgid')} 2>/dev/null) || {{ echo gone; exit 0; }}; "
+                                   f"kill -0 -- -$pg 2>/dev/null && echo running || echo gone", timeout=60)
+    return out.strip() if rc == 0 and out.strip() in ("running", "gone") else "unknown"
+
+
+def remote_stop(c, wait_s=30):
+    """Stop the claim's remote process group and confirm it is gone; False when that cannot be confirmed."""
+    d = f"{WORKDIR}/{c['ticket']}"
+    rc, out = remote_sh(c["host"], f"pg=$(cat {shlex.quote(d + '/remote.pgid')} 2>/dev/null) || {{ echo gone; exit 0; }}; "
+                                   f"kill -TERM -- -$pg 2>/dev/null; for i in $(seq {wait_s}); do kill -0 -- -$pg 2>/dev/null || {{ echo gone; exit 0; }}; sleep 1; done; "
+                                   f"kill -KILL -- -$pg 2>/dev/null; sleep 1; kill -0 -- -$pg 2>/dev/null && echo running || echo gone", timeout=wait_s + 60)
+    return rc == 0 and out.strip().endswith("gone")
+
+
+def remote_prepare(host, wt, branch, d, resume=False):
+    """Mirror the gated base to the box as its `main` (fix prompts merge it) and copy LFS objects. The worktree is made
+    only when it does not exist, and never reset: on a resume (and on a re-dispatch) the host's copy - its commits and
+    its uncommitted files - is the newer one, and this Mac's branch is pushed only when the mirror has none."""
+    base = merge_target()
+    # --no-verify: the only pre-push hook is Git LFS's upload, which the mirror cannot serve - LFS objects go by rsync.
+    # Never --force: the gated base only ever moves forward; a push that is not a fast-forward refuses the start.
+    sh(["git", "push", "-q", "--no-verify", host, f"{base}:refs/heads/main"], check=True)
+    if not resume and sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
+        sh(["git", "push", "-q", "--no-verify", host, f"{branch}:refs/heads/{branch}"])      # no -f: never over the host's
+    sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",
+        f"{hosts()[host]['ssh']}:{to_remote(host, REPO)}/.git/lfs/objects/"], timeout=600, check=True)
+    q = shlex.quote
+    rc, out = remote_sh(host, f"set -e; cd {q(REPO)}; git fetch -q origin; git branch -f main origin/main; git worktree prune; mkdir -p {q(d)}; "
+                              f"if [ ! -d {q(wt)} ]; then "
+                              f"if git rev-parse -q --verify origin/{branch} >/dev/null; then git worktree add -q -B {branch} {q(wt)} origin/{branch}; "
+                              f"else git worktree add -q -b {branch} {q(wt)} origin/main; fi; "
+                              f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true; fi", timeout=600)
+    if rc:
+        raise RuntimeError(f"remote_prepare on {host}: {out.strip()[-200:]}")
+
+
+def remote_put(host, path, text):
+    rc, out = remote_sh(host, f"mkdir -p {shlex.quote(os.path.dirname(path))} && cat > {shlex.quote(path)}", input=to_remote(host, text))
+    if rc:
+        raise RuntimeError(f"remote_put {host}:{path}: {out.strip()[:200]}")
+
+
+def remote_popen(host, wt, branch, script, env, d, out_name, out, err):
+    """The local end of a remote run: a plain ssh in its own session - the claim's pid."""
+    env = dict(env, **hosts()[host].get("env", {}))
+    return subprocess.Popen(ssh_argv(host, remote_wrapper(wt, branch, script, env, d, out_name)), stdin=subprocess.DEVNULL,
+                            stdout=out, stderr=err, start_new_session=True)
+
+
+def remote_attach(c):
+    """The connection dropped but the remote run lives: a new local ssh that waits for its group - the claim's pid."""
+    d = f"{WORKDIR}/{c['ticket']}"
+    p = subprocess.Popen(ssh_argv(c["host"], f"pg=$(cat {shlex.quote(d + '/remote.pgid')}); while kill -0 -- -$pg 2>/dev/null; do sleep 10; done"),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return p.pid
+
+
+def sync_back(c):
+    """A remote run ended: its complete out file and run.log, its handback.json, its branch into this Mac's worktree,
+    and the box's uncommitted files (for the reap's UNCOMMITTED rule). False = could not; the reap waits a tick."""
+    host, tid, branch, wt = c["host"], c["ticket"], c["branch"], c["wt"]
+    d = f"{WORKDIR}/{tid}"
+    try:
+        dest = hosts()[host]["ssh"]
+        out_name = os.path.basename(c.get("out") or f"{d}/out.json")
+        for f in (out_name, "run.log", "handback.json"):
+            r = subprocess.run(["scp", *SSH_OPTS, "-q", f"{dest}:{to_remote(host, d)}/{f}", f"{d}/{f}.remote"], capture_output=True, timeout=120)
+            if r.returncode == 0:
+                os.replace(f"{d}/{f}.remote", f"{d}/{f}")
+            elif f != "handback.json":
+                raise RuntimeError(f"scp {f}: {r.stderr.decode(errors='replace').strip()[:160]}")
+            elif os.path.exists(f"{d}/handback.json"):
+                os.remove(f"{d}/handback.json")          # never judge this run by an older hand-back
+        sh(["git", "fetch", "-q", host, f"+refs/heads/{branch}:refs/remotes/{host}/{branch}"], check=True, timeout=300)
+        if os.path.isdir(wt):
+            sh(["git", "reset", "-q", "--hard", f"{host}/{branch}"], cwd=wt, check=True)
+        rc, dirty = remote_sh(host, f"git -C {shlex.quote(wt)} status --porcelain --untracked-files=no", timeout=60)
+        if rc:
+            raise RuntimeError(f"remote status: {dirty.strip()[:160]}")
+        c["remote_dirty"] = [l for l in dirty.splitlines() if l.strip()]
+        sync_transcript(c)                      # the run's last stretch, which no tick copied
+        log(f"REMOTE {tid}: synced back from {host} at {sh(['git', 'rev-parse', '--short', host + '/' + branch]).strip()}"
+            + (f"; {len(c['remote_dirty'])} file(s) left uncommitted there" if c["remote_dirty"] else ""))
+        return True
+    except Exception as e:
+        log(f"REMOTE {tid}: sync back from {host} FAILED ({e}) - held; retried next tick")
+        if not c.get("sync_warned"):
+            c["sync_warned"] = True
+            attention(tid, branch, "REMOTE_SYNC", f"could not bring the run back from {host}: {str(e)[:200]}")
+        return False
+
+
+PROJECTS = os.path.expanduser("~/.claude/projects")
+
+
+def _proj_dir(path):
+    """Claude Code's per-cwd transcript dir name: the path with '/' and '.' as '-'."""
+    return re.sub(r"[/.]", "-", path)
+
+
+def sync_remote_view(claims, dry):
+    """Every tick (user via supervisor, 2026-09-25 00:40: a remote worker must show on the dashboard like a local one):
+    per remote host, ONE ssh that reports reachability, load, disk and its running claude sessions to
+    $HACKRIFF_OPS/hosts/<host>.json; per running remote claim, its session transcript appended into this Mac's
+    transcript dir for that worktree - the dashboard's worker row and transcript modal read exactly that file."""
+    if dry or not hosts():
+        return
+    os.makedirs(f"{S}/hosts", exist_ok=True)
+    for h in hosts():
+        rc, out = remote_sh(h, "cat /proc/loadavg; nproc; df -BG --output=avail $HOME | tail -1", timeout=20)
+        rec = {"at": int(time.time()), "reachable": rc == 0}
+        if rc == 0:
+            try:
+                parts = out.split()
+                rec.update(load1=float(parts[0]), cores=int(parts[5]), disk_free_gb=int(parts[6].rstrip("G")))
+            except (IndexError, ValueError):
+                pass
+        with open(f"{S}/hosts/{h}.json.tmp", "w") as f:
+            json.dump(rec, f)
+        os.replace(f"{S}/hosts/{h}.json.tmp", f"{S}/hosts/{h}.json")
+        if not rec["reachable"]:
+            continue
+        for tid, c in claims.items():
+            if c.get("host") == h and c.get("state") == "running":
+                sync_transcript(c)
+
+
+def sync_transcript(c):
+    """Append a remote claim's session transcript into this Mac's transcript dir for its worktree."""
+    if not c.get("session_id"):
+        return
+    h = c["host"]
+    remote = f"~/.claude/projects/{_proj_dir(to_remote(h, c['wt']))}/{c['session_id']}.jsonl"
+    local_dir = f"{PROJECTS}/{_proj_dir(c['wt'])}"
+    os.makedirs(local_dir, exist_ok=True)
+    r = subprocess.run(["rsync", "-a", "--append", "-e", "ssh " + " ".join(SSH_OPTS),
+                        f"{hosts()[h]['ssh']}:{remote}", f"{local_dir}/{c['session_id']}.jsonl"], capture_output=True, timeout=120)
+    if r.returncode not in (0, 23):          # 23: the transcript is not there yet (a run's first seconds)
+        log(f"REMOTE {c['ticket']}: transcript copy from {h} failed (rsync {r.returncode}): {(r.stderr or b'')[-160:]!r}")
+
+
+def launch(t, dry, host=None):
     tid, branch, wt = t["id"], branch_of(t["id"]), worktree_of(t["id"])
     model = MODEL_ALIAS.get((t.get("model") or "sonnet").lower(), "sonnet")
     effort = (t.get("effort") or "medium").lower()
@@ -391,13 +671,18 @@ def launch(t, dry):
         else:
             sh(["git", "worktree", "add", wt, branch], check=True)
     else:
-        sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
+        # From the GATED base, never a batch still gating on main (2026-09-25 00:31: T-567 was cut from main while
+        # the T-577/T-915 batch gated, so its branch carried those provisional merges to node2).
+        sh(["git", "worktree", "add", wt, "-b", branch, merge_target()], check=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
     open(f"{d}/brief.md", "w").write(brief)
+    # The session id is chosen here, not read from out.json at the end: a run killed by a signal
+    # writes no out.json, and without the id it could never be resumed (incident 2026-09-24 04:07).
+    session = str(uuid.uuid4())
     cmd = ["claude", "-p", "--agent", "worker", "--model", model, "--dangerously-skip-permissions",
-           "--output-format", "json", "--max-budget-usd", BUDGET_USD]
+           "--output-format", "json", "--max-budget-usd", BUDGET_USD, "--session-id", session]
     if effort in EFFORTS:
         cmd += ["--effort", effort]
     # The build-target clone (`cp -c`, an APFS clone) walks main's whole target tree and takes
@@ -405,7 +690,21 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
-    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    if host:
+        try:
+            remote_prepare(host, wt, branch, d)
+            remote_put(host, f"{d}/brief.md", brief)
+        except Exception as e:
+            log(f"REMOTE {tid}: could not prepare {host} ({e}) - not dispatched this tick")
+            return None
+        script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
+        env = dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
+        p = remote_popen(host, wt, branch, script, env, d, "out.json", open(f"{d}/out.json", "w"), open(f"{d}/run.log", "a"))
+        log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {host}:{wt} (remote; this Mac holds the ssh session)")
+        return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
+                "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
+                "review": needs_review(t), "session_id": session, "host": host}
+    clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     out = open(f"{d}/out.json", "w")
@@ -422,7 +721,7 @@ def launch(t, dry):
     log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; {'cpulimit ' + str(WORKER_CORES * 100) + '% + ' if cmd_prefix else ''}background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
-            "review": needs_review(t)}
+            "review": needs_review(t), "session_id": session}
 
 
 def launch_review(claim):
@@ -678,8 +977,11 @@ def write_result(c, hb):
 
 
 def record_done(claim, outcome, res):
+    # A fix run says WHY it ran (user, 2026-09-24) - the /worklog "Fix runs" table and the digest tally.
+    why = ({"attempt": claim.get("fix_attempts"), "reason_class": claim.get("fix_reason_class") or "OTHER",
+            "reason": claim.get("fix_reason") or ""} if claim.get("kind") == "fix" else {})
     with open(DONE, "a") as f:
-        f.write(json.dumps({"ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
+        f.write(json.dumps({**why, "ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
                             "started": int(claim["started"]), "finished": int(time.time()),
                             "minutes": round((time.time() - claim["started"]) / 60, 1),
                             "cost_usd": res.get("total_cost_usd"), "turns": res.get("num_turns"),
@@ -704,15 +1006,61 @@ def enqueue(branch, wt=None):
         log(f"RECLAIM {wt}/target (branch queued)")
 
 
+def alert(level, title, body, key):
+    """ops/alert.py (Discord, deduped per key); never raises."""
+    try:
+        subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"), level, title, body, "--key", key],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
+
+
+_SPEC = re.compile(r"([a-z0-9-]+)(?:\.e2e\.mjs)?")
+
+
+def not_own_red(t):
+    """A failing listed test the worker marks as not its own ("known_flake" / "reproduces_on_main"), or whose
+    browser specs are ALL ones the flake ledger has seen pass alone (hkpy.flakes) - not a branch defect."""
+    if t.get("known_flake") or t.get("reproduces_on_main"):
+        return True
+    cmd = str(t.get("cmd", ""))
+    if "run.mjs" not in cmd:
+        return False
+    specs = [m + ".e2e.mjs" for m in _SPEC.findall(cmd.split("run.mjs", 1)[1]) if m and not m.startswith("-")]
+    if not specs:
+        return False
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import flakes
+        led = flakes.ledger(S)
+    except Exception:
+        return False
+    return all(led.get(s) is not None and led[s].passed_alone > 0 for s in specs)
+
+
+def hand_back_reds(hb):
+    """(red, own): the hand-back's failing tests, and those of them that are the branch's own defect.
+    A worker's red proof (its new test on the OLD code, or the defect re-injected) exits non-zero by design
+    and says so with "expect": "red" - the deflaker's convention with the same guard: it counts only beside
+    a green run. Three DONE hand-backs read BLOCKED 'needs a person' on exactly that in 24 h (T-894 15:25,
+    T-905 20:16 on 2026-09-24; the app-trace deflaker at 01:32 before its own fix)."""
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)
+    red = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
+    return red, [t for t in red if not not_own_red(t)]
+
+
 def reap(claims, dry):
     changed = False
+    killed = []
     for tid, c in list(claims.items()):
         if c.get("state") != "running":
             continue
         pid = c["pid"]
         age_min = (time.time() - c["started"]) / 60
         limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
-        if alive(pid):
+        if alive(pid) and not c.get("detached"):
             if track_usage(c):                      # the only chance to see this run's CPU time
                 changed = True
             if age_min > limit:
@@ -720,13 +1068,34 @@ def reap(claims, dry):
                     os.killpg(pid, signal.SIGTERM)
                 except OSError:
                     pass
+                if c.get("host"):
+                    remote_stop(c)
                 c["state"] = "timeout"
                 c["ended"] = time.time()
-                attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
                 record_done(c, "timeout", {})
                 changed = True
+                if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
+                        and os.path.isdir(c.get("wt", "")) and _gone(pid)):
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped")
+                    log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
+                else:
+                    attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
             continue
-        # finished
+        # finished - for a remote claim (a review runs on this Mac), the LOCAL ssh ended: ask the box first
+        if c.get("host") and c["kind"] != "review":
+            state = remote_run_state(c)
+            if state == "running":
+                c["pid"], c["detached"] = remote_attach(c), False
+                log(f"REMOTE {tid}: connection to {c['host']} dropped, run still going there - re-attached (pid {c['pid']})")
+                changed = True
+                continue
+            if state == "unknown" or not sync_back(c):
+                if state == "unknown" and not c.get("detached"):
+                    log(f"REMOTE {tid}: {c['host']} unreachable - the claim waits, polled on the host (stage 4 re-dispatches)")
+                    c["detached"] = True           # its local pid is dead: never signal it again (pids recycle)
+                    changed = True
+                continue
+            c["detached"] = False
         changed = True
         # The root is gone; anything of this run still running is a LEAK, holding cores and disk
         # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
@@ -772,9 +1141,13 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
-        if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-            bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+        red, own = hand_back_reds(hb)
+        if hb and outcome == "done" and own:
+            bad = own[0]
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        elif hb and outcome == "done" and red:
+            attention(tid, c["branch"], "NOTE", "queued with a red the worker marks not its own (the gate arbitrates): "
+                      + "; ".join(f"{t.get('cmd')} exit {t.get('exit')}" for t in red)[:300])
         # How the hand-back arrived is the contract's own reliability measure: `json` is the
         # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
         # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
@@ -787,9 +1160,27 @@ def reap(claims, dry):
                                 "briefed": os.path.exists(f"{d}/brief.md") and "handback.json" in open(f"{d}/brief.md").read()}) + "\n")
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
+        if c.get("host"):
+            dirty = c.get("remote_dirty", [])        # this Mac's copy was just reset to the pushed branch
         if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
             write_result(c, hb)                    # the board line the worker used to write by hand
             ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
+        if not hb and not res:
+            # No result JSON and no handback: the run did not finish, it was KILLED (a signal - 04:07
+            # on 2026-09-24 a pkill took five workers; they were logged "NO_HANDBACK ... (done)", parked
+            # as uncommitted/no-work and never run again). Keep the worktree and resume the session.
+            record_done(c, "killed", res)
+            if c.get("session_id") and c.get("kill_resumes", 0) < KILL_RESUMES and os.path.isdir(c.get("wt", "")):
+                claims[tid] = launch_fix(dict(c, kind="work"), f"KILLED your run ended after {age_min:.0f} min with no result - "
+                                         f"it was killed by a signal, not failed; {len(dirty)} modified files and {ahead} commits "
+                                         f"are in {c['wt']}: check them and continue the ticket from there")
+                killed.append(f"{tid} ({'fix held' if claims[tid].get('state') == 'fix-held' else 'resumed'})")
+            else:
+                c["state"] = "killed"
+                attention(tid, c["branch"], "KILLED", f"killed after {age_min:.0f} min with no session to resume; "
+                          f"worktree kept ({len(dirty)} modified files, {ahead} commits) - redispatch it")
+                killed.append(f"{tid} (needs a redispatch)")
+            continue
         if res.get("is_error"):
             c["state"] = "error"
             attention(tid, c["branch"], "ERROR", f"claude -p reported an error after {age_min:.0f} min; see {d}/run.log")
@@ -826,20 +1217,89 @@ def reap(claims, dry):
             c["state"] = "queued"
             record_done(c, "done", res)
             enqueue(c["branch"], c.get("wt"))
+    if killed:
+        alert("amber", f"{len(killed)} worker(s) killed", ", ".join(killed) + " - worktrees kept", "wr:killed:" + ",".join(sorted(killed)))
     changed |= handle_gate_failures(claims, dry)
     return changed
+
+
+def fix_reason(fail_line, branch):
+    """(class, reason) for a fix run - hkpy.fixes; a GATE_FAIL names what the merge runner's triage
+    found red. Never fails a launch: an unreadable reason is OTHER with the raw line."""
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import fixes
+        text = ""
+        if fixes.classify(fail_line) == "GATE_FAIL" and os.path.exists(MERGE_LOG):
+            with open(MERGE_LOG, "rb") as f:
+                f.seek(max(0, os.path.getsize(MERGE_LOG) - 4_000_000))
+                text = f.read().decode("utf-8", "replace")
+        return fixes.reason_for(fail_line, text, branch)
+    except Exception:
+        return "OTHER", " ".join(fail_line.split())[:200]
+
+
+def _gone(pid, wait_s=30):
+    """The stopped run's whole process group has exited (SIGKILL after wait_s): a resume must not share the
+    session with it. The leader is this runner's own unreaped Popen child - os.kill(pid, 0) succeeds on a
+    zombie - so reap it first, and ask the GROUP, not the cpulimit wrapper (review, 2026-09-24)."""
+    for i in range(wait_s + 3):
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        if i == wait_s:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(1)
+    return False
 
 
 def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
+    cls, why = fix_reason(fail_line, branch)
+    c = dict(c, fix_reason_class=cls, fix_reason=why)
     # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
     # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
     # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
     if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
+    if fail_line.startswith("KILLED"):
+        k = c.get("kill_resumes", 0) + 1
+        prompt = f"""Your run on {tid} was KILLED from outside (a signal - not a failure of yours, not a gate result);
+this resumes the same session. {fail_line[len("KILLED "):]}.
+In {wt}: `git status` and `git log --oneline main..{branch}` show what you had done. Keep what is right, then carry on with the
+ticket exactly as your original brief says: targeted tests, commit on {branch}, write {d}/handback.json, and end your final
+message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main checkout, never the
+full gate, never edit docs/tasks.yaml by hand.
+"""
+        r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json", fail_line=fail_line)
+        return r if r.get("state") == "fix-held" else dict(r, kill_resumes=k)
+    if fail_line.startswith("TIMEOUT"):
+        t = c.get("timeout_resumes", 0) + 1
+        prompt = f"""Your run on {tid} reached its {MAX_MINUTES}-minute limit and was stopped; this resumes the same session ONCE,
+with the same limit, to WRAP UP - not to continue open-ended.
+In {wt}: `git status` and `git log --oneline main..{branch}` show what you have. Start no new scope. Get what is done into a
+committed, tested state: targeted tests only, commit on {branch}, write {d}/handback.json. If the ticket's acceptance is met,
+hand back DONE. If it is not, hand back BLOCKED and say precisely what remains (files, tests, the next step) in
+blocked.needs, so the coordinator can split or re-brief it - a clear remainder is a good outcome here, a half-commit is not.
+End your final message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main
+checkout, never the full gate, never edit docs/tasks.yaml by hand.
+"""
+        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json", fail_line=fail_line)
+        return r if r.get("state") == "fix-held" else dict(r, timeout_resumes=t)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):
@@ -857,7 +1317,7 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
-        return _run_fix(c, n, prompt)
+        return _run_fix(c, n, prompt, fail_line=fail_line)
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
     prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
@@ -873,23 +1333,59 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
-    return _run_fix(c, n, prompt)
+    return _run_fix(c, n, prompt, fail_line=fail_line)
 
 
-def _run_fix(c, n, prompt):
+def _run_fix(c, n, prompt, out_name=None, fail_line=""):
     tid, wt = c["ticket"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
-    out_path = f"{d}/fix{n}.json"
+    out_path = f"{d}/{out_name or f'fix{n}.json'}"
+    if c.get("host"):      # the session lives on that host: a resume runs there, once the previous run is gone
+        host, pname = c["host"], f"prompt-{os.path.basename(out_path)}.md"
+        try:
+            if not remote_stop(c):
+                raise RuntimeError("the previous remote run could not be confirmed stopped")
+            remote_prepare(host, wt, c["branch"], d, resume=True)
+            remote_put(host, f"{d}/{pname}", prompt)
+            if os.path.exists(f"{d}/review.json"):             # the Mac-side files a fix prompt points at
+                remote_put(host, f"{d}/review.json", open(f"{d}/review.json").read())
+            try:
+                remote_put(host, MERGE_LOG, "".join(open(MERGE_LOG).readlines()[-20000:]))
+            except OSError:
+                pass
+            script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/{pname}'"
+            p = remote_popen(host, wt, c["branch"], script, dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)),
+                             d, os.path.basename(out_path), open(out_path, "w"), open(f"{d}/run.log", "a"))
+        except Exception as e:
+            log(f"FIX {tid} on {host} NOT launched: {e}")
+            if not c.get("held_warned"):          # once per hold, not every tick while the host is away
+                attention(tid, c["branch"], "FIX_HELD", f"fix attempt {n} on {host} not launched: {str(e)[:200]}")
+            return dict(c, state="fix-held", fail_line=fail_line or c.get("fail_line") or "", held_warned=True)
+        log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] on {host}: resumed session {c['session_id'][:8]} pid={p.pid}")
+        return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n,
+                    fail_line=None, held_warned=False, detached=False)
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
+    log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] {c.get('fix_reason', '')[:120]}: "
+        f"resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
+
+
+def branches_waiting():
+    """Branches in merge-queue.txt or in the running batch (the bulk marker's branches=)."""
+    waiting = set()
+    for f in (MERGE_QUEUE, BULKMARK):
+        try:
+            waiting |= set(open(f).read().replace("branches=", " ").split())
+        except OSError:
+            pass
+    return waiting
 
 
 def release_stale_claims(claims, tasks_by_id):
@@ -897,9 +1393,14 @@ def release_stale_claims(claims, tasks_by_id):
     # A `queued` claim whose branch is already on main is finished: the merge runner landed it
     # (or a hand-merge did) and nothing flipped the claim. 24 of 39 "queued" claims were such
     # on 2026-09-23 01:40, inflating the dashboard's IN QUEUE count and every throughput read.
+    # Not while main is provisional: a batch commits each merge before gating (and a single merge is
+    # staged), so every branch in it reads "on main" and was closed - T-866 at 03:33:46 on 2026-09-24,
+    # 16 s before that batch failed, which left its red with no claim to resume. The reaper has the
+    # same guard for the same reason.
+    provisional = os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
     for tid, c in list(claims.items()):
         b = c.get("branch")
-        if c.get("state") == "queued" and b:
+        if c.get("state") == "queued" and b and not provisional:
             try:
                 if sh(["git", "rev-parse", "-q", "--verify", b]).strip() and \
                    int(sh(["git", "rev-list", "--count", f"main..{b}"]).strip() or 0) == 0:
@@ -907,8 +1408,20 @@ def release_stale_claims(claims, tasks_by_id):
                     c["state"] = "merged"; c["ended"] = time.time(); changed = True
             except Exception:
                 pass
+    # ...and one whose TICKET is done on the board while its branch is in no queue: it landed as a
+    # rebuilt copy (task-t538 as task-t538-rl), so its own branch is never on main. 12 of 13 `queued`
+    # claims were such on 2026-09-24 02:50, 26-42 h after landing - each one a deflake wait on a spec
+    # its branch touched (deflake_deferred) and a phantom in every "in queue" count.
+    # A staged single-branch merge is in neither list: wait for it to end (the next tick decides).
+    waiting = None if os.path.exists(f"{REPO}/.git/MERGE_HEAD") else branches_waiting()
     for tid, c in list(claims.items()):
-        if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
+        if (waiting is not None and c.get("state") == "queued" and c.get("branch") and c["branch"] not in waiting
+                and tasks_by_id.get(tid, {}).get("status") in ("done", "cancelled")):
+            log(f"CLAIM {tid}: the board says {tasks_by_id[tid]['status']} and {c['branch']} is in no queue "
+                f"(landed as a rebuilt branch) - claim closed")
+            c["state"] = "merged"; c["ended"] = time.time(); changed = True
+    for tid, c in list(claims.items()):
+        if c.get("state") in ("no-work", "error", "timeout", "killed") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
                 log(f"RELEASE {tid}: claim ended {c['state']} {RELEASE_AFTER_H:.0f}h+ ago and the ticket is still todo - eligible again")
                 del claims[tid]; changed = True
@@ -1083,7 +1596,7 @@ def handle_gate_failures(claims, dry):
             # A conflict run is a worker: it waits for a slot under the dispatch cap, one per tick,
             # and never while a hold is in force (a held one would all relaunch at once). The line
             # stays unseen until then, so a backlog cannot burst.
-            if (conflict_runs >= 1 or busy_workers(claims) >= dispatch_cap()
+            if (conflict_runs >= 1 or busy_workers(claims, c.get("host")) >= slot_cap(c.get("host"))
                     or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
                 continue
             c.setdefault("gate_fails_seen", []).append(line)
@@ -1140,7 +1653,7 @@ def dead_dispatches(claims, tasks, now, has_work=has_work, busy=None, prior=None
     revert, skipped = [], []
     for tid, c in claims.items():
         t = tasks.get(tid)
-        if not (t and t.get("status") == "in-progress" and c.get("state") in ("no-work", "error", "timeout")
+        if not (t and t.get("status") == "in-progress" and c.get("state") in ("no-work", "error", "timeout", "killed")
                 and now - c.get("started", 0) > RELEASE_AFTER_H * 3600):
             continue
         if busy.get(tid, 0) > c.get("started", 0) or t.get("branch") not in (None, branch_of(tid)) or has_work(tid):
@@ -1296,30 +1809,69 @@ def candidates(tasks, claims):
     return out
 
 
+_GATE_SEEN = [0.0]
+RESERVE_GRACE_S = 90   # > one tick (30 s) + the runner's gap between two gates (3-8 s, then its 8 s sleep)
+
+
 def dispatch_cap():
-    if not GATE_ALONE and gate_running():
-        return min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
-    return CAP
+    # The gate keeps its GATE_RESERVE cores while it runs - and for RESERVE_GRACE_S after it was last
+    # seen: an isolation's single gates leave 3-8 s gaps with no marker, and each gap a tick landed in
+    # filled the box to CAP (2026-09-24 14:30: 7 workers beside a gate, load 58 vs plan 32). Not keyed
+    # on the queue: held/parked branches sit there with no gate coming (review).
+    if GATE_ALONE:
+        return CAP
+    if gate_running():
+        _GATE_SEEN[0] = time.time()
+    return min(CAP, RESERVE_CAP) if time.time() - _GATE_SEEN[0] < RESERVE_GRACE_S else CAP
 
 
-def busy_workers(claims):
-    """Running work, fix AND deflake runs: each is a worker on the box (dispatch counted only `work`)."""
-    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake"))
+def busy_workers(claims, host=None):
+    """Running work, fix AND deflake runs on one host (None = this Mac): each is a worker there (dispatch counted
+    only `work`). A remote claim holds a slot on its host, not on this Mac (remote workers stage 2)."""
+    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake")
+               and c.get("host") == host)
+
+
+def dispatch_remote(claims, dry):
+    """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
+    (dispatch-paused) does. One launch per host per tick."""
+    # The alone-mode gate hold binds here too: in that mode the merge runner waits for EVERY claim, remote included.
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+        return False
+    try:
+        tasks = board()
+    except Exception:
+        return False
+    changed, launched = False, set()
+    for t in candidates(tasks, claims):
+        h = host_for(t, claims)
+        if not h or h in launched:
+            continue
+        g = t.get("parallel_group")
+        if g and sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
+            continue
+        c = launch(t, dry, host=h)
+        if c:
+            claims[t["id"]] = dict(c, state="running")
+            changed = True
+            launched.add(h)
+    return changed
 
 
 def dispatch(claims, dry):
-    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
+    changed_remote = dispatch_remote(claims, dry)
+    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work" and not c.get("host")]
     cap = dispatch_cap()
-    free = cap - busy_workers(claims)          # fix runs are workers on the box too
+    free = cap - busy_workers(claims)          # this Mac's: fix runs are workers on the box too
     if free <= 0:
-        return False
+        return changed_remote
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
-        return False
+        return changed_remote
     load1 = os.getloadavg()[0]
     if load1 > LOAD_MAX:
         log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
-        return False
+        return changed_remote
     # THE GATE GETS THE BOX TO ITSELF (user, 2026-09-22). Two rules, one cycle:
     #   1. no dispatch while a gate runs (the merge runner only starts one once no worker is
     #      running - see merge-runner.sh workers_running) - so a gate never shares the box;
@@ -1332,36 +1884,39 @@ def dispatch(claims, dry):
     # to stop all dispatch; delete it to resume. Reaping, results and queueing carry on.
     if os.path.exists(f"{S}/dispatch-paused"):
         log(f"HOLD: dispatch-paused file present ({len(running)} running)")
-        return False
+        return changed_remote
     # The three holds below are the alone-mode cycle (WORK_GATE_ALONE=1, see gate_holds_dispatch).
     # In the default overlap mode a gate only lowers the cap to the reserve (above) and the queue
     # never pauses dispatch: the merge runner gates whatever is queued as soon as the previous
     # gate ends, so the batch is "what handed back during the last gate".
     if gate_holds_dispatch():
         log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
-        return False
+        return changed_remote
     depth = queue_depth()
     if GATE_ALONE and depth >= QUEUE_PAUSE:
         log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
-        return False
+        return changed_remote
     # The gate is IMMINENT when something is queued and no worker is running: the merge runner
     # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
     # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
     # dispatch into that window; the gate takes the batch, then dispatch resumes.
     if GATE_ALONE and depth > 0 and not running:
         log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
-        return False
+        return changed_remote
     free = min(free, PER_TICK)
     try:
         tasks = board()
     except Exception as e:
         attention("board", "main", "BOARD_UNREADABLE", str(e)[:200])
-        return False
+        return changed_remote
     changed = False
     taken = {}   # launches per parallel_group this tick, on top of the running-claim count
+    named = named_remote()
     for t in candidates(tasks, claims):
         if free <= 0:
             break
+        if t["id"] in named:              # named for a remote host: waits for it, never falls back to this Mac
+            continue
         g = t.get("parallel_group")
         if g and taken.get(g, 0) + sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
             continue
@@ -1373,7 +1928,20 @@ def dispatch(claims, dry):
             if g:
                 taken[g] = taken.get(g, 0) + 1
             free -= 1
-    return changed
+    return changed or changed_remote
+
+
+#: Untracked paths a worktree regenerates on its own - build output, installed hooks, envs. A
+#: worktree with no commits ahead and no tracked edits whose ONLY untracked files are these holds
+#: nothing of anyone's: t356 (claim `blocked`, 0 commits, only an untracked `.githooks/`) held
+#: 31 GB and failed `worktree remove` on EVERY tick - 1,499 REAP failures by 2026-09-24 00:18,
+#: beside 1,730 for gateaudit, a worktree whose directory was already gone.
+REGENERABLE = (".githooks/", "target/", "node_modules/", "ui/node_modules/", "ui/dist/", "py/.venv/", ".venv/")
+_REAP_SAID: set = set()
+
+
+def only_regenerable(untracked):
+    return bool(untracked) and all(any(u == r or u.startswith(r) for r in REGENERABLE) for u in untracked)
 
 
 def reap_worktrees(claims, dry):
@@ -1386,6 +1954,8 @@ def reap_worktrees(claims, dry):
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
     live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    if not dry:
+        sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
     paths = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("worktree ") and "/.claude/worktrees/" in l]
     for wt in paths:
@@ -1396,9 +1966,11 @@ def reap_worktrees(claims, dry):
         branch = sh(["git", "branch", "--show-current"], cwd=wt).strip()
         if not branch:
             continue
-        dirty = any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+        status = sh(["git", "status", "--porcelain"], cwd=wt).splitlines()
+        dirty = any(not l.startswith("??") for l in status)
         if dirty:
             continue
+        untracked = [l[3:] for l in status if l.startswith("??")]
         ahead = int(sh(["git", "rev-list", "--count", f"main..{branch}"]).strip() or 0)
         if ahead:
             continue   # unmerged commits, whatever main says: 2026-09-22 a provisional bulk merge on main
@@ -1410,9 +1982,230 @@ def reap_worktrees(claims, dry):
         # Untracked files block `worktree remove`. On a MERGED branch or a claim that ended without
         # commits (no-work / error / timeout) they are abandoned scratch: force. Otherwise refuse, and say so.
         claim = next((c for c in claims.values() if c.get("wt") == wt), {})
-        force = merged or claim.get("state") in ("no-work", "error", "timeout")
+        force = merged or claim.get("state") in ("no-work", "error", "timeout") or only_regenerable(untracked)
+        if untracked and not force:
+            # Someone's uncommitted new files: never forced. Said ONCE (not on every tick).
+            key = (wt, tuple(sorted(untracked)))
+            if key not in _REAP_SAID:
+                _REAP_SAID.add(key)
+                log(f"REAP {wt} ({branch}: no commits) kept - untracked files that are not build output: {' '.join(untracked)[:160]}")
+            continue
         r = subprocess.run(["git", "worktree", "remove"] + (["--force"] if force else []) + [wt], cwd=REPO, capture_output=True, text=True)
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+
+
+E2E_DATA_IDLE_MIN = 60   # a leaked browser-e2e backend data dir untouched this long is removed
+
+
+def reclaim_e2e_data(dry):
+    """ui/e2e/backend.mjs gives every spec's `hk serve` a mkdtemp data dir ($TMPDIR/hk-e2e-data-*,
+    4-5 GB each: the IQ ring and pyramid) and removes it in stop() - which a spec killed by a gate
+    timeout, an orphan sweep or a signal never runs. 2026-09-24 10:30: 49 such dirs, 89.6 GB, back to
+    09-22, and free disk falling ~10 GB per 20 min; 88 GB came back by hand. A live backend names its
+    dir in argv (--data-dir), so: no process names it and nothing in it written for E2E_DATA_IDLE_MIN."""
+    tmp = tempfile.gettempdir()
+    dirs = [os.path.join(tmp, n) for n in os.listdir(tmp) if n.startswith("hk-e2e-data-")]
+    if not dirs:
+        return
+    cut = time.time() - E2E_DATA_IDLE_MIN * 60
+    procs = sh(["ps", "-axo", "command"])
+    if not procs.strip():
+        return   # no process table: no evidence the dirs are unused
+    for d in dirs:
+        if d in procs or os.path.islink(d) or not os.path.isdir(d):
+            continue
+        try:
+            newest = max([os.path.getmtime(d)] + [e.stat().st_mtime for e in os.scandir(d)])
+        except OSError:
+            continue
+        if newest > cut:
+            continue
+        if dry:
+            log(f"DRY-RUN would remove leaked e2e data dir {d}")
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        log(f"RECLAIM {d} (leaked e2e backend data, idle {(time.time() - newest) / 60:.0f} min, no process names it)")
+
+
+def _target_written(t):
+    """Newest write under target/. ctime too: `cp -c -R -p` (the worktree clone recipe) keeps main's old
+    mtimes, so a target cloned a minute ago would read as idle; the clone cannot keep the old ctime."""
+    return max(max(st.st_mtime, st.st_ctime) for st in
+               (os.stat(p) for p in (t, f"{t}/debug", f"{t}/debug/deps", f"{t}/debug/.fingerprint") if os.path.exists(p)))
+
+
+_HASHED = re.compile(r"^(.+)-([0-9a-f]{16})$")
+
+
+def _units(profile_dir):
+    """hash -> the build unit it belongs to, from cargo's own `.fingerprint/<pkg>-<hash>/` directory: the
+    package plus the target kind files it holds (`bin-hk`, `test-bin-hk`, `test-integration-test-api_contract`).
+    A file stem is NOT a unit: `hk` is both hk-cli's bin and its unit-test harness, and four integration-test
+    names exist in two crates each (review, 2026-09-24 - the stem-keyed first pass deleted current twins)."""
+    # ...and the configuration: cargo gives the same unit a new hash per profile, and two are live at once -
+    # workers build line-tables-only, gates the default dev profile (re-review, 2026-09-24: 1211 of 2344
+    # "superseded" executables differed from the newest only in profile, and both were rebuilt daily).
+    out, fp = {}, os.path.join(profile_dir, ".fingerprint")
+    for d in os.listdir(fp) if os.path.isdir(fp) else []:
+        m = _HASHED.match(d)
+        if not m:
+            continue
+        try:
+            files = os.listdir(os.path.join(fp, d))
+            kinds = sorted({re.sub(r"^(dep|output)-", "", f) for f in files
+                            if f != "invoked.timestamp" and not f.endswith(".json")})
+            with open(os.path.join(fp, d, next(f for f in files if f.endswith(".json")))) as fh:
+                j = json.load(fh)
+        except (OSError, StopIteration, ValueError):
+            continue
+        out[m.group(2)] = (m.group(1), tuple(kinds), j.get("profile"), j.get("features"), str(j.get("rustflags")))
+    return out
+
+
+def superseded_executables(profile_dir):
+    """Every executable in `<profile>/deps` whose build unit has a NEWER executable there: the same unit at an
+    older hash, which cargo never runs again (and rebuilds if it is ever wanted). An executable whose unit
+    cargo's fingerprints do not name is kept."""
+    deps, units, groups = os.path.join(profile_dir, "deps"), _units(profile_dir), {}
+    for n in os.listdir(deps) if os.path.isdir(deps) else []:
+        m, p = _HASHED.match(n), os.path.join(deps, n)
+        if not m or m.group(2) not in units or os.path.islink(p) or not os.path.isfile(p) or not os.access(p, os.X_OK):
+            continue
+        groups.setdefault(units[m.group(2)], []).append((os.stat(p).st_mtime, p))
+    return [p for g in groups.values() for _, p in sorted(g)[:-1]]
+
+
+def _building(target, builds):
+    """A cargo process writes into this target: one whose CARGO_TARGET_DIR names it, or one with none set
+    working in its tree (main's checkout: anywhere under it but the worktrees, which are judged one by one).
+    Only cargo is asked - every build, test run and link is under one, and its environment is readable
+    (Apple's ld hides its own; the stage daemon's link step read as 'building main' - review, 2026-09-24)."""
+    tree = os.path.dirname(target)
+    for cwd, ctd in builds:
+        if ctd:
+            if os.path.realpath(ctd) == os.path.realpath(target):
+                return True
+        elif cwd == tree or (cwd.startswith(tree + "/") and
+                             not (tree == REPO and cwd.startswith(os.path.join(REPO, ".claude", "worktrees") + "/"))):
+            return True
+    return False
+
+
+def _builds():
+    """(cwd, CARGO_TARGET_DIR or "") for every running cargo process (cargo, cargo-nextest, cargo-clippy...)."""
+    out, pid, cwd = [], None, {}
+    for l in sh(["lsof", "-a", "-c", "cargo", "-d", "cwd", "-Fpn"], timeout=60).splitlines():
+        if l.startswith("p"):
+            pid = l[1:]
+        elif l.startswith("n") and pid:
+            cwd[pid] = l[1:]
+    for pid, d in cwd.items():
+        env = sh(["ps", "eww", "-o", "command=", "-p", pid])
+        m = re.search(r"(?:^|\s)CARGO_TARGET_DIR=(\S+)", env)
+        out.append((d, m.group(1) if m else ""))
+    return out
+
+
+def sweep_superseded(dry):
+    """User via supervisor, 2026-09-24 21:14 (Serves: cost - disk 303 -> 54 GB that day): superseded test
+    executables piled up in main's target/, gate-target and every worker clone - 2365 of them, ~40 GB
+    apparent, the SAME blocks in each (clones), so they free only when the last copy goes. After every
+    landing (a new merge commit on main since the last sweep) and between gates, keep the newest executable
+    per build unit in all of them in one pass. A target a cargo process writes into is skipped whole, and a
+    file any process holds open is never touched."""
+    if gate_running():
+        return
+    # A landing is a merge commit on main; the work runner's own board-sync commits move HEAD too, and are not one.
+    head = sh(["git", "-C", REPO, "log", "-1", "--merges", "--format=%H"]).strip()
+    mark = f"{S}/sweep-last"
+    try:
+        last = open(mark).read().strip()
+    except OSError:
+        last = ""
+    if not head or head == last:
+        return
+    root = os.path.join(REPO, ".claude", "worktrees")
+    targets = [(REPO, os.path.join(REPO, "target")), (None, os.path.join(S, "gate-target"))]
+    targets += [(os.path.join(root, n), os.path.join(root, n, "target")) for n in sorted(os.listdir(root))] if os.path.isdir(root) else []
+    # Where the compilers write: a target a build is writing into is left for the next landing.
+    builds = _builds()
+    before, swept, skipped, todo = disk_free_gb(), 0, [], []
+    for wt, t in targets:
+        prof = os.path.join(t, "debug")
+        if os.path.islink(t) or not os.path.isdir(os.path.join(prof, "deps")):
+            continue
+        if _building(t, builds):
+            skipped.append(os.path.basename(wt or t))
+            continue
+        todo += superseded_executables(prof)
+    held = set()
+    if todo:
+        dirs = sorted({os.path.dirname(p) for p in todo if os.path.isdir(os.path.dirname(p))})
+        # lsof exits 1 whether or not it found holders; a dir that vanished makes it print usage and
+        # NOTHING - which would read as "nothing held". Anything on stderr aborts the sweep.
+        r = subprocess.run(["lsof", "-Fn"] + [a for d in dirs for a in ("+d", d)], capture_output=True, text=True, timeout=120)
+        if r.stderr.strip():
+            log(f"SWEEP aborted: lsof over the deps dirs said {r.stderr.strip()[:160]!r}")
+            return
+        held = {l[1:] for l in r.stdout.splitlines() if l.startswith("n")}
+    objs = {}
+    for p in todo:
+        if p in held:
+            continue
+        if not dry:
+            d, base = os.path.dirname(p), os.path.basename(p)
+            if d not in objs:
+                objs[d] = [n for n in os.listdir(d) if n.endswith(".rcgu.o")]
+            # split-debuginfo=unpacked leaves <exe>.<cgu>.rcgu.o beside it: orphans once the executable goes.
+            for q in [p, p + ".d"] + [os.path.join(d, n) for n in objs[d] if n.startswith(base + ".")]:
+                try:
+                    os.remove(q)
+                except FileNotFoundError:
+                    pass
+        swept += 1
+    if not dry:
+        with open(mark, "w") as f:
+            f.write(head + "\n")
+    if swept or skipped:
+        log(f"{'DRY-RUN ' if dry else ''}SWEEP after {head[:8]}: {swept} superseded executable(s) removed across "
+            f"{len(targets)} target(s), freed {disk_free_gb() - before:.1f} GB (df); skipped (building): {' '.join(skipped) or 'none'}")
+
+
+def reclaim_idle_targets(claims, dry):
+    """reap_worktrees keeps a worktree with unmerged commits or edits, and enqueue() frees a target only
+    when its branch is queued - so a timed-out, blocked, conflicted or uncommitted worker keeps 4-8 GB
+    of build output forever. 2026-09-24 09:47: 22 GB free (floor 20), 55 GB of it in twelve such idle
+    targets, reclaimed by hand; on 2026-09-22 the floor held dispatch for 209 ticks. Remove target/ only
+    (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
+    process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
+    root = os.path.join(REPO, ".claude", "worktrees")
+    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    idle = []
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        wt, t = os.path.join(root, name), os.path.join(root, name, "target")
+        if wt in live or os.path.islink(wt) or os.path.islink(t) or not os.path.isdir(t):
+            continue
+        written = _target_written(t)
+        if time.time() - written >= IDLE_TARGET_H * 3600:
+            idle.append((wt, time.time() - written))
+    if not idle:
+        return
+    # Coordinator-run work has no claim (09-24: t802/t803 e2e specs, t858); a process is the only sign.
+    cwds = sh(["lsof", "-d", "cwd", "-Fn"], timeout=60)
+    if not re.search(r"^p\d+", cwds, re.M):
+        return   # lsof said nothing: no evidence the worktrees are unused, so no delete
+    seen = sh(["ps", "-axo", "command"]) + "\n" + cwds
+    for wt, age in idle:
+        if re.search(re.escape(wt) + r"(/|\s|$)", seen, re.M):
+            continue
+        if dry:
+            log(f"DRY-RUN would reclaim {wt}/target (idle {age / 3600:.1f} h)")
+            continue
+        # Renamed first: a build that starts during a long delete finds no target, never half of one.
+        gone = os.path.join(wt, f"target.reclaim-{int(time.time())}")
+        os.rename(os.path.join(wt, "target"), gone)
+        shutil.rmtree(gone, ignore_errors=True)
+        log(f"RECLAIM {wt}/target (idle {age / 3600:.1f} h, no running claim or process; source kept)")
 
 
 # ---------- deflake dispatch (user, 2026-09-23) ----------
@@ -1456,6 +2249,40 @@ def read_deflake_requests(path=None):
     return out
 
 
+# A ticket branch still on its way to main - what a deflaker must not race (T-801, 2026-09-23 23:30:
+# the runner dispatched deflakers on app-trace and fog-of-war while T-801's worker was rewriting both
+# specs under the user's authorization; the coordinator had to hold one by hand).
+_INFLIGHT = ("running", "queued", "review-failed", "gate-failed", "fix-held", "conflict")
+_DEFER_SAID = set()
+
+
+def deflake_deferred(slug, req, claims):
+    """Why this deflake request must wait, or "". (a) its own last run left a branch with unmerged
+    commits (held, blocked, review-failed): a second run would start over beside it; (b) an in-flight
+    ticket branch edits the same spec file. Both are asked of merge_target(), not main: while a batch
+    gates, main holds it provisionally and every branch in it reads as merged (09-24 09:39:52: a second
+    app-trace deflaker went out 28 s after the batch carrying the first one's fix was committed)."""
+    target = merge_target()
+    c = claims.get(DEFLAKE_PREFIX + slug)
+    if c and c.get("branch") and commits_ahead(c["branch"], target) > 0:
+        return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+    test = str(req.get("test", ""))
+    if not test.endswith(".e2e.mjs"):
+        return ""
+    path = f"ui/e2e/{test}"
+    # A `queued` claim counts only while its branch really is queued or gating: 15 claims were
+    # `queued` 25-40 h after landing under another name (T-538 as task-t538-rl) - a forever wait.
+    waiting = branches_waiting()
+    for tid, t in claims.items():
+        if tid.startswith(DEFLAKE_PREFIX) or t.get("state") not in _INFLIGHT or not t.get("branch"):
+            continue
+        if t["state"] == "queued" and t["branch"] not in waiting:
+            continue
+        if sh(["git", "diff", "--name-only", f"{target}...{t['branch']}", "--", path]).strip():
+            return f"{tid}'s branch {t['branch']} ({t.get('state')}) edits {path}"
+    return ""
+
+
 def pending_deflakes(claims, reqs):
     """([(slug, newest unconsumed request)] that may dispatch now, oldest waiting first; changed).
     A request waits while the slug's previous run is still open or its branch unmerged (claim
@@ -1491,6 +2318,12 @@ def pending_deflakes(claims, reqs):
                 new = [r for r in new if r["ts"] > ended]
                 if not new:
                     continue
+        why = deflake_deferred(slug, latest, claims)
+        if why:
+            if (slug, latest["ts"]) not in _DEFER_SAID:
+                _DEFER_SAID.add((slug, latest["ts"]))
+                log(f"DEFLAKE WAIT {slug}: request for {latest['test']} - {why}")
+            continue
         ready.append((min(r["ts"] for r in new), slug, max(new, key=lambda r: r["ts"])))
     ready.sort(key=lambda x: x[0])
     return [(slug, r) for _, slug, r in ready], changed
@@ -1550,7 +2383,8 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "precheck": {{"exit": 0}},
    "blocked": {{"needs": "<if blocked: fails alone - the evidence; or what else unblocks it>"}},
    "observed_but_not_chased": ["<anything outside scope, with the exact evidence>", ...]}}
-"done" is refused over a non-zero test exit. Also end your final message with one line
+"done" is refused over a non-zero test exit - except a red-when-the-defect-returns proof, which you record
+with "expect": "red" beside its non-zero "exit". Also end your final message with one line
 HANDBACK: DONE   or   HANDBACK: BLOCKED <why>
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 """
@@ -1578,7 +2412,7 @@ def launch_deflake(slug, req, prior, dry):
     open(f"{d}/request.json", "w").write(json.dumps(req, indent=1))
     cmd = ["claude", "-p", "--agent", "deflaker", "--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
-    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     p = subprocess.Popen(bounded(["bash", "-c", script]), cwd=wt, stdin=subprocess.DEVNULL,
@@ -1637,8 +2471,13 @@ def reap_deflake(claims, key, c):
     if hb is None and hb_err and " names " in hb_err:
         hb, hb_err = load_handback(d, c["deflake"])         # the bare slug is an acceptable name too
     outcome, why = handback_outcome(hb, text)
-    if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-        bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+    # A deflaker's red-when-the-defect-returns proof exits non-zero by design; it says so with
+    # "expect": "red" (01:33 on 2026-09-24 a DONE deflake read as BLOCKED on exactly those runs).
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)     # a red proof needs a green run beside it
+    fails = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
+    if hb and outcome == "done" and fails:
+        bad = fails[0]
         outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
     if hb_err:
         log(f"HANDBACK {key}: {hb_err} ({outcome})")
@@ -1671,6 +2510,24 @@ def reap_deflake(claims, key, c):
         claims[key] = dict(launch_review(c), state="running")
 
 
+_DEPTH_AT = [0.0]
+
+
+def record_queue_depth():
+    """One $HACKRIFF_OPS/queue-depth.jsonl line a minute: branches not yet on main (hkpy.flow's one
+    definition) - sampled here because this runner ticks through a gate, the merge runner does not
+    (user, 2026-09-24 17:02: 'merge queue is huge, is it growing? track its length on /flow')."""
+    if time.time() - _DEPTH_AT[0] < 60:
+        return
+    _DEPTH_AT[0] = time.time()
+    if f"{REPO}/py" not in sys.path:
+        sys.path.append(f"{REPO}/py")
+    from hkpy import flow
+    d = flow.queue_waiting(S)
+    with open(f"{S}/{flow.QUEUE_DEPTH_JSONL}", "a") as f:
+        f.write(json.dumps({"ts": round(time.time(), 1), **{k: d[k] for k in ("waiting", "queued", "gating", "isolating")}}) + "\n")
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
@@ -1690,6 +2547,10 @@ def tick(dry):
     except Exception as e:
         log(f"release_stale_claims error: {e}")
     try:
+        sync_remote_view(claims, dry)
+    except Exception as e:
+        log(f"sync_remote_view error: {e}")
+    try:
         sync_board(claims, dry)
     except Exception as e:
         log(f"sync_board error: {e}")
@@ -1698,9 +2559,25 @@ def tick(dry):
     except Exception as e:
         log(f"reap_worktrees error: {e}")
     try:
+        reclaim_e2e_data(dry)
+    except Exception as e:
+        log(f"reclaim_e2e_data error: {e}")
+    try:
+        reclaim_idle_targets(claims, dry)
+    except Exception as e:
+        log(f"reclaim_idle_targets error: {e}")
+    try:
+        sweep_superseded(dry)
+    except Exception as e:
+        log(f"sweep_superseded error: {e}")
+    try:
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:
         log(f"dispatch_deflakes error: {e}")
+    try:
+        record_queue_depth()
+    except Exception as e:
+        log(f"record_queue_depth error: {e}")
     changed |= dispatch(claims, dry)
     if not dry:
         save_claims(claims)
@@ -1755,6 +2632,14 @@ def main():
     os.makedirs(WORKDIR, exist_ok=True)
     for p in (NEEDS, DONE):
         open(p, "a").close()
+    import launchpath
+    launchpath.check(__file__, log)
+    # Workers inherit this process's environment. Restarted from a role session, it carried that
+    # session's HACKRIFF_ROLE into every worker, and ops/watchdog.py (which names a role session by
+    # that variable before looking at claims) charged 5 workers' load to role:pipeline-manager -
+    # 665 % and an over-budget alarm on 2026-09-24 03:20. The runner is no role: drop it.
+    if os.environ.pop("HACKRIFF_ROLE", None):
+        log("ENV: dropped an inherited HACKRIFF_ROLE - workers are owned by their claims, not by a role")
     same = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "ops/work-runner.py"], cwd=REPO).returncode == 0
     log(f"VERSION: {'matches' if same else 'DIFFERS FROM'} HEAD:ops/work-runner.py  ops={S} cap={CAP} dry={a.dry_run}")
     # What this process is actually running with - `just knobs show` reads it back as "effective".

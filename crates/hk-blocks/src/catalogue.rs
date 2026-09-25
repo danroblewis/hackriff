@@ -32,6 +32,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
     all.extend(blocks::fec::planned());
     all.extend(blocks::parse::planned());
     all.extend(blocks::multi::planned());
+    all.extend(blocks::audio::planned());
     all.extend(mauto_rows());
     for d in &mut all {
         if !d.params_pinned
@@ -68,6 +69,11 @@ mod tests {
             for p in d.inputs.iter().chain(&d.outputs) {
                 assert!(!p.types.is_empty(), "{}.{}", d.name, p.name);
             }
+            assert!(
+                !d.outputs.is_empty() || d.name == hk_recipe::AUDIO_OUT_BLOCK,
+                "{}: only the audio sink has no output port",
+                d.name
+            );
             for o in &d.outputs {
                 // Polymorphic outputs need an input to follow.
                 assert!(o.types.len() == 1 || !d.inputs.is_empty(), "{}", d.name);
@@ -101,6 +107,11 @@ mod tests {
             "text",
             "follow_hops",
             "identity",
+            "squelch",
+            "agc",
+            "deemphasis",
+            "stereo_decode",
+            "audio_out",
         ] {
             assert!(all.descriptor(name).is_some(), "{name} missing");
         }
@@ -115,6 +126,7 @@ mod tests {
             blocks::fec::planned(),
             blocks::parse::planned(),
             blocks::multi::planned(),
+            blocks::audio::planned(),
             mauto_rows(),
         ]
         .concat();

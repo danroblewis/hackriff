@@ -40,7 +40,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser } from "./harness.mjs";
+import { Browser, tileAsks, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -145,7 +145,9 @@ const SNAPSHOT = `(() => {
     headline: row ? row.children[1].textContent : "",
     // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
     // the words** — see [[heldObservation]] for what a stale one costs.
-    rect: box ? { x: box.x, y: box.y, w: box.width, h: box.height } : null,
+    // T-918: the canvas is full-bleed; the pane (trace strip on top) starts below the inset it states.
+    rect: box ? { x: box.x, y: box.y + (Number(canvas.dataset.insetTop) || 0), w: box.width,
+      h: box.height - (Number(canvas.dataset.insetTop) || 0) - (Number(canvas.dataset.insetBottom) || 0) } : null,
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
     counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
@@ -467,6 +469,54 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
 })()`;
 
 /**
+ * **Wait for a scrubbed pane's state for as long as the page is WORKING towards it — not for a
+ * number of seconds** (the deflake, 2026-09-24).
+ *
+ * Both states the scrubbed checks need — "a cell slice with a peak", and "every tile the pane
+ * addresses resident" — are reached by the tile route answering, and nothing else. Their waits
+ * were wall-clock deadlines (12 s a park attempt, 20 s for residency): a bet on that route's
+ * service rate, which this repo measured moving more than twenty-fold with load (harness.mjs,
+ * [[waitWhileWorking]]). The gate's signature, three times in two days: `timed out after 20000 ms
+ * waiting for the trace to be drawn from a pyramid cell … (no coarse stand-ins, nothing pending)`,
+ * green alone in ~31 s each time. Measured on this file at load 17–20: one tile request on the
+ * wire at a time, ~4 s each, and a frozen pane reaching `8 tiles · 0 coarse stand-ins · 0 pending`
+ * 8 s after the park; a little more contention and both scrubbed checks went red on runs ALONE —
+ * the colour check still filling at 20 s, and the afterglow check's eight park attempts each
+ * timing out at 12 s on a readout that still said `no tile in hand for this span yet (24 pending)`.
+ * Holding every tile response 13 s (CDP `Fetch`, so the request stays open exactly as a slow
+ * route's does) reproduces the park failure deterministically on the old waits.
+ *
+ * So the wait runs while the pane's report (its tile counts and the trace's own words) changes or
+ * a tile request is on the wire — including one the route is still answering — and gives up when
+ * both have been still for [[waitWhileWorking]]'s `stallMs`. The state asserted is unchanged; a pane
+ * that stops working without reaching it (a hole in the history, a refusal made terminal, T-523's
+ * wedge) is reported as before, with the last report and what the wire did.
+ */
+const PANE_REPORT = (expr) => `JSON.stringify({
+  ok: ${expr},
+  counts: document.querySelector('.hk-surface-viewport[data-viewport="pane"]')
+    ?.querySelector('.hk-surface-counts')?.textContent ?? "",
+  trace: document.querySelector('.sf-trace')?.textContent ?? "",
+})`;
+async function whileTilesArrive(page, what, expr) {
+  const n0 = page.requests.length;
+  const r = await waitWhileWorking(page, async () => JSON.parse(await page.eval(PANE_REPORT(expr))),
+    (v) => v.ok === true, { openIsWork: true });
+  const tiles = page.requests.slice(n0).filter((q) => q.url.includes("/api/tiles"));
+  await page.settleBodies();
+  const answers = {};
+  for (const a of tileAsks(tiles)) answers[a.status ?? "unanswered"] = (answers[a.status ?? "unanswered"] ?? 0) + 1;
+  const wire = `${tiles.length} tile request(s), ${tiles.filter((q) => q.endedMs !== null).length} ended; ` +
+    `addresses by answer ${JSON.stringify(answers)}`;
+  if (!r.ok) {
+    throw new Error(`the page stopped working without reaching ${what}: after ${r.ms} ms, nothing ` +
+      `changed for ${r.stalledMs} ms (${wire})\n  pane: ${JSON.stringify(r.value.counts)}\n` +
+      `  trace: ${JSON.stringify(r.value.trace)}\n  exceptions: ${JSON.stringify(page.exceptions.slice(0, 3))}`);
+  }
+  return { ms: r.ms, wire };
+}
+
+/**
  * **Park a viewport on an observed pyramid cell behind the live edge** — by RE-ESTABLISHING the
  * state, never by waiting for it.
  *
@@ -480,15 +530,20 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
  * about which second each one happened to freeze on.
  *
  * So each attempt returns to the growing edge, waits for a live frame that HAS a peak (data is
- * arriving), freezes there, and gives the pyramid a bounded moment to answer for that cell. A failed
- * attempt freezes somewhere else rather than waiting longer in the same hole.
+ * arriving), freezes there, and waits while the pyramid is answering for that cell
+ * ([[whileTilesArrive]] — as long as tiles are arriving, never a fixed number of seconds). A failed
+ * attempt — the pane went still without a cell — freezes somewhere else rather than waiting longer
+ * in the same hole.
  */
 async function scrubOntoCell(page, lagS, tries = 8) {
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
+  // T-882: the follow/freeze control is the FAB, which mounts once the surface has booted (the
+  // retired `.sf-live` existed from the first paint).
+  await page.waitFor("the follow-live FAB to mount", "!!document.querySelector('.map-fab')", { timeoutMs: 60000 });
   let last = "";
   for (let i = 0; i < tries; i++) {
-    // Back to the growing edge. `.sf-live` toggles, so this presses until the pane says it is
+    // Back to the growing edge. The FAB (T-882: the retired `.sf-live`) toggles, so this presses until the pane says it is
     // following rather than assuming one press means one direction.
     //
     // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
@@ -505,16 +560,16 @@ async function scrubOntoCell(page, lagS, tries = 8) {
       // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
       // clicked three times every attempt and left the viewport frozen.
       if ((await page.eval(FOLLOWING_EXPR)) === true) break;
-      await page.click(`document.querySelector('.sf-live')`);
+      await page.click(`document.querySelector('.map-fab')`);
       await page.frames(8);
     }
     await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR,
       { timeoutMs: 30000 });
-    await page.click(`document.querySelector('.sf-live')`);
+    await page.click(`document.querySelector('.map-fab')`);
     try {
-      await page.waitFor(`a pyramid-cell slice at least ${lagS} s behind the live edge`,
-        scrubbedExpr(lagS), { timeoutMs: 12000 });
-      return i + 1;
+      const w = await whileTilesArrive(page, `a pyramid-cell slice at least ${lagS} s behind the live edge`,
+        scrubbedExpr(lagS));
+      return `attempt ${i + 1} (the cell arrived ${w.ms} ms after the freeze; ${w.wire})`;
     } catch (e) {
       last = String((e && e.message) || e);
       await page.frames(4);
@@ -527,6 +582,44 @@ async function scrubOntoCell(page, lagS, tries = 8) {
 /** The pane is at the growing edge — the chrome's own fact, never the readout string (T-478). */
 const FOLLOWING_EXPR =
   `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"][data-following="true"]').length > 0`;
+
+/**
+ * **Bring the tuned band, with a control region on each side, into the columns the surface itself
+ * is showing** (T-801). The app's panels float over the full-bleed canvas's sides by design; the
+ * view opens on the observed extent, which puts the band's edges near the canvas's own edges, under
+ * them. A frequency-only zoom OUT (shift+wheel, T-456 — view arithmetic, never a device route)
+ * anchored at the band's own centre shrinks the band towards that centre until both edges and a
+ * margin beyond each lie in the widest uncovered run of columns, read from the browser's own hit
+ * test (`Page.unoccludedColumns`) — never from a hard-coded panel width. Returns a sentence for the
+ * diagnostics; the extent test re-checks the fit on the observation it actually measures.
+ */
+async function fitBandIntoUncovered(page, { tries = 12 } = {}) {
+  let said = "";
+  for (let i = 0; i <= tries; i++) {
+    await page.waitFor("the tap to see a stream header and the pane to state its frequency window",
+      `!!(window.__hkTap.geom && window.__hkTap.geom.bandwidthHz > 0) &&
+       / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+      { timeoutMs: 30000 });
+    const snap = JSON.parse(await page.eval(SNAPSHOT));
+    const unocc = await page.unoccludedColumns(".sf-canvas", { y0: snap.rect.y, y1: snap.rect.y + TRACE_PX });
+    const win = windowOf(snap.headline);
+    const g = snap.tap.geom;
+    const w = snap.rect.w;
+    const colOf = (hz) => ((hz - win.f0Hz) / win.spanHz) * w;
+    const lo = colOf(g.centerHz - g.bandwidthHz / 2), hi = colOf(g.centerHz + g.bandwidthHz / 2);
+    const vLo = unocc.x - snap.rect.x, vHi = vLo + unocc.w - 1;
+    // A control region of a tenth of the uncovered width beyond each edge, which is well over the
+    // extent test's own stroke tolerance and its 5 %-of-the-canvas control-region floor.
+    const margin = Math.max(24, unocc.w * 0.1);
+    said = `band columns ${lo.toFixed(0)}–${hi.toFixed(0)}, uncovered ${vLo.toFixed(0)}–${vHi.toFixed(0)} ` +
+      `of ${w.toFixed(0)}, after ${i} zoom step(s)`;
+    if (lo >= vLo + margin && hi <= vHi - margin) return said;
+    const cx = Math.min(vHi - margin, Math.max(vLo + margin, (lo + hi) / 2));
+    await page.wheel({ x: snap.rect.x + cx, y: snap.rect.y + snap.rect.h * 0.4 }, 240, { shift: true });
+    await page.frames(3);
+  }
+  return said;
+}
 
 const LIVE_FRAME_EXPR =
   `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`;
@@ -574,11 +667,14 @@ const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.t
  */
 const sameBox = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
-async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000 }) {
+async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000, scrubbed = false }) {
   let last = null;
   for (let i = 0; i < tries; i++) {
     await page.eval("window.__hkTap.resume()");
-    await page.waitFor(what, expr, { timeoutMs });
+    // A scrubbed pane's state is reached by tiles arriving, so it is waited for while they arrive
+    // ([[whileTilesArrive]]); a live frame needs no tile and keeps its plain bound.
+    const waited = scrubbed ? await whileTilesArrive(page, what, expr)
+      : { ms: await page.waitFor(what, expr, { timeoutMs }), wire: "" };
     await page.eval("window.__hkTap.hold()");
     await page.frames(4);
     const before = JSON.parse(await page.eval(SNAPSHOT));
@@ -587,7 +683,12 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
     const still = before.trace === after.trace && before.headline === after.headline
       && sameBox(before.rect, after.rect);
     if (still && accept(before)) {
-      return { snap: before, img, rect: before.rect, withheld: after.tap.withheld,
+      // T-801: which of the strip's columns the SURFACE is on top at, from the browser's own hit
+      // test on this same (held, box-checked) layout — the app's panels float over the full-bleed
+      // canvas by design, and their pixels are not the trace's.
+      const unocc = await page.unoccludedColumns(".sf-canvas",
+        { y0: before.rect.y, y1: before.rect.y + TRACE_PX });
+      return { snap: before, img, rect: before.rect, unocc, withheld: after.tap.withheld, waited,
         rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
     }
     last = { still, accepted: accept(before), before: before.trace, after: after.trace,
@@ -612,6 +713,8 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   assert.equal(await page.eval("JSON.stringify(window.__cspViolations ?? [])"), "[]",
     "the app violated its own CSP — the tap changes nothing about that");
   assert.deepEqual(page.exceptions, [], "uncaught exception during load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
 
   // The tap has to be the thing that sees the stream, or everything below is vacuous.
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
@@ -761,11 +864,24 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
 
   // The canvas became a real render. Its BOX is deliberately not kept: the rectangle the pixels
   // below are indexed by comes back with them, from `heldObservation` — see the note there.
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+  // **Both band edges and a control region on each side must be where the SURFACE is on top**
+  // (T-801). Since MAP-01 the canvas is full-bleed and the app's inventory panel (and the focus
+  // panel, when something is focused) float over its sides by design — and the view opens on the
+  // observed extent, i.e. with the tuned band's edges out near the canvas's own edges, under those
+  // panels. The first red run measured it: the band's left edge at column 205.7 lay under the
+  // inventory panel (whose own coloured text supplied a "trace sample" at column 51). The claim —
+  // drawn exactly where data exists, absent everywhere else, both edges pinned in one frame — is
+  // kept whole by bringing the band INTO the uncovered region with a frequency-only zoom out (a
+  // pure view gesture; it never reaches a device route), rather than by dropping an edge.
+  const fit = await fitBandIntoUncovered(page);
+  t.diagnostic(`fitting the tuned band into the uncovered columns: ${fit}`);
   // A live-frame slice, so the boundary under test is the tuned band and not a tile edge.
   const obs = await heldObservation(page, path.join(ART, "app-trace-extent.png"), {
     what: "the trace to state a live-frame slice", expr: LIVE_FRAME_EXPR, accept: isLiveFrame,
@@ -777,8 +893,25 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   const geom = snap.tap.geom;
   assert.ok(geom && geom.bandwidthHz > 0, "the tap never saw a stream header to take the band from");
   const band = { f0Hz: geom.centerHz - geom.bandwidthHz / 2, f1Hz: geom.centerHz + geom.bandwidthHz / 2 };
+  // Columns are still indexed across the canvas's FULL width: the pane maps frequency over the
+  // whole full-bleed canvas, and the panels float over that drawing without reframing it.
   const colOf = (hz) => ((hz - win.f0Hz) / win.spanHz) * s.w;
   const expLo = colOf(band.f0Hz), expHi = colOf(band.f1Hz);
+  // The columns the surface is on top at (canvas-relative), from the observation's own hit test.
+  const vis = obs.unocc && obs.unocc.w > 0
+    ? { lo: Math.round(obs.unocc.x - obs.rect.x), hi: Math.round(obs.unocc.x - obs.rect.x) + obs.unocc.w - 1 }
+    : { lo: 0, hi: s.w - 1 };
+  const visible = (i) => i >= vis.lo && i <= vis.hi;
+  t.diagnostic(`uncovered columns ${vis.lo}..${vis.hi} of ${s.w} (${obs.unocc?.occluded ?? 0} under floating chrome)`);
+  // The premise the whole test rests on, asserted rather than assumed: both edges, with a stroke's
+  // slack either side, are on columns the surface itself is showing.
+  const tol0 = Math.max(8, (2 * s.w) / TRACE_COLUMNS);
+  assert.ok(visible(Math.floor(expLo - tol0)) && visible(Math.ceil(expHi + tol0)),
+    `the tuned band's columns ${expLo.toFixed(1)}–${expHi.toFixed(1)} are not both inside the uncovered ` +
+    `columns ${vis.lo}..${vis.hi} after fitting (${fit}) — an edge under a panel cannot be pinned`);
+  // Every column a panel covers is dropped from the strip: its pixels are the panel's, not the trace's.
+  for (let i = 0; i < s.w; i++) if (!visible(i)) s.cols[i] = -1;
+  s.drawn = s.cols.filter((v) => v >= 0).length;
 
   const drawnAt = s.cols.map((v, i) => (v >= 0 ? i : -1)).filter((i) => i >= 0);
   t.diagnostic(`viewport ${(win.f0Hz / 1e6).toFixed(3)}–${(win.f1Hz / 1e6).toFixed(3)} MHz over ${s.w} px; ` +
@@ -803,15 +936,19 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   // ABSENT: every column outside the band is empty. This is the half that a floor, a zero, or a line
   // interpolated across the gap would fail — and it is not vacuous, because the columns inside the
   // band were just shown to be drawn.
-  const outside = s.cols.map((v, i) => ({ v, i })).filter(({ i }) => i < expLo - tol || i > expHi + tol);
+  const outside = s.cols.map((v, i) => ({ v, i })).filter(({ i }) => visible(i) && (i < expLo - tol || i > expHi + tol));
   const lit = outside.filter(({ v }) => v >= 0);
   t.diagnostic(`${outside.length} columns lie outside the tuned band; ${lit.length} of them are drawn`);
   assert.equal(lit.length, 0,
     `${lit.length} columns outside the tuned band carry a trace sample (first at ${lit[0]?.i}). ` +
     "There is no current frame out there: drawing one claims a measurement nobody took.");
   // The whole viewport is not the band, or the two assertions above are the same assertion.
-  assert.ok(outside.length > s.w * 0.05,
-    `only ${outside.length} of ${s.w} columns are outside the band — this frame has no control region`);
+  // …and on BOTH sides of it, where a panel no longer hides either end (T-801).
+  const leftCtl = outside.filter(({ i }) => i < expLo).length, rightCtl = outside.length - leftCtl;
+  t.diagnostic(`control columns: ${leftCtl} left of the band, ${rightCtl} right of it`);
+  assert.ok(outside.length > s.w * 0.05 && leftCtl >= tol && rightCtl >= tol,
+    `only ${outside.length} of ${s.w} columns are outside the band (${leftCtl} left, ${rightCtl} right) — ` +
+    "this frame has no control region on each side");
 
   await page.eval("window.__hkTap.resume()");
   assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the trace's extent");
@@ -844,6 +981,8 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   // As above: the box that indexes the pixels is the observation's own, not this one.
   const opened = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
@@ -857,9 +996,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
       "in a pane holding every tile it is addressing (no coarse stand-ins, nothing pending)",
     expr: scrubbedExpr(2, { resident: true }),
     accept: (snap) => CELL_SLICE_RE.test(snap.trace) && isResident(snap.counts),
-    timeoutMs: 20000,
+    scrubbed: true,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
+  t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
+    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
   // **How far the canvas moved while this test was getting into state.** Reported rather than
   // asserted: the movement is legitimate (the chrome above the stage grows and shrinks with what it
   // has to say), and the only thing that was ever wrong was measuring pixels with the box from
@@ -885,7 +1025,20 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // BLOCK about as wide as whatever drew it. The one recorded failure was 147 of 586 columns —
   // a quarter of a band this pane cuts into four tiles — and there was no record of which.
   const missAt = [];
-  for (let x = 0; x < s.w; x++) {
+  // **Only where the SURFACE is on top** (T-801's rule, carried to this check). The inventory panel
+  // floats over the full-bleed canvas's left side, and its own text and background were being read
+  // as "trace ink" over "cells": every run's first misses were column 51, ink [212,221,225] over
+  // eight identical [20,28,33] — the panel's lettering on the panel. Those are not the trace's
+  // pixels or the waterfall's, so they are neither compared nor counted, exactly as the extent
+  // check does with the same `obs.unocc`.
+  const vis = obs.unocc && obs.unocc.w > 0
+    ? { lo: Math.max(0, Math.round(obs.unocc.x - obs.rect.x)),
+        hi: Math.min(s.w - 1, Math.round(obs.unocc.x - obs.rect.x) + obs.unocc.w - 1) }
+    : { lo: 0, hi: s.w - 1 };
+  const visW = vis.hi - vis.lo + 1;
+  t.diagnostic(`comparing uncovered columns ${vis.lo}..${vis.hi} of ${s.w} ` +
+    `(${obs.unocc?.occluded ?? 0} under floating chrome)`);
+  for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
     const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
@@ -923,9 +1076,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // strip is one colour, or the waterfall is — this would score as well as the real comparison, and
   // the test would be measuring the ramp's coarseness rather than the trace's colour.
   let shuffled = 0;
-  for (let x = 0; x < s.w; x++) {
+  for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
-    const far = (x + Math.floor(s.w / 3)) % s.w;
+    // A third of the UNCOVERED span away, wrapping inside it, so the control never reads the panel.
+    const far = vis.lo + ((x - vis.lo + Math.floor(visW / 3)) % visW);
     if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(obs.img, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
@@ -952,6 +1106,8 @@ test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a rea
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the trace to draw",
     `/slice [\\d:]+Z/.test(document.querySelector('.sf-trace')?.textContent ?? "")`, { timeoutMs: 90000 });
   const rect = await page.$rect(".sf-canvas");
@@ -985,6 +1141,8 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   const page = await browser.page(undefined, { initScript: TAP });
 
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   // The pre-scrub reading, captured by the read that matched it (see `traceMatching`): this line
   // used to wait for a peak and then read the readout again, and the second read is a later frame
   // which need not still have one. It is a *baseline*, not the claim — the claim below is stated
@@ -998,7 +1156,7 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   // Upward: the pointer is in GL coordinates (y up) and a pane's time runs up, so dragging toward
   // the top of the screen walks the window BACKWARD. Repeated because one drag is half a window and
   // the window has to clear the live row entirely.
-  await page.click(`document.querySelector('.sf-live')`);
+  await page.click(`document.querySelector('.map-fab')`);
   for (let i = 0; i < 4; i++) {
     await page.drag(
       { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.75 },
@@ -1060,6 +1218,8 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   const LAG_S = 2;
@@ -1082,9 +1242,10 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
       "rows before it in hand",
     expr: scrubbedExpr(LAG_S, { afterglowInHand: true }),
     accept: (snap) => CELL_SLICE_RE.test(snap.trace) && !AFTERGLOW_NOT_IN_HAND_RE.test(snap.trace),
-    timeoutMs: 20000,
+    scrubbed: true,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
+  t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
+    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
   const snap = obs.snap;
   const m = /slice ([\d:]+)Z \(([^)]+)\)/.exec(snap.trace);
   assert.ok(m, `the trace stated no slice: ${JSON.stringify(snap.trace)}`);

@@ -8,6 +8,16 @@ SCRATCH = os.environ.get("HACKRIFF_OPS", os.path.expanduser("~/.hackriff-ops"))
 os.makedirs(SCRATCH, exist_ok=True)
 PROJ = "/Users/daniellewis/.claude/projects/-Users-daniellewis-hackriff"
 OPSDIR = os.path.dirname(os.path.abspath(__file__))   # so `import perf` (same dir) resolves
+# A PREVIEW (ops/preview-dashboard.sh, user 2026-09-24: "he does not want to wait behind a merge batch
+# to SEE a dashboard change") runs a branch's ops/ + py/ copied out of git into a scratch directory,
+# on :8902 beside the real :8901. Its child builds must run that copy's code, not main's; everywhere
+# else (the real instance) they run REPO's, never a path derived from a worktree.
+PREVIEW = os.environ.get("MONITOR_PREVIEW") == "1"
+CODE_ROOT = os.path.dirname(OPSDIR) if PREVIEW else REPO
+# The caches the dashboard itself WRITES: a preview keeps its own (ops/preview-dashboard.sh seeds them
+# with copies), so a branch's code never writes the real instance's usage.json, burndown-cache.json
+# or role-sessions.json.
+STATE = CODE_ROOT if PREVIEW else SCRATCH
 
 # A self-contained ticket-detail modal: any element with data-tid opens it (fetches
 # /ticket.json and shows every field). Injected before </body> of any page, so a
@@ -614,7 +624,11 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
-let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
+let last='',scope='frontier',flt={done:false,todo:true,blocked:false,collapse:true},msFilter='';
+// Defaults (user, 2026-09-24 23:20): 'todo' shown and 'collapse done' on. A choice made here is remembered in
+// this browser (localStorage 'graph.flt') and overrides them.
+try{ Object.assign(flt, JSON.parse(localStorage.getItem('graph.flt')||'{}')); }catch(e){}
+function saveFlt(){ try{localStorage.setItem('graph.flt',JSON.stringify(flt));}catch(e){} }
 // Open milestones live for THIS TAB only (sessionStorage): a persisted "M2 open" survived a reload
 // on 2026-09-22 and read as "the map always shows everything". The chips in the top bar say what
 // is open and close it.
@@ -631,10 +645,9 @@ renderOpenChips();
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
-// "collapse done" is off by default (it removes nodes); it is remembered like the other filters.
-if(flt.collapse===undefined) flt.collapse=false; document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
-document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);last='';draw();};
+['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).classList.toggle('on',flt[k]); document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);saveFlt();last='';draw();};});
+document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
+document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);saveFlt();last='';draw();};
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
@@ -934,7 +947,11 @@ def merge_status():
         except Exception:
             pass
     state = "merging" if merging else ("gating" if gate else "idle")
-    return {"state": state, "msg": mmsg, "ticket": mticket,
+    try:   # the one "branches not yet on main" number (hkpy.flow.queue_waiting), same as /flow's
+        not_on_main = _flow_modules()[0].queue_waiting(SCRATCH)["waiting"]
+    except Exception:
+        not_on_main = None
+    return {"state": state, "msg": mmsg, "ticket": mticket, "not_on_main": not_on_main,
             "gate": gate, "elapsed_s": elapsed, "queue": queue,
             "testing": testing, "ahead": ahead, "gates_running": gates_running,
             "phase": phase, "progress": progress, "typical_s": typical_s, "merge_age_s": merge_age_s}
@@ -1110,6 +1127,21 @@ def latest_junit():
                       "total_s": round(sum(c["s"] for c in cases))})
     return {"run": run, "age_s": int(time.time() - os.path.getmtime(os.path.join(root, run))), "files": files}
 
+def blamed_alone(n=6):
+    """Tests whose fail-alone reds the runner pinned on a merge (`branch_defects` in flakes.json),
+    most first. Several on one test is the shape of a MAIN-side defect blamed on unrelated branches
+    (canvas-journey, 2026-09-24: three) - shown on /flow so it is seen, not rediscovered."""
+    try:
+        with open(os.path.join(SCRATCH, "flakes.json"), encoding="utf-8") as fh:
+            tests = json.load(fh).get("tests") or {}
+    except Exception:
+        return []
+    rows = [{"test": str(k), "blamed": int(v.get("branch_defects") or 0), "failed_alone": int(v.get("failed_alone") or 0),
+             "passed_alone": int(v.get("passed_alone") or 0)}
+            for k, v in tests.items() if isinstance(v, dict) and int(v.get("branch_defects") or 0) > 0]
+    return sorted(rows, key=lambda r: (-r["blamed"], r["test"]))[:n]
+
+
 def flake_top(n=5):
     """The flake ledger's worst offenders — `$HACKRIFF_OPS/flakes.json` (py/hkpy/flakes.py).
 
@@ -1218,7 +1250,7 @@ def work_queue(smap, wts, ags, merge_ticket=""):
             "active_ms": sorted(m for m in active_ms if m),
             "todo_total": sum(1 for t in all_tasks if t.get("status") == "todo")}
 
-USAGE_FILE = os.path.join(SCRATCH, "usage.json")
+USAGE_FILE = os.path.join(STATE, "usage.json")
 USAGE_SESSION = "usagepoll"
 
 def _parse_usage(text):
@@ -1729,7 +1761,10 @@ def agents(status_map):
         if not alive and (c or s["age_s"] > ACTIVE):
             continue
         s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
-        s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
+        # A remote claim's row names its host (user via supervisor, 2026-09-25 00:40): its transcript is the copy the
+        # work runner appends from that host every tick, its pid the local ssh session holding the run.
+        s["host"] = c.get("host") or "mac"
+        s["label"] = (f"{c['host']} · " if c.get("host") else "") + f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
         best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
     return out
@@ -1871,7 +1906,7 @@ def gather():
 
 def _flow_modules():
     import sys as _sys
-    py_dir = os.path.join(REPO, "py")
+    py_dir = os.path.join(CODE_ROOT, "py")
     if py_dir not in _sys.path:
         _sys.path.insert(0, py_dir)
     from hkpy import flow as flow_mod, experiment as exp_mod
@@ -1977,7 +2012,15 @@ def build_flow_panel(ops, now=None):
             "gates_48h": gates48,
             "full_gate_p50_min": full_p50, "baseline_full_gate_p50_min": baseline_full_p50,
             "causes_24h": dict(causes), "reds_24h": len(reds24), "gates_24h": len(closed24),
+            "blamed_alone": blamed_alone(),
+            # Branches not yet on main (user, 2026-09-24 17:02: 'is the merge queue growing?').
+            "queue_depth": {"now": flow_mod.queue_waiting(ops),
+                            "hourly": flow_mod.queue_depth_hourly(ops, now - timedelta(hours=24), now),
+                            "spark": flow_mod.queue_depth_series(ops, now - timedelta(hours=24), now)},
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
+            # Remote worker hosts (user, 2026-09-25): running/landed per host and its mirror's drift from main.
+            "remote_hosts": (rh := flow_mod.remote_hosts(ops)),
+            "landings_by_host_24h": flow_mod.landings_by_host(ops, hosts=rh),
             "experiment": experiment,
         }
     except Exception as e:
@@ -1994,7 +2037,13 @@ def flow_panel_cached(ops, max_age=30.0):
     with _FLOW_LOCK:
         if _FLOW_CACHE["data"] is not None and time.time() - _FLOW_CACHE["at"] < max_age:
             return _FLOW_CACHE["data"]
-        data = build_flow_panel(ops)
+        # built in a child process (_child_json): the log parse's heap goes when the child exits
+        data = _child_json(f"""
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(CODE_ROOT, "ops", "monitor.py")!r})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.build_flow_panel({ops!r})))
+""")
         _FLOW_CACHE.update(at=time.time(), data=data)
         return data
 
@@ -2012,8 +2061,13 @@ h1{font-size:15px;margin:0;letter-spacing:.02em;white-space:nowrap}h1 b{color:va
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--teal);margin-right:5px}
 .top .counts{margin-left:auto}
 .cols{flex:1;min-height:0;display:grid;grid-template-columns:1.5fr 1fr 1.15fr;gap:10px;padding:10px}
-.col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;min-height:0;min-width:0}
+/* REACHABILITY RULE (user, 2026-09-24): nothing on this page may be unreachable. Every card can
+   shrink (flex-shrink 1 - never an inline flex:0 0 auto, which is what hid #mergecard on 09-22 and
+   Work trees / Merge queue / Recent commits on 09-24), keeps a floor so it never collapses to its
+   border, and scrolls its own body (.bd) or itself; the column scrolls when the floors alone do not
+   fit. py/tests/test_monitor_layout.py enforces it on every card. */
+.col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;flex:0 1 auto;min-height:min(96px,100%);min-width:0;overflow:auto}
 .card.fill{flex:1}
 .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 8px;display:flex;justify-content:space-between;flex:0 0 auto}
 .card h2 em{font-style:normal;color:var(--dim)}
@@ -2086,7 +2140,14 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
 .boxline .ow{color:var(--teal)}.boxline .ow.hot{color:var(--amber)}
 .boxline .un{color:var(--coral)}
 .boxline .hd{color:var(--dim);letter-spacing:.06em;text-transform:uppercase;font-size:10px}
-@media(max-width:1000px){.cols{grid-template-columns:1fr 1fr}}
+@media(max-width:1000px){
+  body{overflow:auto;overflow-x:hidden}
+  .app{height:auto;min-height:100vh;overflow:visible}
+  .cols{grid-template-columns:1fr 1fr;flex:none}
+  .col{overflow:visible}
+  .card.fill{flex:none}
+  .bd{max-height:60vh}
+}
 @media(max-width:640px){
   body{overflow:auto;overflow-x:hidden;font-size:12px}
   .app{height:auto;overflow:visible}
@@ -2105,18 +2166,19 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><a class=maplink href="/metrics" title="Code metrics over committed main: lines, churn, test cost, outliers, hygiene, trends">metrics ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
     <div class="card" id=mergecard><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
-    <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
+    <div class="card" id=levcard><h2>Leverage <em><a class=maplink href="/worklog#leverage">all ↗</a></em></h2><div class=bd id=lev style="font-size:12px"></div></div>
+    <div class="card" id=queuecard style="max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
   <div class=col>
-    <div class="card" id=syscard style="flex:0 0 auto"><h2>System <em id=sys-sub></em></h2>
+    <div class="card" id=syscard style="flex-shrink:0.2"><h2>System <em id=sys-sub></em></h2>
       <div class="cpu-wrap"><div class="cores" id=cores></div></div>
       <div class="gauges">
         <div><div class="mem-lbl"><span>Memory</span><span id=mem-txt></span></div><div class="mem-bar"><i id=mem-fill></i></div></div>
@@ -2124,9 +2186,9 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
       </div>
       <div class=boxline id=boxline title="ops/watchdog.py: per-owner CPU, and anything no worker/gate/role/demo owns"></div>
     </div>
-    <div class="card" style="flex:0 0 auto;max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
+    <div class="card" style="max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
-    <div class="card" style="flex:0 0 auto;height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
+    <div class="card" style="height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
   </div>
 </div></div>
 <script>
@@ -2218,7 +2280,7 @@ async function tick(){
     const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju
       +(fl?hdr('Flake ledger · tests that cost gates')+fl:'')
       +hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
-    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
+    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting'+(mg.not_on_main!=null?' · '+mg.not_on_main+' not on main':'');
   }
   const b=d.budget||{}; const bEl=$('#budget');
   if(b.weekly!=null||b.session!=null){
@@ -2285,6 +2347,20 @@ async function tick(){
  }catch(e){ $('#err').textContent='fetch error: '+e; $('#st').textContent='retrying'; }
 }
 tick(); setInterval(tick,5000);
+// Leverage beside the merge queue (user, 2026-09-24: "put the Leverage top-5 and the ETA line on the
+// MAIN page beside the queue, since that is where he looks") - the full panel is /worklog#leverage.
+async function levTick(){ try{
+  const [b,e]=await Promise.all([fetch('/taskorder.json',{cache:'no-store'}).then(r=>r.json()),
+                                 fetch('/eta.json',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}))]);
+  const el=$('#lev'); if(!el) return;
+  if(b.error){ el.innerHTML='<div style="color:var(--dim)">'+esc(String(b.error))+'</div>'; return; }
+  const rows=(b.rows||[]).filter(r=>r.unblocks>0).slice(0,5);
+  el.innerHTML=(e.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px">${esc(e.line)}</div>`:'')+
+    (e.graph&&e.graph.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px" title="max expected landing over every todo/in-progress ticket; deferred and blocked excluded (py/hkpy/graphclear.py)">${esc(e.graph.line)}</div>`:'')+
+    rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline"><span style="font:12px var(--mono);color:var(--amber);min-width:2.2em;text-align:right" title="open tickets transitively behind it">${esc(String(r.unblocks))}</span><span class=tlink data-tid="${esc(r.id)}" style="font:12px var(--mono)">${esc(r.id)}</span><span style="color:var(--dim);font:11px var(--mono)">${esc(Object.entries(r.downstream_milestones||{}).map(([k,v])=>k+' '+v).join(', '))}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.title)}</span></div>`).join('')+
+    `<div style="color:var(--dim);font:11px var(--mono);margin-top:3px">${esc(String(b.open))} open · frontier ${esc(String((b.frontier||[]).length))} ready now${(b.self_deps||[]).length?' · <span style="color:var(--coral)">self-dependency '+esc(b.self_deps.join(' '))+'</span>':''}</div>`;
+}catch(x){} }
+levTick(); setInterval(levTick,60000);
 const coreEl=$('#cores'); let cells=[];
 function coreColor(v){ return v>=85?'#E47B68':v>=55?'#F0A542':v>=20?'#52C2AE':'#2E4A5B'; }
 function buildCores(n){ coreEl.innerHTML=''; cells=[]; for(let i=0;i<n;i++){ const c=document.createElement('div'); c.className='core'; const f=document.createElement('i'); c.appendChild(f); c.title='core '+i; coreEl.appendChild(c); cells.push(f);} }
@@ -2871,6 +2947,47 @@ function drawCauses(el, d){
     h+=`<tr><td style="color:${C.txt}">${k}</td><td class=num><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><span style="width:${w.toFixed(0)}%;max-width:80px;height:8px;background:${k==='real'?C.coral:k==='other'?C.mut:C.amber};border-radius:4px;display:inline-block"></span>${v}</div></td></tr>`;
   });
   h+='</tbody></table>';
+  // fail-alone reds pinned on a merge, per test: several on one test = a main-side defect blamed on branches
+  const B=d.blamed_alone||[];
+  if(B.length){
+    h+='<div class=kv style="margin-top:8px"><span>blamed on a branch (fails alone, per test)</span></div><table><tbody>';
+    B.forEach(r=>{ h+=`<tr><td style="color:${r.blamed>=2?C.coral:C.txt}">${esc(r.test)}</td><td class=num>${r.blamed}× blamed · alone ${r.passed_alone} pass / ${r.failed_alone} fail</td></tr>`; });
+    h+='</tbody></table>';
+  }
+  el.innerHTML=h;
+}
+
+// 4c. remote worker hosts: running / landed, and the mirror's drift from main (it must never serve a stale base).
+function drawRemoteHosts(el, d){
+  if(!el) return; const H=d.remote_hosts||[];
+  if(!H.length){ el.innerHTML='<div class=kv><span>no remote host configured</span></div>'; return; }
+  const by=d.landings_by_host_24h||{};
+  el.innerHTML=(Object.keys(by).length?`<div class=kv><span>landings 24h by host:</span>${Object.entries(by).map(([k,v])=>`<span>${esc(k)} <b>${v}</b></span>`).join('')}</div>`:'')+H.map(h=>{
+    const drift=h.behind==null?'<span>mirror never pushed</span>':(h.behind>0?`<span style="color:${C.amber}">mirror behind by <b>${h.behind}</b></span>`:'<span>mirror current</span>');
+    const when=h.pushed_at?new Date(h.pushed_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'-';
+    const p=h.probe||{}, age=p.at?Math.round(Date.now()/1000-p.at):null;
+    const reach=p.at==null?'<span>not probed yet</span>':(p.reachable?`<span>reachable · ${age}s ago</span>`:`<span style="color:${C.red}">UNREACHABLE · ${age}s ago</span>`);
+    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length}/${h.cap} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed (${h.landed_24h} in 24h)</span><span>${h.dispatched} dispatched</span></div>`+
+           `<div class=kv>${reach}<span>load ${p.load1??'-'} / ${p.cores??'-'} cores</span><span>disk ${p.disk_free_gb??'-'} GB free</span></div>`+
+           `<div class=kv>${drift}<span>mirror ${esc(h.mirror||'-')} · pushed ${when}</span></div>`;
+  }).join('');
+}
+
+// 4b. merge-queue depth: branches not yet on main (queue file + batch + isolation remainder).
+function drawQueueDepth(el, d){
+  const q=d.queue_depth; if(!el) return; if(!q){ el.innerHTML='<div class=kv><span>no data</span></div>'; return; }
+  const n=q.now||{}, sp=q.spark||[], H=q.hourly||[];
+  let h=`<div class=kv><span>not yet on main <b>${n.waiting??'?'}</b></span><span>queued ${n.queued??0}</span><span>gating ${n.gating??0}</span><span>isolating ${n.isolating??0}</span></div>`;
+  if(sp.length>1){
+    const W=300,Hh=40, t0=sp[0][0], t1=sp[sp.length-1][0]||t0+1, mx=Math.max(1,...sp.map(p=>p[1]));
+    const pts=sp.map(p=>((p[0]-t0)/(t1-t0||1)*W).toFixed(1)+','+(Hh-p[1]/mx*Hh).toFixed(1)).join(' ');
+    h+=`<svg viewBox="0 0 ${W} ${Hh}" style="width:100%;height:44px"><polyline fill=none stroke="${C.amber}" stroke-width=1.5 points="${pts}"/></svg><div class=kv><span>24 h, max ${mx}</span></div>`;
+  }
+  if(H.length){
+    h+='<table><thead><tr><th>hour</th><th>in</th><th>out</th><th>min</th><th>mean</th><th>max</th></tr></thead><tbody>';
+    H.slice(-12).forEach(r=>{ const grow=(r.in??0)>r.out; h+=`<tr><td>${esc(r.hour)}</td><td class=num style="color:${grow?C.coral:C.txt}">${r.in??'–'}</td><td class=num>${r.out}</td><td class=num>${r.min??'–'}</td><td class=num>${r.mean??'–'}</td><td class=num>${r.max??'–'}</td></tr>`; });
+    h+='</tbody></table>';
+  }
   el.innerHTML=h;
 }
 
@@ -2912,13 +3029,17 @@ async function load(){
       <div class="card wide"><h2><span>Per hour, last 24h</span></h2><div id=cHourly class=chart></div></div>
       <div class="card wide"><h2><span>Per-gate durations by class, last 48h</span></h2><div id=cGates class=chart></div></div>
       <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
+      <div class=card><h2>Merge queue depth <em>not yet on main</em></h2><div id=cQueueDepth></div></div>
       <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
+      <div class=card><h2>Remote hosts <em>workers off this Mac</em></h2><div id=cRemote></div></div>
       <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
     </div>`;
     drawLandings($('#cLand'), d);
     drawHourly($('#cHourly'), d.hourly_24h||[]);
     drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
     drawCauses($('#cCauses'), d);
+    drawQueueDepth($('#cQueueDepth'), d);
+    drawRemoteHosts($('#cRemote'), d);
     drawTouchpoints($('#cTouch'), d);
     drawExperiment($('#cExp'), d);
   }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }
@@ -2927,9 +3048,173 @@ load(); setInterval(load,30000);
 let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(load,150); });
 </script></body></html>"""
 
+def _child_json(code, timeout=90):
+    """Run a heavy build in a short-lived child Python and return its JSON. The dashboard is a
+    long-lived process, and each board parse (1.9 MB YAML) or flow build (merge-runner.log, ~500k
+    lines) left ~6 MB of heap it never returned: measured 2026-09-24, RSS 470 -> 667 MB in 19 min,
+    the watchdog's 1536 MB ceiling in ~1.5 h (the 2026-09-22 dashboard reached 2.1 GB and stopped
+    answering). A child's memory goes back to the OS when it exits. A subprocess, not a fork: this
+    is a threaded server, and a forked child can deadlock on a lock another thread held."""
+    import sys as _sys
+    out = subprocess.run([_sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=timeout,
+                         env=dict(os.environ, PYTHONPATH=os.path.join(CODE_ROOT, "py"), HACKRIFF_OPS=SCRATCH,
+                                  **({"HK_METRICS_NO_SAMPLE": "1"} if PREVIEW else {})))
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or "child failed").strip().splitlines()[-1][:300])
+    return json.loads(out.stdout)
+
+
+_TASKORDER = {"t": 0.0, "v": None}
+_ETA = {"t": 0.0, "v": None}
+
+
+def eta_cached(max_age=300.0):
+    """The digest's ETA line (hkpy.flow.eta_line: queue clears / top Leverage ticket lands), for the
+    main page's Leverage card, plus the open-graph line (hkpy.graphclear) - built in a child
+    (_child_json), cached 5 min: the graph estimate reads the board and the runner logs."""
+    if _ETA["v"] is not None and time.time() - _ETA["t"] < max_age:
+        return _ETA["v"]
+    v = _child_json(f"""
+import json
+from datetime import datetime
+from hkpy import flow
+now = datetime.now()
+s = flow.summary({SCRATCH!r}, now)
+print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, now, {REPO!r}), "graph": flow.open_graph({SCRATCH!r}, now, s, repo={REPO!r})}}))
+""")
+    _ETA.update(t=time.time(), v=v)
+    return v
+
+
+_METRICS = {"sha": None, "v": None, "err": None}
+METRICS_CACHE = os.path.join(CODE_ROOT if PREVIEW else SCRATCH, "metrics-cache.json")
+
+
+def _committed_sha():
+    ref = "main"
+    try:
+        for ln in open(os.path.join(SCRATCH, "bulk-in-progress"), encoding="utf-8"):
+            if ln.startswith("base=") and ln.split("=", 1)[1].strip():
+                ref = ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return subprocess.run(["git", "-C", REPO, "rev-parse", ref], capture_output=True, text=True, timeout=20).stdout.strip()
+
+
+def metrics_refresh():
+    """Code metrics (hkpy.codemetrics, user 2026-09-24) over committed main: rebuilt in a child
+    process only when that sha moves - i.e. on each landing - and kept on disk so a restart does not
+    rebuild. The build appends the day's sample to metrics.jsonl."""
+    if _METRICS["v"] is None:
+        try:
+            _METRICS.update(v=json.load(open(METRICS_CACHE)), err=None)
+            _METRICS["sha"] = _METRICS["v"].get("sha")
+        except Exception:
+            pass
+    sha = _committed_sha()
+    if sha and sha != _METRICS["sha"]:
+        try:
+            v = _child_json(f"""
+import json
+from hkpy import codemetrics
+print(json.dumps(codemetrics.build({REPO!r}, {SCRATCH!r})))
+""", timeout=300)
+            _METRICS.update(sha=v.get("sha"), v=v, err=None)
+            tmp = METRICS_CACHE + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(v, fh)
+            os.replace(tmp, METRICS_CACHE)
+        except Exception as e:
+            _METRICS["err"] = f"{type(e).__name__}: {e}"
+    return _METRICS
+
+
+def _metrics_poller():
+    while True:
+        try:
+            metrics_refresh()
+        except Exception:
+            pass
+        time.sleep(300)
+
+
+_FIXES = {"t": 0.0, "v": None}
+
+
+def fixes_cached(max_age=60.0):
+    """Why tickets were handed back for a fix run (hkpy.fixes.summary; user, 2026-09-24) - the
+    /worklog "Fix runs" card. Built in a child (_child_json), cached 60 s."""
+    if _FIXES["v"] is not None and time.time() - _FIXES["t"] < max_age:
+        return _FIXES["v"]
+    v = _child_json(f"""
+import json
+from hkpy import fixes
+print(json.dumps(fixes.summary({SCRATCH!r})))
+""")
+    _FIXES.update(t=time.time(), v=v)
+    return v
+
+
+def taskorder_cached(max_age=60.0):
+    """`hkpy.taskorder.analyse` over main's COMMITTED board (the bulk marker's base while a batch
+    gates - never the provisional tip), built in a child process (_child_json) and cached 60 s."""
+    if _TASKORDER["v"] is not None and time.time() - _TASKORDER["t"] < max_age:
+        return _TASKORDER["v"]
+    v = _child_json(f"""
+import json
+from hkpy import taskorder
+tasks, ref = taskorder.committed_tasks({REPO!r}, {SCRATCH!r})
+a = taskorder.analyse(tasks)
+keep = ("id", "title", "status", "milestone", "depth", "gate", "unblocks", "value", "downstream_milestones", "blocked")
+print(json.dumps({{"board": ref, "formula": a["formula"], "open": a["open"], "rows": [{{k: r[k] for k in keep}} for r in a["rows"]],
+                  "groups": a["groups"], "frontier": a["frontier"], "cycle": a["cycle"], "self_deps": a["self_deps"]}}))
+""")
+    _TASKORDER.update(t=time.time(), v=v)
+    return v
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Leverage (py/hkpy/taskorder.py, `just task order`): which open tickets release the most
+        # when they land, over main's committed board - the panel on /worklog beside the role logs.
+        if self.path.startswith("/eta.json"):
+            try:
+                body = json.dumps(eta_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/metrics.json"):
+            m = _METRICS if _METRICS["v"] is not None else metrics_refresh()
+            if m["v"] is not None:
+                body = json.dumps(dict(m["v"], stale_error=m["err"]) if m["err"] else m["v"]).encode(); self.send_response(200)
+            else:
+                body = json.dumps({"error": m["err"] or "not built yet"}).encode(); self.send_response(503)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/metrics"):
+            import sys as _sys
+            if OPSDIR not in _sys.path:
+                _sys.path.insert(0, OPSDIR)
+            import metricspage
+            body = metricspage.PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/fixes.json"):
+            try:
+                body = json.dumps(fixes_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/taskorder.json"):
+            try:
+                body = json.dumps(taskorder_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
         if self.path.startswith("/worklog.json"):
             try:
@@ -2937,7 +3222,7 @@ class H(BaseHTTPRequestHandler):
                 if OPSDIR not in _sys.path:
                     _sys.path.insert(0, OPSDIR)
                 import worklog
-                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+                body = json.dumps(worklog.build(reg=worklog.discover(ops=STATE)) if PREVIEW else worklog.build()).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
@@ -3032,7 +3317,7 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/burndown.json"):
             try:
                 import burndown
-                body = json.dumps(burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))).encode(); self.send_response(200)
+                body = json.dumps(burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "rows": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
@@ -3115,14 +3400,48 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
+#: The dashboard re-executes itself in place above this RSS (MB): the watchdog's ceiling is 1536,
+#: and on 2026-09-23/24 it crossed it twice in one evening (1746 MB after 6.5 h, then 1818 MB 50
+#: min after a restart) and was restarted by hand both times - its rebuilds allocate big transient
+#: structures and CPython does not hand the freed heap back. Twice by hand -> a rule.
+RSS_MAX_MB = int(os.environ.get("MONITOR_RSS_MAX") or 1200)
+
+
+def _rss_mb():
+    try:
+        return int(subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True,
+                                  text=True, timeout=10).stdout.strip() or 0) / 1024
+    except Exception:
+        return 0.0
+
+
+def _rss_guard(limit_mb=None, every_s=60, rss=_rss_mb, execv=os.execv, sleep=time.sleep):
+    """Checks own RSS every `every_s`; above the limit, logs and re-executes this script in place
+    (same pid and port, ~2 s without a dashboard). Returns only in tests (execv stubbed)."""
+    limit_mb = limit_mb or RSS_MAX_MB
+    while True:
+        sleep(every_s)
+        mb = rss()
+        if mb > limit_mb:
+            import sys as _sys
+            print(f"monitor: RSS {mb:.0f} MB > {limit_mb} MB - re-executing in place", file=_sys.stderr, flush=True)
+            return execv(_sys.executable, [_sys.executable] + _sys.argv)
+
+
 if __name__ == "__main__":
+    import sys
+    import launchpath
+    launchpath.check(__file__, lambda m: print(f"monitor: {m}", file=sys.stderr, flush=True))
+    threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
-    threading.Thread(target=_usage_poller, daemon=True).start()
+    if not PREVIEW:   # it owns the shared `usagepoll` tmux session and a Haiku login: the real instance's
+        threading.Thread(target=_usage_poller, daemon=True).start()
+    threading.Thread(target=_metrics_poller, daemon=True).start()
     def _warm_burndown():
         try:
             import burndown
-            burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))
+            burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()

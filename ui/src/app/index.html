@@ -39,7 +39,9 @@
 
   <!-- EXPLORE -->
   <div class="main" id="view-explore">
-    <aside class="side" aria-label="Inventory and selections">
+    <!-- T-895 (P1): collapsed to a chip with the lists' counts by default; `chrome/side-chip.ts` adds
+         the chip and the open overlay's close (×) around the two slots without touching them. -->
+    <aside class="side" data-slot="side" aria-label="Inventory and selections">
       <div class="side-inv" data-slot="inventory"></div>
       <div class="side-sel" data-slot="selections"></div>
     </aside>
@@ -57,7 +59,18 @@
     <section class="centre" aria-label="Spectrum surface">
       <div class="surface" data-slot="surface"></div>
     </section>
-    <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>
+    <!-- T-803 (MAP-03): the focus panel lives in a non-modal bottom sheet (peek / half / full) that
+         floats over the still-live canvas; `chrome/sheet.ts` adds its grab handle and title strip
+         around `.sheet-body` without touching the focus slot inside it. -->
+    <section class="sheet" data-slot="sheet" aria-label="Selected">
+      <div class="sheet-body">
+        <div class="drawer" data-slot="drawer"></div>
+        <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>
+      </div>
+    </section>
+    <!-- T-821 (MAP-21): the Research slide-in — collections as layers, every mark also a row. Opened
+         from the map's top-right cluster; a fixed-position panel with a visible close (P1/P3). -->
+    <aside class="research" data-slot="research" aria-label="Research: collections" hidden></aside>
   </div>
 
   <!-- DECODE -->

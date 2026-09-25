@@ -142,14 +142,14 @@ use hk_detect::trunk::{
     CcConfirmer, CcFraming, ChannelMap, DmrGrant, EncryptionSync, Grant, GridFit, LDU_DIBITS,
     LduPayload, LduScan, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ,
     RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit, VoiceRefused, algid_name, best_lmr_raster,
-    dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of, protocol_of, resolve_alias,
-    scan_blocks, scan_cacs, scan_csbks, scan_ldus,
+    clock_offset_mod_grid, dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of,
+    protocol_of, resolve_alias, scan_blocks, scan_cacs, scan_csbks, scan_ldus,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::repo::synthesis::{AliasEvidence, AliasState, ReceiverAlias, ReceiverFit};
 use hk_model::{
-    CallRecord, GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem,
-    TrunkSystemId,
+    CalibrationMethod, CalibrationState, CalibrationStateId, CallRecord, GrantEvent, GrantKind,
+    SampleTime, Timestamp, TrunkProtocol, TrunkSystem, TrunkSystemId,
 };
 use num_complex::{Complex, Complex32};
 use serde_json::json;
@@ -691,6 +691,11 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
     // tolerance. Every emission moves by the same constant, so an uncorrected grid rejects the
     // whole band at once and candidacy never happens. A build that only works at 0 ppm works on
     // synthetic IQ and nothing else.
+    //
+    // The fit runs on every pass and is NOT replaced by a stored calibration (T-560): the phase it
+    // measures is the clock error PLUS where this tuned centre sits against the grid, and only the
+    // spectrum knows the second. The absolute clock the alias search settles is what is recorded
+    // as C05 state ([`record_receiver_clock`]).
     let grid = grid_fit(buf, fs, raster);
     let grid_offset = grid.map_or(0.0, |g| g.offset_hz);
     if let Some(g) = grid {
@@ -1008,6 +1013,18 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
                 eprintln!("hk-pipeline: trunk-cc write: {e}");
                 continue;
             }
+        }
+        // The alias the search just settled is the RECEIVER's clock, measured: C05 calibration
+        // state for this device, recorded when it is new or has moved (T-560).
+        if let Err(e) = record_receiver_clock(
+            &mut repo,
+            &prov.device_id,
+            &plan.alias,
+            tune_center,
+            t_start,
+        ) {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: trunk-cc receiver calibration: {e}");
         }
         for entry in &new_entries {
             match repo.append_channel_plan(system_id, entry) {
@@ -1456,8 +1473,11 @@ fn plan_follow<'e>(
         return plan;
     };
 
-    // ---- The alias: bounded by the crystal, chosen by which alias has energy.
-    let aliases = grid_aliases(grid_offset, raster, tune_center, RECEIVER_CLOCK_BOUND_PPM);
+    // ---- The alias: bounded by the crystal, chosen by which alias has energy. The grid fit's
+    // phase is measured against the TUNED CENTRE, which need not sit on a channel (852.456 MHz is
+    // 6 kHz off the 800 MHz raster); a granted frequency is on the real grid, so its phase against
+    // the tuned centre is removed first and only the receiver's clock reaches the search (T-560).
+    let aliases = receiver_aliases(grid_offset, raster, tune_center, plan.channels[0].0);
     alias.candidates = aliases.len() as u32;
     let mut per_alias: Vec<Vec<Option<ChannelFrames>>> = Vec::with_capacity(aliases.len());
     let mut scores: Vec<AliasScore> = Vec::with_capacity(aliases.len());
@@ -2214,6 +2234,69 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
     }
 }
 
+/// The absolute receiver offsets a pass's alias search tries, Hz: every alias of the receiver's
+/// clock within the crystal's bound, with the tuned centre's own phase against the grid removed
+/// first via `channel_hz`, one granted frequency (T-560; see [`clock_offset_mod_grid`]).
+fn receiver_aliases(grid_offset: f64, raster: f64, tune_center: f64, channel_hz: f64) -> Vec<f64> {
+    let clock = clock_offset_mod_grid(grid_offset, raster, tune_center, channel_hz);
+    grid_aliases(clock, raster, tune_center, RECEIVER_CLOCK_BOUND_PPM)
+}
+
+/// Records the receiver clock a pass's alias search settled as C05 [`CalibrationState`] for
+/// `device_id` (T-560; docs/19 §7.6a), and returns the row written, if one was.
+///
+/// **Only a resolved alias is a clock.** The grid fit alone is known modulo the raster and
+/// includes where the tuned centre sits against the grid, so it is never recorded as ppm; the
+/// alias is the absolute offset the crystal's bound and the granted channels' energy chose
+/// ([`plan_follow`]). An unresolved or untried pass records nothing rather than a guess.
+///
+/// **Sign.** [`ReceiverAlias::offset_hz`] is where an emission *lands* relative to its transmit
+/// frequency; [`CalibrationState::ppm`] is the oscillator's own error, positive = fast. A fast
+/// local oscillator puts every emission LOW, so `ppm = −offset / f`: the unit docs/19 §7.6a
+/// measured, whose emissions sat 8.2 kHz low at 852 MHz ("−9.6 ppm" as an offset), is an
+/// oscillator **+9.6 ppm fast**.
+///
+/// **Recorded once, not per pass.** A new version is written only when no raster calibration is
+/// on record for the device or the measurement has moved by more than [`RASTER_TOLERANCE_HZ`] at
+/// this centre — a smaller change cannot move any raster assignment, and re-writing it every
+/// half-second pass would bury the version history in noise. A new version `supersedes` the last.
+fn record_receiver_clock(
+    repo: &mut hk_model::Repository,
+    device_id: &str,
+    alias: &ReceiverAlias,
+    tune_center_hz: f64,
+    t: Timestamp,
+) -> Result<Option<CalibrationState>, hk_model::RepoError> {
+    if alias.state != AliasState::Resolved {
+        return Ok(None);
+    }
+    let Some(offset_ppm) = alias.ppm.filter(|p| p.is_finite()) else {
+        return Ok(None);
+    };
+    let ppm = -offset_ppm;
+    let prior =
+        repo.latest_calibration_state_for_device(device_id, &CalibrationMethod::LmrRaster)?;
+    let unchanged = prior
+        .as_ref()
+        .is_some_and(|p| (p.ppm - ppm).abs() * 1e-6 * tune_center_hz.abs() <= RASTER_TOLERANCE_HZ);
+    if unchanged {
+        return Ok(None);
+    }
+    let cal = CalibrationState {
+        id: CalibrationStateId::new(),
+        supersedes: prior.map(|p| p.id),
+        device_id: device_id.to_owned(),
+        ppm,
+        method: CalibrationMethod::LmrRaster,
+        measured_at: t,
+        valid: None,
+        temperature_c: None,
+        power_table: Vec::new(),
+    };
+    repo.insert_calibration_state(&cal)?;
+    Ok(Some(cal))
+}
+
 /// Fits the receiver's own offset from the `raster_hz` channel grid, over `buf` (T-546; docs/19
 /// §7.6a, §4.4 step 1).
 ///
@@ -2388,6 +2471,105 @@ mod tests {
             at(-5)
         );
         assert!(at(7) < MIN_CC_FCO, "empty channel: fco {:.3}", at(7));
+    }
+
+    /// docs/19 §7.6a's own capture, through the hunt's arithmetic: tuned to 852.456 MHz (itself
+    /// 6 kHz off the 851.0125 + k·12.5 kHz raster) on a HackRF whose emissions all land 9.6 ppm
+    /// low. Blind, from the IQ alone: every on-raster emission still fits the raster (none is
+    /// reported off-raster), and the alias search is offered the receiver's TRUE clock — which it
+    /// is not if the tuned centre's own phase is left in the fit (T-560).
+    #[test]
+    fn a_minus_9_6_ppm_receiver_off_a_channel_still_fits_the_raster_and_offers_its_true_clock() {
+        let (fs, raster) = (500_000.0, 12_500.0);
+        let tune = 852.456e6;
+        let clock = -9.6e-6 * tune; // -8184 Hz: where every emission lands, relative to truth
+        // Four real channels on the published grid, including the one granted below.
+        let channels = [852.4625e6, 852.4375e6, 852.5e6, 852.375e6];
+        let buf = scene(1 << 17, fs, &channels.map(|f| (f - tune + clock, 1.0)));
+        let g = grid_fit(&buf, fs, raster).expect("four on-grid emissions concentrate");
+        let origin = tune + g.offset_hz;
+        for f in channels {
+            let seen = f + clock;
+            let fit = best_lmr_raster(seen, origin, RASTER_TOLERANCE_HZ);
+            assert!(
+                fit.is_some(),
+                "{:.4} MHz (seen at {:.4}) reported OFF-raster against origin {:.4} MHz",
+                f / 1e6,
+                seen / 1e6,
+                origin / 1e6
+            );
+            // And without the fit, the uncorrected grid rejects it: this is what T-546 fixed.
+            assert!(best_lmr_raster(seen, tune, RASTER_TOLERANCE_HZ).is_none());
+        }
+        let aliases = receiver_aliases(g.offset_hz, raster, tune, channels[0]);
+        assert!(
+            aliases.iter().any(|&a| (a - clock).abs() < 300.0),
+            "the true clock {clock:.0} Hz is not among the aliases tried: {aliases:?} (grid fit \
+             {:+.0} Hz)",
+            g.offset_hz
+        );
+    }
+
+    fn resolved(offset_hz: f64, tune: f64) -> ReceiverAlias {
+        ReceiverAlias {
+            state: AliasState::Resolved,
+            evidence: AliasEvidence::GrantedChannelEnergy,
+            offset_hz: Some(offset_hz),
+            ppm: Some(1e6 * offset_hz / tune),
+            bound_ppm: RECEIVER_CLOCK_BOUND_PPM,
+            candidates: 3,
+            targets: 2,
+            occupied: 2,
+            runner_up: 0,
+        }
+    }
+
+    /// The settled clock is C05 calibration state, with its provenance, recorded ONCE and read
+    /// back rather than re-derived; it is re-versioned only when it moves (T-560).
+    #[test]
+    fn a_resolved_clock_is_recorded_once_as_calibration_state_and_superseded_when_it_moves() {
+        let mut repo = hk_model::Repository::open_in_memory().unwrap();
+        let (dev, tune) = ("hackrf:t-560", 852.456e6);
+        let t = Timestamp::from_unix_nanos(1_000);
+        let first = record_receiver_clock(&mut repo, dev, &resolved(-8_184.0, tune), tune, t)
+            .unwrap()
+            .expect("a resolved alias is a measured clock");
+        // Emissions 9.6 ppm LOW = an oscillator 9.6 ppm FAST, in CalibrationState's convention.
+        assert!((first.ppm - 9.6).abs() < 0.01, "{}", first.ppm);
+        assert_eq!(first.method, CalibrationMethod::LmrRaster);
+        assert_eq!(first.device_id, dev);
+        assert_eq!(first.measured_at, t);
+        assert_eq!(first.supersedes, None);
+        let stored = repo
+            .latest_calibration_state_for_device(dev, &CalibrationMethod::LmrRaster)
+            .unwrap();
+        assert_eq!(stored.as_ref(), Some(&first));
+
+        // The next passes measure the same clock within the raster tolerance: nothing is written.
+        for jitter in [-300.0, 0.0, 450.0] {
+            let again =
+                record_receiver_clock(&mut repo, dev, &resolved(-8_184.0 + jitter, tune), tune, t);
+            assert_eq!(again.unwrap(), None, "re-recorded at {jitter:+} Hz");
+        }
+        // Unresolved or never-tried passes are not clocks.
+        let mut unresolved = resolved(4_316.0, tune);
+        unresolved.state = AliasState::Unresolved;
+        assert_eq!(
+            record_receiver_clock(&mut repo, dev, &unresolved, tune, t).unwrap(),
+            None
+        );
+
+        // A clock that has really moved (a warmer crystal, a different receiver on the port) is a
+        // new version that names the one it replaces.
+        let moved = record_receiver_clock(&mut repo, dev, &resolved(-4_000.0, tune), tune, t)
+            .unwrap()
+            .expect("moved by more than the raster tolerance");
+        assert_eq!(moved.supersedes, Some(first.id));
+        assert_eq!(
+            repo.latest_calibration_state_for_device(dev, &CalibrationMethod::LmrRaster)
+                .unwrap(),
+            Some(moved)
+        );
     }
 
     /// The age half of C23's stale-IDEN pitfall, at the row it produces (T-268).

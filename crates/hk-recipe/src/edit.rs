@@ -42,17 +42,32 @@ pub struct EditPlan {
     /// Field maps added, removed or changed. Nodes referencing them are `Params` changes on
     /// their field-map param (hot: applied in place at the swap, no reset downstream).
     pub field_maps_changed: BTreeSet<String>,
-    /// `input` changed: the channel is re-plumbed and every node is rebuilt.
+    /// `input` changed (any key but `liveness`, [`crate::InputSpec::same_channel`]): the channel
+    /// is re-plumbed and every node is rebuilt.
     pub input_changed: bool,
     /// Outputs changed: streams for removed outputs finish; new ones are offered.
     pub outputs_changed: bool,
 }
 
 impl EditPlan {
+    /// The same plan when the pipeline's channel **centre** also moves (an applied refinement,
+    /// ADR-0015 §12.6): the recipe document may be unchanged, but the channel is re-plumbed,
+    /// so it is an `input` change — every surviving node is rebuilt (ADR-0011 §2.3).
+    pub fn with_channel_moved(mut self) -> EditPlan {
+        self.input_changed = true;
+        for change in self.nodes.values_mut() {
+            if !matches!(change, NodeChange::Added | NodeChange::Removed) {
+                *change = NodeChange::Rebuilt;
+            }
+        }
+        self.reset.clear();
+        self
+    }
+
     /// Plans `old` → `new` against the block descriptors in `catalogue` (which params are hot,
     /// which name field maps). A key the catalogue doesn't know is cold.
     pub fn between(old: &Recipe, new: &Recipe, catalogue: &dyn Catalogue) -> EditPlan {
-        let input_changed = old.input != new.input;
+        let input_changed = !old.input.same_channel(&new.input);
         let schema = |block: &str, key: &str| {
             catalogue
                 .descriptor(block)
@@ -216,6 +231,35 @@ mod tests {
             ),
             block("fields", vec![param("map", ParamType::FieldMap, true)]),
         ]
+    }
+
+    /// ADR-0015 §12.6 (T-870): an applied refinement moves the channel centre, which is an
+    /// `input` change even when the document is identical — every surviving node rebuilds;
+    /// added and removed nodes stay what they were.
+    #[test]
+    fn a_moved_channel_rebuilds_every_surviving_node() {
+        let old = recipe(json!([
+            {"id": "a", "block": "slicer", "params": {"threshold": 0.0}},
+            {"id": "b", "block": "diff_decode"},
+            {"id": "c", "block": "identity"}
+        ]));
+        let plan = EditPlan::between(&old, &old, &catalogue());
+        assert!(!plan.input_changed);
+        assert!(plan.nodes.values().all(|c| *c == NodeChange::Unchanged));
+        let moved = plan.with_channel_moved();
+        assert!(moved.input_changed);
+        assert!(moved.nodes.values().all(|c| *c == NodeChange::Rebuilt));
+        assert!(moved.reset.is_empty(), "nothing survives to be reset");
+
+        let mut grown = old.clone();
+        grown.nodes.remove(1);
+        grown
+            .nodes
+            .push(serde_json::from_value(json!({"id": "d", "block": "identity"})).unwrap());
+        let moved = EditPlan::between(&old, &grown, &catalogue()).with_channel_moved();
+        assert_eq!(moved.nodes["a"], NodeChange::Rebuilt);
+        assert_eq!(moved.nodes["b"], NodeChange::Removed);
+        assert_eq!(moved.nodes["d"], NodeChange::Added);
     }
 
     #[test]

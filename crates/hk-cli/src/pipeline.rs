@@ -46,8 +46,8 @@ use hk_pipeline::{
 };
 
 use crate::control::{
-    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback, PipelineRecordings,
-    PipelineRetuner, PipelineRunControl,
+    PipelineAnalyze, PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback,
+    PipelineRecordings, PipelineRetuner, PipelineRunControl,
 };
 use crate::signal;
 
@@ -1112,6 +1112,42 @@ pub fn serve_api(
         )),
         hk_pipeline::playback::PlaybackConfig::default(),
     ));
+    // T-859 (MAUTO M-8): region-analyze jobs over the run's IQ ring. No search backend yet
+    // (`server_backend()` is `None`: no production IQ evaluator), so a job acquires and then says
+    // it searched nothing.
+    // T-860 (MAUTO M-9): a finished job attaches to the run's inventory and may confirm through
+    // `ConfirmPolicy.synthesized`.
+    let analyze = {
+        let tuned_ctl = controller.clone();
+        let reg = registry.clone();
+        let attach_sink: hk_pipeline::StreamSink = Arc::new(move |h, p| reg.register(h, p));
+        Arc::new(hk_pipeline::synth::jobs::AnalyzeJobs::with_attacher(
+            Arc::new(hk_pipeline::synth::jobs::RingJobEnv::new(
+                handle.iq_buffer(),
+                Box::new(move || {
+                    let s = tuned_ctl.status();
+                    (!s.finished)
+                        .then(|| hk_model::FreqRange::centered(s.center_hz, s.sample_rate_hz))
+                }),
+            )),
+            // The one shared choice (T-863): the ADR-0015 §7 suite reads the same function.
+            hk_pipeline::synth::jobs::server_backend(),
+            hk_pipeline::synth::jobs::PowerPolicy::Mains,
+            // T-884 item 1: the run's **configured** `ConfirmPolicy.synthesized`, read from the
+            // inventory that holds it — never a fresh default, which would make the configuration
+            // field unreadable on the one path that gates an irreversible confirm.
+            // T-884 item 2: and a `messages` publisher, so a decode a job attaches to a known
+            // emitter reaches the stream like every other stored decode.
+            Some(Arc::new(
+                hk_pipeline::synth::jobs::RepoAttacher::with_stream(
+                    handle.data_dir().join("hackriff.db"),
+                    handle.synthesized_confirm(),
+                    Some(&attach_sink),
+                    controller.status().content_class,
+                ),
+            )),
+        ))
+    };
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
@@ -1122,7 +1158,13 @@ pub fn serve_api(
         .with(
             "playback",
             Arc::clone(&playback) as Arc<dyn hk_api::stream::StreamOpener>,
-        ); // T-463
+        ) // T-463
+        .with(
+            "analyze",
+            Arc::new(hk_pipeline::synth::jobs::AnalyzeOpener(Arc::clone(
+                &analyze,
+            ))) as Arc<dyn hk_api::stream::StreamOpener>,
+        ); // T-859
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
     let alarms = alarm_control(handle, registry, &db)?; // T-122
@@ -1186,6 +1228,7 @@ pub fn serve_api(
         watch: Some(Arc::new(PipelineWatch(Arc::clone(&alarms)))),        // T-166
         anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
         iq_buffer: Some(Arc::new(PipelineIqBuffer(handle.iq_buffer()))),  // T-157
+        analyze: Some(Arc::new(PipelineAnalyze(analyze))),                // T-859
         datasets: Some(Arc::new(PipelineDatasets::new(
             handle.data_dir().join("hackriff.db"),
             handle.iq_buffer(),
@@ -1286,6 +1329,9 @@ pub(crate) fn config_for(
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
     // The IQ capture buffer is on for the composed daemon (the library default is off, T-178).
     cfg.iq_buffer = hk_store::iqbuffer::IqBufferConfig::from_env();
+    // T-904: per-frame detection retention (1 hour, rolled up; HK_DETECTION_RETENTION, …) and the
+    // `/api/status` `storage` figures. Off for the library default.
+    cfg.retention = Some(hk_pipeline::retention::RetentionSettings::from_env());
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
     let reg = registry.clone();

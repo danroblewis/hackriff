@@ -1,3 +1,4 @@
+import { CANDIDATE_STROKE_PX, CONFIRMED_STROKE_PX, markQuads as mq, signalMarkBoxes as smb } from "../src/surface/marks";
 // **T-388/T-362's invariants, re-pointed at the canvas** (T-445).
 //
 // The retired `ui/test/timebox.test.ts` proved the same properties about the same user-visible
@@ -380,3 +381,16 @@ test("the pending band is drawn by the SAME pass as every other mark, in ink no 
   // And it cannot be confused with a selection that exists: different ink, different kind.
   assert.notDeepEqual(PENDING_MARK, SELECTION_MARK);
 });
+
+{
+  const iv = { t_start_s: 1, t_end_s: 5, open: false };
+  const row = (id: string, state: string) => ({ id, state, f_lo_hz: 1e6, f_hi_hz: 2e6, presence: { last_interval: iv } });
+  test("T-808 confirmed strokes are thicker than candidate; unknowns not hidden", () => {
+    const boxes = smb([row("c", "confirmed"), row("k", "candidate")], null);
+    assert.deepEqual(boxes.map((b) => b.strokePx), [CONFIRMED_STROKE_PX, CANDIDATE_STROKE_PX]);
+    const pb = { f0Hz: 0, f1Hz: 4e6, t0Ns: 0, t1Ns: 10e9 };
+    const q = mq(boxes, 10e9, pb, { x: 0, y: 0, w: 400, h: 400 } as never);
+    const w = (id: string) => { const l = q.find((e) => e.id === id)!; return l.clip[2] - l.clip[0]; };
+    assert.ok(w("c") > w("k"));
+  });
+}

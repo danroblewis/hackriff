@@ -1065,6 +1065,51 @@ test("a 5xx the ROUTE cannot emit is the route saying nothing: silence ladder, n
   }
 });
 
+test("while the silence gate is armed the probes take TURNS: one place is not re-probed while others starve (T-903)", async () => {
+  // `ui/e2e/live-edge` T-523, measured: a probe that went out mid-zoom landed on an intermediate
+  // level which stayed wanted as the final level's pin (`level_f + 1`); it failed, the next frame
+  // re-scheduled it on TOP of the LIFO queue, and every later opening of the gate probed it again —
+  // 75 s of outage and not one ask at the pane's own level ("levels refused: 2/1 1/1").
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock });
+  const whole = { f0Hz: 0, f1Hz: 1e12, t0Ns: 0, t1Ns: 1e15 };
+  const pin = addr(0, 0, 1, 0); // one level coarser in frequency: the final view's parent pin
+  const own = [addr(0), addr(1), addr(2)]; // the pane's own level, where it is zoomed to
+  const silence = async () => {
+    for (const [key, w] of [...h.waiting]) { w.reject(httpError(502)); h.waiting.delete(key); }
+    await flush();
+  };
+  // Mid-zoom: the pane is at level 1 and asks for the place that will become the pin. The proxy
+  // answers 502, which arms the gate.
+  h.cache.setViewports(LAT, [{ box: whole, levelF: 1, levelT: 0 }]);
+  h.cache.beginFrame(); h.cache.acquire(pin); h.cache.endFrame();
+  await flush(); await silence();
+  assert.equal(h.cache.silent, true);
+  // The zoom lands one level in, and stays: its own places are wanted, and the pin with them. Each
+  // frame draws the own level and prefetches the pin, as the renderer does, and every probe the gate
+  // lets through is answered 502.
+  h.cache.setViewports(LAT, [{ box: whole, levelF: 0, levelT: 0 }]);
+  const probed: string[] = [];
+  for (let frame = 0; frame < 2400 && h.cache.silent; frame++) {
+    const before = h.calls.length;
+    h.cache.beginFrame();
+    for (const a of own) h.cache.acquire(a);
+    h.cache.prefetch(pin);
+    h.cache.endFrame();
+    await flush();
+    probed.push(...h.calls.slice(before));
+    await silence();
+    clock += 1000 / 60;
+    if (probed.length >= 6) break;
+  }
+  const ownAsked = new Set(probed.filter((k) => own.some((a) => keyOf(a) === k)));
+  assert.ok(probed.length >= 4, `only ${probed.length} probe(s) in ${clock.toFixed(0)} ms of outage`);
+  assert.equal(ownAsked.size, own.length,
+    `the gate let ${probed.length} probe(s) through (${probed.join(", ")}) and they reached only ` +
+    `${ownAsked.size} of the ${own.length} places at the pane's own level: a place whose probe failed ` +
+    "went back on top of the LIFO queue and took the next probe too, starving every other wanted place");
+});
+
 // ——— T-499: a dead server is asked at a DECAYING rate, and one answer clears the ladder ———
 //
 // What the user saw: "on stream loss some tiles render purple and keep re-rendering left to right in

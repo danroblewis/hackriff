@@ -11,9 +11,11 @@
 //! | [`parse`] | T-089 | fields, text |
 //! | [`multi`] | T-093 | follow_hops |
 //! | [`util`] | T-085 | identity (contract example) |
+//! | [`audio`] | T-866, T-873 | squelch, agc, deemphasis, audio_out (ADR-0011 §8.4); stereo_decode (T-873, ADR-0015 §12.13) |
 
 use crate::Registry;
 
+pub mod audio;
 pub mod fec;
 pub mod framing;
 pub mod iq;
@@ -31,4 +33,5 @@ pub(crate) fn register_all(r: &mut Registry) {
     parse::register(r);
     multi::register(r);
     util::register(r);
+    audio::register(r);
 }

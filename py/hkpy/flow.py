@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -38,6 +39,8 @@ _SUITE = re.compile(r"^gate: (just [\w-]+) took (\d+)s \(exit (-?\d+)\)")
 _GATE_BEGIN = re.compile(r"^(?:BULK gate \(|GATE (\S+) \(just gate-merge)")
 _GATE_END_OK = re.compile(r"^(?:BULK MERGED ✓(.*)|MERGED (\S+) ✓)")
 _GATE_END_BAD = re.compile(r"^(?:BULK gate FAILED|GATE FAILED|GATE TIMEOUT|BULK gate TIMED OUT)")
+#: The daily release candidate: not a merge gate - its suites belong to no gate here.
+_RC_BEGIN = re.compile(r"^RC gate \(")
 _ATTEMPT = re.compile(r"^BULK attempt \((\d+)\): (.*)$")
 _CONFLICT = re.compile(r"^BULK conflict merging (\S+)")
 _WAIT = re.compile(r"^WAIT: ")
@@ -89,6 +92,68 @@ def _read(path: str) -> str:
             return fh.read()
     except FileNotFoundError:
         return ""
+
+
+QUEUE_DEPTH_JSONL = "queue-depth.jsonl"
+
+
+def queue_waiting(ops: str) -> dict:
+    """Branches NOT YET ON MAIN, as one number (user, 2026-09-24 17:02: the dashboard said 14 and the
+    queue file 8, because an isolation's remaining branches live in the runner's memory, not the file).
+    The union of merge-queue.txt, the bulk marker's branches=, the isolation's remainder
+    (isolate-remaining) and the branch being single-merged now (merging-now) - both written by
+    ops/merge-runner.sh."""
+    queued = {ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines()
+              if ln.strip() and not ln.strip().startswith("#")}
+    bulk = set()
+    for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+        if ln.startswith("branches="):
+            bulk = set(ln[len("branches="):].split())
+    isolating = set(_read(os.path.join(ops, "isolate-remaining")).split())
+    merging = set(_read(os.path.join(ops, "merging-now")).split())
+    waiting = queued | bulk | isolating | merging
+    return {"waiting": len(waiting), "queued": len(queued), "gating": len(bulk | merging),
+            "isolating": len(isolating), "branches": sorted(waiting)}
+
+
+def queue_depth_series(ops: str, since: datetime, until: datetime, points: int = 288) -> list[list]:
+    """[[epoch, waiting], ...] inside the window, thinned to at most `points` (a sparkline)."""
+    lo, hi = since.timestamp(), until.timestamp()
+    rows = [[float(o["ts"]), int(o.get("waiting") or 0)] for o in _jsonl(os.path.join(ops, QUEUE_DEPTH_JSONL))
+            if isinstance(o.get("ts"), (int, float)) and lo <= float(o["ts"]) <= hi]
+    step = max(1, -(-len(rows) // points))
+    return rows[::step]
+
+
+def queue_depth_hourly(ops: str, since: datetime, until: datetime) -> list[dict]:
+    """Per hour: min/max/mean of the sampled depth, out = branches landed (landed.jsonl), and
+    in = out + (depth at the hour's end - depth at its start), so growth reads straight off in > out."""
+    samples = []
+    for o in _jsonl(os.path.join(ops, QUEUE_DEPTH_JSONL)):
+        try:
+            t = datetime.fromtimestamp(float(o["ts"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if since <= t <= until:
+            samples.append((t, int(o.get("waiting") or 0)))
+    out_by = Counter()
+    for ld in _jsonl(os.path.join(ops, "landed.jsonl")):
+        t = datetime.fromtimestamp(float(ld.get("merge_ts", 0)))
+        if since <= t <= until:
+            out_by[_hour(t)] += 1
+    by = defaultdict(list)
+    for t, n in sorted(samples):
+        by[_hour(t)].append(n)
+    rows = []
+    for h in sorted(set(by) | set(out_by)):
+        vals = by.get(h, [])
+        out = out_by.get(h, 0)
+        row = {"hour": h, "out": out}
+        if vals:
+            row.update({"min": min(vals), "max": max(vals), "mean": round(sum(vals) / len(vals), 1),
+                        "in": out + vals[-1] - vals[0]})
+        rows.append(row)
+    return rows
 
 
 def _jsonl(path: str) -> list[dict]:
@@ -162,6 +227,9 @@ def gates_from(events: list[Ev]) -> list[Gate]:
         m = _CONFLICT.match(s)
         if m:
             pending_conflicts.append(m.group(1))
+            continue
+        if _RC_BEGIN.match(s):
+            cur = None
             continue
         if _GATE_BEGIN.match(s):
             if cur is not None and cur.end is None:   # a gate that never reported (killed runner)
@@ -318,9 +386,37 @@ def ticket_rows(ops: str, since: datetime, until: datetime) -> list[dict]:
     return out
 
 
+#: A merge-runner CONFLICT / GATE_FAIL line is the WORK RUNNER's input, not a person's: it re-queues a
+#: branch that merges cleanly again, or resumes the worker for a fix run. Counted as a touchpoint only
+#: when nothing took it within this long - a conflict run waits for a free worker slot, and T-613's
+#: re-queue came 1 h 40 min after its line. On 2026-09-24 20 of the 29 "touchpoints" in 24 h were
+#: such lines, and T-875's (conflict-fixed and re-queued by the runner in 7 min) fired a false
+#: Discord "trend break: touchpoint".
+HANDLED_WITHIN_S = 6 * 3600
+#: What the work runner hands to a person (work-needs-attention.txt) - its escalations, the
+#: coordinator's notes - which touchpoints() did not read at all before.
+_PERSON_KINDS = re.compile(r"^(BLOCKED|REVIEW_FAIL|ERROR|TIMEOUT|BOARD_UNREADABLE|NOTE|\w+_ESCALATE|\w+_NO_SESSION|"
+                           r"DEFLAKE_(?!REQUESTED)\w+)$")
+_ATT = re.compile(r"^(\d\d-\d\d \d\d:\d\d)\s+(\S+)\s+(\S+)\s+(\S+)")
+
+
+def _handled(wlog: list[tuple[float, str]], ticket: str, branch: str, t: float) -> bool:
+    marks = (f"FIX {ticket} attempt ", f"CONFLICT {ticket}: no fix run", f"QUEUED {branch} for merge")
+    return any(t <= ts <= t + HANDLED_WITHIN_S and any(m in ln for m in marks) for ts, ln in wlog)
+
+
 def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
-    """What a person had to do: attention lines that name a person's action, and holds."""
+    """What a person had to do: attention lines that name a person's action, the work runner's
+    escalations, and holds. A CONFLICT / GATE_FAIL the work runner took over is not one."""
     out = []
+    wlog = []
+    for ln in _read(os.path.join(ops, "work-runner.log")).splitlines():
+        m = re.match(r"^\[(\d\d-\d\d \d\d:\d\d:\d\d)\] ", ln)
+        if m:
+            try:
+                wlog.append((datetime.strptime(f"{since.year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S").timestamp(), ln))
+            except ValueError:
+                pass
     for raw in _read(os.path.join(ops, "merge-needs-attention.txt")).splitlines():
         m = re.match(r"^\[?(\d\d-\d\d \d\d:\d\d)", raw)
         if not m:
@@ -329,7 +425,26 @@ def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
             t = datetime.strptime(f"{since.year}-{m.group(1)}", "%Y-%m-%d %H:%M")
         except ValueError:
             continue
-        if since <= t <= until and re.search(r"CONFLICT|GATE_FAIL|SUITE_BR|FIX_HELD|BLOCKED|needs a person|a person must", raw):
+        if not since <= t <= until:
+            continue
+        a = _ATT.match(raw)
+        if a and (a.group(4) == "GATE_FAIL" or a.group(4).startswith("CONFLICT(") or a.group(4) == "CONFLICT"):
+            # younger than the window and not yet taken: pending, not yet a person's (a real
+            # escalation arrives as its own work-needs line, counted below at once)
+            if until.timestamp() - t.timestamp() >= HANDLED_WITHIN_S and not _handled(wlog, a.group(3), a.group(2), t.timestamp()):
+                out.append(raw[:160] + "  (not taken by the work runner)")
+            continue
+        if re.search(r"CONFLICT|GATE_FAIL|SUITE_BR|FIX_HELD|BLOCKED|needs a person|a person must", raw):
+            out.append(raw[:160])
+    for raw in _read(os.path.join(ops, "work-needs-attention.txt")).splitlines():
+        a = _ATT.match(raw)
+        if not a or not _PERSON_KINDS.match(a.group(4)):
+            continue
+        try:
+            t = datetime.strptime(f"{since.year}-{a.group(1)}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if since <= t <= until:
             out.append(raw[:160])
     for h in _jsonl(os.path.join(ops, "hold.jsonl")):
         t = datetime.fromtimestamp(float(h.get("ts", 0)))
@@ -393,6 +508,9 @@ def summary(ops: str, now: datetime | None = None) -> dict:
         "queue_depth": len(queue), "workers_running": running, "worker_cap": cap,
         "flake_accepts_24h": len(fa := flake_accepts(ops, now - timedelta(hours=24), now)),
         "flake_saved_min_24h": round(sum(float(o.get("saved_s") or 0) for o in fa) / 60),
+        # The one-solo-pass rule's own saving: the second isolated run it skipped (~ the first one's time).
+        "flake_solo_24h": sum(1 for o in fa if o.get("passes_alone") == 1),
+        "flake_solo_saved_min_24h": round(sum(float(o.get("solo_saved_s") or 0) for o in fa if o.get("passes_alone") == 1) / 60),
     }
 
 
@@ -422,6 +540,63 @@ DIGEST_EVERY_S = 2 * 3600
 BREAK_LOOKBACK_S = 2 * 3600
 
 
+REPO = "/Users/daniellewis/hackriff"
+
+
+def _git(repo: str, *args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
+    """Per remote worker host (hosts.json; user, 2026-09-25): its mirror's main as this repo last pushed it (the
+    remote-tracking ref - local, no network) and how far main is ahead of it, its running claims, and how many of
+    the tickets the work runner dispatched to it are on main."""
+    try:
+        hosts = json.load(open(os.path.join(ops, "hosts.json")))
+    except (OSError, ValueError):
+        return []
+    try:
+        claims = json.load(open(os.path.join(ops, "work-claims.json")))
+    except (OSError, ValueError):
+        claims = {}
+    wlog = _read(os.path.join(ops, "work-runner.log"))
+    out = []
+    for h in hosts:
+        tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/remotes/{h}/main")
+        behind = _git(repo, "rev-list", "--count", f"{tip}..main") if tip else ""
+        pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
+        # Work on the host: a review keeps its claim's host but runs on this Mac (the work runner's busy_workers).
+        running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running"
+                         and c.get("kind", "work") in ("work", "fix", "deflake"))
+        sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
+        # Landed = main carries the runner's merge commit for the ticket's branch ('... (task-t567): gate passed' or
+        # '... (task-t567): batch, gated together'); a just-dispatched branch with no commits is 'merged' but not landed.
+        subjects = _git(repo, "log", "main", "--merges", "--since=30 days ago", "--format=%s")
+        landed = [t for t in sent if f"(task-{t.lower().replace('-', '')})" in subjects]   # the runner's branch_of
+        recent = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+        try:
+            probe = json.load(open(os.path.join(ops, "hosts", f"{h}.json")))      # the work runner's per-tick probe
+        except (OSError, ValueError):
+            probe = {}
+        out.append({"name": h, "cap": (hosts[h] or {}).get("cap", 2), "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+                    "landed_24h": sum(1 for t in sent if f"(task-{t.lower().replace('-', '')})" in recent), "probe": probe,
+                    "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
+                    "landed": len(landed)})
+    return out
+
+
+def landings_by_host(ops: str, repo: str = REPO, hosts: list[dict] | None = None) -> dict:
+    """Landed task branches on main in the last 24 h, split by the host their worker ran on (remote hosts from
+    remote_hosts(); the rest ran on this Mac). `hosts` = an already computed remote_hosts() result."""
+    subjects = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+    total = len(set(re.findall(r"\((task-t\d+[a-z]?)\)", subjects)))
+    remote = {h["name"]: h["landed_24h"] for h in (hosts if hosts is not None else remote_hosts(ops, repo))}
+    return {"mac": total - sum(remote.values()), **remote} if remote else {}
+
+
 def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     """Invariant 23: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> ·
     <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`."""
@@ -439,8 +614,14 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     return (f"flow: {s['landings_per_h_6h']}/h (6h) {s['landings_per_h_24h']}/h (24h) · "
             f"reds {s['reds_24h']}/{s['gates_24h']}{_cause(s)} · touchpoints {s['touchpoints_24h']} · "
             f"{exp} · holding: {_holding(ops, now)}"
-            + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min)"
-               if s.get("flake_accepts_24h") else ""))
+            + (f" · {s['open_graph']['short']}" if (s.get("open_graph") or {}).get("short") else "")
+            + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min"
+               + (f"; {s['flake_solo_24h']} after one solo pass, {s['flake_solo_saved_min_24h']} min of it" if s.get("flake_solo_24h") else "")
+               + ")"
+               if s.get("flake_accepts_24h") else "")
+            # user, 2026-09-25: every tick line says what the remote hosts add
+            + "".join(f" · {h['name']}: {len(h['running'])} running, {h['landed']} landed"
+                      + (f", mirror behind by {h['behind']}" if h.get("behind") else "") for h in remote_hosts(ops)))
 
 
 def _holding(ops: str, now: datetime) -> str:
@@ -488,6 +669,83 @@ def _last_sent(ops: str, key: str) -> float:
     return last
 
 
+def eta_line(ops: str, now: datetime, repo: str | None = None) -> str:
+    """"ETA: queue clears ~HH:MM; T-801 lands ~HH:MM" (hkpy.eta) from measured medians. Never raises."""
+    import statistics
+    from hkpy import eta, taskorder
+    repo = repo or os.environ.get("HACKRIFF_REPO") or "/Users/daniellewis/hackriff"
+    queue = [ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    started = None
+    for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+        if ln.startswith("started="):
+            try:
+                started = datetime.strptime(ln.split("=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+    if started is None and os.path.exists(os.path.join(repo, ".git", "MERGE_HEAD")):
+        started = datetime.fromtimestamp(os.path.getmtime(os.path.join(repo, ".git", "MERGE_HEAD")))
+    full = sorted(r["minutes"] for r in gate_rows(ops, now - timedelta(hours=24), now)
+                  if r["class"] == "full" and r["verdict"] == "green" and r["minutes"])
+    gate_min = float(statistics.median(full)) if full else 25.0
+    done = _jsonl(os.path.join(ops, "work-done.jsonl"))
+    work = [float(o["minutes"]) for o in done if o.get("kind") == "work" and o.get("outcome") in ("done", "done-to-review") and o.get("minutes")][-40:]
+    review = [float(o["minutes"]) for o in done if o.get("kind") == "review" and o.get("minutes")][-40:]
+    work_min = statistics.median(work) if work else 25.0
+    review_min = statistics.median(review) if review else 2.0
+    q_eta = eta.queue_clears(now, len(queue), started, gate_min)
+    ticket, t_eta, why = None, None, ""
+    try:
+        tasks, _ = taskorder.committed_tasks(repo, ops)
+        a = taskorder.analyse(tasks)
+        if a["roots"]:
+            top = a["roots"][0]
+            ticket = top["id"]
+            try:
+                claim = json.load(open(os.path.join(ops, "work-claims.json"))).get(ticket)
+            except Exception:
+                claim = None
+            branch = "task-t" + ticket.split("-", 1)[1].lstrip("0")
+            t_eta, why = eta.ticket_lands(now, ticket, branch, queue, claim, started, gate_min, work_min,
+                                          review_min, board_status=top["status"])
+            why = f"unblocks {top['unblocks']}; {why}"
+    except Exception as e:
+        ticket, why = None, f"({type(e).__name__})"
+    return eta.digest_line(now, q_eta, len(queue), ticket, t_eta, why)
+
+
+def open_graph(ops: str, now: datetime, s: dict, record: bool = False, repo: str | None = None) -> dict:
+    """hkpy.graphclear over main's committed board: {line, short, n, at}; with `record`, one ETA-ledger
+    line each for "queue clears" and "open graph clears". Never raises."""
+    from hkpy import eta, graphclear
+    repo = repo or os.environ.get("HACKRIFF_REPO") or "/Users/daniellewis/hackriff"
+    try:
+        r = graphclear.gather(ops, repo, now, float(s.get("landings_per_h_6h") or 0), float(s.get("landings_per_h_24h") or 0))
+    except Exception as e:
+        return {"line": f"open graph: no estimate ({type(e).__name__}: {e})"[:200], "short": ""}
+    at = (r.get("eta", {}).get("p50") or {}).get("at")
+    out = {"line": r["line"], "n": r.get("n"), "at": at, "chain": r.get("chain"), "bound": r.get("bound"),
+           "short": f"graph clears ~{graphclear._when(at, now)} ({r.get('n')})" if at else ""}
+    if record:
+        try:
+            queue = [ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines() if ln.strip()]
+            gating = os.path.exists(os.path.join(ops, "bulk-in-progress")) or os.path.exists(os.path.join(repo, ".git", "MERGE_HEAD"))
+            full = sorted(g["minutes"] for g in gate_rows(ops, now - timedelta(hours=24), now)
+                          if g["class"] == "full" and g["verdict"] == "green" and g["minutes"])
+            gate_min = float(full[len(full) // 2]) if full else 25.0
+            started = None
+            for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+                if ln.startswith("started="):
+                    try:
+                        started = datetime.strptime(ln.split("=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+            graphclear.record(ops, now, r, eta.queue_clears(now, len(queue), started, gate_min), len(queue), gating)
+        except Exception:
+            pass
+    return out
+
+
 def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[str]:
     """Post the tick line when due, and each trend break at once. Returns what was posted (keys).
     `send(level, title, body, key)` defaults to ops/alert.py, which dedupes by key for 30 min and
@@ -509,6 +767,30 @@ def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[st
             f"\nflake accepted {o['_t'].strftime('%H:%M')}: {o.get('tests')} in `just {o.get('suite')}` "
             f"({o.get('batch')}) - passed alone twice, ~{round(float(o.get('saved_s') or 0) / 60)} min saved"
             for o in events)
+        # ...why tickets were handed back for a fix run, per class (user, 2026-09-24)
+        try:
+            from hkpy import fixes
+            body += "\n" + fixes.tally_line(fixes.rows(ops, now.timestamp() - 86400))
+        except Exception:
+            pass
+        # ...and what landed since the last one, as release notes (user, 2026-09-23)
+        since = last or now.timestamp() - DIGEST_EVERY_S
+        landed = [o for o in _jsonl(os.path.join(ops, "landed.jsonl")) if float(o.get("merge_ts") or 0) > since]
+        if landed:
+            try:
+                from hkpy import landnotes
+                body += "\n\n" + landnotes.notes(f"landed since last digest: {len(landed)}",
+                                                  [str(o.get("branch")) for o in landed], ops=ops, limit=1900 - len(body))
+            except Exception:
+                body += f"\n\nlanded since last digest: {len(landed)}"
+        try:
+            extra = eta_line(ops, now)
+            if (s.get("open_graph") or {}).get("line"):
+                from hkpy import graphclear
+                extra += "\n" + s["open_graph"]["line"] + "\n" + graphclear.accuracy_line(ops)
+            body = body.replace(line, line + "\n" + extra, 1)
+        except Exception:
+            pass
         send("green", "pipeline digest", body, "flow:digest")
         posted.append("flow:digest")
     return posted
@@ -558,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.hourly or not views:
         views.insert(0, ("hourly", hourly(a.ops, since, now)))
     s = summary(a.ops, now)
+    if a.record or a.digest:
+        s["open_graph"] = open_graph(a.ops, now, s, record=a.record)
     if a.json:
         print(json.dumps({"summary": s, **{k: v for k, v in views}}, indent=1))
     else:

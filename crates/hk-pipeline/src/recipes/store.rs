@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use hk_recipe::{RECIPE_SCHEMA, RECIPE_SCHEMA_VERSION, Recipe, is_id};
+use hk_recipe::{RECIPE_SCHEMA, RECIPE_SCHEMA_VERSIONS, Recipe, is_id};
 use serde_json::{Value, json};
 
 /// Suffix of a built-in recipe file.
@@ -239,7 +239,9 @@ impl RecipeStore {
     /// returns the stored document. The caller validates it against the block catalogue first.
     pub fn save(&self, mut recipe: Recipe) -> Result<Recipe, StoreError> {
         check_id(&recipe.id)?;
-        if recipe.schema != RECIPE_SCHEMA || recipe.schema_version != RECIPE_SCHEMA_VERSION {
+        if recipe.schema != RECIPE_SCHEMA
+            || !RECIPE_SCHEMA_VERSIONS.contains(&recipe.schema_version)
+        {
             return Err(StoreError::new(
                 400,
                 "invalid",
@@ -336,6 +338,27 @@ mod tests {
         ));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// T-870: a saved revision reads back **bit-identical** — an applied refinement writes an
+    /// arbitrary f64 (`input.bandwidth_hz`) and the stored revision must carry exactly it. This
+    /// value is one serde_json's default parser reads back one ulp off (125073.8830717856).
+    #[test]
+    fn a_saved_revision_reads_back_every_float_bit_identical() {
+        let root = tmp("floats");
+        let store = RecipeStore::new(None, root.join("user"));
+        let bw = 125_073.883_071_785_59_f64;
+        let mut r = doc("floaty", 1, "Floaty");
+        r.input.bandwidth_hz = Some(bw);
+        let saved = store.save(r).unwrap();
+        let back = store.get("floaty", Some(saved.version)).unwrap();
+        assert_eq!(
+            back.input.bandwidth_hz.map(f64::to_bits),
+            Some(bw.to_bits()),
+            "{:?}",
+            back.input.bandwidth_hz
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

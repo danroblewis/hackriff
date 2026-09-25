@@ -9,12 +9,18 @@
 #   ops/launch.sh coordinator            # fresh coordinator session in tmux 'dev'
 #   ops/launch.sh supervisor             # fresh supervisor session in tmux 'super'
 #   ops/launch.sh coordinator --resume <session-id>   # resume an existing conversation, in-role
+#   ops/launch.sh explorer --window 3h   # explorer window in tmux 'explore' (T-923): the agent from
+#                                        # .claude/agents/explorer.md, run by ops/explorer-window.sh,
+#                                        # which takes the radio lock and releases it at window end,
+#                                        # on exit and on crash. `--dry-run` validates and prints.
 #
 # Any extra args after the role are passed straight to `claude` (e.g. --resume <id>).
 set -euo pipefail
 REPO=/Users/daniellewis/hackriff
-ROLE="${1:?usage: ops/launch.sh <supervisor|coordinator|pipeline-manager> [extra claude args...]}"; shift || true
+ROLE="${1:?usage: ops/launch.sh <supervisor|coordinator|pipeline-manager|explorer> [extra claude args...]}"; shift || true
 RF="$REPO/.claude/roles/$ROLE.md"
+# The explorer is an agent definition, not a role (T-923); its window script runs it with `--agent`.
+[ "$ROLE" = explorer ] && RF="$(cd "$(dirname "$0")/.." && pwd)/.claude/agents/explorer.md"
 [ -f "$RF" ] || { echo "no role file: $RF"; exit 1; }
 
 # The knob store (`just knobs`): a role session inherits it so anything it starts by hand reads the
@@ -39,8 +45,35 @@ case "$ROLE" in
   supervisor)       SESSION=super; MODEL=opus; EFFORT=high ;;
   # The pipeline manager (2026-09-23): owns throughput, ticks every 30 min, one instance (invariant 22).
   pipeline-manager) SESSION=flow;  MODEL=opus; EFFORT=high ;;
-  *) echo "unknown role '$ROLE' (expected supervisor|coordinator|pipeline-manager)"; exit 1 ;;
+  # The explorer (T-923): one bounded window holding the radio lock, one instance.
+  explorer)         SESSION=explore; MODEL=opus; EFFORT=high ;;
+  *) echo "unknown role '$ROLE' (expected supervisor|coordinator|pipeline-manager|explorer)"; exit 1 ;;
 esac
+
+# The explorer's pane runs ops/explorer-window.sh, not claude directly: the window script owns the
+# radio lock's take/release trap and the window-end timer, and starts claude itself. Its arguments
+# are validated here (by the script's own --dry-run) before any tmux session exists.
+PANE_CMD="claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF'"
+PANE_MATCH=claude
+if [ "$ROLE" = explorer ]; then
+  WINDOW=3h; DRY=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --window) WINDOW="${2:?--window needs a value (e.g. 3h)}"; shift 2 ;;
+      --window=*) WINDOW="${1#--window=}"; shift ;;
+      --dry-run) DRY=1; shift ;;
+      *) echo "explorer: unknown argument '$1' (usage: ops/launch.sh explorer --window 3h [--dry-run])"; exit 1 ;;
+    esac
+  done
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "tmux session '$SESSION' already exists - one explorer at a time (attach, or wait for its window to end)."
+    exit 1
+  fi
+  "$(dirname "$0")/explorer-window.sh" --window "$WINDOW" --dry-run || exit 1
+  [ "$DRY" = 1 ] && exit 0
+  PANE_CMD="bash '$REPO/ops/explorer-window.sh' --window '$WINDOW'"
+  PANE_MATCH=explorer-window
+fi
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' already exists — kill it first (tmux kill-session -t $SESSION) or attach."
@@ -88,22 +121,22 @@ fi
 tmux new-session -d -s "$SESSION" -x 220 -y 60 -c "$REPO"
 tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
 tmux send-keys -t "$SESSION" -l \
-  "exec env HACKRIFF_ROLE=$ROLE $KNOBPREFIX claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
+  "exec env HACKRIFF_ROLE=$ROLE $KNOBPREFIX $PANE_CMD $EXTRA"
 tmux send-keys -t "$SESSION" Enter
 if [ -n "$CPULIMIT_BIN" ]; then
   # After the exec the pane's pid is claude itself; wait for that before attaching, so a launch
   # that never reached claude says so instead of claiming a bound.
   PANE_PID="$(tmux display -p -t "$SESSION" '#{pane_pid}')"
   for _ in $(seq 1 40); do
-    ps -o command= -p "$PANE_PID" 2>/dev/null | grep -q claude && break
+    ps -o command= -p "$PANE_PID" 2>/dev/null | grep -q "$PANE_MATCH" && break
     sleep 0.25
   done
-  if ps -o command= -p "$PANE_PID" 2>/dev/null | grep -q claude; then
+  if ps -o command= -p "$PANE_PID" 2>/dev/null | grep -q "$PANE_MATCH"; then
     nohup "$CPULIMIT_BIN" -l "${ROLE_CPU_PCT:-800}" -i -p "$PANE_PID" >/dev/null 2>&1 &
     disown
     echo "  bound: cpulimit -l ${ROLE_CPU_PCT:-800} -i -p $PANE_PID (limiter pid $!)"
   else
-    echo "warning: pane $PANE_PID is not running claude after 10 s - $ROLE launched unbounded" >&2
+    echo "warning: pane $PANE_PID is not running $PANE_MATCH after 10 s - $ROLE launched unbounded" >&2
   fi
 fi
 echo "launched '$ROLE' in tmux session '$SESSION' (model=$MODEL effort=$EFFORT)"

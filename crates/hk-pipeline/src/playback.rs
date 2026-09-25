@@ -719,6 +719,7 @@ impl PlaybackService {
             deemphasis_s: plan.deemphasis_s,
             demod: LISTEN_DEMOD_VERSION.into(),
             refinement: None,
+            ..AudioInfo::default()
         });
         let publisher = Publisher::new(
             header.clone(),

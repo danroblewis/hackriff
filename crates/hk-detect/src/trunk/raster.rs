@@ -194,6 +194,42 @@ pub fn grid_aliases(offset_hz: f64, spacing_hz: f64, center_hz: f64, bound_ppm: 
     out
 }
 
+/// The receiver's clock offset modulo `spacing_hz`, from a grid fit made relative to the tuned
+/// centre, given one absolute channel frequency on that grid (T-560).
+///
+/// [`GridFit::offset_hz`] is the phase of the received emissions **relative to the tuned centre**,
+/// so it holds two things at once: the receiver's clock error, and where the tuned centre itself
+/// sits against the channel grid. Tune 852.456 MHz on the 851.0125 + k·12.5 kHz raster and the
+/// centre is 6 kHz off a channel *before* any clock error — reading that fit as the clock would
+/// misstate the receiver by 6 kHz and send every grant to the channel next door. A granted
+/// frequency is an absolute transmit frequency on the real grid (announced by the system itself,
+/// not looked up), so its phase against the tuned centre is known exactly and is removed here,
+/// leaving the clock alone. A centre tuned on a channel gives back `grid_offset_hz` unchanged.
+///
+/// Result in `(-spacing/2, spacing/2]`; NaN when an input is unusable.
+pub fn clock_offset_mod_grid(
+    grid_offset_hz: f64,
+    spacing_hz: f64,
+    tune_center_hz: f64,
+    channel_hz: f64,
+) -> f64 {
+    let usable = grid_offset_hz.is_finite()
+        && spacing_hz.is_finite()
+        && spacing_hz > 0.0
+        && tune_center_hz.is_finite()
+        && channel_hz.is_finite();
+    if !usable {
+        return f64::NAN;
+    }
+    let phase = (channel_hz - tune_center_hz).rem_euclid(spacing_hz);
+    let m = (grid_offset_hz - phase).rem_euclid(spacing_hz);
+    if m > spacing_hz / 2.0 {
+        m - spacing_hz
+    } else {
+        m
+    }
+}
+
 /// What one candidate alias measured on the granted channels (T-628).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AliasScore {
@@ -488,6 +524,40 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// T-560: the capture docs/19 §7.6a measured was tuned to 852.456 MHz, which is itself 6 kHz
+    /// off the 851.0125 + k·12.5 kHz raster. The spectrum's grid phase then holds that 6 kHz AND
+    /// the −8200 Hz clock error; only the clock may reach the alias search, or the "resolved"
+    /// receiver is off by the tuning and every grant lands on the channel next door.
+    #[test]
+    fn an_off_raster_tuned_centre_is_removed_so_the_alias_search_sees_only_the_clock() {
+        let (spacing, tune, channel): (f64, f64, f64) = (12_500.0, 852.456e6, 852.4625e6);
+        let clock: f64 = -8_200.0;
+        // What the spectrum shows relative to the tuned centre: channel phase + clock, mod raster.
+        let seen = (channel - tune + clock).rem_euclid(spacing);
+        let seen = if seen > spacing / 2.0 {
+            seen - spacing
+        } else {
+            seen
+        };
+        let naive = grid_aliases(seen, spacing, tune, RECEIVER_CLOCK_BOUND_PPM);
+        assert!(
+            !naive.iter().any(|&x| (x - clock).abs() < 1.0),
+            "the uncorrected phase never offers the true clock: {naive:?}"
+        );
+        let clk = clock_offset_mod_grid(seen, spacing, tune, channel);
+        let aliases = grid_aliases(clk, spacing, tune, RECEIVER_CLOCK_BOUND_PPM);
+        assert!(
+            aliases.iter().any(|&x| (x - clock).abs() < 1e-6),
+            "{aliases:?}"
+        );
+        // On-channel tuning is the identity: nothing changes for a centre on the grid.
+        assert!(
+            (clock_offset_mod_grid(4_300.0, spacing, 851.0125e6, 851.5e6) - 4_300.0).abs() < 1e-6
+        );
+        assert!(clock_offset_mod_grid(f64::NAN, spacing, tune, channel).is_nan());
+        assert!(clock_offset_mod_grid(0.0, 0.0, tune, channel).is_nan());
     }
 
     #[test]

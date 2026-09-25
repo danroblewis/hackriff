@@ -26,7 +26,7 @@ Three things are wrong with the constants as written, and they are different kin
 | What may pay | Only **analytic-null** hold-out bits, each net of the look-elsewhere charged **at its own stage for the winning prefix** — never the job-total `look_elsewhere_bits`, never a calibrated-null metric (§2). |
 | The one constant | **`min_analytic_holdout_bits` = 24**, = 14.3 bits of budget + 9.7 bits of stated model-error margin (§3). Replaces the 64. |
 | Frames | **Not a constant.** `min_differences = max(1, ceil((24 + L_check) / width))`, over `differences` (chance-corrected, FEC-corrected frames excluded per T-210), not `distinct_valid`. Gives 1 for a template-fixed CRC-24, 3 for a searched CRC-16 — the legacy number, for the one case it fitted (§4.2). |
-| Width | **Floor of 8**, down from 16, and **stated as an assumption, not a derivation**: it guards a degenerate null the budget cannot see. T-577 measures it. A **hard floor of 16 of the 24 bits must come from a check stage**, so sync excess alone never confirms (§4.3). |
+| Width | **Measured by T-577: 16 with the shipped `differences` count, and 8 only with the count change of §4.3.1.** Never below 8. The floor guards degenerate nulls the budget cannot see. With the shipped count, a no-code burst framed with shifts confirms at 2⁻ʷ per decision, and 16 is the smallest width inside the budget. Two further holes are closed by the count, not by any floor (§4.3.1, [results](../results/T-577.md)). A **hard floor of 16 of the 24 bits must come from a check stage**, so sync excess alone never confirms (§4.3). |
 | Template-fixed vs searched | The discount for a *found* rather than *specified* check is exactly `L_check`, inside the same inequality — **no separate penalty**. "Template-fixed" means `builtin` or user-authored; a template **discovered by a previous search inherits that search's look-elsewhere** and is treated as searched (§5). |
 | Attended vs unattended | **One threshold.** The arithmetic says attended operation buys ~7 bits of headroom; that is a reason it is safer, not licence to lower it (§7). |
 | Cross-job multiplicity | Priced **once**, in the budget's denominator. No running per-session counter — a threshold that drifts with uptime would make the same physical evidence worth less on a device that has been on longer. The denominator is instead **monitored at runtime** and the budget claim is void above it (§8). |
@@ -201,11 +201,28 @@ So "3 frames" was correct for exactly one row of that table and was being applie
 Two conditions replace the flat `width ≥ 16`:
 
 ```rust
-min_check_width: u16 = 8          // assumption, not derivation — T-577 measures it
+min_check_width: u16 = 16         // T-577, measured; 8 only with §4.3.1's count
 hard_check_floor_bits: f32 = 16.0 // at least this much of the 24 comes from a check stage
 ```
 
-**The floor of 8 is not derived from the budget, and this ADR will not pretend otherwise.** The budget constrains a *rate*, and §4.2's inequality already converts any width into the frame count that meets it — arithmetically, width 4 with 7 differences is the same 28 bits as width 16 with 2. What the budget cannot see is a **degenerate null**: below about a byte, a check can be satisfied by a framing artefact rather than by a code, the `differences` guard has too little to work with, and the per-frame independence assumption (§3.2) degrades fastest. 8 is a judgement that a byte is the smallest unit where the accounting still means something. T-577 measures it against ADR-0021's N2/N3 populations, and the number moves when that measurement lands — up or down.
+**The floor of 8 is not derived from the budget, and this ADR will not pretend otherwise.** The budget constrains a *rate*, and §4.2's inequality already converts any width into the frame count that meets it — arithmetically, width 4 with 7 differences is the same 28 bits as width 16 with 2. What the budget cannot see is a **degenerate null**: below about a byte, a check can be satisfied by a framing artefact rather than by a code, the `differences` guard has too little to work with, and the per-frame independence assumption (§3.2) degrades fastest. 8 was a judgement that a byte is the smallest unit where the accounting still means something. T-577 measured it against ADR-0021's N2/N3 populations and three synthetic framing artefacts, and the number moved **up**; see §4.3.1.
+
+#### 4.3.1 Measured (T-577)
+
+Source: [docs/results/T-577.md](../results/T-577.md), harness `hk-estimate/tests/degenerate_null.rs`. N2/N3 alone never reach the gate at any width (0 of 4000 per cell), with one exception, (A) below. Three degenerate nulls do reach it, and each has a mechanism, not only a rate:
+
+- **(A) Init-cancel, independent of width.** An affine check with init = all ones is satisfied by `1^w ‖ 0…0`: the first *w* bits cancel the register and the rest is idle fill. With xorout ≠ 0 the frame is `init ‖ 0…0 ‖ xorout`. Neither frame is periodic as a whole, so the short-period guard counts it. A CW or voice slicer emits it: **2.0–2.3 × 10⁻² per decision at w = 32 on N2**, where one frame alone clears the gate. No floor fixes this.
+- **(B) Shift: the floor for the shipped count.** For a linear check, g ∣ P implies g ∣ x^k·P. When a framer offers zero-padded shifts of one burst (onset jitter, a block grid, a search over offsets), every shift is valid, and each is a distinct "difference". **One 2⁻ʷ event then clears the gate at every width ≥ 8** (seeded rate ≈ 1.0). The realised rate is 2⁻ʷ per decision: 3.9 × 10⁻³ at w = 8 (78× the budget), 2.4 × 10⁻⁴ at 12 (4.9×), and **1.5 × 10⁻⁵ at 16 (0.31×, inside, with 1.7 of the 9.7 margin bits left)**. A GF(2) rank cap does not remove it, because shifted copies are linearly independent. Searched checks have it at **every** width: 1–15 % of no-code beacon windows, and the §8.2-style null control is not built to see it.
+- **(C) Period: the reason for "never below a byte".** A payload repeated at lag ord(x mod g) satisfies the check whatever the payload. ord ≤ 2^w − 1, so at w = 4 a 15-bit code sent twice passes **every frame, with certainty**, and no count can remove it.
+
+**The count change.** A valid frame adds a trial only if two things hold:
+
+1. It is not degenerate: it is not short-periodic even with up to *w* bits trimmed from either end. This closes (A).
+2. Its zero-trimmed polynomial is not a multiple (or divisor) of one already counted, because m·P is valid by construction once P is. This closes (B), including frames that hold two copies of one burst.
+
+The count is then capped at the GF(2) **affine rank + 1** of the valid frames. That is where independence actually saturates: at the payload's varying-bit dimension (a slow sensor ≈ 7, a counter log₂k + 2, a squitter 41), not at a frame count. With this count, every N2/N3 and artefact cell reads 0 of 4000 at w = 8, except (C) at w = 4. It costs the five real-emitter models nothing: it equals `differences` at every k.
+
+**So:** `min_check_width = 16` while `differences` is the `CheckTally` count. It returns to **8** only when the count above ships, re-measured by the same harness. It never goes below 8. (A) and the searched half of (B) need the count change **whatever the floor**, and T-575 carries both. `distinct_valid` versus `differences` (T-575's swap) measured a gap of **0** on every real emitter. The swap's value is on the null side: the short-period guard takes N2 at w = 24/32 from 44–48 % to 0.
 
 **The hard check floor is derived**, from what a confirmation claims. Confirm-by-decode says *this was decoded*. Sync excess has the weakest independence assumptions of the three analytic nulls (a periodic signal repeats its own patterns), and a result carrying 24 bits of sync excess and no check has not decoded anything. So at least 16 of the 24 bits must come from a `check_distinct_valid` contribution. Lowering the width floor to 8 without this would let a sync-only result through the door the width floor was informally holding shut.
 
@@ -253,8 +270,9 @@ pub struct SynthesizedConfirm {
     min_analytic_holdout_bits: f32,   // 24.0
     /// §4.3: at least this much of the above from a check stage. Derived.
     hard_check_floor_bits: f32,       // 16.0
-    /// §4.3: a degenerate-null floor. ASSUMED, not derived. T-577.
-    min_check_width: u16,             // 8
+    /// §4.3: a degenerate-null floor. MEASURED by T-577 (§4.3.1): 16 with the CheckTally
+    /// count, 8 only with §4.3.1's count change; never below 8.
+    min_check_width: u16,             // 16
     /// §1.2: the budget's denominator. Monitored, not trusted (§8).
     assumed_decisions_per_week: u32,  // 20_000
     /// §5.3: ADR-0021 §8.2's control must have run and passed for an open search.
@@ -267,14 +285,14 @@ pub struct SynthesizedConfirm {
 
 The gate, in order:
 
-1. `result.check.width >= min_check_width`;
+1. `result.check.width >= min_check_width` (16; 8 with §4.3.1's count);
 2. `check_bits >= hard_check_floor_bits`, where `check_bits = width × differences − L_check` over hold-out, `differences` per §4.2 and T-210;
 3. `analytic_holdout_bits >= min_analytic_holdout_bits`, summed per §2.1 with per-stage `L_j`;
 4. if the winning check was **searched** (including an inherited-L discovered template, §5.1): the ADR-0021 §8.2 null control ran and did not cap;
 5. front-end trust: ≤ 50 % suspect detections and no overload in the window (unchanged);
 6. profile is not `quick` (unchanged).
 
-**Not stored:** `min_evidence_bits` (deleted — wrong currency), `min_distinct_valid` (deleted — derived per job by §4.2), `min_check_width = 16` (replaced by 8 plus the hard check floor).
+**Not stored:** `min_evidence_bits` (deleted — wrong currency), `min_distinct_valid` (deleted — derived per job by §4.2), the legacy flat `min_check_width = 16` (replaced by the hard check floor plus a measured width floor: 16 with the shipped count, 8 with §4.3.1's count — T-577).
 
 **Unchanged:** the rule never demotes; a user delete wins; a partial verdict never changes lifecycle state; one promoted row per `output_kind`; the lifecycle reason stays backend-rendered and now names the arithmetic — e.g. *"decoded by synthesized pipeline `generic-fsk-framed`: CRC-16, 3 differing frames valid on hold-out without correction, 48 − 21 = 27 analytic bits against a 24-bit threshold; null control passed with an 11.4-bit margin."* A user reading that can tell which number was close.
 
@@ -465,4 +483,4 @@ A reader of that knows which assumption broke, by how much, and which fixture to
 
 ---
 
-*Unverified in this ADR: the 9.7-bit model margin `M`, the 20 000-decisions-per-week denominator `N`, the width floor of 8, the 16-bit hard check floor, the ~5-bit slot product used in §4.2's worked `L_check` values, and the 18-bit ceiling asserted in §10.1's A2. All are first guesses or stated judgements in the ADR-0015 §7 tradition, to be measured by T-576 and T-577 and never loosened after seeing results. The budget itself (§1.1) is the user's decision, not a guess.*
+*Unverified in this ADR: the 9.7-bit model margin `M`, the 20 000-decisions-per-week denominator `N`, the 16-bit hard check floor (the width floor is measured, §4.3.1 — T-577), the ~5-bit slot product used in §4.2's worked `L_check` values, and the 18-bit ceiling asserted in §10.1's A2. All are first guesses or stated judgements in the ADR-0015 §7 tradition, to be measured by T-576 and T-577 and never loosened after seeing results. The budget itself (§1.1) is the user's decision, not a guess.*

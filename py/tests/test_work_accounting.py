@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -273,7 +275,7 @@ def test_fixes_merge_the_gated_base_while_a_batch_is_gating(tmp_path, monkeypatc
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     seen = {}
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt: seen.update(n=n, prompt=prompt) or c)
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, fail_line="": seen.update(n=n, prompt=prompt) or c)
     R.launch_fix(_claim("T-613", "task-t613"), "09-23 15:26  task-t613  T-613  CONFLICT(skipped from bulk)")
     assert seen["n"] == 1 and "no longer merges cleanly" in seen["prompt"]
     assert "git merge eab4bfae" in seen["prompt"] and "git checkout eab4bfae -- docs/tasks.yaml" in seen["prompt"]
@@ -409,7 +411,10 @@ def df(tmp_path, monkeypatch):
                       ("LOG", str(tmp_path / "work-runner.log")), ("NEEDS", str(tmp_path / "work-needs-attention.txt")),
                       ("DONE", str(tmp_path / "work-done.jsonl")), ("MERGE_QUEUE", str(tmp_path / "merge-queue.txt")),
                       ("MERGE_NEEDS", str(tmp_path / "merge-needs-attention.txt")),
-                      ("BULKMARK", str(tmp_path / "bulk-in-progress"))]:
+                      ("BULKMARK", str(tmp_path / "bulk-in-progress")),
+                      # Never the live .git/MERGE_HEAD: the merge gate runs these tests INSIDE a
+                      # staged merge of main, where release_stale_claims correctly holds back (T-879).
+                      ("REPO", str(tmp_path))]:
         monkeypatch.setattr(R, name, val)
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     monkeypatch.setattr(R, "dispatch_cap", lambda: 4)
@@ -717,3 +722,799 @@ def test_board_sync_runs_under_one_lock(tmp_path, monkeypatch):
         return "synced"
     monkeypatch.setattr(R, "_sync_board", inner)
     assert R.sync_board({}, False) == "synced" and held == [True]
+
+
+
+# --------------------------------------------------------------------- reaping stuck worktrees (2026-09-24)
+def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_quietly(tmp_path, monkeypatch):
+    """t356 (0 commits, claim blocked, only an untracked .githooks/) held 31 GB and failed
+    `worktree remove` 1,499 times; a worktree whose directory was gone failed 1,730 times."""
+    import os
+    import shutil
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    g = lambda *a, cwd=repo: sp.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                    check=True, capture_output=True, text=True)
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "base")
+    wts = repo / ".claude" / "worktrees"
+    for name in ("t356", "t900", "tgone"):
+        g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
+    (wts / "t356" / ".githooks").mkdir()
+    (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
+    (wts / "t356" / "target").mkdir()
+    (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
+    shutil.rmtree(wts / "tgone")                                   # registered, directory gone
+    old = 1_000_000_000
+    for name in ("t356", "t900"):
+        os.utime(wts / name, (old, old))
+
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: real_sh(args, cwd=cwd or str(repo), **k))
+    monkeypatch.setattr(R, "REPO", str(repo))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "no-bulk"))
+    monkeypatch.setattr(R, "REAP_AFTER_MIN", 0)
+    monkeypatch.setattr(R, "_REAP_SAID", set())
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")}}
+
+    R.reap_worktrees(claims, dry=False)
+    assert not (wts / "t356").exists()                             # only build output: reaped
+    assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
+    assert "tgone" not in g("worktree", "list").stdout             # pruned
+    kept = [m for m in said if "kept - untracked" in m]
+    assert len(kept) == 1 and "notes-i-never-committed.md" in kept[0]
+    R.reap_worktrees(claims, dry=False)
+    assert len([m for m in said if "kept - untracked" in m]) == 1  # said once, not every tick
+    assert not any("fatal" in m for m in said)
+
+
+@pytest.fixture
+def killed_run(df, monkeypatch, tmp_path):
+    """A ticket worker whose process is gone and left no out.json result and no handback.json."""
+    monkeypatch.setenv("HK_ALERT_OFF", "1")
+    wt = tmp_path / "wt-t802"
+    wt.mkdir()
+    (tmp_path / "work" / "T-802").mkdir(parents=True)
+    (tmp_path / "work" / "T-802" / "out.json").write_text("")            # killed: claude never wrote its result
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        "2\n" if args[:3] == ["git", "rev-list", "--count"] else (" M ui/src/a.ts\n" if args[:2] == ["git", "status"] else ""))
+    fixes, alerts = [], []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line: fixes.append(line) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "alert", lambda *a: alerts.append(a))
+
+    def claim(**kw):
+        return {"T-802": dict({"ticket": "T-802", "branch": "task-t802", "wt": str(wt), "pid": 1, "started": 0,
+                               "kind": "work", "state": "running", "model": "opus"}, **kw)}
+    return claim, fixes, alerts, df[3]
+
+
+def test_a_killed_worker_is_resumed_in_its_worktree(killed_run):
+    """04:07 on 2026-09-24: a pkill took five workers; each was logged "NO_HANDBACK ... (done)", parked
+    as uncommitted/no-work, and never ran again."""
+    claim, fixes, alerts, seen = killed_run
+    claims = claim(session_id="abc")
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("KILLED") and "1 modified files and 2 commits" in fixes[0]
+    assert claims["T-802"]["state"] == "running" and seen == []
+    assert alerts[0][0] == "amber" and "T-802 (resumed)" in alerts[0][2]
+
+
+def test_a_killed_worker_with_no_session_is_named_for_a_redispatch(killed_run):
+    claim, fixes, alerts, seen = killed_run
+    claims = claim()                                                       # launched before --session-id
+    R.reap(claims, dry=False)
+    assert fixes == [] and claims["T-802"]["state"] == "killed"
+    assert [k for _, k, _ in seen] == ["KILLED"] and "T-802 (needs a redispatch)" in alerts[0][2]
+
+
+def test_a_killed_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch, tmp_path):
+    """Review 2026-09-24: through the gate-failure prompt a killed worker would chase a gate that never
+    ran, and a later real gate failure would get one fix attempt instead of two."""
+    monkeypatch.setattr(R, "merge_target", lambda: "main")
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
+    c = {"ticket": "T-802", "branch": "task-t802", "wt": str(tmp_path), "session_id": "abc", "fix_attempts": 1, "kind": "work"}
+    r = R.launch_fix(c, "KILLED your run ended after 40 min with no result")
+    (n, prompt, out_name), = runs
+    assert n == 1 and r["fix_attempts"] == 1 and r["kill_resumes"] == 1 and out_name == "resume1.json"
+    assert "KILLED from outside" in prompt and "merge gate" not in prompt and "merge-runner.log" not in prompt
+
+
+def test_a_killed_claim_with_no_commits_is_released_like_no_work(df, monkeypatch):
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")
+    claims = {"T-802": {"ticket": "T-802", "state": "killed", "started": 0, "branch": "task-t802"}}
+    R.release_stale_claims(claims, {"T-802": {"id": "T-802", "status": "todo"}})
+    assert "T-802" not in claims
+
+
+def test_a_worker_that_wrote_its_result_is_not_killed(killed_run, tmp_path):
+    claim, fixes, alerts, seen = killed_run
+    (tmp_path / "work" / "T-802" / "out.json").write_text(json.dumps({"result": "done", "session_id": "abc"}))
+    claims = claim(session_id="abc")
+    R.reap(claims, dry=False)
+    assert alerts == [] and not any("KILLED" in f for f in fixes)
+
+
+def test_a_leaked_e2e_data_dir_is_removed_and_a_live_one_kept(tmp_path, monkeypatch):
+    """2026-09-24 10:30: 49 hk-e2e-data-* dirs (89.6 GB) left by killed browser specs."""
+    import os
+    for n in ("leaked", "live", "fresh"):
+        (tmp_path / f"hk-e2e-data-{n}").mkdir()
+        (tmp_path / f"hk-e2e-data-{n}" / "ring.bin").write_text("x")
+    (tmp_path / "unrelated").mkdir()
+    old = 1_000_000_000
+    for n in ("leaked", "live"):
+        for p in (tmp_path / f"hk-e2e-data-{n}" / "ring.bin", tmp_path / f"hk-e2e-data-{n}"):
+            os.utime(p, (old, old))
+    os.utime(tmp_path / "unrelated", (old, old))
+    monkeypatch.setattr(R.tempfile, "gettempdir", lambda: str(tmp_path))
+    procs = f"/x/target/debug/hk serve --replay f --data-dir {tmp_path}/hk-e2e-data-live --ui-dist d\n"
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs)
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    R.reclaim_e2e_data(dry=True)
+    assert (tmp_path / "hk-e2e-data-leaked").exists() and len(said) == 1
+    R.reclaim_e2e_data(dry=False)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hk-e2e-data-fresh", "hk-e2e-data-live", "unrelated"]
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")          # ps said nothing: delete nothing
+    for p in (tmp_path / "hk-e2e-data-fresh" / "ring.bin", tmp_path / "hk-e2e-data-fresh"):
+        os.utime(p, (old, old))
+    R.reclaim_e2e_data(dry=False)
+    assert (tmp_path / "hk-e2e-data-fresh").exists()
+
+
+def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
+    """09-24 09:47: 55 GB of build output sat in twelve worktrees the reaper keeps (timeout, blocked,
+    uncommitted); free disk was 22 GB against a 20 GB dispatch floor."""
+    import os
+    root = tmp_path / ".claude" / "worktrees"
+    old = 1_000_000_000
+    for name in ("idle", "fresh", "inuse", "claimed", "t87"):
+        (root / name / "target" / "debug").mkdir(parents=True)
+        (root / name / "src.rs").write_text("kept\n")
+    (root / "linked").mkdir()
+    (root / "linked" / "target").symlink_to(root / "idle" / "target")
+    monkeypatch.setattr(R, "_target_written", lambda t: time.time() if "/fresh/" in t else old)
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    procs = f"node {root}/inuse/ui/e2e/run.mjs\n"                 # a process in inuse; none in t87 (t870 is a prefix trap)
+    lsof = f"p1\nn{root}/t870\n"
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}}
+    R.reclaim_idle_targets(claims, dry=True)
+    assert all((root / n / "target").exists() for n in ("idle", "fresh", "inuse", "claimed", "t87"))
+    R.reclaim_idle_targets(claims, dry=False)
+    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87") if not (root / n / "target").exists())
+    assert gone == ["idle", "t87"]
+    assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
+    assert len([m for m in said if m.startswith("RECLAIM")]) == 2
+    assert (root / "linked").is_symlink() is False and os.path.islink(root / "linked" / "target")
+
+
+def test_an_idle_target_is_kept_when_lsof_says_nothing(tmp_path, monkeypatch):
+    root = tmp_path / ".claude" / "worktrees"
+    (root / "idle" / "target" / "debug").mkdir(parents=True)
+    monkeypatch.setattr(R, "_target_written", lambda t: 1_000_000_000)
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")
+    monkeypatch.setattr(R, "log", lambda m: None)
+    R.reclaim_idle_targets({}, dry=False)
+    assert (root / "idle" / "target").exists()
+
+
+def test_a_target_cloned_with_old_mtimes_reads_as_just_written(tmp_path):
+    """cp -c -R -p keeps main's mtimes; the clone's ctime is when it happened (review, 09-24)."""
+    import os
+    t = tmp_path / "target"
+    (t / "debug" / "deps").mkdir(parents=True)
+    for p in (t / "debug" / "deps", t / "debug", t):
+        os.utime(p, (1_000_000_000, 1_000_000_000))          # an old mtime, as `cp -p` leaves it
+    assert time.time() - R._target_written(str(t)) < 60
+
+
+def test_only_regenerable_is_strict():
+    assert R.only_regenerable([".githooks/", "target/"])
+    assert not R.only_regenerable([".githooks/", "src/new.rs"])
+    assert not R.only_regenerable([])
+
+
+def test_a_deflake_waits_while_a_ticket_branch_edits_its_spec(df, monkeypatch):
+    """2026-09-23 23:30: the runner dispatched deflakers on app-trace and fog-of-war while T-801's
+    worker was rewriting both under the user's authorization; the coordinator held one by hand."""
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 100.0, test="app-trace.e2e.mjs"))
+    edits = {"task-t801": "ui/e2e/app-trace.e2e.mjs\n"}
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        edits.get(args[3].split("...")[1], "") if args[:3] == ["git", "diff", "--name-only"] else "")
+    claims = {"T-801": {"ticket": "T-801", "branch": "task-t801", "state": "review-failed", "kind": "work"},
+              "T-9": {"ticket": "T-9", "branch": "task-t9", "state": "running", "kind": "work"}}
+    R.dispatch_deflakes(claims, dry=False)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    assert (tmp / "work-runner.log").read_text().count("DEFLAKE WAIT deflake-a: request for app-trace.e2e.mjs - T-801's") == 1
+    claims["T-801"]["state"] = "queued"                   # a queued claim whose branch is in no queue: stale
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]
+    launched.clear()
+    (tmp / "merge-queue.txt").write_text("task-t801\n")    # ...but really queued: it waits
+    claims["DEFLAKE:deflake-a"]["state"] = "no-work"
+    write(_req("deflake-a", 100.0, test="app-trace.e2e.mjs"), _req("deflake-a", 2e9, test="app-trace.e2e.mjs"))
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    edits.clear()                                        # landed: main now has it, the three-dot diff is empty
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]
+
+
+def test_a_deflake_waits_while_its_own_last_branch_is_unmerged(df, monkeypatch):
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 600.0))
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 1)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
+def test_a_deflake_waits_while_its_last_branch_gates_in_a_batch(df, monkeypatch):
+    """09-24 09:39:52: main held the batch carrying task-deflake-app-trace-e2e-mjs, so the branch read
+    0 commits ahead of main and a second deflaker was dispatched beside its own gating fix."""
+    tmp, write, launched, _ = df
+    monkeypatch.setattr(R, "_DEFER_SAID", set())         # module-global: the test above said this WAIT
+    write(_req("deflake-a", 600.0))
+    (tmp / "bulk-in-progress").write_text("base=gatedbase\nbranches=task-deflake-a\n")
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0 if t == "main" else 3)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    (tmp / "bulk-in-progress").unlink()                  # the batch landed: main is gated again
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
+def test_a_red_proof_is_not_a_failing_test(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("done", tests=[{"cmd": "node run.mjs app-trace.e2e.mjs  # defect injected", "exit": 1, "expect": "red"},
+                      {"cmd": "node run.mjs app-trace.e2e.mjs", "exit": 0}])
+    claims = claim()
+    R.reap(claims, dry=False)
+    assert len(reviews) == 1 and seen == []
+    hb("done", tests=[{"cmd": "x", "exit": 1, "expect": "red"}])     # a "proof" with no green run beside it
+    R.reap(claim(), dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_BLOCKED"]
+
+
+def test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed(tmp_path, monkeypatch):
+    """task-t538 landed as task-t538-rl: its own branch is never on main, so the claim stayed
+    `queued` for 42 h (12 of 13 such on 2026-09-24). Board done + in no queue = closed."""
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))                     # never the live .git/MERGE_HEAD (T-879)
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")     # branch not on main
+    (tmp_path / "merge-queue.txt").write_text("task-t2\n")
+    (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-t3 task-t4\n")
+    claims = {t: {"ticket": t, "branch": f"task-t{t[2:]}", "state": "queued", "started": 0} for t in ("T-1", "T-2", "T-3", "T-5")}
+    board = {"T-1": {"status": "done"}, "T-2": {"status": "done"}, "T-3": {"status": "done"}, "T-5": {"status": "in-progress"}}
+    assert R.release_stale_claims(claims, board)
+    assert {t: c["state"] for t, c in claims.items()} == {"T-1": "merged", "T-2": "queued", "T-3": "queued", "T-5": "queued"}
+    assert "CLAIM T-1: the board says done and task-t1 is in no queue" in (tmp_path / "work-runner.log").read_text()
+
+
+def test_no_rebuilt_branch_close_while_a_single_merge_is_staged(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "MERGE_HEAD").write_text("abc\n")      # the runner is merging task-t1 alone
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "queued", "started": 0}}
+    R.release_stale_claims(claims, {"T-1": {"status": "done"}})
+    assert claims["T-1"]["state"] == "queued"
+def test_the_runner_drops_an_inherited_role_before_it_starts_a_worker():
+    """2026-09-24 03:20: restarted from the pipeline-manager session, the runner passed
+    HACKRIFF_ROLE=pipeline-manager to every worker, and the watchdog charged their 665 % to that role."""
+    src = _WR.read_text()
+    main_body = src[src.index("def main():"):]
+    pop = main_body.index('os.environ.pop("HACKRIFF_ROLE", None)')
+    assert pop < main_body.index("while True") and pop < main_body.index('log(f"VERSION:')
+
+
+def test_no_claim_is_closed_as_on_main_while_main_is_provisional(tmp_path, monkeypatch):
+    """T-866, 2026-09-24 03:33:46: closed as "on main" because the batch had committed its merge before
+    gating; the batch failed 16 s later and the red had no claim for the work runner to resume."""
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        "0" if args[:2] == ["git", "rev-list"] else "abc123")          # the branch reads as on main
+    (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-t866\n")
+    claims = {"T-866": {"ticket": "T-866", "branch": "task-t866", "state": "queued", "started": 0}}
+    R.release_stale_claims(claims, {"T-866": {"status": "in-progress"}})
+    assert claims["T-866"]["state"] == "queued"
+    (tmp_path / "bulk-in-progress").unlink()                                             # the batch landed
+    R.release_stale_claims(claims, {"T-866": {"status": "in-progress"}})
+    assert claims["T-866"]["state"] == "merged"
+
+
+def test_needs_a_person_titles_only_what_no_automation_picks_up(tmp_path, monkeypatch):
+    """User, 2026-09-24 11:40: six "needs a person" alerts were fix-run outcomes; the user came asking
+    what to decide. The title is reserved for escalations, cancellations, unresolved review FAILs and
+    BLOCKED hand-backs that ask for a decision."""
+    monkeypatch.setattr(R, "NEEDS", str(tmp_path / "needs.txt"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    sent = []
+
+    class Ok:
+        returncode = 1                                                   # no tmux session: no send-keys
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **k: (sent.append(args) if "alert.py" in " ".join(args) else None) or Ok())
+    for kind, detail in [("CONFLICT_ESCALATE", "2 fix attempts spent"), ("CANCEL_PROPOSED", "already done"),
+                         ("BLOCKED", "User decision per use case"), ("BLOCKED", "fails alone: real bug in hk-api"),
+                         ("ERROR", "claude -p error"), ("NO_WORK", "no commits")]:
+        R.attention("T-9", "task-t9", kind, detail)
+    titles = [a[next(i for i, x in enumerate(a) if x.endswith("alert.py")) + 2] for a in sent if "--no-receiver" not in a]
+    assert titles == ["needs a person - T-9 CONFLICT_ESCALATE", "needs a person - T-9 CANCEL_PROPOSED",
+                      "needs a person - T-9 BLOCKED", "T-9 BLOCKED", "T-9 ERROR"]
+
+
+def test_the_merge_runner_says_needs_a_person_only_when_it_gave_up():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    calls = [ln for ln in text.splitlines() if "notify_coordinator \"" in ln]
+    assert calls and all(ln.rstrip().rstrip(";").split('"')[-2] for ln in calls)     # every call titles itself
+    person = [ln for ln in calls if "needs a person" in ln]
+    assert len(person) == 1 and "GIVEN UP" in person[0]
+    gate_fail = next(ln for ln in calls if "FAILED the merge gate" in ln)
+    assert '"gate failed - fix run"' in gate_fail and "TRIAGE_SPECS" in gate_fail   # names the failing test/spec
+
+
+def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monkeypatch):
+    """2026-09-24 14:30: an isolation's single gates leave 3-8 s gaps with no marker; each gap a tick
+    landed in dispatched up to WORK_CAP and the next gate ran beside 7 workers (load 58 vs plan 32).
+    Not keyed on the queue (review): held/parked branches sit there with no gate coming."""
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "GATE_ALONE", False)
+    monkeypatch.setattr(R, "CAP", 6)
+    monkeypatch.setattr(R, "RESERVE_CAP", 4)
+    monkeypatch.setattr(R, "_GATE_SEEN", [0.0])
+    clock = [1_000_000.0]
+    monkeypatch.setattr(R.time, "time", lambda: clock[0])
+    (tmp_path / "merge-queue.txt").write_text("task-parked\n")
+    assert R.dispatch_cap() == 6                                          # queued but no gate: full cap
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert R.dispatch_cap() == 4                                          # a gate runs
+    (tmp_path / "bulk-in-progress").unlink()
+    clock[0] += 20
+    assert R.dispatch_cap() == 4                                          # the gap before the next gate
+    clock[0] += 100
+    assert R.dispatch_cap() == 6                                          # the pipeline went quiet
+
+
+def test_a_red_that_is_not_the_workers_own_queues_instead_of_blocking(monkeypatch):
+    """Supervisor, 2026-09-24 18:55: T-809 read BLOCKED 'needs a person' for app-surface failing the same
+    way on main's build at load 44 - the gate and its flake triage are the arbiter of such a red."""
+    class E:
+        def __init__(self, n): self.passed_alone = n
+    import types
+    fake = types.SimpleNamespace(ledger=lambda ops: {"app-surface.e2e.mjs": E(2), "app-sheet.e2e.mjs": E(1), "canvas.e2e.mjs": E(0)})
+    monkeypatch.setitem(__import__("sys").modules, "hkpy.flakes", fake)
+    monkeypatch.setattr(__import__("hkpy"), "flakes", fake, raising=False)
+    assert R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 1, "reproduces_on_main": True})
+    assert R.not_own_red({"cmd": "x", "exit": 1, "known_flake": True})
+    assert R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-sheet", "exit": 1})          # ledger-known flakers
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-detail", "exit": 1})     # app-detail unknown
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs canvas", "exit": 1})                     # never passed alone
+    assert not R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 101})                          # a plain red: blocked
+
+
+def test_work_clone_target_0_launches_without_a_target_clone(monkeypatch):
+    """2026-09-24 18:11: 83 GB of main's target/ still shared with three worker clones against 101 GB
+    free - WORK_CLONE_TARGET=0 stops new pins; the worker builds from sccache."""
+    monkeypatch.setattr(R, "CLONE_TARGET", True)
+    assert "cp -c -R -p" in R.clone_cmd("/w/t1")
+    monkeypatch.setattr(R, "CLONE_TARGET", False)
+    assert R.clone_cmd("/w/t1") == ""
+
+
+def test_the_queue_depth_is_sampled_once_a_minute(tmp_path, monkeypatch):
+    """User, 2026-09-24 17:02: track 'branches not yet on main' on /flow; the work runner samples it
+    (it ticks through a gate; the merge runner's loop does not)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "_DEPTH_AT", [0.0])
+    (tmp_path / "merge-queue.txt").write_text("task-a\ntask-b\n")
+    (tmp_path / "isolate-remaining").write_text("task-c\n")
+    R.record_queue_depth()
+    R.record_queue_depth()                                               # inside the minute: nothing
+    (line,) = (tmp_path / "queue-depth.jsonl").read_text().splitlines()
+    rec = json.loads(line)
+    assert rec["waiting"] == 3 and rec["queued"] == 2 and rec["isolating"] == 1
+
+
+def test_the_merge_runner_writes_what_it_holds_in_memory():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert 'echo "$1" > "$S/merging-now"; process "$1"' in text and 'rm -f "$S/merging-now"' in text
+    loop = text[text.index('        rest="$isolate"'):]
+    assert '> "$S/isolate-remaining"' in loop[:400] and 'rm -f "$S/isolate-remaining"' in loop[:1200]
+
+
+def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_path):
+    """Review 2026-09-24: a runner killed mid-isolation or mid single merge left those branches in no
+    queue (the reason a restart during an isolation lost them) and now a stale depth file."""
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    i = text.index('for f in "$S/isolate-remaining" "$S/merging-now"; do')
+    block = text[i:text.index("\ndone\n", i) + 6]
+    (tmp_path / "isolate-remaining").write_text("task-b task-c task-d\n")
+    (tmp_path / "merging-now").write_text("task-a\n")
+    (tmp_path / "q").write_text("task-x\n")
+    script = f'set -u\nS={tmp_path}; QUEUE={tmp_path}/q\nlog(){{ echo "LOG $*"; }}\n{block}\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "q").read_text().split() == ["task-x", "task-b", "task-c", "task-d", "task-a"]
+    assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()
+
+
+def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a_landing(tmp_path, monkeypatch):
+    """Supervisor, 2026-09-24 21:14: 2365 superseded test executables (~40 GB apparent) sat in main's target/,
+    gate-target and every worker clone - the same blocks, freed only when the last copy goes. A unit is cargo's
+    (package, target kind), never the file stem: `hk` is hk-cli's bin AND its test harness, and `review_fixes`
+    is an integration test in two crates (review: the stem-keyed first pass deleted current twins)."""
+    import os
+    repo, ops = tmp_path / "repo", tmp_path / "ops"
+
+    def profile(base):
+        (base / "debug" / "deps").mkdir(parents=True)
+        return base / "debug"
+
+    def exe(prof, pkg, kind, stem, h, mtime, mode=0o755, profile=1):
+        fp = prof / ".fingerprint" / f"{pkg}-{h}"
+        fp.mkdir(parents=True)
+        (fp / kind).write_text("")
+        (fp / f"{kind}.json").write_text(json.dumps({"profile": profile, "features": "[]", "rustflags": []}))
+        (fp / "invoked.timestamp").write_text("")
+        p = prof / "deps" / f"{stem}-{h}"
+        p.write_text("x")
+        p.chmod(mode)
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def units(prof):
+        return {
+            "old": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000a1", 100),
+            "new": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000a2", 200),
+            "bin": exe(prof, "hk-cli", "bin-hk", "hk", "00000000000000b1", 300),            # same stem,
+            "harness": exe(prof, "hk-cli", "test-bin-hk", "hk", "00000000000000b2", 100),   # different units
+            "rf1": exe(prof, "hk-plugins", "test-integration-test-review_fixes", "review_fixes", "00000000000000c1", 50),
+            "rf2": exe(prof, "hk-stream", "test-integration-test-review_fixes", "review_fixes", "00000000000000c2", 90),
+            # the same unit in the workers' line-tables-only profile: current too, never "superseded"
+            "lt": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000e1", 50, profile=2),
+        }
+    main_p, gate_p = profile(repo / "target"), profile(ops / "gate-target")
+    busy_p, idle_p = profile(repo / ".claude/worktrees/t1/target"), profile(repo / ".claude/worktrees/t2/target")
+    made = {prof: units(prof) for prof in (main_p, gate_p, busy_p, idle_p)}
+    orphan = gate_p / "deps" / "mystery-00000000000000d1"                               # no fingerprint: kept
+    orphan.write_text("x")
+    orphan.chmod(0o755)
+    held = made[idle_p]["old"]
+    monkeypatch.setattr(R, "REPO", str(repo))
+    monkeypatch.setattr(R, "S", str(ops))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.setattr(R, "BULKMARK", str(ops / "bulk-in-progress"))
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 0.0)
+    wt1 = str(repo / ".claude/worktrees/t1")
+    obj = gate_p / "deps" / "api_contract-00000000000000a1.api_contract.abc123-cgu.0.rcgu.o"   # split debuginfo
+    obj.write_text("o")
+    lsof = {"stderr": ""}
+
+    class Run:
+        def __init__(self, stdout, stderr):
+            self.stdout, self.stderr = stdout, stderr
+
+    def run(args, **kw):
+        assert args[:2] == ["lsof", "-Fn"]
+        return Run(f"p9\nn{held}\n" if str(held.parent) in args else "", lsof["stderr"])
+    monkeypatch.setattr(R.subprocess, "run", run)
+
+    def sh(args, cwd=None, timeout=120, check=False):
+        if args[:2] == ["git", "-C"]:
+            return "merge1\n"
+        if "-d" in args and "cwd" in args:          # cargo in t1's tree; stage's release cargo in main's checkout
+            return f"p1\nn{wt1}/crates/hk-core\np2\nn{repo}\n"
+        if args[:2] == ["ps", "eww"]:
+            return f"cargo build CARGO_TARGET_DIR={ops}/target-serve" if args[-1] == "2" else "cargo test"
+        return ""
+    monkeypatch.setattr(R, "sh", sh)
+    (ops / "bulk-in-progress").write_text("base=x\n")
+    R.sweep_superseded(dry=False)
+    assert all(p.exists() for u in made.values() for p in u.values())            # never during a gate
+    (ops / "bulk-in-progress").unlink()
+    lsof["stderr"] = "lsof: WARNING: can't stat() directory"                     # lsof failed: nothing deleted
+    R.sweep_superseded(dry=False)
+    assert all(p.exists() for u in made.values() for p in u.values())
+    assert not (ops / "sweep-last").exists()
+    lsof["stderr"] = ""
+    R.sweep_superseded(dry=False)
+    for prof in (main_p, gate_p):                    # main swept: stage's cargo writes to target-serve
+        u = made[prof]
+        assert not u["old"].exists() and u["new"].exists()
+        assert u["bin"].exists() and u["harness"].exists() and u["rf1"].exists() and u["rf2"].exists()
+        assert u["lt"].exists()                      # the other profile's build of the same unit is current
+    assert not obj.exists()                          # the swept executable's .rcgu.o go with it
+    assert held.exists() and made[idle_p]["new"].exists()                        # open in a process: kept
+    assert all(p.exists() for p in made[busy_p].values())                        # a cargo works there: skipped
+    assert orphan.exists()
+    assert (ops / "sweep-last").read_text().strip() == "merge1"
+    made[gate_p]["old"].write_text("x")
+    made[gate_p]["old"].chmod(0o755)
+    R.sweep_superseded(dry=False)
+    assert made[gate_p]["old"].exists()                                          # once per landing, not every tick
+
+
+def test_a_workers_red_proof_beside_a_green_run_is_not_a_failing_test():
+    """2026-09-24: T-894 (15:25) and T-905 (20:16) handed back DONE with their new test's red run on the old
+    code listed at exit 1, and read BLOCKED 'needs a person'. "expect": "red" + a green run = evidence."""
+    proof = {"cmd": "cd ui && node test/run.mjs surface-survey (on old code)", "exit": 1, "expect": "red"}
+    fixed = {"cmd": "cd ui && node test/run.mjs surface-survey", "exit": 0}
+    assert R.hand_back_reds({"tests": [proof, fixed]}) == ([], [])
+    assert R.hand_back_reds({"tests": [proof]}) == ([proof], [proof])            # no green run beside it
+    plain = {"cmd": "cargo nextest run -p hk-x", "exit": 101}
+    assert R.hand_back_reds({"tests": [plain, fixed]}) == ([plain], [plain])     # an unmarked red still blocks
+    assert R.hand_back_reds(None) == ([], [])
+
+
+def test_a_timed_out_worker_is_resumed_once_to_wrap_up(killed_run, monkeypatch):
+    """2026-09-24: T-852, T-878, T-888, T-887 and T-904 each hit the 180-min limit, were parked 'worktree kept'
+    and finished by hand. One wrap-up resume of the same session first; a second limit is a person's."""
+    claim, fixes, alerts, seen = killed_run
+    state = {"alive": True}
+    monkeypatch.setattr(R, "alive", lambda pid: state["alive"])
+    monkeypatch.setattr(R, "track_usage", lambda c: False)
+    monkeypatch.setattr(R.os, "killpg", lambda pid, sig: state.update(alive=False))
+    monkeypatch.setattr(R, "_gone", lambda pid: True)                      # the real one: the test below
+    claims = claim(session_id="abc", started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("TIMEOUT") and seen == []
+    state["alive"] = True                                                  # the wrap-up runs out of time too
+    claims = claim(session_id="abc", kind="fix", timeout_resumes=1, started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and [k for _, k, _ in seen] == ["TIMEOUT"]
+
+
+def test_the_wrap_up_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch):
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": runs.append((n, prompt, out_name)) or dict(c, state="running"))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    c = R.launch_fix({"ticket": "T-9", "branch": "task-t9", "wt": "/w/t9", "session_id": "s", "fix_attempts": 0},
+                     "TIMEOUT your run reached the 180-min limit and was stopped")
+    n, prompt, out = runs[0]
+    assert n == 0 and out == "wrapup1.json" and c["timeout_resumes"] == 1
+    assert "WRAP UP" in prompt and "Start no new scope" in prompt and "blocked.needs" in prompt
+
+
+def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_child():
+    """Review, 2026-09-24: os.kill(pid, 0) succeeds on a zombie, and the runner never waits on its Popen
+    children - the resume never fired and each timeout stalled the tick 31 s. A real child, dropped unwaited."""
+    import signal
+    p = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 60"], start_new_session=True)
+    pid = p.pid
+    del p
+    R.os.killpg(pid, signal.SIGTERM)
+    t0 = time.time()
+    assert R._gone(pid, wait_s=10) and time.time() - t0 < 5
+
+
+@pytest.fixture
+def remote_host(tmp_path, monkeypatch):
+    """A 'remote' host that is this machine: remote commands run in a local bash (with a setsid shim - macOS has
+    none), and the host's roots are distinct from the local ones so the path translation is exercised."""
+    import os
+    local_ops, local_repo, far = tmp_path / "ops", tmp_path / "repo", tmp_path / "far"
+    for d in (local_ops / "work", local_repo, far / "ops" / "work", far / "repo"):
+        d.mkdir(parents=True)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "setsid").write_text("#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n")
+    (shim / "setsid").chmod(0o755)
+    # the host has GNU tee (-p); this machine may have BSD tee, which has none
+    (shim / "tee").write_text('#!/bin/bash\nargs=(); for a in "$@"; do [ "$a" = -p ] || args+=("$a"); done; exec /usr/bin/tee "${args[@]}"\n')
+    (shim / "tee").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
+    monkeypatch.setattr(R, "S", str(local_ops))
+    monkeypatch.setattr(R, "REPO", str(local_repo))
+    monkeypatch.setattr(R, "WORKDIR", str(local_ops / "work"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(local_ops / "hosts.json"))
+    (local_ops / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": str(far / "repo"), "ops": str(far / "ops")}}))
+
+    def remote_sh(host, cmd, timeout=120, input=None):
+        r = subprocess.run(["bash", "-c", R.to_remote(host, cmd)], input=input, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    monkeypatch.setattr(R, "remote_sh", remote_sh)
+    return local_ops, local_repo, far
+
+
+def test_a_remote_run_records_its_group_and_tees_its_streams_on_the_host(remote_host):
+    """User, 2026-09-24 23:35: worker agents on a second computer. The wrapper runs the worker in its own session,
+    records the group, and keeps a complete copy of out/run.log on the host - a dropped connection loses nothing."""
+    local_ops, local_repo, far = remote_host
+    d = f"{local_ops}/work/T-9"
+    w = R.to_remote("node2", R.remote_wrapper(f"{local_repo}", "task-t9", "echo RESULT; echo progress >&2; exit 3",
+                                              {"HK_WORKER": "1", "A": "x y"}, d, "out.json"))
+    r = subprocess.run(["bash", "-c", w], capture_output=True, text=True, timeout=30)
+    fd = far / "ops" / "work" / "T-9"
+    assert r.returncode == 3 and "RESULT" in r.stdout and "progress" in r.stderr     # streamed to this Mac
+    assert (fd / "out.json").read_text().strip() == "RESULT" and "progress" in (fd / "run.log").read_text()
+    assert not (fd / "remote.pgid").exists()          # removed when the run ends: a later stop never hits a recycled group
+
+
+def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_host):
+    """Review FAIL 2026-09-24: a hang-up is not a stop. The group recorded on the host is asked about and stopped."""
+    local_ops, local_repo, far = remote_host
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo)}
+    d = f"{local_ops}/work/T-9"
+    w = R.to_remote("node2", R.remote_wrapper(str(local_repo), "task-t9", "exec sleep 60", {}, d, "out.json"))
+    p = subprocess.Popen(["bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(50):
+        if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
+            break
+        time.sleep(0.1)
+    time.sleep(0.3)
+    assert R.remote_run_state(c) == "running"
+    assert R.remote_stop(c, wait_s=5)
+    assert R.remote_run_state(c) == "gone"
+    p.wait(timeout=10)
+
+
+def test_the_host_unreachable_or_a_failed_sync_holds_the_claim(remote_host, monkeypatch):
+    local_ops, local_repo, far = remote_host
+    monkeypatch.setattr(R, "remote_sh", lambda host, cmd, timeout=120, input=None: (255, "ssh: connect timed out"))
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo)}
+    assert R.remote_run_state(c) == "unknown" and not R.remote_stop(c, wait_s=1)
+    seen = []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1, b"", b"no route"))
+    (local_ops / "work" / "T-9").mkdir(parents=True, exist_ok=True)
+    assert R.sync_back(c) is False and [a[2] for a in seen] == ["REMOTE_SYNC"]
+    assert R.sync_back(c) is False and len(seen) == 1                                 # warned once, retried each tick
+
+
+def test_paths_cross_ssh_as_the_hosts_own(remote_host):
+    local_ops, local_repo, far = remote_host
+    argv = R.ssh_argv("node2", f"cat {local_ops}/work/T-9/handback.json; ls {local_repo}/.claude/worktrees/t9")
+    assert argv[0] == "ssh" and "BatchMode=yes" in argv and argv[-2] == "u@h"
+    assert f"{far}/ops/work/T-9/handback.json" in argv[-1] and f"{far}/repo/.claude/worktrees/t9" in argv[-1]
+    assert str(local_ops) not in argv[-1].replace(str(far), "")
+
+
+def test_only_a_ticket_named_by_hand_goes_remote_in_stage_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-9, T-11")
+    assert R.host_for({"id": "T-9"}) is None                                          # no host configured
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o"}}))
+    assert R.host_for({"id": "T-9"}) == "node2" and R.host_for({"id": "T-11"}) == "node2"
+    assert R.host_for({"id": "T-10"}) is None
+
+
+def test_a_remote_worker_is_shown_like_a_local_one(tmp_path, monkeypatch):
+    """User via supervisor, 2026-09-25 00:40: T-567 ran on node2 and the dashboard showed nothing. Each tick: one
+    probe per host into hosts/<host>.json, and each running remote claim's transcript appended into this Mac's
+    transcript dir for its worktree (what the dashboard's worker row and transcript modal read)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setattr(R, "PROJECTS", str(tmp_path / "projects"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/far/repo", "ops": "/far/ops"}}))
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (0, "0.64 0.5 0.6 1/2 3\n24\n534G\n"))
+    runs = []
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: runs.append(args) or subprocess.CompletedProcess(args, 0, b"", b""))
+    claims = {"T-567": {"host": "node2", "state": "running", "session_id": "abc", "wt": f"{R.REPO}/.claude/worktrees/t567"},
+              "T-1": {"state": "running", "session_id": "x", "wt": f"{R.REPO}/.claude/worktrees/t1"}}
+    R.sync_remote_view(claims, dry=False)
+    rec = json.load(open(tmp_path / "hosts" / "node2.json"))
+    assert rec["reachable"] and rec["load1"] == 0.64 and rec["cores"] == 24 and rec["disk_free_gb"] == 534
+    [rsync] = runs                                                       # only the remote claim
+    assert rsync[:3] == ["rsync", "-a", "--append"]
+    assert rsync[-2] == "u@h:~/.claude/projects/-far-repo--claude-worktrees-t567/abc.jsonl"
+    assert rsync[-1] == f"{tmp_path}/projects/{R._proj_dir(R.REPO)}--claude-worktrees-t567/abc.jsonl"
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (255, "timed out"))
+    runs.clear()
+    R.sync_remote_view(claims, dry=False)
+    assert not json.load(open(tmp_path / "hosts" / "node2.json"))["reachable"] and runs == []
+
+
+def test_a_reachable_host_below_its_cap_takes_eligible_work_and_the_macs_cap_counts_only_the_mac(tmp_path, monkeypatch):
+    """Remote workers stage 2 (supervisor 2026-09-25 00:31: keep node2 going): the remote pass dispatches an eligible
+    ticket to a reachable host below its own cap; never the Mac-first GPU paths; the Mac's cap counts only its own."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o", "cap": 2}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    remote_claims = {"T-1": {"state": "running", "kind": "work", "host": "node2"}}
+    local_claims = {"T-2": {"state": "running", "kind": "work"}, "T-3": {"state": "running", "kind": "fix"}}
+    claims = {**remote_claims, **local_claims}
+    assert R.busy_workers(claims) == 2 and R.busy_workers(claims, "node2") == 1
+    t = {"id": "T-9", "title": "hk-store retention follow-ups", "needs": "none"}
+    assert R.host_for(t, claims) == "node2"
+    assert R.host_for({"id": "T-10", "title": "wgpu provider for the FFT", "needs": "none"}, claims) is None
+    assert R.host_for(t, dict(claims, **{"T-4": {"state": "running", "kind": "work", "host": "node2"}})) is None   # at cap
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time() - 600, "reachable": True}))
+    assert R.host_for(t, claims) is None                                          # stale probe: not ready
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": False}))
+    assert R.host_for(t, claims) is None
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-10")
+    assert R.host_for({"id": "T-10", "title": "wgpu"}, claims) == "node2"         # named by hand: always
+
+
+def test_the_remote_pass_launches_one_per_host_per_tick_and_its_claims_are_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 3}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    tasks = [{"id": f"T-{i}", "title": "x", "needs": "none", "status": "todo"} for i in (21, 22)]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "candidates", lambda ts, cl: [t for t in ts if t["id"] not in cl])
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append((t["id"], host)) or {"ticket": t["id"], "host": host, "kind": "work"})
+    claims = {}
+    assert R.dispatch_remote(claims, dry=False) is True
+    assert launched == [("T-21", "node2")] and claims["T-21"]["state"] == "running"
+
+
+def test_a_new_task_branch_starts_from_the_gated_base_while_a_batch_gates(tmp_path, monkeypatch):
+    """2026-09-25 00:31: T-567 was cut from main while the T-577/T-915 batch gated, carrying provisional merges."""
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    (tmp_path / "bulk-in-progress").write_text("base=gatedbase123\nbranches=task-t1\n")
+    calls = []
+
+    def sh(args, cwd=R.REPO, timeout=120, check=False):
+        calls.append(args)
+        if args[:3] == ["git", "worktree", "add"]:
+            raise RuntimeError("stop here")                  # only the branch point is under test
+        return ""
+    monkeypatch.setattr(R, "sh", sh)
+    with pytest.raises(RuntimeError):
+        R.launch({"id": "T-9", "model": "opus"}, dry=False)
+    assert calls[-1][:3] == ["git", "worktree", "add"] and calls[-1][-1] == "gatedbase123"
+
+
+def test_a_named_remote_ticket_never_falls_back_to_the_mac_and_alone_mode_holds_remote_dispatch(tmp_path, monkeypatch):
+    """Review 2026-09-25: a named ticket skipped by the remote pass (one launch per host per tick, or a failed prepare)
+    was launched on the Mac; and in alone mode remote dispatch kept adding workers the gate was waiting out."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 3}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-31,T-32")
+    tasks = [{"id": t, "title": "x", "needs": "none", "status": "todo"} for t in ("T-31", "T-32")]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "candidates", lambda ts, cl: [t for t in ts if t["id"] not in cl])
+    for k, v in {"dispatch_cap": lambda: 3, "disk_free_gb": lambda: 500.0, "gate_holds_dispatch": lambda: False,
+                 "queue_depth": lambda: 0}.items():
+        monkeypatch.setattr(R, k, v)
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append((t["id"], host)) or {"ticket": t["id"], "host": host, "kind": "work"})
+    claims = {}
+    R.dispatch(claims, dry=False)
+    assert launched == [("T-31", "node2")]                    # T-32 waits for node2's next tick, not the Mac
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: True)
+    launched.clear()
+    assert R.dispatch_remote({}, dry=False) is False and launched == []

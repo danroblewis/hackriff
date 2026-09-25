@@ -482,6 +482,9 @@ pub(crate) fn complex_line(
     }
 }
 
+/// Fewest samples [`carrier_line`] searches; below it the line is not measured (T-888).
+pub(crate) const MIN_LINE_SAMPLES: usize = 8;
+
 /// Power-of-p carrier line of `x^p` (S5 `carrier_lines`): coherence `max|FFT| / Σ|x|^p`
 /// (≈ 1 for a pure carrier of `x^p`), the carrier frequency / p, and the amplitude ratio of the
 /// second-largest line (outside ±3 native bins, circular) to the largest. Unwindowed, 2× pad.
@@ -515,7 +518,7 @@ pub(crate) fn carrier_line(
     p: u32,
 ) -> (f64, f64, f64, f64) {
     let n = x.len();
-    if n < 8 {
+    if n < MIN_LINE_SAMPLES {
         return (0.0, 0.0, 1.0, 1.0);
     }
     let big_n = (n * 2).next_power_of_two();

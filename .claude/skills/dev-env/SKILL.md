@@ -28,6 +28,8 @@ A `watchdog.json` older than two minutes means the watchdog is dead, and nothing
 box: that is how sixteen orphaned busy loops ran through every gate for 2 h 18 m on 2026-09-22.
 
 ### stop
+0. `touch $HACKRIFF_OPS/roles-stopped` — FIRST: `ops/watchdog.py` relaunches a dead `dev`/`flow`
+   session within ~2 min (incident 2026-09-24 04:07) unless this marker (or `dispatch-paused`) exists.
 1. `tmux kill-session -t dev` — the coordinator and every subagent it spawned.
 2. `pkill -f work-runner.py` — dispatch. Its running `claude -p` workers keep going in their
    worktrees and finish on their own; their branches are picked up by the next runner start
@@ -64,8 +66,10 @@ find whose edits those were before touching them.
    MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &
    nohup python3 ops/watchdog.py    >/dev/null 2>&1 & disown   # contention watchdog; see ops/README.md
    ```
-   If a script's newest version is only on an unmerged branch, start it from that worktree
-   (`.claude/worktrees/<name>/ops/<script>`) and restart from `main` once it lands.
+   **Never from a worktree**, not even for a change that has not landed: the runner removes the
+   worktree when its branch lands and the running script loses its own files (2026-09-24: /flow
+   answered `FileNotFoundError: .../worktrees/pm-dashmem/ops/monitor.py`). Each script logs
+   `PATH:` at start and refuses (`REFUSED:`, exit 2) under `.claude/worktrees/`.
 3. **Verify** (about a minute later), and report each line:
    ```bash
    grep VERSION $HACKRIFF_OPS/merge-runner.log | tail -1     # "matches"
@@ -79,6 +83,8 @@ find whose edits those were before touching them.
    `main`; if it starts spawning workers for ordinary `todo` tickets, its role file is stale —
    stop it, check `.claude/roles/coordinator.md` carries the "Dispatch … is the work runner's job"
    paragraph.
+   Then (and the pipeline manager, `ops/launch.sh pipeline-manager`, if it is not running)
+   `rm -f $HACKRIFF_OPS/roles-stopped` — only now may the watchdog relaunch a session that dies.
 5. Tell the user what is running, what is queued, what the first dispatches were, and anything
    in either attention file.
 
@@ -102,9 +108,9 @@ case "$1" in
   monitor)      MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 & disown ;;
   stage)        nohup bash ops/stage.sh >/dev/null 2>&1 & disown ;;   # restarts the :8899 demo - only when the user is not on it
 esac
-sleep 4; pgrep -fl "ops/$1"; grep -E 'VERSION|KNOBS' $HACKRIFF_OPS/${1}.log 2>/dev/null | tail -2
+sleep 4; pgrep -fl "ops/$1"; grep -E 'PATH:|REFUSED|VERSION|KNOBS' $HACKRIFF_OPS/${1}.log 2>/dev/null | tail -3
 ```
-Report the `VERSION: matches …` and `KNOBS: …` lines; a `STALE`/`DIFFERS` version means the script on disk is not what `main` has.
+Report the `PATH: /Users/daniellewis/hackriff/ops/…`, `VERSION: matches …` and `KNOBS: …` lines; a `STALE`/`DIFFERS` version means the script on disk is not what `main` has.
 
 ## Rules that bind this skill's session too
 - Never edit, `stash`, `reset` or commit in the main checkout except the documented rewind, and
