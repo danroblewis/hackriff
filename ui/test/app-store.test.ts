@@ -128,7 +128,7 @@ test("mode, theme, time cursor and goto actions", () => {
   assert.deepEqual(s.get().time, { live: true });
   s.set(requestGoto(101.3e6));
   s.set(requestGoto(101.3e6));
-  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, seq: 2 });
+  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: null, seq: 2 });
 });
 
 test("review drawer toggles and opens on a tab and region", () => {

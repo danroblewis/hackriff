@@ -244,6 +244,24 @@ export class Browser {
   close() { this.conn.close(); kill(this.b); }
 }
 
+/**
+ * The share a tile answer STATED to its client (T-630), or null when it stated none: an answered
+ * tile's `cost.in_flight_share`, or the `share N` a `503` refusal names in its message. The same two
+ * places the client reads it from (`tile.ts`), so a spec can compare what the route said with what
+ * the page then claims.
+ */
+export function statedShare(cost, error) {
+  if (typeof cost?.in_flight_share === "number") return cost.in_flight_share;
+  const m = /\bshare\s+(\d+)/.exec(typeof error === "string" ? error : "");
+  return m ? Number(m[1]) : null;
+}
+
+/** Every share `rec`'s answer stated — one for a single read, one per stating entry of a batch. */
+export function sharesStated(rec) {
+  if (rec.entries) return rec.entries.map((e) => e.share).filter((v) => v !== null && v !== undefined);
+  return rec.share === null || rec.share === undefined ? [] : [rec.share];
+}
+
 /** One page target, with its console, its exceptions and its network recorded from before load. */
 export class Page {
   static async open(conn, url, { width = 1440, height = 900, initScript = null, newWindow = false } = {}) {
@@ -327,6 +345,12 @@ export class Page {
     this.requests = [];
     /** Live and peak concurrency, per url predicate name — see `watchConcurrency`. */
     this.watches = [];
+    /**
+     * Record, on each single `GET /api/tiles` read, the share the route stated in it (`r.share`).
+     * Batch entries always carry theirs (`r.entries[].share`); a single read's needs its body, so
+     * this is opt-in: a spec about the T-630 share turns it on, nothing else pays for it.
+     */
+    this.tileShares = false;
   }
 
   #sent(m) {
@@ -379,9 +403,23 @@ export class Page {
           const j = JSON.parse(text);
           // `fCellHz` is the answered tile's own frequency cell, which is how a caller places an
           // ADDRESS in Hz (T-889): the lattice's level-0 cell is `fCellHz / 2^level_f`, origin 0 Hz.
+          // `share` is what the route TOLD this client about its allowance in that entry (T-630):
+          // an answered tile's `cost.in_flight_share`, or the `share N` a per-address refusal names.
+          // Recorded so a spec can tell a read that stated a share from one that merely came back.
           r.entries = (j.tiles ?? []).map((e) => ({ spelling: e.address?.spelling ?? null, status: e.status ?? null,
-            fCellHz: e.tile?.grid?.f_cell_hz ?? null }));
+            fCellHz: e.tile?.grid?.f_cell_hz ?? null, share: statedShare(e.tile?.cost, e.error) }));
           r.remaining = j.remaining ?? [];
+        })
+        .catch((e) => { r.bodyError = String(e?.message ?? e); });
+      this.#bodies.add(got);
+      void got.finally(() => this.#bodies.delete(got));
+    } else if (!error && this.tileShares && r.status !== null && /\/api\/tiles\?/.test(r.url)) {
+      // A single-tile read's statement of the share, answer or refusal alike — opt-in
+      // ([[tileShares]]), because it means reading every tile body back over CDP.
+      const got = this.conn.send("Network.getResponseBody", { requestId: id }, this.sessionId)
+        .then(({ body, base64Encoded }) => {
+          const j = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+          r.share = statedShare(j.cost, j.error);
         })
         .catch((e) => { r.bodyError = String(e?.message ?? e); });
       this.#bodies.add(got);

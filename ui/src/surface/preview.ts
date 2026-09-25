@@ -560,6 +560,8 @@ export interface PreviewOptions {
   /** HUD axes (T-805, `./hud.ts`): the label layer, and the chrome's fade asked every frame. */
   hud?: HTMLElement | null;
   hudAlpha?: (() => number) | null;
+  /** Band-1 DOM marks laid out in the render frame (T-809, `./pins.ts`). See `SurfaceViewOptions.dom`. */
+  dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
   /**
    * **Ask the coverage map before asking for tiles** (T-580, `./survey.ts`): how this host reads
    * `GET /api/coverage` for the survey. Supplied, no tile is requested until the first survey lands,
@@ -648,6 +650,7 @@ export class SurfacePreview {
       tracePx: opts.tracePx ?? 0,
       hud: opts.hud ?? null,
       hudAlpha: opts.hudAlpha ?? null,
+      dom: opts.dom ?? null,
     });
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the

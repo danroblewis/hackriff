@@ -693,6 +693,20 @@ export class TileCache<T> {
    * rather than a second flag, so "are we backing off" has one source. */
   private silences = 0;
   private silentUntil = 0;
+  /**
+   * **Places a silent probe was spent on, owed the BACK of the queue when next wanted** (T-903).
+   *
+   * While the gate is armed the client asks one place per opening, and the queue is LIFO. A probe
+   * that fails is not re-queued here — the next frame's `acquire`/`prefetch` re-schedules it — and
+   * `schedule` pushes it on TOP, above every place that was already waiting, so the next opening
+   * asked for the very same place again, and the one after, for the whole outage. Every other
+   * wanted place was starved of a probe. Measured in `ui/e2e/live-edge` (T-523's case): a probe that
+   * went out mid-zoom landed on an intermediate level that stayed wanted as the final level's pin
+   * (`level_f + 1`), and in 75 s of outage the pane's own level was never asked once ("levels
+   * refused: 2/1 1/1"). So a place a silence answered re-enters at the bottom and the probes take
+   * turns across everything wanted. Cleared by an answer, when order stops mattering.
+   */
+  private silenced = new Set<string>();
   /** Measured mean production time, ms. See [[observe]]. */
   private serverMs: number;
   readonly stats: TileCacheStats = {
@@ -823,6 +837,21 @@ export class TileCache<T> {
    * before deciding whether the coverage survey may answer the place instead (T-580). */
   isResident(addr: TileAddr): boolean { return this.map.has(keyOf(addr)); }
 
+  /**
+   * **Places the coverage survey settles as never sampled — no lane may start a request for one**
+   * (T-905). T-580 gated the renderer's own misses on the survey, but a request can start from
+   * other lanes: T-538's pan look-ahead ([[prefetchAhead]]) issues straight to the route, and it
+   * fires exactly when this cache is idle — which a pane over never-sampled spectrum always is,
+   * because the survey answered every place it draws. The fog-of-war e2e caught that as a tile
+   * requested over never-swept band C about one run in nine. So the rule lives HERE, where every
+   * miss begins ([[pump]] and [[prefetchAhead]]), not in each caller. Consulted only for a place
+   * not in hand: a resident copy's revalidation is not a skip decision.
+   *
+   * `null` (the default) settles nothing — a cache with no survey fetches as before.
+   */
+  setSettled(fn: ((addr: TileAddr) => boolean) | null): void { this.settled = fn; }
+  private settled: ((addr: TileAddr) => boolean) | null = null;
+
   /** Want this tile soon, but do not draw it: the parent-level pin, and pan prefetch. */
   prefetch(addr: TileAddr): void {
     if (this.map.has(keyOf(addr))) { this.peek(addr, true); return; }
@@ -840,7 +869,9 @@ export class TileCache<T> {
     // The route has already said this place is not askable. A renderer calls `acquire` for it on
     // every frame, so without this the refusal is re-issued at frame rate (T-479).
     if (this.terminal.has(key)) return;
-    this.queue.push(addr);
+    // A place whose silent probe just failed waits behind the others (T-903, [[silenced]]).
+    if (this.silenced.delete(key)) this.queue.unshift(addr);
+    else this.queue.push(addr);
     this.queued.add(key);
     if (this.queue.length > this.maxQueue) {
       const dropped = this.queue.splice(0, this.queue.length - this.maxQueue);
@@ -1431,6 +1462,10 @@ export class TileCache<T> {
       const key = keyOf(addr);
       if (this.speculated.has(key) || this.map.has(key) || this.inflight.has(key) ||
           this.queued.has(key) || this.terminal.has(key)) continue;
+      // A guess over spectrum the survey settles as never sampled is not a guess worth a slot: the
+      // answer is already known (T-905). Not remembered as speculated, so a later survey that says
+      // the band WAS sampled leaves it askable.
+      if (this.settled?.(addr)) continue;
       this.speculated.add(key);
       while (this.speculated.size > SPECULATED_MEMORY) {
         this.speculated.delete(this.speculated.values().next().value as string);
@@ -1504,6 +1539,7 @@ export class TileCache<T> {
     this.terminal.clear();
     this.silences = 0;
     this.silentUntil = 0;
+    this.silenced.clear();
     this.lastBox.clear();
     this.speculating.clear();
     this.speculated.clear();
@@ -1550,6 +1586,10 @@ export class TileCache<T> {
       const key = keyOf(addr);
       this.queued.delete(key);
       if (this.map.has(key) || this.inflight.has(key)) continue;
+      // Queued before the survey settled it (or by a lane that does not read the survey, like the
+      // next-row look-ahead): dropped, never issued (T-905). The renderer re-asks every frame, so a
+      // place the next survey calls sampled is queued again then.
+      if (this.settled?.(addr)) { this.stats.cancelled++; continue; }
       this.issue(addr, owner);
     }
     this.pumpRefresh();
@@ -1865,6 +1905,7 @@ export class TileCache<T> {
     // exists to stop asking a server that is not there, and this one demonstrably is (T-499).
     this.silences = 0;
     this.silentUntil = 0;
+    this.silenced.clear();
     if (this.limit >= this.ceiling) { this.goodRuns = 0; return; }
     if (++this.goodRuns >= RECOVER_AFTER) { this.limit++; this.goodRuns = 0; }
   }
@@ -1974,6 +2015,7 @@ export class TileCache<T> {
     // server that comes back is a changed answer — but so is asking again on the next frame, which
     // is what the render loop does unless something here says when. See [[OFFLINE_BACKOFF_MS]].
     this.stats.silentFailures++;
+    this.silenced.add(keyOf(addr));
     this.silences++;
     this.silentUntil = this.now() +
       Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1));

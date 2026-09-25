@@ -944,7 +944,11 @@ def merge_status():
         except Exception:
             pass
     state = "merging" if merging else ("gating" if gate else "idle")
-    return {"state": state, "msg": mmsg, "ticket": mticket,
+    try:   # the one "branches not yet on main" number (hkpy.flow.queue_waiting), same as /flow's
+        not_on_main = _flow_modules()[0].queue_waiting(SCRATCH)["waiting"]
+    except Exception:
+        not_on_main = None
+    return {"state": state, "msg": mmsg, "ticket": mticket, "not_on_main": not_on_main,
             "gate": gate, "elapsed_s": elapsed, "queue": queue,
             "testing": testing, "ahead": ahead, "gates_running": gates_running,
             "phase": phase, "progress": progress, "typical_s": typical_s, "merge_age_s": merge_age_s}
@@ -2003,6 +2007,10 @@ def build_flow_panel(ops, now=None):
             "full_gate_p50_min": full_p50, "baseline_full_gate_p50_min": baseline_full_p50,
             "causes_24h": dict(causes), "reds_24h": len(reds24), "gates_24h": len(closed24),
             "blamed_alone": blamed_alone(),
+            # Branches not yet on main (user, 2026-09-24 17:02: 'is the merge queue growing?').
+            "queue_depth": {"now": flow_mod.queue_waiting(ops),
+                            "hourly": flow_mod.queue_depth_hourly(ops, now - timedelta(hours=24), now),
+                            "spark": flow_mod.queue_depth_series(ops, now - timedelta(hours=24), now)},
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
             "experiment": experiment,
         }
@@ -2263,7 +2271,7 @@ async function tick(){
     const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju
       +(fl?hdr('Flake ledger · tests that cost gates')+fl:'')
       +hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
-    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
+    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting'+(mg.not_on_main!=null?' · '+mg.not_on_main+' not on main':'');
   }
   const b=d.budget||{}; const bEl=$('#budget');
   if(b.weekly!=null||b.session!=null){
@@ -2940,6 +2948,24 @@ function drawCauses(el, d){
   el.innerHTML=h;
 }
 
+// 4b. merge-queue depth: branches not yet on main (queue file + batch + isolation remainder).
+function drawQueueDepth(el, d){
+  const q=d.queue_depth; if(!el) return; if(!q){ el.innerHTML='<div class=kv><span>no data</span></div>'; return; }
+  const n=q.now||{}, sp=q.spark||[], H=q.hourly||[];
+  let h=`<div class=kv><span>not yet on main <b>${n.waiting??'?'}</b></span><span>queued ${n.queued??0}</span><span>gating ${n.gating??0}</span><span>isolating ${n.isolating??0}</span></div>`;
+  if(sp.length>1){
+    const W=300,Hh=40, t0=sp[0][0], t1=sp[sp.length-1][0]||t0+1, mx=Math.max(1,...sp.map(p=>p[1]));
+    const pts=sp.map(p=>((p[0]-t0)/(t1-t0||1)*W).toFixed(1)+','+(Hh-p[1]/mx*Hh).toFixed(1)).join(' ');
+    h+=`<svg viewBox="0 0 ${W} ${Hh}" style="width:100%;height:44px"><polyline fill=none stroke="${C.amber}" stroke-width=1.5 points="${pts}"/></svg><div class=kv><span>24 h, max ${mx}</span></div>`;
+  }
+  if(H.length){
+    h+='<table><thead><tr><th>hour</th><th>in</th><th>out</th><th>min</th><th>mean</th><th>max</th></tr></thead><tbody>';
+    H.slice(-12).forEach(r=>{ const grow=(r.in??0)>r.out; h+=`<tr><td>${esc(r.hour)}</td><td class=num style="color:${grow?C.coral:C.txt}">${r.in??'–'}</td><td class=num>${r.out}</td><td class=num>${r.min??'–'}</td><td class=num>${r.mean??'–'}</td><td class=num>${r.max??'–'}</td></tr>`; });
+    h+='</tbody></table>';
+  }
+  el.innerHTML=h;
+}
+
 // 5. touchpoints, 24h.
 function drawTouchpoints(el, d){
   const tp=d.touchpoints_24h||{count:0,items:[]};
@@ -2978,6 +3004,7 @@ async function load(){
       <div class="card wide"><h2><span>Per hour, last 24h</span></h2><div id=cHourly class=chart></div></div>
       <div class="card wide"><h2><span>Per-gate durations by class, last 48h</span></h2><div id=cGates class=chart></div></div>
       <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
+      <div class=card><h2>Merge queue depth <em>not yet on main</em></h2><div id=cQueueDepth></div></div>
       <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
       <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
     </div>`;
@@ -2985,6 +3012,7 @@ async function load(){
     drawHourly($('#cHourly'), d.hourly_24h||[]);
     drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
     drawCauses($('#cCauses'), d);
+    drawQueueDepth($('#cQueueDepth'), d);
     drawTouchpoints($('#cTouch'), d);
     drawExperiment($('#cExp'), d);
   }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }

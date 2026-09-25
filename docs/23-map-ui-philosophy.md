@@ -575,6 +575,32 @@ partly planned; the tickets that close the gaps are named per principle.*
 5. **The existing small controls are right; keep them.** The +/- zoom cluster, the follow-live
    reticle FAB, the map-type/layers button and the Go-to frequency box (T-802) are the model for
    rule 4, and are not to be replaced or enlarged.
+6. **The map is GIS, not Google Maps: features are drawn at their true extent; markers are a
+   generalization, never the representation** (user, 2026-09-24 19:35, after T-809's pins on
+   staging: "a point doesn't represent something meaningful on a waterfall graph. A signal has a
+   frequency width and a duration, that's a rectangle"). This is the signal-model invariant (a
+   signal is a time-frequency region, ADR-0017/0019) applied to symbolization:
+   - **Geometry is the feature's true extent.** Every detection, emitter and event is a polygon in
+     (t, f) — its box — drawn in content space through the pane's capture-time mapping (§10.1,
+     band 0/1). A single-frame impulse is the only true point, and even it is a thin bar of its
+     measured bandwidth. An ongoing signal's box runs to the live edge by assumption; the box is
+     drawn at the resolution tier the pane was drawn at.
+   - **Scale-dependent generalization.** Only when a box is under ~6 px on screen does it collapse to
+     a small symbol at its centre, with the same symbology; once zoom makes it at least that big it
+     is the box again. Pins exist only as this generalization.
+   - **Symbology by attribute, on the polygon:** Confirmed = solid outline + light fill; Candidate =
+     dashed outline, no or very light fill; unexplained = outline + '?' label; curated/human marks =
+     a distinct outline style. Class is carried by fill, outline and label — never by glyph shape —
+     and is colour-blind safe (T-813).
+   - **Identify = hit-test the polygon.** Hover anywhere inside the box shows the MapTip; a click
+     selects it (thicker outline, corner handles, the sheet rises); Tab walks features in reading
+     order (time, then frequency).
+   - **Labels by placement rules**, not tooltips only: where a box is wide enough its label
+     (frequency · bandwidth · class) sits inside or just above it, and overlapping labels thin by
+     priority (Confirmed > Candidate).
+   - **Density, not clustering, at coarse zoom.** Where many features would generalize, a
+     density layer (features per cell, from `/api/tiles/events`) replaces numbered cluster bubbles;
+     drilling in resolves to boxes.
 
 ---
 

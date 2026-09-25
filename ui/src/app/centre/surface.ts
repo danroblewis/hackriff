@@ -48,12 +48,10 @@ import {
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
+import { PinLayer, detectionPins, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
-import {
-  autoContrastButton, loadRangeMode, pressAutoContrast, pressViewportScale, saveRangeMode,
-  viewportScaleButton, type ContrastButton,
-} from "../../surface/contrast";
+import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
@@ -79,12 +77,13 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
-import { requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import {
   BASE_STYLES, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
+import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 
@@ -163,7 +162,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-812 (MAP-12): the band-plan priors' labels — band 2 like the HUD's, placed per frame from the
   // pane's own box, and pointer-transparent. The ranked reasoning itself is in `priorsEl` below.
   const priorsLabelEl = h("div", { class: "sf-priors-labels", "aria-hidden": "true" });
-  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, priorsLabelEl, captureEl);
+  // T-809 (MAP-09): the pins — band 1, DOM so each is keyboard-focusable with an accessible name,
+  // laid out every render frame by the `dom` hook below from the same pane views the tiles were
+  // drawn with. `pointer-events: none` throughout: the POINTER reaches a pin through the canvas's
+  // own handler and `PinLayer.pick` (the quadtree), so a drag or wheel that starts on a pin still
+  // pans and zooms — one gesture everywhere (docs/23 §3). The MapTip is placed in the same pass.
+  const pinsEl = h("div", { class: "sf-pins", role: "group", "aria-label": "Signal markers: Tab to a marker for its summary, Enter to select it, arrow keys for its neighbours" });
+  const tipEl = h("div", { class: "sf-maptip", role: "tooltip", id: "sf-maptip", hidden: true });
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -175,22 +180,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-812 (MAP-12): the active pane's band-plan priors, ranked, each with the backend's own reason —
   // shown only while that pane's priors layer is on. Suggestions, never truth.
   const priorsEl = h("div", { class: "sf-priors", role: "status", hidden: true });
-  const liveBtn = h("button", { class: "mini sf-live", type: "button" }, "Live");
-  const traceBtn = h("button", {
-    class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
-    title: "The spectrum trace above each viewport: the slice across frequency at that viewport's own time position, and the max-hold over its whole window. Both are drawn on the surface's one measured dB range.",
-  }, "Trace");
-  // T-470: the display range is anchored by default, so the same measured dB is the same colour at
-  // every zoom — and so is the trace's y axis, which reads the same range. This is the opt-in escape
-  // hatch for digging into weak signals, and the label beside it states the range and which way
-  // round it is — a fixed scale is honest only if it is quoted.
-  const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
-  // T-528: the second half of the same control. `Auto-contrast` decides *whether* the scale tracks
-  // the screen; this decides *what it measures* when it does — whole tiles (cheap, and a carrier
-  // off screen in a tile that is partly on screen still sets the top of the ramp) or the observed
-  // cells actually inside the view. Both are kept: they make opposite trades and the user has said
-  // they want each. Persisted per viewer like `Signals` above, defaulting to today's behaviour.
-  const vscaleBtn = h("button", { class: "mini sf-vscale", type: "button" }, "Viewport scale: off");
+  // T-470/T-528: the display range, stated. Its CONTROL is the layers menu's "Colour scale" axis
+  // (T-882); the sentence stays on the picture, because a fixed scale is honest only if it is quoted.
+  const rangeEl = h("span", { class: "sf-range", role: "status" });
+  // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
+  // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
+  const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, tipEl, captureEl, readout);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -217,28 +213,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     savePaneLayers(layersFor(paneId));
     syncLayerControls();
   };
-  const signalsBtn = h("button", {
-    class: "mini sf-signalsbtn", type: "button", "aria-pressed": String(isLayerVisible(seedFor(FIRST_PANE), "detections")),
-    title: "Show or hide the found-signal boxes (Candidate/Confirmed detections) on the canvas. Display only — changes nothing about what is detected.",
-  }, "Signals");
-  const rangeEl = h("span", { class: "sf-range", role: "status" });
-  // T-822 / MAP-22: measurement mode. A toggle beside `Signals`, not a modifier competing with the
-  // shift+drag region gesture (T-458) — the two are mutually exclusive per `surface/input.ts`, and a
-  // button (rather than a held key) is what lets a measurement be taken with one hand, the way
-  // inspectrum's own ruler tool works. `aria-pressed` styles it through `base.css`'s generic
-  // `.mini[aria-pressed="true"]` rule; the canvas is already drawn with a crosshair cursor
-  // (`centre.css`'s `.sf-canvas`), which reads correctly for this mode with no change needed.
-  const measureBtn = h("button", {
-    class: "mini sf-measurebtn", type: "button", "aria-pressed": "false",
-    title: "Measure: drag on the surface to read Δf/Δt between two points and save it "
-      + "(GET/POST /api/measurements, docs/25 §4). Esc exits.",
-  }, "Measure");
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn, measureBtn,
-    recordIqButton(ctx),
-    h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", onclick: () => splitActive() }, "Split ⇔"),
-    h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => closeActive() }, "Close"),
-    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", onclick: () => preview?.fitToSurface() }, "Whole surface"));
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, priorsEl, chrome, note);
+  // Record IQ over this viewport's span (GAP-1 interim). Its home is the viewport menu (T-882); a
+  // found signal's own clip is the detail sheet's "Record clip" (T-804).
+  const recordBtn = recordIqButton(ctx);
+  recordBtn.classList.add("map-pane-item");
+  recordBtn.dataset.paneAct = "record";
+  // T-882: there is no toolbar row. Live is the follow-live FAB, Trace/Signals/Contrast are the
+  // layers menu, Measure and pane management are the floating cluster's top-right (`map-controls`).
+  el.replaceChildren(stage, traceEl, ringEl, priorsEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
@@ -246,6 +228,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let viewMoved: () => void = () => {};
   let renderLive: () => void = () => {};
   let renderLayers: () => void = () => {};
+  let renderMeasure: () => void = () => {};
   /** Split: the new pane inherits the creating pane's registry by value (docs/24 §13.5). */
   const splitActive = () => {
     const p = preview;
@@ -266,15 +249,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (p.activePane !== gone) store.set(dropPaneLayers(gone));
     syncLayerControls();
   };
-  /** The toolbar's `Signals` button and an open layers menu both describe the ACTIVE pane's
-   * registry, so a pane switch or a toggle from either place re-states both. Set-if-changed. */
+  /** An open layers menu describes the ACTIVE pane's registry (and the view-wide trace and colour
+   * scale), so a pane switch or a toggle re-states it. Set-if-changed: the menu is not rebuilt per
+   * frame. (T-882 retired the toolbar's `Signals` button, which used to mirror the same layer.) */
   let syncedFor = "";
   function syncLayerControls(): void {
     const p = preview;
     const reg = layersFor(p ? p.activePane : FIRST_PANE);
-    const on = String(isLayerVisible(reg, "detections"));
-    if (signalsBtn.getAttribute("aria-pressed") !== on) signalsBtn.setAttribute("aria-pressed", on);
-    const key = `${reg.paneId}|${reg.base}|${reg.layers.map((l) => +l.visible).join("")}`;
+    const scale = p ? `${p.range.mode}|${rangeLabel(p.range)}` : "";
+    const key = `${reg.paneId}|${reg.base}|${reg.layers.map((l) => +l.visible).join("")}|${+traceOn}|${scale}`;
     if (key !== syncedFor) { syncedFor = key; renderLayers(); }
   }
   let windows: ActiveWindow[] = [];
@@ -462,10 +445,62 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const more = a.rows.length > items.length || a.truncated ? h("span", {}, ` · ${a.rows.length - items.length} more drawn, not listed`) : null;
     priorsEl.replaceChildren(head, ...(more ? [more] : []), h("ol", {}, ...items));
   };
-  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, priors: priorsQuads };
+  const artifactQuads: OverlayLayerFn = (pane, edge) =>
+    artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
+  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, priors: priorsQuads };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. */
-  const drawnLayers = new Set<LayerId>(Object.keys(overlayFns) as LayerId[]);
+  const drawnLayers = new Set<LayerId>([...Object.keys(overlayFns) as LayerId[], "pins"]);
+
+  // ---- the pins (T-809 / MAP-09, docs/24 §14) ----
+  // Hover and keyboard focus are pointer/focus state, kept here like `pending` rather than in the
+  // store; selection IS the store's one `focus`, so the canvas, the sheet and the lists agree.
+  let hoveredPin: PlacedPin | null = null;
+  let focusedPin: PlacedPin | null = null;
+  const selectPin = (p: PlacedPin) => {
+    // A detection marker selects its row: `focusSignal` is what raises the detail sheet (T-804).
+    // A curated marker has no focus target until MAP-21's panel; selecting one does nothing rather
+    // than mis-focusing a row.
+    if (p.pin.source === "detection") store.set(focusSignal(p.pin.id));
+  };
+  const pinLayer = new PinLayer(pinsEl, {
+    onFocus: (p) => { focusedPin = p; },
+    onSelect: selectPin,
+  });
+  /** The MapTip for whichever pin is focused (keyboard) or else hovered (pointer), re-placed on the
+   * pin's position THIS frame so it moves with the pin. It reads loaded state only. */
+  const placeTip = () => {
+    const want = focusedPin ?? hoveredPin;
+    const now = want ? pinLayer.pins.find((q) => q.paneId === want.paneId && q.pin.id === want.pin.id) ?? null : null;
+    if (!now) {
+      if (!tipEl.hidden) tipEl.hidden = true;
+      return;
+    }
+    const text = pinTipLines(now.pin).join("\n");
+    if (tipEl.textContent !== text) tipEl.textContent = text;
+    if (tipEl.hidden) tipEl.hidden = false;
+    tipEl.dataset.pin = now.pin.id;
+    // Beside the pin, flipped to its left where it would run off the canvas's right edge.
+    const w = tipEl.offsetWidth;
+    // For a feature drawn as its box (no glyph), beside the box's edge rather than over it.
+    const xr = now.area ? now.area.x1 : now.x, xl = now.area ? now.area.x0 : now.x;
+    const x = xr + 14 + w > canvas.clientWidth ? xl - 14 - w : xr + 14;
+    tipEl.style.transform = `translate(${x.toFixed(1)}px, ${(now.y + 10).toFixed(1)}px)`;
+  };
+  const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
+    const s = store.get();
+    const all = detectionPins(Object.values(s.inventory.rows));
+    const layouts = panes
+      .filter((v) => isLayerVisible(layersFor(v.id), "pins"))
+      .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
+    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
+    placeTip();
+  };
+  /** CSS px from the canvas's top-left — the coordinate the pins are laid out in. */
+  const cssPoint = (e: MouseEvent) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
 
   // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
   //
@@ -622,24 +657,23 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
     return out;
   };
-  traceBtn.addEventListener("click", () => {
-    traceOn = !traceOn;
+  // The trace strip's switch — the layers menu's "Every pane" row since T-882 (it was the toolbar's
+  // `Trace` button). Presentation only: the strip's height and whether the readout is written.
+  const setTrace = (on: boolean) => {
+    traceOn = on;
     if (preview) preview.view.tracePx = traceOn ? TRACE_PX : 0;
-    traceBtn.classList.toggle("on", traceOn);
-    traceBtn.setAttribute("aria-pressed", String(traceOn));
     traceEl.hidden = !traceOn;
     if (!traceOn) traceEl.textContent = "";
-  });
-  // T-522: presentation only — no route, no poll. The frame reads the pane's registry
-  // fresh every frame (the same discipline as `traceOn` above), so the next frame just draws fewer
-  // boxes; there is no cache or subscription to invalidate.
-  // T-806: it is the ACTIVE pane's `detections` layer now — the same switch the layers menu shows.
-  signalsBtn.addEventListener("click", () => {
-    const id = preview?.activePane ?? FIRST_PANE;
-    const on = !isLayerVisible(layersFor(id), "detections");
+    syncLayerControls();
+  };
+  // T-522: the found-signal boxes' switch is the ACTIVE pane's `detections` layer (T-806) — the
+  // layers menu's overlay row, since T-882 its only control. Presentation only — no route, no poll.
+  // The frame reads the pane's registry fresh every frame, so the next frame just draws fewer boxes;
+  // there is no cache or subscription to invalidate.
+  const setSignals = (id: string, on: boolean) => {
     editLayers(setPaneLayer(id, "detections", on, seedFor(id)), id);
     writeShowSignals(on);
-  });
+  };
 
   // ---- mirror the active viewport into the app's one window (CLAUDE.md's whole-UI window rule) ----
   // The inventory lists, the focus panel and the decode captures all scope themselves through
@@ -831,10 +865,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // banner) and every other modal affordance on this surface (the row/selection context menu).
   const setMeasureMode = (on: boolean) => {
     measureMode = on;
-    measureBtn.setAttribute("aria-pressed", String(on));
+    renderMeasure();
     if (!on) { pendingMeasure = null; hoverEl.textContent = ""; }
   };
-  measureBtn.addEventListener("click", () => setMeasureMode(!measureMode));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && measureMode) setMeasureMode(false); });
 
   /** The `view` a measurement is stamped with (docs/25 §10.2): what the pane was showing at the
@@ -919,6 +952,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
+        dom: pinsFrame,
       });
     } catch (e) {
       say(`WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`);
@@ -941,7 +975,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); viewMoved(); },
-      onHover: (p) => {
+      onHover: (p, e) => {
+        // A pin under the pointer wins the MapTip; the quadtree is the hit test (docs/24 §14.4).
+        hoveredPin = p ? pinLayer.pick(cssPoint(e).x, cssPoint(e).y) : null;
+        canvas.style.cursor = hoveredPin ? "pointer" : "";
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
         const markLabel = hit?.mark
@@ -951,7 +988,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
           : null;
         hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}` : "";
       },
-      onClick: (p) => {
+      onClick: (p, e) => {
+        const c = cssPoint(e);
+        const pin = pinLayer.pick(c.x, c.y);
+        if (pin) { selectPin(pin); return; }
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
         if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
@@ -1013,6 +1053,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on));
     const host: MapControlHost = {
       ...acts,
+      // T-882: the retired toolbar row's controls, rehomed into the cluster. All view state.
+      measuring: () => measureMode,
+      setMeasuring: (on) => setMeasureMode(on),
+      split: () => splitActive(),
+      closePane: () => closeActive(),
+      wholeSurface: () => { pv.fitToSurface(); lastMirror = ""; mirror(); renderLive(); },
+      paneCount: () => pv.view.panes.list().length,
+      paneMenuExtras: [recordBtn],
       goTo: (hz) => store.set(requestGoto(hz)),
       centreHz: () => store.get().device.centerHz,
       gotoOffer: () => {
@@ -1029,11 +1077,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
         return {
           pane: ids.length > 1 ? `pane ${n} of ${ids.length}` : "this pane",
           bases: BASE_STYLES.map((b) => ({ id: b.id, label: b.label, hint: b.hint, on: reg.base === b.id })),
-          overlays: paintOrder(reg).filter((l) => l.plane === "overlay" && drawnLayers.has(l.id)).map((l) => {
+          // T-809: the `dom`-plane pins are an overlay-content toggle too (docs/24 §4's second axis).
+          overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
             return { id: l.id, label: d.label, hint: d.hint, on: l.visible };
           }),
-          viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceBtn.getAttribute("aria-pressed") === "true" }],
+          viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceOn }],
+          scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
         };
       },
       setBase: (id) => {
@@ -1044,29 +1094,43 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const lid = id as LayerId;
         if (!drawnLayers.has(lid)) return;
         const on = !isLayerVisible(layersFor(pv.activePane), lid);
-        editLayers(setPaneLayer(pv.activePane, lid, on, seedFor(pv.activePane)), pv.activePane);
-        if (lid === "detections") writeShowSignals(on);
+        if (lid === "detections") setSignals(pv.activePane, on);
+        else editLayers(setPaneLayer(pv.activePane, lid, on, seedFor(pv.activePane)), pv.activePane);
       },
-      toggleViewWide: (id) => { if (id === "trace") traceBtn.click(); },
+      toggleViewWide: (id) => { if (id === "trace") setTrace(!traceOn); },
+      setScale: (id) => { const m = scaleMode(id); if (m) setMode(m); },
       viewChanged: () => { lastMirror = ""; mirror(); renderLive(); },
       toast: (text) => store.set(toast(text)),
+    };
+    const setMode = (mode: RangeMode) => {
+      preview?.setRangeMode(mode);
+      saveRangeMode(mode);
+      renderRange();
     };
     const controls = mountMapControls(host);
     stage.append(controls.el);
     renderFollow = controls.syncFollow;
     renderLayers = controls.syncLayers;
+    renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
 
+    const topBar = document.querySelector<HTMLElement>(".app > .bar");
     const fit = () => {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
       // The map strip is drawn in device px; the FAB docks above it in CSS px.
       stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr}px`);
+      // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
+      // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
+      // rather than under it. Layout arithmetic over two measured boxes; 0 where they do not meet.
+      const over = topBar ? Math.max(0, Math.ceil(topBar.getBoundingClientRect().bottom - r.top)) : 0;
+      stage.style.setProperty("--chrome-top", `${over}px`);
     };
     fit();
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
+    if (topBar) ro?.observe(topBar);
     window.addEventListener("resize", fit);
     preview.start();
 
@@ -1077,67 +1141,38 @@ function mount(el: HTMLElement, ctx: AppContext) {
     startPoll(async () => { mirror(); refreshPriors(); }, 1000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
-    store.select((s) => s.nav.gotoHz, (hz) => {
+    // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a
+    // different span still moves the pane; a request that names a span restores it (snapped by the
+    // pane model), view arithmetic only.
+    store.select((s) => s.nav, (nav) => {
       const p = preview;
-      if (!p || hz === null || !Number.isFinite(hz)) return;
+      if (!p) return;
       const pane = p.view.panes.get(p.activePane);
-      if (!pane) return;
-      p.view.panes.setFreq(p.activePane, hz, pane.freq.spanHz);
+      const w = pane ? gotoWindow(nav, pane.freq.spanHz) : null;
+      if (!w) return;
+      p.view.panes.setFreq(p.activePane, w.centerHz, w.spanHz);
       mirror();
     });
 
-    liveBtn.addEventListener("click", () => {
-      const p = preview;
-      if (!p) return;
-      const following = p.view.panes.isFollowing(p.activePane);
-      // T-442: freezing is a COORDINATE change, not a mode change — `pause` writes down the window
-      // the pane was already showing, so the frame you pause on is identical to the one before it.
-      p.view.panes.setFollowing(p.activePane, !following);
-      p.view.minimap.setFollowing(!following);
-      // `mirror` writes the cursor for whichever arm we are now on, so there is no separate
-      // `goLive` write here: one place publishes the window, and it is the viewport's own state.
-      lastMirror = ""; // the arm of the cursor changed, so re-publish it even if the numbers match
-      mirror();
-      renderLive();
-    });
-    renderLive = () => {
-      const on = !!preview && preview.view.panes.isFollowing(preview.activePane);
-      liveBtn.textContent = on ? "Live" : "Paused";
-      liveBtn.classList.toggle("on", on);
-      liveBtn.title = on
-        ? "This viewport follows the growing edge. Pausing freezes the view only — capture, the ring and detection never stop."
-        : "This viewport is frozen on a past window. Capture never stopped.";
-      renderFollow();
-    };
+    // Follow / freeze is the FAB (T-882 retired the toolbar's `Live` button): `paneActions`'
+    // `followLive`/`pauseLive` move the pane and the map strip together, and `viewChanged` re-publishes
+    // the cursor for whichever arm the pane is now on — one place publishes the window.
+    renderLive = () => renderFollow();
     renderLive();
     store.select((s) => s.time.live, renderLive);
 
     // ---- the colour scale (T-470, T-528). A view control; it reaches no route and no device. ----
     //
-    // Two buttons, ONE piece of state — the mode the surface is actually in — so the pair cannot
-    // get into a combination that means nothing. Every press goes through `./contrast.ts`'s pure
-    // functions and is persisted there; nothing here is fetched, polled or sent.
-    const paint = (btn: HTMLButtonElement, b: ContrastButton) => {
-      btn.textContent = b.label;
-      btn.title = b.title;
-      btn.classList.toggle("on", b.pressed);
-      btn.setAttribute("aria-pressed", String(b.pressed));
-    };
+    // ONE piece of state — the mode the surface is actually in — offered as the layers menu's
+    // "Colour scale" radio group (T-882; it was two toolbar buttons), whose rows are derived from
+    // the mode by `contrast.ts`'s `scaleRows`, so the menu cannot disagree with the surface. Every
+    // press is persisted there; nothing here is fetched, polled or sent.
     const renderRange = () => {
       const p = preview;
       if (!p) return;
-      const r = p.range;
-      rangeEl.textContent = rangeLabel(r);
-      paint(contrastBtn as HTMLButtonElement, autoContrastButton(r.mode));
-      paint(vscaleBtn as HTMLButtonElement, viewportScaleButton(r.mode));
+      setText(rangeEl, rangeLabel(p.range));
+      syncLayerControls();
     };
-    const setMode = (mode: RangeMode) => {
-      preview?.setRangeMode(mode);
-      saveRangeMode(mode);
-      renderRange();
-    };
-    contrastBtn.addEventListener("click", () => setMode(pressAutoContrast(preview?.range.mode ?? "anchored")));
-    vscaleBtn.addEventListener("click", () => setMode(pressViewportScale(preview?.range.mode ?? "anchored")));
     // The remembered mode, applied once the surface exists. `anchored` — the default — is what the
     // probe's anchor already put it in, so the common path sets nothing.
     const remembered = loadRangeMode();

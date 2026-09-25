@@ -161,7 +161,7 @@ export interface OverlayQuad {
    * (`./hud.ts`) along a pane's bottom and left edges; `prior-band` is T-812's dashed band-plan
    * allocation edge/bracket (`./priors.ts`); the remaining two are the map's own.
    * All are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "prior-band";
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "prior-band";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
 }
