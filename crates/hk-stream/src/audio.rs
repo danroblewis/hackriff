@@ -27,7 +27,7 @@
 
 use std::str::FromStr;
 
-use hk_model::{DetectionId, EmitterId, EstimatedParams};
+use hk_model::{DetectionId, EmitterId, EstimatedParams, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -63,6 +63,34 @@ pub struct SquelchInfo {
     /// `None`: no estimate, the squelch stays open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub noise_dbfs: Option<f64>,
+}
+
+/// A Listen stream that opened **squelched, waiting for the carrier** (header; T-987).
+///
+/// Present only when nothing was demodulable at the instant the stream opened — the channel was
+/// silent between two of its bursts — and the target's own history carried enough per-burst
+/// evidence to choose the mode: the mode, channel and bandwidth then come from the emitter's past
+/// bursts, not from the probe, and the squelch is armed from the silence the probe measured, so
+/// the stream carries status records and no audio until the carrier returns. Absent on a stream
+/// whose probe recognised the carrier (the usual case), so readers that ignore unknown fields are
+/// unaffected. A target with no such history is still refused `422 no-analog-mode`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CarrierWait {
+    /// The emitter whose accumulated evidence chose the mode (the requested one, or the one the
+    /// requested extent covers).
+    pub emitter_id: EmitterId,
+    /// That emitter's latest sighting, Unix ns.
+    #[serde(rename = "last_seen_ns")]
+    pub last_seen: Timestamp,
+    /// Observations (bursts) in its history whose estimate named the chosen mode.
+    pub mode_bursts: u32,
+    /// Observations in its history that named any analog mode (`mode_bursts` of them agreed).
+    pub analog_bursts: u32,
+    /// Why the probe demodulated nothing when the stream opened.
+    pub probe: String,
+    /// The same, as one line for a person: `waiting for carrier (last seen <UTC>, mode nbfm from
+    /// 3 of 3 bursts)`.
+    pub statement: String,
 }
 
 /// AGC settings (header).
@@ -153,6 +181,10 @@ pub struct AudioInfo {
     /// The pipeline's edit revision when the stream was offered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_rev: Option<u32>,
+    /// The stream opened squelched and is waiting for the carrier (T-987); absent when the
+    /// probe recognised the carrier at open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<CarrierWait>,
 }
 
 /// A status record's fields.

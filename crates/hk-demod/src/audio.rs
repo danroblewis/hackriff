@@ -163,9 +163,53 @@ pub struct AudioPlan {
 impl AudioPlan {
     /// The plan for a probe; `Err` with the reason when no analog mode was recognised.
     pub fn from_probe(p: &ProbeResult, cfg: &AudioConfig) -> Result<Self, String> {
-        let obw = p.params.obw99_hz.value();
-        let bw = |factor: f64, lo: f64, hi: f64| (obw.unwrap_or(lo) * factor).clamp(lo, hi);
-        let (bandwidth, sideband, agc, deemph) = match p.mode.mode {
+        if p.mode.mode == AnalogMode::Unknown {
+            return Err(p
+                .mode
+                .reason
+                .clone()
+                .unwrap_or_else(|| "no analog modulation recognised".into()));
+        }
+        let sideband = (p.mode.mode == AnalogMode::Ssb).then(|| {
+            if p.params.shape.symmetry.is_some_and(|s| s > 0.0) {
+                Sideband::Lower
+            } else {
+                Sideband::Upper
+            }
+        });
+        let mut plan = Self::for_mode(
+            p.mode.mode,
+            sideband,
+            p.rf_center_hz,
+            p.params.obw99_hz.value(),
+            cfg,
+        )
+        .ok_or_else(|| "no analog modulation recognised".to_owned())?;
+        plan.noise_power = p
+            .params
+            .noise_density
+            .value()
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .map(|n| n * plan.channel_bandwidth_hz);
+        Ok(plan)
+    }
+
+    /// The plan for a mode that was **already decided** — by a probe ([`Self::from_probe`]), or
+    /// by the per-burst evidence an emitter accumulated while it was keyed (T-987: Listen opened
+    /// in the silence between bursts). The channel is `center_hz`, as wide as the mode's rule
+    /// makes `obw_hz` (the table in the [module docs](self)); `None` for [`AnalogMode::Unknown`].
+    ///
+    /// No noise power: that is a measurement of the channel *now*, which the caller makes
+    /// ([`channel_noise_power`]) or takes from its probe. Without one the squelch stays open.
+    pub fn for_mode(
+        mode: AnalogMode,
+        sideband: Option<Sideband>,
+        center_hz: f64,
+        obw_hz: Option<f64>,
+        cfg: &AudioConfig,
+    ) -> Option<Self> {
+        let bw = |factor: f64, lo: f64, hi: f64| (obw_hz.unwrap_or(lo) * factor).clamp(lo, hi);
+        let (bandwidth, sideband, agc, deemph) = match mode {
             AnalogMode::Wfm => (
                 cfg.wfm_channel_bandwidth_hz,
                 None,
@@ -174,38 +218,43 @@ impl AudioPlan {
             ),
             AnalogMode::Nbfm => (bw(1.25, 6e3, 25e3), None, false, None),
             AnalogMode::Am => (bw(1.1, 5e3, 20e3), None, true, None),
-            AnalogMode::Ssb => {
-                let lower = p.params.shape.symmetry.is_some_and(|s| s > 0.0);
-                let sb = if lower {
-                    Sideband::Lower
-                } else {
-                    Sideband::Upper
-                };
-                (bw(1.0, 2.4e3, 4e3), Some(sb), true, None)
-            }
+            AnalogMode::Ssb => (
+                bw(1.0, 2.4e3, 4e3),
+                Some(sideband.unwrap_or(Sideband::Upper)),
+                true,
+                None,
+            ),
             AnalogMode::Cw => (500.0, None, true, None),
-            AnalogMode::Unknown => {
-                return Err(p
-                    .mode
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "no analog modulation recognised".into()));
-            }
+            AnalogMode::Unknown => return None,
         };
-        let noise_power = p
-            .params
-            .noise_density
-            .value()
-            .filter(|n| n.is_finite() && *n > 0.0)
-            .map(|n| n * bandwidth);
-        Ok(Self {
-            mode: p.mode.mode,
+        Some(Self {
+            mode,
             sideband,
-            channel_center_hz: p.rf_center_hz,
+            channel_center_hz: center_hz,
             channel_bandwidth_hz: bandwidth,
-            noise_power,
+            noise_power: None,
             agc,
             deemphasis_s: deemph,
+        })
+    }
+
+    /// The mode and sideband a stored mode label names: a [`Demodulation::mode`] or a
+    /// Classification `family` (`wfm`, `nbfm`/`nfm`, `am`, `usb`, `lsb`, `ssb`, `cw`). `None` for
+    /// anything that is not an analog audio mode (`2fsk`, `unknown`, a service family, …).
+    ///
+    /// A bare `ssb` names no sideband; [`Self::for_mode`] then demodulates the upper one.
+    ///
+    /// [`Demodulation::mode`]: hk_model::Demodulation::mode
+    pub fn mode_from_label(label: &str) -> Option<(AnalogMode, Option<Sideband>)> {
+        Some(match label.trim().to_ascii_lowercase().as_str() {
+            "wfm" => (AnalogMode::Wfm, None),
+            "nbfm" | "nfm" => (AnalogMode::Nbfm, None),
+            "am" => (AnalogMode::Am, None),
+            "usb" => (AnalogMode::Ssb, Some(Sideband::Upper)),
+            "lsb" => (AnalogMode::Ssb, Some(Sideband::Lower)),
+            "ssb" => (AnalogMode::Ssb, None),
+            "cw" => (AnalogMode::Cw, None),
+            _ => return None,
         })
     }
 
@@ -223,6 +272,50 @@ impl AudioPlan {
         let h = 0.5 * self.channel_bandwidth_hz;
         (self.channel_center_hz - h, self.channel_center_hz + h)
     }
+}
+
+/// The channel power of `iq` through `plan`'s channel filter (±1 full-scale units, the unit
+/// [`AudioPlan::noise_power`] is in), for arming the squelch on a channel that is **quiet now**
+/// (T-987). `None` when the samples yield too little channel output to measure.
+///
+/// The channel is the one [`AudioDemod`] will demodulate, through the same DDC, so the squelch
+/// compares like with like. The answer is the **median** of ~10 ms block powers rather than the
+/// mean: a probe window that caught the tail of a burst is still read as the floor it mostly
+/// was, not lifted by the burst.
+pub fn channel_noise_power<T: IqSample>(
+    plan: &AudioPlan,
+    source_rate_hz: f64,
+    tuned_center_hz: f64,
+    info: InputInfo<'_>,
+    iq: &[T],
+) -> Result<Option<f64>, DemodError> {
+    let wfm = plan.mode == AnalogMode::Wfm;
+    let rate = if wfm { MPX_RATE_HZ } else { AUDIO_RATE_HZ };
+    let mut ddc = Ddc::new(
+        DdcSpec::new(
+            plan.channel_center_hz - tuned_center_hz,
+            plan.channel_bandwidth_hz,
+        )
+        .with_output_rate(rate),
+        source_rate_hz,
+    )?;
+    let block = ddc.process(info, iq)?;
+    let out_rate = block.header.sample_rate_hz;
+    let x = block.samples;
+    let per = ((0.01 * out_rate) as usize).max(16);
+    // The filter's start-up transient is not the channel: skip the first block.
+    let mut powers: Vec<f64> = x
+        .chunks_exact(per)
+        .skip(1)
+        .map(|c| c.iter().map(|s| f64::from(s.norm_sqr())).sum::<f64>() / c.len() as f64)
+        .filter(|p| p.is_finite())
+        .collect();
+    if powers.len() < 3 {
+        return Ok(None);
+    }
+    powers.sort_by(f64::total_cmp);
+    let median = powers[powers.len() / 2];
+    Ok((median > 0.0).then_some(median))
 }
 
 enum Kind {
@@ -846,5 +939,79 @@ mod tests {
         };
         let pr = probe(info(&p, 0), &iq, &req).unwrap();
         assert!(AudioPlan::from_probe(&pr, &AudioConfig::default()).is_err());
+    }
+
+    /// T-987: a plan decided **before** the carrier is on the air (from an emitter's per-burst
+    /// evidence) whose squelch is armed from the silence the probe measured stays shut through
+    /// the silence, opens on the next burst, and demodulates that burst's tone.
+    #[test]
+    fn a_squelch_armed_on_the_silence_opens_on_the_next_burst() {
+        let off = 120e3;
+        let (dev, tone) = (3_000.0, 1_000.0);
+        let quiet = (1.0 * FS) as usize;
+        let n = quiet + (1.0 * FS) as usize;
+        let mut iq = noise(n, 17, 0.002);
+        for (k, s) in iq.iter_mut().enumerate().skip(quiet) {
+            let t = k as f64 / FS;
+            let ph = TAU * off * t + dev / tone * (TAU * tone * t).sin();
+            *s += Complex32::new(0.2 * ph.cos() as f32, 0.2 * ph.sin() as f32);
+        }
+        // The silence alone is refused by the probe (nothing recognised) ...
+        let p = provenance();
+        let req = SnippetRequest {
+            start_index: 0,
+            end_index: (0.5 * FS) as u64,
+            center_offset_hz: off,
+            bandwidth_hz: 25e3,
+        };
+        let pr = probe(info(&p, 0), &iq[..(0.5 * FS) as usize], &req).unwrap();
+        assert!(AudioPlan::from_probe(&pr, &AudioConfig::default()).is_err());
+        // ... so the mode comes from elsewhere, and the squelch is armed from what was measured.
+        let (mode, sb) = AudioPlan::mode_from_label("nbfm").unwrap();
+        let mut plan =
+            AudioPlan::for_mode(mode, sb, FC + off, Some(10e3), &AudioConfig::default()).unwrap();
+        assert_eq!(plan.mode_name(), "nbfm");
+        assert!((plan.channel_bandwidth_hz - 12.5e3).abs() < 1.0, "{plan:?}");
+        let noise_power = channel_noise_power(&plan, FS, FC, info(&p, 0), &iq[..quiet])
+            .unwrap()
+            .expect("the silence is measurable");
+        // The floor of a 12.5 kHz channel of complex noise of variance 0.002^2 per sample at 1 MS/s.
+        let expect = 0.002f64.powi(2) * 12.5e3 / FS;
+        assert!(
+            noise_power > 0.2 * expect && noise_power < 5.0 * expect,
+            "measured {noise_power:e}, expected about {expect:e}"
+        );
+        plan.noise_power = Some(noise_power);
+        let mut d = AudioDemod::new(plan, AudioConfig::default(), FS, FC).unwrap();
+        let mut idx = 0;
+        let mut opened_in_silence = false;
+        for chunk in iq[..quiet].chunks(8192) {
+            d.process(info(&p, idx as u64), chunk).unwrap();
+            opened_in_silence |= d.squelch_open();
+            d.take_audio();
+            idx += chunk.len();
+        }
+        assert!(
+            !opened_in_silence,
+            "the squelch stays shut while nothing is keyed"
+        );
+        let mut audio = Vec::new();
+        for chunk in iq[quiet..].chunks(8192) {
+            d.process(info(&p, idx as u64), chunk).unwrap();
+            d.drain_audio_into(&mut audio);
+            idx += chunk.len();
+        }
+        assert!(d.squelch_open(), "the returning carrier opens the squelch");
+        let tail = &audio[audio.len() / 4..];
+        assert!(
+            tone_db(tail, AUDIO_RATE_HZ, tone) > -3.0,
+            "the burst's tone"
+        );
+        assert_eq!(AudioPlan::mode_from_label("2fsk"), None);
+        assert_eq!(AudioPlan::mode_from_label("unknown"), None);
+        assert_eq!(
+            AudioPlan::mode_from_label("LSB"),
+            Some((AnalogMode::Ssb, Some(Sideband::Lower)))
+        );
     }
 }

@@ -12,6 +12,11 @@
 //! 4. **Probe**: reads `probe_s` from the live edge; C13 estimate + T-012 mode selection
 //!    ([`hk_demod::audio::probe`]) choose mode, channel centre and bandwidth. The gate runs again
 //!    on the probe box and on the chosen channel; nothing is demodulated before both pass.
+//!    **A probe that finds nothing is not yet a refusal (T-987, [`wait`]):** on a bursty channel
+//!    opened between transmissions, the target's own history — its past bursts' mode estimates —
+//!    chooses the mode and channel, the squelch is armed from the silence the probe read, and
+//!    the stream opens waiting for the carrier (header `audio.wait`). Only a target with no
+//!    analog history is refused `422 no-analog-mode`.
 //! 5. **Stream**: [`AudioDemod`] (squelch, AGC) → 20 ms `ri16_le` records at 48 kS/s plus status
 //!    records, through a [`Publisher`] with a small per-consumer queue (drop-not-block, ≈ 0.6 s).
 //!
@@ -75,6 +80,8 @@ use crate::config::ListenSettings;
 use crate::refine::{ListenProbe, LiveRefiner, RefineSettings, SOURCE_LISTEN, listen_probe};
 use crate::run::Shared;
 use crate::stats::{ChainStatGuard, Counters, ListenCounters, add, inc};
+
+mod wait;
 
 /// Listen settings.
 #[derive(Clone, Debug)]
@@ -595,26 +602,38 @@ impl ListenManager {
             cfg.probe_bandwidth_hz,
             pr,
         );
-        let plan = plan.map_err(|why| {
-            OpenRefusal::new(
-                422,
-                "no-analog-mode",
-                format!("no analog modulation recognised: {why}"),
-            )
-        })?;
-        let (clo, chi) = plan.channel_extent_hz();
-        // A refined emission only has to overlap the selection.
-        let reach = match &refined {
-            Some(_) => (0.5 * (hi - lo) + 0.5 * plan.channel_bandwidth_hz).max(0.5 * probe_bw),
-            None => 0.5 * probe_bw,
+        // What the probe found at this instant: a plan whose emission lies in the selection, or
+        // why there is none.
+        let now = plan
+            .map_err(|why| format!("no analog modulation recognised: {why}"))
+            .and_then(|plan| {
+                // A refined emission only has to overlap the selection.
+                let reach = match &refined {
+                    Some(_) => {
+                        (0.5 * (hi - lo) + 0.5 * plan.channel_bandwidth_hz).max(0.5 * probe_bw)
+                    }
+                    None => 0.5 * probe_bw,
+                };
+                if (plan.channel_center_hz - fc).abs() > reach {
+                    return Err("the strongest emission lies outside the selection".to_owned());
+                }
+                Ok(plan)
+            });
+        // T-987: nothing demodulable now is not the end of it on a bursty channel — the target's
+        // own history chooses the mode and the stream opens squelched, waiting ([`wait`]).
+        let (plan, waiting) = match now {
+            Ok(plan) => (plan, None),
+            Err(why) => {
+                let (plan, history) =
+                    open_waiting(shared, emitter, (lo, hi), &cfg.audio, info, &iq, &why)?;
+                let block = history.header(plan.mode_name(), &why);
+                (plan, Some((history, block)))
+            }
         };
-        if (plan.channel_center_hz - fc).abs() > reach {
-            return Err(OpenRefusal::new(
-                422,
-                "no-analog-mode",
-                "the strongest emission lies outside the selection",
-            ));
-        }
+        // A refinement that locked onto some other emission is not this channel's: a waiting
+        // stream neither stores it nor keeps refining towards it.
+        let refined = if waiting.is_some() { None } else { refined };
+        let (clo, chi) = plan.channel_extent_hz();
         // The chosen channel is what is demodulated: gate it too.
         let class = gate(shared, clo.min(lo), chi.max(hi))?;
         if !in_window(tune.center_hz, tune.sample_rate_hz, clo, chi) {
@@ -656,6 +675,16 @@ impl ListenManager {
                 params.pilot_hz = Some(*p);
             }
         }
+        // A waiting stream's mode was measured on the emitter's past bursts, not now: its
+        // confidence is the history's agreement and its parameters are what those bursts
+        // measured (T-987).
+        let (mode_confidence, mode_rules) = match &waiting {
+            Some((h, _)) => {
+                params = h.params.clone();
+                (h.agreement(), format!("{}+history", pr.mode.rules_version))
+            }
+            None => (pr.mode.confidence, pr.mode.rules_version.clone()),
+        };
         let mut header = StreamHeader::new(
             format!("listen/{}", STREAM_SEQ.fetch_add(1, Ordering::Relaxed)),
             StreamKind::Audio,
@@ -673,8 +702,8 @@ impl ListenManager {
             channels,
             frame_samples: AUDIO_FRAME_SAMPLES as u32,
             mode: plan.mode_name().into(),
-            mode_confidence: pr.mode.confidence,
-            mode_rules: pr.mode.rules_version.clone(),
+            mode_confidence,
+            mode_rules,
             params,
             snr_db: pr.params.snr_box_db.value(),
             squelch: SquelchInfo {
@@ -690,6 +719,7 @@ impl ListenManager {
             deemphasis_s: plan.deemphasis_s,
             demod: LISTEN_DEMOD_VERSION.into(),
             refinement: refined.as_ref().map(crate::refine::audio_refinement),
+            wait: waiting.map(|(_, block)| block),
             ..AudioInfo::default()
         });
         let publisher = Publisher::new(
@@ -759,6 +789,43 @@ impl ListenManager {
             end: end_slot,
         })
     }
+}
+
+/// The plan and history a Listen opens **waiting** on (T-987, [`wait`]), or the honest refusal:
+/// the probe's reason `why` and what the target's history held instead of an analog mode.
+fn open_waiting(
+    shared: &Shared,
+    emitter: Option<EmitterId>,
+    (lo, hi): (f64, f64),
+    audio: &AudioConfig,
+    info: InputInfo<'_>,
+    iq: &[Complex<i8>],
+    why: &str,
+) -> Result<(hk_demod::audio::AudioPlan, wait::History), OpenRefusal> {
+    let refuse = |held: &str| {
+        OpenRefusal::new(
+            422,
+            "no-analog-mode",
+            format!("{why}; nothing to wait for: {held}"),
+        )
+    };
+    let found = wait::history(&shared.repo(), emitter, (lo, hi), info.time.host_time)
+        .map_err(|e| OpenRefusal::new(500, "inventory", e.to_string()))?;
+    let history = found.map_err(|wait::NoHistory(held)| refuse(&held))?;
+    let mut plan = history
+        .plan(audio)
+        .ok_or_else(|| refuse("its history names no analog audio mode"))?;
+    let tune = &info.provenance.tune;
+    plan.noise_power =
+        hk_demod::audio::channel_noise_power(&plan, tune.sample_rate_hz, tune.center_hz, info, iq)
+            .map_err(|e| OpenRefusal::new(500, "demod", e.to_string()))?
+            .filter(|n| n.is_finite() && *n > 0.0);
+    if plan.noise_power.is_none() {
+        return Err(refuse(
+            "the silence could not be measured, so no squelch could be armed",
+        ));
+    }
+    Ok((plan, history))
 }
 
 impl StreamOpener for ListenManager {
