@@ -1658,6 +1658,11 @@ fn start_segment(
     // (T-508) — the source is already back in the slot by then, because whatever held it has been
     // dropped with this closure.
     let spawned = (|| -> anyhow::Result<()> {
+        // T-915: the spectrum reader's claim on the view queue, taken before ANY reader starts —
+        // the history reader (spawned first) must not be able to end the view writer ahead of the
+        // rows the spectrum reader has yet to push. If this closure fails before that reader is
+        // spawned, the claim drops with it and the writer is not left waiting.
+        let mut view_producer = shared.view_queue.as_ref().map(|q| q.producer());
         // T-541: every reader goes through `guarded`, so none of them can die unnoticed.
         let spawn = |name: &'static str,
                      f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
@@ -1704,10 +1709,14 @@ fn start_segment(
             )?);
         }
         {
-            let (s, a) = (Arc::clone(&shared), common.attention.clone());
+            let (s, a, vp) = (
+                Arc::clone(&shared),
+                common.attention.clone(),
+                view_producer.take(),
+            );
             workers.push(spawn(
                 "hk-spectrum",
-                Box::new(move || crate::spectrum::run(s, a)),
+                Box::new(move || crate::spectrum::run(s, a, vp)),
             )?);
         }
         {

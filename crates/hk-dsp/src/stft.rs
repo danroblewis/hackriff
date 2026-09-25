@@ -612,6 +612,30 @@ impl StftProcessor {
         self.replay.emitted
     }
 
+    /// **Ends the stream (T-915):** [`Self::flush`], then emits the averaging still in progress as
+    /// a partial frame when it holds at least `min_segments` segments. Returns frames emitted.
+    ///
+    /// `flush` alone keeps the averaging in progress, which is right while more samples may come
+    /// and wrong once none will: the stream's last `< K` segments were captured, and dropping them
+    /// leaves their time observed and unmeasured. A retune that re-plumbs ends every reader's
+    /// stream this way, so each departure lost the band's last row (T-915). The frame is a
+    /// T-139 partial frame: its tuning, time and flags are the averaging's own, and `n_avg` and
+    /// `sample_count` are what was averaged. It is counted in [`StftStats::partial_frames`].
+    ///
+    /// The staged samples short of one segment cannot be measured and stay unmeasured. Pushing
+    /// after `finish` starts a new averaging, as after any emitted frame.
+    pub fn finish(&mut self, min_segments: usize, mut emit: impl FnMut(&SpectrumFrame)) -> usize {
+        let mut n = self.flush(&mut emit);
+        let emit: &mut dyn FnMut(&SpectrumFrame) = &mut emit;
+        let replay = &mut self.replay;
+        if replay.frame.is_some() && replay.acc.count() as usize >= min_segments.max(1) {
+            replay.stats.partial_frames += 1;
+            replay.emit_frame(emit);
+            n += 1;
+        }
+        n
+    }
+
     /// Clears all state (as at creation), keeping the settings and counters. Rows still in
     /// flight on an asynchronous provider are discarded.
     pub fn reset(&mut self) {
