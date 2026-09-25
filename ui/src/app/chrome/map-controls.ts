@@ -127,6 +127,10 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   toast(text: string): void;
   /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
   research?: { isOpen(): boolean; toggle(): void };
+  /** T-1008: the scan plan's small button (in the Go-to cluster — it commands the radio, like the
+   * retune offer beside it) and its panel. Built by `app/map/scan-overlay.ts`, whose own code states
+   * its routes; absent, the cluster offers no scan. */
+  scan?: { button: HTMLElement; panel: HTMLElement };
 }
 
 /** The tool-mode banner's words (the mockup's `#mode`), per mode (docs/23 §10.4). */
@@ -298,7 +302,9 @@ export function mountMapControls(host: MapControlHost): {
   }) as HTMLInputElement;
   const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off" },
     svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input,
-    h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"));
+    h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"),
+    // T-1008: the Scan button sits in the Go-to glass — small, because it commands the radio.
+    host.scan?.button ?? null);
 
   // The retune offer never fades (docs/23 §10.2), so it carries no `map-fade`.
   const offerWhy = h("span", { class: "map-offer-why" });
@@ -404,7 +410,7 @@ export function mountMapControls(host: MapControlHost): {
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
     svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, host.scan?.panel ?? null, zoom, fab);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the

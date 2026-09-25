@@ -40,6 +40,15 @@ export interface SurfaceInputOptions {
   onHover?: (p: GlPoint | null, e: PointerEvent) => void;
   /** Called for a context-menu request (right-click) at a point. */
   onContext?: (p: GlPoint, e: MouseEvent) => void;
+  /**
+   * T-1008: **a handle the host drew under the press** — the scan plan's region edges. Asked once,
+   * at the press, on a pane, before any other meaning is decided: a handle is under the pointer
+   * only where the host drew one, so a press there means "move this", whatever tool mode or
+   * modifier is in force. A grabbed stroke is neither a pan nor a region nor a click: `move` gets
+   * every point, and `end` the release (or the cancel). `null` leaves the press to the rest of the
+   * vocabulary untouched. The host decides what a handle does; this file only routes the stroke.
+   */
+  grabHandle?: (p: GlPoint, pane: string) => { move(p: GlPoint): void; end(): void } | null;
   /** A region stroke in progress, every move, for the host to draw as a pending box; `null` when
    * the stroke ended or was abandoned. It is *not* a commit — see [[SurfaceInputOptions.onRegion]]. */
   onRegionDrag?: (r: SurfaceRegion | null) => void;
@@ -150,6 +159,8 @@ export function attachSurfaceInput(
        * It moves nothing until it has travelled `DRAG_PX` from the press; then `touchIntent` decides,
        * once. `t0` is the press's own `timeStamp`, so the hold is read off the events, not a clock. */
       undecided: boolean; t0: number; press: GlPoint;
+      /** T-1008: a host handle this stroke grabbed ([[SurfaceInputOptions.grabHandle]]). */
+      handle?: { move(p: GlPoint): void; end(): void } | null;
     }
     | null = null;
 
@@ -167,6 +178,7 @@ export function attachSurfaceInput(
   const isTouch = (e: PointerEvent) => e.pointerType === "touch";
 
   const endRegion = () => {
+    if (dragging?.handle) dragging.handle.end();
     if (dragging?.region) opts.onRegionDrag?.(null);
     if (dragging?.measuring) opts.onMeasureDrag?.(null);
     if (dragging?.annotating) opts.onAnnotateDrag?.(null);
@@ -211,6 +223,16 @@ export function attachSurfaceInput(
     const map = preview.onMap(p);
     const pane = map ? null : preview.paneAt(p);
     if (pane) preview.activePane = pane;
+    // T-1008: a host handle under the press is grabbed first — it is only there where one was drawn.
+    const handle = pane && opts.grabHandle ? opts.grabHandle(p, pane) : null;
+    if (handle) {
+      dragging = {
+        x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region: null, measuring: null,
+        annotating: null, tool: null, undecided: false, t0: e.timeStamp, press: p, handle,
+      };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     // **`Shift + drag` never changes meaning, in any tool mode** (docs/23 §10.4's gesture table): it
     // is checked FIRST, so entering measurement mode re-binds only the BARE drag/click — exactly as
     // `dragIntent`'s own modifier check already read it, mode or no mode. Only when shift is not the
@@ -252,6 +274,7 @@ export function attachSurfaceInput(
       return;
     }
     if (!dragging || !e.buttons) { opts.onHover?.(point(e), e); return; }
+    if (dragging.handle) { dragging.handle.move(point(e)); return; } // a handle is not a pan
     if (dragging.undecided) {
       // Nothing moves until the finger has gone somewhere (a jittery tap stays a tap); then the
       // stroke's meaning is decided once, from how long it rested first.
@@ -329,6 +352,7 @@ export function attachSurfaceInput(
     const d = dragging;
     dragging = null;
     if (!d) return;
+    if (d.handle) { d.handle.move(point(e)); d.handle.end(); return; } // nothing panned, nothing clicked
     settle(d);
     if (d.region) {
       opts.onRegionDrag?.(null);
@@ -384,7 +408,7 @@ export function attachSurfaceInput(
     if (e && isTouch(e)) fingers.delete(e.pointerId);
     if (pinch) { endPinch(); return; }
     endRegion();
-    if (dragging && !dragging.undecided) settle(dragging);
+    if (dragging && !dragging.undecided && !dragging.handle) settle(dragging);
     dragging = null;
   };
   const onLeave = (e: PointerEvent) => { if (!dragging) opts.onHover?.(null, e); };
