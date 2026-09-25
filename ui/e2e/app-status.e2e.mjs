@@ -209,14 +209,15 @@ for (const width of [1280, 400]) test(`at ${width} px: a scale bar per pane, one
 
 /**
  * T-996's rehomed capture controls (T-476's Retune, T-496's width presets), in the left column under
- * Go-to, at every width the cluster has a layout for. The block is a fixed-position stack of fixed
- * tops (`map-controls.css`), so what can go wrong is geometry: a block squeezed to a sliver that
- * wraps into a tower, or the transient offer / mode banner stacked over it. Read with BOTH of those
+ * Go-to, at every width the cluster has a layout for. The column is one in-flow stack
+ * (`map-controls.css`'s `.map-stack`): T-997's inventory pills first, then the capture block, the
+ * offer and the banner. What can go wrong is geometry: a block squeezed to a sliver that wraps into
+ * a tower, or the pills / transient offer / mode banner stacked over it. Read with ALL of those
  * showing — the worst case — and every control in the column must be pressable at its own centre.
  */
 const COLUMN = `JSON.stringify((() => {
   const shown = (e) => { const r = e.getBoundingClientRect(); return !e.closest('[hidden]') && r.width > 0 && r.height > 0; };
-  const blocks = ['.map-goto', '.map-nudge', '.map-retune', '.map-offer', '.map-mode', '.map-status', '.map-topright']
+  const blocks = ['.map-goto', '.map-nudge', '.map-inv', '.map-retune', '.map-offer', '.map-mode', '.map-status', '.map-topright']
     .map((sel) => [sel, document.querySelector(sel)]).filter(([, e]) => e && shown(e))
     .map(([sel, e]) => { const r = e.getBoundingClientRect(); return { sel, x: r.left, y: r.top, r: r.right, b: r.bottom }; });
   const overlaps = [];
@@ -224,7 +225,7 @@ const COLUMN = `JSON.stringify((() => {
     const a = blocks[i], q = blocks[j];
     if (Math.min(a.r, q.r) - Math.max(a.x, q.x) > 0.5 && Math.min(a.b, q.b) - Math.max(a.y, q.y) > 0.5) overlaps.push(a.sel + ' x ' + q.sel);
   }
-  const controls = [...document.querySelectorAll('.map-retune button, .map-offer button')].filter(shown);
+  const controls = [...document.querySelectorAll('.map-inv button, .map-retune button, .map-offer button')].filter(shown);
   const unpressable = controls.map((el) => {
     const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
     return { name: el.textContent.trim() || el.getAttribute('aria-label'), w: Math.round(r.width), h: Math.round(r.height),
@@ -232,7 +233,8 @@ const COLUMN = `JSON.stringify((() => {
       ok: !!top && (top === el || el.contains(top)) && r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && r.height >= 24 };
   }).filter((b) => !b.ok);
   const retune = blocks.find((b) => b.sel === '.map-retune');
-  return { blocks, overlaps, unpressable, controls: controls.length, retune,
+  const pills = blocks.find((b) => b.sel === '.map-inv');
+  return { blocks, overlaps, unpressable, controls: controls.length, retune, pills,
     widths: document.querySelectorAll('.map-retune .map-width').length,
     scrollW: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), innerW: innerWidth };
 })())`;
@@ -245,7 +247,7 @@ for (const [width, height] of [[1280, 800], [1000, 860], [920, 860], [400, 860]]
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the capture controls to mount under Go-to",
     `!!document.querySelector('.sf-scale') && !document.querySelector('.map-retune').hidden &&
-     document.querySelectorAll('.map-retune .map-width').length > 0`, { timeoutMs: 60000 });
+     document.querySelectorAll('.map-retune .map-width').length > 0 && !!document.querySelector('.map-inv .map-pill')`, { timeoutMs: 60000 });
   // The worst case: the transient Go-to offer (a destination no tuned window covers) AND the tool
   // mode banner, both shown at once beside the persistent block.
   await page.eval(`(() => { const i = document.querySelector('.map-goto input'); i.value = '2400M';
@@ -258,7 +260,8 @@ for (const [width, height] of [[1280, 800], [1000, 860], [920, 860], [400, 860]]
   t.diagnostic(`at ${width} px: ${JSON.stringify(c)}`);
   if (SHOTS) await page.shot(path.join(SHOTS, `retune-${width}.png`));
   assert.ok(c.retune, "no Retune block is shown");
-  assert.ok(c.controls >= 1 + c.widths + 1, `the column matched too few controls to mean anything: ${c.controls}`);
+  assert.ok(c.pills, "no inventory pills are shown (T-997) — the column was read without them");
+  assert.ok(c.controls >= 2 + 1 + c.widths + 1, `the column matched too few controls to mean anything: ${c.controls}`);
   assert.deepEqual(c.overlaps, [], `left-column chrome drawn over each other at ${width} px`);
   assert.deepEqual(c.unpressable, [], `a capture control is not pressable at its own centre at ${width} px`);
   // A block squeezed into a tower is not "small floating chrome" (docs/23 §10.6 rule 4).

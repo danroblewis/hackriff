@@ -207,12 +207,37 @@ export interface HudLabel {
 const CORNER_CSS = { freqLeft: 64, freqRight: 36, timeTop: 10, timeBottom: 30 };
 
 /**
+ * T-997: a box of the map's own floating chrome that the TIME ruler's labels must not print into,
+ * in CSS px from the canvas's top-left. The cluster is docked top-LEFT (Go-to, the nudge row, the
+ * inventory pills, the retune offer) — the very column the time ruler runs down — so without this a
+ * label prints under a control and is simply lost, which is the defect the user reported of the
+ * T-895 chip ("it overlaps the timeline markers"), one row further up.
+ *
+ * A reserved label is DROPPED, exactly as a corner-colliding one is: a label moved off its tick
+ * would name an instant it is not at.
+ */
+export interface HudReserve { readonly left: number; readonly right: number; readonly bottom: number }
+
+/** How far a time label prints from its anchor, CSS px: `centre.css`'s 14 px margin plus the widest
+ * observed label ("−82 ms 11:10:38.700Z" measured 132 px), and half its line box above/below the
+ * tick it is centred on. Deliberately generous: a label half-under a control is still lost. */
+export const TIME_LABEL_BOX_CSS = { left: 14, width: 150, half: 10 };
+
+/** Does a time label anchored at (`x`, `y`) print into `reserve`? */
+export function timeLabelReserved(x: number, y: number, reserve: HudReserve | null): boolean {
+  if (!reserve) return false;
+  const l = x + TIME_LABEL_BOX_CSS.left, r = l + TIME_LABEL_BOX_CSS.width;
+  return y - TIME_LABEL_BOX_CSS.half < reserve.bottom && l < reserve.right && r > reserve.left;
+}
+
+/**
  * The labels of one pane's rulers, in CSS px from the canvas's top-left. `canvasHpx` is the drawing
  * buffer's height (device px) — the GL rectangle's origin is bottom-left, the DOM's top-left.
  * A label that would collide with the other ruler at a corner is dropped, not moved: a label moved
- * off its tick would name a place it is not at.
+ * off its tick would name a place it is not at. `reserve` (T-997) drops the same way for the
+ * floating chrome's top-left column.
  */
-export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1): HudLabel[] {
+export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1, reserve: HudReserve | null = null): HudLabel[] {
   const k = dpr > 0 ? dpr : 1;
   const left = r.rect.x / k, top = (canvasHpx - (r.rect.y + r.rect.h)) / k;
   const w = r.rect.w / k, h = r.rect.h / k;
@@ -227,6 +252,7 @@ export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1): HudLabel[] 
     if (!t.major || t.label === null) continue;
     const y = t.pos / k;
     if (y < CORNER_CSS.timeTop || y > h - CORNER_CSS.timeBottom) continue;
+    if (timeLabelReserved(left, top + y, reserve)) continue;
     out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: t.label, sub: t.sub, value: t.value });
   }
   return out;

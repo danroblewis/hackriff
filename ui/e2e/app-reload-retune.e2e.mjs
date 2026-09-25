@@ -12,10 +12,12 @@
 // goes through the device interface, and a retune here is deliberately NOT the thing under test),
 // reloads, and asserts what the PAGE draws: the pane's window, and the retune offer beside it.
 //
-// ——— RED ON CODE BEFORE T-955 ———
-// Revert `recentObservedExtent`'s use in `probeSurface` (ui/src/surface/preview.ts) back to plain
-// `observedExtent` and this fails: the reloaded pane's centre sits near the OLD band (or between the
-// two), not within tolerance of the retuned one.
+// ——— RED ON CODE BEFORE THE T-955 FIX ROUND ———
+// On 448a9a65 the FAB press froze the drifted-but-following pane (it read `isFollowing`, never the
+// tuned window), the painted Go-to offer outlived the retune, and the reload 30 s after a retune
+// opened on the union of both tunings (recency counted from the grid's end, not the newest row).
+//
+// Screenshots land in $HK_E2E_SHOTS (when set) for the hand-back.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
@@ -25,6 +27,18 @@ const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 28;
 const AWAY_HZ = 433.92e6; // outside fm_100p8M_2p4M's 2.4 MHz recording — the mock's synthesised floor
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const SHOTS = process.env.HK_E2E_SHOTS ?? null;
+const shot = (page, name) => (SHOTS ? page.shot(`${SHOTS}/${name}.png`) : Promise.resolve());
+/** The page's own view of the tuned window, from the navigation poll it already runs. */
+const FAB = "document.querySelector('.map-ctl .map-fab')";
+const OFFER_SHOWN = "!document.querySelector('.map-ctl .map-offer').hidden";
+const OFFER_TEXT = "document.querySelector('.map-ctl .map-offer-why').textContent";
+/** Go-to, the way the user did it: type into the box and submit (a view move, never a retune). */
+async function goTo(page, text) {
+  await page.eval(`(() => { const i = document.querySelector('.map-ctl .map-goto input'); i.value = ${JSON.stringify(text)};
+    i.closest('form').requestSubmit(); })()`);
+  await page.frames(3);
+}
 
 /** `GET`, riding out the route's backpressure (`503` is "ask again", never "no" — T-690). */
 async function get(backend, p, { tries = 60, waitMs = 200 } = {}) {
@@ -90,35 +104,68 @@ async function openApp(backend) {
   return { browser, page };
 }
 
-test("T-955: reload after an API retune opens on the NEW tuned window, with no stale retune offer", async (t) => {
+async function waitTuned(backend, hz) {
+  for (let i = 0; i < 60; i++) {
+    const nav = await get(backend, "/api/navigation");
+    const w = nav.windows?.[0];
+    if (w && Math.abs(w.center_hz - hz) < 100) return w;
+    await sleep(200);
+  }
+  assert.fail(`the mock never reached ${hz} Hz`);
+}
+
+test("T-955: after an API retune — the Go-to offer does not outlive it, follow-live brings a drifted pane to the tuned live edge, and a reload 30 s later opens on the NEW window", async (t) => {
   const backend = await startBackend({ port: PORT, mockDevice: true });
   t.after(() => backend.stop());
   let browser;
   try {
     const first = await openApp(backend);
-    const before = await pane0(first.page);
-    t.diagnostic(`before retune: ${before.where}`);
-    first.browser.close();
+    browser = first.browser;
+    const page = first.page;
+    const before = await pane0(page);
+    const tuned0 = await waitTuned(backend, (await get(backend, "/api/navigation")).windows[0].center_hz);
+    t.diagnostic(`before retune: ${before.where} (tuned ${tuned0.center_hz})`);
 
-    // The retune the user did: an explicit device action, through the API, never a page gesture.
+    // (2) The explorer's 04:16 step: Go-to a band the radio is not on — the offer is painted.
+    await goTo(page, "433.92M");
+    await page.waitFor("the Go-to retune offer to be painted", OFFER_SHOWN, { timeoutMs: 5000 });
+    t.diagnostic(`offer: ${await page.eval(OFFER_TEXT)}`);
+    // …then the radio is retuned THERE through the API (not the offer): the offer is now stale.
     await retune(backend, AWAY_HZ);
-    for (let i = 0; i < 40; i++) {
-      const nav = await get(backend, "/api/navigation");
-      if (Math.abs((nav.windows?.[0]?.center_hz ?? 0) - AWAY_HZ) < 100) break;
-      await sleep(200);
-    }
-    const tunedNav = await get(backend, "/api/navigation");
-    const tuned = tunedNav.windows?.[0];
-    assert.ok(tuned && Math.abs(tuned.center_hz - AWAY_HZ) < 100,
-      `the mock never reached the retuned centre: ${JSON.stringify(tunedNav.windows)}`);
+    const tuned = await waitTuned(backend, AWAY_HZ);
+    const retunedAt = Date.now();
+    await page.waitFor("the stale Go-to offer to be withdrawn once the radio holds that window",
+      `!(${OFFER_SHOWN})`, { timeoutMs: 15000 });
 
-    // Reload — a fresh page load, exactly like the user's F5. Nothing here is a gesture.
-    const { browser: b2, page } = await openApp(backend);
-    browser = b2;
-    t.after(() => browser.close());
+    // (1) The explorer's 0428 pane: FOLLOWING in time, but at a frequency the radio has left.
+    await goTo(page, `${tuned0.center_hz / 1e6}M`);
+    const drifted = await pane0(page);
+    assert.equal(drifted.following, true, "precondition: the drifted pane still follows live time");
+    assert.ok(Math.abs(windowOf(drifted.where).centerHz - tuned0.center_hz) < 1e6, `precondition: ${drifted.where}`);
+    await page.waitFor("the FAB to say the pane is off the tuned window", `${FAB}.classList.contains('off-tuned')`, { timeoutMs: 15000 });
+    await shot(page, "t955-follow-before");
+    await page.click(FAB);
+    await page.frames(4);
+    const followed = await pane0(page);
+    assert.equal(await page.eval(OFFER_SHOWN), false, "the Go-to offer for the band the pane LEFT survived the follow-live press");
+    await sleep(2000);
+    await shot(page, "t955-follow-after");
+    t.diagnostic(`follow-live from a drifted following pane: ${drifted.where} -> ${followed.where}`);
+    assert.equal(followed.following, true, `the follow-live press FROZE the pane (explorer 0430): ${followed.where}`);
+    assert.ok(Math.abs(windowOf(followed.where).centerHz - tuned.center_hz) < tuned.span_hz,
+      `follow-live left the pane at ${followed.where}, not the tuned ${tuned.center_hz / 1e6} MHz`);
+    first.browser.close();
+    browser = null;
 
-    const after = await pane0(page);
-    t.diagnostic(`after reload: ${after.where} · following ${after.following} · offer: ${after.why}`);
+    // (3) The reported flow: a genuine reload 30 s after the retune.
+    const wait = 30_000 - (Date.now() - retunedAt);
+    if (wait > 0) await sleep(wait);
+    const second = await openApp(backend);
+    browser = second.browser;
+    const after = await pane0(second.page);
+    await sleep(3000);
+    await shot(second.page, "t955-reload-30s");
+    t.diagnostic(`after reload ${Math.round((Date.now() - retunedAt) / 1000)} s after the retune: ${after.where} · following ${after.following} · offer: ${after.why}`);
     const w = windowOf(after.where);
     assert.ok(Math.abs(w.centerHz - tuned.center_hz) < tuned.span_hz,
       `the reloaded pane opened at ${(w.centerHz / 1e6).toFixed(4)} MHz, not near the retuned ` +
@@ -126,10 +173,7 @@ test("T-955: reload after an API retune opens on the NEW tuned window, with no s
     assert.ok(w.spanHz <= tuned.span_hz * 4,
       `the reloaded pane's span (${(w.spanHz / 1e6).toFixed(3)} MHz) is many times the tuned window's ` +
       `(${(tuned.span_hz / 1e6).toFixed(3)} MHz): the sliver-in-a-wide-box shape of the bug`);
-
-    // No stale offer: the retune control beside the pane must not still be naming the OLD band.
-    assert.ok(!after.why.includes("100.8000"),
-      `the retune offer still names the band the radio LEFT: ${JSON.stringify(after.why)}`);
+    assert.equal(await second.page.eval(OFFER_SHOWN), false, "a freshly loaded page painted a Go-to offer");
   } finally {
     browser?.close();
   }
