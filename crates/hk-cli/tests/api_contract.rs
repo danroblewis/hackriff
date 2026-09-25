@@ -11416,6 +11416,27 @@ const NOT_A_TIME: &[&str] = &[
     "id",
     "sample_index",
     "seq",
+    // **Elapsed-time counters: ns SINCE THE RUN STARTED, never an instant** (T-510, T-939).
+    //
+    // These are the same kind of entry as `bytes` above — a count that reaches 10^9 — and a
+    // nanosecond duration reaches it after **one second** of the thing it measures. This sweep's
+    // only evidence is magnitude, and magnitude cannot tell a duration from an instant: both are
+    // ns under an `_ns` name, and the seconds band (10^9 … 10^10) is 1 s … 10 s of accumulated
+    // time. `wait_ns` crosses it within a second of any run, and `cpu_ns` — here since T-510 —
+    // would cross it in any run long enough for one reader to spend a CPU-second, which the
+    // 5 s replay this sweep sets up happens not to reach. So the exemption is by name and is
+    // exhaustive: these ten are the `ReaderCounters` / `SourceCounters` time accumulators
+    // (`crates/hk-pipeline/src/stats.rs`), nothing serves an instant under any of them, and a new
+    // *instant* must still not be given one of these names.
+    "cpu_ns",
+    "wait_ns",
+    "clip_ns",
+    "burst_ns",
+    "stft_ns",
+    "frame_ns",
+    "floor_ns",
+    "detector_ns",
+    "track_ns",
 ];
 
 fn looks_like_a_time(key: &str) -> bool {
