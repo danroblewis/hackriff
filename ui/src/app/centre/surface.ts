@@ -88,8 +88,8 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
-import { DensityFetches, densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile, type DensityTile } from "../../surface/density";
-import { addrSpelling } from "../../surface/lattice";
+import { DensityFetches, densityAddrs, densityQuads, isCoarseZoom, sharedDensityReader, type DensityTile } from "../../surface/density";
+import type { TileAddr } from "../../surface/lattice";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
@@ -519,11 +519,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
   // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
   const densityByPane = new Map<string, DensityTile[]>();
-  // Per-address copies and WHEN each is asked again (`DensityFetches`, the tile cache's own
-  // live-edge/sealed rule): a following pane's live-edge tile is revalidated on a bounded cadence, a
-  // failed ask is retried with backoff, and a sealed past tile is asked for once.
+  // Per-pane, per-address copies and WHEN each is asked again (`DensityFetches`): while a pane
+  // follows, every tile it shows is re-asked on a bounded cadence as rows arrive (counts are
+  // back-dated to an event's start, so a tile the edge left still changes); a frozen pane asks once
+  // and keeps its own copy; a failed ask is retried with backoff. One request per address in
+  // flight, shared between panes (`sharedDensityReader`).
   const densityFetches = new DensityFetches();
   const densityInflight = new Set<string>();
+  const densityGet = sharedDensityReader((url) => client.get<unknown>(url));
   // The refresh/backoff pacing is counted in POLL TICKS (the poll below runs every
   // `DENSITY_POLL_MS`), never a browser clock — the centre modules are on the capture clock only
   // (T-393/T-386's guard); this is request pacing, not a time anything is placed at.
@@ -546,25 +549,23 @@ function mount(el: HTMLElement, ctx: AppContext) {
     for (const id of [...densityByPane.keys()]) if (!ids.has(id)) densityByPane.delete(id);
     const edgeNs = p.view.panes.lastEdgeNs;
     const nowMs = ++densityPolls * DENSITY_POLL_MS;
-    const keep = new Set<string>();
+    const keep: [string, TileAddr][] = [];
     for (const pane of p.view.panes.views(edgeNs)) {
       const on = isLayerVisible(layersFor(pane.id), "density") && isCoarseZoom(lat, pane.box, pane.rect.w, pane.rect.h);
       if (!on) { densityByPane.set(pane.id, []); continue; }
       const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
-      for (const a of addrs) keep.add(addrSpelling(a));
-      densityByPane.set(pane.id, densityFetches.tiles(addrs));
+      for (const a of addrs) keep.push([pane.id, a]);
+      densityByPane.set(pane.id, densityFetches.tiles(pane.id, addrs));
       if (densityInflight.has(pane.id)) continue;
-      const due = densityFetches.due(lat, addrs, edgeNs, p.view.panes.isFollowing(pane.id), nowMs);
+      const due = densityFetches.due(pane.id, addrs, edgeNs, p.view.panes.isFollowing(pane.id), nowMs);
       if (due.length === 0) continue;
-      densityInflight.add(pane.id);
-      Promise.all(due.map((a) => client.get<unknown>(densityUrl(a))
-        .then((body) => {
-          const t = parseDensityTile(a, body);
-          if (t) densityFetches.succeeded(a, t, edgeNs, nowMs); else densityFetches.failed(a, nowMs);
-        })
-        .catch(() => { densityFetches.failed(a, nowMs); })))
-        .then(() => { densityByPane.set(pane.id, densityFetches.tiles(addrs)); })
-        .finally(() => { densityInflight.delete(pane.id); });
+      const id = pane.id;
+      densityInflight.add(id);
+      Promise.all(due.map((a) => densityGet(a).then((t) => {
+        if (t) densityFetches.succeeded(id, a, t, edgeNs, nowMs); else densityFetches.failed(id, a, nowMs);
+      })))
+        .then(() => { densityByPane.set(id, densityFetches.tiles(id, addrs)); })
+        .finally(() => { densityInflight.delete(id); });
     }
     densityFetches.retain(keep);
   };

@@ -26,7 +26,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  DENSITY_LIVE_REFRESH_MS, DENSITY_RETRY_BASE_MS, DensityFetches, DENSITY_MARK, DENSITY_MAX_TILES_PER_PANE, densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile,
+  DENSITY_LIVE_REFRESH_MS, DENSITY_RETRY_BASE_MS, DensityFetches, DENSITY_MARK, sharedDensityReader, DENSITY_MAX_TILES_PER_PANE, densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile,
   type DensityTile,
 } from "../src/surface/density";
 import { GENERALIZE_BELOW_CSS_PX, isGeneralized } from "../src/surface/marks";
@@ -241,73 +241,111 @@ test("MAP density: wired into the host's overlay table and its poll — reads on
   assert.ok(fns, "the overlay renderer table");
   assert.match(fns[1], /\bdensity: densityQuadsFn\b/);
   assert.match(src, /startPoll\(async \(\) => \{ mirror\(\); refreshPriors\(\); refreshDensity\(\); \}, 1000\)/);
-  assert.match(src, /client\.get<unknown>\(densityUrl\(a\)\)/);
   // The poll's own fetch is gated by the same isCoarseZoom test the draw path uses — a fine-zoomed
   // pane must not even ask for tiles it would draw nothing with.
   assert.match(src, /isCoarseZoom\(lat, pane\.box, pane\.rect\.w, pane\.rect\.h/);
   assert.ok(!/client\.(post|put|delete)[^;]*density/i.test(src), "density must only ever be read");
 });
 
-// 9. Refresh (review fix 2): the counts are "not a tile channel" — they change with every append —
-// so an UNCHANGED live-edge address must be asked again, a failure retried, and a sealed tile asked
-// once. Keyed on the address alone (the reviewed code), none of these held.
+// 9. Refresh (review fixes 2 and 3): the counts are "not a tile channel" — they change with every
+// append, and an event is counted at its START although it is usually written when its track
+// closes — so while a pane follows, EVERY tile it shows (the edge's and ones the edge has left) is
+// asked again as rows arrive; a failure is retried; a frozen pane keeps its own copy.
 const LIVE_ADDR: TileAddr = { scheme: "view", device: "any", cells: 256, levelF: 10, levelT: 8, fIndex: 3, tIndex: 20 };
 const LIVE_EXT = extentOf(LAT as Lattice, LIVE_ADDR);
 const INSIDE = (LIVE_EXT.t0Ns + LIVE_EXT.t1Ns) / 2;
+const PAST_END = LIVE_EXT.t1Ns + 1e9;
 const counted = (n: number): DensityTile => ({
   addr: LIVE_ADDR, fLoHz: LIVE_EXT.f0Hz, fCellHz: 1, t0Ns: LIVE_EXT.t0Ns, tCellNs: 1, nt: 1, nf: 1, counts: [n],
 });
+const countsOf = (f: DensityFetches, pane: string) => f.tiles(pane, [LIVE_ADDR]).map((t) => t.counts[0]);
 
 test("MAP density refresh: a live-edge tile's counts update after new events, address unchanged", () => {
   const f = new DensityFetches();
-  const lat = LAT as Lattice;
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE, true, 0), [LIVE_ADDR], "first sight is asked for");
-  f.succeeded(LIVE_ADDR, counted(1), INSIDE, 0);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, true, 0), [LIVE_ADDR], "first sight is asked for");
+  f.succeeded("p", LIVE_ADDR, counted(1), INSIDE, 0);
   // The edge moves on inside the SAME tile; within the cadence nothing is asked (no storm)...
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE + 1e9, true, DENSITY_LIVE_REFRESH_MS - 1), []);
-  // ...and once the cadence elapses the same address is asked again, and its new counts shown.
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE + 1e9, true, DENSITY_LIVE_REFRESH_MS), [LIVE_ADDR]);
-  f.succeeded(LIVE_ADDR, counted(7), INSIDE + 1e9, DENSITY_LIVE_REFRESH_MS);
-  assert.deepEqual(f.tiles([LIVE_ADDR]).map((t) => t.counts[0]), [7]);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE + 1e9, true, DENSITY_LIVE_REFRESH_MS - 1), []);
+  // ...no rows arrived (edge unmoved): nothing to ask about either...
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, true, 10 * DENSITY_LIVE_REFRESH_MS), []);
+  // ...and once rows arrived and the cadence elapsed, the same address is asked again and shown.
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE + 1e9, true, DENSITY_LIVE_REFRESH_MS), [LIVE_ADDR]);
+  f.succeeded("p", LIVE_ADDR, counted(7), INSIDE + 1e9, DENSITY_LIVE_REFRESH_MS);
+  assert.deepEqual(countsOf(f, "p"), [7]);
   // A FROZEN pane over the same tile is a view over the past: not revalidated.
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE + 9e9, false, 10 * DENSITY_LIVE_REFRESH_MS), []);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE + 9e9, false, 10 * DENSITY_LIVE_REFRESH_MS), []);
 });
 
 test("MAP density refresh: a failed fetch is retried with backoff, then shown", () => {
   const f = new DensityFetches();
-  const lat = LAT as Lattice;
-  f.failed(LIVE_ADDR, 0);
-  assert.deepEqual(f.tiles([LIVE_ADDR]), [], "nothing to draw yet");
+  f.failed("p", LIVE_ADDR, 0);
+  assert.deepEqual(f.tiles("p", [LIVE_ADDR]), [], "nothing to draw yet");
   // Retried even for a frozen pane (a failure is not a copy), after the backoff — not before.
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE, false, DENSITY_RETRY_BASE_MS - 1), []);
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE, false, DENSITY_RETRY_BASE_MS), [LIVE_ADDR]);
-  f.failed(LIVE_ADDR, DENSITY_RETRY_BASE_MS);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, false, DENSITY_RETRY_BASE_MS - 1), []);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, false, DENSITY_RETRY_BASE_MS), [LIVE_ADDR]);
+  f.failed("p", LIVE_ADDR, DENSITY_RETRY_BASE_MS);
   // Second failure doubles the wait.
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE, false, 3 * DENSITY_RETRY_BASE_MS - 1), []);
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], INSIDE, false, 3 * DENSITY_RETRY_BASE_MS), [LIVE_ADDR]);
-  f.succeeded(LIVE_ADDR, counted(4), INSIDE, 3 * DENSITY_RETRY_BASE_MS);
-  assert.deepEqual(f.tiles([LIVE_ADDR]).map((t) => t.counts[0]), [4]);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, false, 3 * DENSITY_RETRY_BASE_MS - 1), []);
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, false, 3 * DENSITY_RETRY_BASE_MS), [LIVE_ADDR]);
+  f.succeeded("p", LIVE_ADDR, counted(4), INSIDE, 3 * DENSITY_RETRY_BASE_MS);
+  assert.deepEqual(countsOf(f, "p"), [4]);
 });
 
-test("MAP density refresh: a sealed past tile is fetched only once", () => {
+test("MAP density refresh: a past tile on screen in a FOLLOWING pane is re-asked as the edge advances — never sealed", () => {
   const f = new DensityFetches();
-  const lat = LAT as Lattice;
-  const later = LIVE_EXT.t1Ns + 3600e9; // asked long after the edge left the tile
-  assert.deepEqual(f.due(lat, [LIVE_ADDR], later, true, 0), [LIVE_ADDR]);
-  f.succeeded(LIVE_ADDR, counted(2), later, 0);
-  for (const t of [1, 10, 100, 1000]) {
-    assert.deepEqual(f.due(lat, [LIVE_ADDR], later + t * 1e9, true, t * DENSITY_LIVE_REFRESH_MS), [], `sealed, t=${t}`);
+  // Asked after the edge left the tile — the case a seal would freeze forever.
+  f.succeeded("p", LIVE_ADDR, counted(2), PAST_END, 0);
+  for (const s of [60, 120, 600, 3600]) {
+    assert.deepEqual(f.due("p", [LIVE_ADDR], PAST_END + s * 1e9, true, s * 1000), [LIVE_ADDR], `+${s} s`);
   }
-  // A copy asked while the edge was INSIDE gets exactly one completing re-ask after the edge passes.
-  const g = new DensityFetches();
-  g.succeeded(LIVE_ADDR, counted(1), INSIDE, 0);
-  assert.deepEqual(g.due(lat, [LIVE_ADDR], later, true, DENSITY_LIVE_REFRESH_MS), [LIVE_ADDR]);
-  g.succeeded(LIVE_ADDR, counted(3), later, DENSITY_LIVE_REFRESH_MS);
-  assert.deepEqual(g.due(lat, [LIVE_ADDR], later + 1e12, true, 100 * DENSITY_LIVE_REFRESH_MS), []);
+  // Frozen, the same past tile is asked once and kept.
+  assert.deepEqual(f.due("p", [LIVE_ADDR], PAST_END + 3600e9, false, 1e7), []);
 });
 
-test("MAP density refresh: the host asks by DensityFetches.due, not by an address key", () => {
+test("MAP density refresh: a back-dated event lands in a tile after the edge passed its end, and is shown", () => {
+  const f = new DensityFetches();
+  f.succeeded("p", LIVE_ADDR, counted(1), INSIDE, 0);
+  f.succeeded("p", LIVE_ADDR, counted(1), PAST_END, DENSITY_LIVE_REFRESH_MS); // the completing ask
+  // A track closes 60 s later with a start inside this tile: the ledger now counts 2 there.
+  const later = PAST_END + 60e9, now = DENSITY_LIVE_REFRESH_MS + 60_000;
+  assert.deepEqual(f.due("p", [LIVE_ADDR], later, true, now), [LIVE_ADDR], "the next refresh must ask again");
+  f.succeeded("p", LIVE_ADDR, counted(2), later, now);
+  assert.deepEqual(countsOf(f, "p"), [2]);
+});
+
+test("MAP density refresh: copies are per pane — a frozen pane never picks up a following pane's refresh", () => {
+  const f = new DensityFetches();
+  f.succeeded("frozen", LIVE_ADDR, counted(1), INSIDE, 0);
+  f.succeeded("live", LIVE_ADDR, counted(1), INSIDE, 0);
+  f.succeeded("live", LIVE_ADDR, counted(9), INSIDE + 1e9, DENSITY_LIVE_REFRESH_MS);
+  assert.deepEqual(countsOf(f, "live"), [9]);
+  assert.deepEqual(countsOf(f, "frozen"), [1]);
+  f.retain([["live", LIVE_ADDR]]);
+  assert.deepEqual(countsOf(f, "frozen"), [], "a pane no longer showing an address drops its copy");
+  assert.deepEqual(countsOf(f, "live"), [9]);
+});
+
+test("MAP density refresh: two panes due for one address in one tick send ONE request", async () => {
+  const urls: string[] = [];
+  let release!: (v: unknown) => void;
+  const gate = new Promise((r) => { release = r; });
+  const read = sharedDensityReader((url) => { urls.push(url); return gate; });
+  const a = read(LIVE_ADDR), b = read(LIVE_ADDR);
+  assert.equal(urls.length, 1, "deduped across panes");
+  release({ extent: { nt: 1, nf: 1, f_lo_hz: 0, f_cell_hz: 1, t0_s: 0, t_cell_s: 1 }, counts: [3] });
+  const [ta, tb] = await Promise.all([a, b]);
+  assert.deepEqual([ta?.counts, tb?.counts], [[3], [3]]);
+  // Once answered, the next ask goes out again: it shares what is IN FLIGHT, it is not a cache.
+  void read(LIVE_ADDR);
+  assert.equal(urls.length, 2);
+  // A failure resolves null, for the caller to retry.
+  const bad = sharedDensityReader(() => Promise.reject(new Error("503")));
+  assert.equal(await bad(LIVE_ADDR), null);
+});
+
+test("MAP density refresh: the host asks by DensityFetches.due per pane, through the shared reader", () => {
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(src, /densityFetches\.due\(lat, addrs, edgeNs, p\.view\.panes\.isFollowing\(pane\.id\), nowMs\)/);
+  assert.match(src, /densityFetches\.due\(pane\.id, addrs, edgeNs, p\.view\.panes\.isFollowing\(pane\.id\), nowMs\)/);
+  assert.match(src, /sharedDensityReader\(\(url\) => client\.get<unknown>\(url\)\)/);
   assert.doesNotMatch(src, /densityKeyByPane/, "a fetched-once address key froze the live edge");
 });
