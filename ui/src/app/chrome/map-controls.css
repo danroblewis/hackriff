@@ -94,9 +94,9 @@
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
 .map-sep { height: 1px; background: var(--line); margin: 2px 4px; }
 
-/* Follow-live FAB: bottom-right, above the map strip (`--map-strip`, set from the drawn height). */
+/* Follow-live FAB: bottom-right, above the panes' bottom inset (`--map-strip`; the minimap strip itself is retired, T-995). */
 .map-fab {
-  right: 0; bottom: calc(var(--map-strip, 110px) + 4px); width: 48px; height: 48px; border-radius: 50%;
+  right: 0; bottom: calc(var(--map-strip, 0px) + 4px); width: 48px; height: 48px; border-radius: 50%;
   display: grid; place-items: center; padding: 0; cursor: pointer;
   background: color-mix(in srgb, var(--panel) 72%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   border: 1px solid var(--line); color: var(--muted); box-shadow: 0 4px 18px var(--shadow);

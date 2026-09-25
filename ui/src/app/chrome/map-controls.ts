@@ -37,6 +37,10 @@ export const IDLE_CLASS = "chrome-idle";
 /** The subset of `surface/panes.ts`'s `PaneModel` the cluster drives. All of it is view state. */
 export interface PaneControl {
   zoomBoth(id: string, factor: number, anchorF?: number, anchorT?: number): void;
+  /** The part of a uniform zoom both axes can take (`PaneModel.lockedZoomFactor`, T-472). */
+  lockedZoomFactor(id: string, factor: number): number;
+  zoomFreq(id: string, factor: number, anchor?: number): void;
+  zoomTime(id: string, factor: number, anchor?: number): void;
   isFollowing(id: string): boolean;
   setFollowing(id: string, on: boolean): void;
 }
@@ -139,12 +143,26 @@ const MODE_TEXT = {
  * Zoom anchors frequency at the pane's centre and time at the newest row when the pane follows
  * (so zooming never walks a live pane off the growing edge) and at the middle when it is frozen.
  */
-export function paneActions(panes: PaneControl, activePane: () => string | null, onFollow?: (on: boolean) => void) {
+export function paneActions(panes: PaneControl, activePane: () => string | null) {
   return {
     zoom(factor: number): void {
       const id = activePane();
       if (!id) return;
-      panes.zoomBoth(id, factor, 0.5, panes.isFollowing(id) ? 1 : 0.5);
+      const anchorT = panes.isFollowing(id) ? 1 : 0.5;
+      // T-995: with the minimap retired (user, 2026-09-25) the whole 1 MHz–6 GHz range is reached by
+      // zooming OUT, Google-Maps style — so once one axis cannot take the whole press (the T-472
+      // lock comes back short of it: in practice the time axis already holds the whole record, which
+      // only grows by the seconds between presses), Zoom-out widens each axis on its own, each to its
+      // own bound, so frequency carries on to the device range. Without this a young record capped
+      // the zoom-out at tens of MHz, and a phone (no shift-wheel) had no way at all to see the whole
+      // spectrum. A discrete press, not the continuous wheel T-472 locked; the wheel, pinch and
+      // Zoom-in keep the lock unchanged, and while neither axis is at a bound this IS the lock.
+      if (factor > 1 && panes.lockedZoomFactor(id, factor) < factor) {
+        panes.zoomFreq(id, factor, 0.5);
+        panes.zoomTime(id, factor, anchorT);
+        return;
+      }
+      panes.zoomBoth(id, factor, 0.5, anchorT);
     },
     followLive(): void {
       const id = activePane();
@@ -152,7 +170,6 @@ export function paneActions(panes: PaneControl, activePane: () => string | null,
       // T-442: following is a coordinate change on the pane, nothing more — the SDR, the ring and
       // detection never paused, so there is nothing to resume anywhere but the screen.
       panes.setFollowing(id, true);
-      onFollow?.(true);
     },
     pauseLive(): void {
       const id = activePane();
@@ -160,7 +177,6 @@ export function paneActions(panes: PaneControl, activePane: () => string | null,
       // T-442: freezing writes down the window the pane was already showing — the frame you pause
       // on is identical to the one before it. The view stops; the capture does not.
       panes.setFollowing(id, false);
-      onFollow?.(false);
     },
     isFollowing(): boolean {
       const id = activePane();

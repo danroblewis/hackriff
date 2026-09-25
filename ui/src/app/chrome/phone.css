@@ -38,7 +38,7 @@ body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visi
   /* The zoom stack docks just above the follow-live FAB (the mockup's phone `.rightstack`) instead of
      at mid-height, where the short phone stage put its "−" under the FAB. Same edge, same order —
      one position per width, never user-placed (§10.6 rule 3) — and within a thumb of the FAB. */
-  .map-zoom { top: auto; transform: none; bottom: calc(var(--map-strip, 110px) + 4px + 48px + 8px); }
+  .map-zoom { top: auto; transform: none; bottom: calc(var(--map-strip, 0px) + 4px + 48px + 8px); }
 
   /* Research becomes a full-height panel (docs/23 §10.3); the sheet drops to peek when it opens
      (`focus-sheet.ts`). Still one fixed position and a visible close (§10.6 rules 1 and 3). It spans
