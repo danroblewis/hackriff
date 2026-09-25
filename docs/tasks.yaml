@@ -29399,6 +29399,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile latency review): Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache
+
+      2026-09-25 supervisor amendment (partial - the message arrived truncated, start being re-requested): (c) with A (T-1018) + B (T-1019) landed, the RAM hot cache is an ACCELERATOR ONLY - size it in viewports, not 32 MB. Raw IQ (ring.ci8, native 8-bit) is fine - no change there.
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
