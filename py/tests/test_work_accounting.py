@@ -1166,3 +1166,62 @@ def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_pat
     assert out.returncode == 0, out.stderr
     assert (tmp_path / "q").read_text().split() == ["task-x", "task-b", "task-c", "task-d", "task-a"]
     assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()
+
+
+def test_the_sweep_keeps_the_newest_hash_per_binary_everywhere_after_a_landing(tmp_path, monkeypatch):
+    """Supervisor, 2026-09-24 21:14: 2365 superseded test executables (~40 GB apparent) sat in main's target/,
+    gate-target and every worker clone - the same blocks, freed only when the last copy goes."""
+    import os
+    repo, ops = tmp_path / "repo", tmp_path / "ops"
+    def deps(base):
+        d = base / "debug" / "deps"
+        d.mkdir(parents=True)
+        return d
+
+    def exe(d, name, mtime, mode=0o755):
+        p = d / name
+        p.write_text("x")
+        p.chmod(mode)
+        os.utime(p, (mtime, mtime))
+        return p
+    main_d, gate_d = deps(repo / "target"), deps(ops / "gate-target")
+    busy_d, idle_d = deps(repo / ".claude/worktrees/t1/target"), deps(repo / ".claude/worktrees/t2/target")
+    made = {}
+    for d in (main_d, gate_d, busy_d, idle_d):
+        made[d] = [exe(d, "api_contract-00000000000000aa", 100), exe(d, "api_contract-00000000000000bb", 200),
+                   exe(d, "libhk_model-00000000000000cc.rlib", 50, 0o644), exe(d, "hk-00000000000000dd", 10)]
+    held = made[main_d][0]
+    main_old, main_new = exe(main_d, "receiver_lines-00000000000000aa", 100), exe(main_d, "receiver_lines-00000000000000bb", 200)
+    monkeypatch.setattr(R, "REPO", str(repo))
+    monkeypatch.setattr(R, "S", str(ops))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.setattr(R, "BULKMARK", str(ops / "bulk-in-progress"))
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 0.0)
+    wt1 = str(repo / ".claude/worktrees/t1")
+    def sh(args, cwd=None, timeout=120, check=False):
+        if args[:2] == ["git", "-C"]:
+            return "head1\n"
+        if "-d" in args and "cwd" in args:                   # a build in t1; stage's release build in main
+            return f"p1\nn{wt1}/crates/hk-core\np2\nn{repo}\n"
+        if args[:2] == ["ps", "eww"]:
+            return f"cargo build CARGO_TARGET_DIR={ops}/target-serve" if args[-1] == "2" else "cargo test"
+        if "+d" in args:
+            return f"p2\nn{held}\n" if args[args.index('+d') + 1] == str(main_d) else ""
+        return ""
+    monkeypatch.setattr(R, "sh", sh)
+    (ops / "bulk-in-progress").write_text("base=x\n")
+    R.sweep_superseded(dry=False)
+    assert all(p.exists() for ps in made.values() for p in ps)                 # never during a gate
+    (ops / "bulk-in-progress").unlink()
+    R.sweep_superseded(dry=False)
+    assert held.exists()                                                       # open in a process: kept
+    assert not main_old.exists() and main_new.exists()   # stage builds in main's tree into target-serve: main swept
+    for d in (gate_d, idle_d):
+        assert not made[d][0].exists() and made[d][1].exists()                 # older hash gone, newest kept
+    assert all(p.exists() for p in made[busy_d])                               # a build runs there: skipped whole
+    assert all(made[d][2].exists() and made[d][3].exists() for d in made)      # libs and lone binaries untouched
+    assert (ops / "sweep-last").read_text().strip() == "head1"
+    made[gate_d][0].write_text("x")
+    made[gate_d][0].chmod(0o755)
+    R.sweep_superseded(dry=False)
+    assert made[gate_d][0].exists()                                            # once per landing, not every tick

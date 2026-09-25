@@ -1639,6 +1639,105 @@ def _target_written(t):
                (os.stat(p) for p in (t, f"{t}/debug", f"{t}/debug/deps", f"{t}/debug/.fingerprint") if os.path.exists(p)))
 
 
+_HASHED = re.compile(r"^(.+)-([0-9a-f]{16})$")
+
+
+def superseded_executables(deps):
+    """Every executable in a cargo `deps` dir except the newest per stem: the same test/bin binary at an
+    older hash, which cargo never runs again (a rebuild relinks the newest; a missing one is rebuilt)."""
+    groups = {}
+    for n in os.listdir(deps) if os.path.isdir(deps) else []:
+        m, p = _HASHED.match(n), os.path.join(deps, n)
+        if not m or os.path.islink(p) or not os.path.isfile(p) or not os.access(p, os.X_OK):
+            continue
+        groups.setdefault(m.group(1), []).append((os.stat(p).st_mtime, p))
+    return [p for g in groups.values() for _, p in sorted(g)[:-1]]
+
+
+def _building(target, builds):
+    """A compiler/linker/test run writes into this target: a process in its tree whose CARGO_TARGET_DIR
+    is unset (then <tree>/target), or one whose CARGO_TARGET_DIR names this target from anywhere. The
+    stage daemon's release build runs in main's checkout into $HACKRIFF_OPS/target-serve and does not
+    count for main's target/ (2026-09-24 21:17: it made the first sweep skip main, 3.7 of ~40 GB freed)."""
+    tree = os.path.dirname(target)
+    for cwd, ctd in builds:
+        if ctd:
+            if os.path.realpath(ctd) == os.path.realpath(target):
+                return True
+        elif cwd == tree or (tree != REPO and cwd.startswith(tree + "/")):
+            return True
+    return False
+
+
+def _builds():
+    """(cwd, CARGO_TARGET_DIR or "") for every running cargo / rustc / linker / nextest process."""
+    out, pid, cwd = [], None, {}
+    for l in sh(["lsof", "-a", "-c", "cargo", "-c", "rustc", "-c", "ld", "-c", "ld64.lld", "-d", "cwd", "-Fpn"], timeout=60).splitlines():
+        if l.startswith("p"):
+            pid = l[1:]
+        elif l.startswith("n") and pid:
+            cwd[pid] = l[1:]
+    for pid, d in cwd.items():
+        env = sh(["ps", "eww", "-o", "command=", "-p", pid])
+        m = re.search(r"(?:^|\s)CARGO_TARGET_DIR=(\S+)", env)
+        out.append((d, m.group(1) if m else ""))
+    return out
+
+
+def sweep_superseded(dry):
+    """User via supervisor, 2026-09-24 21:14 (Serves: cost - disk 303 -> 54 GB that day): superseded test
+    executables piled up in main's target/, gate-target and every worker clone - 2365 of them, ~40 GB
+    apparent, the SAME blocks in each (clones), so they free only when the last copy goes. After every
+    landing (main's HEAD moved since the last sweep) and between gates, keep the newest hash per binary
+    in all of them in one pass. A target where cargo/rustc/the linker is at work is skipped whole, and a
+    file any process holds open is never touched."""
+    if gate_running():
+        return
+    head = sh(["git", "-C", REPO, "rev-parse", "HEAD"]).strip()
+    mark = f"{S}/sweep-last"
+    try:
+        last = open(mark).read().strip()
+    except OSError:
+        last = ""
+    if not head or head == last:
+        return
+    root = os.path.join(REPO, ".claude", "worktrees")
+    targets = [(REPO, os.path.join(REPO, "target")), (None, os.path.join(S, "gate-target"))]
+    targets += [(os.path.join(root, n), os.path.join(root, n, "target")) for n in sorted(os.listdir(root))] if os.path.isdir(root) else []
+    # Where the compilers write: a target a build is writing into is left for the next landing.
+    builds = _builds()
+    before, swept, skipped = disk_free_gb(), 0, []
+    for wt, t in targets:
+        deps = os.path.join(t, "debug", "deps")
+        if os.path.islink(t) or not os.path.isdir(deps):
+            continue
+        if _building(t, builds):
+            skipped.append(os.path.basename(wt or t))
+            continue
+        stale = superseded_executables(deps)
+        if not stale:
+            continue
+        held = {l[1:] for l in sh(["lsof", "+d", deps, "-Fn"], timeout=60).splitlines() if l.startswith("n")}
+        for p in stale:
+            if p in held:
+                continue
+            if dry:
+                swept += 1
+                continue
+            for q in (p, p + ".d"):
+                try:
+                    os.remove(q)
+                except FileNotFoundError:
+                    pass
+            swept += 1
+    if not dry:
+        with open(mark, "w") as f:
+            f.write(head + "\n")
+    if swept or skipped:
+        log(f"{'DRY-RUN ' if dry else ''}SWEEP after {head[:8]}: {swept} superseded executable(s) removed across "
+            f"{len(targets)} target(s), freed {disk_free_gb() - before:.1f} GB (df); skipped (building): {' '.join(skipped) or 'none'}")
+
+
 def reclaim_idle_targets(claims, dry):
     """reap_worktrees keeps a worktree with unmerged commits or edits, and enqueue() frees a target only
     when its branch is queued - so a timed-out, blocked, conflicted or uncommitted worker keeps 4-8 GB
@@ -2030,6 +2129,10 @@ def tick(dry):
         reclaim_idle_targets(claims, dry)
     except Exception as e:
         log(f"reclaim_idle_targets error: {e}")
+    try:
+        sweep_superseded(dry)
+    except Exception as e:
+        log(f"sweep_superseded error: {e}")
     try:
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:
