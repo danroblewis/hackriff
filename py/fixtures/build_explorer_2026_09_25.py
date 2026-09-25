@@ -71,6 +71,23 @@ def whole(n: int) -> dict[str, int]:
     return {"sample_start": 0, "sample_count": n}
 
 
+def backfill_clip_counts(meta: dict[str, Any], data_path: Path, n: int) -> None:
+    """T-960: the second explorer FM/RDS pair's raw ``.sigmf-meta`` (captured by a slightly
+    different staging-build path than T-935's first pair) omits ``hackriff:clip_count`` per
+    capture entirely rather than writing 0, unlike every other committed fixture
+    (test_committed_hackrf_fixtures_carry_provenance_and_truth). Backfilled with a real count
+    from the sample data (fxlib.count_clipped), not a hardcoded 0, so a genuinely clipped raw
+    capture missing the key would still be caught."""
+    datatype = meta["global"]["core:datatype"]
+    caps = meta["captures"]
+    for i, c in enumerate(caps):
+        if CLIP_COUNT_KEY in c:
+            continue
+        start = int(c["core:sample_start"])
+        end = int(caps[i + 1]["core:sample_start"]) if i + 1 < len(caps) else n
+        c[CLIP_COUNT_KEY] = fxlib.count_clipped(data_path, datatype, start, end - start)
+
+
 def build_one(name: str) -> dict[str, Any]:
     meta_path = OUT / f"{name}.sigmf-meta"
     data_path = OUT / f"{name}.sigmf-data"
@@ -84,6 +101,7 @@ def build_one(name: str) -> dict[str, Any]:
     fc = float(meta["captures"][0]["core:frequency"])
     n = fxlib.n_samples(data_path, meta["global"]["core:datatype"])
     prov = meta["global"][sigmf.PROVENANCE_KEY]
+    backfill_clip_counts(meta, data_path, n)
 
     clip_count = int(sum(c.get(CLIP_COUNT_KEY, 0) for c in meta["captures"]))
     clip_fraction = clip_count / n

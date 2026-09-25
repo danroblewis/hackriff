@@ -26,8 +26,8 @@ invisible to it exactly as for every other fixture.
 |---|---|---|
 | `fm-101p3-pi1694` (capture centre 100.9 MHz) | SIGNAL-062 | **101.300 MHz WFM + RDS**, oracle PI `1694` (56/56 CRC-valid groups, BLER 0.0 over the 5 s window), PTY 7, TP 0, pilot 18999.890 Hz, clock −5.77 ppm. PS is dynamic (song/artist scroll); the window's only complete frame is `Animals ` (2x), consistent with the explorer's live RT "... Glass Animals - Heat Waves". Whole-file `overload` artefact: 11 811 945 / 12 000 000 samples clipped (98.4 %) at LNA 32/VGA 30/amp on — severe front-end overload in SF's FM environment, not a bug. |
 | `fm-98p9-piA4FF` (capture centre 98.5 MHz) | SIGNAL-062 | **98.900 MHz WFM + RDS**, oracle PI `A4FF` (3/27 CRC-valid groups, BLER 0.639 — weak but internally consistent, all 3 groups vote the same PI), PTY 9, pilot 18999.849 Hz. **98.100 MHz WFM**, pilot present (18999.890 Hz) but 0 CRC-valid groups in the window: oracle agrees with the explorer's "no PI" claim. Whole-file `overload` artefact: 1 441 836 / 12 000 000 samples clipped (12.0 %). |
-| `fm-88p5-pi3AAB` (capture centre 89.0 MHz) | SIGNAL-062 | **88.500 MHz WFM + RDS**, oracle PI `3AAB` (4/34 CRC-valid groups, BLER 0.507 — weak), PTY 22, TP 0, pilot 18999.665 Hz, clock −17.62 ppm. **89.435 MHz WFM**, pilot present (18999.935 Hz) but 0 CRC-valid groups: oracle agrees with the explorer's "no PI, weak" claim. Whole-file `overload`: 0 samples clipped (no overload this clip, despite the same LNA/VGA/amp as the overloaded pair above — a quieter 5 s window, not a settings change). |
-| `fm-106p1-pi1323` (capture centre 106.5 MHz) | SIGNAL-062 | **106.100 MHz WFM + RDS**, oracle PI `1323` (22/55 CRC-valid groups, BLER 0.227), PTY 16, TP 0, pilot 18999.894 Hz, clock −5.60 ppm. **106.907 MHz WFM**, pilot present (18999.114 Hz) but 0 CRC-valid groups: oracle agrees with the explorer's "pilot lock, no RDS" claim. Whole-file `overload`: 0 samples clipped. |
+| `fm-88p5-pi3AAB` (capture centre 89.0 MHz) | SIGNAL-062 | **88.500 MHz WFM + RDS**, oracle PI `3AAB` (4/34 CRC-valid groups, BLER 0.507 — weak), PTY 22, TP 0, pilot 18999.665 Hz, clock −17.62 ppm. **89.435 MHz WFM**, pilot present (18999.935 Hz) but 0 CRC-valid groups: oracle agrees with the explorer's "no PI, weak" claim. Whole-file `overload`: 579 551 / 12 000 000 samples clipped (4.8 %), consistent with the explorer's `app_overload_flag: true`. |
+| `fm-106p1-pi1323` (capture centre 106.5 MHz) | SIGNAL-062 | **106.100 MHz WFM + RDS**, oracle PI `1323` (22/55 CRC-valid groups, BLER 0.227), PTY 16, TP 0, pilot 18999.894 Hz, clock −5.60 ppm. **106.907 MHz WFM**, pilot present (18999.114 Hz) but 0 CRC-valid groups: oracle agrees with the explorer's "pilot lock, no RDS" claim. Whole-file `overload`: 694 878 / 12 000 000 samples clipped (5.8 %), consistent with the explorer's `app_overload_flag: true`. |
 
 **Oracle cross-check (T-935): no disagreements.** The independent `rds_ref.py` oracle, run fresh
 over each fixture's own 5 s window, confirms both PI codes the explorer agent's live RDS recipe
@@ -48,6 +48,12 @@ on lattice-sync recovery order. Recorded here rather than silently reconciled, p
 the truth silently" rule; the committed `hackriff:truth.rds.pi_votes` carries this build's fresh
 count (22), not the explorer's narrative figure. Both new stations' 89.435/106.907 MHz "no RDS"
 claims are confirmed by the oracle exactly as the FM/RDS pair above.
+
+The T-960 pair's raw `.sigmf-meta` (a slightly different staging-build capture path than T-935's)
+omitted `hackriff:clip_count` per capture entirely rather than writing `0`; the build script
+backfills it from the sample data itself (`fxlib.count_clipped`), which is how the real 4.8 %/
+5.8 % clip fractions above were found — the naive "missing key defaults to 0" reading would have
+under-reported both as unclipped, contradicting the explorer's own `app_overload_flag: true`.
 
 ## The FLEX paging capture (T-949): external store, not this directory
 

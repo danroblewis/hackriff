@@ -58,7 +58,8 @@
       },
       "core:global_index": 6591373184,
       "hackriff:buffer_run": 2,
-      "hackriff:buffer_segment": 49
+      "hackriff:buffer_segment": 49,
+      "hackriff:clip_count": 694878
     }
   ],
   "annotations": [
@@ -86,8 +87,8 @@
         "duration_s": 5.0,
         "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
         "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
-        "clip_count": 0,
-        "clip_fraction": 0.0,
+        "clip_count": 694878,
+        "clip_fraction": 0.0579065,
         "overload": true,
         "quantisation_limited": false,
         "quantisation_noise_dbfs_per_hz": -113.65969934007163,
@@ -220,8 +221,8 @@
       "hackriff:truth": {
         "role": "artefact",
         "kind": "overload",
-        "clipped_samples": 0,
-        "clip_fraction": 0.0,
+        "clipped_samples": 694878,
+        "clip_fraction": 0.0579065,
         "overload_rule": "clip_fraction > 0.0001 (component at -128 or 127)",
         "note": "LNA 32 / VGA 30 / amp on in San Francisco's strong-signal FM environment on an 8-bit HackRF One with no preselector; the explorer agent's one gain-reduction retry (LNA 24 / VGA 24 / amp off) made RDS worse, so this is a front-end/location limit, not a bug (journal-20260925.md)",
         "t_start_s": 0.0,
