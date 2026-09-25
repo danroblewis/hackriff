@@ -24516,7 +24516,7 @@ tasks:
   - id: T-823
     milestone: MMAP
     title: 'Export: collections, measurements, annotations out as file/link (SigMF-adjacent)'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-RESEARCH
     model: sonnet
@@ -24552,6 +24552,7 @@ tasks:
       Observed, not chased: An earlier over-broad filter run of api_contract was killed by my timeout in open_iq_answers_as_documented (SIGTERM at 45s, slow test, not a failure of mine).
       Use cases: RESEARCH-003
       Resources: 172 CPU-s, peak 2.0 GB
+    commit: 439b9c34
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
