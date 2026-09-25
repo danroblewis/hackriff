@@ -87,7 +87,9 @@ impl Builtin {
         }
     }
 
-    fn run(
+    /// Runs this objective's loop over `window` from `start` (the worker's one call; public so a
+    /// test can exercise exactly the objective a recipe declares).
+    pub fn run(
         self,
         settings: &RefineSettings,
         window: IqWindow<'_, Complex<i8>>,

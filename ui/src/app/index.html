@@ -100,7 +100,11 @@
        the viewed window. Workflow #3: choose a region and see what was seen there over time. -->
   <div class="hist" id="view-history" data-slot="catalogue" aria-label="History" hidden></div>
 
-  <footer class="dock" data-slot="outputs" aria-label="Live outputs"></footer>
+  <!-- T-994: the Outputs dock BAR is retired — its pixels return to the map, where a box with an
+       open output shows an active halo + badge and carries its actions in a right-click /
+       long-press menu. What remains is a small, closeable Active-outputs chips strip that exists only
+       while something is open (hidden otherwise), so every former dock action stays reachable. -->
+  <div class="out-strip" data-slot="outputs" role="region" aria-label="Active outputs" hidden></div>
 </div>
 
 <aside class="review" id="review" data-slot="review" aria-label="Review" hidden></aside>

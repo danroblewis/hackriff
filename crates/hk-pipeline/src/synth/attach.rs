@@ -34,7 +34,8 @@ use hk_model::repo::LIFECYCLE_TEXT_MAX;
 use hk_model::repo::synthesis::{
     EmitterSynthesis, Resolution as RowResolution, ResolutionKind as RowKind,
     ResolutionReason as RowReason, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage as RowStage,
-    StageEvidence as RowEvidence, SynthPipeline, SynthesisJob, Verdict as RowVerdict,
+    StageEvidence as RowEvidence, SuspectedStructure, SynthPipeline, SynthesisJob,
+    Verdict as RowVerdict,
 };
 use hk_model::signature::{
     DEFAULT_MIN_DISCRIMINATING, FieldExpect, FieldSpec, RecipeRef as SigRecipeRef,
@@ -191,6 +192,11 @@ fn row_resolution(r: &Resolution) -> RowResolution {
             Reason::Tied => RowReason::Tied,
             Reason::BudgetExhausted => RowReason::BudgetExhausted,
             Reason::UnsupportedStructure => RowReason::UnsupportedStructure,
+        }),
+        // ADR-0021 §7A.6/§9.4: the structure and its missing block ride on the row itself.
+        suspected: r.suspected.as_ref().map(|s| SuspectedStructure {
+            structure: s.structure.clone(),
+            missing_block: s.missing_block.clone(),
         }),
         summary: r.summary.clone(),
     }
@@ -749,6 +755,7 @@ fn attach_in(
                         kind: RowKind::Unknown,
                         deepest_verdict: Some(row_verdict(r.verdict)),
                         reason: None,
+                        suspected: None,
                         summary: "Searched and not identified.".into(),
                     }),
             )
@@ -898,6 +905,32 @@ mod tests {
         let mut r = solved();
         f(r.holdout.as_mut().unwrap());
         r
+    }
+
+    /// T-567 (ADR-0021 §7A.6): the sealed resolution's suspicion reaches the **row**, so an
+    /// `unsupported-structure` analysis names the block it is waiting on wherever it is read —
+    /// and `hk_model`'s row validation refuses the row if it does not (so a mapping that dropped
+    /// this field would refuse every such attach, not silently lose the name).
+    #[test]
+    fn an_unsupported_structure_row_carries_the_block_it_is_waiting_on() {
+        let mut r = Resolution::not_searched(None);
+        r.kind = ResolutionKind::UnsupportedStructure;
+        r.reason = Some(Reason::UnsupportedStructure);
+        r.suspected = Some(hk_synth::trace::Suspected {
+            structure: "css".into(),
+            missing_block: "css_dechirp".into(),
+            suspected_by: hk_synth::SuspectedBy::Classification,
+            posterior: Some(0.61),
+        });
+        let row = row_resolution(&r);
+        assert_eq!(row.kind, RowKind::UnsupportedStructure);
+        let s = row.suspected.expect("the row names what it is waiting on");
+        assert_eq!(s.structure, "css");
+        assert_eq!(s.missing_block, "css_dechirp");
+        // Every other kind names nothing: `unknown` may not borrow a missing block.
+        r.kind = ResolutionKind::Unknown;
+        r.suspected = None;
+        assert!(row_resolution(&r).suspected.is_none());
     }
 
     /// ADR-0022 §4.2's worked table: the frame count is a formula, not a constant.

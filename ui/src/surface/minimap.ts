@@ -192,9 +192,10 @@ export interface OverlayQuad {
    * `onPx / periodPx` of its rectangle — [[inkFraction]] — and is still a stroke, never a wash. */
   readonly pattern?: OverlayPattern;
   /** T-910: which part of a feature's symbology this quad is — its outline (`edge`), its light
-   * `fill`, a selected feature's corner `handle`, or its generalized `symbol`. Absent on every
-   * other mark. Descriptive only: the pass draws every part the same way. */
-  readonly part?: "edge" | "fill" | "handle" | "symbol";
+   * `fill`, a selected feature's corner `handle`, or its generalized `symbol`; T-994's `active`
+   * ring is the halo drawn OUTSIDE a feature whose output (Listen/decode/record/stream) is open.
+   * Absent on every other mark. Descriptive only: the pass draws every part the same way. */
+  readonly part?: "edge" | "fill" | "handle" | "symbol" | "active";
 }
 
 /** The mark for "a pane is looking here". Amber: nowhere near any cell mark or any ramp stop. */
