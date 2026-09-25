@@ -6,7 +6,7 @@
 //! Adding a decoder is a manifest plus a spec entry; nothing is recompiled and capture never
 //! restarts.
 //!
-//! Node lists are validated into one of five shapes ([`ChainShape`]):
+//! Node lists are validated into one of seven shapes ([`ChainShape`]):
 //! - `[record?] analog-auto` — C19 auto mode (estimate → mode → WFM + RDS); writes content, so
 //!   `requires_content` must be set. A short probe window runs mode selection first; the chain
 //!   continues only when the mode is accepted (`accept_modes`, `require_pilot`);
@@ -18,8 +18,12 @@
 //!   `record` node is refused, so the hunt can never become a content chain and the fail-closed
 //!   class a 12.5 kHz LMR band derives (`metadata-only`) never has anything of its to refuse.
 //! - `sweep-char` — sweep characterisation of a candidate region from its IQ (T-297,
-//!   [`crate::chains::sweep`]). **Metadata only**, enforced the same way, and the only shape on
+//!   [`crate::chains::sweep`]). **Metadata only**, enforced the same way, and on
 //!   [`Trigger::EveryTrack`]: it attaches *beside* the decode chain rather than instead of it.
+//! - `classify` — the C15 classifier over a candidate region's own IQ (T-878,
+//!   [`crate::chains::classify`]). **Metadata only**, enforced the same way, and the other shape on
+//!   [`Trigger::EveryTrack`]: the classifier runs for every confirmed track whether or not any
+//!   decode chain matched it, attached or succeeded (ADR-0016 §4, "Placement").
 //!
 //! **Channel priors.** A spec with `raster_hz` snaps a candidate's centre to the band's channel
 //! raster and widens it to the node's channel bandwidth, and at most one chain runs per channel.
@@ -209,6 +213,30 @@ pub enum NodeSpec {
         /// Most characterising chains alive at once.
         max_chains: usize,
     },
+    /// The C15 classifier over a candidate region's own IQ (T-878, [`crate::chains::classify`]).
+    ///
+    /// Like [`NodeSpec::SweepChar`], every field is an **admission bound**: what the classifier
+    /// decides is `hk_classify`'s (its densities, gates and thresholds), which no spec can reach.
+    /// These bound what one classification may *spend*:
+    ///
+    /// - `pad_s` — signal-free pad either side of the analysed box, as `fsk-bursts` takes it;
+    /// - `retain_s` — the rolling sample buffer, so the chain's memory is bounded (and capped
+    ///   again at the same sample ceiling the fsk chain uses, whatever the rate);
+    /// - `window_s` — the longest extent analysed. A burst shorter than this is analysed whole; a
+    ///   continuous emission is analysed over its first `window_s`, and is classified as soon as
+    ///   that much of it has arrived rather than when its track closes;
+    /// - `max_chains` — most classifying chains alive at once across the run: the trigger is per
+    ///   confirmed track, and a busy band has many.
+    Classify {
+        /// Pad either side of the analysed box, s.
+        pad_s: f64,
+        /// Rolling sample buffer, s.
+        retain_s: f64,
+        /// Longest extent analysed, s.
+        window_s: f64,
+        /// Most classifying chains alive at once.
+        max_chains: usize,
+    },
 }
 
 fn one() -> u32 {
@@ -322,6 +350,17 @@ pub enum ChainShape {
         /// Most windows examined per region.
         max_passes: u64,
         /// Most characterising chains alive at once.
+        max_chains: usize,
+    },
+    /// The C15 classifier (T-878). Metadata only.
+    Classify {
+        /// Pad, s.
+        pad_s: f64,
+        /// Buffer, s.
+        retain_s: f64,
+        /// Longest extent analysed, s.
+        window_s: f64,
+        /// Most classifying chains alive at once.
         max_chains: usize,
     },
 }
@@ -474,6 +513,40 @@ impl ChainSpec {
                 })
             }
             [
+                NodeSpec::Classify {
+                    pad_s,
+                    retain_s,
+                    window_s,
+                    max_chains,
+                },
+            ] => {
+                // Metadata only, for the reason `sweep-char` is: a classification is a measured
+                // posterior about a region, which `hk_model::content` says is never gated.
+                if self.requires_content {
+                    return Err(
+                        "classify is metadata-only: it must not set requires_content".into(),
+                    );
+                }
+                if self.record().is_some() {
+                    return Err("classify is metadata-only: it must not carry a record node".into());
+                }
+                if !(*pad_s >= 0.0 && *window_s > 0.0 && *retain_s >= *window_s + 2.0 * *pad_s) {
+                    return Err(
+                        "classify needs pad_s >= 0, window_s > 0 and retain_s >= window_s + 2 pad_s"
+                            .into(),
+                    );
+                }
+                if *max_chains == 0 {
+                    return Err("classify needs max_chains >= 1".into());
+                }
+                Ok(ChainShape::Classify {
+                    pad_s: *pad_s,
+                    retain_s: *retain_s,
+                    window_s: *window_s,
+                    max_chains: *max_chains,
+                })
+            }
+            [
                 rest @ ..,
                 NodeSpec::Plugin {
                     manifest,
@@ -502,7 +575,7 @@ impl ChainSpec {
             }
             _ => Err(
                 "node list must be [record] analog-auto | [record] fsk-bursts | \
-                 [record] [ddc] plugin | trunk-cc | sweep-char"
+                 [record] [ddc] plugin | trunk-cc | sweep-char | classify"
                     .into(),
             ),
         }
@@ -624,6 +697,14 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "nodes": [
       { "node": "sweep-char", "window_s": 0.2, "frame_s": 0.004096, "max_passes": 2,
         "max_chains": 4 }
+    ]
+  },
+  {
+    "id": "classify",
+    "trigger": "every-track",
+    "bandwidth_hz": [500, 2e6],
+    "nodes": [
+      { "node": "classify", "pad_s": 0.02, "retain_s": 3.0, "window_s": 0.25, "max_chains": 4 }
     ]
   },
   {
@@ -914,6 +995,62 @@ mod tests {
         assert!(sweep.matches(903.0347e6, 903.1617e6, Some(true)));
         // And the 2-FSK burst beside it, so the run has a control that is examined and declined.
         assert!(sweep.matches(902.9267e6, 902.9534e6, Some(true)));
+    }
+
+    /// T-878: the classifier ships in the built-in registry on the every-track trigger, so it runs
+    /// beside whatever decode chain a track selects — and where none matched — never instead of
+    /// one, and it can never be turned into a content chain.
+    #[test]
+    fn the_classifier_is_built_in_beside_every_decode_chain_and_metadata_only() {
+        let specs = builtin_chains();
+        let classify = specs
+            .iter()
+            .find(|s| s.id == "classify")
+            .expect("the classifier ships in the built-in registry, not only in a plan");
+        classify.validate().unwrap();
+        assert_eq!(classify.trigger, Trigger::EveryTrack);
+        assert!(!classify.requires_content);
+        assert!(classify.record().is_none());
+        assert!(matches!(
+            classify.shape(),
+            Ok(ChainShape::Classify { max_chains, .. }) if max_chains >= 1
+        ));
+        // Selection is untouched.
+        assert_eq!(
+            select_for_track(&specs, 433.96e6, 433.99e6, Some(true))
+                .unwrap()
+                .id,
+            "fsk-bursts"
+        );
+        // The regions T-852 found unclassified: a POCSAG channel no decoder matches, a WFM station
+        // only the FM chain takes, and a LoRa burst the fsk chain gives up on.
+        assert!(classify.matches(152.355e6, 152.365e6, Some(true)));
+        assert!(classify.matches(101.1e6, 101.3e6, Some(false)));
+        assert!(classify.matches(903.0375e6, 903.1625e6, Some(true)));
+
+        let node = |patch: serde_json::Value| -> ChainSpec {
+            let mut n = serde_json::json!({ "node": "classify", "pad_s": 0.02, "retain_s": 3.0,
+                "window_s": 0.25, "max_chains": 4 });
+            for (k, v) in patch.as_object().unwrap() {
+                n[k.as_str()] = v.clone();
+            }
+            serde_json::from_value(serde_json::json!({ "id": "c", "trigger": "every-track",
+                "nodes": [n] }))
+            .unwrap()
+        };
+        node(serde_json::json!({})).validate().unwrap();
+        for bad in [
+            serde_json::json!({ "max_chains": 0 }),
+            serde_json::json!({ "window_s": 0.0 }),
+            // The buffer must hold a whole window and its pads, or a continuous emission's box has
+            // left it before it spans the window.
+            serde_json::json!({ "retain_s": 0.2 }),
+        ] {
+            assert!(node(bad.clone()).validate().is_err(), "{bad} is unbounded");
+        }
+        let mut content = node(serde_json::json!({}));
+        content.requires_content = true;
+        assert!(content.validate().is_err(), "a posterior is not content");
     }
 
     #[test]
