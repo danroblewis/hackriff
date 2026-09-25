@@ -47,6 +47,15 @@ export const PIN_HIT_RADIUS_PX = 12;
  * mockup's `yTop + 10`), never further than the middle of the visible part of the interval. */
 export const PIN_EDGE_INSET_PX = 10;
 
+/**
+ * GIS scale-dependent generalization (user decision 2026-09-24: "a signal has a frequency width
+ * and a duration, that's a rectangle"). A feature whose box is at least this many CSS px on screen
+ * in BOTH axes is represented by its box — the detections layer (T-808) strokes it — and the pin
+ * draws NO glyph there, only an invisible hit area over the box. Below it in either axis the box is
+ * too small to read, and the feature generalizes to the glyph at its centre.
+ */
+export const PIN_GENERALIZE_BELOW_PX = 6;
+
 /** docs/24 §14.2's glyph vocabulary. Shape carries the kind, so state is never hue alone. */
 export type PinKind = "confirmed" | "candidate" | "unknown" | "curated";
 
@@ -71,6 +80,10 @@ export interface Pin {
   /** Detection markers render the live catalogue; curated markers are durable research objects. */
   readonly source: "detection" | "curated";
   readonly fHz: number;
+  /** The feature's frequency extent — the same edges its detections-layer box is drawn from. A
+   * curated marker is a point (`f0Hz === f1Hz`), so it always generalizes to its glyph. */
+  readonly f0Hz: number;
+  readonly f1Hz: number;
   /** The time extent the pin may sit in. A curated marker is an instant (`t0Ns === t1Ns`). `null`
    * = open at the live edge. */
   readonly t0Ns: number;
@@ -124,7 +137,8 @@ export function detectionPins(rows: readonly PinRow[]): Pin[] {
     const t0Ns = iv.t_start_s * S_TO_NS;
     const t1Ns = iv.open ? null : iv.t_end_s * S_TO_NS;
     out.push({
-      id: r.id, kind, source: "detection", fHz: centreHz, t0Ns, t1Ns,
+      id: r.id, kind, source: "detection", fHz: centreHz,
+      f0Hz: r.user_band ? r.user_band.f_lo : r.f_lo_hz, f1Hz: r.user_band ? r.user_band.f_hi : r.f_hi_hz, t0Ns, t1Ns,
       tip: { centreHz, bandwidthHz, family, onAir: iv.open, startNs: t0Ns, endNs: t1Ns },
     });
   }
@@ -136,7 +150,7 @@ export function curatedPins(markers: readonly PinMarker[]): Pin[] {
   return markers.map((m) => {
     const t = m.t_s * S_TO_NS;
     return {
-      id: m.id, kind: "curated", source: "curated", fHz: m.f_hz, t0Ns: t, t1Ns: t,
+      id: m.id, kind: "curated", source: "curated", fHz: m.f_hz, f0Hz: m.f_hz, f1Hz: m.f_hz, t0Ns: t, t1Ns: t,
       tip: { centreHz: m.f_hz, bandwidthHz: null, family: null, onAir: false, startNs: t, endNs: null, name: m.name },
     };
   });
@@ -148,6 +162,10 @@ export interface PlacedPin {
   readonly paneId: string;
   readonly x: number;
   readonly y: number;
+  /** The feature's visible box on screen (CSS px) when it is at least
+   * [[PIN_GENERALIZE_BELOW_PX]] in both axes: then there is NO glyph, and this rectangle is the
+   * invisible hit/focus area. Absent/null = generalized to the glyph at `(x, y)`. */
+  readonly area?: { readonly x0: number; readonly y0: number; readonly x1: number; readonly y1: number } | null;
 }
 
 export interface PaneLayout {
@@ -188,7 +206,10 @@ export function layoutPanePins(
     if (vis1 < vis0) continue;
     const yTop = yOf(vis1), yBot = yOf(vis0);
     const y = Math.min(yTop + PIN_EDGE_INSET_PX, (yTop + yBot) / 2);
-    inPane.push({ pin: p, paneId, x: left + w * ((p.fHz - box.f0Hz) / fSpan), y });
+    const xOf = (f: number) => left + w * ((f - box.f0Hz) / fSpan);
+    const x0 = xOf(Math.max(Math.min(p.f0Hz, p.f1Hz), box.f0Hz)), x1 = xOf(Math.min(Math.max(p.f0Hz, p.f1Hz), box.f1Hz));
+    const big = x1 - x0 >= PIN_GENERALIZE_BELOW_PX && yBot - yTop >= PIN_GENERALIZE_BELOW_PX;
+    inPane.push({ pin: p, paneId, x: xOf(p.fHz), y, area: big ? { x0, y0: yTop, x1, y1: yBot } : null });
   }
   if (inPane.length <= cap) return { placed: inPane, overCap: 0 };
   inPane.sort((a, b) => PRIORITY[a.pin.kind] - PRIORITY[b.pin.kind]);
@@ -356,7 +377,7 @@ export class PinLayer {
   update(layouts: readonly PaneLayout[], hoveredId: string | null, selectedId: string | null): void {
     const doc = this.root.ownerDocument;
     this.placed = layouts.flatMap((l) => l.placed);
-    this.index = new PinIndex(this.placed);
+    this.index = new PinIndex(this.placed.filter((p) => !p.area));
     const seen = new Set<string>();
     for (const p of this.placed) {
       const key = `${p.paneId}|${p.pin.id}`;
@@ -375,14 +396,22 @@ export class PinLayer {
         this.els.set(key, el);
       }
       this.byEl.set(el, p);
-      const cls = `sf-pin ${p.pin.kind} ${p.pin.source}`
+      const cls = `sf-pin ${p.pin.kind} ${p.pin.source}${p.area ? " area" : ""}`
         + (p.pin.id === hoveredId ? " hovered" : "") + (p.pin.id === selectedId ? " selected" : "");
       if (el.className !== cls) el.className = cls;
       const label = pinLabel(p.pin);
       if (el.getAttribute("aria-label") !== label) el.setAttribute("aria-label", label);
       const pressed = String(p.pin.id === selectedId);
       if (el.getAttribute("aria-pressed") !== pressed) el.setAttribute("aria-pressed", pressed);
-      el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px)`;
+      if (p.area) {
+        // No glyph: an invisible, focusable hit area exactly over the box the detections layer draws.
+        el.style.transform = `translate(${p.area.x0.toFixed(1)}px, ${p.area.y0.toFixed(1)}px)`;
+        el.style.width = `${(p.area.x1 - p.area.x0).toFixed(1)}px`;
+        el.style.height = `${(p.area.y1 - p.area.y0).toFixed(1)}px`;
+      } else {
+        el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px)`;
+        if (el.style.width) { el.style.width = ""; el.style.height = ""; }
+      }
     }
     for (const [key, el] of this.els) {
       if (seen.has(key)) continue;
@@ -396,8 +425,21 @@ export class PinLayer {
     this.overEl.hidden = over === 0;
   }
 
-  /** The pin under a pointer, CSS px from the canvas's top-left — the quadtree, not the DOM. */
-  pick(x: number, y: number): PlacedPin | null { return this.index.pick(x, y); }
+  /** The feature under a pointer, CSS px from the canvas's top-left — not the DOM. A generalized
+   * glyph (the quadtree) wins, being the more specific target; otherwise anywhere inside a box
+   * hits that feature, the smallest box first where boxes nest. */
+  pick(x: number, y: number): PlacedPin | null {
+    const glyph = this.index.pick(x, y);
+    if (glyph) return glyph;
+    let best: PlacedPin | null = null, bestA = Infinity;
+    for (const p of this.placed) {
+      const a = p.area;
+      if (!a || x < a.x0 || x > a.x1 || y < a.y0 || y > a.y1) continue;
+      const size = (a.x1 - a.x0) * (a.y1 - a.y0);
+      if (size < bestA) { best = p; bestA = size; }
+    }
+    return best;
+  }
 
   /** Every placed pin this frame (tests, and a screen reader's summary). */
   get pins(): readonly PlacedPin[] { return this.placed; }

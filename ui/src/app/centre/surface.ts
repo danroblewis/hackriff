@@ -439,7 +439,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     tipEl.dataset.pin = now.pin.id;
     // Beside the pin, flipped to its left where it would run off the canvas's right edge.
     const w = tipEl.offsetWidth;
-    const x = now.x + 14 + w > canvas.clientWidth ? now.x - 14 - w : now.x + 14;
+    // For a feature drawn as its box (no glyph), beside the box's edge rather than over it.
+    const xr = now.area ? now.area.x1 : now.x, xl = now.area ? now.area.x0 : now.x;
+    const x = xr + 14 + w > canvas.clientWidth ? xl - 14 - w : xr + 14;
     tipEl.style.transform = `translate(${x.toFixed(1)}px, ${(now.y + 10).toFixed(1)}px)`;
   };
   const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {

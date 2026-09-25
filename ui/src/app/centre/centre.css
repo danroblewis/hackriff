@@ -152,6 +152,11 @@
 .sf-pin.hovered::before, .sf-pin:focus-visible::before { scale: 1.3; }
 .sf-pin:focus-visible { outline: 2px dashed var(--fg, #d5dee2); outline-offset: -2px; border-radius: 4px; }
 .sf-pin.selected { border-radius: 50%; box-shadow: inset 0 0 0 2px var(--amber), 0 0 6px var(--amber); }
+/* User decision 2026-09-24: a signal is a rectangle. A feature whose box is >= 6 px in both axes
+   draws NO glyph — the detections layer's box is the representation — and its button is an
+   invisible hit/focus area over that box, sized per frame by `PinLayer.update`. */
+.sf-pin.area { margin: 0; background: none; box-shadow: none; border-radius: 0; }
+.sf-pin.area::before, .sf-pin.area::after { content: none; display: none; }
 .sf-pins-over {
   position: absolute; right: 8px; top: 8px; padding: 2px 8px; border-radius: 10px;
   background: rgba(13, 19, 23, .8); color: var(--lav); font: 10.5px var(--mono);

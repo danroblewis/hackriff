@@ -393,3 +393,68 @@ test("thin client: hover, focus and select reach no route; the module names no r
     assert.ok(!src.includes(banned), `pins.ts reaches for ${banned}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 9: GIS generalization (user decision 2026-09-24): a signal is a RECTANGLE. The box is the
+//    representation; the glyph exists only when the box is < 6 px on screen in either axis.
+// ---------------------------------------------------------------------------
+
+test("a box >= 6 px in both axes draws NO glyph: its button is an invisible area over the box", () => {
+  // 200 kHz of a 2 MHz / 1000 px pane = 100 px wide; 5 s of a 20 s / 500 px pane = 125 px tall.
+  const [p] = detectionPins([row("big")]);
+  const { placed } = layoutPanePins([p], "p1", BOX, RECT, 500, 1, T0 * S);
+  assert.ok(placed[0].area, "a readable box is not generalized");
+  near(placed[0].area!.x0, 450); near(placed[0].area!.x1, 550);
+  near(placed[0].area!.y0, 500 * (1 - 15 / 20)); near(placed[0].area!.y1, 500 * (1 - 10 / 20));
+  const root = new FakeEl();
+  const layer = new PinLayer(root as unknown as HTMLElement);
+  layer.update([{ placed, overCap: 0 }], null, null);
+  const el = layer.element("p1", "big") as unknown as FakeEl;
+  assert.equal(el.className, "sf-pin candidate detection area", "the `area` class suppresses the glyph");
+  assert.equal(el.style.transform, "translate(450.0px, 125.0px)");
+  assert.equal(el.style.width, "100.0px");
+  assert.equal(el.style.height, "125.0px");
+  assert.match(el.getAttribute("aria-label")!, /^candidate signal at /, "still focusable with its name");
+  const css = readFileSync("src/app/centre/centre.css", "utf8");
+  assert.match(css, /\.sf-pin\.area::before, \.sf-pin\.area::after \{ content: none; display: none; \}/);
+});
+
+test("a box < 6 px in either axis generalizes to the glyph at its centre", () => {
+  // 5 kHz of a 2 MHz / 1000 px pane = 2.5 px wide (tall enough in time) → glyph.
+  const [narrow] = detectionPins([row("n", { f_lo_hz: 100.9975e6, f_hi_hz: 101.0025e6, bandwidth_hz: 5e3 })]);
+  // 0.1 s of a 20 s / 500 px pane = 2.5 px tall (wide enough in frequency) → glyph.
+  const [brief] = detectionPins([row("b", { presence: { last_interval: { t_start_s: T0 - 10, t_end_s: T0 - 9.9, open: false } } })]);
+  const { placed } = layoutPanePins([narrow, brief], "p1", BOX, RECT, 500, 1, T0 * S);
+  assert.equal(placed.length, 2);
+  for (const q of placed) assert.equal(q.area, null, `${q.pin.id} generalizes`);
+  // A curated marker is a point: always the glyph.
+  const [c] = curatedPins([{ id: "m", name: "mine", f_hz: 101e6, t_s: T0 - 5 }]);
+  assert.equal(layoutPanePins([c], "p1", BOX, RECT, 500, 1, T0 * S).placed[0].area, null);
+  const root = new FakeEl();
+  const layer = new PinLayer(root as unknown as HTMLElement);
+  layer.update([{ placed, overCap: 0 }], null, null);
+  const el = layer.element("p1", "n") as unknown as FakeEl;
+  assert.equal(el.className, "sf-pin candidate detection");
+  near(placed[0].x, 500);
+  assert.equal(el.style.transform, `translate(500.0px, ${placed[0].y.toFixed(1)}px)`);
+  // Zooming in until the same feature is readable turns it back into its box.
+  const zoomed = { ...BOX, f0Hz: 100.99e6, f1Hz: 101.01e6 };
+  assert.ok(layoutPanePins([narrow], "p1", zoomed, RECT, 500, 1, T0 * S).placed[0].area);
+});
+
+test("hover/click anywhere inside a large box hits the feature, far from its centre", () => {
+  const [p] = detectionPins([row("big")]); // box x 450..550, y 125..250; centre glyph point (500, 135)
+  const root = new FakeEl();
+  const layer = new PinLayer(root as unknown as HTMLElement);
+  layer.update([layoutPanePins([p], "p1", BOX, RECT, 500, 1, T0 * S)], null, null);
+  assert.equal(layer.pick(455, 245)?.pin.id, "big", "bottom-left corner, 60 px from the centre point");
+  assert.equal(layer.pick(545, 200)?.pin.id, "big");
+  assert.equal(layer.pick(440, 200), null, "outside the box: nothing");
+  assert.equal(layer.pick(500, 260), null);
+  // A generalized glyph inside a big box is the more specific target.
+  const [small] = detectionPins([row("s", { f_center_hz: 101.03e6, f_lo_hz: 101.0299e6, f_hi_hz: 101.0301e6 })]);
+  layer.update([layoutPanePins([p, small], "p1", BOX, RECT, 500, 1, T0 * S)], null, null);
+  const s = layer.pins.find((q) => q.pin.id === "s")!;
+  assert.equal(layer.pick(s.x, s.y)?.pin.id, "s");
+  assert.equal(layer.pick(460, 240)?.pin.id, "big");
+});
