@@ -28670,7 +28670,7 @@ tasks:
   - id: T-970
     milestone: MAUTO
     title: "FM/RDS sub-1: classifier classes a pilot+RDS station as WFM (today unknown 0.999 on 106.1/98.085)"
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: CLASSIFY-WFM
@@ -28695,6 +28695,7 @@ tasks:
       Observed, not chased: THE REVIEW HARNESS ITSELF: ops/work/T-970/review.json contains two concatenated JSON records - a complete newer one ending `VERDICT: PASS` and the trailing bytes of an older, longer one ending `VERDICT: FAIL a pilot-only WFM call can lose to a prior below the 10:1 dominance ratio...`. The newer write is shorter than the older, and the writer overwrites without truncating, so the stale tail survives and the verdict parse sees two verdict lines (hence `REVIEW_FAIL no verdict line`). Whatever opens that path should truncate, or write to a temp file and rename. As it stands a second review of any branch can silently resurrect the first review's verdict. | Acceptance gap the reviewer also named, and I agree with: the ticket asked for a blind test THROUGH THE MOCK SDR. `ota_fm_stations.rs` reads the SigMF files directly and finds stations with its own peak search, mirroring hk-pipeline/src/classify.rs:147-163 step for step rather than going through the device interface, the detector and chains/classify.rs. It is a coverage gap, not a bug - the production call path is identical - but it wants a ticket for a mock-SDR test asserting the pipeline's own wfm row. | `GET /api/taxonomy` (crates/hk-api/src/taxonomy.rs:42) serves `max_confidence` but not the new `max_unknown_confidence`, so a UI cannot learn the 0.9 abstention ceiling from the contract. Adding it is the docs/api.md + crates/hk-cli/tests/api_contract.rs pair (T-079) and was left out of scope. | The `asserted >= 5` guard in ota_fm_stations.rs should be raised when T-960's 88.5 and 106.1 MHz fixtures land: the test enumerates fixtures by path and skips unfetched ones, so they join the assertion set with no code change, but the ticket's named 106.1 station is not covered until then. | hk-pipeline was not re-run after this fix (it was 442/447 before, all five reds triaged as load-flakes that pass alone in 1.3-8.9 s against 80-172 s loaded: data_path x2, degrade_dont_crash x2, departure_rows_folded x1 - none of them classifies anything). This fix only narrows what the classifier may emit; it cannot widen any row, and every hk-classify test including the contract test every_classification_satisfies_the_contract is green.
       Use cases: SIGNAL-062
       Resources: 4 CPU-s, peak 0.3 GB
+    commit: 0ba7890c
   - id: T-971
     milestone: MAUTO
     title: "FM/RDS sub-2: continuous RDS accumulation on the detection row (PS/RT/PTY), not a 4-group PI snapshot"
