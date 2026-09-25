@@ -26511,7 +26511,8 @@ tasks:
   - id: T-901
     milestone: MLIVE
     title: Server row pushes on /ws/tiles/rows stall 0.35-5 s every ~64 rows (and /api/navigation with them) - live rows are not steady (T-893 finding)
-    status: todo
+    status: in-progress
+    branch: task-t901
     priority: high
     deps:
     - T-893
