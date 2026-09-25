@@ -48,7 +48,7 @@
 // `HK_E2E_TILE_FAIR`, so a baseline run cannot be mistaken for a green one.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Browser } from "./harness.mjs";
+import { Browser, sharesStated } from "./harness.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const STATUS = `(document.querySelector('[data-slot="status"]')?.textContent ?? '')`;
@@ -97,6 +97,9 @@ test("a second tab can open /surface while the first is saturating the tile rout
 
   // Tab one: load, then send it to the whole surface so it is demanding tiles as hard as it can.
   const first = await browser.page();
+  // Record what the route STATED in each of the first tab's answers, single reads included, so the
+  // readout assertion below is gated on what the route said and not merely on a response arriving.
+  first.tileShares = true;
   await first.goto(`${ORIGIN}/surface.html#token=${TOKEN}`);
   await first.waitForSurfaceMounted();
   await first.waitFor("the first tab to be uploading tiles",
@@ -227,13 +230,33 @@ test("a second tab can open /surface while the first is saturating the tile rout
   // clients registered. Count those, from the two pages' own records: one or more of them and the
   // first tab was told its share and had every chance to say so; none of them and it was never
   // told, which is a fact about this run and not a defect in the client.
+  //
+  // **"Told" means the answer STATED a share, not that a response came back** (deflake, 2026-09-24).
+  // Since T-573 nearly every read is a batch, and a batch whose members were all refused is still a
+  // `200` — the share is in each member's `503` message, where the page has to read it. Counting
+  // any response as "told" hid which path the statement took; the red of 2026-09-24 ("share 4 …
+  // the route answered 1 of its reads") was exactly a read the route answered with refusals naming
+  // `share 2`, which the batch path then dropped (`tilebatch.ts`). So the harness reads the share
+  // out of every answer (a tile's `cost.in_flight_share`, a refusal's `share N`), and the gate below
+  // counts the reads that carried one — any value, so the first-come-first-served baseline, which
+  // states 4, still reaches the assertion with the evidence to be red.
+  await first.settleBodies();
   const secondAnsweredAt = tiles(second).find((r) => r.respondedMs !== null)?.respondedMs ?? null;
-  const told = secondAnsweredAt === null ? [] : tiles(first).filter(
+  const after = secondAnsweredAt === null ? [] : tiles(first).filter(
     (r) => r.startedMs >= secondAnsweredAt && r.respondedMs !== null);
+  const told = after.filter((r) => sharesStated(r).length > 0);
+  const byKind = { "batch tile": [], "batch refusal": [], "single read": [] };
+  for (const r of told) {
+    if (r.entries) for (const e of r.entries) {
+      if (e.share !== null && e.share !== undefined) byKind[e.status === 200 ? "batch tile" : "batch refusal"].push(e.share);
+    } else byKind["single read"].push(r.share);
+  }
+  const statedText = Object.entries(byKind).filter(([, v]) => v.length)
+    .map(([k, v]) => `${v.length} ${k}(s) stating share ${[...new Set(v)].join("/")}`).join(", ") || "none";
   t.diagnostic(`first tab: peak ${peak} admitted tile reads over ${during.length} requests the route ` +
-    `served it while the second tab booted; the route answered it ${told.length} read(s) begun after ` +
-    `the second tab was registered; status line "${m ? m[0] : statusLine}" ` +
-    `(settled after ${settled.polls} sample(s), ${settled.ms} ms)`);
+    `served it while the second tab booted; of ${after.length} read(s) begun after the second tab ` +
+    `was registered and answered, ${told.length} stated a share (${statedText}); status line ` +
+    `"${m ? m[0] : statusLine}" (settled after ${settled.polls} sample(s), ${settled.ms} ms)`);
   // **Non-vacuity, before the assertion rather than after it**: a peak measured over a window in
   // which the first tab asked for nothing proves nothing about who the route would have preferred.
   // Say so, and do not assert on it — a green banked on a race that did not happen is the failure
@@ -259,11 +282,12 @@ test("a second tab can open /surface while the first is saturating the tile rout
   // red (measured 2026-09-23: 3 reads answered, 199 readouts, over 30 s).
   assert.ok(Number(m[4]) <= share || told.length === 0,
     `the first tab still believes its share is ${m[4]} of ${limit} with two clients up: "${m[0]}". ` +
-    `The route answered ${told.length} of its reads begun after the second tab registered, so it ` +
-    `was told; it had ${settled.polls} readout(s) over ${settled.ms} ms to say so.`);
+    `The route stated a share in ${told.length} of its answers to reads begun after the second tab ` +
+    `registered (${statedText}), so it was told; it had ${settled.polls} readout(s) over ` +
+    `${settled.ms} ms to say so.`);
   if (Number(m[4]) > share) {
-    t.diagnostic("INCONCLUSIVE: the route answered the first tab no read begun after the second tab " +
-      `registered, so it was never told its share; the readout's "share ${m[4]}" is the last number ` +
+    t.diagnostic("INCONCLUSIVE: no answer to a read the first tab began after the second tab " +
+      `registered stated a share, so it was never told one; the readout's "share ${m[4]}" is the last number ` +
       "the route gave it and is honest. The boot bounds and the peak above still hold.");
   }
   assert.ok(Number(m[1]) + Number(m[2]) <= Number(m[3]),
