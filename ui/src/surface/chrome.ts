@@ -97,6 +97,13 @@ export interface ReadoutRow {
   readonly tierLabel: string;
   /** What the frame actually drew for it — resident tiles, coarse stand-ins, and not-yet-arrived. */
   readonly counts: string;
+  /**
+   * **What the last-known (shadow) cells on this viewport were read at** (T-916), or `null` when
+   * every shadow here was read at the pane's own level — see [[PaneStatus.shadowLabel]]. Shown on
+   * its own line, like `ruler`, because it is a second resolution on one screen and the level cell
+   * already speaks for the measured cells.
+   */
+  readonly shadow: string | null;
   /** The other viewports this one resolved to a different level from. */
   readonly differsFrom: readonly string[];
   /** This viewport's own control, or `null` when it has none (T-476). */
@@ -152,6 +159,10 @@ export function readoutOf(
       // "never looked" is not "not arrived yet", and a readout that cannot say which is which is
       // the grey-vs-pending confusion one level up.
       counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge${s.surveyed ? ` · ${s.surveyed} never sampled` : ""}${s.blank ? ` · ${s.blank} drew nothing` : ""}${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`,
+      // T-916: named beside the counts, because it is the same kind of statement as `level` — what
+      // the pixels on this pane were actually measured at. Absent when every shadow here was read
+      // at the pane's own level, which is the case the readout has nothing extra to say about.
+      shadow: s.shadowLabel,
       differsFrom: s.differsFrom,
       // The map is a viewport, but it is not one you *look* through — it is the thing that says
       // where the panes are — so a control that acts on "this viewport's window" has no meaning on
@@ -218,6 +229,12 @@ export class SurfaceChrome {
       // (`flex-basis: 100%`, like `why`), hidden rather than emptied when there is nothing to mark.
       entry.ruler.hidden = row.ruler === null;
       if (row.ruler !== null) set(entry.ruler, row.ruler);
+      // T-916: the last-known tier's own resolution statement. Hidden — not emptied — when there is
+      // nothing to say, exactly as `ruler` is, and marked on the element too so a test (and a
+      // stylesheet) reads the state rather than parsing the sentence.
+      entry.shadow.hidden = row.shadow === null;
+      entry.root.setAttribute("data-shadow-source", row.shadow === null ? "own-level" : "ladder");
+      if (row.shadow !== null) set(entry.shadow, row.shadow);
       // The control is created once with the row and only ever *updated*: a button rebuilt each
       // frame is a button that cannot be pressed, because the element under the finger between
       // pointerdown and pointerup would be a different one.
@@ -283,12 +300,13 @@ export class SurfaceChrome {
     const why = h("span", { class: "hk-surface-why", hidden: true });
     const action = h("button", { class: "hk-surface-action", type: "button", hidden: true }) as HTMLButtonElement;
     const ruler = h("span", { class: "hk-surface-ruler", hidden: true });
+    const shadow = h("span", { class: "hk-surface-shadow-source", hidden: true });
     const widthGroup = h("div", { class: "hk-surface-widths", hidden: true });
     // The id is captured, not read off the DOM: rows are kept by id and this listener outlives every
     // update, so the press names the viewport the row was minted for and nothing else.
     action.addEventListener("click", () => { if (!action.disabled) this.onAction?.(id); });
-    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler);
-    const entry: Row = { root, cells, why, action, ruler, widthGroup, widthBtns: [] };
+    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler, shadow);
+    const entry: Row = { root, cells, why, action, ruler, shadow, widthGroup, widthBtns: [] };
     this.rows.set(id, entry);
     this.list.append(root);
     return entry;
@@ -308,6 +326,7 @@ interface Row {
   readonly why: HTMLElement;
   readonly action: HTMLButtonElement;
   readonly ruler: HTMLElement;
+  readonly shadow: HTMLElement;
   readonly widthGroup: HTMLElement;
   readonly widthBtns: WidthBtn[];
 }

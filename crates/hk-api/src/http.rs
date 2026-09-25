@@ -141,6 +141,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-897: traced (t, f) paths - chirps, sweeps, hop sequences - over a viewport (the map's
     // `paths` layer, docs/23 §10.6 rule 2)
     ("GET", "/api/paths"),
+    // T-898: the device's own route through frequency - the recorded tune intervals as a traced
+    // path per front end (the map's `tune` layer, docs/23 §10.6 rule 2)
+    ("GET", "/api/tune-history"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
     // T-463: the one playhead of historical playback (view state over recorded history; audio at
@@ -1297,6 +1300,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
         .or_else(|| crate::paths::route(state, &ctl)) // T-897
+        .or_else(|| crate::tune_history::route(state, &ctl)) // T-898
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
         .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))

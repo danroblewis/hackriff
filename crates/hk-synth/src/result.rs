@@ -101,6 +101,11 @@ pub struct CheckSummary {
     pub tested: u32,
     /// Whether these counts are from the hold-out window.
     pub holdout: bool,
+    /// The recipe node (check block) these counts are from, so the engine reads `differences`
+    /// and `width` off the **same** block. `None` from an evaluator that does not say: the engine
+    /// then takes the smallest count any check block reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// A template reference on a result.

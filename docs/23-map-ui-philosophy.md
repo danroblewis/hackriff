@@ -459,6 +459,18 @@ the retune offer, the mode banner, or any honesty statement (the per-pane tier/l
 retention-bound and IQ-horizon rules and the words beside them). A statement about what the data *is*
 may not be made less legible to make the picture prettier.
 
+**Collapsing is not fading, and the line between them (T-919, 2026-09-25).** The pane status
+bottom-left is a **compact line**, not a panel: the per-pane **tier/level** readout (with that
+pane's Retune and the sentence naming where it would go) and the **colour-scale** statement stay on
+the picture in every state, never faded and never behind a press. The paragraph-length statements —
+the spectrum-trace readout, the IQ-ring rules **in words** (retention bound, oldest IQ, whether this
+pane's own time position has IQ), the fog note, the ranked priors and the orientation note — sit
+behind a visible toggle with a visible dismiss, because P1 (§10.6 rule 1) says an overlay's default
+state is its smallest. Two things this does **not** license: the rules themselves are drawn on every
+pane whatever the status says (they are band-0/1 marks, not chrome), and the box can never be closed
+to *nothing* — dismissing returns it to the line. Measured: 560 × 184 px permanent, before; 560 × 29
+at 1440 px and 340 × 51 at 420 px, after (`ui/e2e/app-status.e2e.mjs`).
+
 ### 10.3 The sheet at every width; Research as a right slide-in
 
 Settled 2026-09-22 (ADR-0023 §7); these were the mockup's two open choices.

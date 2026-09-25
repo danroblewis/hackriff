@@ -1319,6 +1319,8 @@ export class TileCache<T> {
       ...claimOf(rows.resolution, c),
       rangeDb: null, bytes: n * BYTES_PER_CELL,
       serverInFlightLimit: null, serverInFlightShare: null,
+      // Pushed rows carry no shadow: a synthesized tile is live rows and nothing else (T-916).
+      shadowSource: null,
     };
     const tex = this.tex.upload(data);
     this.stats.uploads++;

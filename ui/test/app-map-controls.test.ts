@@ -190,7 +190,43 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   // (docs/23 §10.1: no chrome subtracts from the canvas). The statuses that were rows under the
   // stage float over it in one bottom-left stack, as screen-space chrome, with the readout.
   assert.match(host, /el\.replaceChildren\(stage\);/, "the stage is the surface's only row: full-bleed, nothing above or below it");
-  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome" \}, traceEl, ringEl, fogEl, priorsEl, chrome, note, readout\)/,
-    "the statuses float over the stage as one chrome stack");
+  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome", "data-open": "false" \}, statusBody, statusLine\)/,
+    "the statuses float over the stage as one chrome stack, collapsed by default");
   assert.match(host, /paneMenuExtras: \[recordBtn\]/, "Record IQ has a home in the viewport menu");
+});
+
+// T-919 (user P1, docs/23 §10.6 rule 1 + §10.2): the floating status is a COMPACT LINE that
+// expands on demand and has a visible dismiss — it is not a permanent 560 x 184 px panel over the
+// waterfall. What is compiled in here is the composition and the toggle; that the collapsed box is
+// actually small, that the tier/level statement is in it in every state, and that expand / collapse
+// / dismiss work on the real page are `ui/e2e/app-status.e2e.mjs`'s to measure.
+test("T-919: the status box is a collapsed line by default, with a toggle and a dismiss that never hides the honesty statements", () => {
+  const host = readFileSync("src/app/centre/surface.ts", "utf8");
+  // The paragraphs — the ones that made it tall — are the BODY, and the body starts hidden.
+  assert.match(host, /class: "sf-status-body", id: "sf-status-body", hidden: true \},\s*\n?\s*traceEl, ringEl, fogEl, priorsEl, note\)/,
+    "the sentences are not the collapsible body, or the body does not start closed");
+  // The line is always on the picture, and carries the per-viewport level/tier row (§10.2: an
+  // honesty statement is never hidden) and the colour-scale sentence (T-470).
+  assert.match(host, /class: "sf-status-line" \},\s*\n?\s*chrome, readout,/,
+    "the always-visible line must carry the viewport level readout and the colour-scale readout");
+  for (const [re, why] of [
+    [/class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded"/, "no accessible expand control"],
+    [/class: "sf-status-close", type: "button", "aria-label": "Close the status detail"/, "no visible dismiss (P1)"],
+    [/trackOverlay\("surface-status", \(\) => setStatusOpen\(false\)\)/, "the detail is not on the one Escape stack (T-900)"],
+    [/statusClose\.addEventListener\("click", \(\) => setStatusOpen\(false\)\)/, "the dismiss does not close the detail"],
+  ] as const) assert.match(host, re, why);
+  // Dismissing returns to the LINE, never to nothing: nothing removes or hides `statusEl` itself.
+  assert.doesNotMatch(host, /statusEl\.hidden|statusLine\.hidden|statusEl\.remove\(\)/,
+    "the status line itself can be hidden, which would switch an honesty statement off");
+  const css = readFileSync("src/app/centre/centre.css", "utf8");
+  assert.match(css, /\.sf-status \{[\s\S]*?max-width: min\(560px, calc\(100% - 80px\)\)/,
+    "the status has no width bound, or runs under the right-edge cluster");
+  assert.match(css, /\.sf-status:not\(\[data-open="true"\]\) \.sf-chrome \{[^}]*max-height: 46px/,
+    "the collapsed viewport row is not bounded to a line");
+  // What the collapse may NOT put away: the level/tier (§10.2) and the offer's own sentence, which
+  // is what a press consents to (T-476's painted-offer rule).
+  for (const keep of ["hk-surface-level", "hk-surface-why"]) {
+    assert.doesNotMatch(css, new RegExp(`\\.sf-status:not\\(\\[data-open="true"\\]\\) \\.${keep} \\{[^}]*display: none`),
+      `the collapsed line hides .${keep}`);
+  }
 });

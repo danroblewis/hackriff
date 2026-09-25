@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 
 use hk_model::classify::{ArbRank, DECODER_RULES_PREFIX, Stage as ClassifyStage, TaxonomyRef};
 use hk_model::emitter::Classification as LegacyClassification;
+use hk_model::repo::LIFECYCLE_TEXT_MAX;
 use hk_model::repo::synthesis::{
     EmitterSynthesis, Resolution as RowResolution, ResolutionKind as RowKind,
     ResolutionReason as RowReason, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage as RowStage,
@@ -564,6 +565,7 @@ fn attach_in(
             outcome: SynthConfirmOutcome::NotAttached,
             evidence_bits,
             reason: reason.to_owned(),
+            decision_rate: None,
         },
     };
 
@@ -664,6 +666,19 @@ fn attach_in(
         suspect_fraction: (trust.detections > 0).then(|| trust.suspect_fraction()),
         overload: input.overload,
     });
+    // ADR-0022 §8: every evaluation counts toward the rolling decision rate, in this transaction
+    // (a rolled-back attach decided nothing), on the device's clock — decisions per device-week
+    // is the budget's unit, whatever capture time the analysed window has.
+    let rate = policy.decision_rate(
+        ingest
+            .repo_mut()
+            .record_confirm_decision(CONFIRM_SYNTH_RULE, Timestamp::now())?,
+    );
+    let decision = match (decision, rate.void_text()) {
+        (Ok(reason), Some(void)) => Ok(format!("{reason}; {void}")),
+        (Err(why), Some(void)) => Err(format!("{why}; {void}")),
+        (d, None) => d,
+    };
     let state = ingest.repo().emitter_lifecycle_state(emitter)?;
     if state == LifecycleState::Deleted {
         // Deleted since it was chosen: a user delete wins, and the rule never resurrects.
@@ -679,18 +694,21 @@ fn attach_in(
             outcome: SynthConfirmOutcome::Confirmed,
             evidence_bits,
             reason: reason.clone(),
+            decision_rate: Some(rate),
         },
         Ok(reason) => SynthConfirmDecision {
             rule: CONFIRM_SYNTH_RULE,
             outcome: SynthConfirmOutcome::Already,
             evidence_bits,
             reason: format!("already confirmed; this analysis would have: {reason}"),
+            decision_rate: Some(rate),
         },
         Err(why) => SynthConfirmDecision {
             rule: CONFIRM_SYNTH_RULE,
             outcome: SynthConfirmOutcome::Insufficient,
             evidence_bits,
             reason: why.clone(),
+            decision_rate: Some(rate),
         },
     };
 
@@ -776,7 +794,7 @@ fn attach_in(
             LifecycleState::Confirmed,
             LifecycleAuthor::Auto,
             CONFIRM_SYNTH_RULE,
-            &confirm.reason,
+            lifecycle_text(&confirm.reason),
             input.window.end,
         )?;
     }
@@ -787,6 +805,21 @@ fn attach_in(
         synthesis_written: true,
         confirm,
     }))
+}
+
+/// The lifecycle store refuses a reason over [`LIFECYCLE_TEXT_MAX`] bytes, and a long template
+/// id plus the arithmetic plus a void budget note can reach it: the event keeps the head of the
+/// sentence (cut on a character boundary), and the `emitter_synthesis` row's `confirm` keeps it
+/// whole.
+fn lifecycle_text(reason: &str) -> &str {
+    if reason.len() <= LIFECYCLE_TEXT_MAX {
+        return reason;
+    }
+    let mut n = LIFECYCLE_TEXT_MAX;
+    while !reason.is_char_boundary(n) {
+        n -= 1;
+    }
+    &reason[..n]
 }
 
 #[cfg(test)]
@@ -825,6 +858,7 @@ mod tests {
                 corrected_excluded: 0,
                 tested: 3,
                 holdout: true,
+                node: None,
             }),
             frames_preview: Vec::new(),
             characterisation: None,
@@ -942,8 +976,14 @@ mod tests {
 
     #[test]
     fn width_floor_hard_check_floor_and_analytic_threshold_each_refuse() {
-        let e = ok(&with(|h| h.check_width = Some(7))).unwrap_err();
-        assert!(e.contains("under the 8-bit floor"), "{e}");
+        // T-577 / ADR-0022 §4.3.1: the floor is 16 while 8 is unmeasured with the shipped count.
+        let e = ok(&with(|h| h.check_width = Some(15))).unwrap_err();
+        assert!(
+            e.contains("a 15-bit check is under the 16-bit floor"),
+            "{e}"
+        );
+        let e = ok(&with(|h| h.check_width = Some(8))).unwrap_err();
+        assert!(e.contains("under the 16-bit floor"), "{e}");
         let e = ok(&with(|h| h.check_width = None)).unwrap_err();
         assert!(e.contains("always carries a check"), "{e}");
         // 24 analytic bits of sync excess and a thin check: not a decode.
@@ -1092,14 +1132,12 @@ mod tests {
     }
 
     /// ADR-0022 §4.2 (review M1): the check is worth at most `width × differences − L_check`,
-    /// whatever the evaluator reports. A searched CRC-8 on a beacon repeating one payload five
-    /// times has one difference: 8 − 13 = −5 bits, so it refuses even when told 40.
+    /// whatever the evaluator reports. A searched CRC-16 on a beacon repeating one payload five
+    /// times has one difference: 16 − 21 = −5 bits, so it refuses even when told 40.
     #[test]
     fn check_bits_are_clamped_to_width_times_differences_less_l_check() {
         let e = ok(&with(|h| {
-            h.check_width = Some(8);
             h.differences = 1;
-            h.l_check = Some(13.0);
             h.check_bits = Some(40.0);
             h.analytic_bits = 45.0;
         }))
@@ -1147,6 +1185,271 @@ mod tests {
             })
             .unwrap_err();
         assert!(e.contains("disabled"), "{e}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-575: the ticket's named cases, ADR-0022 §2, §4.2, §5.1, §8
+    // -----------------------------------------------------------------------------------------
+
+    /// One ADS-B-like squitter: a CRC-24 frame and an 8-pulse preamble's sync excess.
+    fn crc24_single_frame(origin: CheckOrigin, l_check: f32) -> PipelineResult {
+        let mut r = solved();
+        let c = r.check.as_mut().unwrap();
+        c.model = "CRC-24".into();
+        c.width = 24;
+        c.distinct_valid = 1;
+        c.tested = 1;
+        let h = r.holdout.as_mut().unwrap();
+        h.check_width = Some(24);
+        h.differences = 1;
+        h.l_check = Some(l_check);
+        h.check_bits = Some(24.0 - l_check);
+        h.analytic_bits = 24.0 - l_check + 6.0;
+        h.check_origin = origin;
+        if !origin.searched() {
+            h.null_control = None;
+        }
+        r
+    }
+
+    /// ADR-0022 §4.2's first row: a template-fixed CRC-24 needs one difference, so one clean
+    /// squitter confirms; the same frame with its generator searched (L_check ≈ 24 + 5) does not.
+    #[test]
+    fn t575_a_template_fixed_crc24_single_frame_confirms_and_the_same_frame_searched_does_not() {
+        let reason = ok(&crc24_single_frame(CheckOrigin::TemplateFixed, 0.0)).unwrap();
+        assert!(
+            reason.contains("CRC-24 (template-fixed), 1 differing frame"),
+            "{reason}"
+        );
+        assert!(reason.contains("24.0 − 0.0 = 24.0 check bits"), "{reason}");
+        let e = ok(&crc24_single_frame(CheckOrigin::Searched, 29.0)).unwrap_err();
+        assert!(e.contains("hard check floor"), "{e}");
+        assert!(e.contains("3 needed"), "{e}");
+    }
+
+    /// ADR-0022 §4.2: `differences`, not `distinct_valid`. A template-fixed CRC-16 beacon
+    /// repeating one payload eight times has eight valid frames and one difference; whatever its
+    /// check reports, it is worth one frame's 16 bits, so with 6 bits of sync it reaches 22 of the
+    /// 24 — and the repeat count confirms nothing.
+    #[test]
+    fn t575_a_repeated_payload_beacon_does_not_confirm_on_its_repeat_count() {
+        let mut r = crc24_single_frame(CheckOrigin::TemplateFixed, 0.0);
+        let c = r.check.as_mut().unwrap();
+        c.model = "CRC-16".into();
+        c.width = 16;
+        c.distinct_valid = 8;
+        c.tested = 8;
+        let h = r.holdout.as_mut().unwrap();
+        h.check_width = Some(16);
+        h.differences = 1;
+        h.check_bits = Some(128.0);
+        h.analytic_bits = 134.0;
+        let e = ok(&r).unwrap_err();
+        assert!(
+            e.contains("22.0 analytic hold-out bits against a 24-bit threshold"),
+            "{e}"
+        );
+        // With eight *different* payloads the same frames carry 128 check bits, and confirm.
+        let h = r.holdout.as_mut().unwrap();
+        h.differences = 8;
+        let reason = ok(&r).unwrap();
+        assert!(
+            reason.contains("128.0 − 0.0 = 128.0 check bits"),
+            "{reason}"
+        );
+    }
+
+    /// ADR-0022 §4.1: the rank currency does not pay. 70 `evidence_bits`, 22 of them analytic.
+    #[test]
+    fn t575_seventy_evidence_bits_of_which_22_are_analytic_do_not_confirm() {
+        let mut r = solved();
+        r.evidence_bits = 70.0;
+        r.analytic_holdout_bits = Some(22.0);
+        let h = r.holdout.as_mut().unwrap();
+        h.evidence_bits = 70.0;
+        h.analytic_bits = 22.0;
+        h.check_bits = Some(22.0);
+        let e = ok(&r).unwrap_err();
+        assert!(
+            e.contains("22.0 analytic hold-out bits against a 24-bit threshold"),
+            "{e}"
+        );
+    }
+
+    /// ADR-0022 §2.3: the gate's whole input is the hold-out evidence of the hypothesis being
+    /// confirmed plus the window's trust. The job-total `coverage.look_elsewhere_bits` is not a
+    /// field of [`SynthesizedEvidence`] or of [`PipelineResult`], so it cannot reach the gate;
+    /// what can move the decision is only this hypothesis's own numbers. (The engine side — a
+    /// job total larger than the analytic ladder, and the result still solving — is
+    /// `hk-synth`'s `t575_the_job_total_look_elsewhere_never_reaches_the_solve_or_confirm_key`.)
+    #[test]
+    fn t575_the_job_total_look_elsewhere_never_reaches_the_gate() {
+        let r = solved();
+        let ev = SynthesizedEvidence {
+            profile: Profile::Standard,
+            result: &r,
+            pipeline: "generic-fsk-framed".into(),
+            suspect_fraction: Some(0.0),
+            overload: Some(false),
+        };
+        // Exhaustive destructuring: a field added here must be argued for.
+        let SynthesizedEvidence {
+            profile: _,
+            result: _,
+            pipeline: _,
+            suspect_fraction: _,
+            overload: _,
+        } = &ev;
+        assert!(SynthesizedConfirm::default().decide(&ev).is_ok());
+    }
+
+    /// ADR-0022 §5.1: a discovered template's check confirms only when its `L_check` includes
+    /// the inherited discovery charge. A row claiming less than it inherited is refused.
+    #[test]
+    fn t575_a_discovered_template_confirms_only_with_its_inherited_l_charged() {
+        let discovered = CheckOrigin::Discovered {
+            look_elsewhere_bits: Some(20.0),
+        };
+        // S5's own count 1 bit + 20 inherited = 21: 48 − 21 = 27 check bits, and it confirms.
+        let reason = ok(&with(|h| h.check_origin = discovered)).unwrap();
+        assert!(reason.contains("48.0 − 21.0 = 27.0 check bits"), "{reason}");
+        // The same row with the inherited charge left out of L_check.
+        let e = ok(&with(|h| {
+            h.check_origin = discovered;
+            h.l_check = Some(1.0);
+            h.check_bits = Some(47.0);
+        }))
+        .unwrap_err();
+        assert!(e.contains("inherited"), "{e}");
+        // And an unknown inherited charge with an L_check that pretends to know it.
+        let e = ok(&with(|h| {
+            h.check_origin = CheckOrigin::Discovered {
+                look_elsewhere_bits: None,
+            };
+        }))
+        .unwrap_err();
+        assert!(e.contains("not recorded"), "{e}");
+    }
+
+    /// ADR-0022 §8: the budget claim holds up to the assumed rate and is void strictly above it;
+    /// the thresholds do not move either way.
+    #[test]
+    fn t575_the_decision_rate_voids_the_budget_claim_above_the_assumed_rate() {
+        let p = SynthesizedConfirm::default();
+        let at = p.decision_rate(20_000);
+        assert_eq!(at.budget_claim, crate::inventory::BudgetClaim::Holds);
+        assert_eq!(at.void_text(), None);
+        let over = p.decision_rate(20_001);
+        assert_eq!(over.budget_claim, crate::inventory::BudgetClaim::Void);
+        assert_eq!(over.assumed_per_week, 20_000);
+        let text = over.void_text().unwrap();
+        assert!(
+            text.contains("20001 decisions in 7 days > 20000 assumed"),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(over).unwrap(),
+            json!({"decisions_7d": 20001, "assumed_per_week": 20000, "budget_claim": "void"})
+        );
+        // The same evidence decides the same way at any count: no uptime-dependent charge.
+        assert!(ok(&solved()).is_ok());
+    }
+
+    /// T-575 review: the pipeline name comes first in the reason and is unbounded (a template id),
+    /// so a long one pushed the arithmetic past the 512-byte lifecycle cut. It is capped.
+    #[test]
+    fn t575_a_long_pipeline_name_never_crowds_the_arithmetic_out_of_the_lifecycle_reason() {
+        let r = solved();
+        let reason = SynthesizedConfirm::default()
+            .decide(&SynthesizedEvidence {
+                profile: Profile::Standard,
+                result: &r,
+                pipeline: "x".repeat(2_000),
+                suspect_fraction: Some(0.0),
+                overload: Some(false),
+            })
+            .unwrap();
+        let kept = lifecycle_text(&reason);
+        assert!(
+            kept.contains("analytic bits against a 24-bit threshold"),
+            "{kept}"
+        );
+        assert!(kept.contains("null control passed"), "{kept}");
+        assert!(kept.contains('…'), "{kept}");
+    }
+
+    /// T-575 × T-884: the configured rule now reaches the gate, and configuration may only make
+    /// it stricter. A clause configured looser than ADR-0022 §6 — a CRC-8 floor, 8 analytic
+    /// bits, no null control, overload allowed, a higher assumed decision rate — is **clamped**
+    /// to the floors; a stricter one is kept.
+    #[test]
+    fn t575_configuration_can_tighten_the_gate_but_never_loosen_it() {
+        let loose = SynthesizedConfirm {
+            enabled: true,
+            min_analytic_holdout_bits: 8.0,
+            hard_check_floor_bits: f64::NAN,
+            min_check_width: 8,
+            assumed_decisions_per_week: 1_000_000,
+            require_null_control_when_searched: false,
+            max_suspect_detection_fraction: 1.0,
+            forbid_overload_in_window: false,
+        };
+        assert_eq!(loose.effective(), SynthesizedConfirm::default());
+        let ev = |r: &PipelineResult, overload| {
+            loose.decide(&SynthesizedEvidence {
+                profile: Profile::Standard,
+                result: r,
+                pipeline: "p".into(),
+                suspect_fraction: Some(0.0),
+                overload,
+            })
+        };
+        // A CRC-8 with plenty of bits: the configured 8-bit floor does not apply.
+        let e = ev(&with(|h| h.check_width = Some(8)), Some(false)).unwrap_err();
+        assert!(e.contains("under the 16-bit floor"), "{e}");
+        // No null control for a searched check: still refused.
+        let e = ev(&with(|h| h.null_control = None), Some(false)).unwrap_err();
+        assert!(e.contains("needs the null control"), "{e}");
+        // Overload: still refused.
+        assert!(
+            ev(&solved(), Some(true))
+                .unwrap_err()
+                .contains("overloaded")
+        );
+        // 20 analytic bits: under the ADR's 24, whatever the configuration says.
+        let e = ev(&with(|h| h.analytic_bits = 20.0), Some(false)).unwrap_err();
+        assert!(e.contains("against a 24-bit threshold"), "{e}");
+        // The decision rate is judged against the ADR's denominator, not a larger configured one.
+        assert_eq!(
+            loose.decision_rate(20_001).budget_claim,
+            crate::inventory::BudgetClaim::Void
+        );
+        // Stricter configuration is kept.
+        let tight = SynthesizedConfirm {
+            min_check_width: 24,
+            min_analytic_holdout_bits: 40.0,
+            ..SynthesizedConfirm::default()
+        };
+        assert_eq!(tight.effective(), tight);
+        let e = tight
+            .decide(&SynthesizedEvidence {
+                profile: Profile::Standard,
+                result: &solved(),
+                pipeline: "p".into(),
+                suspect_fraction: Some(0.0),
+                overload: Some(false),
+            })
+            .unwrap_err();
+        assert!(e.contains("under the 24-bit floor"), "{e}");
+    }
+
+    #[test]
+    fn t575_a_long_reason_is_cut_to_the_lifecycle_limit_on_a_char_boundary() {
+        let long = "−".repeat(LIFECYCLE_TEXT_MAX);
+        let cut = lifecycle_text(&long);
+        assert!(cut.len() <= LIFECYCLE_TEXT_MAX && !cut.is_empty());
+        assert!(long.starts_with(cut));
+        assert_eq!(lifecycle_text("short"), "short");
     }
 
     /// ADR-0015 §4.2's feedback (M-10, T-861): a solved result's S1 block names its `hk-mod@1`

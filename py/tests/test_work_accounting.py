@@ -1518,3 +1518,35 @@ def test_a_named_remote_ticket_never_falls_back_to_the_mac_and_alone_mode_holds_
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: True)
     launched.clear()
     assert R.dispatch_remote({}, dry=False) is False and launched == []
+
+
+def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_named_not_dispatchable(tmp_path, monkeypatch):
+    """Supervisor 2026-09-25 03:56: the status said 'dispatchable=1 (T-844)' while candidates() skips a branch with commits,
+    and had no host dimension. Now: T-844-like tickets are 'held_by_branch' + one ORPHAN_BRANCH attention; hosts listed."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 5}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    monkeypatch.setattr(R, "_ORPHANS_SAID", set())
+    tasks = [{"id": "T-44", "status": "todo", "title": "x"}, {"id": "T-45", "status": "todo", "title": "y"}]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        ("3\n" if "task-t44" in args[-1] else "0\n") if args[:3] == ["git", "rev-list", "--count"] else "abc tip\n")
+    seen = []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    for k, v in {"load_claims": lambda: {"T-9": {"ticket": "T-9", "state": "running", "kind": "work", "host": "node2"}},
+                 "save_claims": lambda c: None, "reap": lambda c, d: False, "dispatch": lambda c, d: False,
+                 "release_stale_claims": lambda c, b: False, "sync_board": lambda c, d: None, "reap_worktrees": lambda c, d: None,
+                 "reclaim_e2e_data": lambda d: None, "reclaim_idle_targets": lambda c, d: None, "sweep_superseded": lambda d: None,
+                 "sync_remote_view": lambda c, d: None, "dispatch_deflakes": lambda c, d: False, "record_queue_depth": lambda: None,
+                 "gate_holds_dispatch": lambda: False, "dispatch_cap": lambda: 2, "disk_free_gb": lambda: 400.0}.items():
+        monkeypatch.setattr(R, k, v)
+    R.tick(dry=False)
+    st = json.load(open(tmp_path / "work-runner-status.json"))
+    assert st["frontier"]["held_by_branch"] == ["T-44"] and st["frontier"]["dispatchable_ids"] == ["T-45"]
+    assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "probe_age_s": 0}
+    assert st["hosts"]["mac"] == {"running": 0, "cap": 2}
+    assert [a[2] for a in seen] == ["ORPHAN_BRANCH"]
+    R.tick(dry=False)
+    assert len(seen) == 1                                                  # once per runner process

@@ -75,10 +75,15 @@ struct World {
     null_calls: AtomicU64,
     /// The null windows carry the "signal" too: structure the search finds in structureless data.
     null_fits: bool,
-    /// Distinct valid frames on hold-out at the true CRC.
+    /// Valid frames on hold-out at the true CRC (the check's `n`, and its `raw` too unless
+    /// `holdout_payloads` says the payloads repeat).
     holdout_frames: u32,
     /// ADR-0021 §7A.5's characterisation the evaluator reports on the true prefix's hold-out run.
     characterisation: Option<serde_json::Value>,
+    /// `Some(k)`: those frames carry only `k` distinct payloads — a beacon repeating itself. The
+    /// S5 record then says `raw = k` (ADR-0022 §4.2's `differences`) over `n = holdout_frames`,
+    /// while its `bits` still claim every frame (an evaluator over-reporting).
+    holdout_payloads: Option<u32>,
     /// The CRC's width, as the check summary reports it.
     width: u32,
     proposals: AtomicU64,
@@ -96,6 +101,7 @@ impl World {
             null_fits: false,
             holdout_frames: 12,
             characterisation: None,
+            holdout_payloads: None,
             width: 16,
             proposals: AtomicU64::new(0),
             grants: Mutex::new(Vec::new()),
@@ -234,12 +240,16 @@ impl Evaluator for World {
                     (true, true) => self.holdout_frames,
                     _ => 0,
                 };
+                let distinct = match (holdout || null, self.holdout_payloads) {
+                    (true, Some(k)) => k.min(frames),
+                    _ => frames,
+                };
                 (
                     ev(
                         Stage::S5,
                         MetricId::CheckDistinctValid,
                         GroupId::Undeclared,
-                        frames as f32,
+                        distinct as f32,
                         frames,
                         self.width as f32 * frames as f32,
                     ),
@@ -257,6 +267,7 @@ impl Evaluator for World {
             corrected_excluded: 0,
             tested: self.holdout_frames.max(1),
             holdout,
+            node: None,
         });
         let frames = if holdout && on_truth && req.stage == Stage::S5 {
             (0..self.holdout_frames)
@@ -1466,7 +1477,7 @@ fn m9_an_open_search_solves_on_analytic_hold_out_bits_after_the_null_control_pas
     let analytic_on_ladder: f32 = h
         .stages
         .iter()
-        .filter(|e| e.metric.is_analytic())
+        .filter(|e| e.metric.pays_for_confirm())
         .map(|e| e.bits)
         .sum();
     assert!(
@@ -1977,4 +1988,82 @@ fn t567_an_aborted_look_seals_not_searched_and_never_unknown() {
     let v = serde_json::to_value(&res).unwrap();
     assert_eq!(v["kind"], "not-searched");
     assert!(v.get("coverage").is_none() || v["coverage"].is_null());
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-575: ADR-0022 §4.2's `differences`, and the job-total look-elsewhere never reaching the gate
+// ---------------------------------------------------------------------------------------------
+
+/// A beacon sending one payload twelve times is one fact, not twelve (ADR-0022 §4.2). The engine
+/// reads `differences` from the check block's chance-corrected `raw`, not its tested support `n`,
+/// and clamps the check to `width × differences − L_check` however many bits the block claims —
+/// so the repeat count solves nothing. Before T-575 this solved, with `differences` = 12.
+#[test]
+fn t575_a_repeated_payload_beacon_does_not_solve_on_its_repeat_count() {
+    let mut beacon = World::new(FSK);
+    beacon.holdout_payloads = Some(1);
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &beacon,
+        &Control::new(),
+    );
+    assert!(
+        o.results.iter().all(|r| r.verdict != Verdict::Solved),
+        "{:?}",
+        o.results.iter().map(|r| r.verdict).collect::<Vec<_>>()
+    );
+    let h = o
+        .results
+        .iter()
+        .find_map(|r| r.holdout.as_ref().filter(|h| h.check_width.is_some()))
+        .expect("validated on hold-out");
+    assert_eq!(h.differences, 1, "one payload, however often it repeats");
+    let l_check = h.l_check.unwrap();
+    assert!(
+        (h.check_bits.unwrap() - (16.0 - l_check)).abs() < 1e-3,
+        "clamped to width × differences − L_check: {:?}, L {l_check}",
+        h.check_bits
+    );
+
+    // The same frames with distinct payloads solve, so it is the repetition that refused.
+    let world = World::new(FSK);
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    assert_eq!(o.results[0].verdict, Verdict::Solved);
+    assert_eq!(o.results[0].holdout.as_ref().unwrap().differences, 12);
+}
+
+/// ADR-0022 §2.3: the job-total `coverage.look_elsewhere_bits` is a reporting field, never charged
+/// against the hypothesis being confirmed. One CRC-24 frame plus its sync: the paying ladder less
+/// the job total is under 24 bits, yet the result solves with ≥ 24 analytic bits — each stage
+/// charged its own `L_j` only. Had the job total been subtracted, it could not have.
+#[test]
+fn t575_the_job_total_look_elsewhere_never_reaches_the_solve_or_confirm_key() {
+    let mut world = World::new(FSK);
+    world.width = 24;
+    world.holdout_frames = 1;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    let h = top.holdout.as_ref().unwrap();
+    let paying: f32 = h
+        .stages
+        .iter()
+        .filter(|e| e.metric.pays_for_confirm())
+        .map(|e| e.bits)
+        .sum();
+    let job_total = o.coverage.look_elsewhere_bits;
+    assert!(h.analytic_bits >= 24.0);
+    assert!(
+        paying - job_total < 24.0,
+        "the fixture must make the job total decisive: {paying} − {job_total}"
+    );
+    assert!(h.analytic_bits > paying - job_total);
 }

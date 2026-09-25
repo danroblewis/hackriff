@@ -212,8 +212,14 @@ struct Sig {
 }
 
 fn ev(stage: Stage, metric: MetricId, group: GroupId, n: u32, bits: f32) -> EvidenceSet {
+    // A check's `raw` is its differences (ADR-0022 §4.2): here every tested frame differs.
+    let raw = if metric == MetricId::CheckDistinctValid {
+        n as f32
+    } else {
+        bits
+    };
     let mut s = EvidenceSet::new();
-    s.push(Evidence::new(stage, metric, group, bits, n, bits))
+    s.push(Evidence::new(stage, metric, group, raw, n, bits))
         .unwrap();
     s
 }
@@ -302,6 +308,7 @@ impl Evaluator for World {
             corrected_excluded: 0,
             tested: 12,
             holdout,
+            node: None,
         });
         // The hold-out run's decoded frames: what the attach step stores (ADR-0015 §5.5).
         let frames = if holdout && on && req.stage == Stage::S5 {
@@ -1172,6 +1179,16 @@ mod m9 {
         assert_eq!(job.null_control.as_ref().unwrap()["capped"], json!(false));
         assert_eq!((job.decodes_stored, job.decodes_valid), (12, 12));
         assert_eq!(job.confirm.as_ref().unwrap()["outcome"], json!("confirmed"));
+        // ADR-0022 §8: the decision was counted, durably, and the claim it was made under holds.
+        assert_eq!(
+            job.confirm.as_ref().unwrap()["decision_rate"],
+            json!({"decisions_7d": 1, "assumed_per_week": 20000, "budget_claim": "holds"})
+        );
+        assert_eq!(
+            repo.confirm_decisions_in_week(CONFIRM_SYNTH_RULE, hk_model::Timestamp::now())
+                .unwrap(),
+            1
+        );
         let e = repo.emitter(emitter).unwrap();
         assert_eq!(
             e.f_center_hz, CENTER_HZ,

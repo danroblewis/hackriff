@@ -233,6 +233,12 @@ def anchor_owner(row: dict, claim_pids: dict[int, str]) -> str | None:
         return "fuzz-rig"
     if "ops/stage.sh" in cmd or "hk serve --bind 127.0.0.1:8899" in cmd:
         return "demo"
+    # The explorer window (T-923): its window script, its agent, and the server it runs on the HackRF (:8897, data under
+    # $HACKRIFF_OPS/explorer/) - started detached by the agent, so ancestry alone never finds it (2026-09-25 04:0x: the
+    # live-HackRF server alarmed 'unowned at 387 %, kill it' mid-window).
+    if ("ops/explorer-window.sh" in cmd or "--agent explorer" in cmd or "127.0.0.1:8897" in cmd
+            or "/.hackriff-ops/explorer/" in cmd):
+        return "explorer"
     if "--append-system-prompt-file" in cmd or "ops/launch.sh" in cmd or row.get("env"):
         return "role:" + role_name(cmd, row.get("env", ""))
     return None
@@ -659,6 +665,39 @@ def kill_now(rows: list[dict]) -> list[int]:
     return done
 
 
+# ---------------------------------------------------------------- radio lock (T-922)
+RADIO_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "py", "hkpy", "radio.py")
+
+
+def _radio():
+    """py/hkpy/radio.py by path (stdlib only), so the watchdog needs no uv environment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hk_radio", RADIO_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def radio_stale(now: float, dry: bool = False) -> list[dict]:
+    """(g) A radio lock past its `until` is released, with a red alert: its owner overran its window
+    or died holding the radio, and staging stays on replay until the lock is gone. `--dry-run`
+    reports without removing it."""
+    try:
+        R = _radio()
+        lock = R.read(S)
+        if lock is None or not R.is_stale(lock, now):
+            return []
+        what = R.describe(lock, now)
+        if not dry:
+            R.release_stale(S, now)
+    except Exception as e:  # never let the lock path stop the watchdog
+        logline(f"radio-lock check failed: {e}")
+        return []
+    return [{"rule": "radio-stale", "level": "red", "key": "watchdog:radio-stale",
+             "title": f"stale radio lock {'would be ' if dry else ''}released: {lock['owner']}",
+             "body": f"{what}\nstaging goes back to LIVE on its next tick (ops/stage.sh)."}]
+
+
 def tick(since: dict, dry: bool = False) -> dict:
     rows = read_ps()
     claims = load_claims()
@@ -669,6 +708,7 @@ def tick(since: dict, dry: bool = False) -> dict:
         load1 = 0.0
     alarms, kills = evaluate(rows, agg, unowned, load1, since, time.time(), claims)
     alarms += liveness(rows, since, time.time(), dry)
+    alarms += radio_stale(time.time(), dry)
     killed = [] if dry else kill_now(kills)
     snap = {
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),

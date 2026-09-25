@@ -33,6 +33,16 @@
 //! advancing — is asserted where clients actually are, over two real WebSockets:
 //! `crates/hk-cli/tests/api_contract.rs`, `one_clients_pause_never_freezes_another_clients_stream`.
 //!
+//! **T-920 made the backpressure leg a demonstration instead of a coincidence.** "No view control
+//! stalled the source" is only worth asserting if a stalled reader *could* have stalled it, so the
+//! run used to guard against vacuity with `gate_waits > 0` — the gate happened to hold a block
+//! back inside the measured window. That is a race between one replay thread and three FFT
+//! threads, not a property: on an idle 24-core Linux box, on current `main`, it failed 5 runs in 7
+//! while every reader reported `lost 0` and every detection produced was stored. The run now
+//! *pins a gate cursor*, watches the capture thread stop within the gate's own documented bound
+//! (half a ring plus the block in flight), and releases it and watches the run resume — three
+//! facts no scheduler can decide.
+//!
 //! **T-489 put a viewer in the run.** The producer computes rows only while a consumer is open, so
 //! a run with no consumer at all publishes none — the headless-survey saving, not a lever any
 //! viewer holds. The claim asserted below is about "the stream every other viewer is reading", so
@@ -68,6 +78,8 @@ const RING_S: f64 = 0.5;
 const PHASE_SAMPLES: u64 = 2_500_000;
 /// Samples to let in-flight rows land after a display change before the next window is measured.
 const SETTLE_SAMPLES: u64 = 50_000;
+/// The mock radio's block size, and so the most that can be in flight past a gate decision.
+const BLOCK_SAMPLES: u64 = 16_384;
 
 const LIMIT: Duration = Duration::from_secs(120);
 
@@ -182,7 +194,12 @@ fn delta(before: Marks, after: Marks) -> Marks {
 #[test]
 fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     let dir = TempDir::new("view-pause-keeps-capture");
-    let (radio, ctl) = radio::Radio::new(CENTER, FS, 16_384, radio::tone(|_| OFFSET_HZ));
+    let (radio, ctl) = radio::Radio::new(
+        CENTER,
+        FS,
+        BLOCK_SAMPLES as usize,
+        radio::tone(|_| OFFSET_HZ),
+    );
     let t0 = Timestamp::from_unix_nanos(radio::T0_NS);
     let mut plan = replay_plan(CENTER, FS, t0);
     plan.extra = json!({ "pipeline": { "ring_s": RING_S } });
@@ -325,13 +342,17 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
         b.detections,
         a.detections
     );
-    // Without this the backpressure leg would be vacuous: a gate that never engaged could not have
-    // stalled the source whether or not a reader held its cursor.
-    assert!(
-        b.gate_waits > 0,
-        "the lossless gate never held a block back during the held phase, so this run did not \
-         exercise the backpressure path a stalled reader would sit on: {b:?}"
-    );
+    // The backpressure leg is not vacuous — but it is **demonstrated below**, after the view
+    // phases, rather than asserted here (T-920). What stood here was `b.gate_waits > 0`: proof
+    // that the gate happened to hold a block back inside this 5-second window. Whether the writer
+    // runs a half ring ahead of three FFT readers inside any particular window is a race between
+    // threads, not a property of the run: on one idle 24-core Linux box, on current `main`, that
+    // assertion failed 5 runs in 7 (`gate_waits: 0` in both phases) while every reader reported
+    // `lost 0` and the run stored every detection it produced. It is the second kind of
+    // timing-based test in docs/10 §3.6 — an assertion that is really a throughput bound — and
+    // the fix is not to move it to the `timing` tier but to stop needing the coincidence: see
+    // `a stalled reader really does stop the source` below, which pins a cursor and watches the
+    // capture thread stop, in a way no scheduler can make pass or fail by luck.
 
     // ---- and back to the run's own settings: still nothing stops ----
     let display = handle
@@ -353,6 +374,94 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     let c = delta(c0, marks(&handle, &counters));
     eprintln!("back:    {c:?}");
     assert!(c.rows > 0, "the rows did not carry on: {c:?}");
+
+    // ---- the claim's other half: a stalled READER really does stop the source (T-920) ----
+    //
+    // Everything above says a view control did not stop capture. That is only worth asserting if
+    // something *could* have: if the lossless gate were not armed, no view control could stall
+    // the source however badly it behaved, and every phase above would pass for the wrong reason.
+    //
+    // So the run demonstrates it, instead of waiting to catch the gate in the act. A cursor is
+    // registered claiming everything from the current live edge on and then never advanced — a
+    // reader that has stopped reading, which is precisely the shape of backpressure a view
+    // control would have to produce to reach the device. `FlowGate` admits a block only while it
+    // stays within `slack` (half the ring) of the slowest claim, so the capture thread must stop
+    // after at most `slack` further samples plus the block in flight. That bound holds whatever
+    // the relative speed of the writer and the readers is, which is exactly what `gate_waits > 0`
+    // did not.
+    let gate = handle
+        .flow_gate()
+        .expect("a running segment has a flow gate");
+    assert!(
+        gate.enabled(),
+        "this run is configured lossless, so its gate must be live"
+    );
+    let bound = gate.slack() + 2 * BLOCK_SAMPLES;
+    let d0 = marks(&handle, &counters);
+    // Read off the gate itself, not `counters.source.gate_waits`: the capture thread publishes
+    // that counter only *after* the block it waited for is pushed (`capture.rs`), so a thread
+    // currently parked in `wait_for_block` has not reported the wait it is sitting in — which is
+    // the one state this block is about.
+    let waits_before = gate.waits();
+    let stalled = gate.register(handle.ring_position());
+    // Poll until the capture thread is still, failing the moment it runs past the bound.
+    let deadline = std::time::Instant::now() + LIMIT;
+    let mut last = 0u64;
+    let held = loop {
+        let d = delta(d0, marks(&handle, &counters));
+        assert!(
+            d.captured <= bound,
+            "a reader that stopped reading did NOT stop the source: capture advanced {} samples \
+             past a pinned cursor, past the gate's own bound of {bound} (slack {} + two blocks). \
+             The lossless gate is not holding the capture thread, so nothing above about view \
+             controls not stalling it means anything: {d:?}",
+            d.captured,
+            gate.slack()
+        );
+        if d.captured > 0 && d.captured == last {
+            break d;
+        }
+        last = d.captured;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the capture thread never settled against the pinned cursor: {d:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let waits = gate.waits() - waits_before;
+    eprintln!(
+        "stalled: {held:?} (gate slack {}, waits +{waits})",
+        gate.slack()
+    );
+    assert!(
+        waits > 0,
+        "the source stopped, but the gate recorded no wait — so something OTHER than the \
+         backpressure path stopped it, and this is not the demonstration it claims to be: \
+         {held:?}"
+    );
+
+    // ---- and releasing it starts the source again: the stall was the cursor, not the run ----
+    //
+    // Without this the block above could pass on a run that had simply ended.
+    // The claim here is narrower than a phase's, and so is the wait: capture and the ring move
+    // again, by more than the whole bound they were held at. Detection is deliberately NOT waited
+    // on — it is the one counter the gate does not pin to the capture clock (see [`wait_phase`],
+    // T-448), and every phase above has already established it keeps running.
+    drop(stalled);
+    let r0 = marks(&handle, &counters);
+    let deadline = std::time::Instant::now() + LIMIT;
+    let r = loop {
+        let r = delta(r0, marks(&handle, &counters));
+        if r.captured > bound && r.ring > bound {
+            break r;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run did not resume once the stalled reader released its cursor: {r:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    eprintln!("resumed: {r:?}");
 
     ctl.finish();
     let (summary, fired) = wait_guarded(handle, LIMIT);

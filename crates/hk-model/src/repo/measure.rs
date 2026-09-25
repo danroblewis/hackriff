@@ -210,6 +210,41 @@ impl Repository {
         Ok(())
     }
 
+    /// T-913: aborts every Survey left **open** by a process that is gone, and says how many.
+    ///
+    /// A run that crashes never calls [`Self::finish_survey`], so its survey stays `open` for
+    /// ever — and the detection retention pass ages an open survey from *its own* newest row
+    /// (deliberately: a running tracker must not lose rows it may still link), so the crashed
+    /// run's newest hour of detections is never aged out at all. Only something that closes the
+    /// survey can put those rows back under the store-wide watermark.
+    ///
+    /// The caller is the next run over the same data directory, at start-up, **before** it opens
+    /// its own survey (`hk-pipeline::run`): one process writes a store, so any survey still open
+    /// then belongs to a process that is no longer running. Each is aborted (never *closed*: a
+    /// crashed survey did not complete) at its own newest detection `t_end`, or at its `t_start`
+    /// if it recorded none, with no summary — the summary is a measurement the crashed run never
+    /// made, and inventing one would be a lie.
+    pub fn abort_orphaned_surveys(&mut self) -> Result<usize, RepoError> {
+        let tx = self.write_tx()?;
+        let open: Vec<([u8; 16], i64)> = tx
+            .prepare_cached("SELECT survey_id, t_start FROM survey WHERE state = 'open'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut aborted = 0;
+        for (id, t_start) in open {
+            let newest: Option<i64> = tx
+                .prepare_cached("SELECT max(t_end) FROM detection WHERE survey_id = ?1")?
+                .query_row([id], |r| r.get(0))?;
+            aborted += tx.execute(
+                "UPDATE survey SET state = 'aborted', t_end = ?2 \
+                 WHERE survey_id = ?1 AND state = 'open'",
+                params![id, newest.unwrap_or(t_start).max(t_start)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(aborted)
+    }
+
     /// One Survey.
     pub fn survey(&self, id: SurveyId) -> Result<Survey, RepoError> {
         type Raw = (
