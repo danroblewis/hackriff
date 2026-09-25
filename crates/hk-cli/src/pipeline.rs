@@ -1112,8 +1112,9 @@ pub fn serve_api(
         )),
         hk_pipeline::playback::PlaybackConfig::default(),
     ));
-    // T-859 (MAUTO M-8): region-analyze jobs over the run's IQ ring. No search backend yet —
-    // stage evaluation over IQ is MAUTO M-2 — so a job acquires and then says it searched nothing.
+    // T-859 (MAUTO M-8): region-analyze jobs over the run's IQ ring. No search backend yet
+    // (`server_backend()` is `None`: no production IQ evaluator), so a job acquires and then says
+    // it searched nothing.
     // T-860 (MAUTO M-9): a finished job attaches to the run's inventory and may confirm through
     // `ConfirmPolicy.synthesized`.
     let analyze = {
@@ -1127,7 +1128,8 @@ pub fn serve_api(
                         .then(|| hk_model::FreqRange::centered(s.center_hz, s.sample_rate_hz))
                 }),
             )),
-            None,
+            // The one shared choice (T-863): the ADR-0015 §7 suite reads the same function.
+            hk_pipeline::synth::jobs::server_backend(),
             hk_pipeline::synth::jobs::PowerPolicy::Mains,
             Some(Arc::new(hk_pipeline::synth::jobs::RepoAttacher::new(
                 handle.data_dir().join("hackriff.db"),

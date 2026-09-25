@@ -22,8 +22,8 @@
 //!    [`MAX_WINDOW_NS`] keeps its newest part and says so in `warnings`. **Coverage is what was
 //!    read** (ADR-0015 §14.5): `window` is filled from the ledger, never from the request.
 //! 3. **Searching**: the [`SearchBackend`] runs `hk_synth::engine::search` over the acquired IQ.
-//!    **Stage evaluation over IQ is MAUTO M-2** (`Block::evidence` + `run_window`), which has not
-//!    landed, so a server built without a backend ends every job here as `failed` with
+//!    No production backend exists yet ([`server_backend`] is `None`: nothing implements the
+//!    engine's `Evaluator` over acquired IQ), so a server ends every job here as `failed` with
 //!    `error.code: "no_evaluator"` — *after* a real acquisition, so the job still says exactly
 //!    what it would have searched. That is `not-searched`, never `unknown` (ADR-0021 §7A.4).
 //! 4. **Finished**: `done`, `cancelled` or `failed`. The last [`MAX_FINISHED`] finished jobs are
@@ -254,6 +254,21 @@ pub trait SearchBackend: Send + Sync {
         control: &Control,
         observer: &mut dyn Observer,
     ) -> Result<SearchOutcome, String>;
+}
+
+/// **The search backend a server runs region-analyze jobs with** — the one place it is chosen, so
+/// `hk serve` (`hk_cli::pipeline`) and ADR-0015 §7's acceptance suite (`acceptance_mauto`'s
+/// `mauto_eval`, T-863 = MAUTO M-12) can never disagree about what a job would search with.
+///
+/// `None` on this build: nothing yet implements [`SearchBackend`] over acquired IQ — that is, an
+/// [`hk_synth::engine::Evaluator`] running candidate prefixes through `hk_blocks::run_window` with
+/// the calibrated scoring (the machinery `hk_synth::objective::EvidenceObjective` already uses),
+/// plus template seeding into [`hk_synth::engine::Root`]s. So every job ends `failed /
+/// no_evaluator` after a real acquisition (module docs), and the §7 suite reports its rates as
+/// *not measured* rather than as failed or passed. Returning a backend here arms that suite's
+/// thresholds with no edit to the suite.
+pub fn server_backend() -> Option<Arc<dyn SearchBackend>> {
+    None
 }
 
 /// Attaches a finished job's results to the inventory (MAUTO M-9, [`super::attach`]). A server

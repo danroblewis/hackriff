@@ -15,7 +15,8 @@ T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only
 :mod:`hkpy.synth.lora_scene`), ``mismatched_hypothesis`` (SIGNAL-052/RESEARCH-002, T-626: the N5 mismatched-hypothesis negative
 population -- see :mod:`hkpy.synth.mismatch`), ``retune_diversity`` (AWARE-011, T-586: one region at several
 centres, fixed-frequency emitters beside LO-relative artefacts -- see :mod:`hkpy.synth.retune`),
-``multipath_echo`` (AWARE-053, T-222: one transmission received twice -- a delayed, attenuated
+``generic_fsk_sweep`` (RESEARCH-002/SIGNAL-052, T-863: ADR-0015 section 7's
+generic FSK/OOK population -- see :mod:`hkpy.synth.generic_fsk`), ``multipath_echo`` (AWARE-053, T-222: one transmission received twice -- a delayed, attenuated
 copy beside an independent station of the same family -- see :mod:`hkpy.synth.multipath`). Every scenario also accepts the impairment parameters in
 :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
@@ -33,6 +34,7 @@ from typing import Any
 
 from hkpy.synth import (
     c4fm_burst,
+    generic_fsk,
     impairments,
     lora_scene,
     mismatch,
@@ -151,6 +153,13 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "one 2-FSK transmission received twice (T-222): a delayed, attenuated copy of the same "
         "bursts on another channel, beside an independent station of the same family, bandwidth "
         "and modulation -- so only the content separates the pair from the decoy"),
+    "generic_fsk_sweep": ScenarioSpec(
+        generic_fsk.generic_fsk_sweep, generic_fsk.GENERIC_FSK_DEFAULTS,
+        ("RESEARCH-002", "SIGNAL-052"),
+        "ADR-0015 section 7's generic FSK/OOK sweep (T-863 = MAUTO M-12): one bursty emitter per "
+        "seed, 300 Bd-50 kBd, random 16-32-bit sync, RevEng CRC-8/16 (or an off-catalogue "
+        "polynomial, or none), SNR in its own bandwidth, CFO within +/-0.2 x bandwidth; the "
+        "deepest achievable verdict is stated a priori in truth"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "
