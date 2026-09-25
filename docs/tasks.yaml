@@ -27158,7 +27158,7 @@ tasks:
   - id: T-913
     milestone: M2-hardening
     title: "Detection retention follow-ups: on_air double count, rollup f-extent vs per-frame OBW, startup index build, periodic count(*), writer lock-wait measurement, WAL peak, 20 Msps fixture metas (T-904 review)"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-904
@@ -27194,6 +27194,7 @@ tasks:
       Observed, not chased: hk-model's timing-tier test a_prune_batch_holds_the_write_lock_briefly (T-904) FAILED once under `cargo test -p hk-model --lib` on this box at load average ~15 — worst batch lock hold 1956.7 ms against its 50 ms bound, 48k rows in 480 batches, lock_ns_total 18.9 s (avg 39 ms/batch), so it was a single outlier. It passed in isolation and in every later run, and nextest's default-filter keeps it out of every gate (it is `just timing` only). Its own doc says it needs a quiet box. Note the coincidence with T-913 item 8's unexplained 0.5-1.95 s outliers at 20 Msps: the new writer-latency measurement shows the detect writer never sees more than ~23 ms, so whatever produces those outliers is on the pass's own commit/IO side, not queueing behind the writer. | Item 9 (20 Msps WAL peak ~295 MB mid-pass; 112 MB/h growth still climbing at 12 min) needs the staging device and a 1-2 h live run: not reproducible in a worktree. Worth re-issuing as a device-time ticket. | Item 10: fixtures/store does not exist in this checkout (fixtures/ holds hackrf, sweeps, tiny, manifest.json), so the 2026-09-13 20 Msps urban_* SigMF metas with the old provenance schema could not be migrated here. Needs the machine holding that capture store. | Migration 0020 does not backfill explanation_detection from existing explanation bodies: no code path writes Evidence::Detection today (hk-context::gnss_service deliberately does not), so there is nothing to recover — documented in the migration. If a producer lands before any store is upgraded past 0020, that assumption needs re-checking.
       Use cases: AWARE-042
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 415bcef1
   - id: T-914
     milestone: MMAP
     title: app-surface.e2e.mjs layers-menu checks derive the overlay list from the registry, not a literal - every layer ticket (T-811/T-812/T-821/T-897) stops being blamed
