@@ -1039,3 +1039,241 @@ fn the_shipped_floor_is_the_lattice_the_client_test_pins() {
         );
     }
 }
+
+/// **T-1018: a coarse tile is read from its OWN node, never folded out of level 0 at read time.**
+///
+/// The user's tile-latency review (2026-09-25): `/api/tiles` sorted its candidates finest first and
+/// read the first that held anything, so a `(3, 1)` tile read 16 × 65 536 level-0 cells in four
+/// history-lock holds while T-585's live-maintained node `(3, 1)` sat unread, and a `(6, 1)` tile —
+/// past the lattice's `level_f` ≤ 3 — was folded from the finest affordable level instead of the
+/// cheapest one that answers it. Max-hold composes, so the node gives the same grid.
+///
+/// Driven end to end: the scripted receiver behind the generic device contract, the live chain
+/// writing the view lattice, and the tile route reading the pipeline's own pyramid. Every
+/// assertion is a count or a value — no wall clock (`cost.build_ms` is printed, never asserted).
+///
+/// 1. An **on-node** coarse tile answers from its exact node: `exact_node == true`, and
+///    `cost.source_cells == cells²` in ONE lock hold.
+/// 2. Its pixels equal the **level-0 fold** of the same data (the answer the finest-first walk
+///    served), cell for cell: the same cells observed and the same max-hold value.
+/// 3. An **off-lattice** tile answers from the candidate with the FEWEST source cells that still
+///    only folds — node `(3, 1)` for `(6, 1)` — never a replicating level, and states it.
+#[test]
+fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_folds() {
+    use hk_api::http::ApiState;
+    use hk_api::tiles::{TILE_CELLS, tiles_json};
+
+    let dir = TempDir::new("tile-read-level");
+    let (rx, ctl) = radio::Radio::new(CENTER, FS, BLOCK, radio::tone(|_| OFFSET_HZ));
+    let t0 = Timestamp::from_unix_nanos(radio::T0_NS);
+    let mut plan = replay_plan(CENTER, FS, t0);
+    plan.extra = json!({ "pipeline": { "ring_s": RING_S } });
+    let mut cfg = PipelineConfig::new(&dir.0, plan).unwrap();
+    cfg.source_class = window_class(CENTER, FS);
+    cfg.live_window_class = true;
+    cfg.lossless = true;
+    cfg.settings.chains = Some(Vec::new());
+    let handle = Pipeline::start(
+        cfg,
+        Box::new(rx),
+        SourceInfo {
+            sample_rate_hz: FS,
+            center_hz: CENTER,
+            start_time: t0,
+        },
+        None,
+        Box::new(TrackInventory::default()),
+    )
+    .unwrap();
+    let view = handle
+        .view_history()
+        .expect("the pipeline opens a view-scheme pyramid");
+    // 5 phases = 20 s of capture time: enough rows for node (3, 1) (8 bins × 2 rows) to hold
+    // committed rows of its own, and a finished run, so the store is still while it is compared.
+    for _ in 0..5 {
+        assert!(
+            ctl.wait_emitted(ctl.emitted() + PHASE_SAMPLES, LIMIT),
+            "the run stopped delivering samples"
+        );
+    }
+    ctl.finish();
+    let (summary, fired) = wait_guarded(handle, LIMIT);
+    assert!(!fired, "the run had to be stopped by the watchdog");
+    assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+
+    let (f0, t0_ns, n3_1) = {
+        let p = view.lock().unwrap();
+        assert!(
+            p.config().coarse_live,
+            "the view lattice's coarse nodes are live (T-571)"
+        );
+        let g = p.geometry();
+        (
+            g.levels[0].f_cell_hz,
+            g.levels[0].t_cell_ns,
+            g.level_at(3, 1).expect("node (3, 1) is on the lattice"),
+        )
+    };
+    assert_eq!(n3_1, node(3, 1) as usize);
+    let state = ApiState {
+        view_history: Some(Arc::clone(&view)),
+        ..ApiState::default()
+    };
+    let cells = TILE_CELLS;
+    // The tile holding the tone, 5 s into the run, at `(level_f, level_t)` of the view lattice.
+    let address = |lf: usize, lt: usize| {
+        let f_span = f0 * 2f64.powi(lf as i32) * cells as f64;
+        let t_span = t0_ns * (1i64 << lt) * cells as i64;
+        let f_index = ((CENTER + OFFSET_HZ) / f_span).floor() as i64;
+        let t_index = (radio::T0_NS + 5_000_000_000).div_euclid(t_span);
+        (f_index, t_index, f_span, t_span)
+    };
+    let tile = |lf: usize, lt: usize| {
+        let (f_index, t_index, ..) = address(lf, lt);
+        let q: Vec<(String, String)> = [
+            ("scheme", "view".to_string()),
+            ("level_f", lf.to_string()),
+            ("level_t", lt.to_string()),
+            ("f_index", f_index.to_string()),
+            ("t_index", t_index.to_string()),
+            ("cells", cells.to_string()),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b))
+        .collect();
+        let v = tiles_json(&state, &q).expect("the tile is servable");
+        eprintln!(
+            "tile ({lf}, {lt}): answered level {} exact_node {} source_cells {} chunks {} \
+             build_ms {} (printed, never asserted) candidates {} tried {}",
+            v["resolution"]["answered"]["level"],
+            v["resolution"]["answered"]["exact_node"],
+            v["cost"]["source_cells"],
+            v["cost"]["chunks"],
+            v["cost"]["build_ms"],
+            v["resolution"]["candidates"],
+            v["resolution"]["tried"],
+        );
+        v
+    };
+
+    // ---- 1. on-node: the exact node answers, cells² source cells, one lock hold ----
+    let on = tile(3, 1);
+    let observed = on["grid"]["observed_cells"].as_u64().unwrap();
+    assert!(
+        observed > 0,
+        "the tone's tile must hold data, or nothing is judged: {}",
+        on["grid"]["observed_cells"]
+    );
+    assert_eq!(
+        on["axes"]["store_node"],
+        json!(n3_1),
+        "(3, 1) is a real node"
+    );
+    assert_eq!(
+        on["resolution"]["answered"]["exact_node"],
+        json!(true),
+        "node (3, 1) exists, is live-maintained, and was not read: level {} answered from {} \
+         source cells",
+        on["resolution"]["answered"]["level"],
+        on["cost"]["source_cells"]
+    );
+    assert_eq!(on["cost"]["source_cells"], json!(cells * cells));
+    assert_eq!(on["cost"]["chunks"], json!(1), "one history lock hold");
+    for axis in ["frequency", "time"] {
+        assert_eq!(
+            on["resolution"]["fold"][axis]["direction"],
+            json!("exact"),
+            "{axis}"
+        );
+    }
+
+    // ---- 2. the same pixels as the level-0 fold, cell for cell ----
+    let (f_index, t_index, f_span, t_span) = address(3, 1);
+    let freq = FreqRange::new(f_index as f64 * f_span, (f_index + 1) as f64 * f_span);
+    let time = TimeRange::new(
+        Timestamp::from_unix_nanos(t_index * t_span),
+        Timestamp::from_unix_nanos((t_index + 1) * t_span),
+    );
+    let fine = {
+        let p = view.lock().unwrap();
+        p.query(&RegionQuery {
+            freq,
+            time,
+            resolution: Resolution::Level(0),
+        })
+        .expect("level 0 answers")
+        .overview(time, freq, cells, cells)
+    };
+    let served = on["grid"]["max_db"].as_array().expect("json planes");
+    assert_eq!(served.len(), fine.cells.len());
+    assert_eq!(
+        fine.observed_cells as u64, observed,
+        "the same cells are observed"
+    );
+    let mut worst = 0f64;
+    for (i, (s, f)) in served.iter().zip(&fine.cells).enumerate() {
+        match (s.as_f64(), f.sources > 0) {
+            (None, false) => {}
+            (Some(s), true) => worst = worst.max((s - f64::from(f.max_db)).abs()),
+            (s, f) => panic!("cell {i}: served {s:?}, level-0 fold observed {f}"),
+        }
+    }
+    eprintln!(
+        "node (3, 1) against the level-0 fold: max |Δ max_db| = {worst} dB over {observed} cells"
+    );
+    // Max-hold composes exactly; the only slack is the store's 0.01 dB stored form (codec).
+    assert!(
+        worst <= 0.011,
+        "the node's max-hold differs from level 0's by {worst} dB"
+    );
+
+    // ---- 3. off-lattice: the cheapest candidate that folds, never the finest ----
+    let off = tile(6, 1);
+    assert!(
+        off["grid"]["observed_cells"].as_u64().unwrap() > 0,
+        "{}",
+        off["grid"]["observed_cells"]
+    );
+    assert_eq!(
+        off["axes"]["store_node"],
+        json!(null),
+        "(6, 1) is past the lattice"
+    );
+    assert_eq!(
+        off["resolution"]["answered"]["level"],
+        json!(n3_1),
+        "node (3, 1) is the candidate with the fewest source cells that still folds onto (6, 1); \
+         candidates {} tried {}",
+        off["resolution"]["candidates"],
+        off["resolution"]["tried"]
+    );
+    for axis in ["frequency", "time"] {
+        assert_ne!(
+            off["resolution"]["fold"][axis]["direction"],
+            json!("replicated"),
+            "a replicating level was chosen over one that folds ({axis})"
+        );
+    }
+    // (6, 1) over node (3, 1): 8× the frequency cells, the time cells one for one.
+    assert_eq!(off["cost"]["source_cells"], json!(8 * cells * cells));
+    // Every other folding candidate costs more to read — which is the whole rule.
+    let p = view.lock().unwrap();
+    let g = p.geometry();
+    let src = |l: usize| {
+        let c = &g.levels[l];
+        ((f_span * 8.0) / c.f_cell_hz).ceil() * ((t_span as f64) / c.t_cell_ns as f64).ceil()
+    };
+    let chosen = src(n3_1);
+    for c in off["resolution"]["candidates"].as_array().unwrap() {
+        let l = c.as_u64().unwrap() as usize;
+        let lv = &g.levels[l];
+        let folds = lv.f_cell_hz <= f0 * 64.0 && lv.t_cell_ns <= t0_ns * 2;
+        if folds && l != n3_1 {
+            assert!(
+                src(l) > chosen,
+                "level {l} folds from {} cells, fewer than {chosen}",
+                src(l)
+            );
+        }
+    }
+}

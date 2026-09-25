@@ -62,8 +62,8 @@ use tungstenite::protocol::{Role, WebSocket};
 use crate::http::ApiState;
 use crate::query::{ApiError, Params, Region, bad, param};
 use crate::tiles::{
-    TileKey, TileStore, affordable_levels, axis_fold, chunk_rows, num, parse_key, servable,
-    store_name, tier_of, tile_store, with_tile_history, with_tile_history_built,
+    TileKey, TileStore, axis_fold, chunk_rows, num, parse_key, read_order, servable, store_name,
+    tier_of, tile_store, with_tile_history, with_tile_history_built,
 };
 
 /// Rows in one `rows` message at most. Small enough that a block's coverage plane is always laid
@@ -166,10 +166,9 @@ pub fn parse_subscription(state: &ApiState, q: &Params) -> Result<RowSubscriptio
                  `axes.*.max_level` on /api/tiles states how far up the lattice can be read",
             ));
         }
-        let c: Vec<u8> = affordable_levels(p, &key)
-            .into_iter()
-            .map(|l| l as u8)
-            .collect();
+        // The tile read's own order (T-1018), so a pushed block and the sealed tile it becomes
+        // are answered by the same level.
+        let c: Vec<u8> = read_order(p, &key).into_iter().map(|l| l as u8).collect();
         Ok((key, c))
     })?;
     if let Some(t) = to
@@ -451,8 +450,8 @@ impl RowCursor {
             nrows,
             key.cells,
         );
-        // The tile read's rule: finest affordable level first, walk coarser only when a level holds
-        // nothing, and say which answered.
+        // The tile read's rule: `read_order` (the exact node, else the cheapest level that folds),
+        // walk on only when a level holds nothing, and say which answered.
         let mut tried = Vec::new();
         let mut first: Option<(u8, Overview)> = None;
         let mut answered: Option<(u8, Overview)> = None;

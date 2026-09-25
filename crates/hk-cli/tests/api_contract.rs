@@ -9208,20 +9208,24 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!(2),
         "(level_f 0, level_t 2) is node 0*8+2 of the 8x8 view lattice: {coarse_t}"
     );
-    // The node existing does not mean the read uses it: the rule is **finest affordable first**
-    // (T-438), and node (0, 0) is affordable here and finer in time, so it answers and its cells
-    // fold onto the tile's. Folding a finer source invents nothing and greys nothing — it is the
-    // only direction that is free. `exact_node: false` alongside a non-null `store_node` is that
-    // preference showing, not a missing node.
+    // **T-1018: the node existing means the read USES it.** The view lattice's coarse nodes are
+    // maintained live (T-571/T-585), so the exact node holds the same max-hold the finer levels
+    // fold to — for `cells²` source cells instead of 4× that. (Before T-1018 the rule was finest
+    // affordable first, and node (0, 0) answered this address with `exact_node: false`.)
     assert_eq!(
         coarse_t["resolution"]["answered"]["exact_node"],
-        json!(false),
+        json!(true),
+        "{coarse_t}"
+    );
+    assert_eq!(
+        coarse_t["resolution"]["answered"]["level"],
+        json!(2),
         "{coarse_t}"
     );
     assert_eq!(
         coarse_t["resolution"]["fold"]["time"]["direction"],
-        json!("folded"),
-        "a finer source folded onto a coarser tile invents nothing: {coarse_t}"
+        json!("exact"),
+        "the tile's own node answers it cell for cell: {coarse_t}"
     );
     assert!(
         coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,
