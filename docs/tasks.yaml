@@ -27695,7 +27695,8 @@ tasks:
   - id: T-934
     milestone: M2-hardening
     title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
-    status: todo
+    status: in-progress
+    branch: task-t934
     priority: P2
     deps: []
     parallel_group: DEFLAKE-WC
