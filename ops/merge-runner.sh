@@ -275,6 +275,19 @@ bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (t
   return 0
 }
 
+# REMOTE MIRRORS (user, 2026-09-25 00:15): after every landing, main goes to each remote worker host's mirror
+# ($HACKRIFF_OPS/hosts.json names them; each is a git remote of this repo), so a remote worker never starts from a
+# stale base and the drift is visible. Only the LANDED HEAD (called after the MERGED line), never --force, in the
+# background - a slow or absent host never delays the next gate. A failure is logged; the next landing retries.
+push_mirrors(){
+  [ -s "$S/hosts.json" ] || return 0
+  local sha h; sha=$(git -C "$REPO" rev-parse HEAD)
+  for h in $(python3 -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1]))))' "$S/hosts.json" 2>/dev/null); do
+    ( if timeout 120 git -C "$REPO" push -q --no-verify "$h" "$sha:refs/heads/main" >/dev/null 2>&1; then log "PUSHED $h ${sha:0:8}"
+      else log "PUSH FAILED $h ${sha:0:8} - host down or its mirror not a fast-forward; the next landing retries"; fi ) &
+  done
+}
+
 process(){
   local branch=$1 ticket; ticket=$(ticket_of "$branch")
   cd "$REPO" || return 1
@@ -354,6 +367,7 @@ process(){
       return 0
     fi
     log "MERGED $branch ✓"
+    push_mirrors
     record_landed "$branch"
     clear_attempts "$branch"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGED" >> "$DONELOG"
@@ -848,6 +862,7 @@ try_bulk(){
   elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
+    push_mirrors
     for b in "${branches[@]}"; do
       echo "$(date '+%m-%d %H:%M')  $b  $(ticket_of "$b")  MERGED(bulk)" >> "$DONELOG"
       record_landed "$b"

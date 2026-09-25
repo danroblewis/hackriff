@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -534,6 +535,52 @@ DIGEST_EVERY_S = 2 * 3600
 BREAK_LOOKBACK_S = 2 * 3600
 
 
+REPO = "/Users/daniellewis/hackriff"
+
+
+def _git(repo: str, *args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _on_main(repo: str, branch: str) -> bool:
+    """The branch exists and main contains it (merge-base answers by exit code)."""
+    try:
+        r = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", branch, "main"], capture_output=True, timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
+    """Per remote worker host (hosts.json; user, 2026-09-25): its mirror's main as this repo last pushed it (the
+    remote-tracking ref - local, no network) and how far main is ahead of it, its running claims, and how many of
+    the tickets the work runner dispatched to it are on main."""
+    try:
+        hosts = json.load(open(os.path.join(ops, "hosts.json")))
+    except (OSError, ValueError):
+        return []
+    try:
+        claims = json.load(open(os.path.join(ops, "work-claims.json")))
+    except (OSError, ValueError):
+        claims = {}
+    wlog = _read(os.path.join(ops, "work-runner.log"))
+    out = []
+    for h in hosts:
+        tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/remotes/{h}/main")
+        behind = _git(repo, "rev-list", "--count", f"{tip}..main") if tip else ""
+        pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
+        running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running")
+        sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
+        landed = [t for t in sent if _on_main(repo, "task-t" + t[2:].lstrip("0"))]
+        out.append({"name": h, "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+                    "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
+                    "landed": len(landed)})
+    return out
+
+
 def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     """Invariant 23: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> ·
     <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`."""
@@ -555,7 +602,10 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
             + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min"
                + (f"; {s['flake_solo_24h']} after one solo pass, {s['flake_solo_saved_min_24h']} min of it" if s.get("flake_solo_24h") else "")
                + ")"
-               if s.get("flake_accepts_24h") else ""))
+               if s.get("flake_accepts_24h") else "")
+            # user, 2026-09-25: every tick line says what the remote hosts add
+            + "".join(f" · {h['name']}: {len(h['running'])} running, {h['landed']} landed"
+                      + (f", mirror behind by {h['behind']}" if h.get("behind") else "") for h in remote_hosts(ops)))
 
 
 def _holding(ops: str, now: datetime) -> str:
