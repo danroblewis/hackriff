@@ -1317,42 +1317,90 @@ def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_chi
     assert R._gone(pid, wait_s=10) and time.time() - t0 < 5
 
 
-def test_a_remote_run_is_an_ssh_session_whose_hangup_stops_the_remote_group(tmp_path, monkeypatch):
-    """User, 2026-09-24 23:35: worker agents on a second computer. The local claim pid is `sleep | ssh`; the remote
-    wrapper runs the worker in its own session, kills it when stdin closes, and pushes the branch when it ends."""
-    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
-    (tmp_path / "hosts.json").write_text(json.dumps({"box": {"ssh": "ubuntu@10.0.0.9"}}))
-    w = R.remote_wrapper("/r/.claude/worktrees/t9", "task-t9", "exec 'claude' '-p' < '/o/work/T-9/brief.md'",
-                         {"HK_WORKER": "1", "CARGO_BUILD_JOBS": "6"})
-    assert w.startswith("setsid bash -c ") and "</dev/null & p=$!" in w
-    assert "( cat >/dev/null; kill -TERM -- -$p 2>/dev/null ) &" in w                  # this Mac hung up -> stop it
-    assert "push -q -f origin HEAD:refs/heads/task-t9" in w and w.endswith("exit $rc")
-    assert "HK_WORKER=1" in w and "cd /r/.claude/worktrees/t9" in w
-    argv = R.ssh_argv("box", "true")
-    assert argv[0] == "ssh" and "BatchMode=yes" in argv and argv[-2:] == ["ubuntu@10.0.0.9", "true"]
+@pytest.fixture
+def remote_host(tmp_path, monkeypatch):
+    """A 'remote' host that is this machine: remote commands run in a local bash (with a setsid shim - macOS has
+    none), and the host's roots are distinct from the local ones so the path translation is exercised."""
+    import os
+    local_ops, local_repo, far = tmp_path / "ops", tmp_path / "repo", tmp_path / "far"
+    for d in (local_ops / "work", local_repo, far / "ops" / "work", far / "repo"):
+        d.mkdir(parents=True)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "setsid").write_text("#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n")
+    (shim / "setsid").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
+    monkeypatch.setattr(R, "S", str(local_ops))
+    monkeypatch.setattr(R, "REPO", str(local_repo))
+    monkeypatch.setattr(R, "WORKDIR", str(local_ops / "work"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(local_ops / "hosts.json"))
+    (local_ops / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": str(far / "repo"), "ops": str(far / "ops")}}))
+
+    def remote_sh(host, cmd, timeout=120, input=None):
+        r = subprocess.run(["bash", "-c", R.to_remote(host, cmd)], input=input, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    monkeypatch.setattr(R, "remote_sh", remote_sh)
+    return local_ops, local_repo, far
+
+
+def test_a_remote_run_records_its_group_and_tees_its_streams_on_the_host(remote_host):
+    """User, 2026-09-24 23:35: worker agents on a second computer. The wrapper runs the worker in its own session,
+    records the group, and keeps a complete copy of out/run.log on the host - a dropped connection loses nothing."""
+    local_ops, local_repo, far = remote_host
+    d = f"{local_ops}/work/T-9"
+    w = R.to_remote("node2", R.remote_wrapper(f"{local_repo}", "task-t9", "echo RESULT; echo progress >&2; exit 3",
+                                              {"HK_WORKER": "1", "A": "x y"}, d, "out.json"))
+    r = subprocess.run(["bash", "-c", w], capture_output=True, text=True, timeout=30)
+    fd = far / "ops" / "work" / "T-9"
+    assert r.returncode == 3 and "RESULT" in r.stdout and "progress" in r.stderr     # streamed to this Mac
+    assert (fd / "out.json").read_text().strip() == "RESULT" and "progress" in (fd / "run.log").read_text()
+    assert (fd / "remote.pgid").read_text().strip().isdigit()
+
+
+def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_host):
+    """Review FAIL 2026-09-24: a hang-up is not a stop. The group recorded on the host is asked about and stopped."""
+    local_ops, local_repo, far = remote_host
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo)}
+    d = f"{local_ops}/work/T-9"
+    w = R.to_remote("node2", R.remote_wrapper(str(local_repo), "task-t9", "exec sleep 60", {}, d, "out.json"))
+    p = subprocess.Popen(["bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(50):
+        if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
+            break
+        time.sleep(0.1)
+    time.sleep(0.3)
+    assert R.remote_run_state(c) == "running"
+    assert R.remote_stop(c, wait_s=5)
+    assert R.remote_run_state(c) == "gone"
+    p.wait(timeout=10)
+
+
+def test_the_host_unreachable_or_a_failed_sync_holds_the_claim(remote_host, monkeypatch):
+    local_ops, local_repo, far = remote_host
+    monkeypatch.setattr(R, "remote_sh", lambda host, cmd, timeout=120, input=None: (255, "ssh: connect timed out"))
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo)}
+    assert R.remote_run_state(c) == "unknown" and not R.remote_stop(c, wait_s=1)
+    seen = []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1, b"", b"no route"))
+    (local_ops / "work" / "T-9").mkdir(parents=True, exist_ok=True)
+    assert R.sync_back(c) is False and [a[2] for a in seen] == ["REMOTE_SYNC"]
+    assert R.sync_back(c) is False and len(seen) == 1                                 # warned once, retried each tick
+
+
+def test_paths_cross_ssh_as_the_hosts_own(remote_host):
+    local_ops, local_repo, far = remote_host
+    argv = R.ssh_argv("node2", f"cat {local_ops}/work/T-9/handback.json; ls {local_repo}/.claude/worktrees/t9")
+    assert argv[0] == "ssh" and "BatchMode=yes" in argv and argv[-2] == "u@h"
+    assert f"{far}/ops/work/T-9/handback.json" in argv[-1] and f"{far}/repo/.claude/worktrees/t9" in argv[-1]
+    assert str(local_ops) not in argv[-1].replace(str(far), "")
 
 
 def test_only_a_ticket_named_by_hand_goes_remote_in_stage_one(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
     monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-9, T-11")
     assert R.host_for({"id": "T-9"}) is None                                          # no host configured
-    (tmp_path / "hosts.json").write_text(json.dumps({"box": {"ssh": "u@h"}}))
-    assert R.host_for({"id": "T-9"}) == "box" and R.host_for({"id": "T-11"}) == "box"
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o"}}))
+    assert R.host_for({"id": "T-9"}) == "node2" and R.host_for({"id": "T-11"}) == "node2"
     assert R.host_for({"id": "T-10"}) is None
-
-
-def test_a_finished_remote_run_is_synced_back_before_the_normal_reap(tmp_path, monkeypatch):
-    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
-    (tmp_path / "hosts.json").write_text(json.dumps({"box": {"ssh": "u@h"}}))
-    monkeypatch.setattr(R, "WORKDIR", str(tmp_path / "work"))
-    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    calls = []
-    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: calls.append((args, cwd)) or "")
-    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: calls.append((args, None)))
-    R.sync_back({"host": "box", "ticket": "T-9", "branch": "task-t9", "wt": str(wt)})
-    flat = [" ".join(a) for a, _ in calls]
-    assert flat[0] == "git fetch -q box +refs/heads/task-t9:refs/remotes/box/task-t9"
-    assert calls[1] == (["git", "reset", "-q", "--hard", "box/task-t9"], str(wt))         # this Mac's worktree
-    assert any(a[0] == "scp" and a[-1].endswith("/work/T-9/handback.json") for a, _ in calls)
