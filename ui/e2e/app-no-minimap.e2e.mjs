@@ -42,6 +42,8 @@ async function ready() {
     await new Promise((res) => setTimeout(res, 500));
   }
 }
+/** Widths at which the segment's spot was the visible surface AND lit. */
+const litAt = [];
 let backendP = null;
 const backend = () => (backendP ??= ready());
 after(async () => { (await backendP?.catch(() => null))?.stop(); });
@@ -107,17 +109,38 @@ for (const [width, height] of [[1280, 800], [400, 800]]) test(`at ${width} x ${h
   const paneH = (rect.h - ins.top - ins.bottom) * dpr;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
   const top = Math.round((rect.y + ins.top) * dpr + traceH);
+  // Where the segment must be: the tuned window's centre through the pane's own frequency mapping
+  // (the readout `w` the zoom-out loop ended on), +-8 CSS px for the 2 px drawing floor and rounding.
+  const mid = (tuned.f_lo_hz + tuned.f_hi_hz) / 2;
+  const xCss = rect.x + ((mid - w.loHz) / (w.hiHz - w.loHz)) * rect.w;
+  const x0 = Math.max(0, Math.floor((xCss - 8) * dpr)), x1 = Math.min(shot.width, Math.ceil((xCss + 8) * dpr));
+  // Is that spot the SURFACE, or floating chrome over it? The browser's own hit test, under the
+  // harness's `unoccludedColumns` rule (the surface's mount counts; `data-band="chrome"` does not).
+  // A pixel claim is made only where the surface is visible — a chip over the corner is not a
+  // missing segment — and the file's last test requires the claim to have been made at SOME width.
+  const visible = await page.eval(`(() => {
+    const c = document.querySelector('.sf-canvas'); const mount = c.closest('.surface') ?? c.parentElement;
+    const el = document.elementFromPoint(${xCss}, ${(top + 1) / dpr});
+    return !!el && mount.contains(el) && !el.closest('[data-band="chrome"]'); })()`);
   let lit = 0;
   for (let y = Math.max(0, top - 3); y < Math.min(shot.height, top + 12); y++) {
-    for (let x = 0; x < shot.width; x++) {
+    for (let x = x0; x < x1; x++) {
       const d = (y * shot.width + x) * 4;
       if (Math.abs(shot.data[d] - DEVICE0[0]) + Math.abs(shot.data[d + 1] - DEVICE0[1]) + Math.abs(shot.data[d + 2] - DEVICE0[2]) <= 40) lit++;
     }
   }
-  t.diagnostic(`at ${width} px, ${lit} px of the live-segment colour in the pane's newest rows (y ${top - 3}-${top + 12}); ` +
+  t.diagnostic(`at ${width} px, ${lit} px of the live-segment colour at x ${Math.round(xCss)} CSS px in the pane's newest rows ` +
+    `(y ${top - 3}-${top + 12} device px); that spot is ${visible ? "the surface" : "UNDER floating chrome"}; ` +
     `tuned ${(tuned.f_lo_hz / 1e6).toFixed(1)}-${(tuned.f_hi_hz / 1e6).toFixed(1)} MHz`);
-  assert.ok(lit >= 2, "the mock's active capture window is not lit on the zoomed-out pane — the minimap's segment was lost, not moved");
+  if (visible) {
+    assert.ok(lit >= 2, "the mock's active capture window is not lit on the zoomed-out pane — the minimap's segment was lost, not moved");
+    litAt.push(width);
+  }
 
   const control = page.requests.filter((r) => CONTROL.test(r.url) && r.method !== "GET");
   assert.deepEqual(control.map((r) => r.url), [], "zooming out reached a device route");
+});
+
+test("the live capture segment was seen lit on the surface at one width at least (not vacuously skipped everywhere)", () => {
+  assert.ok(litAt.length > 0, "at every width the segment's spot was under floating chrome, so nothing proved it is drawn");
 });
