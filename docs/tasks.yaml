@@ -26890,7 +26890,7 @@ tasks:
   - id: T-911
     milestone: MLIVE
     title: "Departed band's shadow must keep the colour of its last live row (within one ramp step, undimmed): blind e2e + fix in the carry-forward/shadow path (user, staging)"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: PIPE-tiles
@@ -26907,6 +26907,7 @@ tasks:
       FOUND BY user 2026-09-24 ~19:45 (relayed, message truncated).
     core_interface: true
     branch: task-t911
+    commit: f2a4c88b
   - id: T-912
     milestone: M2-hardening
     title: "CI matches the check-tier gate: 'check' on push/PR, 'acceptance' nightly + manual; rust-toolchain.toml pins 1.93.1; nextest installed in the acceptance job"
