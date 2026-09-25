@@ -19027,7 +19027,7 @@ tasks:
     status: in-progress
     priority: normal
     parallel_group: MUI-X1
-    model: sonnet
+    model: opus
     depends_on: [T-566]
     use_cases: [RESEARCH-001, RESEARCH-003]
     core_interface: false
@@ -19076,6 +19076,8 @@ tasks:
       Observed, not chased: The trace panel's 'why not X' answer covers the outcomes ADR-0021 §6A's table lists (unsupported/deferred_budget/deferred_prior/pruned_floor/not_applicable) generically via the served summary text and tried flag rather than a bespoke per-outcome sentence; this matches the thin-client rule (all wording is the backend's summary) but means the panel never repeats the exact table wording from the ADR — that wording lives server-side already per T-566's summary field. | Reviewer's follow-up #3 (not blocking, from attempt-1 review): AnalyzeJob.resolution as served by hk-model/src/repo/synthesis.rs carries only kind/deepest_verdict/reason/summary, not `explanations[]` yet, so the panel's explanations-subordinate rendering (acceptance item 6) is implemented but untested against real server data until a later ticket adds that field to the served Resolution. | Reviewer's follow-up #3 also noted the panel shows bounds.truncated/elided (the trace-fetch response's own shape, matching acceptance item 5's example) but not job.trace_summary.nodes_elided; left as-is, flagging in case a future ticket wants trace_summary's session-level nodes_elided shown too.
       Use cases: RESEARCH-001, RESEARCH-003
       Resources: 5 CPU-s, peak 0.3 GB
+    effort: high
+    effort_reason: two sonnet rounds failed review on the trace-panel resolution headline race (supervisor 2026-09-25 03:22)
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
