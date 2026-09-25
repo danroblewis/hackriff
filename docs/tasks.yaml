@@ -23924,7 +23924,8 @@ tasks:
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
-    status: todo
+    status: in-progress
+    branch: task-t811
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -26637,7 +26638,8 @@ tasks:
   - id: T-907
     milestone: M2-hardening
     title: e2e harness waitForSurfaceMounted returns immediately on the APP page (waits on [data-slot=note], only on /surface) - app specs can race an unmounted surface; app-surface boot flake
-    status: todo
+    status: in-progress
+    branch: task-t907
     priority: high
     deps: []
     parallel_group: UI-E2E
