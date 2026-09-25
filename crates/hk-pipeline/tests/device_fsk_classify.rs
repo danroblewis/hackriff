@@ -30,13 +30,37 @@
 //!     after the burst cleared it. **T-876** counts only runs that hold a sample significant over
 //!     the whole snippet (`EstimatorConfig::extent_pfa`): every edge now lands within 0.16 ms of
 //!     the truth, and 8 of 16 above-gate rows claim `fsk`.
-//!   - *7 rows: the one-Gaussian `2fsk` density puts h = 4 in its tail* — mean-normalised
-//!     distance m 2.4–3.8 against 1.9–2.1 on the claimed rows, driven by `sigma_aa` (z 2.4–4.3),
-//!     `blind_qpsk` (z 4.0 on every row, claimed ones included), `if_slope_r2` (up to 5.2) and
-//!     `cyclic_db` (≈ −2.3).
+//!   - *The rest: two device-path features the `2fsk` density had never seen — not the
+//!     one-Gaussian tail these docs used to blame.* T-877 split and re-fitted the density and
+//!     found the rows fell *further* out, on `cyclic_db` (z −3.3…−3.8 against its components) and
+//!     `sigma_aa` (z +2.2…+4.0). T-887 traced each to its source, on 77 bursts of this scene
+//!     (seeds 852–855 × 25/30 dB) measured through this call site's own steps:
+//!     - **`sigma_aa` was a C13 bias.** Each extent edge sat about one edge window *outside* the
+//!       burst (−44 / +56 source samples at 500 kS/s): `first − win/2` subtracted a half window
+//!       from a centred moving average's 6 dB crossing, which at any useful SNR is already a half
+//!       window early. The normalised snippet carried ~4 noise-only samples at each end of ~1 200,
+//!       an envelope sample at the noise floor reads `|a/ā − 1| ≈ 1`, and those eight samples
+//!       alone took `sigma_aa` from 0.025 to 0.083. C13 now puts each edge where the moving
+//!       average crosses half-way to the burst's on-level (`hk_estimate::params`,
+//!       `half_level_edges`): edges within +7 / +4 source samples, `sigma_aa` z **+2.2…+4.3 →
+//!       −0.9…+0.5**, and 13 of 16 above-gate rows claimed on the densities of the time.
+//!     - **`cyclic_db` is the dev grid's burst length, and is still open.** A cyclic line's
+//!       significance grows with the symbols it integrates, ~9.5 dB a decade on an h = 4 packet
+//!       (20.0 dB at 112 symbols, 26.5 at 448, 29.3 at 896; flat in C14's samples per OBW), and
+//!       the device's 20.2 dB is exactly a 112-symbol burst's: the device measurement is right.
+//!       Every dev-grid `2fsk` record holds 270–1 170 symbols, so the density has never seen a
+//!       burst this short, and these rows still read `cyclic_db` z −2.8…−1.7. Cutting each
+//!       `2fsk` draw's C14 view to a packet of drawn length and refitting took that to
+//!       −0.8…+0.1, but it moved one acceptance draw's `2fsk` prior over the verifier's
+//!       candidate floor, and the verifier — which prefers `gfsk` on that `2fsk` draw on either
+//!       view — confirmed the tree's wrong call past p = 0.9 (`verifier_gain`'s never-more-
+//!       confidently-wrong guard, 0 → 1). That generator change is held back until the verifier
+//!       half is resolved; the rows are claimed without it.
 //!
-//! So the floor asserted below is the measured gain (8 of 16: red at 0 before T-852, at 5 before
-//! T-876), and the majority is the open target the density follow-up owns.
+//! With T-888's refit (`blind_bpsk`/`blind_qpsk` absent where C14 cannot measure them) and the
+//! half-level edges, **16 of 16** above-gate rows claim `fsk`. The floor asserted below is 15 —
+//! one row of margin; red at 0 before T-852, 5 before T-876, 8 before T-887's extent fix and
+//! 12 with T-888 alone.
 
 mod common;
 
@@ -305,6 +329,14 @@ fn wide_deviation_fsk_through_the_mock_sdr_is_claimed_fsk_and_never_a_wrong_fami
     // seeds 853 and 856): the first→last crossing of the 6 dB edge threshold took in an isolated
     // noise excursion milliseconds after the burst, and the appended noise-only samples pushed
     // the envelope features out of every FSK class.
+    //
+    // T-887: and each edge sits **on** the burst, within three quarters of one window. Until then
+    // every edge sat about a window *outside* it (start −1.00…+0.50, end +0.25…+1.22 windows over
+    // these 240 bursts): the edge was a centred moving average's 6 dB crossing, already half a
+    // window early at any useful SNR, less another half window. The noise-only samples that put
+    // in the normalised snippet doubled `sigma_aa` (module docs). Measured with the half-level
+    // edges: start −0.27…+0.50, end −0.12…+0.27 windows, every edge within 0.044 ms.
+    const EDGE_WINDOWS: f64 = 0.75;
     assert!(
         no_extent.is_empty(),
         "detected bursts without an untruncated extent: {no_extent:#?}"
@@ -315,21 +347,21 @@ fn wide_deviation_fsk_through_the_mock_sdr_is_claimed_fsk_and_never_a_wrong_fami
         .filter(|l| l.contains("extent"))
         .zip(&extents)
         .filter(|(_, x)| {
-            x.start_err_s.abs() > 3.0 * x.window_s || x.end_err_s.abs() > 3.0 * x.window_s
+            x.start_err_s.abs() > EDGE_WINDOWS * x.window_s
+                || x.end_err_s.abs() > EDGE_WINDOWS * x.window_s
         })
         .map(|(l, _)| l)
         .collect();
     assert!(
         bad.is_empty(),
-        "extent edges more than three windows from the truth: {bad:#?}"
+        "extent edges more than {EDGE_WINDOWS} of a window from the truth: {bad:#?}"
     );
     // Measured 5 of 16 with the T-852 densities and 0 of 16 with the ones before them; 8 of 16
-    // once the extent stopped overrunning (T-876: 25 dB seed 853 and 30 dB seed 853, overrun rows,
-    // now claim fsk, and so does 25 dB seed 856; 30 dB seed 856 stays unknown with a clean
-    // extent, in the single-Gaussian density's tail). Red at 5 on the pre-T-876 estimator. The
-    // module docs name what stands between this and a majority.
+    // once the extent stopped overrunning (T-876); 13 of 16 once its edges stopped running a
+    // window into the noise (T-887, `sigma_aa`), and 16 of 16 with T-888's refit on top. Red at 12
+    // on T-888's densities with the pre-T-887 estimator.
     assert!(
-        claimed_above >= 7,
+        claimed_above >= 15,
         "fsk claimed on {claimed_above} of {above} above-gate rows: {log:#?}"
     );
 }
