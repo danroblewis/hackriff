@@ -18,8 +18,8 @@
   /* T-824: the top-right cluster's real width (its 36 px buttons, their gaps, padding and border,
      plus Go-to's gap to it), so Go-to and the retune offer stop short of it at phone width rather
      than sliding under it (the old 132 px fallback was one button short). T-820 added Annotate and
-     Pin: six buttons = 6 × 36 + 5 × 4 + 4 + 2 + 8 = 250 px. */
-  --topright-w: 250px;
+     Pin; T-993 Review and the ⋯ menu: eight buttons = 8 × 36 + 7 × 4 + 4 + 2 + 8 = 330 px. */
+  --topright-w: 330px;
 }
 /* T-803: no right-hand focus column any more (it became the bottom sheet, which leaves this
    cluster's right-edge column clear — `sheet.css`'s `--sheet-gutter`), so the right inset is fixed. */
@@ -115,3 +115,62 @@
 .map-layer-key { list-style: none; margin: 2px 0 4px 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; font-size: 10.5px; color: var(--muted); }
 .map-layer-key li { display: flex; align-items: center; gap: 5px; }
 .map-key-swatch { width: 22px; height: 12px; flex: none; image-rendering: pixelated; border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); }
+
+/* ---- T-993: the retired top bar's controls, as floating chrome ------------------------------------
+   docs/23 §10 P1/P4. Moved into the cluster by `top-chrome.ts` while Explore is shown:
+     .map-status — the Explore/Decode/History switch + device, recording and stream state: top-centre
+                   when the row has room for it, else under the top-right cluster;
+     .map-nudge  — T-409's tuning nudges, under Go-to (device commands live beside Go-to, with the
+                   retune offer, which moves one row down to make room);
+     #review-btn — an icon button in the top-right cluster; Theme — in its ⋯ menu.
+   Each fades with the rest; the status pill never fades while it states the stream is not live. */
+.map-review-home { display: contents; }
+.map-topright #review-btn { position: relative; width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; background: none; color: var(--text); border-radius: 8px; cursor: pointer; font-size: 16px; line-height: 1; }
+.map-topright #review-btn:hover { background: var(--raise); }
+.map-topright #review-btn[aria-pressed="true"] { background: var(--amber-soft); color: var(--amber); }
+.map-topright #review-btn .rv-label { display: none; }
+.map-topright #review-btn .rv-n { position: absolute; top: 1px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: var(--coral); color: var(--ground); font: 600 9.5px/14px var(--ui); text-align: center; }
+.bar #review-btn .rv-ico { display: none; }
+.bar #review-btn .rv-n { margin-left: 4px; color: var(--coral); }
+.bar #review-btn .rv-n::before { content: "("; } .bar #review-btn .rv-n::after { content: ")"; }
+.map-more-menu { width: min(220px, 100%); }
+.map-more-body #theme-btn { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
+.map-more-body #theme-btn:hover { background: var(--raise); }
+.map-more-body { display: flex; flex-direction: column; gap: 4px; }
+
+.map-status { top: 0; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 2px 10px 2px 2px; white-space: nowrap; max-width: calc(100% - 2 * min(300px, 100% - var(--topright-w)) - 16px); box-sizing: border-box; overflow: hidden; min-height: 40px; }
+.map-status .modes { background: none; border: 0; padding: 0; gap: 2px; }
+.map-status .mode { padding: 4px 9px; min-height: 30px; font-size: 12px; }
+.map-status .readouts { gap: 10px; }
+.map-status .ro { flex-direction: row; align-items: baseline; gap: 5px; }
+.map-ctl.is-idle .map-status:has(.conn:not([hidden])) { opacity: 1; }
+
+.map-nudge { top: 44px; left: 0; display: flex; align-items: center; padding: 3px 6px; min-height: 36px; box-sizing: border-box; }
+.map-nudge .nudge-btn { min-height: 28px; min-width: 28px; }
+.map-offer { top: 88px; }
+
+/* Not enough room for the pill between Go-to and the cluster: it drops under the cluster (right),
+   beside the nudges (left); the tool-mode banner moves below both rows. */
+@media (max-width: 1180px) {
+  .map-status { top: 44px; left: auto; right: 0; transform: none; max-width: calc(100% - 8px); }
+  .map-mode { top: 132px; }
+}
+@media (max-width: 900px) {
+  .map-status .readouts { display: none; }
+}
+/* Phone (T-824's breakpoint): the cluster's buttons narrow so Go-to keeps a usable width beside
+   eight of them, the nudges drop their label, and the pill states the device by its dot and label
+   on the row under the nudges. */
+@media (max-width: 600px) {
+  .map-ctl { --topright-w: 284px; } /* 8 × 32 + 7 × 2 + 4 + 2 + 8 */
+  .map-topright { gap: 2px; }
+  .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }
+  .map-hint { display: none; }
+  .map-nudge { padding: 3px 4px; }
+  .map-nudge .nudge-label { display: none; }
+  .map-nudge .nudge-btn { padding: 2px 4px; }
+  .map-status { top: 88px; gap: 6px; padding-right: 8px; }
+  .map-status .mode { padding: 4px 7px; font-size: 11.5px; }
+  .map-offer { top: 132px; }
+  .map-mode { top: 176px; }
+}
