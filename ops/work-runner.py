@@ -111,6 +111,8 @@ DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 CLONE_TARGET = os.environ.get("WORK_CLONE_TARGET", "1") != "0"   # clone main's target/ into a new worktree
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 IDLE_TARGET_H = float(os.environ.get("WORK_IDLE_TARGET_H", "2"))     # a kept worktree's target/ untouched this long is reclaimed
+LOW_DISK_GB = int(os.environ.get("WORK_LOW_DISK_GB", "60"))          # under this much free, the idle wait drops to LOW_DISK_IDLE_MIN
+LOW_DISK_IDLE_MIN = 15
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # A branch that fails its merge gate goes back to the SAME worker: `claude -p --resume <session>`
@@ -2362,13 +2364,16 @@ def reclaim_idle_targets(claims, dry):
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
     live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited", "sync-error")}
+    # Short of disk, the wait drops to minutes (supervisor 2026-09-25 13:31: free hit 22 GB, floor 20, and idle
+    # targets were reaped by hand): the same no-claim, no-process rules still decide what goes.
+    wait_s = LOW_DISK_IDLE_MIN * 60 if disk_free_gb() < LOW_DISK_GB else IDLE_TARGET_H * 3600
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
         if wt in live or os.path.islink(wt) or os.path.islink(t) or not os.path.isdir(t):
             continue
         written = _target_written(t)
-        if time.time() - written >= IDLE_TARGET_H * 3600:
+        if time.time() - written >= wait_s:
             idle.append((wt, time.time() - written))
     if not idle:
         return
