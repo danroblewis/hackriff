@@ -895,6 +895,23 @@ impl ConfirmPolicy {
     ///
     /// **A — decoded identity.** A CRC-valid decode carrying a transmitter identity.
     ///
+    /// **What route A trusts, and what it does not (T-962).** The gate counts CRC-valid decode
+    /// rows carrying the emitter's identity; it does not, and cannot, re-judge the protocol
+    /// evidence behind each one. "How many agreeing frames make this identifier real" is a
+    /// question only the decoder can answer — one ADS-B squitter's 24-bit CRC is strong where a
+    /// handful of RDS blocks, whose check is 10 bits and whose lattice can mis-lock, is not. So
+    /// **a decoder must not attach a [`hk_model::DecodedIdentity`] to evidence it has not
+    /// committed**, and the bound lives beside the decoder that states it: for RDS it is
+    /// `hk_demod::rds::GroupConfig::pi_commit_votes` (10 agreeing CRC-valid PI blocks, ≈ 0.9 s of
+    /// a real station at 11.4 groups/s), and a PI below it is written as provisional with its
+    /// vote count and **no identity**, so this route never sees it. ADR-0022 §6's
+    /// `analytic_holdout_bits` budget is not the bound that applies: it governs
+    /// [`Self::synthesized`], the route for a *synthesized* pipeline whose searched check stage
+    /// the engine can price a look-elsewhere for (ADR-0022 §5.1–§5.2), and a shipped
+    /// template-fixed decoder on this route computes no such quantity. What does carry over is
+    /// ADR-0022 §1.3: a confirm is a lifecycle change no rule demotes, so this gate binds always
+    /// and may only ever be made stricter.
+    ///
     /// **B — continuous and trusted.** A track that was on air long enough, at a high enough duty
     /// cycle, with few enough suspect members and enough trust-confirmed detections.
     ///

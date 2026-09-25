@@ -5,7 +5,7 @@
 //!   time span, `demod_version`.
 //! - **Decode rows** (decoder `hk-rds`), content class **unrestricted** (public broadcast), no
 //!   content field (every RDS field used here is identity metadata), CRC valid, identity
-//!   `rds-pi`:
+//!   `rds-pi` **once the PI is committed** (T-962, below):
 //!   - one `rds-pi` row for the accepted PI with the vote, PTY/TP/TA, group types, PS frames and
 //!     block/group error rates;
 //!   - one `rds-group-0-ps-frame` row per complete PS frame sent under the accepted PI, with
@@ -18,7 +18,25 @@
 //! - **Re-demodulation** of the same IQ is a re-measurement (producer `hk-rds`, same span and
 //!   channel): new rows are written and linked, the emitter's count does not grow.
 //!
-//! Nothing identity-bearing is written without an accepted PI.
+//! Nothing identity-bearing is written without a **committed** PI.
+//!
+//! **T-962: a provisional PI is written, and is not an identity.** `hk_demod::rds` reports a PI
+//! from `pi_min_votes` agreeing CRC-valid blocks but marks it
+//! [`provisional`](crate::rds::PiDecision::provisional) until it has `pi_commit_votes` of them
+//! (10 — see that field for why a vote count and not ADR-0022 §6's bits budget). A session whose
+//! PI is still provisional writes:
+//!
+//! - the `rds-pi` Decode row, with `pi`, `pi_votes`, `pi_total_votes`, `pi_share` and
+//!   `pi_provisional: true` in its metadata, and **no [`DecodedIdentity`]** — so the UI can show
+//!   "PI 1704 (3 groups, provisional)" from the row it already reads;
+//! - **no identity-bearing sighting**, so the emitter is never created, merged or keyed by that
+//!   PI, and `Repository::identity_decode_evidence` finds nothing for it. A Confirmed state
+//!   therefore cannot rest on it: `ConfirmPolicy`'s route A (decoded identity) needs an identity,
+//!   and none was claimed.
+//!
+//! The session is otherwise recorded exactly as a no-PI session is — Demodulation, classification
+//! on the caller's emitter hint, decodes, links, label. This is the same distinction the module
+//! already draws for [`write_declined`]: short evidence leaves a **record**, not a **claim**.
 //!
 //! **A refusal is a record too (T-416).** [`write_declined`] is the counterpart of
 //! [`write_session`] for a probe that measured a window and then declined to go on with it — the
@@ -94,10 +112,12 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
     let Some(pi) = rds.pi else {
         return Vec::new();
     };
-    let identity = DecodedIdentity {
+    // T-962: a provisional PI is evidence, not a claim. The row carries it and its vote; the
+    // identity column stays empty, which is what keeps the confirm gate's route A off it.
+    let identity = pi.committed().then(|| DecodedIdentity {
         scheme: IdentityScheme::RdsPi,
         value: pi.hex(),
-    };
+    });
     let start = session.time_range().start;
     let decode = |frame_model: &str, metadata, t| Decode {
         id: DecodeId::new(),
@@ -109,7 +129,7 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
         metadata,
         content: None,
         crc_status: CrcStatus::Valid,
-        identity: Some(identity.clone()),
+        identity: identity.clone(),
         content_class: ContentClass::Unrestricted,
         t,
         provenance: None,
@@ -121,6 +141,7 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
             "pi_votes": pi.votes,
             "pi_total_votes": pi.total_votes,
             "pi_share": pi.share,
+            "pi_provisional": pi.provisional,
             "ps": rds.ps(),
             "ps_frames": rds.ps_frames,
             "pty": rds.pty,
@@ -201,6 +222,9 @@ pub fn write_session(
 ) -> Result<WrittenSession, RepoError> {
     let time = session.time_range();
     let pi = session.rds().and_then(|r| r.pi);
+    // T-962: only a committed PI is identity-bearing. A provisional one takes the no-identity
+    // path below — recorded, shown, never resolved against or confirmed on.
+    let committed = pi.filter(|p| p.committed());
     let demod_id = DemodulationId::new();
     let family = session.mode.mode.as_str();
     let classification = Classification {
@@ -212,7 +236,7 @@ pub fn write_session(
     };
     let mut emitter_id = ctx.emitter_hint;
     let mut emitter_created = false;
-    if let Some(pi) = pi {
+    if let Some(pi) = committed {
         let identity = DecodedIdentity {
             scheme: IdentityScheme::RdsPi,
             value: pi.hex(),
@@ -275,8 +299,9 @@ pub fn write_session(
     let label = rds_label(session);
     if let Some(eid) = emitter_id {
         let now = time.end;
-        if pi.is_none() {
-            // With a PI the sighting carried it (input: the demodulation).
+        if committed.is_none() {
+            // With a committed PI the sighting carried it (input: the demodulation). A
+            // provisional PI recorded no sighting, so the classification is appended here.
             repo.append_classification(eid, &classification)?;
         }
         let links = std::iter::once(LinkTarget::Demodulation(demod.id))
@@ -302,6 +327,9 @@ pub fn write_session(
                     "family": "fm/rds",
                     "source": "most frequent RDS PS frame",
                     "pi": pi.hex(),
+                    // T-962: a label is revisable where a confirm is not (ADR-0022 §1.3), so a
+                    // provisional PI may still label — saying so.
+                    "pi_provisional": pi.provisional,
                     "ps_frames": rds.ps_frames,
                     "decodes": decodes.iter().map(|d| d.id).collect::<Vec<_>>(),
                 }),

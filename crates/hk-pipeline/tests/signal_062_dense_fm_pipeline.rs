@@ -22,6 +22,7 @@ mod common;
 #[path = "support/radio.rs"]
 mod radio;
 
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -160,17 +161,16 @@ fn signal_062_dense_fm_wfm_chain_attaches_and_decodes_the_target_pi() {
     assert!(s.errors.is_empty(), "{:?}", s.errors);
 
     let repo = repo(&dir.0);
-    let decoded = |pi: &str| {
-        repo.decodes_for_identity(&DecodedIdentity {
-            scheme: IdentityScheme::RdsPi,
-            value: pi.into(),
-        })
-        .unwrap()
-        .len()
-    };
+    // T-962: what this test is about is that the target's **PI is decoded** between equal-power
+    // neighbours. It used to look that up through `decodes_for_identity`, which asks a different
+    // question — whether the PI was committed as a transmitter *identity* — and those two came
+    // apart when the commit bound landed. The claim is read off the decode row itself now, so it
+    // keeps saying what T-099 meant by it whatever the identity gate decides.
+    let rows = rds_pi_rows(&dir.0);
+    let decoded = |pi: &str| rows.iter().filter(|r| r.0 == pi).count();
     let found: Vec<(&str, usize)> = scene.iter().map(|&(_, pi, _)| (pi, decoded(pi))).collect();
     eprintln!(
-        "[{SIGNAL_062}] chains attached {}, mode rejected {}, demodulations {}, PI decodes {found:?}",
+        "[{SIGNAL_062}] chains attached {}, mode rejected {}, demodulations {}, PI decodes {found:?}, rows {rows:?}",
         s.counter("/chains/attached"),
         s.counter("/chains/mode_rejected"),
         s.counter("/chains/demodulations"),
@@ -183,6 +183,86 @@ fn signal_062_dense_fm_wfm_chain_attaches_and_decodes_the_target_pi() {
         found[0].1 > 0,
         "[{SIGNAL_062}] target PI not decoded between equal-power neighbours: {found:?}"
     );
+
+    // T-962, pinned here because this is where it was measured: this scene's RDS evidence window.
+    //
+    // Every station in this clean synthetic scene decodes its PI from **three** CRC-valid groups
+    // with a perfect block error rate — about 0.26 s of RDS at 11.4 groups/s, because three
+    // stations 400 kHz apart give each chain session a short, contended window. That is the same
+    // vote count the false 98.085 MHz commit reached (PI 1704, while an independent oracle found
+    // no RDS on the clip at all), and the same capture read through a *single* real station gives
+    // 52 votes over 55 groups (`hk-demod::signal_062_real`). So three agreeing groups is where the
+    // true and the false case are indistinguishable by count, and `GroupConfig::pi_commit_votes`
+    // = 10 sits in the gap between that and a real station.
+    //
+    // Nothing is lost here by staying under it: the PI is decoded, recorded and shown with its
+    // vote, and an FM station still confirms on ConfirmPolicy's route C (the pilot lock), which
+    // needs no RDS. If this scene ever yields a longer window, this assertion is the thing that
+    // should go red — and then these PIs should be allowed to commit.
+    let (votes, provisional, errors): (Vec<u64>, Vec<bool>, Vec<f64>) = {
+        let mut v = (Vec::new(), Vec::new(), Vec::new());
+        for r in &rows {
+            v.0.push(r.1);
+            v.1.push(r.2);
+            v.2.push(r.3);
+        }
+        v
+    };
+    eprintln!("[{SIGNAL_062}] T-962 RDS evidence window: votes {votes:?} block error {errors:?}");
+    assert!(
+        votes.iter().all(|&n| n < 10),
+        "[{SIGNAL_062}] T-962: the chain's RDS window now yields {votes:?} agreeing groups, past \
+         the 10-vote commit bound. That is the improvement this comment asked for — re-read the \
+         bound's doc on `GroupConfig::pi_commit_votes` and let these PIs commit."
+    );
+    assert!(
+        errors.iter().all(|&e| e < 1e-9),
+        "[{SIGNAL_062}] T-962: the short window is meant to be short, not damaged; block error \
+         rates {errors:?}"
+    );
+    assert!(
+        provisional.iter().all(|&p| p),
+        "[{SIGNAL_062}] T-962: {votes:?} agreeing groups may not be a committed identity"
+    );
+    for (pi, _, _, _) in &rows {
+        assert!(
+            repo.decodes_for_identity(&DecodedIdentity {
+                scheme: IdentityScheme::RdsPi,
+                value: pi.clone(),
+            })
+            .unwrap()
+            .is_empty(),
+            "[{SIGNAL_062}] T-962: a provisional PI is not identity evidence for the confirm gate"
+        );
+    }
+}
+
+/// Every `rds-pi` decode row the run stored: (PI, vote count, provisional, block error rate).
+///
+/// Read straight off the table, because the point is to see the rows the *identity* index cannot
+/// see: a provisional PI writes no identity, so `decodes_for_identity` returns none of them.
+fn rds_pi_rows(dir: &Path) -> Vec<(String, u64, bool, f64)> {
+    let conn = rusqlite::Connection::open(dir.join("hackriff.db")).unwrap();
+    let mut stmt = conn.prepare("SELECT body FROM decode ORDER BY t").unwrap();
+    let bodies: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    bodies
+        .iter()
+        .map(|b| serde_json::from_str::<serde_json::Value>(b).unwrap())
+        .filter(|d| d["frame_model"] == "rds-pi")
+        .map(|d| {
+            let m = &d["metadata"];
+            (
+                m["pi"].as_str().unwrap_or_default().to_owned(),
+                m["pi_votes"].as_u64().unwrap_or_default(),
+                m["pi_provisional"].as_bool().unwrap_or_default(),
+                m["block_error_rate"].as_f64().unwrap_or(1.0),
+            )
+        })
+        .collect()
 }
 
 /// T-129 (AWARE-042, SIGNAL-062): occupancy channels learned blind on the dense scene (no chains)
