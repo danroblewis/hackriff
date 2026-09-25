@@ -28213,6 +28213,8 @@ tasks:
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): repeat: the page opens on a 0-520 MHz overview with the tuned window a sliver. Also (possibly a harness artefact): the first /#token= load after a refused navigation stayed on 'token needed' - reproduce with a real browser before fixing.
 
       Review attempt(s) on cdf2aa1f ended REVIEW_FAIL with no verdict line. Checked ops/work/T-955/{fix1,review}.json directly: both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one reviewer attempt made zero turns, the other got a Bash call denied (running the new e2e/app-reload-retune.e2e.mjs against a built hk binary) and then hit the spend limit after ~23 min. No actual defect was named. Triage: merged in fcb0dd43 (already an ancestor, no-op), re-ran just test-ui: 88/88 files pass, tsc --noEmit clean, same as before the review. No code change made; treating this as an infra/cost failure of the review step, not a finding against the diff.
+
+      2026-09-25 14:4x coordinator: T-996's fix round ran the browser specs on a base carrying the LANDED 448a9a65 and found reds this correction should clear - verify after it lands: app-surface T-802 'timed out waiting for zoom-in to change the pane's window' (the pane opens at its smallest time span, 0.64 s, so zoom-in is a no-op - the 64x opening-span shrink), app-phone 'spreading two fingers did not zoom' (same cause), app-reload-retune 'reloaded pane opened at 100.776 MHz, not near the retuned 433.92', canvas-journey #1 'grey does not track coverage 37-47 % vs 80.5 %'. If any survives the correction, the coordinator files it.
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 09:28).
       Fixed the root cause behind both reported symptoms: the surface's opening window (surface/bootstrap.ts + preview.ts) was computed as the bounding box over EVERY cell ever observed, so a session holding two different tunings inside one record horizon (162.2 MHz then 144.6 MHz) got a box spanning the gap between them - a reload opened on the stale band with a stale retune offer, and one live run opened on '100-1100 MHz x 1.6 h' with the actually-tuned band drawn as a sliver. Added recentObservedExtent, which boxes only the most recently active rows of the coverage grid, and used it (falling back to the whole-history census only when the recent rows are empty) at both the coarse and fine stages of probeSurface's refinement pass, so the opening tracks the currently-tuned band and the per-pane retune offer naturally stops naming the departed one. Separately, followLive (app/chrome/map-controls.ts) now also resets the pane's frequency window to the front end's own current tuning (frequency.current) when pressed, not only its time. Both changes are view arithmetic only; no device route. RE-TRIAGE (this pass): the branch failed review twice with 'no verdict line'. Read both raw review artifacts directly (ops/work/T-955/fix1.json and review.json): both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one attempt made zero turns, the other had one Bash call denied (running the new e2e file against a built hk binary) and then hit the spend limit ~23 minutes in. No actual defect was ever named against this diff. Triaged per the brief: merged in fcb0dd43 (already an ancestor of this branch - no-op), re-ran the full targeted UI suite: unchanged, 88/88 files pass, tsc --noEmit clean. No code change was made this pass, since nothing in the diff was found broken; this is recorded as an infra/cost failure of the review step, not a finding, via `just task note T-955`.
@@ -28274,7 +28276,7 @@ tasks:
   - id: T-959
     milestone: MLIVE
     title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
-    status: todo
+    status: in-progress
     priority: P2
     deps: []
     parallel_group: TILE-CLIENT
@@ -28341,6 +28343,8 @@ tasks:
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
+
+      2026-09-25 13:48 coordinator: T-962 is behind two reds of the 13:07 bulk. (1) hk-api hk_api_never_calls_the_ungated_emitter_getters - decode.rs's provisional_decodes walked repo.emitter_links: FIXED eb293ff6 (Repository::provisional_decodes_of_emitter in the gated layer; inventory_api + decode_api 18/18). (2) hk-pipeline listen_recipe_parity legacy_listen_and_the_analog_wfm_recipe_agree_on_the_same_iq FAILS ALONE on task-t962 (252 s, listen_recipe_parity.rs:650): the recipe 'station' messages never carry identity.value within the test window under the 10-votes-in-5-s rule, and ps_of() requires it. Real defect, not load; Opus fix round after the 14:20 usage-limit reset.
     core_interface: true
   - id: T-963
     milestone: MAUTO
@@ -28365,7 +28369,7 @@ tasks:
   - id: T-964
     milestone: MSCAN
     title: "Scan everything (fast) does not light the coverage map: 4.3 % sampled after a full 1 MHz-6 GHz pass; /api/coverage observed only for the current step"
-    status: todo
+    status: in-progress
     priority: P1
     deps: []
     parallel_group: SCAN-COVERAGE
@@ -28377,6 +28381,8 @@ tasks:
       DELIVER: every scan step's tune interval is recorded in the coverage map (the SDR config/tune history is the provenance, CLAUDE.md) and served by /api/coverage and the tiles for the step's span and time; a whole-range pass lights the whole range (observed, or observed-but-not-measured where applicable - T-441's distinct marks); the sampled-fraction banner reads the backend's coverage. Test through the mock SDR: a scan over N steps -> /api/coverage observed for every stepped cell; red on current code.
       WHAT THE USER WILL SEE ON STAGING: after 'Scan everything', the whole 1 MHz-6 GHz surface shows where it looked.
       core_interface (coverage). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 13:50 coordinator: skipped from the bulks for a real conflict in ui/src/surface/bootstrap.ts with T-955 (landed 448a9a65; its correction af8bf491 is queued and edits the same file). Resolved ONCE after the T-955 correction lands, then re-queued. Branch holds the reviewed work (4540c41d).
     core_interface: true
   - id: T-965
     milestone: MSCAN
@@ -28976,6 +28982,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired
+
+      2026-09-25 AMENDMENT (user feedback ~14:05, item 3 - re-affirmed): 'I still don't want the whole spectrum view underneath the waterfall display.' Acceptance adds: no full-width strip under the canvas at any size; the canvas's bottom row is the page's last pixel (e2e at 1280x800 and 400 px). If the branch already queued leaves any strip, the follow-up is this ticket's.
   - id: T-996
     milestone: MMAP
     title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
@@ -29120,6 +29128,10 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes
+
+      2026-09-25 AMENDMENT (user feedback ~14:05 via supervisor, item 2): 'The info side bar on the bottom left with the Retune button looks out of place.' The pane's status words + Retune live INSIDE the pane as ONE small translucent chip next to the scale bar (bottom-right, T-996), or appear only as the Retune offer when the view is un-tuned (T-376 rule). No permanent bottom-left panel.
+
+      2026-09-25 coordinator, from T-996: at 1280 px T-996's Retune block (now in a flex stack under the nudge row) still covers the top one or two time-ruler labels, and the fully expanded bottom sheet may cover it at narrow widths - moving status + Retune into the pane chip (this ticket's amendment) removes both.
   - id: T-1004
     milestone: MMAP
     title: "Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost"
@@ -29401,6 +29413,8 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (tile latency review): Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache
 
       2026-09-25 supervisor amendment (partial - the message arrived truncated, start being re-requested): (c) with A (T-1018) + B (T-1019) landed, the RAM hot cache is an ACCELERATOR ONLY - size it in viewports, not 32 MB. Raw IQ (ring.ci8, native 8-bit) is fine - no change there.
+
+      2026-09-25 coordinator, user ruling (via supervisor 13:10): the tiles are NOT a cache - they are rolling history STORAGE filled alongside the raw IQ, budgeted and evicted coarse-last under T-1023 (one rolling storage budget). This ticket is only the RAM accelerator in front of that storage: size it in viewports, report its hit rate; it holds no data the disk pyramid does not.
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
@@ -29437,6 +29451,127 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the two specs alone), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-955 fix-round worker 2026-09-25 (red on main 166117b4): app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)
+  - id: T-1023
+    milestone: MLIVE
+    title: One rolling storage budget (IQ ring + tile pyramid + DB), sized to the device and configurable (flag + settings), eviction keeps the coarse levels so zoom-out over all history is a read; budget and per-level horizon in /api/status
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: STORAGE-BUDGET
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER RULING (2026-09-25, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1310-storage-budget.md): "I never specified a tile cache maximum, and I never said this was a cache. What I wanted was to fill our maximum rolling storage with both the raw data AND the pre-generated tiles, so people can zoom out and still see things from any point of the history."
+      FACTS: tiles already persist on disk (<data>/history/view/history/s2/L0..L15, zstd-3, quantised dB) under PyramidConfig::byte_budget, HARD-CODED 8 GiB (crates/hk-store/src/history/config.rs:247), fine-first eviction (T-116) - but no flag and no status line. The IQ ring has --iq-retention / --iq-buffer-max. Measured on staging (T-1024's numbers): one 2.4 MHz band at 0.04 s rows grows history/ ~1.1 MB/s (~3.9 GB/h), so 8 GiB is ~2 h of one band.
+      DELIVER:
+      1. ONE rolling storage budget = IQ ring + tile pyramid + DB, sized to the device (default derived from free disk on the data volume, stated), configurable: a `hk serve` flag beside --iq-retention/--iq-buffer-max, and a setting in the T-1007 settings menu (server call; the UI never computes it). The split between IQ ring and pyramid is explicit and reported.
+      2. Eviction keeps the COARSE levels: a zoom-out over the whole retained history must stay a READ of a stored coarse node, never a fold from finer data (the user's requirement; ties to T-1018, which reads the exact node first). Fine levels are evicted oldest-first before any coarse level; state the realised horizon per level.
+      3. /api/status reports the budget, bytes used per component (IQ ring, pyramid per level, DB) and the realised horizon per pyramid level (oldest retained t per level); docs/api.md + api_contract.rs together (T-079). The canvas's honesty tiers already say which level a pane was drawn at - make sure an evicted fine level degrades to the coarse stored level with its tier stated, never grey where coarse data exists ('show all data that exists').
+      ACCEPTANCE: through the mock SDR with a small budget: after the fine levels roll over, a request for an old window at a coarse level is answered from a stored node (resolution.answered.exact_node true, no fold), the fine request for the same window reports the coarse tier it fell back to; /api/status's horizons match what the tile route serves; changing the flag changes the budget (restart) and the setting (live, if supported - state which).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, hk-api tiles/status, api_contract, just precheck), then HAND BACK with the measured horizon numbers. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile storage ruling): One rolling storage budget (IQ ring + tile pyramid + DB), sized to the device and configurable (flag + settings), eviction keeps the coarse levels so zoom-out over all history is a read; budget and per-level horizon in /api/status
+    core_interface: true
+    high_effort_reason: storage and eviction policy for all retained history (IQ ring + pyramid + DB) is a core data-model contract; eviction order decides what the canvas can ever show again
+  - id: T-1024
+    milestone: MLIVE
+    title: "Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: TILE-DISK
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER RULING context (2026-09-25; ~/.hackriff-ops/handoffs/coordinator-1310-storage-budget.md): tiles are rolling history storage, not a cache - so bytes per cell on disk decide how many hours of history the device keeps.
+      MEASURED on staging 2026-09-25 12:3x, one 2.4 MHz band at 0.04 s rows: history/ grows 1.1 MB/s (~3.9 GB/h); level-0 tiles average 120 kB per 256x256 = ~1.8 B/cell across four planes (zstd-3, quantised dB).
+      DELIVER (measurement first, then the cheapest honest reduction): measure which plane costs what on disk (max_db, occupancy/frames, coverage, anything else) at L0 and at a coarse level, compressed and raw, on a mock-SDR run and on the staging data dir (read-only copy). Coverage is derivable from the observation record and need not be stored per cell - confirm and, if so, stop storing it (read it from the record / coverage map). Propose and implement the reduction that buys the most hours without losing measured information (e.g. dropping derivable planes, delta/bit-packing, a better zstd level if CPU on the capture thread allows - T-453: per-arriving-row cost must be MEASURED on the capture thread). This is the disk half of T-1019 (the wire half); share encodings with it where sensible.
+      ACCEPTANCE: a table of bytes/cell per plane before/after; hours of one 2.4 MHz band per 8 GiB before/after; capture-thread per-row cost before/after (must not regress beyond a stated bound); tiles read back identical values for every stored plane (round-trip test) and derived coverage equals the stored coverage it replaced.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, the round-trip test, just precheck hk-store), then HAND BACK with the table. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile storage ruling): Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)
+  - id: T-1025
+    milestone: MMAP
+    title: "Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them"
+    status: todo
+    priority: high
+    deps:
+    - T-993
+    parallel_group: MAP-TOPCHIPS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~14:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1410-map-chrome-feedback.md): "I really want that bottom bar gone in the UI. The top bar *looks* like it's an overlay, but the background is opaque, so it's still effectively a top bar. ... The bottom 'Selected — nothing yet: click a signal or drag a region' bar also has an opaque background ... The bottom right accordion panel is kind of dumb to show all the time, it should be hidden all the time until someone clicks on something, like on Google Maps how someone clicks something and it opens the detailed view, and if they click on the back of the map it goes away, or if they click on another interest point it changes." Principle (docs/23 §10 P1): overlays are minimal, closeable, translucent; the map is the page; NOTHING OPAQUE SPANS AN EDGE.
+      ITEM 1 (follow-up to T-993, done): the top-centre status pill and the top-right cluster read as a bar because their background is opaque / shared. DELIVER: separate translucent chips (backdrop blur, no full-width background, no shared container), fading with the rest.
+      ACCEPTANCE: no element wider than ~1/3 of the pane spans the top edge; canvas pixels are visible between the chips (e2e samples the canvas between them); at 1280x800 and 400 px.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them
+  - id: T-1026
+    milestone: MMAP
+    title: "Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-CARD
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~14:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1410-map-chrome-feedback.md): "I really want that bottom bar gone in the UI. The top bar *looks* like it's an overlay, but the background is opaque, so it's still effectively a top bar. ... The bottom 'Selected — nothing yet: click a signal or drag a region' bar also has an opaque background ... The bottom right accordion panel is kind of dumb to show all the time, it should be hidden all the time until someone clicks on something, like on Google Maps how someone clicks something and it opens the detailed view, and if they click on the back of the map it goes away, or if they click on another interest point it changes." Principle (docs/23 §10 P1): overlays are minimal, closeable, translucent; the map is the page; NOTHING OPAQUE SPANS AN EDGE.
+      ITEM 5: the bottom-right sheet/accordion (T-803) is always shown. DELIVER: the detail card is HIDDEN by default; it opens when a feature (box, pin, marker, path) is clicked, closes on a click on bare map, switches content when another feature is clicked, Esc closes it; the inventory pills (T-997) open it on the list view. Hit-test the feature's polygon (boxes, not pins - user rule), not its centre. Selection state is view state (no device call).
+      ACCEPTANCE (ui/e2e): default paint has no card; click a box -> card with that box's identity/fields; click bare canvas -> card gone; click another box -> content swapped; Esc -> gone; T-997's pill -> card on its list. Works at 400 px (touch: tap/long-press per T-994).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list
+    high_effort_reason: the bottom sheet/accordion's open-state model is replaced by a selection-driven card that every map feature, the inventory pills (T-997) and the Selected strip retirement build on; hit-testing on boxes/pins/paths
+  - id: T-1027
+    milestone: MMAP
+    title: "Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge"
+    status: todo
+    priority: high
+    deps:
+    - T-1026
+    parallel_group: MAP-CARD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~14:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1410-map-chrome-feedback.md): "I really want that bottom bar gone in the UI. The top bar *looks* like it's an overlay, but the background is opaque, so it's still effectively a top bar. ... The bottom 'Selected — nothing yet: click a signal or drag a region' bar also has an opaque background ... The bottom right accordion panel is kind of dumb to show all the time, it should be hidden all the time until someone clicks on something, like on Google Maps how someone clicks something and it opens the detailed view, and if they click on the back of the map it goes away, or if they click on another interest point it changes." Principle (docs/23 §10 P1): overlays are minimal, closeable, translucent; the map is the page; NOTHING OPAQUE SPANS AN EDGE.
+      ITEM 4: the bottom 'Selected — nothing yet: click a signal or drag a region' bar is opaque and permanent (T-994 retires only the Outputs dock). DELIVER: retire the Selected strip; selection state lives in the click-opened detail card (the sibling card ticket); the empty-state hint is a one-time translucent toast or the Go-to tooltip, never a bar.
+      ACCEPTANCE: no element spans the bottom edge; e2e asserts the canvas's last row is the page's last pixel at 1280x800 and 400 px; every action the strip offered is reachable from the card or the box context menu (T-994).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge
+  - id: T-1028
+    milestone: MMAP
+    title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
+    status: todo
+    priority: high
+    deps:
+    - T-1000
+    parallel_group: MAP-RETUNE-MODE
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER DIRECTIVE (2026-09-25 ~14:15, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1420-retune-mode.md): "I think the 'retune' functionality would be cool as a mode, like they can turn on 'retune' mode and whenever they zoom or pan it retunes to that. For areas that are too large and can't be tuned, use the largest possible size instead of denying them. This mode gets turned off. Maybe it's a keyboard thing, hold down a certain key while panning to retune."
+      INVARIANT AMENDMENT (this ticket edits the text): CLAUDE.md 'Navigation is view arithmetic in time and a device command in frequency' + the ADR that states it (grep 'never commands the radio') + docs/23 §10 + docs/api.md if the retune route gains a 'largest achievable' snap option (with api_contract.rs, T-079).
+      - DEFAULT (mode off) UNCHANGED: pan/zoom never command the radio; the spy-client tests keep asserting an empty call list.
+      - RETUNE MODE (explicit, visible, off by default): while ON, the view's frequency window is the tune request. A pan/zoom that SETTLES (gesture end, or ~150 ms still) issues ONE retune through the same gated DeviceAction path (one capture at a time, settle gap, device_id recorded, snapped to the nearest achievable config). Latest settled view wins; a retune in flight is not cancelled - the next waits for the settle gap.
+      - TOO WIDE IS NOT AN ERROR IN THE MODE: a span wider than the instantaneous bandwidth tunes the LARGEST achievable span centred on the view's centre (clamped to the tunable range at the edges). Panes still say honestly what is tuned (coverage/fog shows the tuned window inside the wider view; honesty tier unchanged). The 'no achievable configuration' error remains only for a view entirely outside the tunable range or a replay's extent.
+      - MOMENTARY FORM: holding a key while panning/zooming = retune mode for that gesture; release = off. Must not clash with T-456's one-axis-zoom modifier (ui/src/surface/input.ts); suggested: hold R, tap R toggles the sticky mode; the chip highlights while active.
+      - PANES/DEVICES: per ACTIVE pane (T-1000) and that pane's device (T-1006 when it lands; the global device until then); a FROZEN pane in retune mode retunes frequency only and stays frozen in time. Never touches time, the ring or detection (pause/scrub invariants stand).
+      - UI: a small toggle chip in the map controls (beside Live/layers), highlighted when on; a one-line status word in the pane while a retune is pending/settling.
+      TESTS (spy client, ui/test + ui/e2e): (1) mode off: pan/zoom -> zero device calls; (2) mode on: one gesture -> exactly one snapped retune after settle; three quick pans -> one call with the last view; (3) mode on, view 40 MHz wide at 100 MHz on a 20 MHz device -> one call for the max span centred at 100 MHz, no error surfaced; (4) held-key form: calls only while held, release restores mode-off behaviour; (5) frozen pane + mode on -> frequency retune, time window unchanged; (6) the docs above.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216; api_contract if the route changes), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule
+    high_effort_reason: "amends a stated invariant (navigation never commands the radio) and drives the gated DeviceAction path from gestures: settle/debounce, one-in-flight, largest-achievable snapping and per-pane device routing must all stay honest"
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
