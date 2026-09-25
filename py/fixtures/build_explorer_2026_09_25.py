@@ -19,11 +19,13 @@ payload content (CLAUDE.md legal guardrails).
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import annotate
+import flex_ref
 import fxlib
 import rds_ref
 from fxlib import CLIP_COUNT_KEY, sigmf
@@ -41,6 +43,15 @@ STATIONS = {
     "fm-101p3-pi1694": [(101_300_000.0, "FM 101.3 MHz")],
     "fm-98p9-piA4FF": [(98_900_000.0, "FM 98.9 MHz"), (98_100_000.0, "FM 98.1 MHz")],
 }
+
+#: The FLEX paging capture (T-949): 12 s at 2.4 Msps, 57.6 MB -- over fixtures/README.md's 25 MB
+#: committed cap, so unlike the FM/RDS pair above it goes into the external store, not Git LFS.
+FLEX_NAME = "flex-pagers-930p8"
+FLEX_USE_CASE = "SIGNAL-088"
+#: "... x<N> in this clip ..." in the explorer's own prose claim (e.g. "at 1600 bps x3 in this
+#: clip", "0xA6C6AAAA x1 in this clip (x3 in a 30 s window)"); parsed rather than trusted, so a
+#: mismatch against the independent oracle below is reported, not silently fixed.
+FLEX_CLAIM_RE = re.compile(r"x(\d+) in this clip")
 
 
 def db(x: float) -> float:
@@ -214,6 +225,180 @@ def build_one(name: str) -> dict[str, Any]:
     }
 
 
+def build_flex() -> dict[str, Any]:
+    """Builds the FLEX paging fixture into the **external store** (fixtures/store/, gitignored):
+    at 57.6 MB the raw 12 s/2.4 Msps capture is over fixtures/README.md's 25 MB committed cap, so
+    unlike the FM/RDS pair it cannot go through Git LFS. Same annotate.apply/manifest discipline
+    as a committed fixture, just a different ``status``/``path`` (fixtures/README.md's
+    ``manifest.json`` table)."""
+    src_meta = EXPLORER_HOME / f"{FLEX_NAME}.sigmf-meta"
+    src_data = EXPLORER_HOME / f"{FLEX_NAME}.sigmf-data"
+    explorer_truth = json.loads((EXPLORER_HOME / f"{FLEX_NAME}.truth.json").read_text())
+
+    meta = sigmf.read_meta(src_meta)
+    meta["global"]["core:license"] = LICENSE
+    meta["global"]["core:description"] = (
+        f"hk-pipeline IQ capture buffer clip ({FLEX_USE_CASE}, {FLEX_NAME})"
+    )
+    fs = float(meta["global"]["core:sample_rate"])
+    fc = float(meta["captures"][0]["core:frequency"])
+    n = fxlib.n_samples(src_data, meta["global"]["core:datatype"])
+    prov = meta["global"][sigmf.PROVENANCE_KEY]
+
+    clip_count = int(sum(c.get(CLIP_COUNT_KEY, 0) for c in meta["captures"]))
+    clip_fraction = clip_count / n
+
+    items: list[dict[str, Any]] = []
+    oracle_log: dict[str, Any] = {}
+    disagreements: list[str] = []
+    summary_bits: list[str] = []
+
+    for em in explorer_truth["emissions"]:
+        f_center = float(em["f_center_hz"])
+        offset_hz = f_center - fc
+        oracle = flex_ref.decode_ci8(str(src_data), fs, offset_hz, duration_s=n / fs)
+        oracle_log[f_center] = oracle
+
+        claim_match = FLEX_CLAIM_RE.search(em["decoded"])
+        claimed_syncs = int(claim_match.group(1)) if claim_match else None
+        agrees = claimed_syncs is not None and claimed_syncs == oracle["n_syncs"]
+        if not agrees:
+            disagreements.append(
+                f"{f_center / 1e6:.4f} MHz: explorer claims {claimed_syncs} sync(s) in this clip, "
+                f"oracle found {oracle['n_syncs']} (Hamming <= {oracle['max_hamming']}/32)"
+            )
+
+        level_claims = re.findall(r"(\d)(?:-level|FSK)", em["kind"] + " " + em["decoded"])
+        claimed_levels = int(level_claims[-1]) if level_claims else None
+        oracle_levels = {rate: v["n_levels"] for rate, v in oracle["levels"].items()}
+        if claimed_levels is not None and claimed_levels not in oracle_levels.values():
+            disagreements.append(
+                f"{f_center / 1e6:.4f} MHz: explorer claims {claimed_levels}-level FSK, oracle "
+                f"level-count re-slice found {oracle_levels} clean levels per candidate rate"
+            )
+
+        flex_truth = {
+            "sync_hex": oracle["sync_hex"],
+            "sync_rate_bd": oracle["sync_rate_bd"],
+            "n_syncs": oracle["n_syncs"],
+            "syncs": oracle["syncs"],
+            "levels": oracle["levels"],
+            "decoder": oracle["decoder"],
+            "oracle_agrees_with_explorer_claimed_sync_count": agrees,
+            "explorer_claim": {
+                "kind": em["kind"],
+                "decoded": em["decoded"],
+                "claimed_syncs_in_clip": claimed_syncs,
+                "source": "app blind detection (family: unknown, confidence 0.999) + the "
+                          "explorer's own numpy oracle tools/oracle_pager.py, 2026-09-25 ~04:27-"
+                          "04:33 PDT (journal-20260925.md)",
+            },
+        }
+        items.append(dict(
+            **whole(n),
+            freq_lower_edge=f_center - float(em["bandwidth_hz"]) / 2,
+            freq_upper_edge=f_center + float(em["bandwidth_hz"]) / 2,
+            label=f"paging {f_center / 1e6:.4f} MHz",
+            comment=em["kind"],
+            truth=dict(
+                role="emission", kind="flex-pager", modulation="FSK",
+                center_hz=f_center, offset_hz=offset_hz, bandwidth_hz=float(em["bandwidth_hz"]),
+                channel_hz=f_center, decoded=False,
+                decode_note="Not decoded: no FLEX bitstream decoder in the app yet "
+                            "(journal-20260925.md); confirmed only by sync-word oracles.",
+                paging=flex_truth,
+            ),
+        ))
+        levels_txt = "/".join(f"{r}:{v['n_levels']}L" for r, v in oracle["levels"].items())
+        summary_bits.append(f"{f_center / 1e6:.4f}: oracle {oracle['n_syncs']} sync(s), "
+                            f"levels {levels_txt}")
+
+    items.append(dict(
+        **whole(n),
+        label="overload",
+        truth=dict(
+            role="artefact", kind="overload", clipped_samples=clip_count,
+            clip_fraction=clip_fraction,
+            overload_rule=f"clip_fraction > {fxlib.OVERLOAD_CLIP_FRACTION:g} (component at -128 or 127)",
+            note="LNA 32 / VGA 30 / amp on; provenance reports overload=false for this capture.",
+        ),
+    ))
+
+    scenario = dict(
+        role="scenario", kind="capture", recording=FLEX_NAME,
+        use_cases=[FLEX_USE_CASE],
+        generator=BUILDER,
+        source={
+            "capture": "explorer agent live clip",
+            "method": "POST /api/iqbuffer/clip on the explorer agent's staging build",
+            "captured": explorer_truth["capture"]["captured"],
+            "device": explorer_truth["capture"]["device"],
+        },
+        datatype=meta["global"]["core:datatype"], sample_rate_hz=fs, n_samples=n, duration_s=n / fs,
+        dbfs_reference="full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        calibration="uncalibrated (no dBm): antenna unknown, as attached by the user",
+        clip_count=clip_count, clip_fraction=clip_fraction, overload=prov["overload"],
+        quantisation_limited=prov["quantisation_limited"],
+        quantisation_noise_dbfs_per_hz=fxlib.quantisation_floor_dbfs_per_hz(fs),
+        capture_settings={
+            "lna_db": explorer_truth["capture"]["lna_db"],
+            "vga_db": explorer_truth["capture"]["vga_db"],
+            "amp": explorer_truth["capture"]["amp"],
+            "bias_tee": explorer_truth["capture"]["bias_tee"],
+            "antenna": explorer_truth["capture"]["antenna"],
+        },
+        identification_source=explorer_truth["source"],
+        not_in_clip_but_seen=explorer_truth.get("not_in_clip_but_seen"),
+        annotation_completeness=(
+            "partial: the three FLEX channels named in the explorer's truth file, plus the "
+            "whole-file overload artefact; a fourth channel (931.7331 MHz) was seen active in a "
+            "wider 30 s window but is idle in this 12 s clip"
+        ),
+        legal=LEGAL,
+    )
+    truth = {"annotations": [dict(**whole(n), label="capture", truth=scenario), *items]}
+    annotate.apply(meta, truth["annotations"], n)
+
+    dst_dir = fxlib.store_dir() / f"explorer-{DATE}"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst_meta = dst_dir / f"{FLEX_NAME}.sigmf-meta"
+    dst_data = dst_dir / f"{FLEX_NAME}.sigmf-data"
+    sigmf.write_meta(meta, dst_meta)
+    dst_data.write_bytes(src_data.read_bytes())
+
+    return {
+        "name": FLEX_NAME,
+        "clip_count": clip_count,
+        "clip_fraction": clip_fraction,
+        "truth_summary": "; ".join(summary_bits) + f"; overload clip_fraction {clip_fraction:.3f}",
+        "disagreements": disagreements,
+        "n": n,
+        "size_bytes": dst_data.stat().st_size,
+        "sha256_data": fxlib.sha256_file(dst_data),
+        "sha256_meta": fxlib.sha256_file(dst_meta),
+    }
+
+
+def update_manifest_external(row: dict[str, Any], name: str, use_case: str,
+                             purpose: str) -> None:
+    manifest = json.loads(fxlib.MANIFEST.read_text())
+    entries = manifest["entries"]
+    rel_dir = f"store/explorer-{DATE}"
+    for kind, size, sha in (
+        ("sigmf-data", row["size_bytes"], row["sha256_data"]),
+        ("sigmf-meta", (fxlib.store_dir() / f"explorer-{DATE}" / f"{name}.sigmf-meta").stat().st_size,
+         row["sha256_meta"]),
+    ):
+        entries[:] = [e for e in entries if not (e.get("name") == name and e.get("kind") == kind)]
+        entries.append({
+            "name": name, "status": "external", "path": f"{rel_dir}/{name}.{kind}",
+            "size_bytes": size, "sha256": sha, "kind": kind, "use_cases": [use_case],
+            "license": LICENSE, "truth_summary": row["truth_summary"], "purpose": purpose,
+            "datetime": "2026-09-25", "clip_count": row["clip_count"],
+        })
+    fxlib.MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n")
+
+
 def update_manifest(rows: list[dict[str, Any]]) -> None:
     manifest = json.loads(fxlib.MANIFEST.read_text())
     entries = manifest["entries"]
@@ -248,6 +433,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{r['name']}: {r['truth_summary']}")
         for d in r["disagreements"]:
             print(f"  DISAGREEMENT: {d}")
+
+    flex_row = build_flex()
+    update_manifest_external(
+        flex_row, FLEX_NAME, FLEX_USE_CASE,
+        purpose="explorer-agent captured live FLEX paging channels, blind truth cross-checked "
+                "against the independent flex_ref.py sync-word oracle (T-949)",
+    )
+    print(f"{flex_row['name']}: {flex_row['truth_summary']}")
+    for d in flex_row["disagreements"]:
+        print(f"  DISAGREEMENT: {d}")
     return 0
 
 

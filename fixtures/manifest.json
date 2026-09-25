@@ -716,6 +716,38 @@
       "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
       "datetime": "2026-09-25",
       "clip_count": 1441836
+    },
+    {
+      "name": "flex-pagers-930p8",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/flex-pagers-930p8.sigmf-data",
+      "size_bytes": 57600000,
+      "sha256": "05a8044f7a5f7652cb7b128e1808f5e4c401746360deb3ca8e5215ac338152ba",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-088"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "929.6084: oracle 3 sync(s), levels 1600bd:1L/3200bd:2L; 929.9331: oracle 1 sync(s), levels 1600bd:1L/3200bd:1L; 931.1580: oracle 2 sync(s), levels 1600bd:2L/3200bd:2L; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FLEX paging channels, blind truth cross-checked against the independent flex_ref.py sync-word oracle (T-949)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
+    },
+    {
+      "name": "flex-pagers-930p8",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/flex-pagers-930p8.sigmf-meta",
+      "size_bytes": 11558,
+      "sha256": "9d837012868e7ad8b554b678dac5f8de8fa61f21fba7eeed6bccd7a22cdba743",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-088"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "929.6084: oracle 3 sync(s), levels 1600bd:1L/3200bd:2L; 929.9331: oracle 1 sync(s), levels 1600bd:1L/3200bd:1L; 931.1580: oracle 2 sync(s), levels 1600bd:2L/3200bd:2L; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FLEX paging channels, blind truth cross-checked against the independent flex_ref.py sync-word oracle (T-949)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
     }
   ]
 }
