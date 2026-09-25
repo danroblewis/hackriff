@@ -3,8 +3,11 @@
 //! Its own STFT (the detection bin width, Hann 50 % overlap, `K` for ~`history_rows_per_s`
 //! frames/s, no SK) and its own `NoiseFloorTracker` feed `FloorProduct::ingest`, which folds
 //! each frame into the dBFS/Hz pyramid (or the dBm/Hz one when a calibration applies). The
-//! product's uncalibrated pyramid is the history `/api/history` answers from. At the end of the run
-//! tiles are sealed through the last frame plus an hour.
+//! product's uncalibrated pyramid is the history `/api/history` answers from. At the end of the
+//! run every open tile is forced shut ([`hk_store::Pyramid::seal_all`]) with the watermark left at
+//! the last frame — never past it, which is T-942: a watermark in a time block that has not
+//! happened yet is one the next run on the same data dir recovers, and then refuses every frame
+//! it folds.
 //!
 //! **Readers never stall this reader (T-037b).** `/api/history` and `/api/floor` hold the
 //! product's lock for a whole query. Frames go through a [`FloorIngestQueue`], which only tries
@@ -107,6 +110,9 @@ pub(crate) fn update_view_tile_counters(counters: &Counters, view: &Pyramid) {
     set(&counters.history.view_bytes_written, s.bytes_written);
 }
 
+/// Late frames a run may count before it says so in the log: ~10 s at the default 10 rows/s.
+const LATE_ALARM: u64 = 100;
+
 fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
     for r in folded {
         match r {
@@ -114,6 +120,21 @@ fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
             Ok(_) => inc(&h.frames_ingested),
             Err(_) => inc(&h.frames_rejected),
         }
+    }
+    // **T-942: a total loss must not be silent.** `frames_late` was counted and served all along
+    // — the explorer read `frames_ingested 0, frames_late 2024` off `/api/status` — but nothing
+    // said it out loud, so a run recorded no spectrum history at all for half an hour while
+    // looking healthy everywhere else. A run that has folded NOTHING and refused a hundred frames
+    // is not a run with a little jitter; it says so, once (the count crosses the threshold at one
+    // frame, and never again in the run's life).
+    if h.frames_ingested.load(Ordering::Relaxed) == 0
+        && h.frames_late.load(Ordering::Relaxed) == LATE_ALARM
+    {
+        eprintln!(
+            "hk-pipeline: spectrum history is recording NOTHING: all {LATE_ALARM} frames so far \
+             were folded behind the pyramid's watermark, which sits ahead of this run's capture \
+             time (see /api/status `history`, T-942)"
+        );
     }
 }
 
@@ -1068,7 +1089,27 @@ pub(crate) fn run(
     // `seal_at_end` is true for a single-device run, which keeps this reader's seal as it was.
     let seal = !continues && folded_anything && shared.seal_at_end;
     if seal {
-        p.seal_through(last_end.saturating_add_nanos(3_600_000_000_000))
+        // **The watermark stops at the last frame, whatever the seal reaches (T-942).**
+        //
+        // This was `seal_through(last_end + 1 h)`. The hour of slack forced every partially-filled tile shut so a finished replay's
+        // history was complete on disk at every level. It also **sealed tiles whose time block
+        // had not happened yet**, and scheme 1's ladder makes that an hour wide: level 2's tile
+        // is one hour, so the run-end seal wrote the tile of the hour the run died in and left
+        // its `block_end` — the next hour boundary — on disk as the newest sealed time. The next
+        // run on the same `--data-dir` recovered its watermark from that (`Pyramid::recover`),
+        // and `Pyramid::ingest` answers `Late` for every frame whose level-0 block ends at or
+        // before the watermark: **every** frame of the new run, until wall clock passed the hour
+        // boundary. Measured by the explorer on staging, 2026-09-25: `frames_ingested 0`,
+        // `frames_late 2024`, `/api/history` `observed_cells 0`, and `/api/navigation`
+        // `time.latest_s` an exact hour boundary 34 minutes in the future.
+        //
+        // `seal_all` still forces every partially-filled tile shut, so a finished replay's
+        // history is complete on disk at every level — what changes is that the *clock* stays at
+        // the data. `Pyramid::open` then reopens a level-0 tile that was sealed past the last
+        // frame and rebuilds its coarse summaries, so a restart **continues filling** the tile it
+        // was in the middle of. The monotonic watermark still applies (T-446); it just never runs
+        // ahead of what was recorded.
+        p.seal_all(last_end)
             .map_err(|e| anyhow::anyhow!("sealing history: {e}"))?;
     }
     p.checkpoint()

@@ -90,6 +90,34 @@ test("MAP-02: zooming a following pane keeps it on the growing edge", () => {
   assert.equal(m.get(id)!.time.live, true);
 });
 
+test("T-955: follow-live brings a drifted pane back to the front end's OWN tuned window, not only its time", () => {
+  const m = model();
+  const id = m.list()[0].id;
+  // A pane that has drifted off the tuned window while still frozen — a stale reload, a pan, a
+  // retune elsewhere — reproduced directly rather than through the bootstrap: `setFreq` is exactly
+  // what a stale-view reload would have left the pane showing.
+  m.pause(id);
+  m.setFreq(id, 162.2e6, 200e3);
+  const tuned = { centerHz: 144.6e6, spanHz: 200e3 };
+  const acts = paneActions(m, () => id, undefined, () => tuned);
+  assert.equal(m.get(id)!.freq.centerHz, 162.2e6, "the drift is real before the press");
+  acts.followLive();
+  assert.equal(acts.isFollowing(), true);
+  assert.equal(m.get(id)!.freq.centerHz, tuned.centerHz, "follow-live left the pane on the stale frequency");
+  assert.equal(m.get(id)!.freq.spanHz, tuned.spanHz);
+});
+
+test("T-955: with no tuned window to give, follow-live still moves time and leaves frequency alone", () => {
+  const m = model();
+  const id = m.list()[0].id;
+  m.pause(id);
+  m.setFreq(id, 162.2e6, 200e3);
+  const acts = paneActions(m, () => id, undefined, () => null);
+  acts.followLive();
+  assert.equal(acts.isFollowing(), true);
+  assert.equal(m.get(id)!.freq.centerHz, 162.2e6, "no tuned window was reported: nothing to correct against");
+});
+
 test("MAP-02: no active pane means every control is a no-op, not a throw", () => {
   const m = model();
   const acts = paneActions(m, () => null);
