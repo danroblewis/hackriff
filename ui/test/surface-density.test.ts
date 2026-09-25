@@ -29,10 +29,11 @@ import {
   DENSITY_LIVE_REFRESH_MS, DENSITY_RETRY_BASE_MS, DensityFetches, DENSITY_MARK, sharedDensityReader, DENSITY_MAX_TILES_PER_PANE, densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile,
   type DensityTile,
 } from "../src/surface/density";
+import { DENSITY_POLL_MS, DensityPoll } from "../src/app/centre/density-poll";
 import { GENERALIZE_BELOW_CSS_PX, isGeneralized } from "../src/surface/marks";
 import { composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, withLayer } from "../src/surface/layers";
 import { extentOf, levelsFor, type Box, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { toClip, type PaneRect } from "../src/surface/surface";
+import { toClip, type PaneRect, type PaneView } from "../src/surface/surface";
 
 const S = 1e9;
 const T0 = 1_700_000_000 * S;
@@ -240,10 +241,11 @@ test("MAP density: wired into the host's overlay table and its poll — reads on
   const fns = /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{([^}]*)\}/.exec(src);
   assert.ok(fns, "the overlay renderer table");
   assert.match(fns[1], /\bdensity: densityQuadsFn\b/);
-  assert.match(src, /startPoll\(async \(\) => \{ mirror\(\); refreshPriors\(\); refreshDensity\(\); \}, 1000\)/);
-  // The poll's own fetch is gated by the same isCoarseZoom test the draw path uses — a fine-zoomed
-  // pane must not even ask for tiles it would draw nothing with.
-  assert.match(src, /isCoarseZoom\(lat, pane\.box, pane\.rect\.w, pane\.rect\.h/);
+  assert.match(src, /startPoll\(async \(\) => \{ mirror\(\); refreshPriors\(\); refreshDensity\(\); \}, DENSITY_POLL_MS\)/);
+  // Which address is read, when, and under what deadline is `./density-poll.ts`'s (T-927): the host
+  // hands it the one client's GET — with the deadline's signal — and nothing else. The gate the
+  // fetch is under, and that it asks by `DensityFetches.due`, are asserted on that module below.
+  assert.match(src, /new DensityPoll\(\(url, signal\) => client\.get<unknown>\(url, \{ signal \}\)\)/);
   assert.ok(!/client\.(post|put|delete)[^;]*density/i.test(src), "density must only ever be read");
 });
 
@@ -325,27 +327,135 @@ test("MAP density refresh: copies are per pane — a frozen pane never picks up 
   assert.deepEqual(countsOf(f, "live"), [9]);
 });
 
-test("MAP density refresh: two panes due for one address in one tick send ONE request", async () => {
+test("MAP density refresh: two panes due for one address in one tick send ONE request, stamped at the edge it was ISSUED at", async () => {
   const urls: string[] = [];
   let release!: (v: unknown) => void;
   const gate = new Promise((r) => { release = r; });
   const read = sharedDensityReader((url) => { urls.push(url); return gate; });
-  const a = read(LIVE_ADDR), b = read(LIVE_ADDR);
+  // The second ask JOINS the request in flight — and asks with a LATER edge (its own tick).
+  const a = read(LIVE_ADDR, INSIDE), b = read(LIVE_ADDR, INSIDE + 9e9);
   assert.equal(urls.length, 1, "deduped across panes");
   release({ extent: { nt: 1, nf: 1, f_lo_hz: 0, f_cell_hz: 1, t0_s: 0, t_cell_s: 1 }, counts: [3] });
-  const [ta, tb] = await Promise.all([a, b]);
-  assert.deepEqual([ta?.counts, tb?.counts], [[3], [3]]);
+  const [ansA, ansB] = await Promise.all([a, b]);
+  assert.deepEqual([ansA.tile?.counts, ansB.tile?.counts], [[3], [3]]);
+  // T-927 follow-up 2: the joiner is told the edge the request was ISSUED at, not its own. Recording
+  // its own later tick claims a snapshot fresher than the picture in it, and `due`'s "rows arrived
+  // since" test then skips the refresh that would catch what arrived in between.
+  assert.deepEqual([ansA.edgeAtFetchNs, ansB.edgeAtFetchNs], [INSIDE, INSIDE],
+    "both copies are stamped at the issuing ask's edge");
   // Once answered, the next ask goes out again: it shares what is IN FLIGHT, it is not a cache.
-  void read(LIVE_ADDR);
+  void read(LIVE_ADDR, INSIDE);
   assert.equal(urls.length, 2);
-  // A failure resolves null, for the caller to retry.
+  // A failure resolves a null tile, for the caller to retry.
   const bad = sharedDensityReader(() => Promise.reject(new Error("503")));
-  assert.equal(await bad(LIVE_ADDR), null);
+  assert.equal((await bad(LIVE_ADDR, INSIDE)).tile, null);
 });
 
-test("MAP density refresh: the host asks by DensityFetches.due per pane, through the shared reader", () => {
-  const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(src, /densityFetches\.due\(pane\.id, addrs, edgeNs, p\.view\.panes\.isFollowing\(pane\.id\), nowMs\)/);
-  assert.match(src, /sharedDensityReader\(\(url\) => client\.get<unknown>\(url\)\)/);
+test("MAP density refresh: the poll asks by DensityFetches.due per pane, through the shared reader", () => {
+  const src = readFileSync("src/app/centre/density-poll.ts", "utf8");
+  assert.match(src, /this\.fetches\.due\(pane\.id, addrs, edgeNs, following\(pane\.id\), nowMs\)/);
+  assert.match(src, /sharedDensityReader\(\(url\) => withDeadline\(/);
   assert.doesNotMatch(src, /densityKeyByPane/, "a fetched-once address key froze the live edge");
+});
+
+// ---------------------------------------------------------------------------
+// 10. The HOST side (T-927): the read's deadline, the joined request's edge stamp, the stale addr
+//     set, the NaN edge, and one spelling of the poll period. Each claim is stated against the
+//     behaviour T-810 shipped, so the test is red on the old rule rather than merely green on the new.
+// ---------------------------------------------------------------------------
+
+const HOST_PANE = (id: string, box: Box = WIDE): PaneView => ({ id, box, rect: RECT, device: "any" });
+const ON = () => true;
+const FOLLOWING = () => true;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The wire body `/api/tiles/events` answers, one cell with `n` events, for whatever tile was asked. */
+const wireCount = (n: number) => ({ extent: { nt: 1, nf: 1, f_lo_hz: 0, f_cell_hz: 1, t0_s: 0, t_cell_s: 1 }, counts: [n] });
+
+test("MAP density host: a read that never settles is abandoned at its deadline, and asked again", async () => {
+  const asked: string[] = [];
+  let aborts = 0;
+  // A reader that hangs AND ignores its signal — the worst case: the deadline must still release it.
+  const poll = new DensityPoll((url, signal) => {
+    asked.push(url);
+    signal.addEventListener("abort", () => { aborts++; });
+    return new Promise<unknown>(() => {});
+  }, 5);
+  poll.tick(LAT as Lattice, [HOST_PANE("p1")], T0, ON, FOLLOWING);
+  const n = asked.length;
+  assert.ok(n > 0, "a coarse-zoomed pane asks");
+  assert.deepEqual(poll.inflightPanes, ["p1"], "a batch is in flight while the reads hang");
+  await sleep(60);
+  assert.deepEqual(poll.inflightPanes, [],
+    "the deadline released the pane's batch — with no timeout on the GET it stayed set until the browser gave up, and the shared reader stalled every other pane asking for the same address");
+  assert.ok(aborts > 0, "and the request itself was aborted, not merely forgotten");
+  // Released means re-askable: the next poll retries on `DensityFetches`' own backoff.
+  poll.tick(LAT as Lattice, [HOST_PANE("p1")], T0, ON, FOLLOWING);
+  assert.equal(asked.length, 2 * n, "the hung address is asked again; with the stuck in-flight marker it never was");
+});
+
+test("MAP density host: a pane JOINING a request in flight keeps the copy at the edge it was issued at", async () => {
+  let count = 3;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = () => r(); });
+  const poll = new DensityPoll(() => gate.then(() => wireCount(count)));
+  const e1 = T0 - 60 * S;
+  const e2 = T0; // the edge has moved on by the time the second pane asks
+  poll.tick(LAT as Lattice, [HOST_PANE("p1")], e1, ON, FOLLOWING);
+  poll.tick(LAT as Lattice, [HOST_PANE("p1"), HOST_PANE("p2")], e2, ON, FOLLOWING);
+  release();
+  await sleep(10);
+  const firstCounts = poll.tilesFor("p2").map((t) => t.counts[0]);
+  assert.ok(firstCounts.length > 0 && firstCounts.every((c) => c === 3), "p2 drew the shared answer");
+  count = 9; // new events land in those tiles
+  // Stamped at `e1` (when the request went out), p2's copy is stale as of `e2` and is refreshed once
+  // the cadence elapses. Stamped at p2's own later tick (`e2`), `e2 < e2` is false: p2 would keep the
+  // pre-`e1` picture for as long as the edge stood still, exactly the snapshot-too-fresh defect.
+  for (let i = 0; i < 2 + DENSITY_LIVE_REFRESH_MS / DENSITY_POLL_MS; i++) {
+    poll.tick(LAT as Lattice, [HOST_PANE("p1"), HOST_PANE("p2")], e2, ON, FOLLOWING);
+  }
+  await sleep(10);
+  assert.ok(poll.tilesFor("p2").every((t) => t.counts[0] === 9),
+    "p2's copy was refreshed — with the joining tick's edge recorded instead, it never was");
+});
+
+test("MAP density host: a late completion is written against the CURRENT addresses, not the ones it was sent with", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = () => r(); });
+  const poll = new DensityPoll(() => gate.then(() => wireCount(5)));
+  poll.tick(LAT as Lattice, [HOST_PANE("p1")], T0, ON, FOLLOWING);
+  // The layer goes off (or the pane pans away) while the batch is in flight.
+  poll.tick(LAT as Lattice, [HOST_PANE("p1")], T0, () => false, FOLLOWING);
+  assert.deepEqual(poll.tilesFor("p1"), [], "nothing drawn with the layer off");
+  release();
+  await sleep(10);
+  assert.deepEqual(poll.tilesFor("p1"), [],
+    "the completion must not restore the old set — the reviewed code wrote the addrs it was SENT with, so they came back for a second");
+  // With the layer back on, the answer that did arrive is drawn (it was kept, not thrown away).
+  poll.tick(LAT as Lattice, [HOST_PANE("p1")], T0, ON, FOLLOWING);
+  assert.ok(poll.tilesFor("p1").length > 0);
+});
+
+test("MAP density refresh: a NaN live edge is never stored as the fetch edge — it would seal the address for ever", () => {
+  const f = new DensityFetches();
+  f.succeeded("p", LIVE_ADDR, counted(1), Number.NaN, 0);
+  assert.deepEqual(countsOf(f, "p"), [1], "the copy in hand is kept");
+  assert.deepEqual(f.due("p", [LIVE_ADDR], INSIDE, true, DENSITY_LIVE_REFRESH_MS), [LIVE_ADDR],
+    "asked again once an edge is known: `NaN < edge` is false, so storing NaN was an accidental seal — the very thing review fix 3 removed");
+});
+
+test("MAP density host: the poll period is one constant, and the poll module reads only", () => {
+  const host = readFileSync("src/app/centre/surface.ts", "utf8");
+  const mod = readFileSync("src/app/centre/density-poll.ts", "utf8");
+  // T-927 follow-up 5: one spelling of the period — defined in the poll module, used by startPoll.
+  assert.match(mod, /export const DENSITY_POLL_MS = 1000;/);
+  assert.doesNotMatch(host, /DENSITY_POLL_MS\s*=/, "the host imports the constant, it does not redefine it");
+  assert.match(host, /startPoll\(async \(\) => \{ mirror\(\); refreshPriors\(\); refreshDensity\(\); \}, DENSITY_POLL_MS\)/);
+  // The fetch is gated by the same isCoarseZoom test the draw path uses — a fine-zoomed pane must not
+  // even ask for tiles it would draw nothing with.
+  assert.match(mod, /isCoarseZoom\(lat, pane\.box, pane\.rect\.w, pane\.rect\.h\)/);
+  // Read only, no device route, and no browser clock (pacing is in poll ticks).
+  assert.ok(!/\.(post|put|del)\(/.test(mod), "density is only ever read");
+  for (const word of ["Date.now", "performance.now", "DeviceAction", "/api/control", "/api/device"]) {
+    assert.ok(!mod.replace(/^\s*\/\/.*$/gm, "").includes(word), `density-poll.ts must not contain "${word}"`);
+  }
 });

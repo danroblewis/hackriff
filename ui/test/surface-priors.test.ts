@@ -174,7 +174,8 @@ test("MAP-12: thin client — the layer module fetches nothing, and toggling it 
   assert.deepEqual(fetched, []);
   // The host fetches priors on the poll (never in the frame), through the one client, GET only.
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(host, /startPoll\(async \(\) => \{ mirror\(\); refreshPriors\(\); refreshDensity\(\); \}, 1000\)/);
+  // The period is `DENSITY_POLL_MS`, the centre poll's one constant (T-927 fix 5), not a literal.
+  assert.match(host, /startPoll\(async \(\) => \{ mirror\(\); refreshPriors\(\); refreshDensity\(\); \}, DENSITY_POLL_MS\)/);
   assert.match(host, /client\.get<unknown>\(path\)/);
   assert.ok(!/client\.(post|put|delete)[^;]*priors/i.test(host), "priors must only ever be read");
 });
