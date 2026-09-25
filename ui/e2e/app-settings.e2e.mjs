@@ -91,14 +91,34 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px one small ⋯ h
   await page.click("document.querySelector('#map-more-menu [data-scale=\"anchored\"]')");
   await page.waitFor("the anchored scale to come back", "localStorage.getItem('hk-surface-range-mode') === 'anchored'", { timeoutMs: 10000 });
 
-  // The time ruler: a HUD time label turns from "−1 m 20 s" into a UTC timestamp, on the same marks.
-  await page.waitFor("a HUD time label to be drawn", "document.querySelectorAll('.sf-hud-label.time b').length > 0", { timeoutMs: 60000 });
-  const ageLabels = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.sf-hud-label.time b')].map((e) => e.textContent))`));
-  assert.ok(ageLabels.some((s) => /(s|m|h)\b|live edge/.test(String(s))), `no seconds-ago time label to start from: ${JSON.stringify(ageLabels)}`);
+  // The time ruler. TWO properties, because at phone width there may be nothing on screen to read:
+  //   - the mode is taken and remembered (the page's own stored preference), at every width;
+  //   - where the HUD actually prints time labels, they turn from "-1 m 20 s" into a UTC timestamp,
+  //     ALL of them, on the same marks.
+  // T-997 drops a time label that would print into the map's top-left floating chrome, and at 400 px
+  // that column is the whole width — so there the ruler legitimately shows none, and this says so
+  // out loud rather than asserting on the hidden pool elements (asserting on those is what made an
+  // earlier draft of this spec look green at 1280 and red at 400 for the wrong reason).
+  const shownTimeLabels = `JSON.stringify([...document.querySelectorAll('.sf-hud-label.time')]
+    .filter((e) => !e.hidden).map((e) => e.children[0].textContent))`;
+  const ageLabels = JSON.parse(await page.eval(shownTimeLabels));
+  t.diagnostic(`at ${W}: time labels before the switch ${JSON.stringify(ageLabels)}`);
   await page.click("document.querySelector('#map-more-menu [data-ruler=\"clock\"]')");
-  await page.waitFor("the time ruler to read timestamps",
-    `localStorage.getItem('hk-ruler-mode') === 'clock'
-     && [...document.querySelectorAll('.sf-hud-label.time b')].some((e) => /\\d\\d:\\d\\d:\\d\\d/.test(e.textContent ?? ""))`, { timeoutMs: 30000 });
+  await page.waitFor("the timestamp mode to be taken and remembered",
+    "localStorage.getItem('hk-ruler-mode') === 'clock'", { timeoutMs: 10000 });
+  if (ageLabels.length) {
+    assert.ok(ageLabels.every((s) => /(s|m|h)\b|live edge/.test(String(s))), `not seconds-ago to start from: ${JSON.stringify(ageLabels)}`);
+    await page.waitFor("every drawn time label to read a UTC timestamp",
+      `(() => { const t = [...document.querySelectorAll('.sf-hud-label.time')].filter((e) => !e.hidden)
+         .map((e) => e.children[0].textContent);
+         return t.length > 0 && t.every((s) => /\\d\\d:\\d\\d:\\d\\d/.test(String(s))); })()`,
+      { timeoutMs: 30000 });
+  } else {
+    // Nothing is drawn: prove that is T-997's reserve (every pooled label hidden), not a broken HUD.
+    assert.equal(await page.eval("[...document.querySelectorAll('.sf-hud-label.time')].every((e) => e.hidden)"), true,
+      "no time label is shown and the HUD is not reporting them as dropped — the ruler is simply missing");
+    t.diagnostic(`at ${W}: the time ruler prints no label here (T-997 drops labels under the top-left chrome), so the mode is asserted as taken, not as drawn`);
+  }
   await page.click("document.querySelector('#map-more-menu [data-ruler=\"age\"]')");
   await page.waitFor("the seconds-ago labels to come back", "localStorage.getItem('hk-ruler-mode') === 'age'", { timeoutMs: 10000 });
 

@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PaneModel } from "../src/surface/panes";
 import type { Lattice } from "../src/surface/lattice";
-import { IDLE_MS, IdleFade, ZOOM_STEP, fabState, paneActions, parseGoto } from "../src/app/chrome/map-controls";
+import { IDLE_MS, IdleFade, ZOOM_STEP, fabPress, fabState, mountMapControls, paneActions, parseGoto } from "../src/app/chrome/map-controls";
 import { createStore } from "../src/app/store";
 import { initialState, requestGoto } from "../src/app/state";
 import type { AppContext } from "../src/app/context";
@@ -90,31 +90,76 @@ test("MAP-02: zooming a following pane keeps it on the growing edge", () => {
   assert.equal(m.get(id)!.time.live, true);
 });
 
-test("T-955: follow-live brings a drifted pane back to the front end's OWN tuned window, not only its time", () => {
+// ——— T-955: the follow-live control's states are relative to the TUNED window's live edge ———
+
+const TUNED = { centerHz: 144.6e6, spanHz: 2.4e6 };
+
+/** The explorer's 0428 pane: following live TIME at 162.2 MHz ± 7.91 MHz after the radio retuned to
+ * 144.6 MHz. Built over the real PaneModel and the real `paneActions`, with fetch spied. */
+function driftedFollowing() {
   const m = model();
   const id = m.list()[0].id;
-  // A pane that has drifted off the tuned window while still frozen — a stale reload, a pan, a
-  // retune elsewhere — reproduced directly rather than through the bootstrap: `setFreq` is exactly
-  // what a stale-view reload would have left the pane showing.
-  m.pause(id);
-  m.setFreq(id, 162.2e6, 200e3);
-  const tuned = { centerHz: 144.6e6, spanHz: 200e3 };
-  const acts = paneActions(m, () => id, undefined, () => tuned);
-  assert.equal(m.get(id)!.freq.centerHz, 162.2e6, "the drift is real before the press");
-  acts.followLive();
-  assert.equal(acts.isFollowing(), true);
-  assert.equal(m.get(id)!.freq.centerHz, tuned.centerHz, "follow-live left the pane on the stale frequency");
-  assert.equal(m.get(id)!.freq.spanHz, tuned.spanHz);
+  m.setFreq(id, 162.2e6, 15.82e6);
+  assert.equal(m.isFollowing(id), true, "the pane is following in time — the reported shape");
+  return { m, id };
+}
+
+test("T-955: the FAB on a pane FOLLOWING at the wrong frequency brings it to the tuned live edge — it does not freeze it", () => {
+  const fetched: unknown[] = [];
+  const g = globalThis as { fetch?: unknown };
+  const real = g.fetch;
+  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("a view control reached the network")); };
+  const { ctx, calls } = spyCtx();
+  try {
+    const { m, id } = driftedFollowing();
+    const acts = paneActions(m, () => id, undefined, () => TUNED);
+    assert.equal(acts.atLiveEdge(), false, "a pane following spectrum the radio has left is NOT at the tuned live edge");
+    assert.equal(fabState(acts.isFollowing(), acts.atLiveEdge()).offTuned, true, "the FAB must not read as plain 'following' there");
+    fabPress(acts);
+    assert.equal(m.isFollowing(id), true, "the press FROZE the pane (explorer 0430: frozen at -14 s)");
+    assert.equal(m.get(id)!.freq.centerHz, TUNED.centerHz, "the press left the pane on the stale frequency");
+    assert.equal(m.get(id)!.freq.spanHz, TUNED.spanHz);
+    assert.equal(acts.atLiveEdge(), true);
+    // …and only NOW, at the tuned live edge, does the same press freeze.
+    fabPress(acts);
+    assert.equal(m.isFollowing(id), false, "at the tuned live edge the press is the freeze");
+    assert.equal(m.get(id)!.freq.centerHz, TUNED.centerHz, "freezing moved nothing");
+    void ctx;
+  } finally { if (real) g.fetch = real; else delete g.fetch; }
+  assert.deepEqual(fetched, [], "follow-live reached fetch: it is a view change, never a device call");
+  assert.deepEqual(calls, [], "follow-live reached the control client");
 });
 
-test("T-955: with no tuned window to give, follow-live still moves time and leaves frequency alone", () => {
+test("T-955: a FROZEN pane off the tuned window is brought to the tuned live edge in both axes", () => {
+  const { m, id } = driftedFollowing();
+  m.pause(id);
+  const acts = paneActions(m, () => id, undefined, () => TUNED);
+  fabPress(acts);
+  assert.equal(m.isFollowing(id), true);
+  assert.equal(m.get(id)!.freq.centerHz, TUNED.centerHz);
+});
+
+test("T-955: a pane already OVERLAPPING the tuned window keeps the user's zoom — only time is re-pinned", () => {
   const m = model();
   const id = m.list()[0].id;
+  m.setFreq(id, 144.39e6, 200e3); // zoomed onto a few channels inside the tuned 2.4 MHz
   m.pause(id);
-  m.setFreq(id, 162.2e6, 200e3);
+  const acts = paneActions(m, () => id, undefined, () => TUNED);
+  fabPress(acts);
+  assert.equal(m.isFollowing(id), true);
+  assert.equal(m.get(id)!.freq.centerHz, 144.39e6, "follow-live destroyed a zoom inside the tuned window");
+  assert.equal(m.get(id)!.freq.spanHz, 200e3);
+  assert.equal(acts.atLiveEdge(), true);
+});
+
+test("T-955: with no tuned window reported, the FAB is the plain time toggle and frequency is left alone", () => {
+  const { m, id } = driftedFollowing();
   const acts = paneActions(m, () => id, undefined, () => null);
-  acts.followLive();
-  assert.equal(acts.isFollowing(), true);
+  assert.equal(acts.atLiveEdge(), true, "nothing to be off: time decides");
+  fabPress(acts);
+  assert.equal(m.isFollowing(id), false);
+  fabPress(acts);
+  assert.equal(m.isFollowing(id), true);
   assert.equal(m.get(id)!.freq.centerHz, 162.2e6, "no tuned window was reported: nothing to correct against");
 });
 
@@ -165,7 +210,11 @@ test("MAP-02: the cluster names no route; its one device path is the painted ret
   // The go-to offer is shown only where no tuned window covers the pane, and — since T-947 — pressed
   // through `acceptPaneWidth`, planning the device's OWN current span (or a caller default), never
   // the pane's viewport: the pane-row Retune (`pressOffer` → `acceptPaneRetune`) is untouched.
-  assert.match(host, /if \(!o \|\| o\.covered\) \{ lastPaintedGoto = null; return null; \}/);
+  // T-955: "covered" is whether a tuned window — the active windows OR `frequency.current`, so a
+  // retune by anyone counts the moment the poll reports it — holds the pane's CENTRE (a Go-to names
+  // a centre), not whether it holds the whole viewport.
+  assert.match(host, /const heldNow = !!pane && \(coveringWindow\(windows, c, c, pane\.device\) !== null\s*\|\| \(!!cur && Math\.abs\(c - cur\.center_hz\) <= cur\.span_hz \/ 2\)\);/);
+  assert.match(host, /if \(!o \|\| heldNow\) \{ lastPaintedGoto = null; return null; \}/);
   assert.match(host, /press: pressGotoOffer/);
   assert.match(host, /const pressGotoOffer = [^]*?acceptPaneWidth\(ctx, \{/);
   assert.match(host, /const gotoSpanHz = \(\): number => goToSpanHz\(/);
@@ -264,5 +313,107 @@ test("T-919: the status box is a collapsed line by default, with a toggle and a 
   for (const keep of ["hk-surface-level", "hk-surface-why"]) {
     assert.doesNotMatch(css, new RegExp(`\\.sf-status:not\\(\\[data-open="true"\\]\\) \\.${keep} \\{[^}]*display: none`),
       `the collapsed line hides .${keep}`);
+  }
+});
+
+// ——— T-955: a painted Go-to offer is re-derived when the radio retunes (by anyone) ———
+
+type Handler = (e: unknown) => void;
+/** A lenient element: enough of the DOM for `mountMapControls` to build and for a test to press. */
+class FakeEl {
+  attrs: Record<string, string> = {};
+  children: FakeEl[] = [];
+  handlers: Record<string, Handler[]> = {};
+  classes = new Set<string>();
+  hidden = false;
+  disabled = false;
+  textContent = "";
+  value = "";
+  title = "";
+  style = { setProperty() {}, removeProperty() {} };
+  classList = {
+    add: (...c: string[]) => c.forEach((x) => this.classes.add(x)),
+    remove: (...c: string[]) => c.forEach((x) => this.classes.delete(x)),
+    toggle: (c: string, on?: boolean) => { const v = on ?? !this.classes.has(c); if (v) this.classes.add(c); else this.classes.delete(c); return v; },
+    contains: (c: string) => this.classes.has(c),
+  };
+  constructor(readonly tag: string) {}
+  setAttribute(k: string, v: string) { this.attrs[k] = v; if (k === "class") v.split(/\s+/).forEach((c) => c && this.classes.add(c)); if (k === "hidden") this.hidden = true; }
+  getAttribute(k: string) { return this.attrs[k] ?? null; }
+  removeAttribute(k: string) { delete this.attrs[k]; }
+  append(...c: (FakeEl | string)[]) { for (const x of c) if (typeof x !== "string") this.children.push(x); else this.textContent += x; }
+  replaceChildren(...c: FakeEl[]) { this.children = []; this.append(...c); }
+  addEventListener(t: string, fn: Handler) { (this.handlers[t] ??= []).push(fn); }
+  removeEventListener() {}
+  fire(t: string, e: unknown = { preventDefault() {} }) { for (const fn of this.handlers[t] ?? []) fn(e); }
+  focus() {}
+  contains() { return false; }
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+  getBoundingClientRect() { return { width: 0, height: 0, top: 0, bottom: 0, left: 0, right: 0 }; }
+  find(cls: string): FakeEl | null {
+    if (this.classes.has(cls)) return this;
+    for (const c of this.children) { const f = c.find(cls); if (f) return f; }
+    return null;
+  }
+}
+
+test("T-955: a painted Go-to offer is withdrawn when the radio retunes onto the pane, and re-worded when it retunes elsewhere", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    // The host's offer is `offerNow`'s: null while a tuned window covers the pane, else a Retune
+    // naming the span the radio would be given. `tuned` is what `frequency.current` says NOW.
+    let tuned: { centerHz: number; spanHz: number } = { centerHz: 100.9e6, spanHz: 2.4e6 };
+    const offerFor = () => {
+      const p = m.get(id)!;
+      if (m.overlapsFreq(id, tuned.centerHz, tuned.spanHz) && Math.abs(p.freq.centerHz - tuned.centerHz) < tuned.spanHz / 2) return null;
+      return { why: `Retune to ${(p.freq.centerHz / 1e6).toFixed(4)} MHz at ${(tuned.spanHz / 1e6).toFixed(3)} MHz span`, enabled: true, press() {} };
+    };
+    const acts = paneActions(m, () => id, undefined, () => tuned);
+    const host = {
+      ...acts,
+      measuring: () => false, setMeasuring() {}, goTo: (hz: number) => m.setFreq(id, hz, m.get(id)!.freq.spanHz),
+      centreHz: () => tuned.centerHz, gotoOffer: offerFor, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const form = root.find("map-goto")!, offer = root.find("map-offer")!, why = root.find("map-offer-why")!;
+    const input = form.children.find((x) => x.tag === "input")!;
+    input.value = "162.2M";
+    form.fire("submit");
+    assert.equal(offer.hidden, false, "the Go-to offer is painted");
+    assert.match(why.textContent, /162\.2000 MHz/);
+
+    // The radio is retuned to 162.2 MHz (by the API, another client, or this page): the offer is
+    // now for a window the radio already holds — it must not outlive the retune (explorer 0416→0428).
+    tuned = { centerHz: 162.2e6, spanHz: 2.4e6 };
+    c.tuningChanged();
+    assert.equal(offer.hidden, true, "the stale 'Retune to 162.2 MHz' offer outlived the retune to 162.2 MHz");
+
+    // Painted again, then the radio goes elsewhere: re-derived against the NEW tuned window.
+    tuned = { centerHz: 100.9e6, spanHz: 2.4e6 };
+    form.fire("submit");
+    assert.equal(offer.hidden, false);
+    tuned = { centerHz: 144.6e6, spanHz: 10e6 };
+    c.tuningChanged();
+    assert.equal(offer.hidden, false, "the pane is still off the tuned window: an offer still applies");
+    assert.match(why.textContent, /10\.000 MHz span/, "the offer was not re-derived against the new tuned window");
+  } finally {
+    g.document = saved.document; g.window = saved.window;
   }
 });

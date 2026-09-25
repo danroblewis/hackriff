@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import {
-  HUD_TICK, HudAxes, fmtRulerAge, fmtRulerHz, hudLabels, hudTickQuads, paneRuler,
+  HUD_TICK, HudAxes, fmtRulerAge, fmtRulerHz, hudLabels, hudTickQuads, paneRuler, timeLabelReserved,
 } from "../src/surface/hud";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { toClip, type PaneRect } from "../src/surface/surface";
@@ -125,6 +125,32 @@ test("labels land on their ticks in CSS px (GL rect → DOM, device px → CSS) 
     assert.ok(l.x >= 64, "no frequency label under the time ruler's corner");
   }
   for (const l of t) near(l.y, r.time.find((x) => x.value === l.value)!.pos / 2);
+});
+
+// T-997: the map's floating chrome is docked down the SAME left edge the time ruler runs down
+// (Go-to, the nudge row, the inventory pills, the retune offer). A label under a control is a label
+// lost — exactly the complaint the user made of the T-895 chip at mid-height — so a label that would
+// print into the chrome's box is DROPPED, never moved off the instant it names.
+test("a time label that would print under the floating chrome is dropped, never moved", () => {
+  const rect: PaneRect = { x: 0, y: 0, w: 2000, h: 1600 }; // dpr 2 → 1000 x 800 CSS
+  const r = paneRuler("p", BOX, rect, 1e3, 0.01, T0, 2);
+  const all = hudLabels(r, 1600, 2).filter((l) => l.axis === "time");
+  assert.ok(all.length > 1, "no time labels at all, so this proves nothing");
+  // The left column as `map-controls.css` places it: 8 px in, ~330 px wide, down to the pills' row.
+  const reserve = { left: 8, right: 160, bottom: 200 };
+  const kept = hudLabels(r, 1600, 2, reserve).filter((l) => l.axis === "time");
+  assert.ok(kept.length < all.length, "the reserve dropped nothing — the case is not exercised");
+  for (const l of kept) {
+    assert.ok(!timeLabelReserved(l.x, l.y, reserve), `a kept label prints into the chrome at y = ${l.y}`);
+    // Dropped, never moved: every kept label is still exactly where it was without the reserve.
+    const same = all.find((a) => a.value === l.value)!;
+    assert.deepEqual([l.x, l.y], [same.x, same.y], "a label was moved off its tick");
+  }
+  // And the frequency ruler along the bottom is untouched by a top-left reserve.
+  assert.equal(hudLabels(r, 1600, 2, reserve).filter((l) => l.axis === "freq").length,
+    hudLabels(r, 1600, 2).filter((l) => l.axis === "freq").length);
+  // A null reserve is the old behaviour, exactly.
+  assert.deepEqual(hudLabels(r, 1600, 2, null), hudLabels(r, 1600, 2));
 });
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,7 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
+import type { HudReserve } from "../../surface/hud";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
@@ -61,7 +62,7 @@ import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrien
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
-  acceptPaneRetune, acceptPaneWidth, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
@@ -171,6 +172,33 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/**
+ * T-997: the floating chrome's TOP-LEFT column, measured against the canvas, so the time ruler's
+ * labels are dropped rather than printed underneath it (`surface/hud.ts`'s `HudReserve`). The
+ * cluster's children are absolutely placed by `map-controls.css`, and the ones that matter are the
+ * ones that reach into the ruler's own band down the left edge — Go-to, the nudge row, the
+ * inventory pills, the retune offer, and at phone width the status pill. Whichever they are, this
+ * asks the layout rather than repeating the CSS's numbers: one rect read per child, once per frame,
+ * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
+ * most one layout and never a read-write thrash.
+ */
+const RULER_BAND_CSS = 14 + 150; // `hud.ts`'s TIME_LABEL_BOX_CSS: where a time label prints.
+function chromeReserve(canvas: HTMLCanvasElement, ctl: HTMLElement | null): HudReserve | null {
+  if (!ctl) return null;
+  const base = canvas.getBoundingClientRect();
+  let left = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const child of Array.from(ctl.children)) {
+    const r = child.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const x0 = r.left - base.left, x1 = r.right - base.left, y1 = r.bottom - base.top;
+    // Only what reaches into the band the time labels print in, and only above the fold: the zoom
+    // stack, the FAB and the top-right cluster are nowhere near the left ruler.
+    if (x0 > RULER_BAND_CSS) continue;
+    left = Math.min(left, x0); right = Math.max(right, x1); bottom = Math.max(bottom, y1);
+  }
+  return bottom > -Infinity ? { left, right, bottom } : null;
+}
+
 /** The surface's tool modes (docs/23 §10.4's table columns). */
 type ToolMode = "navigate" | "measure" | "annotate" | "pin";
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
@@ -1276,6 +1304,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
+        hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
         dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); },
       });
     } catch (e) {
@@ -1421,9 +1450,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
-      // T-955: follow-live brings the pane's FREQUENCY back to the front end's own current window
-      // too, when one is known — the same `frequency.current` the retune-offer span already reads
-      // (`goToSpanHz`), never a device call.
+      // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
+      // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
+      // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
+      // NOTE for T-1006 (per-pane device): this reads the GLOBAL `frequency.current`, not the
+      // pane's own device's window.
       () => {
         const cur = store.get().navGrid.grid?.frequency?.current;
         return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
@@ -1464,7 +1495,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const o = offerNow(pv.activePane);
         // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
         // reaches it and the pane row's persistent control is where a finer capture is offered.
-        if (!o || o.covered) { lastPaintedGoto = null; return null; }
+        // T-955: a Go-to names a CENTRE (T-947), so "covered" is whether the tuned window holds the
+        // pane's centre — not whether it holds the whole viewport, which a pane zoomed out past the
+        // capture never is. Checked against `frequency.current` as well as the active windows, so a
+        // retune by anyone withdraws the offer the moment the navigation poll reports it (the
+        // explorer's 0428: "Retune to 162.2000 MHz" still painted with the radio at 162.2, then 144.6).
+        const pane = pv.view.panes.get(pv.activePane);
+        const cur = store.get().navGrid.grid?.frequency?.current ?? null;
+        const c = pane?.freq.centerHz ?? NaN;
+        const heldNow = !!pane && (coveringWindow(windows, c, c, pane.device) !== null
+          || (!!cur && Math.abs(c - cur.center_hz) <= cur.span_hz / 2));
+        if (!o || heldNow) { lastPaintedGoto = null; return null; }
         const wo = widthOfferNow(pv.activePane, gotoSpanHz());
         if (!wo) { lastPaintedGoto = null; return null; }
         lastPaintedGoto = wo;
@@ -1604,6 +1645,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
+    // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
+    store.select((s) => {
+      const c = s.navGrid.grid?.frequency?.current;
+      return c ? `${c.center_hz}/${c.span_hz}` : "";
+    }, () => controls.tuningChanged());
 
     // ---- the active pane, made visible (T-1000, docs/23 §10.7) ----
     // Whatever made a pane active — a press, a right-click, a wheel, a split, a close, a key — the
