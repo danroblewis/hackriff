@@ -77,6 +77,7 @@ fn rds_decode(frame_model: &str, t_s: i64, metadata: Value, content: Option<Valu
         }),
         content_class: ContentClass::Unrestricted,
         t: ts(t_s),
+        provenance: None,
     }
 }
 

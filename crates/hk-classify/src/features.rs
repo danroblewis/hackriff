@@ -1600,8 +1600,16 @@ fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
     if s.family_features.fsk.is_some() {
         f.set("blind_fsk", s.family_scores.fsk);
     }
-    f.set("blind_bpsk", s.family_scores.bpsk);
-    f.set("blind_qpsk", s.family_scores.qpsk);
+    // T-888: the same rule for the two PSK scores. An order-p line is implied by any order-p/2
+    // line, so where the lower order decisively explains the higher, C14's score is the veto
+    // constant times a saturated ramp (every integer-h FSK row read `blind_qpsk` = 0.200 exactly)
+    // — a default, not a measurement. C14 reports that condition; it is absent here.
+    if s.family_features.bpsk_measured {
+        f.set("blind_bpsk", s.family_scores.bpsk);
+    }
+    if s.family_features.qpsk_measured {
+        f.set("blind_qpsk", s.family_scores.qpsk);
+    }
 }
 
 /// Prominence of the strongest autocorrelation **peak** at a plausible OFDM symbol length.

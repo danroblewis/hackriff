@@ -71,6 +71,14 @@ fi
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 # Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
 BULK_MAX=${BULK_MAX:-15}
+# GATE TIERS (user, 2026-09-24 20:00: "GATE_TIERS=check now"). `full` (the default) gates every merge
+# with both phases; `check` gates it with `--phase check` only (lint + test for `full`-class diffs,
+# test-ui for `ui`, the py/ops suites) - the split CI has: check per push, acceptance once a day.
+# The acceptance phase's home under `check` is the daily release-candidate run (`just rc`, user rule
+# the same evening: its reds become P1 tickets, never an un-land). Rollback: GATE_TIERS=full.
+GATE_TIERS=${GATE_TIERS:-full}
+case "$GATE_TIERS" in full) GATE_PHASE="" ;; check) GATE_PHASE="--phase check" ;;
+  *) echo "merge-runner: GATE_TIERS=$GATE_TIERS is not full|check - using full" >&2; GATE_TIERS=full; GATE_PHASE="" ;; esac
 DRY_RUN=${DRY_RUN:-0}
 touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
@@ -166,7 +174,7 @@ flip_done(){ # ticket merge_sha
   case "$t" in T-*) ;; *) return 0 ;; esac
   [ -f "$REPO/py/hkpy/tasks.py" ] || { log "flip_done $t: no task CLI on main yet - the board keeps todo until reconcile"; return 0; }
   if (cd "$REPO" && uv run --locked --project py python -m hkpy.tasks set "$t" status=done commit="${sha:0:8}" >>"$LOG" 2>&1 \
-      && git add docs/tasks.yaml && git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
+      && git add docs/tasks.yaml && HK_MERGE_RUNNER=1 git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
     log "BOARD $t -> done (${sha:0:8})"
   else
     (cd "$REPO" && git checkout -q -- docs/tasks.yaml 2>/dev/null)
@@ -223,6 +231,50 @@ main_is_red(){
   return 1
 }
 
+# BISECT, NOT ISOLATE (supervisor for the user, 2026-09-24 19:37: four 1-by-1 isolations that day, 5-9 h of
+# serial full gates each). When a batch's triaged test/spec fails alone and main is green on it, find the
+# branch that breaks it with THAT TEST ALONE over halves of the batch (log2(n) targeted runs), confirm the
+# last candidate is red ALONE, and only then blame it. Everything else goes back as one batch and still
+# lands only through a full gate - nothing is excused. The candidates are persisted in isolate-remaining,
+# so a restart mid-bisect re-queues them (startup).
+bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
+  # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
+  # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
+  local base=$1; shift; local t rc=1
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ] || { log "BISECT: main moved off $base during the bisect - giving up, nothing reset"; return 2; }
+  for t in "$@"; do
+    if ! git -C "$REPO" merge -q --no-ff -m "Merge $(ticket_of "${t%%=*}") (${t%%=*}): bisect probe (automated, never kept)" "${t#*=}" >>"$LOG" 2>&1; then
+      git -C "$REPO" merge --abort 2>/dev/null; git -C "$REPO" reset -q --hard "$base"
+      log "BISECT: ${t%%=*} does not merge onto $base with the others - giving up"; return 2
+    fi
+  done
+  if [ -n "${TRIAGE_FILTER:-}" ]; then
+    ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1 || rc=0
+  else
+    ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
+      || { git -C "$REPO" reset -q --hard "$base"; log "BISECT: rebuild failed on ${*%%=*} - giving up"; return 2; }
+    ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1 || rc=0
+  fi
+  git -C "$REPO" reset -q --hard "$base"
+  log "BISECT: base + $(printf '%s ' "${@%%=*}")-> $([ "$rc" = 0 ] && echo RED || echo green)"
+  return $rc
+}
+bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (twice), or nothing
+  local base=$1; shift; local cand=("$@") n r
+  printf '%s ' "${@%%=*}" > "$S/isolate-remaining"
+  while [ "${#cand[@]}" -gt 1 ]; do
+    n=$(( ${#cand[@]} / 2 ))
+    bisect_red "$base" "${cand[@]:0:$n}"; r=$?
+    [ "$r" = 2 ] && return 0
+    if [ "$r" = 0 ]; then cand=("${cand[@]:0:$n}"); else cand=("${cand[@]:$n}"); fi
+  done
+  # Blame needs the red on base + it ALONE twice: a halving that ended on the green side rests on
+  # nothing else, and one red run cannot tell a defect from a test that is flaky even alone.
+  bisect_red "$base" "${cand[0]}" || return 0
+  bisect_red "$base" "${cand[0]}" && echo "${cand[0]}"
+  return 0
+}
+
 process(){
   local branch=$1 ticket; ticket=$(ticket_of "$branch")
   cd "$REPO" || return 1
@@ -254,14 +306,14 @@ process(){
     log "CONFLICT $branch -> flag for AI"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main." "merge conflict - fix run"; return 0
   fi
-  log "GATE $branch (just gate-merge; may take 15-25 min)…"
+  log "GATE $branch (just gate-merge${GATE_PHASE:+ $GATE_PHASE}; may take 15-25 min)…"
   GATE_T0=$SECONDS
   local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
-  limited just gate-merge; rc=$?
+  limited just gate-merge $GATE_PHASE; rc=$?
   # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
   # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
   # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
-  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge"; rc=$?; fi
+  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge $GATE_PHASE"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
     #
@@ -294,7 +346,7 @@ process(){
     # before any commit that touches it, and a merge commit is one of the two writers that can
     # put a malformed board on main. An unchecked `git commit` here would log "MERGED ✓" for a
     # merge that never happened, which is the same false-success shape as T-840's lost MERGE_HEAD.
-    if ! git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
+    if ! HK_MERGE_RUNNER=1 git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
       log "COMMIT REFUSED for $branch (pre-commit hook or hook failure) - NOT merged"
       git merge --abort 2>/dev/null || true
       echo "$(date '+%m-%d %H:%M')  $branch  $ticket  COMMIT_REFUSED" >> "$NEEDS"
@@ -604,7 +656,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   # test files a deflake request the work runner dispatches) and alerted - never a silent pass.
   # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
   # single-branch path passes `just gate-merge`, because its merge is still STAGED.
-  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t0
+  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base $GATE_PHASE"} tests filter t0
   # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
   # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
   # Every way nextest reports a red test - a crash (SIGSEGV/SIGABRT/...), a TIMEOUT, a leak - not
@@ -614,7 +666,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   TRIAGE_KIND="test"
   # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
   # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
-  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; FLAKE_PASSES=2; FLAKE_SOLO_S=0
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; TRIAGE_ALONE_FIRST=0; FLAKE_PASSES=2; FLAKE_SOLO_S=0
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -638,7 +690,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
       return 1
     fi
     log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
-    return 1
+    TRIAGE_ALONE_FIRST=1; return 1
   fi
   # pytest (the `py` suites inside `just test`) prints `FAILED tests/x.py::name` - not a nextest line,
   # so it takes the suite path (hold for a fix), but the alarm names it: at 09:42 and 09:44 on
@@ -668,7 +720,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
     return 1
   fi
   log "TRIAGE: a test FAILS alone -> a real defect in this merge"
-  return 1
+  TRIAGE_ALONE_FIRST=1; return 1
 }
 
 # The suite that stopped the gate passes on the isolation evidence; run what it never reached.
@@ -775,13 +827,13 @@ try_bulk(){
   tickets="${tickets# }"
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
-  log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
+  log "BULK gate (just gate --base $base${GATE_PHASE:+ $GATE_PHASE} over ${#branches[@]} merged branches; may take 15-25 min)…"
   GATE_T0=$SECONDS
   # $(( )) strips the leading spaces macOS `wc -l` prints; `tail -n +"   381417"` is an
   # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
   # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
   local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
-  limited just gate --base "$base"; rc=$?
+  limited just gate --base "$base" $GATE_PHASE; rc=$?
   # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
   # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
   # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
@@ -835,7 +887,36 @@ try_bulk(){
       rm -f "$BULKMARK"
       return 0
     fi
-    log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+    # Only for a red that failed alone on its FIRST isolated run: one that passed alone and then
+    # failed is flaky even alone, and a bisection over it would blame whichever branch it ended on.
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ "${TRIAGE_ALONE_FIRST:-0}" = 1 ] \
+       && { [ -n "${TRIAGE_FILTER:-}" ] || [ -n "${TRIAGE_SPECS:-}" ]; } && [ "${#branches[@]}" -ge 2 ]; then
+      # The bulk gate's own end line first, so hkpy.flow / cycletime close THIS gate here; the probes
+      # below are not gates and print no `gate: … took` lines.
+      log "BULK gate FAILED -> rewound to $base; the batch introduced it - bisecting before any isolate. BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS}) alone (instead of ${#branches[@]} serial gates)"
+      local tips=() b culprit tip side=""
+      for b in "${branches[@]}"; do tips+=("$b=$(git -C "$REPO" rev-parse "$b")"); done
+      culprit=$(bisect_culprit "$base" "${tips[@]}"); tip=${culprit#*=}; culprit=${culprit%%=*}
+      # The single-branch path's main-side question (process): a spec failing alone on 2+ other
+      # branches within a day is main's intermittent defect - then no blame here; isolation decides.
+      [ -n "$culprit" ] && side=$(main_side_of "$culprit" | sed 's/^main-side //')
+      [ -n "$side" ] && { log "BISECT: $culprit is red alone, but $(echo $side) is main-side -> no blame here"; culprit=""; }
+      if [ -n "$culprit" ]; then
+        local others=(); for b in "${branches[@]}"; do [ "$b" != "$culprit" ] && others+=("$b"); done
+        { printf '%s\n' "${others[@]}"; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+        rm -f "$S/isolate-remaining"
+        record_attempt "$culprit" "$tip"
+        log "GATE FAILED $culprit (bisected: red ALONE twice on base + it, green on base: $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS})) -> abort + flag for AI; ${#others[@]} other(s) re-queued first as one batch"
+        echo "$(date '+%m-%d %H:%M')  $culprit  $(ticket_of "$culprit")  GATE_FAIL" >> "$NEEDS"
+        notify_coordinator "$(ticket_of "$culprit") ($culprit) FAILED the merge gate (bisected from the batch): $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} | cut -c1-200)" "gate failed - fix run"
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      rm -f "$S/isolate-remaining"
+      log "BISECT: no single branch confirmed red alone -> isolate by merging each individually"
+    else
+      log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+    fi
   else
     log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  BULK_FAIL_HEAD_MOVED" >> "$NEEDS"
@@ -891,7 +972,7 @@ fi
 log "GATE TARGET: $CARGO_TARGET_DIR (main's target/ is the workers' clone source and is not rebuilt by gates)"
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 # What this process is actually running with - `just knobs show` reads it back as "effective".
-log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0}"
+log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0} GATE_TIERS=$GATE_TIERS"
 self_version
 # STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
 # happen automatically?"). This runner is the only writer of main, so a staged merge or a

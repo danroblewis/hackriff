@@ -62,8 +62,8 @@ use tungstenite::protocol::{Role, WebSocket};
 use crate::http::ApiState;
 use crate::query::{ApiError, Params, Region, bad, param};
 use crate::tiles::{
-    TileKey, TileStore, affordable_levels, chunk_rows, num, parse_key, servable, store_name,
-    tile_store, with_tile_history, with_tile_history_built,
+    TileKey, TileStore, affordable_levels, axis_fold, chunk_rows, num, parse_key, servable,
+    store_name, tier_of, tile_store, with_tile_history, with_tile_history_built,
 };
 
 /// Rows in one `rows` message at most. Small enough that a block's coverage plane is always laid
@@ -474,6 +474,9 @@ impl RowCursor {
             let g = &p.geometry().levels[usize::from(level)];
             Ok((g.f_cell_hz, g.t_cell_ns))
         })?;
+        // The honesty tier of THIS block, by the tile route's own rule over the level that answered
+        // it (T-902). Without it a client building a tile from pushed rows had to guess one.
+        let source = tier_of(&key, lf, lt, crate::http::max_live_span_hz(state));
         let max_db: Vec<Value> = o
             .cells
             .iter()
@@ -504,6 +507,18 @@ impl RowCursor {
                 "f_cell_hz": lf,
                 "t_cell_s": lt as f64 / 1e9,
                 "tried": tried,
+            },
+            // Exactly `/api/tiles`' `resolution.{source,live,statement,fold}`, stated for this
+            // block's rows: the level they were actually measured at, never inferred by the reader
+            // from a neighbouring tile (T-902). `fold.time.served` is this block's row count.
+            "resolution": {
+                "source": source.as_str(),
+                "live": source.is_live(),
+                "statement": source.statement(),
+                "fold": {
+                    "frequency": axis_fold(lf, key.f_cell_hz, o.src_nf, key.cells),
+                    "time": axis_fold(lt as f64, key.t_cell_ns as f64, o.src_nt, nrows),
+                },
             },
             "final": watermark.is_some_and(|w| s.row_ns(b) <= w),
         }))

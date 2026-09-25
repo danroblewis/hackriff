@@ -546,6 +546,8 @@ export interface PreviewOptions {
    * nothing drawn here can tint a measurement.
    */
   marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /** Per-pane coverage-fog visibility (T-807), forwarded to `SurfaceView`'s `fog`. */
+  fog?: ((paneId: string) => boolean) | null;
   /**
    * **The instantaneous spectrum trace** (T-457): quads for the strip carved off the top of each
    * pane. Like `marks`, a function called per frame — but handed the `PaneReport` the data pass just
@@ -560,6 +562,8 @@ export interface PreviewOptions {
   /** HUD axes (T-805, `./hud.ts`): the label layer, and the chrome's fade asked every frame. */
   hud?: HTMLElement | null;
   hudAlpha?: (() => number) | null;
+  /** Band-1 DOM marks laid out in the render frame (T-809, `./pins.ts`). See `SurfaceViewOptions.dom`. */
+  dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
   /**
    * **Ask the coverage map before asking for tiles** (T-580, `./survey.ts`): how this host reads
    * `GET /api/coverage` for the survey. Supplied, no tile is requested until the first survey lands,
@@ -644,10 +648,12 @@ export class SurfacePreview {
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
+      fog: opts.fog ?? null,
       trace: opts.trace ?? null,
       tracePx: opts.tracePx ?? 0,
       hud: opts.hud ?? null,
       hudAlpha: opts.hudAlpha ?? null,
+      dom: opts.dom ?? null,
     });
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the

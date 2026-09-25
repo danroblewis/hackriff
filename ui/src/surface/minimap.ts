@@ -159,9 +159,10 @@ export interface OverlayQuad {
    * (`./trace.ts`), drawn in the strip above a pane; `time-rule` is T-506's full-width line at one
    * capture instant (the IQ horizon and the retention bound); `hud-tick` is T-805's HUD ruler mark
    * (`./hud.ts`) along a pane's bottom and left edges; `research-box` is T-821's collection mark
-   * (a marker or annotation, `app/map/research-slice.ts`); the remaining two are the map's own.
+   * (a marker or annotation, `app/map/research-slice.ts`); `path-stroke` is one step of T-897's
+   * traced (t, f) route (`./paths.ts`); the remaining two are the map's own.
    * All are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link";
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "path-stroke";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
 }

@@ -1074,7 +1074,22 @@ impl OccupancyService {
             span.start.saturating_add_nanos(-rule.slack_ns),
             span.end.saturating_add_nanos(rule.slack_ns),
         );
-        match repo.detections_in_region(&Region::new(FreqRange::new(0.0, 1e12), wide)) {
+        let region = Region::new(FreqRange::new(0.0, 1e12), wide);
+        // T-904: past the detection retention age the per-frame rows are gone and their rollups
+        // stand in for them (one extent per contiguous run of a track); a rollup holds only rows
+        // that were deleted, so the two never count the same air twice.
+        let rollups: Vec<DetectionExtent> = match repo.detection_rollups_in_region(&region) {
+            Ok(r) => r
+                .iter()
+                .map(DetectionExtent::of_rollup)
+                .filter(|e| e.time.end >= span.start && e.time.start <= span.end)
+                .collect(),
+            Err(_) => {
+                inner.stats.errors += 1;
+                Vec::new()
+            }
+        };
+        let mut out: Vec<DetectionExtent> = match repo.detections_in_region(&region) {
             Ok(d) => {
                 // T-172: a twin's own tuning centre, from its Provenance (content-addressed, so
                 // immutable and cached per id; failed reads are not cached).
@@ -1099,7 +1114,9 @@ impl OccupancyService {
                 inner.stats.errors += 1;
                 Vec::new()
             }
-        }
+        };
+        out.extend(rollups);
+        out
     }
 
     fn close(&self, inner: &mut Inner, iv: TimeRange, hour: bool) {

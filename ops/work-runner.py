@@ -118,6 +118,9 @@ REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # attempts; the coordinator hears about it only when the cap is spent.
 FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
 KILL_RESUMES = 2   # resumes of a run killed by a signal; not fix attempts - nothing failed
+# A work run that hits MAX_MINUTES is resumed ONCE to wrap up (commit what is done, hand back) instead of parking
+# for a person: five did on 2026-09-24 (T-852, T-878, T-888, T-887, T-904), each finished by hand afterwards.
+TIMEOUT_RESUMES = 1
 # A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
@@ -384,7 +387,9 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "observed_but_not_chased": ["<an observed failure outside scope, with the exact evidence>", ...],
    "use_cases": ["<the use-case ids your tests assert on>", ...]}}
 The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
-"done" if any test exit is non-zero. A CANCEL is yours to propose with evidence in the repo; an Opus review
+"done" if any test exit is non-zero - unless that red is not yours: mark it "known_flake": true or
+"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A deliberate red
+proof (your new test on the old code, or the defect re-injected) is marked "expect": "red" and counts only beside a green run. A CANCEL is yours to propose with evidence in the repo; an Opus review
 confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
@@ -743,6 +748,42 @@ def alert(level, title, body, key):
         pass
 
 
+_SPEC = re.compile(r"([a-z0-9-]+)(?:\.e2e\.mjs)?")
+
+
+def not_own_red(t):
+    """A failing listed test the worker marks as not its own ("known_flake" / "reproduces_on_main"), or whose
+    browser specs are ALL ones the flake ledger has seen pass alone (hkpy.flakes) - not a branch defect."""
+    if t.get("known_flake") or t.get("reproduces_on_main"):
+        return True
+    cmd = str(t.get("cmd", ""))
+    if "run.mjs" not in cmd:
+        return False
+    specs = [m + ".e2e.mjs" for m in _SPEC.findall(cmd.split("run.mjs", 1)[1]) if m and not m.startswith("-")]
+    if not specs:
+        return False
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import flakes
+        led = flakes.ledger(S)
+    except Exception:
+        return False
+    return all(led.get(s) is not None and led[s].passed_alone > 0 for s in specs)
+
+
+def hand_back_reds(hb):
+    """(red, own): the hand-back's failing tests, and those of them that are the branch's own defect.
+    A worker's red proof (its new test on the OLD code, or the defect re-injected) exits non-zero by design
+    and says so with "expect": "red" - the deflaker's convention with the same guard: it counts only beside
+    a green run. Three DONE hand-backs read BLOCKED 'needs a person' on exactly that in 24 h (T-894 15:25,
+    T-905 20:16 on 2026-09-24; the app-trace deflaker at 01:32 before its own fix)."""
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)
+    red = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
+    return red, [t for t in red if not not_own_red(t)]
+
+
 def reap(claims, dry):
     changed = False
     killed = []
@@ -762,9 +803,14 @@ def reap(claims, dry):
                     pass
                 c["state"] = "timeout"
                 c["ended"] = time.time()
-                attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
                 record_done(c, "timeout", {})
                 changed = True
+                if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
+                        and os.path.isdir(c.get("wt", "")) and _gone(pid)):
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped")
+                    log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
+                else:
+                    attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
             continue
         # finished
         changed = True
@@ -812,9 +858,13 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
-        if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-            bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+        red, own = hand_back_reds(hb)
+        if hb and outcome == "done" and own:
+            bad = own[0]
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        elif hb and outcome == "done" and red:
+            attention(tid, c["branch"], "NOTE", "queued with a red the worker marks not its own (the gate arbitrates): "
+                      + "; ".join(f"{t.get('cmd')} exit {t.get('exit')}" for t in red)[:300])
         # How the hand-back arrived is the contract's own reliability measure: `json` is the
         # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
         # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
@@ -905,6 +955,30 @@ def fix_reason(fail_line, branch):
         return "OTHER", " ".join(fail_line.split())[:200]
 
 
+def _gone(pid, wait_s=30):
+    """The stopped run's whole process group has exited (SIGKILL after wait_s): a resume must not share the
+    session with it. The leader is this runner's own unreaped Popen child - os.kill(pid, 0) succeeds on a
+    zombie - so reap it first, and ask the GROUP, not the cpulimit wrapper (review, 2026-09-24)."""
+    for i in range(wait_s + 3):
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        if i == wait_s:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(1)
+    return False
+
+
 def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
@@ -928,6 +1002,19 @@ full gate, never edit docs/tasks.yaml by hand.
 """
         r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json")
         return dict(r, kill_resumes=k)
+    if fail_line.startswith("TIMEOUT"):
+        t = c.get("timeout_resumes", 0) + 1
+        prompt = f"""Your run on {tid} reached its {MAX_MINUTES}-minute limit and was stopped; this resumes the same session ONCE,
+with the same limit, to WRAP UP - not to continue open-ended.
+In {wt}: `git status` and `git log --oneline main..{branch}` show what you have. Start no new scope. Get what is done into a
+committed, tested state: targeted tests only, commit on {branch}, write {d}/handback.json. If the ticket's acceptance is met,
+hand back DONE. If it is not, hand back BLOCKED and say precisely what remains (files, tests, the next step) in
+blocked.needs, so the coordinator can split or re-brief it - a clear remainder is a good outcome here, a half-commit is not.
+End your final message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main
+checkout, never the full gate, never edit docs/tasks.yaml by hand.
+"""
+        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json")
+        return dict(r, timeout_resumes=t)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):
@@ -1606,6 +1693,143 @@ def _target_written(t):
                (os.stat(p) for p in (t, f"{t}/debug", f"{t}/debug/deps", f"{t}/debug/.fingerprint") if os.path.exists(p)))
 
 
+_HASHED = re.compile(r"^(.+)-([0-9a-f]{16})$")
+
+
+def _units(profile_dir):
+    """hash -> the build unit it belongs to, from cargo's own `.fingerprint/<pkg>-<hash>/` directory: the
+    package plus the target kind files it holds (`bin-hk`, `test-bin-hk`, `test-integration-test-api_contract`).
+    A file stem is NOT a unit: `hk` is both hk-cli's bin and its unit-test harness, and four integration-test
+    names exist in two crates each (review, 2026-09-24 - the stem-keyed first pass deleted current twins)."""
+    # ...and the configuration: cargo gives the same unit a new hash per profile, and two are live at once -
+    # workers build line-tables-only, gates the default dev profile (re-review, 2026-09-24: 1211 of 2344
+    # "superseded" executables differed from the newest only in profile, and both were rebuilt daily).
+    out, fp = {}, os.path.join(profile_dir, ".fingerprint")
+    for d in os.listdir(fp) if os.path.isdir(fp) else []:
+        m = _HASHED.match(d)
+        if not m:
+            continue
+        try:
+            files = os.listdir(os.path.join(fp, d))
+            kinds = sorted({re.sub(r"^(dep|output)-", "", f) for f in files
+                            if f != "invoked.timestamp" and not f.endswith(".json")})
+            with open(os.path.join(fp, d, next(f for f in files if f.endswith(".json")))) as fh:
+                j = json.load(fh)
+        except (OSError, StopIteration, ValueError):
+            continue
+        out[m.group(2)] = (m.group(1), tuple(kinds), j.get("profile"), j.get("features"), str(j.get("rustflags")))
+    return out
+
+
+def superseded_executables(profile_dir):
+    """Every executable in `<profile>/deps` whose build unit has a NEWER executable there: the same unit at an
+    older hash, which cargo never runs again (and rebuilds if it is ever wanted). An executable whose unit
+    cargo's fingerprints do not name is kept."""
+    deps, units, groups = os.path.join(profile_dir, "deps"), _units(profile_dir), {}
+    for n in os.listdir(deps) if os.path.isdir(deps) else []:
+        m, p = _HASHED.match(n), os.path.join(deps, n)
+        if not m or m.group(2) not in units or os.path.islink(p) or not os.path.isfile(p) or not os.access(p, os.X_OK):
+            continue
+        groups.setdefault(units[m.group(2)], []).append((os.stat(p).st_mtime, p))
+    return [p for g in groups.values() for _, p in sorted(g)[:-1]]
+
+
+def _building(target, builds):
+    """A cargo process writes into this target: one whose CARGO_TARGET_DIR names it, or one with none set
+    working in its tree (main's checkout: anywhere under it but the worktrees, which are judged one by one).
+    Only cargo is asked - every build, test run and link is under one, and its environment is readable
+    (Apple's ld hides its own; the stage daemon's link step read as 'building main' - review, 2026-09-24)."""
+    tree = os.path.dirname(target)
+    for cwd, ctd in builds:
+        if ctd:
+            if os.path.realpath(ctd) == os.path.realpath(target):
+                return True
+        elif cwd == tree or (cwd.startswith(tree + "/") and
+                             not (tree == REPO and cwd.startswith(os.path.join(REPO, ".claude", "worktrees") + "/"))):
+            return True
+    return False
+
+
+def _builds():
+    """(cwd, CARGO_TARGET_DIR or "") for every running cargo process (cargo, cargo-nextest, cargo-clippy...)."""
+    out, pid, cwd = [], None, {}
+    for l in sh(["lsof", "-a", "-c", "cargo", "-d", "cwd", "-Fpn"], timeout=60).splitlines():
+        if l.startswith("p"):
+            pid = l[1:]
+        elif l.startswith("n") and pid:
+            cwd[pid] = l[1:]
+    for pid, d in cwd.items():
+        env = sh(["ps", "eww", "-o", "command=", "-p", pid])
+        m = re.search(r"(?:^|\s)CARGO_TARGET_DIR=(\S+)", env)
+        out.append((d, m.group(1) if m else ""))
+    return out
+
+
+def sweep_superseded(dry):
+    """User via supervisor, 2026-09-24 21:14 (Serves: cost - disk 303 -> 54 GB that day): superseded test
+    executables piled up in main's target/, gate-target and every worker clone - 2365 of them, ~40 GB
+    apparent, the SAME blocks in each (clones), so they free only when the last copy goes. After every
+    landing (a new merge commit on main since the last sweep) and between gates, keep the newest executable
+    per build unit in all of them in one pass. A target a cargo process writes into is skipped whole, and a
+    file any process holds open is never touched."""
+    if gate_running():
+        return
+    # A landing is a merge commit on main; the work runner's own board-sync commits move HEAD too, and are not one.
+    head = sh(["git", "-C", REPO, "log", "-1", "--merges", "--format=%H"]).strip()
+    mark = f"{S}/sweep-last"
+    try:
+        last = open(mark).read().strip()
+    except OSError:
+        last = ""
+    if not head or head == last:
+        return
+    root = os.path.join(REPO, ".claude", "worktrees")
+    targets = [(REPO, os.path.join(REPO, "target")), (None, os.path.join(S, "gate-target"))]
+    targets += [(os.path.join(root, n), os.path.join(root, n, "target")) for n in sorted(os.listdir(root))] if os.path.isdir(root) else []
+    # Where the compilers write: a target a build is writing into is left for the next landing.
+    builds = _builds()
+    before, swept, skipped, todo = disk_free_gb(), 0, [], []
+    for wt, t in targets:
+        prof = os.path.join(t, "debug")
+        if os.path.islink(t) or not os.path.isdir(os.path.join(prof, "deps")):
+            continue
+        if _building(t, builds):
+            skipped.append(os.path.basename(wt or t))
+            continue
+        todo += superseded_executables(prof)
+    held = set()
+    if todo:
+        dirs = sorted({os.path.dirname(p) for p in todo if os.path.isdir(os.path.dirname(p))})
+        # lsof exits 1 whether or not it found holders; a dir that vanished makes it print usage and
+        # NOTHING - which would read as "nothing held". Anything on stderr aborts the sweep.
+        r = subprocess.run(["lsof", "-Fn"] + [a for d in dirs for a in ("+d", d)], capture_output=True, text=True, timeout=120)
+        if r.stderr.strip():
+            log(f"SWEEP aborted: lsof over the deps dirs said {r.stderr.strip()[:160]!r}")
+            return
+        held = {l[1:] for l in r.stdout.splitlines() if l.startswith("n")}
+    objs = {}
+    for p in todo:
+        if p in held:
+            continue
+        if not dry:
+            d, base = os.path.dirname(p), os.path.basename(p)
+            if d not in objs:
+                objs[d] = [n for n in os.listdir(d) if n.endswith(".rcgu.o")]
+            # split-debuginfo=unpacked leaves <exe>.<cgu>.rcgu.o beside it: orphans once the executable goes.
+            for q in [p, p + ".d"] + [os.path.join(d, n) for n in objs[d] if n.startswith(base + ".")]:
+                try:
+                    os.remove(q)
+                except FileNotFoundError:
+                    pass
+        swept += 1
+    if not dry:
+        with open(mark, "w") as f:
+            f.write(head + "\n")
+    if swept or skipped:
+        log(f"{'DRY-RUN ' if dry else ''}SWEEP after {head[:8]}: {swept} superseded executable(s) removed across "
+            f"{len(targets)} target(s), freed {disk_free_gb() - before:.1f} GB (df); skipped (building): {' '.join(skipped) or 'none'}")
+
+
 def reclaim_idle_targets(claims, dry):
     """reap_worktrees keeps a worktree with unmerged commits or edits, and enqueue() frees a target only
     when its branch is queued - so a timed-out, blocked, conflicted or uncommitted worker keeps 4-8 GB
@@ -1997,6 +2221,10 @@ def tick(dry):
         reclaim_idle_targets(claims, dry)
     except Exception as e:
         log(f"reclaim_idle_targets error: {e}")
+    try:
+        sweep_superseded(dry)
+    except Exception as e:
+        log(f"sweep_superseded error: {e}")
     try:
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:

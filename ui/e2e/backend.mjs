@@ -12,6 +12,7 @@
 // The fixture is a SigMF recording replayed through `--replay`; nothing here touches a radio and
 // nothing here can retune one.
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import net from "node:net";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -108,7 +109,12 @@ export async function startBackend({
   // HK_E2E_UI_DIST is how `selftest.mjs` points the product's own server at a DELIBERATELY BROKEN
   // build, to prove this suite can still tell the difference.
   uiDist = process.env.HK_E2E_UI_DIST ?? path.join(UI_DIR, "dist"),
-  token = "hke2e0123456789abcdef",
+  // T-883: a FRESH token per backend, never a shared constant. With one constant token every e2e
+  // backend on the machine accepted every run's requests, so a run that ended up talking to another
+  // worktree's `hk serve` (the port race below) could not tell: every authenticated read succeeded
+  // against the wrong server. A per-backend token is what lets the readiness loop ask "is this MY
+  // server?" and get a true answer.
+  token = `hke2e${randomBytes(16).toString("hex")}`,
   // T-845, additive: further `hk serve` flags, e.g. `["--iq-retention", "20s"]` for a ring that
   // wraps within seconds rather than after the default two minutes.
   args = [],
@@ -128,8 +134,48 @@ export async function startBackend({
   // corner. Stepping to the next free port is what the caller wanted anyway — the port is internal,
   // callers use the returned `origin` — and it fails closed if none is free.
   if (mockFault && !mockDevice) throw new Error("a mock fault needs mockDevice: true (a --replay has no device to fail)");
-  port = await freePort(port);
   const bin = hkBinary();
+  // **The port race (T-883).** `freePort` answers "free" at the instant it asks, and `hk serve` binds
+  // a moment later — so two runs in two worktrees that ask about the same port at the same time are
+  // BOTH told it is free, both spawn, and one bind loses. The loser's readiness loop used to accept
+  // whatever answered `/surface.html` on that port — the WINNER's server — before its own child had
+  // even finished dying of the bind error, and with the old shared token every authenticated read
+  // succeeded too. Reproduced 3/3 with two concurrent `startBackend` calls on one port: both returned
+  // the same origin, and one of them owned a dead child. The loser's lane then drove the other
+  // worktree's bundle and history, and lost its server outright when the other run ended — exactly
+  // the "another worktree's run" cross-talk T-802 and T-803 reported. So readiness now demands proof
+  // of identity (`isOurs`), and a lost race steps to the next free port instead of adopting.
+  let lastLog = "";
+  for (let attempt = 0; attempt < 8; attempt++) {
+    port = await freePort(port);
+    const started = await spawnAndAwait({ bin, port, fixture, mockDevice, mockFault, uiDist, token, args });
+    if (started.ok) return started.backend;
+    lastLog = started.log;
+    if (!started.lostRace) throw new Error(started.error);
+    console.error(`e2e: lost the race for port ${port} to another server (not this run's hk serve); ` +
+      "trying the next free port rather than adopting it");
+    port += 1;
+  }
+  throw new Error(`hk serve lost the bind race on 8 ports in a row; giving up:\n${lastLog.slice(-2000)}`);
+}
+
+/**
+ * Is the server answering `origin` this run's own? Only a server started with THIS backend's token
+ * accepts it on an authenticated route — a foreign `hk serve` answers `401` — and this call's own
+ * child must still be alive (a child that lost the bind dies, and whatever still answers is not it).
+ * Returns `"ours"`, `"foreign"` or `"not-yet"` (nothing answering, or a server still coming up).
+ */
+async function isOurs(origin, token, proc) {
+  let r;
+  try {
+    r = await fetch(`${origin}/api/streams?token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(5000) });
+    await r.arrayBuffer().catch(() => {});
+  } catch { return "not-yet"; }
+  if (r.status === 401 || r.status === 403) return "foreign";
+  return r.ok && proc.exitCode === null && proc.signalCode === null ? "ours" : "not-yet";
+}
+
+async function spawnAndAwait({ bin, port, fixture, mockDevice, mockFault, uiDist, token, args }) {
   const dataDir = mkdtempSync(path.join(tmpdir(), "hk-e2e-data-"));
   const source = mockDevice
     ? ["--device", `mock:${path.join(REPO, fixture)}`]
@@ -168,15 +214,28 @@ export async function startBackend({
   };
 
   for (let i = 0; i < 400; i++) {
-    if (exited) { stop(); throw new Error(`${exited}\n${log.slice(-2000)}`); }
+    // Something answered on this port while our own child is dead or refused: whoever it is, it is
+    // not ours. `exited` alone is not enough — the child's exit can land AFTER a foreign server has
+    // already answered, which is precisely how the old loop adopted one.
+    if (exited) {
+      stop();
+      const foreign = (await isOurs(origin, token, proc)) === "foreign";
+      return { ok: false, lostRace: foreign || /in use|AddrInUse|os error 48|os error 98/i.test(log),
+        log, error: `${exited}\n${log.slice(-2000)}` };
+    }
     try {
       const r = await fetch(`${origin}/surface.html`);
-      if (r.ok) return { origin, token, dataDir, stop, log: () => log, proc };
+      await r.arrayBuffer().catch(() => {});
+      if (r.ok) {
+        const who = await isOurs(origin, token, proc);
+        if (who === "ours") return { ok: true, backend: { origin, token, dataDir, stop, log: () => log, proc } };
+        if (who === "foreign") { stop(); return { ok: false, lostRace: true, log }; }
+      }
     } catch { /* not listening yet */ }
     await new Promise((r) => setTimeout(r, 50));
   }
   stop();
-  throw new Error(`hk serve did not come up on ${origin} in 20 s:\n${log.slice(-2000)}`);
+  return { ok: false, lostRace: false, log, error: `hk serve did not come up on ${origin} in 20 s:\n${log.slice(-2000)}` };
 }
 
 /**

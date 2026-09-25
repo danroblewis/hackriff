@@ -299,8 +299,70 @@ pub struct TraceNode {
     pub evaluations: u64,
     /// CPU spent, ms.
     pub cpu_ms: u64,
+    /// The outcome was decided by wall or CPU time, or by an external event (a cancel, a power
+    /// change), so a re-run with the same [`ReplayKey`] need not reproduce it (ADR-0021 §5).
+    /// Only not-tried nodes carry it: `deferred_budget` behind a time-caused stop (a wall/CPU
+    /// backstop, a plateau measured against wall, a cancel) and `refused_power`. A
+    /// `deferred_budget` behind a **count** cap is deterministic and does not. Any flagged node
+    /// makes the whole job non-replayable (`trace_summary.replayable: false`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nondeterministic: bool,
     /// Backend-rendered text.
     pub summary: String,
+}
+
+/// A block and the contract version the search ran it at.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockVersion {
+    /// Block kind.
+    pub name: String,
+    /// Its `BlockDescriptor::version`.
+    pub version: u32,
+}
+
+/// The count caps that bound a replayable job (ADR-0021 §5). Wall and CPU are backstops: a job
+/// they stop is non-replayable whatever its key says, so they are not part of it; `threads` is
+/// not either, because the engine's decisions do not depend on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayBudget {
+    /// Evaluation cap.
+    pub max_evaluations: Option<u64>,
+    /// Proposal-call cap.
+    pub max_proposal_calls: Option<u64>,
+    /// Shared assist-operation pool.
+    pub max_assist_ops: Option<u64>,
+    /// Memo-cache cap: an evicted prefix is recomputed and charged, so it moves the count.
+    pub max_cache_bytes: u64,
+}
+
+/// What a trace can be reproduced from (ADR-0021 §5): given an identical key and a count-bounded
+/// budget, every decision in the trace is identical — beam order, memoisation, every prune and
+/// score. Recorded on the job; persisted beside `trace_summary` (M-9).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayKey {
+    /// Engine version (`hk-synth@1`).
+    pub engine: String,
+    /// Templates the roots came from, sorted, deduplicated.
+    pub templates: Vec<crate::result::TemplateRef>,
+    /// Every block the roots' skeletons can place, at its catalogue version; sorted.
+    pub blocks: Vec<BlockVersion>,
+    /// The calibration table's hash, when evidence was calibrated (M-2/M-9 fill it).
+    #[serde(default)]
+    pub calibration_hash: Option<String>,
+    /// The analysed window (`{clip_id, …}`): the pin-on-analyze clip makes the input exact.
+    /// The engine never sees IQ; the job layer fills it.
+    #[serde(default)]
+    pub window: Option<Value>,
+    /// Profile.
+    pub profile: Profile,
+    /// The count caps.
+    pub budget: ReplayBudget,
+    /// SHA-256 of the canonical seeding (roots with their skeletons, free parameters, priors
+    /// and deferrals; the unsupported suspicions; the solve rule; the trace bounds).
+    pub seed_ref: String,
 }
 
 /// A node whose fields disagree with its outcome.
@@ -511,20 +573,35 @@ pub struct RuledOut {
     pub best_bits: f32,
 }
 
-/// The shuffled-null control's record (ADR-0021 §8.2).
+/// Least margin, bits, the real hold-out result must hold over the best null window
+/// (ADR-0021 §8.2: `min_null_margin = 8`, 256:1). ADR-0021's number; T-568 measures it.
+pub const MIN_NULL_MARGIN_BITS: f32 = 8.0;
+
+/// The shuffled-null control's record (ADR-0021 §8.2), kept **whether or not it fired**: "the
+/// null control ran and passed with a 12.9-bit margin" is a checkable fact; an absence is not.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NullControl {
-    /// Nulls run.
+    /// Null windows asked for (the profile's `K`).
     pub k: u32,
-    /// Whether it ran.
+    /// Whether all `k` ran. A control that could not run (budget, evaluator error) is **not** a
+    /// pass: an open-search result without one neither solves nor confirms.
     pub ran: bool,
-    /// Best bits any null reached.
+    /// Best hold-out-style `evidence_bits` the unchanged winning prefix reached on any null window.
     pub best_null_bits: f32,
-    /// Margin of the real result over the best null.
+    /// The real hold-out `evidence_bits` minus [`Self::best_null_bits`].
     pub margin_bits: f32,
-    /// Whether the null budget was capped.
+    /// The verdict was **capped at `framed`** because the margin fell below
+    /// [`MIN_NULL_MARGIN_BITS`]. The control can only cap; it never raises a verdict.
     pub capped: bool,
+}
+
+impl NullControl {
+    /// Whether the control ran and did not cap — the only state in which a searched check may
+    /// confirm (ADR-0022 §6 step 4).
+    pub const fn passed(&self) -> bool {
+        self.ran && !self.capped
+    }
 }
 
 /// The negative result (ADR-0021 §7A.2), present whenever no result reached `solved`.
@@ -622,6 +699,7 @@ mod tests {
             outcome,
             evaluations: 7,
             cpu_ms: 41,
+            nondeterministic: false,
             summary: String::new(),
         }
     }

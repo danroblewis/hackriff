@@ -17,10 +17,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
+import { FOLLOWING, paneAct, rehomedHitTest } from "./app-chrome.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
+
+/** The controls T-882's hit test must find, so an empty result cannot come from matching nothing.
+ * The fixed ones are literal: closed = Go-to input, Layers, Research (T-821), Measure, Viewport,
+ * zoom in/out, FAB (8); the viewport menu = its × (T-900), Split, Close, Whole surface, Record IQ
+ * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
+ * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
+ * rows outside it: the coverage-fog row (T-807), the trace strip and the three colour-scale rows
+ * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
+ * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
+ * cannot arrive between this read and the hit test. */
+async function rehomedCounts(page) {
+  await page.waitFor("the registry to state the reserved Bookmarks collection",
+    `(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '').includes('"collection:00000000-0000-7000-8000-000000000b00"')`,
+    { timeoutMs: 30000 });
+  const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
+  assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
+  return { closed: 8, pane: 5, layers: registry.length + 1 + 1 + 3 };
+}
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {
   const browser = await Browser.open();
@@ -53,12 +72,11 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   // T-506: the Capture panel is gone — its roles are on the canvas (the test at the bottom).
   assert.equal(await page.$count('[data-slot="capture"]'), 0, "the retired Capture panel is still mounted");
 
-  // (4) It addressed the surface, or said why it could not. `.sf-note` carries T-450's orientation
-  // sentence on success and the failure text on every abort path, so waiting on "not still
-  // addressing" and then reading it is the difference between a diagnosis and a 30 s timeout.
-  await page.waitFor("the app's surface to finish addressing",
-    `!!document.querySelector('.sf-canvas') &&
-     ((document.querySelector('.sf-note')?.textContent ?? "").length > 0)`, { timeoutMs: 60000 });
+  // (4) It addressed the surface, or said why it could not. The wait is the surface's own
+  // mounted/failed event (T-907: `data-surface` on <html>, set by both surface pages), which fails
+  // at once with the page's reason on every abort path; `.sf-note` then carries T-450's orientation
+  // sentence, read below.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   const note = (await page.$text(".sf-note")) ?? "";
   assert.ok(!/could not be addressed|WebGL2 is unavailable/.test(note),
     `the app's surface refused to mount: ${note}`);
@@ -117,40 +135,30 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "the app commanded the front end just by opening");
 
-  // (8) **Every control in the toolbar is actually pressable** (T-528).
+  // (8) **Every control is actually pressable** (T-528), and **there is no toolbar row** (T-882).
   //
-  // The defect this exists for: `.sf-actions` was a shrinkable flex container, so once its buttons
-  // were wider than the bar the *container* shrank and the buttons overflowed to the right, under
-  // `.sf-range` — a later sibling, therefore painted on top. They stayed visible, focusable and
-  // `offsetParent !== null`; they stopped being *clickable*, because a real click lands on whatever
-  // `elementFromPoint` says is on top. Adding a fourth toggle to this bar silently disabled `Split`,
-  // `Close` and `Whole surface`, and the only thing that noticed was two assertions in another file
-  // reporting that a split had not added a viewport.
-  //
-  // So the guard is the hit test itself, over **every** button rather than over the three that
-  // happened to break, and it is written here because this is the file that owns the app's surface
-  // chrome. Any future control that makes the row too wide fails here, naming itself, instead of
-  // making an unrelated spec fail somewhere else.
-  const unclickable = JSON.parse(await page.eval(`JSON.stringify(
-    [...document.querySelectorAll('.sf-actions button')].map((el) => {
-      const r = el.getBoundingClientRect();
-      const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-      return { label: (el.textContent ?? '').trim(), w: Math.round(r.width),
-               covered: top ? (top.className || top.tagName) : 'nothing',
-               ok: !!top && (top === el || el.contains(top)) };
-    }).filter((b) => !b.ok))`));
-  assert.deepEqual(unclickable, [],
-    "a toolbar button is not clickable at its own centre — something is drawn over it, or it has "
-    + "overflowed the bar. A control a user can see is a control a user can press.");
-  const bar = JSON.parse(await page.eval(`JSON.stringify((() => {
-    const b = document.querySelector('.sf-bar').getBoundingClientRect();
-    const s = document.querySelector('.sf-stage').getBoundingClientRect();
-    const last = [...document.querySelectorAll('.sf-bar > *')].map((e) => e.getBoundingClientRect().bottom);
-    return { bottom: b.bottom, stageTop: s.top, contentBottom: Math.max(...last) };
-  })())`));
-  assert.ok(bar.contentBottom <= bar.stageTop + 0.5,
-    `the bar's contents reach ${bar.contentBottom.toFixed(1)} px, past the stage at ${bar.stageTop.toFixed(1)} px: `
-    + "chrome is being drawn over the picture");
+  // T-528's defect: a toolbar button overflowed under a later sibling and stayed visible, focusable
+  // and `offsetParent !== null` — and not *clickable*, because a real click lands on whatever
+  // `elementFromPoint` says is on top. Adding a fourth toggle silently disabled `Split`, `Close` and
+  // `Whole surface`. T-882 removed the row and rehomed every control into the floating cluster
+  // (Live → the FAB; Trace/Signals/Contrast → the layers menu; Measure and the viewport menu →
+  // top-right), so the guard is the same hit test over EVERY rehomed control, menus opened in turn.
+  // The same check runs at 1000/920/420 px below.
+  assert.equal(await page.eval("document.querySelectorAll('.sf-bar, .sf-actions').length"), 0,
+    "the retired toolbar row is back");
+  const edges = JSON.parse(await page.eval(`JSON.stringify({
+    stage: document.querySelector('.sf-stage').getBoundingClientRect().top,
+    surface: document.querySelector('.sf-stage').parentElement.getBoundingClientRect().top })`));
+  assert.ok(Math.abs(edges.stage - edges.surface) < 0.5,
+    `the stage starts ${edges.stage - edges.surface} px below its column: something still sits above the canvas`);
+  await page.waitFor("the floating cluster to mount", "!!document.querySelector('.map-pane-btn')", { timeoutMs: 30000 });
+  const want = await rehomedCounts(page);
+  const hits = await rehomedHitTest(page);
+  t.diagnostic(`rehomed controls tested: ${JSON.stringify(hits.counts)}`);
+  assert.deepEqual(hits.counts, want, "a rehomed control is missing from the cluster");
+  assert.deepEqual([...hits.closed, ...hits.pane, ...hits.layers], [],
+    "a rehomed control is not clickable at its own centre — something is drawn over it, or it is "
+    + "off-screen. A control a user can see is a control a user can press.");
 
   t.diagnostic(`load-to-drawn ${Date.now() - t0} ms · ${page.requests.length} requests`);
 });
@@ -164,6 +172,8 @@ test("a drag on the app's surface moves the view and still reaches no device rou
   const page = await browser.page();
 
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the app's surface to draw",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
     { timeoutMs: 60000 });
@@ -192,6 +202,8 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-fab') &&
@@ -216,12 +228,13 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.click("document.querySelector('.map-zoom-out')");
   await page.waitFor("zoom-out to change the pane's window", `(${headline}) !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
 
-  // Pause through the toolbar, then the FAB re-pins the pane to the growing edge.
-  await page.click("document.querySelector('.sf-live')");
+  // The FAB is the retired Live button too (T-882): a press freezes the following pane, and the
+  // next re-pins it to the growing edge. Both states are stated on the FAB itself.
+  await page.click("document.querySelector('.map-fab')");
   await page.waitFor("the FAB to say the pane is frozen", `document.querySelector('.map-fab').classList.contains('frozen')`, { timeoutMs: 10000 });
   await page.click("document.querySelector('.map-fab')");
   await page.waitFor("the FAB to follow the live edge again",
-    `document.querySelector('.map-fab').classList.contains('following') && document.querySelector('.sf-live').textContent === 'Live'`,
+    `${FOLLOWING} && document.querySelector('.map-fab').getAttribute('aria-pressed') === 'true'`,
     { timeoutMs: 10000 });
 
   // Layers opens a menu and closes again.
@@ -256,6 +269,8 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-layers-btn') && /^IQ ring/.test(document.querySelector('.sf-ring')?.textContent ?? '')`,
@@ -270,16 +285,20 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   // layer that arrives asynchronously (a collection loaded by a poll) cannot race the expectation.
   const menu = `JSON.stringify({
     head: [...document.querySelectorAll('#map-layers h4')].map((e) => e.textContent),
-    bases: [...document.querySelectorAll('#map-layers input[type=radio]')].map((i) => [i.value, i.checked]),
-    overlays: [...document.querySelectorAll('#map-layers input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
-    signals: document.querySelector('.sf-signalsbtn').getAttribute('aria-pressed'),
+    bases: [...document.querySelectorAll('#map-layers input[data-base]')].map((i) => [i.value, i.checked]),
+    overlays: [...document.querySelectorAll('#map-layers [data-axis=overlays] input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
+    signals: String(document.querySelector('#map-layers input[data-layer="detections"]').checked),
     registry: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? 'null'),
   })`;
   /** The menu's expected overlay rows for one snapshot: `[id, visibleByDefault]` in paint order. */
   const expectedOf = (snap) => {
     assert.ok(Array.isArray(snap.registry), "the surface states no overlay registry (.sf-stage[data-overlay-layers])");
-    for (const d of snap.registry) assert.equal(d.plane, "overlay", `${d.id} is drawn as an overlay but registered on the ${d.plane} plane`);
-    const rows = snap.registry.slice().sort((a, b) => a.z - b.z).map((d) => [d.id, d.visibleByDefault]);
+    // The overlays axis offers the stroke overlays and (T-809) the `dom`-plane pins, in paint order:
+    // plane first (overlay under dom), then ascending `z` — the registry's own `paintOrder`.
+    const planes = ["overlay", "dom"];
+    for (const d of snap.registry) assert.ok(planes.includes(d.plane), `${d.id} is offered as an overlay but registered on the ${d.plane} plane`);
+    const rows = snap.registry.slice().sort((a, b) => planes.indexOf(a.plane) - planes.indexOf(b.plane) || a.z - b.z)
+      .map((d) => [d.id, d.visibleByDefault]);
     // Fixed, so the derivation cannot pass on an empty or gutted registry: the two core overlays
     // are drawn, they paint first, and they are on by default (unknowns are never hidden by default).
     assert.deepEqual(rows.slice(0, 2), [["rules", true], ["detections", true]],
@@ -300,11 +319,13 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   assert.deepEqual(one.bases, [["ramp", true], ["phosphor", false]], "base style: exactly one, ramp by default");
   assert.deepEqual(one.overlays, expectedOf(one), "overlays in paint order, defaults on");
   assert.match(one.head[0], /Base style · this pane/);
-  assert.match(one.head[1], /Overlays · this pane/);
+  assert.ok(one.head.some((t) => /^Overlays · this pane/.test(t)), `no overlays axis: ${one.head}`);
   assert.equal(one.signals, "true");
 
-  // Split: the new pane is active, inherits pane 1's registry, and the menu says which pane it is.
-  await page.eval(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent.startsWith('Split')).click()`);
+  // Split (the viewport menu since T-882, which closes the layers menu while it is open): the new
+  // pane is active, inherits pane 1's registry, and the reopened layers menu says which pane it is.
+  await paneAct(page, "split");
+  await page.click("document.querySelector('.map-layers-btn')");
   await page.waitFor("the menu to act on pane 2", `/pane 2 of 2/.test(document.querySelector('#map-layers h4')?.textContent ?? '')`, { timeoutMs: 10000 });
   const split = JSON.parse(await page.eval(menu));
   const expected = expectedOf(split);
@@ -322,7 +343,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   await page.waitFor("pane 2's readouts to state its layers",
     `/hidden on this pane/.test(document.querySelector('.sf-ring').textContent) &&
      /phosphor style/.test(document.querySelector('.sf-trace').textContent) &&
-     document.querySelector('.sf-signalsbtn').getAttribute('aria-pressed') === 'false'`, { timeoutMs: 10000 });
+     document.querySelector('#map-layers input[data-layer="detections"]').checked === false`, { timeoutMs: 10000 });
   const two = JSON.parse(await page.eval(menu));
   assert.deepEqual(two.bases, [["ramp", false], ["phosphor", true]]);
   const flipped = new Set(expected.map(([id]) => id));
@@ -330,7 +351,8 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     "pane 2's toggles must flip every drawn overlay, in paint order");
 
   // Close pane 2: pane 1 is active again, and none of pane 2's toggles reached it.
-  await page.eval(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent === 'Close').click()`);
+  await paneAct(page, "close");
+  await page.click("document.querySelector('.map-layers-btn')");
   const said = `JSON.stringify({ head: document.querySelector('#map-layers h4')?.textContent,
     ring: document.querySelector('.sf-ring').textContent, trace: document.querySelector('.sf-trace').textContent })`;
   try {
@@ -349,6 +371,57 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   assert.deepEqual(page.exceptions, [], "uncaught exception while toggling layers");
 });
 
+test("T-807: the coverage fog is a per-pane layer you can switch off, and the page says so", async (t) => {
+  // MAP-07 in a real browser: the layers menu has a Coverage section with the fog switch (on by
+  // default) and its key — grey, unknown, observed, excluded, last-known, and what hidden fog looks
+  // like — painted by the one cell rule. Switching it off states in words that never-observed
+  // spectrum is drawn as bare ground; a split pane inherits it and diverges; nothing reaches a
+  // device route.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the surface to draw and the floating controls to mount",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
+     !!document.querySelector('.map-layers-btn')`, { timeoutMs: 60000 });
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
+  const state = `JSON.stringify({
+    fog: document.querySelector('#map-layers [data-axis=data] input[data-layer="coverage"]')?.checked ?? null,
+    key: [...document.querySelectorAll('#map-layers .map-layer-key li')].map((e) => e.dataset.mark),
+    said: document.querySelector('.sf-fog').hidden ? "" : document.querySelector('.sf-fog').textContent,
+    head: document.querySelector('#map-layers h4')?.textContent,
+  })`;
+  const one = JSON.parse(await page.eval(state));
+  assert.equal(one.fog, true, "the coverage fog must be shown by default: grey is the survey");
+  assert.deepEqual(one.key, ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"]);
+  assert.equal(one.said, "");
+
+  await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);
+  await page.waitFor("the page to say the fog is hidden on this pane",
+    `!document.querySelector('.sf-fog').hidden && /Coverage fog hidden on this pane/.test(document.querySelector('.sf-fog').textContent)`,
+    { timeoutMs: 10000 });
+  assert.equal(JSON.parse(await page.eval(state)).fog, false);
+
+  // Split: the new pane inherits the hidden fog; show it there, and pane 1 keeps its own choice.
+  await paneAct(page, "split");
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the menu to act on pane 2", `/pane 2 of 2/.test(document.querySelector('#map-layers h4')?.textContent ?? '')`, { timeoutMs: 10000 });
+  assert.equal(JSON.parse(await page.eval(state)).fog, false, "a split must inherit the fog layer");
+  await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);
+  await page.waitFor("pane 2's fog shown again", `document.querySelector('.sf-fog').hidden`, { timeoutMs: 10000 });
+  await paneAct(page, "close");
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("pane 1 active, its fog still hidden",
+    `/this pane/.test(document.querySelector('#map-layers h4')?.textContent ?? '') && !document.querySelector('.sf-fog').hidden`,
+    { timeoutMs: 20000 });
+  assert.equal(JSON.parse(await page.eval(state)).fog, false, "pane 2's fog toggle leaked into pane 1");
+
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
+  assert.deepEqual(control.map((r) => r.url), [], "a fog toggle reached the front end");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while toggling the coverage fog");
+});
+
 test("T-506: the canvas draws the IQ horizon and the retention bound where the ring window says", async (t) => {
   // The retired Capture panel was the only place either boundary was drawn. This measures them on
   // the canvas in a real browser: the ink is found in the screenshot, row by row, and its position
@@ -358,6 +431,8 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the canvas to draw and the ring readout to hold an IQ horizon",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.sf-ring')?.dataset.iqS`, { timeoutMs: 60000 });
@@ -371,7 +446,8 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   // Whole surface: the extent now reaches the retained window, so both rules are on screen.
   // A REAL click, not `el.click()`: T-506 found "Whole surface" hit-tested to the range sentence
   // painted over it, so the button looked pressable and did nothing.
-  await page.click(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent === "Whole surface")`);
+  // T-882: it lives in the viewport menu now; `paneAct` clicks the menu button and the item for real.
+  await paneAct(page, "whole");
   await page.waitFor("Whole surface to freeze the pane on the whole extent",
     `document.querySelector('.sf-ring')?.dataset.backing !== "live"`, { timeoutMs: 10000 });
   // Let the edge advance a little, so the retention bound (edge − retention) climbs off the frozen
@@ -475,5 +551,36 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   if (st.iq - st.ret > 5) assert.ok(mid(iqRows) < mid(retRows) - 2, "the IQ horizon is drawn above (newer than) the retention bound");
   assert.match(st.text, /green line: oldest IQ/);
   assert.match(st.text, /magenta dashes: retention bound/);
+  assert.deepEqual(page.exceptions, [], "uncaught exception");
+});
+
+for (const width of [1000, 920, 420]) test(`T-882: at ${width} px every rehomed control is pressable — no toolbar row runs off-screen`, async (t) => {
+  // The T-803 worker's finding: at 1000/920 px the old row ran Split, Close and Whole surface off
+  // the right edge, and at 420 px Live/Trace/Auto-contrast sat under the top bar — while T-528's
+  // hit test only ran at 1440. The row is gone; this is the hit test at the widths that broke it.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { width, height: 860 });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
+  await page.waitFor("the surface to draw and the floating cluster to mount",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 100 &&
+     !!document.querySelector('.map-ctl .map-pane-btn')`, { timeoutMs: 60000 });
+  await page.frames(3);
+  assert.equal(await page.eval("document.querySelectorAll('.sf-bar, .sf-actions').length"), 0);
+  const want = await rehomedCounts(page);
+  const hits = await rehomedHitTest(page);
+  t.diagnostic(`at ${width} px: ${JSON.stringify(hits)}`);
+  assert.deepEqual(hits.counts, want, "a rehomed control is missing");
+  assert.deepEqual([...hits.closed, ...hits.pane, ...hits.layers], [], `a rehomed control is not pressable at ${width} px`);
+  // The viewport menu open, kept as an artifact: the proposed home for pane management (T-882's
+  // handback), which docs/26 left undecided.
+  await page.click("document.querySelector('.map-pane-btn')");
+  await page.waitFor("the viewport menu to open", "!document.querySelector('#map-pane-menu').hidden", { timeoutMs: 5000 });
+  await page.shot(path.join(process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"), `app-surface-viewport-menu-${width}.png`));
+  await page.click("document.querySelector('.map-pane-btn')");
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
+  assert.deepEqual(control.map((r) => r.url), [], "opening the menus reached the front end");
   assert.deepEqual(page.exceptions, [], "uncaught exception");
 });

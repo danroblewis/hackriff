@@ -43,6 +43,17 @@ struct read_partid_serialno_t {
     serial_no: [u32; 4],
 }
 
+/// `hackrf_device_list_t` (hackrf.h). Read-only; freed by `hackrf_device_list_free`.
+#[repr(C)]
+struct hackrf_device_list_t {
+    serial_numbers: *mut *mut c_char,
+    usb_board_ids: *mut c_int,
+    usb_device_index: *mut c_int,
+    devicecount: c_int,
+    usb_devices: *mut *mut c_void,
+    usb_devicecount: c_int,
+}
+
 type hackrf_sample_block_cb_fn = unsafe extern "C" fn(transfer: *mut hackrf_transfer) -> c_int;
 
 const HACKRF_SUCCESS: c_int = 0;
@@ -54,6 +65,8 @@ unsafe extern "C" {
     fn hackrf_library_version() -> *const c_char;
     fn hackrf_library_release() -> *const c_char;
     fn hackrf_error_name(errcode: c_int) -> *const c_char;
+    fn hackrf_device_list() -> *mut hackrf_device_list_t;
+    fn hackrf_device_list_free(list: *mut hackrf_device_list_t);
     fn hackrf_open_by_serial(serial: *const c_char, device: *mut *mut hackrf_device) -> c_int;
     fn hackrf_close(device: *mut hackrf_device) -> c_int;
     fn hackrf_start_rx(
@@ -110,6 +123,34 @@ fn check(operation: &'static str, rc: c_int) -> Result<(), SourceError> {
         operation,
         message: format!("{name} ({rc})"),
     })
+}
+
+/// The serial of every connected HackRF (`None` where libhackrf could not read one), for naming
+/// the device in a refused open (T-892). Enumeration is what `hackrf_open_by_serial` already does
+/// internally, so it disturbs a device held elsewhere no more than the failed open did.
+/// Call with the library acquired.
+fn listed_serials() -> Vec<Option<String>> {
+    // SAFETY: the library is initialised (caller holds a `LIBRARY_USERS` reference).
+    let list = unsafe { hackrf_device_list() };
+    if list.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: non-NULL list from libhackrf; read only, freed below.
+    let l = unsafe { &*list };
+    let n = usize::try_from(l.devicecount).unwrap_or(0);
+    let serials = (0..n)
+        .map(|i| {
+            if l.serial_numbers.is_null() {
+                return None;
+            }
+            // SAFETY: `serial_numbers` has `devicecount` entries, each NULL or a C string.
+            let p = unsafe { *l.serial_numbers.add(i) };
+            (!p.is_null()).then(|| c_string(p))
+        })
+        .collect();
+    // SAFETY: the list came from `hackrf_device_list` and is freed exactly once.
+    unsafe { hackrf_device_list_free(list) };
+    serials
 }
 
 fn acquire_library() -> Result<(), SourceError> {
@@ -186,9 +227,12 @@ impl LibHackRf {
         let ptr = wanted.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         // SAFETY: `ptr` is NULL or a NUL-terminated string alive for the call; `dev` is written.
         let rc = unsafe { hackrf_open_by_serial(ptr, &mut dev) };
-        if let Err(e) = check("hackrf_open_by_serial", rc) {
+        if rc != HACKRF_SUCCESS {
+            // SAFETY: `hackrf_error_name` accepts any value and returns a static string.
+            let name = c_string(unsafe { hackrf_error_name(rc) });
+            let device = super::describe_open_target(serial, &listed_serials());
             release_library();
-            return Err(e);
+            return Err(super::open_failure(rc, &name, device));
         }
         let device = Self {
             dev,

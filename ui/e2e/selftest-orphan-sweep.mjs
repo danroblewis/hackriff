@@ -131,7 +131,9 @@ await new Promise((r) => setTimeout(r, 200)); // let it actually start before an
 const deadOwner = spawnSync("true", [], {}).pid;
 const fakeLockFile = path.join(LOCK_DIR, `${deadOwner}.json`);
 writeFileSync(fakeLockFile, JSON.stringify({
-  pid: deadOwner, startedAt: Date.now(),
+  // `root: HERE` — this checkout's own lock, so the sweep considers it at all (T-883 scoped the
+  // sweep to its own checkout; a lock naming another root is never even judged).
+  pid: deadOwner, root: HERE, startedAt: Date.now(),
   children: [{ pid: sleep.pid, marker: "hk-e2e-chrome-this-marker-cannot-match-anything", lstart: "not a real lstart" }],
 }));
 

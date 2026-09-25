@@ -36,6 +36,23 @@ export const BYTES_PER_CELL = 3;
 /** The honesty tier the route says answered. T-441 draws the three distinctly (see cellrule.ts). */
 export type Tier = "live-iq" | "spectrum-history" | "survey-overview";
 
+/**
+ * A tier as a tile **states** it. `"unknown"` is what a tile built from pushed rows says when a block
+ * it holds did not state a recognised tier (T-902): the honest answer is that we do not know, never
+ * a tier borrowed from a neighbour. It draws with the weakest mark ([[tierByte]] fails closed).
+ */
+export type StatedTier = Tier | "unknown";
+
+/** Weakest first is last: the order a tile holding several claims resolves them in (T-902). */
+const TIER_ORDER: readonly StatedTier[] = ["live-iq", "spectrum-history", "survey-overview", "unknown"];
+
+/** The weaker of two tier claims — a tile holding rows measured at two tiers states the weaker. */
+export const weakerTier = (a: StatedTier, b: StatedTier): StatedTier =>
+  TIER_ORDER.indexOf(a) >= TIER_ORDER.indexOf(b) ? a : b;
+
+/** Is `x` one of the three tiers the routes state? */
+export const isTier = (x: unknown): x is Tier => typeof x === "string" && TIERS.includes(x);
+
 /** Per-axis fold direction, straight off `resolution.fold.<axis>.direction`. */
 export type FoldDirection = "exact" | "folded" | "replicated";
 
@@ -87,7 +104,7 @@ export interface TileData {
   readonly value: Float32Array;
   /** Row-major, same order. One of [[CELL]]'s codes. */
   readonly state: Uint8Array;
-  readonly tier: Tier;
+  readonly tier: StatedTier;
   /** The pyramid level that actually answered (`resolution.answered.level`), for the per-pane
    * "stated level" §8.5a requires instead of pretending two viewports agree. */
   readonly answeredLevel: number;

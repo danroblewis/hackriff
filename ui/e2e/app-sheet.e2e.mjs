@@ -10,15 +10,20 @@ import { Browser } from "./harness.mjs";
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
 
-// T-528's hit test, over the sheet: every surface-toolbar button must still be what a click at its
-// centre lands on. `full` is the tallest the sheet gets, so it is checked there.
+// T-528's hit test, over the sheet: every top control must still be what a click at its centre
+// lands on. `full` is the tallest the sheet gets, so it is checked there. T-882 retired the toolbar
+// row (`.sf-actions`); its controls are the floating cluster's top-right (Layers, Measure, Viewport)
+// beside Go-to, so those are what the sheet must stay clear of now.
 const hitTest = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})].map((el) => {
   const r = el.getBoundingClientRect();
   const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
   return { label: (el.textContent ?? '').trim(), covered: top ? (top.className || top.tagName) : 'nothing',
            bySheet: !!top?.closest('.sheet'), ok: !!top && (top === el || el.contains(top)) };
 }).filter((b) => !b.ok))`;
-const UNCLICKABLE = hitTest(".sf-actions button");
+const TOP_CONTROLS = ".map-goto input, .map-topright button";
+const UNCLICKABLE = hitTest(TOP_CONTROLS);
+/** The lowest bottom of the floating top chrome — what `focus-sheet.ts`'s `clearOf` measures. */
+const TOP_BOTTOM = `Math.max(...[...document.querySelectorAll('.map-ctl .map-goto, .map-ctl .map-topright')].map((e) => e.getBoundingClientRect().bottom))`;
 // T-802's floating controls on the right edge: the sheet grows upward beside them (its gutter), so
 // they must be pressable at every snap height.
 const MAP_RIGHT = hitTest(".map-fab, .map-zoom-in, .map-zoom-out");
@@ -36,6 +41,8 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the app's surface to draw and the sheet to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      document.querySelector('.sheet')?.dataset.snap === 'peek'`, { timeoutMs: 60000 });
@@ -106,16 +113,18 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   assert.deepEqual(page.exceptions, [], "uncaught exception");
 });
 
-for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sheet never covers a toolbar button`, async (t) => {
-  // Below 900 px the sheet spans the width and the toolbar wraps to more rows, so `full` must be
-  // bounded by where the toolbar actually ends (`clearOf`), not by the desktop estimate.
+for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sheet never covers a top control`, async (t) => {
+  // Below 900 px the sheet spans the width, so `full` must be bounded by where the floating top
+  // chrome actually ends (`clearOf`), not by the desktop estimate.
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { width, height: 860,
     initScript: "try { localStorage.setItem('hk-mui-sheet-selected', 'full'); } catch {}" });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  await page.waitFor("the surface's toolbar and a full sheet",
-    `!!document.querySelector('.sf-actions button') && document.querySelector('.sheet')?.dataset.snap === 'full'`,
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
+  await page.waitFor("the floating top controls and a full sheet",
+    `!!document.querySelector('.map-topright button') && document.querySelector('.sheet')?.dataset.snap === 'full'`,
     { timeoutMs: 60000 });
   // Settled: the drawn height is the height the script set (the CSS transition has finished).
   await page.waitFor("the full sheet to settle",
@@ -124,16 +133,16 @@ for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sh
   await page.frames(3);
   const bad = JSON.parse(await page.eval(UNCLICKABLE));
   t.diagnostic(`at ${width} px: sheet top ${await page.eval("document.querySelector('.sheet').getBoundingClientRect().top")}, `
-    + `toolbar bottom ${await page.eval("document.querySelector('.sf-bar').getBoundingClientRect().bottom")}; `
-    + `unpressable toolbar buttons (not the sheet's doing unless bySheet): ${JSON.stringify(bad)}`);
-  assert.deepEqual(bad.filter((b) => b.bySheet), [], "the full sheet covers a toolbar button");
+    + `top chrome bottom ${await page.eval(TOP_BOTTOM)}; `
+    + `unpressable top controls (not the sheet's doing unless bySheet): ${JSON.stringify(bad)}`);
+  assert.deepEqual(bad.filter((b) => b.bySheet), [], "the full sheet covers a top control");
   const right = JSON.parse(await page.eval(MAP_RIGHT));
   t.diagnostic(`FAB/zoom not pressable at ${width} px: ${JSON.stringify(right)}`);
   assert.deepEqual(right.filter((b) => b.bySheet), [], "the full sheet covers the FAB or zoom");
   assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "the FAB or zoom overlaps the full sheet");
   const edges = JSON.parse(await page.eval(`JSON.stringify({ sheet: document.querySelector('.sheet').getBoundingClientRect().top,
-    bar: document.querySelector('.sf-bar').getBoundingClientRect().bottom })`));
-  assert.ok(edges.sheet >= edges.bar, `the full sheet's top (${edges.sheet}) rises over the toolbar (ends ${edges.bar})`);
+    bar: ${TOP_BOTTOM} })`));
+  assert.ok(edges.sheet >= edges.bar, `the full sheet's top (${edges.sheet}) rises over the top controls (end ${edges.bar})`);
   assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), []);
   assert.deepEqual(page.exceptions, [], "uncaught exception");
 });

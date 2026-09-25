@@ -205,6 +205,7 @@ test("MAP-06: the surface routes its overlays through the registry, into the one
   assert.match(fns[1], /\brules: ringQuads\b/);
   assert.match(fns[1], /\bdetections: detectionQuads\b/);
   assert.match(fns[1], /\bartifacts: artifactQuads\b/);
+  assert.match(fns[1], /\bpaths: pathQuadsFn\b/);
   // The base style reaches the trace by the pane's own registry, per frame.
   assert.match(src, /const phosphor = layersFor\(pane\.id\)\.base === "phosphor";/);
   // A split inherits the creating pane's registry.

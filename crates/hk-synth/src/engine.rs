@@ -81,13 +81,17 @@ use crate::evidence::{
     Evidence, EvidenceSet, MetricId, combine_stage_bits, look_elsewhere_bits, quality_from_bits,
 };
 use crate::proposal::ProposalOp;
-use crate::result::{CheckSummary, PipelineResult, StageEvidence, TemplateRef, Verdict};
-use crate::search::{JobState, Profile, StopReason, SynthBudget};
+use crate::result::{
+    CheckOrigin, CheckSummary, HoldoutEvidence, HoldoutFrame, MAX_HOLDOUT_FRAMES, PipelineResult,
+    StageEvidence, TemplateRef, Verdict,
+};
+use crate::search::{JobState, NULL_CONTROL_SHARE, Profile, StopReason, SynthBudget};
 use crate::skeleton::Skeleton;
 use crate::stage::{Stage, default_cap_bits, default_floor_bits};
 use crate::trace::{
-    BeamCause, BudgetCoverage, Coverage, FamilyCoverage, FamilyState, Measured, Outcome,
-    OutcomeKind, Reason, SkeletonCoverage, Spent, Swept, TraceHypothesis, TraceNode,
+    BeamCause, BlockVersion, BudgetCoverage, Coverage, FamilyCoverage, FamilyState,
+    MIN_NULL_MARGIN_BITS, Measured, NullControl, Outcome, OutcomeKind, Reason, ReplayBudget,
+    ReplayKey, SkeletonCoverage, Spent, Swept, TraceBounds, TraceHypothesis, TraceNode,
 };
 use crate::trace_sink::{Trace, TraceSink};
 
@@ -131,6 +135,12 @@ pub enum EvalWindow {
     Search,
     /// The rest. Only hold-out evidence solves or confirms.
     Holdout,
+    /// ADR-0021 §8.2's `k`-th **null** window, derived by the evaluator from the hold-out IQ at
+    /// the same gain state: `0` the time-reversed copy, `1…` phase-randomised surrogates (same
+    /// magnitude spectrum, randomised phase — PSD and SNR kept, symbol timing and framing
+    /// destroyed). An evaluator that cannot make one answers an error, and the control then did
+    /// not run, which is never a pass.
+    Null(u32),
 }
 
 /// One stage evaluation asked of an [`Evaluator`].
@@ -168,6 +178,9 @@ pub struct Evaluated<O> {
     pub output_bytes: u64,
     /// The check summary, when this stage is a check.
     pub check: Option<CheckSummary>,
+    /// Decoded frames, when this stage produces them. Read only from the rank-1 prefix's
+    /// hold-out run (the attach step's stored decodes, ADR-0015 §5.5); ignored elsewhere.
+    pub frames: Vec<HoldoutFrame>,
 }
 
 /// Why an evaluation could not run.
@@ -270,6 +283,10 @@ pub struct Root {
     pub family: Option<String>,
     /// `Some(posterior)`: deferred to the side queue by ADR-0016's likelihood rule.
     pub deferred: Option<f64>,
+    /// Where the check this root reaches comes from (ADR-0022 §5.1). An open skeleton is
+    /// [`CheckOrigin::Searched`]; seeding sets `TemplateFixed` only for a `builtin` or `user`
+    /// template that fixes the whole check.
+    pub check_origin: CheckOrigin,
 }
 
 /// A suspected structure with no block (ADR-0021 §7A.6), recorded as `unsupported` up front.
@@ -289,21 +306,50 @@ pub struct UnsupportedStructure {
     pub posterior: Option<f64>,
 }
 
-/// The solve rule (ADR-0015 decision summary, §5.5): hold-out evidence and distinct frames.
+/// The solve rule, **ADR-0022's inequality** (§4, §6 steps 1–3) on hold-out evidence, replacing
+/// ADR-0015 §5.5's 64 bits / 3 frames / width 16.
+///
+/// A result is `solved` only when all hold, on hold-out, at S5 or deeper:
+/// 1. the check's width ≥ [`Self::min_check_width`] (a check summary is required);
+/// 2. `check_bits = width × differences − L_check` ≥ [`Self::hard_check_floor_bits`] — a solve
+///    always carries a check, never sync excess alone;
+/// 3. `analytic_holdout_bits` ≥ [`Self::min_analytic_holdout_bits`], paid only in analytic-null
+///    bits each net of its own stage's look-elsewhere (ADR-0022 §2.1);
+/// 4. for a **searched** check at a profile with `K > 0`, ADR-0021 §8.2's null control ran and did
+///    not cap.
+///
+/// The frame count is not a constant: it is what the inequality implies,
+/// `max(1, ⌈(24 + L_check) / width⌉)` differences (ADR-0022 §4.2). `ConfirmPolicy.synthesized`
+/// re-checks the same numbers from the stored row, plus front-end trust and the profile.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SolveRule {
-    /// Hold-out `evidence_bits` needed (64).
-    pub min_holdout_bits: f32,
-    /// Distinct valid frames needed at S5 on hold-out (3).
-    pub min_distinct_frames: u32,
+    /// ADR-0022 §4.1: 24.
+    pub min_analytic_holdout_bits: f32,
+    /// ADR-0022 §4.3: 16 of those bits from a check stage. Derived.
+    pub hard_check_floor_bits: f32,
+    /// ADR-0022 §4.3: 8. **Assumed, not derived** (T-577 measures it).
+    pub min_check_width: u32,
 }
 
 impl Default for SolveRule {
     fn default() -> Self {
         Self {
-            min_holdout_bits: 64.0,
-            min_distinct_frames: 3,
+            min_analytic_holdout_bits: 24.0,
+            hard_check_floor_bits: 16.0,
+            min_check_width: 8,
         }
+    }
+}
+
+impl SolveRule {
+    /// Whether `h` (at `stage`) meets steps 1–3. The null control (step 4) is the engine's.
+    pub fn met(&self, stage: Stage, h: &HoldoutEvidence) -> bool {
+        stage >= Stage::S5
+            && h.check_width.is_some_and(|w| w >= self.min_check_width)
+            && h.check_bits
+                .is_some_and(|b| b >= self.hard_check_floor_bits)
+            && h.l_check.is_some()
+            && h.analytic_bits >= self.min_analytic_holdout_bits
     }
 }
 
@@ -324,6 +370,9 @@ pub struct SearchSpec {
     pub solve: SolveRule,
     /// When the job started (coverage `t`), supplied by the caller.
     pub started_at: String,
+    /// Trace residency bounds; [`Profile::trace_bounds`] unless a caller (a test, a
+    /// memory-constrained host) narrows them. Applied on insert (ADR-0021 §2.3).
+    pub trace_bounds: TraceBounds,
 }
 
 impl SearchSpec {
@@ -337,6 +386,7 @@ impl SearchSpec {
             budget: profile.budget(),
             solve: SolveRule::default(),
             started_at: String::new(),
+            trace_bounds: profile.trace_bounds(),
         }
     }
 }
@@ -410,6 +460,10 @@ pub struct Used {
 pub struct TraceCost {
     /// Wall spent building and retaining trace nodes, s.
     pub wall_s: f64,
+    /// The part of `wall_s` spent inside the sink (serialising for the byte bound, retention).
+    pub retention_s: f64,
+    /// Nodes that left the frontier (recorded + elided): what `wall_s` was spent on.
+    pub decisions: u64,
     /// Retained trace bytes at the end.
     pub bytes: u64,
     /// `wall_s` over the job's wall.
@@ -438,12 +492,103 @@ pub struct SearchOutcome {
     pub used: Used,
     /// The trace's cost.
     pub trace_cost: TraceCost,
-    /// Some decision depended on wall/CPU time, a throttle or a thermal pause (ADR-0021 §5).
+    /// Some decision depended on wall/CPU time, a cancel, a throttle, a thermal pause or a power
+    /// change (ADR-0021 §5). Every [`TraceNode::nondeterministic`] node implies it.
     pub nondeterministic: bool,
+    /// What the trace can be reproduced from (ADR-0021 §5). The engine fills everything but
+    /// `window` and `calibration_hash`, which the job layer knows.
+    pub replay_key: ReplayKey,
     /// How often capture losses throttled the job.
     pub throttle_events: u32,
     /// The power policy that refused further expansion, if one did.
     pub refused_power: Option<PowerPolicy>,
+    /// The rank-1 result's decoded hold-out frames (≤ [`MAX_HOLDOUT_FRAMES`]), for the attach
+    /// step's stored decodes (ADR-0015 §5.5). Empty unless rank 1 is `solved`. Never served.
+    pub holdout_frames: Vec<HoldoutFrame>,
+}
+
+impl SearchOutcome {
+    /// The null control a result recorded, preferring one that capped (the reason nothing
+    /// solved) over one that passed.
+    pub fn null_control(&self) -> Option<NullControl> {
+        let all = || {
+            self.results
+                .iter()
+                .filter_map(|r| r.holdout.as_ref()?.null_control)
+        };
+        all().find(|n| n.capped).or_else(|| all().next())
+    }
+
+    /// **Seals** the finished search's [`crate::trace::Resolution`] (ADR-0021 §7A.2, §9.3): built
+    /// here, in `hk-synth`, before any context lookup can run, so nothing downstream can shape it.
+    /// `None` when a result solved. Only a `done` search may say `unknown`; a cancelled or failed
+    /// one ruled nothing out and is `not-searched` with `last_attempt = ended`.
+    ///
+    /// `trace_summary` and `replay_key` are the job's (ADR-0021 §4.1, §5), carried so the
+    /// persisted row can be compared with a later look.
+    pub fn seal(
+        &self,
+        trace_summary: Option<Value>,
+        replay_key: Option<Value>,
+        ended: &str,
+    ) -> Option<crate::trace::Resolution> {
+        use crate::trace::{Resolution, ResolutionKind};
+        if self.state != JobState::Done {
+            return Some(Resolution::not_searched(Some(ended.to_owned())));
+        }
+        if self.results.iter().any(|r| r.verdict == Verdict::Solved) {
+            return None;
+        }
+        let deepest = self.results.iter().map(|r| r.verdict).max();
+        let null_control = self.null_control();
+        let (kind, text) = if self.reason == Some(Reason::UnsupportedStructure) {
+            (
+                ResolutionKind::UnsupportedStructure,
+                "The structure this looks like has no block to decode it yet.".to_owned(),
+            )
+        } else if self.results.iter().any(|r| r.characterisation.is_some()) {
+            (
+                ResolutionKind::StructuredUnidentified,
+                "Framed and check-valid, but no known format matches.".to_owned(),
+            )
+        } else {
+            let why = match self.reason {
+                Some(Reason::NoSignal) => "no signal measured above the floor".to_owned(),
+                Some(Reason::NothingScored) => "every hypothesis measured below its floor".into(),
+                Some(Reason::Tied) => match null_control.filter(|n| n.capped) {
+                    Some(n) => format!(
+                        "the best candidate met the solve rule on hold-out, but the null windows \
+                         came within {:.1} bits of it, under the {MIN_NULL_MARGIN_BITS}-bit margin",
+                        n.margin_bits
+                    ),
+                    None => "the best candidates tied within the margin".to_owned(),
+                },
+                Some(Reason::BudgetExhausted) => {
+                    "the budget ran out before the space was covered".to_owned()
+                }
+                _ => "nothing reached the solve rule".to_owned(),
+            };
+            (
+                ResolutionKind::Unknown,
+                format!("Searched and not identified: {why}."),
+            )
+        };
+        Some(Resolution {
+            kind,
+            deepest_verdict: deepest,
+            reason: self.reason,
+            coverage: Some(self.coverage.clone()),
+            suspected: None,
+            null_control,
+            ruled_out: Vec::new(),
+            retry: None,
+            trace_summary,
+            replay_key,
+            explanations: Vec::new(),
+            last_attempt: None,
+            summary: text,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -464,8 +609,24 @@ struct Live {
 
 #[derive(Clone, Debug)]
 struct Holdout {
-    bits: f32,
+    ev: HoldoutEvidence,
     solved: bool,
+    /// ADR-0021 §8.2 capped the verdict at `framed`.
+    capped: bool,
+    frames: Vec<HoldoutFrame>,
+}
+
+/// One chain run over one window (hold-out or a null).
+struct ChainRun {
+    /// `Σ min(b_j, cap_j)` over the chain's stages.
+    capped_sum: f32,
+    mask: u8,
+    /// Per stage: capped analytic bits, only for stages that emitted analytic evidence.
+    analytic: Vec<(Stage, f32)>,
+    ladder: Vec<StageEvidence>,
+    differences: u32,
+    check: Option<CheckSummary>,
+    frames: Vec<HoldoutFrame>,
 }
 
 struct Node {
@@ -499,6 +660,9 @@ struct Node {
     label: Option<(String, String)>,
     /// Appended to the rendered summary.
     note: Option<String>,
+    /// The [`MAX_DISCRETE_CHILDREN`] overflow row: deferred by a count cap at planning time,
+    /// never by the stop.
+    overflow: bool,
 }
 
 struct Plan {
@@ -518,6 +682,17 @@ struct Plan {
     key: String,
     parent_output: Option<usize>,
     max_evals: u64,
+}
+
+/// Where a not-tried hypothesis would have gone: (parent, root, stage, slot alternative).
+type Slot = (Option<u32>, u32, Stage, usize);
+
+/// Counts `slot` into `groups`, keeping first-seen order (so node ids stay deterministic).
+fn group_into(groups: &mut Vec<(Slot, usize)>, slot: Slot) {
+    match groups.iter_mut().find(|(s, _)| *s == slot) {
+        Some((_, n)) => *n += 1,
+        None => groups.push((slot, 1)),
+    }
 }
 
 /// One discrete option: bindings, the prior bits they add, and whether a proposal made them.
@@ -635,6 +810,25 @@ fn stage_bits(ev: &[NodeEvidence], stage: Stage) -> f32 {
     ev.iter()
         .map(|n| combine_stage_bits(n.evidence.iter().filter(|e| e.stage == stage)))
         .sum()
+}
+
+/// The analytic-null part of `b_k` (ADR-0022 §2.1): §13.1's combination over only the metrics
+/// whose null is a closed-form tail. `None` when the stage emitted no analytic evidence.
+fn analytic_stage_bits(ev: &[NodeEvidence], stage: Stage) -> Option<f32> {
+    let mut any = false;
+    let b = ev
+        .iter()
+        .map(|n| {
+            let it = n
+                .evidence
+                .iter()
+                .filter(|e| e.stage == stage && e.metric.is_analytic());
+            let v: Vec<&Evidence> = it.collect();
+            any |= !v.is_empty();
+            combine_stage_bits(v)
+        })
+        .sum();
+    any.then_some(b)
 }
 
 fn capped(stage: Stage, b: f32) -> f32 {
@@ -854,6 +1048,13 @@ struct Engine<'a, E: Evaluator> {
     refused_power: Option<PowerPolicy>,
     error: Option<String>,
     nondeterministic: bool,
+    /// The stop was caused by time or an external event (a wall/CPU backstop, a wall-measured
+    /// plateau, a cancel), so the not-tried nodes it leaves behind are flagged.
+    time_stop: bool,
+    /// Evaluations spent on ADR-0021 §8.2's null control (bounded by [`NULL_CONTROL_SHARE`]).
+    null_evals: u64,
+    /// A candidate that met the solve rule was capped by the null control.
+    null_capped: bool,
     complete: Vec<u32>,
     best: Option<(Stage, f32)>,
     last_gain_progress: f64,
@@ -887,7 +1088,7 @@ pub fn search<E: Evaluator>(
         nodes: Vec::new(),
         memo: HashMap::new(),
         cache: Cache::new(spec.budget.max_cache_bytes),
-        sink: TraceSink::new(spec.profile.trace_bounds()),
+        sink: TraceSink::new(spec.trace_bounds),
         counts: [0; 7],
         used: Used::default(),
         cpu: Duration::ZERO,
@@ -898,6 +1099,9 @@ pub fn search<E: Evaluator>(
         refused_power: None,
         error: None,
         nondeterministic: false,
+        time_stop: false,
+        null_evals: 0,
+        null_capped: false,
         complete: Vec::new(),
         best: None,
         last_gain_progress: 0.0,
@@ -971,10 +1175,21 @@ impl<'a, E: Evaluator> Engine<'a, E> {
     }
 
     fn reserve(&self) -> u64 {
-        self.spec
-            .budget
-            .max_evaluations
-            .map_or(0, |m| VALIDATION_RESERVE.min(m / 4))
+        self.spec.budget.max_evaluations.map_or(0, |m| {
+            (VALIDATION_RESERVE + self.null_reserve(m)).min(m / 4)
+        })
+    }
+
+    /// Evaluations the null control may spend: `K` seven-stage chains, within
+    /// [`NULL_CONTROL_SHARE`] of the cap (ADR-0021 §8.2). Held back from the search like the
+    /// validation reserve, so a control can run on the first candidate that meets the rule.
+    fn null_reserve(&self, max_evaluations: u64) -> u64 {
+        let want = u64::from(self.spec.profile.null_windows()) * 7;
+        want.min(self.null_share(max_evaluations))
+    }
+
+    fn null_share(&self, max_evaluations: u64) -> u64 {
+        (max_evaluations as f64 * NULL_CONTROL_SHARE).floor() as u64
     }
 
     fn afford(&self, n: u64, with_reserve: bool) -> bool {
@@ -991,13 +1206,23 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         }
     }
 
+    /// A stop decided by time or an external event: whatever it leaves unexplored is not
+    /// reproducible from the replay key (ADR-0021 §5).
+    fn halt_timed(&mut self, why: StopReason) {
+        if self.stop.is_none() {
+            self.time_stop = true;
+            self.nondeterministic = true;
+        }
+        self.halt(why);
+    }
+
     /// Between chunks: cancel, power, throttle, thermal, backstops, plateau.
     fn check_control(&mut self) {
         if self.stop.is_some() {
             return;
         }
         if self.control.is_cancelled() {
-            self.halt(StopReason::Cancelled);
+            self.halt_timed(StopReason::Cancelled);
             return;
         }
         let power = self.control.power();
@@ -1032,14 +1257,13 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             }
             self.set_state(JobState::Searching);
             if self.control.is_cancelled() {
-                self.halt(StopReason::Cancelled);
+                self.halt_timed(StopReason::Cancelled);
                 return;
             }
         }
         let b = &self.spec.budget;
         if self.start.elapsed().as_secs_f64() >= b.wall_s || self.cpu.as_secs_f64() >= b.cpu_s {
-            self.nondeterministic = true;
-            self.halt(StopReason::Budget);
+            self.halt_timed(StopReason::Budget);
         }
     }
 
@@ -1052,9 +1276,10 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         let (p, wall_max) = self.progress_fraction();
         if p - self.last_gain_progress >= PLATEAU_FRACTION {
             if wall_max {
-                self.nondeterministic = true;
+                self.halt_timed(StopReason::Plateau);
+            } else {
+                self.halt(StopReason::Plateau);
             }
-            self.halt(StopReason::Plateau);
         }
     }
 
@@ -1302,6 +1527,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             finalised: false,
             label: None,
             note: None,
+            overflow: false,
         }
     }
 
@@ -1390,6 +1616,9 @@ impl<'a, E: Evaluator> Engine<'a, E> {
 
     fn finalise(&mut self, id: u32, outcome: Outcome) {
         let t = Instant::now();
+        // Everything from here to the sink's retention is trace work: its wall is `trace_wall`,
+        // and its allocations are what a counting allocator attributes to the trace.
+        let _scope = crate::trace_sink::TraceScope::enter();
         // A memoised hit is recorded as `memoised {reused}` whatever its beam fate: the trace's
         // job for it is to show that the engine did not pay twice (ADR-0021 §1 rule 3). It still
         // competes in the beam, under its own prior, and its children name it as their parent.
@@ -1401,6 +1630,16 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         };
         let tried = outcome.tried();
         let kind = outcome.kind();
+        // ADR-0021 §5: a not-tried node whose cause is time or an external event. A
+        // `deferred_budget` left by a time-caused stop is; the over-cap discrete node (which
+        // carries a note) and one behind a count cap are not.
+        let nondeterministic = match &outcome {
+            Outcome::RefusedPower { .. } => true,
+            Outcome::DeferredBudget { stop, .. } => {
+                self.time_stop && self.stop == Some(*stop) && !self.nodes[id as usize].overflow
+            }
+            _ => false,
+        };
         let evidence = tried.then(|| self.evidence(id));
         let mut summary = self.summary(id, &outcome);
         if let Some(note) = &self.nodes[id as usize].note {
@@ -1430,6 +1669,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             outcome,
             evaluations: n.evaluations,
             cpu_ms: n.cpu.as_millis() as u64,
+            nondeterministic,
             summary,
         };
         let (parent, family) = (n.parent, n.family.clone());
@@ -1520,7 +1760,25 @@ impl<'a, E: Evaluator> Engine<'a, E> {
     }
 
     fn not_tried_child(&mut self, parent: Option<u32>, root: u32, stage: Stage, alt: usize) {
+        self.not_tried_group(parent, root, stage, alt, 1);
+    }
+
+    /// `count` hypotheses under one slot alternative of one parent that the stop left: ONE
+    /// not-tried node, whose summary says how many (ADR-0021 §2.3: not-tried rows are few —
+    /// one per deferred alternative, never one per parameter combination — which is what lets
+    /// retention keep every one of them).
+    fn not_tried_group(
+        &mut self,
+        parent: Option<u32>,
+        root: u32,
+        stage: Stage,
+        alt: usize,
+        count: usize,
+    ) {
         let mut n = self.blank(parent, root, stage, Some(alt));
+        if count > 1 {
+            n.note = Some(format!("{count} parameter combinations, none reached"));
+        }
         if let Some(f) = &self.skeleton(root).alternatives(stage)[alt].family
             && n.family.is_none()
         {
@@ -1779,21 +2037,29 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             i = end;
             self.emit();
         }
-        // Plans the stop left: not tried.
+        // Plans the stop left: not tried, one node per (parent, slot alternative).
+        let mut left = Vec::new();
         for plan in plans.drain(i..) {
-            self.not_tried_child(plan.parent, plan.root, plan.stage, plan.alt);
-            if let Some(p) = plan.parent {
+            group_into(&mut left, (plan.parent, plan.root, plan.stage, plan.alt));
+        }
+        for ((parent, root, stage, alt), count) in left {
+            self.not_tried_group(parent, root, stage, alt, count);
+            if let Some(p) = parent {
                 *child_count.entry(p).or_default() += 1;
             }
         }
         drop(outputs);
         // Same-level duplicates: memoised on the one that ran, not tried if it did not.
         self.pending_keys.clear();
+        let mut left = Vec::new();
         for d in std::mem::take(&mut self.later) {
             match self.memo.get(&d.key).copied() {
                 Some(reused) => children.push(self.memoised(d, reused)),
-                None => self.not_tried_child(d.parent, d.root, d.stage, d.alt),
+                None => group_into(&mut left, (d.parent, d.root, d.stage, d.alt)),
             }
+        }
+        for ((parent, root, stage, alt), count) in left {
+            self.not_tried_group(parent, root, stage, alt, count);
         }
 
         // Score and prune the level's children.
@@ -1994,6 +2260,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         if over_cap > 0 {
             let mut n = self.blank(parent, root, stage, Some(alt));
             n.family = family.clone();
+            n.overflow = true;
             n.note = Some(format!(
                 "{over_cap} lower-prior parameter combinations over the {MAX_DISCRETE_CHILDREN} cap"
             ));
@@ -2387,8 +2654,132 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             return;
         }
         let n = &self.nodes[id as usize];
-        if n.stage >= Stage::S5 && self.evidence(id) >= self.spec.solve.min_holdout_bits {
+        // A trigger, not a verdict: search-window evidence that could clear the analytic floor.
+        if n.stage >= Stage::S5 && self.evidence(id) >= self.spec.solve.min_analytic_holdout_bits {
             self.validate(id);
+        }
+    }
+
+    /// Runs `id`'s whole chain over `window`, charging every stage as an evaluation. `None` when
+    /// an evaluation failed (recorded through [`Self::eval_error`] for hold-out; a null window's
+    /// failure only means the control did not run).
+    fn run_chain(&mut self, id: u32, window: EvalWindow) -> Option<ChainRun> {
+        let chain = self.chain(id);
+        let mut out: Option<E::Output> = None;
+        let mut run = ChainRun {
+            capped_sum: 0.0,
+            mask: 0,
+            analytic: Vec::new(),
+            ladder: Vec::new(),
+            differences: 0,
+            check: None,
+            frames: Vec::new(),
+        };
+        for &c in &chain {
+            let (cand, range) = self.candidate(c);
+            let stage = self.nodes[c as usize].stage;
+            let t = Instant::now();
+            let res = self.ev.evaluate(&EvalRequest {
+                window,
+                stage,
+                candidate: &cand,
+                new_nodes: range,
+                parent: out.as_ref(),
+            });
+            let dt = t.elapsed();
+            self.cpu += dt;
+            self.used.evaluations += 1;
+            if matches!(window, EvalWindow::Null(_)) {
+                self.null_evals += 1;
+            }
+            self.nodes[id as usize].evaluations += 1;
+            self.nodes[id as usize].cpu += dt;
+            let ev = match res {
+                Ok(ev) => ev,
+                Err(e) => {
+                    if window == EvalWindow::Holdout {
+                        self.eval_error(e);
+                    }
+                    return None;
+                }
+            };
+            let b = stage_bits(&ev.evidence, stage);
+            run.capped_sum += capped(stage, b);
+            run.mask |= stage_bit(stage);
+            if let Some(a) = analytic_stage_bits(&ev.evidence, stage) {
+                run.analytic.push((stage, capped(stage, a)));
+            }
+            for n in &ev.evidence {
+                run.ladder.extend(
+                    n.evidence
+                        .iter()
+                        .filter(|e| e.stage == stage)
+                        .map(|e| StageEvidence::from_evidence(n.node.clone(), e)),
+                );
+            }
+            if stage == Stage::S5 {
+                run.differences = ev
+                    .evidence
+                    .iter()
+                    .flat_map(|n| n.evidence.iter())
+                    .filter(|e| e.metric == MetricId::CheckDistinctValid)
+                    .map(|e| e.n)
+                    .max()
+                    .unwrap_or(0);
+            }
+            if ev.check.is_some() {
+                run.check = ev.check;
+            }
+            if window == EvalWindow::Holdout && !ev.frames.is_empty() {
+                // The deepest stage that decodes wins: its frames carry the most structure.
+                run.frames = ev.frames;
+                run.frames.truncate(MAX_HOLDOUT_FRAMES);
+            }
+            out = Some(ev.output);
+        }
+        Some(run)
+    }
+
+    /// `L_j` summed over the stages a run touched.
+    fn l_of(&self, mask: u8) -> f32 {
+        Stage::ALL
+            .iter()
+            .filter(|s| mask & stage_bit(**s) != 0)
+            .map(|s| self.l(*s))
+            .sum()
+    }
+
+    /// ADR-0022 §2.1 / §6 accounting of a hold-out run.
+    fn holdout_evidence(&self, root: u32, run: &ChainRun) -> HoldoutEvidence {
+        let origin = self.spec.roots[root as usize].check_origin;
+        let inherited = origin.inherited_bits();
+        let l5 = self.l(Stage::S5);
+        // An unknown inherited charge is left out of the two sums below — which makes them upper
+        // bounds — and `l_check` is `None`, which the solve rule and the confirm gate refuse.
+        let extra = inherited.unwrap_or(0.0);
+        let l_check = inherited.map(|i| l5 + i);
+        let check_bits = run
+            .analytic
+            .iter()
+            .find(|(s, _)| *s == Stage::S5)
+            .map(|(_, b)| b - l5 - extra);
+        // Each analytic stage pays its own `L_j`; the inherited `L_check` is charged once more.
+        let analytic_bits = run
+            .analytic
+            .iter()
+            .map(|(s, b)| b - self.l(*s))
+            .sum::<f32>()
+            - extra;
+        HoldoutEvidence {
+            evidence_bits: run.capped_sum - self.l_of(run.mask),
+            analytic_bits,
+            check_bits,
+            l_check,
+            check_width: run.check.as_ref().map(|c| c.width),
+            differences: run.differences,
+            check_origin: origin,
+            stages: run.ladder.clone(),
+            null_control: None,
         }
     }
 
@@ -2399,71 +2790,38 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         if self.nodes[id as usize].holdout.is_some() {
             return;
         }
-        let chain = self.chain(id);
-        let need = chain.len() as u64;
+        let need = self.chain(id).len() as u64;
         if !self.afford(need, false) {
             return;
         }
         let prev = self.progress.state;
         self.set_state(JobState::Validating);
-        let mut out: Option<E::Output> = None;
-        let mut capped_sum = 0.0;
-        let mut mask = 0u8;
-        let mut frames = 0u32;
-        for &c in &chain {
-            let (cand, range) = self.candidate(c);
-            let stage = self.nodes[c as usize].stage;
-            let t = Instant::now();
-            let res = self.ev.evaluate(&EvalRequest {
-                window: EvalWindow::Holdout,
-                stage,
-                candidate: &cand,
-                new_nodes: range,
-                parent: out.as_ref(),
-            });
-            let dt = t.elapsed();
-            self.cpu += dt;
-            self.used.evaluations += 1;
-            self.nodes[id as usize].evaluations += 1;
-            self.nodes[id as usize].cpu += dt;
-            match res {
-                Ok(ev) => {
-                    let b = stage_bits(&ev.evidence, stage);
-                    capped_sum += capped(stage, b);
-                    mask |= stage_bit(stage);
-                    if stage == Stage::S5 {
-                        frames = ev
-                            .evidence
-                            .iter()
-                            .flat_map(|n| n.evidence.iter())
-                            .filter(|e| e.metric == MetricId::CheckDistinctValid)
-                            .map(|e| e.n)
-                            .max()
-                            .unwrap_or(0);
-                    }
-                    out = Some(ev.output);
-                }
-                Err(e) => {
-                    self.eval_error(e);
-                    if let Some(s) = prev {
-                        self.set_state(s);
-                    }
-                    return;
-                }
+        let Some(run) = self.run_chain(id, EvalWindow::Holdout) else {
+            if let Some(s) = prev {
+                self.set_state(s);
             }
-        }
-        let l: f32 = Stage::ALL
-            .iter()
-            .filter(|s| mask & stage_bit(**s) != 0)
-            .map(|s| self.l(*s))
-            .sum();
-        let bits = capped_sum - l;
-        let rule = self.spec.solve;
+            return;
+        };
+        let root = self.nodes[id as usize].root;
         let stage = self.nodes[id as usize].stage;
-        let solved = stage >= Stage::S5
-            && bits >= rule.min_holdout_bits
-            && frames >= rule.min_distinct_frames;
-        self.nodes[id as usize].holdout = Some(Holdout { bits, solved });
+        let mut ev = self.holdout_evidence(root, &run);
+        let mut solved = self.spec.solve.met(stage, &ev);
+        let mut capped = false;
+        if solved && ev.check_origin.searched() && self.spec.profile.null_windows() > 0 {
+            let nc = self.null_control(id, ev.evidence_bits);
+            capped = nc.capped;
+            solved = nc.passed();
+            if capped {
+                self.null_capped = true;
+            }
+            ev.null_control = Some(nc);
+        }
+        self.nodes[id as usize].holdout = Some(Holdout {
+            ev,
+            solved,
+            capped,
+            frames: run.frames,
+        });
         if solved && self.solved.is_none() {
             self.solved = Some(id);
             self.halt(StopReason::Solved);
@@ -2471,6 +2829,42 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         if let Some(s) = prev {
             self.set_state(s);
         }
+    }
+
+    /// ADR-0021 §8.2: the winning prefix, **unchanged and unrefit**, over `K` null windows. It can
+    /// only cap. Recorded whether or not it fires; a control that could not run is not a pass.
+    fn null_control(&mut self, id: u32, holdout_bits: f32) -> NullControl {
+        let k = self.spec.profile.null_windows();
+        let need = u64::from(k) * self.chain(id).len() as u64;
+        let within_share = self
+            .spec
+            .budget
+            .max_evaluations
+            .is_none_or(|m| self.null_evals + need <= self.null_share(m));
+        let mut nc = NullControl {
+            k,
+            ran: false,
+            best_null_bits: f32::NEG_INFINITY,
+            margin_bits: 0.0,
+            capped: false,
+        };
+        if !within_share || !self.afford(need, false) {
+            nc.best_null_bits = 0.0;
+            return nc;
+        }
+        for i in 0..k {
+            let Some(run) = self.run_chain(id, EvalWindow::Null(i)) else {
+                nc.best_null_bits = nc.best_null_bits.max(0.0);
+                return nc;
+            };
+            let bits = run.capped_sum - self.l_of(run.mask);
+            nc.best_null_bits = nc.best_null_bits.max(bits);
+        }
+        nc.ran = true;
+        nc.margin_bits = holdout_bits - nc.best_null_bits;
+        // A NaN margin is not a pass: the control can only cap.
+        nc.capped = nc.margin_bits.is_nan() || nc.margin_bits < MIN_NULL_MARGIN_BITS;
+        nc
     }
 
     fn validate_top(&mut self) {
@@ -2582,6 +2976,9 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         });
         let verdict = if self.solved_flag(id) {
             Verdict::Solved
+        } else if n.holdout.as_ref().is_some_and(|h| h.capped) {
+            // ADR-0021 §8.2: the null control caps at `framed`, and only caps.
+            Verdict::unsolved_at(n.stage).min(Verdict::Framed)
         } else {
             Verdict::unsolved_at(n.stage)
         };
@@ -2596,7 +2993,22 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             n.stage.as_str()
         );
         if let Some(h) = &n.holdout {
-            summary.push_str(&format!("; hold-out {:.1} bits", h.bits));
+            summary.push_str(&format!(
+                "; hold-out {:.1} bits, {:.1} analytic",
+                h.ev.evidence_bits, h.ev.analytic_bits
+            ));
+            if let Some(nc) = &h.ev.null_control {
+                summary.push_str(&if !nc.ran {
+                    "; null control could not run".to_owned()
+                } else if nc.capped {
+                    format!(
+                        "; capped by the null control ({:.1}-bit margin < {MIN_NULL_MARGIN_BITS})",
+                        nc.margin_bits
+                    )
+                } else {
+                    format!("; null control passed ({:.1}-bit margin)", nc.margin_bits)
+                });
+            }
         }
         PipelineResult {
             rank,
@@ -2608,10 +3020,11 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             stages,
             evidence_bits,
             prior_bits: n.prior_bits,
-            analytic_holdout_bits: None,
+            analytic_holdout_bits: n.holdout.as_ref().map(|h| h.ev.analytic_bits),
             check,
             frames_preview: Vec::new(),
             characterisation: None,
+            holdout: n.holdout.as_ref().map(|h| h.ev.clone()),
         }
     }
 
@@ -2657,6 +3070,11 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         results: &[PipelineResult],
         cov: &Coverage,
     ) -> Option<Reason> {
+        if self.null_capped && self.solved.is_none() {
+            // ADR-0021 §8.2: a candidate met the rule on hold-out and the null windows scored
+            // too close to it — the engine cannot tell the fit from chance.
+            return Some(Reason::Tied);
+        }
         if self.solved.is_some()
             || matches!(
                 stop,
@@ -2716,6 +3134,90 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         Some(Reason::NothingScored)
     }
 
+    /// ADR-0021 §5's key: everything the decisions are a function of, bar the input IQ.
+    fn replay_key(&self) -> ReplayKey {
+        let spec = self.spec;
+        let mut templates: Vec<TemplateRef> = spec
+            .roots
+            .iter()
+            .filter_map(|r| r.template.clone())
+            .collect();
+        templates.sort_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));
+        templates.dedup();
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        for r in &spec.roots {
+            for alts in r.skeleton.slots.values() {
+                for a in alts {
+                    names.extend(a.nodes.iter().map(|n| n.block.as_str()));
+                }
+            }
+        }
+        let blocks = names
+            .into_iter()
+            .filter_map(|name| {
+                self.catalogue.descriptor(name).map(|d| BlockVersion {
+                    name: name.to_owned(),
+                    version: d.version,
+                })
+            })
+            .collect();
+        let roots: Vec<Value> = spec
+            .roots
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "skeleton": r.skeleton,
+                    "template": r.template,
+                    "free": r.free,
+                    "prior_bits": r.prior_bits,
+                    "seed_source": r.seed_source,
+                    "family": r.family,
+                    "deferred": r.deferred,
+                })
+            })
+            .collect();
+        let unsupported: Vec<Value> = spec
+            .unsupported
+            .iter()
+            .map(|u| {
+                serde_json::json!({
+                    "structure": u.structure,
+                    "missing_block": u.missing_block,
+                    "reference": u.reference,
+                    "family": u.family,
+                    "posterior": u.posterior,
+                    "slot": u.slot,
+                })
+            })
+            .collect();
+        let seeding = serde_json::json!({
+            "head": spec.head,
+            "roots": roots,
+            "unsupported": unsupported,
+            "solve": spec.solve,
+            "trace_bounds": spec.trace_bounds,
+        });
+        let seed_ref = hk_model::hash::ContentHash::of(&seeding)
+            .map(|h| h.to_hex())
+            .unwrap_or_default();
+        let b = spec.budget;
+        ReplayKey {
+            engine: crate::ENGINE.to_owned(),
+            templates,
+            blocks,
+            calibration_hash: None,
+            window: None,
+            profile: spec.profile,
+            budget: ReplayBudget {
+                max_evaluations: b.max_evaluations,
+                max_proposal_calls: b.max_proposal_calls,
+                max_assist_ops: b.max_assist_ops,
+                max_cache_bytes: b.max_cache_bytes,
+            },
+            seed_ref,
+        }
+    }
+
     fn finish(mut self) -> SearchOutcome {
         let stop = if self.error.is_some() {
             None
@@ -2735,6 +3237,16 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             "every node leaves the frontier through the trace sink"
         );
         let results = self.results();
+        let holdout_frames = self
+            .solved
+            .filter(|_| {
+                results
+                    .first()
+                    .is_some_and(|r| r.verdict == Verdict::Solved)
+            })
+            .and_then(|id| self.nodes[id as usize].holdout.as_ref())
+            .map(|h| h.frames.clone())
+            .unwrap_or_default();
         let coverage = self.coverage(stop.unwrap_or(StopReason::Exhausted));
         let reason = stop.and_then(|s| self.reason(s, &results, &coverage));
         let wall = self.start.elapsed();
@@ -2743,9 +3255,13 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         self.used.hypotheses = self.counts.iter().sum();
         self.used.cache_bytes = self.cache.peak;
         let trace_wall = self.trace_wall.as_secs_f64();
+        let replay_key = self.replay_key();
+        let retention_s = self.sink.cost().as_secs_f64();
         let trace = self.sink.finish();
         let trace_cost = TraceCost {
             wall_s: trace_wall,
+            retention_s,
+            decisions: trace.nodes.len() as u64 + trace.nodes_elided,
             bytes: trace.bytes,
             fraction: if wall.as_secs_f64() > 0.0 {
                 trace_wall / wall.as_secs_f64()
@@ -2764,8 +3280,10 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             used: self.used,
             trace_cost,
             nondeterministic: self.nondeterministic,
+            replay_key,
             throttle_events: self.throttle_events,
             refused_power: self.refused_power,
+            holdout_frames,
         }
     }
 }
