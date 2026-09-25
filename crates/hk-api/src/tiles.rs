@@ -311,6 +311,16 @@ pub struct Share {
     pub reserved: usize,
     /// Slots out across all clients at the moment of the decision.
     pub in_flight: usize,
+    /// Slots **this client** holds at the moment of the decision, this read's own not included
+    /// (the decision is taken before the slot is, and a refusal takes none at all).
+    ///
+    /// It is the number that tells a refusal's two causes apart (T-959): at `held >= share` the
+    /// client is refused over reads it still owns — including ones it walked away from, which this
+    /// route goes on producing — and at `held < share` it is refused because somebody else holds
+    /// the slots. Backing off is right for the second and wrong for the first, and only the client
+    /// can tell which of its own held reads it is still waiting for, so the route states the count
+    /// and leaves the arithmetic to it.
+    pub held: usize,
     /// Is the fair share in force at all (`HK_TILE_FAIR_SHARE=off` turns it off — the
     /// first-come-first-served route this ticket replaced, kept so the test that proves the share
     /// matters has something to go red against).
@@ -456,6 +466,7 @@ impl TileAdmission {
                 clients: n,
                 reserved: 0,
                 in_flight: self.in_flight(),
+                held: 0,
                 fair: self.fair,
             });
         };
@@ -477,6 +488,7 @@ impl TileAdmission {
             clients: n,
             reserved,
             in_flight: self.in_flight(),
+            held: held.load(Ordering::Acquire),
             fair: self.fair,
         };
         let ceiling = TILE_MAX_IN_FLIGHT.saturating_sub(reserved).max(1);
@@ -573,7 +585,9 @@ impl Drop for TileSlot {
 
 /// The refusal served when admission says no, so the body states the numbers rather than only the
 /// status. `limit` is the server-wide cap (unchanged, and what pre-T-630 clients parse); `share` is
-/// **this client's** cap, which is the number a client should operate at.
+/// **this client's** cap, which is the number a client should operate at; `held` is how many of
+/// them this client already has out (T-959), which is what tells a refusal over its own reads from
+/// one over another client's.
 fn too_many_in_flight(d: Share) -> ApiError {
     let why = if d.share < TILE_MAX_IN_FLIGHT || d.reserved > 0 {
         format!(
@@ -589,13 +603,24 @@ fn too_many_in_flight(d: Share) -> ApiError {
     } else {
         String::new()
     };
+    // **Whose slots** (T-959). `held` is what THIS client already has out, and it is the only thing
+    // in the refusal that tells its two causes apart: at `held >= share` the client is being refused
+    // over its own reads — including ones it aborted, which this route goes on producing until they
+    // finish — and backing its cap off would be punishing it for its own slow reads. At `held <
+    // share` the slots belong to somebody else and backing off is exactly right.
+    let mine = if d.held >= d.share {
+        " — you already hold that many, so these are your own reads still being produced (an \
+         aborted read holds its slot until it finishes), not other clients'"
+    } else {
+        ""
+    };
     ApiError::new(
         503,
         format!(
-            "too many tile reads in flight (limit {TILE_MAX_IN_FLIGHT}, share {}){why}: tile \
-             production takes the history lock, so the cap is ingest backpressure, not a queue — \
-             cancel tiles whose viewport you have left and retry the ones you still want",
-            d.share
+            "too many tile reads in flight (limit {TILE_MAX_IN_FLIGHT}, share {}, held {}){why}{mine}: \
+             tile production takes the history lock, so the cap is ingest backpressure, not a queue \
+             — cancel tiles whose viewport you have left and retry the ones you still want",
+            d.share, d.held
         ),
     )
 }
@@ -2994,8 +3019,12 @@ fn hot_hit_unslotted(
     cost["build_ms"] = json!((started.elapsed().as_secs_f64() * 1e6).round() / 1000.0);
     cost["in_flight"] = json!(state.tile_admission.in_flight());
     cost["in_flight_share"] = json!(share.share);
-    // This read holds no producer slot, and says so.
-    cost["in_flight_held"] = json!(0);
+    // This read holds no producer slot. What the client holds is whatever admission counted a
+    // moment ago when it refused it one (T-959) — 0 for a client with nothing else out, which is
+    // every hot hit that is not racing its own abandoned reads. Stating 0 unconditionally was a
+    // claim about the client, not about this read, and it is false for exactly the client whose
+    // abandoned reads are filling the route.
+    cost["in_flight_held"] = json!(share.held);
     cost["clients"] = json!(share.clients);
     cost["client"] = json!(client);
     cost["reserved"] = json!(share.reserved);
@@ -3864,6 +3893,48 @@ mod tests {
         assert_eq!(s.held(), 1);
     }
 
+    /// **A refusal states what THIS client holds, so its two causes can be told apart** (T-959).
+    ///
+    /// The client's own abandoned reads hold their slots until the route finishes producing them,
+    /// and a client that charges them the route's *average* service time releases them in its own
+    /// books while the route still has them — so its next reads are refused over slots it owns, and
+    /// an AIMD that reads every `503` as contention halves its cap for its own slow reads. The
+    /// number that separates the two is `held`: at or above the share, they are its own.
+    #[test]
+    fn a_refusal_states_how_many_slots_the_refused_client_itself_holds() {
+        let a = Arc::new(TileAdmission::default());
+        // One client holding its whole (sole) share, refused over its own reads.
+        let mine: Vec<TileSlot> = (0..TILE_MAX_IN_FLIGHT)
+            .map(|_| a.acquire("mine").expect("alone, under the cap"))
+            .collect();
+        let d = a.acquire("mine").expect_err("the cap binds");
+        assert_eq!(d.held, TILE_MAX_IN_FLIGHT, "{d:?}");
+        assert!(d.held >= d.share, "refused over its own reads: {d:?}");
+        let err = too_many_in_flight(d);
+        assert_eq!(err.status, 503);
+        assert!(
+            err.message
+                .contains(&format!("held {}", TILE_MAX_IN_FLIGHT)),
+            "the body must name what this client holds: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("your own reads"),
+            "and say so in words: {}",
+            err.message
+        );
+
+        // A second client refused while holding NOTHING is refused over somebody else's slots, and
+        // its refusal says `held 0` — the reading that means "back off", not "wait for yourself".
+        let d = a.acquire("other").expect_err("four are out");
+        assert_eq!(d.held, 0, "{d:?}");
+        assert!(d.held < d.share, "{d:?}");
+        let err = too_many_in_flight(d);
+        assert!(err.message.contains("held 0"), "{}", err.message);
+        assert!(!err.message.contains("your own reads"), "{}", err.message);
+        drop(mine);
+    }
+
     /// **The bootstrap reserve.** The share alone still lets the drawn clients fill the cap
     /// between them, and then a newcomer's first request — the one it cannot start without — waits
     /// on somebody's tile read. So while a client that has never been served a tile is asking, the
@@ -4190,9 +4261,40 @@ mod tests {
             "{}",
             err.message
         );
+        // **And the refusal says WHOSE slots they are** (T-959). These four are other clients':
+        // this caller holds none, which is the reading that means "back off".
+        assert!(
+            err.message.contains("held 0"),
+            "the refusal must state what THIS client holds: {}",
+            err.message
+        );
         drop(held);
+
+        // The same route, refused over the caller's OWN reads — the shape an aborted read leaves,
+        // since `hk-api` goes on producing a tile whose client has walked away. The body says so in
+        // its numbers and in words, so a client can tell a stale charge from contention.
+        // (Its share, not the whole cap: the two other clients are still known here, so this is
+        // exactly the everyday case — a client that fills its own share and asks once more.)
+        let mut mine: Vec<TileSlot> = Vec::new();
+        while let Ok(slot) = state.tile_admission.acquire(ANONYMOUS_CLIENT) {
+            mine.push(slot);
+        }
+        let held_now = mine.len();
+        assert!(held_now > 0, "the caller must hold some of its own");
+        let err = tiles_json(&state, &q).unwrap_err();
+        assert_eq!(err.status, 503, "{}", err.message);
+        assert!(
+            err.message.contains(&format!("held {held_now}"))
+                && err.message.contains("your own reads"),
+            "{}",
+            err.message
+        );
+        drop(mine);
+
         let v = tiles_json(&state, &q).unwrap();
         assert_eq!(v["cost"]["in_flight"], json!(1), "{v}");
+        // This read holds exactly one slot while it is answered, and states it (T-959).
+        assert_eq!(v["cost"]["in_flight_held"], json!(1), "{v}");
         assert!(v["grid"]["observed_cells"].as_u64().unwrap() > 0, "{v}");
         let _ = std::fs::remove_dir_all(&dir);
     }

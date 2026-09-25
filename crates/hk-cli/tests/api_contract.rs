@@ -9119,6 +9119,11 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     // T-630: the cap is server-wide, the SHARE is this client's, and an undeclared caller shares
     // the anonymous bucket — so `curl` and the CLI meet exactly the route they met before.
     assert_eq!(probe["cost"]["in_flight_share"], json!(4), "{probe}");
+    // T-959: and what THIS client holds — this read's own slot, and nothing else, for a serial
+    // caller. It is the number a client corrects its abandoned-read accounting against (an aborted
+    // read holds its slot until the route finishes producing it), and the number that tells a `503`
+    // over its own reads (`held >= share`, named in the body) from one over another client's.
+    assert_eq!(probe["cost"]["in_flight_held"], json!(1), "{probe}");
     assert_eq!(probe["cost"]["clients"], json!(1), "{probe}");
     assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
     assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
@@ -9131,6 +9136,8 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(mine["cost"]["clients"], json!(2), "{mine}");
     assert_eq!(mine["cost"]["in_flight_share"], json!(2), "{mine}");
     assert_eq!(mine["cost"]["in_flight_limit"], json!(4), "{mine}");
+    // Held is per client, not server-wide: this named client holds only its own read.
+    assert_eq!(mine["cost"]["in_flight_held"], json!(1), "{mine}");
     // An id that is not one is not an error: it shares the anonymous bucket.
     let (st, odd) = get(addr, &format!("{}&client=not%20an%20id", tile(0, 0, 0, 0)));
     assert_eq!(st, 200, "{odd}");

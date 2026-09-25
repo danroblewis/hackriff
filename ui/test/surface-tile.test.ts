@@ -12,7 +12,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import {
-  BYTES_PER_CELL, capFromRefusal, decodeTile, fetchTile, probeAddr, shareFromRefusal, TileBusyError,
+  BYTES_PER_CELL, capFromRefusal, decodeTile, fetchTile, heldFromRefusal, probeAddr, shareFromRefusal,
+  TileBusyError,
   TileDecodeError, type TileResponse,
 } from "../src/surface/tile";
 import { newClientId, setTileClientId } from "../src/surface/clientid";
@@ -494,6 +495,35 @@ test("T-630: a named page carries `client` on every tile request, and an unnamed
   assert.equal(ids.size, 3);
   for (const id of ids) assert.match(id, /^[A-Za-z0-9-_.:]{1,64}$/, `the route accepts ${id}`);
   setTileClientId("");
+});
+
+test("T-959: a refusal also names what THIS client holds, and zero is a reading, not silence", async () => {
+  // `held` is what separates a refusal over this client's own reads — including the aborted ones
+  // `hk-api` is still producing — from one over another client's slots. The first must not halve
+  // the cap and must re-charge the leftover reads; the second is what AIMD exists for. So `held 0`
+  // has to survive parsing as 0: a "positive numbers only" reader would turn the contention case
+  // into "the server said nothing", which is how the client used to treat every refusal.
+  const own = "too many tile reads in flight (limit 4, share 2, held 2) — you already hold that many, " +
+    "so these are your own reads still being produced";
+  assert.equal(capFromRefusal(own), 4);
+  assert.equal(shareFromRefusal(own), 2);
+  assert.equal(heldFromRefusal(own), 2);
+  const theirs = "too many tile reads in flight (limit 4, share 2, held 0) — 2 client(s) are reading tiles";
+  assert.equal(heldFromRefusal(theirs), 0);
+  // A pre-T-959 server names none, and that is not "holds nothing".
+  assert.equal(heldFromRefusal("too many tile reads in flight (limit 4, share 2)"), null);
+  await assert.rejects(
+    () => fetchTile(ADDR, "tok", () => Promise.resolve({
+      ok: false, status: 503, statusText: "",
+      json: () => Promise.resolve({ error: own, code: "http_503" }),
+    })),
+    (e: unknown) => {
+      assert.ok(e instanceof TileBusyError);
+      assert.equal(e.held, 2, "the refusal's own count must reach the controller");
+      assert.equal(e.share, 2);
+      return true;
+    },
+  );
 });
 
 test("T-630: a refusal names this client's SHARE as well as the server-wide cap", async () => {
