@@ -148,15 +148,29 @@ export type DeviceAction = {
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
   source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer" | "pane-width";
+  /**
+   * **Which front end to move** (T-1006) — the `device_id` selector every device route takes, or
+   * null to send none.
+   *
+   * A run may hold several radios (MSDR: T-510/T-511), and then `"the" device is not defined`: the
+   * route answers `400 device_required` rather than moving whichever was composed first, because
+   * *"a default costs the user a band they were listening to"* (docs/api.md, "Which radio: the
+   * device selector"). So the caller that knows which radio it means says so, and the ones that do
+   * not — a run with a single front end, a replay — send nothing and get the unchanged behaviour.
+   * Null is *"nothing said"*, never "the first one".
+   */
+  deviceId?: string | null;
 };
 
-/** A retune of the live device to `centerHz`, from the explicit user request `source`. */
+/** A retune of the live device to `centerHz`, from the explicit user request `source`. `deviceId`
+ * names WHICH front end on a multi-SDR run (T-1006); null sends no selector. */
 export const retuneAction = (
   centerHz: number,
   source: DeviceAction["source"],
   want: ax.View | null = null,
   spanHz: number | null = null,
-): DeviceAction => ({ kind: "retune", centerHz, spanHz, want, source });
+  deviceId: string | null = null,
+): DeviceAction => ({ kind: "retune", centerHz, spanHz, want, source, deviceId });
 
 /** A retune may be tried when the device is live or its state hasn't loaded yet (the server then
  * answers `409 not_live` on a replay). */
@@ -228,12 +242,19 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
     // poll, because sending it would turn a stale read into a command.
     const spanHz = action.spanHz ?? null;
     const wholeWindow = spanHz !== null && Number.isFinite(spanHz) && spanHz > 0;
+    // T-1006: the device selector, when the caller named one. Spread rather than sent as an explicit
+    // `device_id: null` — the routes take the field as OPTIONAL and an omitted selector is what a
+    // single-front-end run means by "the device"; a literal null would be a value where the rule is
+    // "nothing said". A caller with no device in mind is therefore byte-identical to before.
+    const pick = action.deviceId ? { device_id: action.deviceId } : {};
     if (wholeWindow) {
-      await ctx.client.post("/api/control/window", { center_hz: centerHz, sample_rate_hz: Math.round(spanHz) });
+      await ctx.client.post("/api/control/window", { center_hz: centerHz, sample_rate_hz: Math.round(spanHz), ...pick });
     } else {
-      await ctx.client.post("/api/control/center", { center_hz: centerHz });
+      await ctx.client.post("/api/control/center", { center_hz: centerHz, ...pick });
     }
-    const on = store.get().device.deviceId;
+    // The radio that was actually asked for: the action's own selector when it named one, else the
+    // run's single front end. Never a different string from the one the request just carried.
+    const on = action.deviceId ?? store.get().device.deviceId;
     // T-498: name the span too, when this action carries one (a nudge does not — it never touches
     // the span, so there is nothing here to claim). `spanHz` is already what was actually asked for
     // above — the SNAPPED, achievable width the plan computed — never a re-derivation, so this

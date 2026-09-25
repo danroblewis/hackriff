@@ -24,7 +24,7 @@
 // radio; a pan is a pan (retune is T-444).
 
 import type { ActiveWindow } from "../navigators";
-import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
+import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type RowDeviceFor, type WidthActionsFor } from "./chrome";
 import type { Box, Lattice, LatticeSet } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
@@ -68,6 +68,10 @@ export interface SurfaceViewOptions {
   /** The press, naming which preset (its opaque `key`). A discrete click; nothing here reads a
    * pointer stream. */
   onWidthAction?: ((paneId: string, key: string) => void) | null;
+  /** The device pill on each pane's chrome row (T-1006) — whose coverage decides that pane's grey.
+   * Asked every frame like the rest of the row, so a pane whose device was just picked, or whose
+   * front end has just gone, says so in the same frame the grey changes. */
+  rowDevice?: RowDeviceFor | null;
   /** Draw the overlay pass. A user preference — **not** what keeps the data pass untinted. */
   overlays?: boolean;
   overlayStyle?: OverlayStyle;
@@ -190,6 +194,8 @@ export class SurfaceView {
   private readonly chromeAction: RowActionFor | null;
   /** Per-viewport width presets, re-asked every frame (T-496). Null when the host offers none. */
   private readonly widthActions: WidthActionsFor | null;
+  /** Per-viewport device pill, re-asked every frame (T-1006). Null when the host offers none. */
+  private readonly rowDevice: RowDeviceFor | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
@@ -230,6 +236,7 @@ export class SurfaceView {
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
     this.widthActions = opts.widthActions ?? null;
+    this.rowDevice = opts.rowDevice ?? null;
     this.chrome = opts.chrome
       ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null, opts.onWidthAction ?? null)
       : null;
@@ -344,6 +351,7 @@ export class SurfaceView {
     };
     const readout = readoutOf(
       statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor, this.widthActions,
+      this.rowDevice,
     );
     this.chrome?.update(readout);
 

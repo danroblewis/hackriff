@@ -66,6 +66,33 @@ export interface WidthAction extends RowAction {
 export type WidthActionsFor = (id: string) => readonly WidthAction[];
 
 /**
+ * **Which front end this viewport's coverage comes from** (T-1006), as strings and one bit.
+ *
+ * A pane carries a `device` selector — docs/16 §8: it *"only chooses whose coverage decides its
+ * grey"* — and until this ticket nothing on screen said what it was. It is stated on the status row
+ * because that row is where every other "what am I actually looking at" fact already lives (the
+ * level, the tier, the shadow source).
+ *
+ * Anonymous in the same way [[RowAction]] is, and for the same structural reason: `device` is an
+ * opaque selector string this file never interprets, `label` and `why` are the host's sentences, and
+ * `stale` is a bit. Nothing about `device_id`s, drivers, sample rates or the control routes reaches
+ * here — which is what keeps this file inside the `/surface.html` preview's import graph while the
+ * device-naming code stays out of it (see the T-476 note above).
+ */
+export interface RowDevice {
+  /** The selector as state — a `device_id`, or `"any"`. Set on the element as `data-device`. */
+  readonly device: string;
+  readonly label: string;
+  readonly why: string;
+  /** The pane names a front end this run does not hold: shown, never silently reset. */
+  readonly stale: boolean;
+}
+
+/** Supplies a viewport's device pill, or `null` for a viewport that has none (e.g. the map, or a
+ * host that knows of no front ends at all). */
+export type RowDeviceFor = (id: string) => RowDevice | null;
+
+/**
  * Supplies a viewport's ruler line (T-459) — the intermediate frequency/time marks between the
  * window's stated edges, or `null` when there is nothing to mark. Anonymous the same way
  * [[RowActionFor]] is: this file does not compute a tick, it only shows the sentence it is handed.
@@ -80,7 +107,8 @@ export interface ReadoutRow {
   /** The minimap is a viewport too — it is in the same list, marked, not in a widget of its own. */
   readonly viewport: "pane" | "minimap";
   readonly following: boolean;
-  /** Where this viewport is looking: frequency window, time window, and whose coverage. */
+  /** Where this viewport is looking: frequency window and time window (whose coverage is the
+   * `device` pill's, T-1006). */
   readonly headline: string;
   /** The time window the headline rounds, unrounded: absolute capture ns as decimal strings, set on
    * the row as `data-t0-ns` / `data-t1-ns` (same reason `data-tier` is — a test reads state, not a
@@ -113,6 +141,9 @@ export interface ReadoutRow {
   readonly ruler: string | null;
   /** Capture-width presets (T-496), `[]` when this viewport has none. */
   readonly widths: readonly WidthAction[];
+  /** **Whose coverage decides this viewport's grey** (T-1006), or `null` when the viewport has no
+   * device of its own (the minimap) or the host knows of no front end to name. */
+  readonly device: RowDevice | null;
 }
 
 export interface Readout {
@@ -134,6 +165,7 @@ export function readoutOf(
   actionFor: RowActionFor | null = null,
   rulerFor: RulerFor | null = null,
   widthsFor: WidthActionsFor | null = null,
+  deviceFor: RowDeviceFor | null = null,
 ): Readout {
   const rows = statuses.map((s): ReadoutRow => {
     const viewport = s.id === minimapId ? "minimap" : "pane";
@@ -141,7 +173,10 @@ export function readoutOf(
       id: s.id,
       viewport,
       following: s.following,
-      headline: [s.freqLabel, s.timeLabel, s.device === "any" ? null : s.device].filter(Boolean).join(" · "),
+      // T-1006: the raw `device` selector used to be appended here as a bare string when it was not
+      // `"any"` — a `device_id` with no word for what it meant, and nothing at all in the common case.
+      // It has its own stated pill now (`device` below), so the headline is the window alone.
+      headline: [s.freqLabel, s.timeLabel].filter(Boolean).join(" · "),
       t0Ns: String(s.t0Ns),
       t1Ns: String(s.t1Ns),
       level: s.levelLabel,
@@ -173,6 +208,9 @@ export function readoutOf(
       ruler: rulerFor?.(s.id) ?? null,
       // Width presets are a device action too, so the map gets none — same reasoning as `action`.
       widths: viewport === "minimap" ? [] : widthsFor?.(s.id) ?? [],
+      // The minimap has no device of its own for the same reason it has no retune: it is the thing
+      // that says where the panes are, not a window you look through at one radio's coverage.
+      device: viewport === "minimap" ? null : deviceFor?.(s.id) ?? null,
     };
   });
   return { rows, note: levelDivergenceNote(statuses) };
@@ -248,6 +286,18 @@ export class SurfaceChrome {
         entry.action.disabled = !a.enabled;
         entry.action.setAttribute("aria-disabled", a.enabled ? "false" : "true");
       }
+      // T-1006: whose coverage this viewport draws. Marked on the ELEMENT as well as said in the
+      // pill (`data-device`, `data-device-stale`) — the same reason `data-tier` and
+      // `data-shadow-source` are: a test, and a stylesheet, read the state rather than parsing a
+      // sentence, and a `device_id` is exactly the kind of string a sentence mangles.
+      const d = row.device;
+      entry.device.hidden = !d;
+      entry.root.setAttribute("data-device", d ? d.device : "");
+      entry.root.setAttribute("data-device-stale", d?.stale ? "true" : "false");
+      if (d) {
+        set(entry.device, d.label);
+        entry.device.title = d.why;
+      }
       // T-496: the width presets. Buttons persist and are only ever updated in place (same reason
       // as `action`, above), so the array is grown/shrunk to match rather than rebuilt; each
       // button's `key` is captured in a per-button record its own click listener reads fresh,
@@ -301,12 +351,16 @@ export class SurfaceChrome {
     const action = h("button", { class: "hk-surface-action", type: "button", hidden: true }) as HTMLButtonElement;
     const ruler = h("span", { class: "hk-surface-ruler", hidden: true });
     const shadow = h("span", { class: "hk-surface-shadow-source", hidden: true });
+    // T-1006. Appended LAST on the row, after every existing element: `ui/e2e/app-surface.e2e.mjs`
+    // and `app-trace.e2e.mjs` read the headline as `children[1]`, so the cells' positions are part
+    // of this row's contract and a new element goes on the end, placed by the stylesheet.
+    const device = h("span", { class: "hk-surface-device", hidden: true });
     const widthGroup = h("div", { class: "hk-surface-widths", hidden: true });
     // The id is captured, not read off the DOM: rows are kept by id and this listener outlives every
     // update, so the press names the viewport the row was minted for and nothing else.
     action.addEventListener("click", () => { if (!action.disabled) this.onAction?.(id); });
-    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler, shadow);
-    const entry: Row = { root, cells, why, action, ruler, shadow, widthGroup, widthBtns: [] };
+    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler, shadow, device);
+    const entry: Row = { root, cells, why, action, ruler, shadow, widthGroup, widthBtns: [], device };
     this.rows.set(id, entry);
     this.list.append(root);
     return entry;
@@ -329,6 +383,7 @@ interface Row {
   readonly shadow: HTMLElement;
   readonly widthGroup: HTMLElement;
   readonly widthBtns: WidthBtn[];
+  readonly device: HTMLElement;
 }
 
 const set = (el: HTMLElement, text: string) => { if (el.textContent !== text) el.textContent = text; };

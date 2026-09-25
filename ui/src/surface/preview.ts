@@ -38,7 +38,7 @@ import {
 } from "./bootstrap";
 import { batchedTileSource } from "./tilebatch";
 import { oneTier, tileUrl, type Box, type Lattice, type LatticeSet, type TileAddr } from "./lattice";
-import type { RowActionFor, WidthActionsFor } from "./chrome";
+import type { RowActionFor, RowDeviceFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
@@ -578,6 +578,10 @@ export interface PreviewOptions {
    * `chromeAction` is — see that field's note; the same import-graph rule applies. */
   widthActions?: WidthActionsFor | null;
   onWidthAction?: ((paneId: string, key: string) => void) | null;
+  /** The device pill on each pane's row (T-1006) — whose coverage decides that pane's grey.
+   * Forwarded, never produced here, for the same import-graph reason `chromeAction` is: the host
+   * that knows what a `device_id` is supplies the strings. */
+  rowDevice?: RowDeviceFor | null;
   minimapPx?: number;
   /**
    * **The growing edge, reported in (T-445).** Omit it and the surface is historical: the edge is
@@ -730,6 +734,7 @@ export class SurfacePreview {
       onChromeAction: opts.onChromeAction ?? null,
       widthActions: opts.widthActions ?? null,
       onWidthAction: opts.onWidthAction ?? null,
+      rowDevice: opts.rowDevice ?? null,
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
