@@ -18816,6 +18816,8 @@ tasks:
       leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
       ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      Review fix (attempt 1): the reviewer found that a hold-out the shuffled-null control CAPPED kept its evaluator characterisation (engine.rs result_of filtered only on solved), and seal() read that characterisation before reaching the tied/capped branch - so a fit the null windows reproduce, the exact case ADR-0021 s8.2 exists to stop, sealed as structured-unidentified, which is s7A.5's durable positive finding and seeds a C18 structure-proposed signature. Fixed in two hunks: a capped hold-out's characterisation is dropped (it asserts framed-and-check-valid, the very claim the control said it could not tell from chance), and seal() tests the capped null control FIRST so nothing below it can outrank s8.2. New test t567_a_null_capped_fit_is_unknown_and_never_structured_unidentified, verified RED on the pre-fix code and green with it. hk-synth 111 passed; precheck clean.
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
