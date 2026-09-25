@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
+import { settled } from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
@@ -45,6 +46,11 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   await page.waitFor("the sheet to rise to half with the signal's detail",
     `document.querySelector('.sheet')?.dataset.snap === 'half' && !!document.querySelector('.focus .detail .bigf')`,
     { timeoutMs: 15000 });
+  // T-958: `dataset.snap` flips at the START of the .28 s height transition, so the sheet's head is
+  // still ~300 px from where it is going. Everything below reads the sheet's box or presses a
+  // button inside it (the close ×, whose rect `page.click` reads one round-trip before it presses),
+  // and a rect read mid-move is not where the press lands.
+  await settled(page, ".sheet", "the sheet's rise");
   assert.match((await page.$text(".focus .detail .bigf")) ?? "", new RegExp(`^${mhz.replace(".", "\\.")}`),
     "the sheet's big frequency is the selected row's");
   assert.match((await page.$text(".sheet-title")) ?? "", /^Selected signal · [\d.]+ MHz$/, "the peek strip names it");

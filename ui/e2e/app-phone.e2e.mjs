@@ -19,6 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
+import { settled } from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
@@ -91,11 +92,19 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   await page.waitFor("a touch to bring the chrome back", "!document.body.classList.contains('chrome-idle')", { timeoutMs: 5000 });
 
   // (3) Sheet and Research: reachable one-handed and closeable.
+  // T-958: the close (×) and the grab handle ride the sheet's head, which travels ~313 px over the
+  // .28 s height transition the press before it started — and `dataset.snap` flips at the START of
+  // that move, not at its end. So a state wait that is followed by another press on the sheet is
+  // followed by `settled` too, the page's own report that it has arrived; without it the press is
+  // aimed where the button WAS and lands in the body below (1 run in 6 alone on a loaded box, and
+  // on main).
   await page.click("document.querySelector('.sheet-grab')");
   await page.waitFor("the sheet to open", "document.querySelector('.sheet').dataset.snap !== 'peek'", { timeoutMs: 5000 });
+  await settled(page, ".sheet", "the sheet's opening");
   await shot("3-sheet");
   await page.click("document.querySelector('.sheet-close')");
   await page.waitFor("the sheet's close to collapse it", "document.querySelector('.sheet').dataset.snap === 'peek'", { timeoutMs: 5000 });
+  await settled(page, ".sheet", "the sheet's collapse");
   await page.click("document.querySelector('.sheet-grab')");
   await page.waitFor("the sheet to open again", "document.querySelector('.sheet').dataset.snap !== 'peek'", { timeoutMs: 5000 });
   await page.click("document.querySelector('.map-research-btn')");
