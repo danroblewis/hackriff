@@ -41,6 +41,20 @@ R = _load()
 WT = "/Users/daniellewis/hackriff/.claude/worktrees/t513"
 
 
+
+@pytest.fixture(autouse=True)
+def _never_the_real_ops_dir(tmp_path_factory, monkeypatch):
+    """Every $HACKRIFF_OPS path (and the transcript dir) points into tmp. 2026-09-25 05:53: a test here ran the real
+    tick() with only S patched - CLAIMS/LOG/WORKDIR are bound at import - and it overwrote the live
+    work-claims.json and dispatched two real deflakers. NOT redirected: REPO (git and worktree operations on the
+    real checkout) - a test that reaches tick(), sync_board or reap_worktrees must patch REPO or stub them."""
+    ops = tmp_path_factory.mktemp("ops")
+    for name in ("CLAIMS", "NEEDS", "DONE", "LOG", "WORKDIR", "MERGE_QUEUE", "BULKMARK", "LANDED", "DEFLAKE_REQUESTS",
+                 "MERGE_NEEDS", "MERGE_LOG", "HOSTS_FILE"):
+        monkeypatch.setattr(R, name, str(ops / pathlib.Path(getattr(R, name)).name))
+    monkeypatch.setattr(R, "PROJECTS", str(ops / "projects"))
+    monkeypatch.setattr(R, "S", str(ops))
+
 def rows(*specs):
     """(pid, ppid, pgid, rss_mb, cpu_s, cmd) tuples -> the row dicts the helpers consume."""
     return [{"pid": p, "ppid": pp, "pgid": g, "rss_mb": rss, "cpu_s": cpu, "cmd": cmd}
@@ -194,7 +208,7 @@ def conflicts(tmp_path, monkeypatch):
     monkeypatch.setattr(R.os.path, "isdir", lambda p: True)
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     launched = []
-    monkeypatch.setattr(R, "launch_fix", lambda c, line: launched.append((c["ticket"], line)) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: launched.append((c["ticket"], line)) or dict(c, state="running", kind="fix"))
     monkeypatch.setattr(R, "merges_cleanly", lambda b, target="main": b == "task-t700")
     monkeypatch.setattr(R, "commits_ahead", lambda b, target: 3)
     monkeypatch.setattr(R, "board_statuses", lambda: {"T-613": "in-progress", "T-627": "in-progress", "T-700": "in-progress"})
@@ -596,7 +610,7 @@ def reaped(df, monkeypatch):
     reviews = []
     monkeypatch.setattr(R, "launch_review", lambda c: reviews.append(c) or dict(c, kind="review", pid=2))
     fixes = []
-    monkeypatch.setattr(R, "launch_fix", lambda c, line: fixes.append(line) or c)
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: fixes.append(line) or c)
 
     def claim(kind="deflake", ahead=2):
         monkeypatch.setattr(R, "commits_ahead", lambda b, t: ahead)
@@ -739,7 +753,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     g("init", "-q", "-b", "main")
     g("commit", "-q", "--allow-empty", "-m", "base")
     wts = repo / ".claude" / "worktrees"
-    for name in ("t356", "t900", "tgone"):
+    for name in ("t356", "t900", "tgone", "t844"):
         g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
     (wts / "t356" / ".githooks").mkdir()
     (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
@@ -747,7 +761,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
     shutil.rmtree(wts / "tgone")                                   # registered, directory gone
     old = 1_000_000_000
-    for name in ("t356", "t900"):
+    for name in ("t356", "t900", "t844"):
         os.utime(wts / name, (old, old))
 
     real_sh = R.sh
@@ -758,10 +772,12 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     monkeypatch.setattr(R, "_REAP_SAID", set())
     said = []
     monkeypatch.setattr(R, "log", said.append)
-    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")}}
+    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")},
+              "T-844": {"state": "fix-held", "wt": str(wts / "t844")}}   # review 07:30: a held fix resumes there
 
     R.reap_worktrees(claims, dry=False)
     assert not (wts / "t356").exists()                             # only build output: reaped
+    assert (wts / "t844").exists()                                 # clean and old, but a held fix's: kept
     assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
     assert "tgone" not in g("worktree", "list").stdout             # pruned
     kept = [m for m in said if "kept - untracked" in m]
@@ -784,7 +800,7 @@ def killed_run(df, monkeypatch, tmp_path):
     monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
                         "2\n" if args[:3] == ["git", "rev-list", "--count"] else (" M ui/src/a.ts\n" if args[:2] == ["git", "status"] else ""))
     fixes, alerts = [], []
-    monkeypatch.setattr(R, "launch_fix", lambda c, line: fixes.append(line) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: fixes.append(line) or dict(c, state="running", kind="fix"))
     monkeypatch.setattr(R, "alert", lambda *a: alerts.append(a))
 
     def claim(**kw):
@@ -874,7 +890,7 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     import os
     root = tmp_path / ".claude" / "worktrees"
     old = 1_000_000_000
-    for name in ("idle", "fresh", "inuse", "claimed", "t87"):
+    for name in ("idle", "fresh", "inuse", "claimed", "t87", "held"):
         (root / name / "target" / "debug").mkdir(parents=True)
         (root / name / "src.rs").write_text("kept\n")
     (root / "linked").mkdir()
@@ -886,11 +902,11 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
     said = []
     monkeypatch.setattr(R, "log", said.append)
-    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}}
+    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}, "T-2": {"state": "fix-held", "wt": str(root / "held")}}
     R.reclaim_idle_targets(claims, dry=True)
     assert all((root / n / "target").exists() for n in ("idle", "fresh", "inuse", "claimed", "t87"))
     R.reclaim_idle_targets(claims, dry=False)
-    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87") if not (root / n / "target").exists())
+    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87", "held") if not (root / n / "target").exists())
     assert gone == ["idle", "t87"]
     assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
     assert len([m for m in said if m.startswith("RECLAIM")]) == 2
@@ -1372,7 +1388,12 @@ def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_h
         if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
             break
         time.sleep(0.1)
-    time.sleep(0.3)
+    # The pgid file is written before the fixture's python setsid shim has called setsid() - under load (1-min 39,
+    # 2026-09-25 06:00) longer than a fixed 0.3 s. Wait for the group, bounded; the host's util-linux setsid has no gap.
+    for _ in range(100):
+        if R.remote_run_state(c) == "running":
+            break
+        time.sleep(0.1)
     assert R.remote_run_state(c) == "running"
     assert R.remote_stop(c, wait_s=5)
     assert R.remote_run_state(c) == "gone"
@@ -1525,6 +1546,7 @@ def test_a_named_remote_ticket_never_falls_back_to_the_mac_and_alone_mode_holds_
 def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_named_not_dispatchable(tmp_path, monkeypatch):
     """Supervisor 2026-09-25 03:56: the status said 'dispatchable=1 (T-844)' while candidates() skips a branch with commits,
     and had no host dimension. Now: T-844-like tickets are 'held_by_branch' + one ORPHAN_BRANCH attention; hosts listed."""
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (1.0, 1.0, 1.0))         # the Mac row's held is load-dependent
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
     (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 5}}))
@@ -1551,8 +1573,95 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     R.tick(dry=False)
     f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
     assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
-    assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "probe_age_s": 0}
-    assert st["hosts"]["mac"] == {"running": 0, "cap": 2}
+    assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0}
+    assert st["hosts"]["mac"] == {"running": 0, "cap": 2, "held": None}
     assert [a[2] for a in seen] == ["ORPHAN_BRANCH"]
     R.tick(dry=False)
     assert len(seen) == 1                                                  # once per runner process
+
+
+def _node2(tmp_path, monkeypatch, cap=2, load1=1.0, max_load1=None):
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    cfg = {"ssh": "u@h", "repo": "/r", "ops": "/o", "cap": cap, **({"max_load1": max_load1} if max_load1 else {})}
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": cfg}))
+    (tmp_path / "hosts").mkdir(exist_ok=True)
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True, "load1": load1}))
+
+
+def test_a_remote_fix_run_waits_for_room_on_its_host_and_is_relaunched_before_new_work(tmp_path, monkeypatch):
+    """Supervisor 2026-09-25 05:52: node2 ran 7 at cap 6 - a REVIEW_FAIL fix (T-869, 05:40:51) resumed on node2 while
+    the six dispatched workers ran; fix runs never asked the host's cap. Now a remote fix is held until its host has
+    room, said once, and tick()'s held-fix pass relaunches it (before dispatch) when a slot frees."""
+    _node2(tmp_path, monkeypatch, cap=2)
+    notes = []
+    monkeypatch.setattr(R, "attention", lambda *a: notes.append(a))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    monkeypatch.setattr(R, "fix_reason", lambda line, b: ("REVIEW_FAIL", "x"))
+    busy = {f"T-{i}": {"state": "running", "kind": "work", "host": "node2"} for i in (1, 2)}
+    fixme = {"ticket": "T-869", "branch": "task-t869", "wt": "/w", "host": "node2", "state": "running", "kind": "review"}
+    claims = {**busy, "T-869": fixme}
+    held = R.launch_fix(dict(fixme, kind="work"), "REVIEW_FAIL VERDICT: FAIL x", claims=claims)
+    assert held["state"] == "fix-held" and held["held_warned"] and "2/2 running" in notes[-1][3]
+    claims["T-869"] = held
+    again = R.launch_fix(dict(held, kind="work"), held["fail_line"], claims=claims)
+    assert again["state"] == "fix-held" and len(notes) == 1                    # said once per hold
+    # its own (stale) running claim never counts against it: a TIMEOUT fix is launched from its running claim
+    assert R.host_room({**busy, "T-869": dict(fixme, kind="work")}, "node2", exclude="T-869") == "2/2 running"
+    assert R.host_room({"T-1": busy["T-1"], "T-869": dict(fixme, kind="work")}, "node2", exclude="T-869") is None
+    # the held-fix pass (tick's, before any dispatch) skips it while the host is full, relaunches it once a slot frees
+    relaunched = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: relaunched.append(c["ticket"]) or dict(c, state="running", kind="fix"))
+    assert R.relaunch_held_fixes(claims) is False and relaunched == []
+    claims["T-2"]["state"] = "done"
+    assert R.relaunch_held_fixes(claims) is True and relaunched == ["T-869"] and claims["T-869"]["state"] == "running"
+
+
+def test_a_remote_host_over_its_load_bound_takes_no_new_work(tmp_path, monkeypatch):
+    """Supervisor 05:52: node2 1-min load 42 (5-min 33) on 24 cores - hold new node2 dispatch until it is under 24
+    (hosts.json max_load1). No bound configured = no load hold; a probe without a load reading holds when bounded."""
+    t = {"id": "T-9", "title": "hk-store retention follow-ups", "needs": "none"}
+    _node2(tmp_path, monkeypatch, cap=6, load1=42.0, max_load1=24)
+    assert R.host_for(t, {}) is None and R.host_room({}, "node2") == "1-min load 42.0 >= 24"
+    _node2(tmp_path, monkeypatch, cap=6, load1=23.9, max_load1=24)
+    assert R.host_for(t, {}) == "node2" and R.host_room({}, "node2") is None
+    _node2(tmp_path, monkeypatch, cap=6, load1=42.0)
+    assert R.host_for(t, {}) == "node2"
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    cfg = json.loads((tmp_path / "hosts.json").read_text())
+    cfg["node2"]["max_load1"] = 24
+    (tmp_path / "hosts.json").write_text(json.dumps(cfg))
+    assert R.host_room({}, "node2") == "no 1-min load reading (bound 24)"
+
+
+def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(tmp_path, monkeypatch):
+    """Supervisor 2026-09-25 07:17: the Mac ran 4 at cap 3 - a local fix run bypassed the cap exactly as node2's did.
+    A local fix waits under the Mac's dispatch cap and WORK_LOAD_MAX, and the held-fix pass relaunches it first."""
+    notes = []
+    monkeypatch.setattr(R, "attention", lambda *a: notes.append(a))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 2)
+    monkeypatch.setattr(R, "fix_reason", lambda line, b: ("GATE_FAIL", "x"))
+    load = [5.0]
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (load[0], 0.0, 0.0))
+    busy = {f"T-{i}": {"state": "running", "kind": "work"} for i in (1, 2)}
+    fixme = {"ticket": "T-844", "branch": "task-t844", "wt": str(tmp_path), "state": "queued", "kind": "work", "session_id": "s"}
+    claims = {**busy, "T-844": fixme, "T-7": {"state": "running", "kind": "work", "host": "node2"}}   # remote: not the Mac's
+    held = R.launch_fix(dict(fixme), "GATE_FAIL x", claims=claims)
+    assert held["state"] == "fix-held" and "2/2 running" in notes[-1][3] and "this Mac" in notes[-1][3]
+    claims["T-844"] = held
+    relaunched = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: relaunched.append(c["ticket"]) or dict(c, state="running", kind="fix"))
+    assert R.relaunch_held_fixes(claims) is False and relaunched == []
+    claims["T-2"]["state"] = "done"
+    load[0] = R.LOAD_MAX + 1
+    assert R.host_room(claims, None, exclude="T-844") == f"1-min load {R.LOAD_MAX + 1:.0f} > {R.LOAD_MAX:.0f}"
+    assert R.relaunch_held_fixes(claims) is False                              # the load bound holds it too
+    load[0] = 5.0
+    assert R.relaunch_held_fixes(claims) is True and relaunched == ["T-844"]
+    # review 07:30: a held local fix whose worktree is gone is never relaunched into a missing cwd (it crashed every tick)
+    claims["T-844"] = dict(held, wt="/nonexistent/wt")
+    relaunched.clear()
+    assert R.relaunch_held_fixes(claims) is True and relaunched == [] and claims["T-844"]["state"] == "gate-failed"
+    assert notes[-1][2] == "GATE_FAIL_NO_SESSION"

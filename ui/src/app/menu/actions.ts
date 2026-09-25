@@ -5,6 +5,7 @@
 // plus the new Analyze stub call (T-190 lands the backend later).
 import { ControlError } from "../../controls/client";
 import type { AppContext } from "../context";
+import { runAutoDecode } from "../decode/pipelines";
 import { startListen, stopOutput } from "../dock/api";
 import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
@@ -63,8 +64,10 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
       onSelect: () => { if (onId) stopOutput(ctx, onId); else startListen(ctx, { kind: "emitter", emitterId: r.id, label: `${fmtMHz(r.f_center_hz)} MHz` }); },
     },
     {
-      id: "decode", label: decodeActionLabel(r), hint: "build a pipeline",
-      onSelect: () => ctx.store.set(setMode("decode")),
+      // T-944: starts the backend's best-matching recipe on this emitter (`/api/recipes/match`),
+      // then opens the Decode tab on it; the recipe list there is the override.
+      id: "decode", label: decodeActionLabel(r), hint: "best-matching recipe",
+      onSelect: () => { void runAutoDecode(ctx, r.id); },
     },
     {
       id: "analyze", label: "Analyze", hint: "synthesize decoder",
@@ -140,14 +143,23 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
 }
 
 /** Menu items for a right-clicked/long-pressed selection: the actions the selection's focus panel
- * carried (§4.5 — Listen to all, Export clip, Delete), plus Analyze. No Decode/Stream
- * out/Promote/Adjust band: those never applied to a selection. */
+ * carried (§4.5 — Listen to all, Export clip, Delete), plus Analyze and Decode. No Stream
+ * out/Promote/Adjust band: those never applied to a selection.
+ *
+ * T-943 added **Decode**. "Decode operates on a captured region and extends with it" (CLAUDE.md) —
+ * a region is the decode pipeline's natural subject, and the selection had no way to reach the
+ * workbench at all, so Decode was unreachable from a selected region in every surface. Same call as
+ * a signal's Decode (a mode change, view state), never a device route. */
 export function selectionMenuItems(ctx: AppContext, s: Selection, rowsInside: readonly Row[]): MenuItem[] {
   return [
     {
       id: "listen-all", label: "Listen to all", hint: `${rowsInside.length} stream${rowsInside.length === 1 ? "" : "s"} at once`,
       disabled: rowsInside.length === 0,
       onSelect: () => { for (const t of listenAllTargets(rowsInside)) startListen(ctx, t); },
+    },
+    {
+      id: "decode", label: "Decode region", hint: "build a pipeline over this region",
+      onSelect: () => ctx.store.set(setMode("decode")),
     },
     {
       id: "analyze", label: "Analyze", hint: "synthesize decoder",

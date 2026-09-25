@@ -393,6 +393,23 @@ function sameTarget(a: PaneRetuneOffer, b: PaneRetuneOffer | null): boolean {
 // text for the same reason. What lives here is only "given a span, what would planning it achieve",
 // which is exactly as true of a host-picked preset as of any other Hz value.
 
+/**
+ * T-947: the span a Go-to's offer should plan for — the front end's OWN current window
+ * (`grid.current.span_hz`, "keep the current tuned span") when one is known, else the caller's
+ * `defaultSpanHz` ("the device's default working span"). **Never the pane's viewport width.**
+ *
+ * A Go-to only names a CENTRE; the viewport it lands in is whatever the pane happened to be zoomed
+ * to before the jump, which is a fact about the VIEW, not about what capture the radio should take.
+ * Planning `paneRetuneOffer`'s way — against the pane's own box — silently inherited that view width
+ * as the requested span (a 15.8 MHz-wide view produced a 15.819 MHz-span offer; found live
+ * 2026-09-25), even though nothing about a zoomed-out view says the user wants a 15.8 MHz capture.
+ * `defaultSpanHz` is deliberately the caller's to choose (see [[paneWidthOffer]]'s own note just
+ * below): this file states no RF fact of its own, only which fact — current or default — applies.
+ */
+export function goToSpanHz(grid: FrequencyGrid | null, defaultSpanHz: number): number {
+  return grid?.current?.span_hz ?? defaultSpanHz;
+}
+
 /** One preset width, planned against a pane's CURRENT centre. */
 export interface PaneWidthOffer {
   readonly paneId: string;
