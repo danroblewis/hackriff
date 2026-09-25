@@ -1824,6 +1824,7 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
     assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
     # invariant 29 on the dashboard: per host whether its refs agree, and per branch mirror / local / behind / ahead
+    assert st["hosts"]["node2"].pop("stats")["reachable"]                  # the probe's stats (test_host_stats.py)
     assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0, "refs_in_sync": False,
                                     "drifting": 1, "branches": {"task-t9": {"mirror": "b" * 40, "local": "a" * 40, "behind": 1,
                                                                             "ahead": 1, "state": "diverged"}}}
