@@ -8955,6 +8955,43 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         (0..n).filter(|&r| covered[r * n + station_col]).count(),
         sh["search"]
     );
+    // T-911: which search answered each before-tile value, and what the own-level one read.
+    for s in sh["sources"].as_array().unwrap() {
+        if s["from"] == json!("before-tile") {
+            assert!(
+                s["search"] == json!("own-level") || s["search"] == json!("ladder"),
+                "a before-tile source names no search: {s}"
+            );
+            assert!(s["store"].is_string(), "{s}");
+        }
+    }
+    let own = &sh["search"]["own_level"];
+    assert!(
+        own.is_null() || own.is_object(),
+        "search.own_level is an object, or null when no level is affordable: {own}"
+    );
+    if own.is_object() {
+        assert!(own["store"].is_string(), "{own}");
+        assert!(own["level"].is_u64(), "{own}");
+        assert!(own["stages"].is_array(), "{own}");
+        let (found, used) = (
+            own["columns_found"].as_u64().unwrap(),
+            own["columns_used"].as_u64().unwrap(),
+        );
+        assert!(used <= found, "{own}");
+        assert!(
+            own["source_cells"].as_u64().unwrap() <= sh["search"]["source_cells"].as_u64().unwrap(),
+            "{}",
+            sh["search"]
+        );
+    }
+    // T-523/T-911: the budget binds what was READ, over both searches.
+    assert!(
+        sh["search"]["source_cells"].as_u64().unwrap()
+            <= sh["search"]["max_source_cells"].as_u64().unwrap(),
+        "{}",
+        sh["search"]
+    );
     assert!(
         sh["rule"]
             .as_str()

@@ -360,6 +360,7 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
     let mut worst_level = 0;
     let mut short_circuited = 0;
     let mut shadowless = Vec::new();
+    let mut overspent = Vec::new();
     for level_f in 0..=9u32 {
         let (ms, v) = shadow_cost(&state, level_f, f_lo, t_ns);
         let applied = v["resolution"]["short_circuit"]["applied"] == Value::Bool(true);
@@ -385,7 +386,22 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
         if applied && v["shadow"]["runs"].as_u64() == Some(0) {
             shadowless.push(level_f);
         }
+        // T-911 review: the bound is on what was READ, not only what is stated. The own-level
+        // search and the ladder share one budget; a ladder given a second whole budget read
+        // 152 576 / 217 088 / 229 376 cells at level_f 1 / 3 / 9 under a stated 131 072.
+        let (read, max) = (
+            sh["source_cells"].as_u64().expect("source_cells"),
+            sh["max_source_cells"].as_u64().expect("max_source_cells"),
+        );
+        if read > max {
+            overspent.push((level_f, read, max));
+        }
     }
+    assert!(
+        overspent.is_empty(),
+        "the shadow search READ more source cells than its stated budget at (level_f, read, max) \
+         {overspent:?}: T-523's bound is on the whole search"
+    );
     eprintln!(
         "  worst short-circuited shadow search: {worst:.2} ms at level_f {worst_level}\n\
          budget now {} source cells (cells x 512 rows), was {} — the tile read's own, which is what T-519\n\

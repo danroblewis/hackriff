@@ -583,6 +583,12 @@ pub struct ShadowRun {
     pub fill: ShadowFill,
 }
 
+/// Time blocks a pinned search ([`Pyramid::last_known_search_at`]) may look back over, from its
+/// `before` (T-911). Bounds the tile-index scan that finds the newest block holding data: on the
+/// view lattice's finest level (64 × 40 ms blocks) that is ~11 minutes, past which the ladder
+/// answers.
+pub const PINNED_REACH_BLOCKS: i64 = 256;
+
 /// Rows a [`LastKnown`] search's final stage may read, whatever the budget allows.
 pub const LAST_KNOWN_MAX_TOP_ROWS: usize = 4096;
 
@@ -647,6 +653,10 @@ pub struct LastKnownSearch {
     /// (0 otherwise). "Newest" is then decided per OUTPUT row, so every source cell inside the
     /// newest output row folds by max-hold — the value the output grid's own cell holds.
     quantum_ns: i64,
+    /// T-911: the oldest time block a pinned search may look at (its reach). Older is left to the
+    /// ladder, so the index scan that finds the newest block holding data is bounded however much
+    /// the store holds.
+    reach_tb: i64,
 }
 
 impl LastKnownSearch {
@@ -1441,6 +1451,7 @@ impl Pyramid {
             done: !(freq.lo_hz.is_finite() && freq.hi_hz > freq.lo_hz),
             pinned: false,
             quantum_ns: 0,
+            reach_tb: i64::MIN,
         }
     }
 
@@ -1461,9 +1472,12 @@ impl Pyramid {
     /// # How it reaches without paying for the gap
     ///
     /// Newest-first, one block of `level` at a time: each stage jumps straight to the newest block
-    /// at or before its end that holds **any** tile over `freq` — a key lookup, never a cell walk —
-    /// so the time a departed band spent unobserved costs nothing to cross (T-461's rule, applied
-    /// to the search). Each stage reads that block's newest part the remaining budget affords; a
+    /// at or before its end that holds **any** tile over `freq` — a range scan of the tile index
+    /// bounded to the last [`PINNED_REACH_BLOCKS`] blocks, never a cell walk — so the time a
+    /// departed band spent unobserved costs no cell read to cross (T-461's rule, applied to the
+    /// search). Nothing older than that reach is searched here: it is the ladder's, which is
+    /// time-deep. The scan runs under the store's lock, and an unbounded one walked every older
+    /// sealed tile of the level across all frequencies on a miss. Each stage reads that block's newest part the remaining budget affords; a
     /// block it cannot afford even one row of is reported unsearched and ends the search. The search
     /// ends when every column has a value, the budget is spent, or nothing older is held. No
     /// straddle arises: every stage ends at or before `before`, which callers align to the level's
@@ -1494,6 +1508,11 @@ impl Pyramid {
         match self.geom.levels.get(level) {
             Some(g) => {
                 let cell = g.t_cell_ns.max(1);
+                let blk = g.t_block_ns().max(1);
+                s.reach_tb = before
+                    .as_unix_nanos()
+                    .div_euclid(blk)
+                    .saturating_sub(PINNED_REACH_BLOCKS);
                 if out_t_cell_ns > cell && out_t_cell_ns % cell == 0 {
                     s.quantum_ns = out_t_cell_ns;
                 }
@@ -1504,8 +1523,15 @@ impl Pyramid {
     }
 
     /// The newest time block of `level` whose start lies before `end_ns` and that holds any tile
-    /// — open, derived or sealed — over `freq`; `None` when there is none. Reads the tile index only.
-    fn newest_block_before(&self, level: usize, freq: FreqRange, end_ns: i64) -> Option<i64> {
+    /// — open, derived or sealed — over `freq`, no older than block `min_tb`; `None` when there is
+    /// none. Reads the tile index only, over `[min_tb, end)` of the sealed map.
+    fn newest_block_before(
+        &self,
+        level: usize,
+        freq: FreqRange,
+        end_ns: i64,
+        min_tb: i64,
+    ) -> Option<i64> {
         let g = &self.geom.levels[level];
         let nf = self.geom.nf as i64;
         let fb_lo = ((freq.lo_hz / g.f_cell_hz).floor() as i64).div_euclid(nf);
@@ -1513,20 +1539,23 @@ impl Pyramid {
         let fits = |fb: i64| (fb_lo..=fb_hi).contains(&fb);
         let blk = g.t_block_ns().max(1);
         let tb_max = (end_ns - 1).div_euclid(blk);
+        if tb_max < min_tb {
+            return None;
+        }
         let sealed = self.sealed[level]
-            .range(..=(tb_max, i64::MAX))
+            .range((min_tb, i64::MIN)..=(tb_max, i64::MAX))
             .rev()
             .find(|((_, fb), _)| fits(*fb))
             .map(|((tb, _), _)| *tb);
         let open = self.open[level]
             .keys()
-            .filter(|&&(fb, tb)| fits(fb) && tb <= tb_max)
+            .filter(|&&(fb, tb)| fits(fb) && (min_tb..=tb_max).contains(&tb))
             .map(|&(_, tb)| tb)
             .max();
         let derived = self
             .derived
             .keys()
-            .filter(|&&(dl, fb, tb)| dl == level && fits(fb) && tb <= tb_max)
+            .filter(|&&(dl, fb, tb)| dl == level && fits(fb) && (min_tb..=tb_max).contains(&tb))
             .map(|&(_, _, tb)| tb)
             .max();
         [sealed, open, derived].into_iter().flatten().max()
@@ -1542,17 +1571,25 @@ impl Pyramid {
             // `quantum_ns`), else the level's own cell.
             let q = s.quantum_ns.max(cell);
             let blk = g.t_block_ns().max(1);
-            let Some(tb) = self.newest_block_before(l, s.freq, s.end_ns) else {
-                // Nothing older is held at this level: the search is complete, not cut.
+            let Some(tb) = self.newest_block_before(l, s.freq, s.end_ns, s.reach_tb) else {
+                // Nothing older is held at this level within the reach: the search is complete,
+                // and anything older is the ladder's.
                 s.done = true;
                 break;
             };
             let b0 = tb.saturating_mul(blk);
-            // Both bounds on the level's own cell grid, so no stage splits a cell. A part-cell
-            // before `end` (an unaligned `before`) cannot be read without folding frames from after
-            // it, and is reported unsearched rather than empty.
+            // Both bounds on the output row grid, so no stage splits a row. The top is the row
+            // holding the block's end rounded UP — the row the tile drew the block's last cells in;
+            // nothing newer than the block is held over `freq`, so the part of that row past the
+            // block reads nothing extra — but never past the row holding `end`. A part-row before
+            // an unaligned `end` cannot be read without folding frames from after it, and is
+            // reported unsearched rather than empty.
             let raw = s.end_ns.min(b0.saturating_add(blk));
-            let hi = raw.div_euclid(q) * q;
+            let hi = raw
+                .div_euclid(q)
+                .saturating_add(i64::from(raw.rem_euclid(q) != 0))
+                .saturating_mul(q)
+                .min(s.end_ns.div_euclid(q) * q);
             let floor = b0.div_euclid(q) * q;
             if raw > hi {
                 s.out.stages.push(LastKnownStage {

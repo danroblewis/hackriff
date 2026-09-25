@@ -710,3 +710,81 @@ fn a_pinned_search_out_of_budget_says_so() {
     assert_eq!(skipped.len(), 1, "{:?}", k.stages);
     assert_eq!((skipped[0].from_ns, skipped[0].to_ns), (T0, T0 + 10 * S));
 }
+
+/// T-911 review: the stage top is the output row holding the newest block's END, rounded UP — the
+/// row the tile drew the block's last cells in — never rounded down past it to an older row.
+///
+/// 10-s blocks, 4-s output rows: −60 dB over `[T0, T0+4)`, −50 dB over `[T0+8, T0+10)`. The tile
+/// row `[T0+8, T0+12)` draws −50, so that is what the band carries into the next tile. Rounding
+/// the block end (T0+10) down to T0+8 skipped that row as "unsearched" and carried −60.
+#[test]
+fn a_pinned_search_reads_the_output_row_holding_the_block_end() {
+    let dir = TempDir::new("lastknown-pinned-block-end");
+    let mut p = Pyramid::open(&dir.0, ladder()).unwrap();
+    for (k, v) in [
+        (0, -60.0),
+        (1, -60.0),
+        (2, -60.0),
+        (3, -60.0),
+        (8, -50.0),
+        (9, -50.0),
+    ] {
+        let psd = vec![lin(v); 4];
+        p.ingest(&frame(T0 + k * S, S, 16_000.0, 1000.0, &psd))
+            .unwrap();
+    }
+    p.seal_through(ts(T0 + 100 * S)).unwrap();
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(BAND.0, BAND.1),
+        ts(T0 + 12 * S),
+        16,
+        4 * S,
+        1_000_000,
+        1_000_000,
+    );
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    let k = s.finish();
+    let c = k.cells[0];
+    assert_eq!(
+        (c.max_db, c.t_ns),
+        (-50.0, T0 + 12 * S),
+        "{c:?} stages {:?}",
+        k.stages
+    );
+    assert!(k.stages.iter().all(|s| !s.skipped), "{:?}", k.stages);
+}
+
+/// T-911 review: the pinned search's index scan is bounded to [`PINNED_REACH_BLOCKS`] blocks back
+/// from `before`; a band last seen further back is left to the ladder, not found by walking every
+/// older sealed tile of the level under the store's lock.
+#[test]
+fn a_pinned_search_looks_back_no_further_than_its_reach() {
+    let dir = TempDir::new("lastknown-pinned-reach");
+    let p = swept(&dir);
+    // Level 0's blocks are 10 s; B was last seen in the block starting at T0+100 s.
+    let run = |before_s: i64| {
+        let mut s = p.last_known_search_at(
+            0,
+            FreqRange::new(BAND.0, BAND.1),
+            ts(T0 + before_s * S),
+            16,
+            0,
+            1_000_000,
+            1_000_000,
+        );
+        while !s.done() {
+            p.last_known_step(&mut s).unwrap();
+        }
+        s.finish().cells[8]
+    };
+    let within = 110 + (PINNED_REACH_BLOCKS - 1) * 10;
+    assert!(run(within).found(), "B's block is inside the reach");
+    let beyond = 110 + (PINNED_REACH_BLOCKS + 1) * 10;
+    assert!(
+        !run(beyond).found(),
+        "B's block is past the reach: the ladder's"
+    );
+}
