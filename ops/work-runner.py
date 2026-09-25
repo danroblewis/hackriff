@@ -768,6 +768,18 @@ def not_own_red(t):
     return all(led.get(s) is not None and led[s].passed_alone > 0 for s in specs)
 
 
+def hand_back_reds(hb):
+    """(red, own): the hand-back's failing tests, and those of them that are the branch's own defect.
+    A worker's red proof (its new test on the OLD code, or the defect re-injected) exits non-zero by design
+    and says so with "expect": "red" - the deflaker's convention with the same guard: it counts only beside
+    a green run. Three DONE hand-backs read BLOCKED 'needs a person' on exactly that in 24 h (T-894 15:25,
+    T-905 20:16 on 2026-09-24; the app-trace deflaker at 01:32 before its own fix)."""
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)
+    red = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
+    return red, [t for t in red if not not_own_red(t)]
+
+
 def reap(claims, dry):
     changed = False
     killed = []
@@ -837,11 +849,7 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
-        red = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict) and int(t.get("exit", 0) or 0) != 0]
-        # A red the worker shows is NOT its own - a known flake, or one that reproduces on main - goes to the
-        # queue: the gate and its flake triage are the arbiter (supervisor, 2026-09-24 18:55: T-809 read as
-        # BLOCKED 'needs a person' for app-surface failing the same way on main's build at load 44).
-        own = [t for t in red if not not_own_red(t)]
+        red, own = hand_back_reds(hb)
         if hb and outcome == "done" and own:
             bad = own[0]
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
