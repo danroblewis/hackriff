@@ -940,13 +940,14 @@ def _admin(tmp_path, monkeypatch, mtime=None, which="index", gitfile=True):
 NOW = 1_000_000.0
 
 
+@pytest.mark.parametrize("dry", [False, True])       # dry: the tick's own check, with no kill-time re-check behind it
 @pytest.mark.parametrize("which", ["index", "HEAD", "logs/HEAD"])
-def test_h_git_activity_in_the_worktree_protects_it(monkeypatch, tmp_path, which):
+def test_h_git_activity_in_the_worktree_protects_it(monkeypatch, tmp_path, which, dry):
     """A live claim-less agent's detached `cmd &` looks like t901 from ps; its git status/diff does not."""
     wt = _admin(tmp_path, monkeypatch, mtime=NOW + W.ORPHAN_FOR - 60, which=which)
     rows = table(row(35689, 1, NEXTEST))
     _, sent = _orphan_env(monkeypatch, tmp_path, rows, cwds={35689: wt})
-    assert _ticks(rows, {}, {}, [NOW, NOW + W.ORPHAN_FOR]) == ([], []) and sent == []
+    assert _ticks(rows, {}, {}, [NOW, NOW + W.ORPHAN_FOR], dry=dry) == ([], []) and sent == []
 
 
 @pytest.mark.parametrize("mtime,gitfile", [(NOW - W.ORPHAN_FOR - 1, True), (None, True), (NOW + 10, False)])
