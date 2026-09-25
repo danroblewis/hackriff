@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! features@1 ─▶ tree gates ─▶ class-conditional densities ─▶ χ² open set ─▶ prior fusion
-//!                                                                    └▶ within-family class
+//!      │                                                              └▶ within-family class
+//!      └▶ the broadcast-FM pilot rule ([`crate::fm`]) ─▶ a likelihood, beside the gate
 //! ```
 //!
 //! What the stage guarantees, and what the tests below check:
@@ -14,7 +15,13 @@
 //!   when no family passes a gate, and when the evidence is too flat to report one
 //!   ([`crate::thresholds`] `min_confidence`, the entropy rule).
 //! - **Priors rank, never veto** ([`crate::fuse`]).
-//! - **Nothing is certain.** The posterior is capped at `MAX_CONFIDENCE`.
+//! - **Nothing is certain.** The posterior is capped at `MAX_CONFIDENCE`, and an abstention at
+//!   `MAX_UNKNOWN_CONFIDENCE` — "I could not measure this" is not a near-certain claim, and the
+//!   residual above the cap goes to the families the tree left admissible (T-970).
+//! - **A measurement may stand beside a gate.** The pre-classification rule of [`crate::fm`]
+//!   measures the FM multiplex directly and supplies a likelihood, so a broadcast station whose
+//!   in-band SNR the densities cannot be trusted at is still named. It is evidence, not a verdict:
+//!   it enters the likelihood and is fused with the C17 prior like everything else.
 //!
 //! The verifier (T-200) and the per-family DL stage (T-204) re-rank *within* what this stage
 //! produced; neither may add a family it did not score.
@@ -22,14 +29,15 @@
 use hk_estimate::blind::SymbolParameters;
 use hk_model::Timestamp;
 use hk_model::classify::{
-    ClassCall, ClassFlag, ClassProvenance, Classification, Coarse, HK_MOD_V1, LabelP, Stage,
-    SuspectFlags, TaxonomyRef, UNKNOWN, entropy_norm,
+    ClassCall, ClassFlag, ClassProvenance, Classification, Coarse, HK_MOD_V1, LabelP,
+    MAX_UNKNOWN_CONFIDENCE, Stage, SuspectFlags, TaxonomyRef, UNKNOWN, entropy_norm,
 };
 use hk_model::emitter::LinkTarget;
 use num_complex::Complex32;
 
 use crate::density::DensityModel;
 use crate::features::{FeatureInput, Features, features};
+use crate::fm::{self, WfmCall};
 use crate::fuse::{FamilyPriorSet, fuse};
 use crate::openset::open_set_score;
 use crate::thresholds::{
@@ -137,6 +145,39 @@ impl Classifier {
         &self.model
     }
 
+    /// The broadcast-FM pre-classification rule ([`crate::fm`]), run on the request's own samples.
+    ///
+    /// Bounded by construction: it measures nothing unless C13 reports a station-shaped occupied
+    /// bandwidth ([`fm::STATION_OBW_HZ`]) at a rate that can carry a 57 kHz subcarrier
+    /// ([`fm::MIN_MPX_RATE_HZ`]), so the extra transform is paid on FM-shaped boxes and on nothing
+    /// else. Every outcome leaves a machine reason, so a row says whether the rule looked.
+    fn wfm_rule(
+        &self,
+        request: &ClassifyRequest<'_>,
+        reasons: &mut Vec<String>,
+    ) -> Option<WfmCall> {
+        let obw = request.obw_hz?;
+        if !(fm::STATION_OBW_HZ.0..=fm::STATION_OBW_HZ.1).contains(&obw)
+            || request.sample_rate_hz < fm::MIN_MPX_RATE_HZ
+        {
+            return None;
+        }
+        let Some(ev) = fm::mpx_evidence(request.samples, request.sample_rate_hz) else {
+            push_reason(reasons, "mpx_not_measurable");
+            return None;
+        };
+        match fm::wfm_rule(Some(obw), &ev) {
+            Some(call) => {
+                push_reason(reasons, call.reason);
+                Some(call)
+            }
+            None => {
+                push_reason(reasons, "no_fm_pilot");
+                None
+            }
+        }
+    }
+
     /// Classifies one normalised snippet.
     pub fn classify(&self, request: &ClassifyRequest<'_>) -> Classification {
         let f = features(&FeatureInput {
@@ -197,6 +238,14 @@ impl Classifier {
             flags.push(ClassFlag::SuspectInput);
         }
 
+        // 1b. **The pre-classification rule** (T-970): a 19 kHz stereo pilot with its subcarriers
+        // suppressed is a broadcast FM multiplex and nothing else in `hk-mod@1` produces one, so
+        // the measurement decides on its own — including where the SNR gate above held `analog`
+        // back, because a tone's detectability is set by the integration time and not by the
+        // in-band SNR of the whole 200 kHz channel (see [`crate::fm`]). It reads only the samples
+        // and C13's occupied bandwidth; it cannot reach a band plan.
+        let wfm = self.wfm_rule(request, &mut reasons);
+
         // 2. Open set: how far the snippet is from every family that was allowed to explain it
         // (the calibrated plausibility). The evidence-only distribution ranks what is left.
         let open_set = open_set_score(scored.iter().map(|(_, s)| s.plausibility));
@@ -243,6 +292,21 @@ impl Classifier {
             }))
             .collect();
 
+        // The rule's claim enters as **likelihood**, not as a verdict: it is evidence about the
+        // waveform, so it goes where the cascade's evidence goes and is then fused with the C17
+        // prior exactly like any other. Because it dominates by far more than the evidence ratio
+        // `fuse` will reorder within, a prior cannot argue with it — but it is not exempt from
+        // being argued with, which a hard-coded family would have been.
+        let likelihood = match &wfm {
+            Some(call) => rule_likelihood(&likelihood, call),
+            None => likelihood,
+        };
+        let open_set = match &wfm {
+            Some(call) => 1.0 - call.confidence,
+            None => open_set,
+        };
+        let known_mass = 1.0 - open_set;
+
         // 3. Fusion with the C17 prior (a prior can reorder, never veto or reach `unknown`).
         let fused = fuse(&likelihood, open_set, request.prior.as_ref());
         let mut posterior = fused.posterior;
@@ -258,6 +322,9 @@ impl Classifier {
         };
         let entropy_of_likelihood = entropy_norm(&likelihood, tax.families.len() + 1);
         let abstain = match &top {
+            // The rule measured the multiplex; the abstention rules below all ask whether the
+            // *density cascade* said enough, which is a question the rule has already answered.
+            _ if wfm.is_some() => None,
             None => Some("no_family_scored"),
             Some((label, p)) => {
                 let t = thresholds_of(label);
@@ -306,6 +373,15 @@ impl Classifier {
             push_reason(&mut reasons, reason);
             force_unknown(&mut posterior);
         }
+        // **An abstention is not a confident claim** (T-970). `unknown` used to come out of the
+        // cap at `MAX_CONFIDENCE` whenever no family scored at all, so a row the cascade could not
+        // measure read `unknown 0.999` — "100 % unk" on the explorer's screen — which states more
+        // certainty about the world than a row that names a family. The residual belongs to the
+        // families the tree left **admissible**: those are precisely the ones that were not ruled
+        // out and could not be measured, which is what an abstention means (ADR-0016 §2).
+        if cap_unknown(&mut posterior, &rules) {
+            push_reason(&mut reasons, "unknown_capped");
+        }
 
         let (family, confidence) = posterior
             .iter()
@@ -318,7 +394,17 @@ impl Classifier {
             .and_then(|t| t.snr_gate_db)
             .unwrap_or(0.0);
         let class_gate = thresholds_of(&family).map_or(0.0, |t| t.class_gate_db);
-        let class = if family == UNKNOWN
+        let class = if let Some(call) = &wfm {
+            // The pilot is not evidence that the emission is *some* analog mode — it is what makes
+            // it wideband broadcast FM rather than AM, SSB or NBFM. The class gate exists because
+            // the within-family densities need SNR; this name does not come from them.
+            Some(ClassCall {
+                label: "wfm".to_owned(),
+                p: call.confidence,
+                dist: Vec::new(),
+                stage: Stage::FeatureTree,
+            })
+        } else if family == UNKNOWN
             || !request
                 .snr_db
                 .is_some_and(|s| s >= snr_gate_db + class_gate)
@@ -410,6 +496,75 @@ impl Classifier {
         }
         out
     }
+}
+
+/// Redistributes `likelihood` so `analog` carries the rule's confidence, keeping the relative
+/// order of everything else (the ranking still seeds MAUTO, ADR-0016 §8).
+fn rule_likelihood(likelihood: &[LabelP], call: &WfmCall) -> Vec<LabelP> {
+    let rest: f64 = likelihood
+        .iter()
+        .filter(|lp| lp.label != "analog")
+        .map(|lp| lp.p)
+        .sum();
+    let share = 1.0 - call.confidence;
+    likelihood
+        .iter()
+        .map(|lp| LabelP {
+            label: lp.label.clone(),
+            p: if lp.label == "analog" {
+                call.confidence
+            } else if rest > 0.0 {
+                share * lp.p / rest
+            } else if lp.label == UNKNOWN {
+                share
+            } else {
+                0.0
+            },
+        })
+        .collect()
+}
+
+/// Holds an abstention's posterior at [`MAX_UNKNOWN_CONFIDENCE`], moving the excess to the
+/// families `rules` left admissible (or, when the tree admitted none, to every family: "we could
+/// measure nothing" is maximal ignorance, not certainty). Returns whether it had to.
+fn cap_unknown(posterior: &mut [LabelP], rules: &[crate::tree::Admissibility]) -> bool {
+    let Some(u) = posterior.iter().position(|lp| lp.label == UNKNOWN) else {
+        return false;
+    };
+    if posterior[u].p <= MAX_UNKNOWN_CONFIDENCE || posterior.iter().any(|lp| lp.p > posterior[u].p)
+    {
+        return false;
+    }
+    let admitted: Vec<usize> = (0..posterior.len())
+        .filter(|i| *i != u)
+        .filter(|i| {
+            rules.is_empty()
+                || !rules.iter().any(|r| r.family == posterior[*i].label)
+                || rules
+                    .iter()
+                    .any(|r| r.family == posterior[*i].label && r.allowed)
+        })
+        .collect();
+    let targets: Vec<usize> = if admitted.is_empty() {
+        (0..posterior.len()).filter(|i| *i != u).collect()
+    } else {
+        admitted
+    };
+    if targets.is_empty() {
+        return false;
+    }
+    let excess = posterior[u].p - MAX_UNKNOWN_CONFIDENCE;
+    posterior[u].p = MAX_UNKNOWN_CONFIDENCE;
+    let weight: f64 = targets.iter().map(|i| posterior[*i].p).sum();
+    for i in &targets {
+        posterior[*i].p += if weight > 0.0 {
+            excess * posterior[*i].p / weight
+        } else {
+            excess / targets.len() as f64
+        };
+    }
+    crate::fuse::normalise_dist(posterior);
+    true
 }
 
 fn push_reason(reasons: &mut Vec<String>, reason: &str) {
