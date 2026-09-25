@@ -29264,7 +29264,7 @@ tasks:
   - id: T-998
     milestone: MMAP
     title: Narrow time ruler (<= 40 px) with a 'seconds ago' vs timestamp toggle in the settings menu; same narrow treatment for the frequency ruler
-    status: todo
+    status: done
     priority: medium
     deps:
     - T-993
@@ -29292,6 +29292,7 @@ tasks:
       Commits: 3ff533fa
       Observed, not chased: e2e first mount often exceeds the timeout under load avg ~40; passes once warm. Port 9216 was held by another worker, used 9520/9600.
       Resources: 1166 CPU-s, peak 2.9 GB — LEAKED 7 processes (killed at reap)
+    commit: 0b8468dd
   - id: T-999
     milestone: MMAP
     title: "Past-survey Go-to loses its time jump: the drawer writes reviewAt but no pane moves to it and mirror() overwrites it - move the pane's time + the missing test"
