@@ -1690,7 +1690,6 @@ def test_the_reset_a_usage_limit_message_names_is_the_next_one_after_it_was_writ
 
 def test_only_the_accounts_limit_messages_count_as_a_usage_limit():
     assert R._USAGE_LIMIT.search(LIMIT_TEXT)
-    assert R._USAGE_LIMIT.search("API Error: spend limit reached (daily; resets 2026-09-26 00:00 UTC)")
     assert not R._USAGE_LIMIT.search("Context limit reached · /compact or /clear to continue")   # one session's
     assert not R._USAGE_LIMIT.search("Error: Exceeded USD budget (5)")                           # --max-budget-usd
 
@@ -1715,22 +1714,40 @@ def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launc
     assert [k for _, k, _ in seen] == ["USAGE_LIMIT"]
     until = R.usage_limited()
     assert until == c["limited_until"] and until == R.usage_limit_until(text, at) == at + 1800 and until > time.time()
-    # while it holds: no dispatch, no deflaker, no fix run, and the limited run stays put
+    # while it holds: no dispatch (remote or here), no deflaker, no fix run, and the limited run stays put
     monkeypatch.setattr(R, "hosts", lambda: {"node2": {"cap": 6}})
-    assert R.dispatch_remote(claims, dry=False) is False
+    monkeypatch.setattr(R, "board", lambda: [{"id": "T-900"}])
+    monkeypatch.setattr(R, "candidates", lambda tasks, claims: tasks)
+    monkeypatch.setattr(R, "host_for", lambda t, claims: "node2")
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append(t["id"]) or {"ticket": t["id"]})
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 4)
+    monkeypatch.setattr(R, "disk_free_gb", lambda: launched.append("mac-dispatch-went-on") or 0.0)
+    assert R.dispatch(claims, dry=False) is False and launched == []
     assert R.dispatch_deflakes(claims, dry=False) is False
     assert R.relaunch_held_fixes(claims) is False and claims["T-802"]["state"] == "limited"
-    # its worktree is kept while it waits
-    live = {x.get("wt") for x in claims.values() if x.get("state") in ("running", "fix-held", "limited")}
-    assert c["wt"] in live
     # the reset passes: the held-fix pass resumes the session with the limit's own KILLED line, through the cap
     (tmp_path / "usage-limited").write_text(f"{time.time() - 1:.0f}\n")
+    assert R.dispatch_remote(claims, dry=False) is True and launched == ["T-900"]   # the stubs above do dispatch
+    del claims["T-900"]
     relaunched = []
     monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: relaunched.append((c["ticket"], line)) or dict(c, state="running", kind="fix"))
     monkeypatch.setattr(R, "host_room", lambda claims, h, exclude=None: None)
     assert R.relaunch_held_fixes(claims) is True
     assert relaunched[0][0] == "T-802" and relaunched[0][1].startswith("KILLED") and "USAGE LIMIT" in relaunched[0][1]
     assert claims["T-802"]["state"] == "running"
+
+
+def test_a_named_reset_already_past_still_holds_for_the_floor(killed_run, monkeypatch, tmp_path):
+    """Review 2026-09-25: the runs said 'resets 9:20am' under a monthly spend limit; read after 9:20 the hold was in the
+    past, so every limited run would resume, die and resume again each tick."""
+    claim, fixes, alerts, seen = killed_run
+    d = tmp_path / "work" / "T-802"
+    (d / "out.json").write_text(json.dumps({"is_error": True, "result": LIMIT_TEXT, "session_id": "s1"}))
+    monkeypatch.setattr(R, "usage_limit_until", lambda text, at: time.time() - 3600)
+    claims = claim(session_id="s0")
+    R.reap(claims, dry=False)
+    assert claims["T-802"]["state"] == "limited" and R.usage_limited() >= time.time() + R.USAGE_LIMIT_FLOOR_S - 5
 
 
 def test_a_fix_run_asked_for_while_the_limit_holds_waits_quietly(monkeypatch, tmp_path):

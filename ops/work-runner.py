@@ -490,10 +490,10 @@ def slot_cap(host):
 # your session limit resets 9:20am"; each was scored an 'error' (released only after RELEASE_AFTER_H), and dispatch kept
 # launching into the wall - 15 tickets in 7 min, the whole frontier, then 0 running until a person resumed them. Now such
 # a run is 'limited': nothing launches until the named reset, then each limited run resumes its own session.
-# The CLI's own account-limit prefixes (review: 'limit reached' alone also matched 'Context limit reached', one session's
-# problem, which would freeze all dispatch and resume the same full context every 30 min).
-_USAGE_LIMIT = re.compile(r"^(You've hit your|You've reached your|You're out of usage credits|Your org is out of usage)\b"
-                          r"|\b(usage|spend|usage credit) limit reached\b", re.I | re.M)
+# The CLI's own account-limit message, as all 27 of 2026-09-25's read (review: 'limit reached' alone also matched
+# 'Context limit reached', one session's problem, which would freeze all dispatch).
+_USAGE_LIMIT = re.compile(r"^You've hit your\b", re.I | re.M)
+USAGE_LIMIT_FLOOR_S = 300   # a named reset already past still holds this long (review: the limit outlived its 9:20)
 
 
 def usage_limit_until(text, at):
@@ -1225,7 +1225,8 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         if res.get("is_error") and _USAGE_LIMIT.search(text):
             out_f = c.get("out") or f"{d}/out.json"
-            until = usage_limit_until(text, os.path.getmtime(out_f) if os.path.exists(out_f) else time.time())
+            until = max(usage_limit_until(text, os.path.getmtime(out_f) if os.path.exists(out_f) else time.time()),
+                        time.time() + USAGE_LIMIT_FLOOR_S)
             if until > usage_limited():
                 open(f"{S}/usage-limited", "w").write(f"{until:.0f}\n")
                 attention(tid, c["branch"], "USAGE_LIMIT", f"the account usage limit stopped this run; nothing launches "
