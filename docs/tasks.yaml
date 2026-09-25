@@ -27551,7 +27551,7 @@ tasks:
   - id: T-927
     milestone: MMAP
     title: "Density layer follow-ups: a hung GET never clears (no timeout), joined-request edge stamp, stale late-batch addrs, NaN-edge guard, poll-period constant (T-810 re-review)"
-    status: in-progress
+    status: done
     branch: task-t927
     priority: normal
     deps:
@@ -27579,6 +27579,7 @@ tasks:
       Commits: 21c81378, 85214ef1
       Observed, not chased: The conflict was purely a same-file collision with T-810's later review fix (a50166bb); nothing of main's was reverted - its per-pane copies, its no-seal rule and its shared reader are all still asserted by their own tests, which pass unchanged except for the reader's new answer shape. | ui/test/surface-priors.test.ts pinned the density poll's literal period ('..., 1000)') in an assertion about priors - a second file's test broke on a density-only change. Updated to the constant here; the wider pattern (host-source regex assertions spread across per-layer test files) is why the host logic moved into its own module.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: ab76e0d9
   - id: T-928
     milestone: MAUTO
     title: Confirm-gate init-cancel guard misses spans with start_bit > 0 (must precede template seeding / floor 8); stale floor-8 doc text; CheckTally preallocates ~790 KB per check block (T-575 review)
