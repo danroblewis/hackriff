@@ -28021,6 +28021,15 @@ tasks:
       FOUND 2026-09-25 by the explorer: the POCSAG recipe hard-codes clock_recovery.symbol_rate_bd: 1200 while its own match declares 500-2500 Bd - a manual-mode choice hidden in a recipe (512/2400 POCSAG never tried). Also its follow-hops channel choice takes channels straight from blind detections, so the DC point (930.800) and 3 comb spurs filled 4 of its 8 slots while real channels (929.883, 931.158, 931.733) were left out. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
       DELIVER: (1) the recipe estimates the symbol rate per channel (or tries 512/1200/2400 by sync evidence) - no fixed rate; (2) follow-hops ranks channels by evidence and skips detections the spur/DC mask marks as artefacts (coordinate with T-948, which owns the mask). Tests: synthetic POCSAG at 512 and 2400 Bd decode through the recipe (red today); a scene with a DC spike + spur comb + 3 real channels picks the real ones.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 09:24).
+      (1) clock_recovery gains symbol_rate_candidates_bd: rate estimated from zero-crossing spacings (lowest candidate whose period explains >=85% of 64 spacings), applied at the next chunk boundary (documented as the one non-chunk-invariant mode; not with pulse rrc). recipes/pocsag.recipe.json now uses [512,1200,2400] instead of a fixed 1200; test drives fsk_demod->clock(recipe params)->slicer at 512/1200/2400 Bd and recovers the tail bits exactly. (2) follow-hops resolve_channels now goes through rank_detections/is_artefact: drops the tuned-centre DC point, detections flagged artifact_of/spur/dc in their fingerprint (hook for T-948's mask, which has not landed) and steady carriers (duty_cycle>=0.95) for bursty recipes, ranks the rest by sightings; a DC spike + 3 comb spurs + 3 real channels picks the 3 real ones. Refresh path also passes the tuned centre.
+      Tests: cargo nextest run -p hk-blocks -E 'test(/pocsag/) | test(/clock/)' -> exit 0 (9 passed); cargo nextest run -p hk-blocks -E 'binary(m1_recipes) | test(/descriptors/)' -> exit 0 (passed); cargo nextest run -p hk-pipeline -E 'test(/rank_tests/) | binary(follow_hops)' -> exit 0 (6 passed)
+      precheck exit 0
+      Commits: e04aa693
+      Observed, not chased: Artefact filtering relies on fingerprint keys artifact_of/spur/dc/duty_cycle; T-948's mask must populate them (or this should call its API) once it lands. | Rate estimation is heuristic zero-crossing spacing on the discriminator output; not validated on real over-the-air pages. | Did not run hk-api/hk-recipe recipe-match tests (no pocsag symbol_rate/clock references found by grep).
+      Use cases: SIGNAL-062
+      Resources: 388 CPU-s, peak 1.8 GB
   - id: T-952
     milestone: MAUTO
     title: "APRS: AFSK1200/AX.25 recipe (no APRS decode path exists)"
