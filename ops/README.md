@@ -135,6 +135,8 @@ for a human/AI to handle — AI is only needed for the exceptions.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup bash ops/merge-runner.sh >/dev/null 2>&1 & disown
 # queue:    echo task-t519 >> $HACKRIFF_OPS/merge-queue.txt
+# review:   mkdir -p $HACKRIFF_OPS/review-hold && echo '<why>' > $HACKRIFF_OPS/review-hold/task-t519   # queued but never gated until
+#           rm $HACKRIFF_OPS/review-hold/task-t519 after the verdict (T-955, 2026-09-25: a tip moved mid-review landed)
 # failures: cat $HACKRIFF_OPS/merge-needs-attention.txt
 # merged:   cat $HACKRIFF_OPS/merge-done.txt   ·   log: $HACKRIFF_OPS/merge-runner.log
 ```

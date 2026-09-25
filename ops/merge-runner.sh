@@ -658,6 +658,17 @@ ready_filter(){
     git -C "$REPO" rev-parse --verify "$b" >/dev/null 2>&1 || { log "SKIP $b: no such branch"; continue; }
     a=$(git -C "$REPO" rev-list --count "main..$b" 2>/dev/null || echo 0)
     [ "${a:-0}" -eq 0 ] && { log "SKIP $b: nothing ahead of main (already merged?)"; continue; }
+    # HELD FOR REVIEW (supervisor 2026-09-25 12:24, incident T-955): a queued branch awaiting a review verdict outside
+    # the runner stays queued and is never gated while $S/review-hold/<branch> exists - the coordinator writes it
+    # when it sends the branch to review and removes it after the verdict. At 12:20 T-955's tip moved (a conflict
+    # fix) while it waited for its Opus review; the moved tip re-gated and landed review-FAILED code.
+    if [ -e "$S/review-hold/$b" ]; then
+      if ! cmp -s "$S/review-hold/$b" "$S/review-hold/.said-$b"; then   # said once per marker text (a subshell: no variable survives)
+        log "REVIEW HOLD $b: $(head -c 160 "$S/review-hold/$b" | tr '\n' ' ')- stays queued, not gated, until $S/review-hold/$b is removed"
+        cp "$S/review-hold/$b" "$S/review-hold/.said-$b"
+      fi
+      echo "$b" >> "$S/pm-held"; continue
+    fi
     # THE PIPELINE MANAGER'S SCOPE CHECK (user, 2026-09-23 17:30: "a lot of changes is fine; not
     # weird changes that aren't warranted - stick to the directive"; hkpy.pmbudget, tested). A
     # task-pm-* branch merges only with a `Serves:` line (an experiment, an incident, a user ask,
