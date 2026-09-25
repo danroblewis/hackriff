@@ -25799,7 +25799,7 @@ tasks:
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-866
@@ -25828,6 +25828,7 @@ tasks:
       Use cases: SIGNAL-062
       Resources: 180 CPU-s, peak 3.0 GB
     branch: task-t870
+    commit: 738bd3af
   - id: T-871
     milestone: MAUTO
     title: "LP-7: MUI: one output model across the dock and the per-signal panels"
