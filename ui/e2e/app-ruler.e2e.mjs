@@ -95,14 +95,14 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the time ruler 
   assert.equal(await page.eval("localStorage.getItem('hk-hud-time-labels')"), "absolute");
 
   // Frozen pane, then both modes again.
-  const c = JSON.parse(await page.eval(`JSON.stringify((() => { const r = document.querySelector('.sf-canvas').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })())`));
   assert.ok(await page.eval(FOLLOWING), "the pane should be following before the scrub");
-  // Freeze the pane on its window (the FAB, an explicit pause), then scrub it back a little.
+  // Freeze the pane on its window (the FAB, an explicit pause). No drag afterwards: a pan that ends
+  // at the tuned live edge re-follows by design (T-955), which would make this assertion depend on
+  // the viewport's geometry rather than on the ruler.
   await page.click("document.querySelector('.map-fab')");
   await page.waitFor("the pane to freeze", `!(${FOLLOWING})`, { timeoutMs: 10000 });
-  await page.drag({ x: c[0], y: c[1] }, { x: c[0], y: c[1] + 120 }, 10);
   await page.frames(5);
-  assert.equal(await page.eval(FOLLOWING), false, "the pane resumed following after the scrub");
+  assert.equal(await page.eval(FOLLOWING), false, "the frozen pane resumed following");
   await check("absolute", "frozen, absolute");
   await toggle();
   await check("relative", "frozen, relative");

@@ -29237,6 +29237,8 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Narrow time ruler (<= 40 px) with a 'seconds ago' vs timestamp toggle in the settings menu; same narrow treatment for the frequency ruler
 
       Review found clock-time mode repeating HH:MM:SS on sub-second ticks; labels clipped at 36px; frozen-pane e2e unverified. Fixed: fmtRulerLocal(t, step) adds decimals below 1s (MM:SS.d / SS.ddd), relative labels compacted (1m20s, now) so nothing clips, e2e asserts no clipping/unique labels/FAB-frozen pane.
+
+      Merge: main's T-997 chrome reserve conflicted in hud.ts/tests; combined hudLabels(r, h, dpr, reserve, mode) and narrowed TIME_LABEL_BOX_CSS to the 40px ruler box. app-ruler + app-inv-pills e2e green.
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 14:37).
       HUD time ruler narrowed to <=40 px (8px type, labels 4px off the edge, ticks 5/3 px, no UTC sub-label); mode toggle 'Time ruler: seconds ago / clock time' in the ⋯ settings menu, persisted per viewer in localStorage key hk-hud-time-labels (try/catch, default relative); absolute mode shows local HH:MM:SS derived from the label's own capture-time ns. Frequency ruler got the same narrow treatment (8px type, 13px above the bottom edge, shorter ticks). New e2e app-ruler.e2e.mjs (1280 and 400 px, following and frozen pane, both modes, width<=40, no overlap with .map-glass chrome, persistence) passes; unit tests added in surface-hud.test.ts; storage key registered in map-overlay-position test. Screenshots in ~/.hackriff-ops/work/T-998/ruler-1280.png and ruler-400.png. No Rust touched so precheck (cargo fmt/clippy) not applicable.
