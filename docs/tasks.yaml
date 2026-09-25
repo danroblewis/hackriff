@@ -27997,7 +27997,7 @@ tasks:
   - id: T-949
     milestone: MAUTO
     title: "FLEX pager capture into fixtures/ (LFS, hidden truth) + new use cases: terrestrial paging, terrestrial APRS"
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
@@ -28009,6 +28009,7 @@ tasks:
       FOUND 2026-09-25 by the explorer (pagers, 929.6-932.0 MHz): a live capture of 3 FLEX channels, oracle-confirmed and NOT decodable by the app: ~/.hackriff-ops/explorer/captures/20260925/flex-pagers-930p8.sigmf-{meta,data} + .truth.json - 12 s, 2.4 Msps at 930.8 MHz, 57.6 MB (FLEX frames are 1.875 s; 6 s held only 1 sync). Truth: FLEX sync 0xA6C6AAAA at 1600 bps on 929.608 (4-level, +-4.9/+-1.6 kHz), 929.933, 931.733 (2-level, +-4.8 kHz) - 3, 1 and 2 syncs in the clip (the explorer's numpy oracle tools/oracle_pager.py); 0 POCSAG syncs. use_case: null - a paging use case is proposed in the truth file.
       DELIVER: (1) append use cases (never renumber; docs/05 + docs/use-cases.yaml together, per CLAUDE.md "Adding a use case"): terrestrial 929-932 MHz paging (FLEX/POCSAG) and terrestrial APRS 144.390 MHz AFSK1200/AX.25 (only SIGNAL-036 ISS APRS exists) - capabilities/hardware_fit/test_tier per docs/06 §3 + docs/10 §2; (2) the FLEX capture into fixtures/hackrf/explorer-2026-09-25/ under Git LFS exactly as T-935 did (hackriff:truth via py/fixtures/annotate.py, hidden from the mock SDR; manifest.json; settings LNA 32 / VGA 30 / amp on, overload flagged, stock antenna, HackRF serial from the journal; py/fixtures/build_explorer_2026_09_25.py extended); cross-check the FLEX syncs with an independent oracle (py/fixtures - add a small FLEX sync reference beside rds_ref.py if none exists).
       MAC ONLY (the capture is in ~/.hackriff-ops on the Mac Studio). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: 03d26447
   - id: T-950
     milestone: MAUTO
     title: FLEX pager decode (2/4-FSK 1600-6400 bps, BCH(31,21)) - the dominant 929-932 MHz protocol; app has only POCSAG
