@@ -255,9 +255,16 @@ export class DensityFetches {
     });
   }
 
-  /** Record a successful answer for `a`, asked when the edge stood at `edgeAtFetchNs`. */
+  /** Record a successful answer for `a`, asked when the edge stood at `edgeAtFetchNs`.
+   *
+   * A non-finite edge (no spectrum row yet, so the host has no edge to name) is stored as
+   * `-Infinity`, never as `NaN` (T-927, follow-up 4): `NaN < anything` is FALSE, so a `NaN` fetch
+   * edge would make [[due]]'s staleness test read "sealed" for ever and this address would never be
+   * asked again — an accidental seal on a live-edge tile. `-Infinity` is the truth of that case:
+   * this copy was asked before any edge was known, so it is stale as soon as one is. */
   succeeded(a: TileAddr, tile: DensityTile, edgeAtFetchNs: number, nowMs: number): void {
-    this.map.set(addrSpelling(a), { tile, edgeAtFetchNs, askedAtMs: nowMs, failures: 0 });
+    const edge = Number.isFinite(edgeAtFetchNs) ? edgeAtFetchNs : Number.NEGATIVE_INFINITY;
+    this.map.set(addrSpelling(a), { tile, edgeAtFetchNs: edge, askedAtMs: nowMs, failures: 0 });
   }
 
   /** Record a failed ask for `a`: the copy in hand (if any) is kept, and a retry is scheduled. */
