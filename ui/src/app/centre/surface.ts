@@ -1367,7 +1367,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
       const dock = document.querySelector<HTMLElement>(".app > .dock");
       const dr = dock?.getBoundingClientRect();
-      const under = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
+      // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
+      // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
+      // clear the peek strip too, not just the dock. Measured only while the sheet IS at peek
+      // (`dataset.snap`): the peek strip's box is a fixed, width-independent clearance (56 px above
+      // the dock, `sheet.css`), but the sheet OPEN (half/full) is a deliberate context switch onto
+      // the sheet's own content, and lifting the minimap (hence shrinking every pane) to chase the
+      // opened sheet's height would move the whole surface's layout on every open/close rather than
+      // fixing the one thing this ticket found wrong with the collapsed default.
+      const sheet = document.querySelector<HTMLElement>(".sheet");
+      const sr = sheet?.dataset.snap === "peek" ? sheet.getBoundingClientRect() : null;
+      const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - sr.top)) : 0;
+      const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
       // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
@@ -1391,6 +1404,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
+    // T-933: the sheet's own height changes with its snap state (peek/half/full — `sheet.css`'s
+    // transition), never the stage's size, so it needs its own observer to keep the minimap's lift
+    // correct as it opens and closes rather than only at first paint.
+    const sheetEl = document.querySelector<HTMLElement>(".sheet");
+    if (sheetEl) ro?.observe(sheetEl);
     window.addEventListener("resize", fit);
     preview.start();
 
