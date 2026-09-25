@@ -69,7 +69,7 @@ import {
   afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
-import { boxOf } from "../../surface/panes";
+import { boxOf, type PaneState } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
 // T-898: the device's OWN route through frequency (`GET /api/tune-history`), drawn like a
 // directions line — one per front end, in the same render pass as the tiles.
@@ -87,7 +87,8 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
-import { focusSelection, focusSignal } from "../explore/slice";
+import { focusSelection, focusSignal, paneRows, setInventoryPanes } from "../explore/slice";
+import type { PaneWindowSpec } from "../explore/pane-window";
 import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { activePaneName, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
@@ -494,7 +495,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // The found-signal boxes are the `detections` LAYER now (T-806, below), so this composition —
     // selections, measurements and the in-progress gesture, which are the user's own interaction
     // and are always drawn — passes `false` for them.
-    return paneMarkBoxes(Object.values(s.inventory.rows), focusId, s.selections.list, selId, pane.box, pendingRegion, false, measurements, null, pendingMeasureRegion);
+    // T-1002: THIS pane's rows — the answer to its own (t, f) window, never the active pane's.
+    return paneMarkBoxes(Object.values(paneRows(s.inventory, pane.id)), focusId, s.selections.list, selId, pane.box, pendingRegion, false, measurements, null, pendingMeasureRegion);
   };
 
   // ---- the overlay layers (T-806 / MAP-06, docs/24 §13.2) ----
@@ -507,7 +509,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
     // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
-    const rows = Object.values(s.inventory.rows);
+    // T-1002: the detections of THIS pane's window (`inventory.panes[pane.id]`), so a pane frozen
+    // on a past signal and a pane at the live edge each draw their own.
+    const rows = Object.values(paneRows(s.inventory, pane.id));
     return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
       { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
@@ -571,7 +575,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     priorsEl.replaceChildren(head, ...(more ? [more] : []), h("ol", {}, ...items));
   };
   const artifactQuads: OverlayLayerFn = (pane, edge) =>
-    artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
+    artifactLinkQuads(artifactLinks(Object.values(paneRows(store.get().inventory, pane.id)), edge), pane.box, pane.rect);
   // T-810 (MAP-10): the coarse-zoom density layer — `GET /api/tiles/events` counts, laid out here
   // through the SAME `toClip` and drawn only where `isCoarseZoom` says this pane is genuinely
   // coarse-zoomed (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for
@@ -658,12 +662,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
   const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
     const s = store.get();
-    const all = detectionPins(Object.values(s.inventory.rows));
     // T-910: the feature layer (hit areas, focus, labels) is over the DETECTIONS it identifies, so a
     // pane that hides its detections has none of it either — no invisible target for an undrawn box.
+    // T-1002: and over the detections THIS pane has, which are its own window's.
     const layouts = panes
       .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
-      .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
+      .map((v) => layoutPanePins(detectionPins(Object.values(paneRows(s.inventory, v.id))), v.id, v.box, v.rect, hPx, dpr, edge));
     pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
     placeTip();
   };
@@ -917,6 +921,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (!p) return;
     const pane = p.view.panes.get(p.activePane);
     if (!pane) return;
+    publishPanes();
     const loHz = pane.freq.centerHz - pane.freq.spanHz / 2, hiHz = pane.freq.centerHz + pane.freq.spanHz / 2;
     const spanS = pane.time.spanNs / S_TO_NS;
     const key = `${loHz}|${hiHz}|${pane.time.live}|${spanS}|${pane.time.live ? "" : pane.time.centerNs}`;
@@ -925,6 +930,44 @@ function mount(el: HTMLElement, ctx: AppContext) {
     store.set((s) => ({ live: { ...s.live, view: { loHz, hiHz } } }));
     if (pane.time.live) store.set((s) => (s.time.live && s.time.spanS === spanS ? {} : { time: { live: true, spanS } }));
     else store.set(reviewAt(pane.time.centerNs / S_TO_NS + spanS / 2, spanS));
+  }
+
+  // ---- and publish EVERY pane's window, not only the active one (T-1002) ----
+  //
+  // The mirror above is what the chrome is scoped to; this is what the DETECTIONS are scoped to.
+  // The inventory is time-scoped to the view (CLAUDE.md's signal model) and each pane is its own
+  // view, so each pane's `(t, f)` window is published and answered separately — otherwise freezing
+  // pane 1 on a past signal re-scopes pane 2's live boxes to pane 1's past window, which is exactly
+  // the split view failing to be a split.
+  //
+  // View arithmetic only: a pane's own centre/span in both axes, in layout order, plus which one is
+  // active. `setInventoryPanes` is a no-op when nothing moved, so this is safe on the frame hook —
+  // and it has to be on one, because the active pane changes in a press's own dispatch (T-1000) and
+  // the lists must follow it there, not a poll later.
+  /** One pane's window as the inventory queries need it — the same arithmetic `mirror()` publishes
+   * for the active pane, per pane. `tS` is the instant the pane's window ENDS at. */
+  const paneSpec = (pane: PaneState, n: number): PaneWindowSpec => {
+    const spanS = pane.time.spanNs / S_TO_NS;
+    return {
+      id: pane.id, n,
+      loHz: pane.freq.centerHz - pane.freq.spanHz / 2,
+      hiHz: pane.freq.centerHz + pane.freq.spanHz / 2,
+      live: pane.time.live,
+      tS: pane.time.live ? null : pane.time.centerNs / S_TO_NS + spanS / 2,
+      spanS,
+    };
+  };
+  function publishPanes(): void {
+    const p = preview;
+    if (!p) return;
+    const list = p.view.panes.list();
+    const specs = list.map((pane, i) => paneSpec(pane, i + 1));
+    const i = list.findIndex((pane) => pane.id === p.activePane);
+    const at = i < 0 ? 0 : i;
+    const active = specs.length
+      ? { id: specs[at].id, n: at + 1, count: specs.length, label: `pane ${at + 1} of ${specs.length}` }
+      : null;
+    store.set(setInventoryPanes(specs, active));
   }
 
   // ---- the retune control (T-444, made persistent and per-pane by T-476) ----
@@ -1431,7 +1474,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!hit?.mark) return;
         const s = store.get();
         if (hit.mark.kind === "signal-box") {
-          const row = s.inventory.rows[hit.mark.id];
+          // T-1002: the row as THIS pane knows it — the box was drawn from that pane's answer.
+          const row = paneRows(s.inventory, hit.pane.id)[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
         } else if (hit.mark.kind === "selection-box") {
           const sel = s.selections.list.find((x) => x.id === hit.mark!.id);
@@ -1603,6 +1647,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
       syncLayerControls();
       renderFollow();
       viewMoved();
+      // T-1002: the lists follow the active pane, so they are re-scoped in the SAME dispatch as the
+      // outline — a press on pane 1 shows pane 1's Candidates, named, not pane 2's for a poll.
+      publishPanes();
     };
     pv.onActiveChange(activeChanged);
     // The pane keys: `[` / `]` step through the panes, `1`-`9` pick one, `L` toggles Live on the
