@@ -9666,6 +9666,36 @@ fn row_push_route_serves_an_address_range_growing_or_sealed() {
         }
         assert_eq!(v["row0"], json!(row), "{v}");
         let n = v["rows"].as_i64().unwrap();
+        if v["type"] == "rows" {
+            // T-902: every block states the honesty tier its rows were measured at, and it is the
+            // tier `/api/tiles` states for the same address when the same level answered — one
+            // rule, so a client never has to infer a pushed-row tile's tier.
+            let res = &v["resolution"];
+            let src = res["source"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no tier: {v}"));
+            assert!(
+                ["live-iq", "spectrum-history", "survey-overview"].contains(&src),
+                "{v}"
+            );
+            assert_eq!(res["live"], json!(src == "live-iq"), "{v}");
+            assert_eq!(res["fold"]["time"]["served"], json!(n), "{v}");
+            assert_eq!(res["fold"]["frequency"]["served"], json!(N), "{v}");
+            let t_index = v["tile"]["t_index"].as_i64().unwrap();
+            let (st, tile) = get(
+                addr,
+                &format!(
+                    "/api/tiles?level_f=0&level_t=0&f_index={f_index}&t_index={t_index}&cells={N}"
+                ),
+            );
+            assert_eq!(st, 200, "{tile}");
+            if tile["resolution"]["answered"]["level"] == v["answered"]["level"] {
+                assert_eq!(
+                    tile["resolution"]["source"], res["source"],
+                    "the row feed and the tile route disagree on a tier: {v} vs {tile}"
+                );
+            }
+        }
         if v["type"] == "rows" && v["final"] == json!(true) {
             let db = v["max_db"].as_array().unwrap();
             for r in 0..n {
