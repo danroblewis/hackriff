@@ -60,12 +60,12 @@ function spy(over: (spellings: string[]) => unknown = () => null) {
 test("the batch request the client builds is the route's own spelling", () => {
   assert.equal(
     tilesBatchUrl([addr(3), addr(4, { levelF: 1, levelT: 2, tIndex: 9 })]),
-    "/api/tiles/batch?addresses=0.0.3.7%2C1.2.4.9&planes=f16",
+    "/api/tiles/batch?addresses=0.0.3.7%2C1.2.4.9&planes=compact",
   );
   // The viewport's own parameters ride once, beside the addresses — never per address.
   assert.equal(
     tilesBatchUrl([addr(0, { device: "hackrf:abc", scheme: "overview", cells: 64 })]),
-    "/api/tiles/batch?addresses=0.0.0.7&scheme=overview&device=hackrf%3Aabc&cells=64&planes=f16",
+    "/api/tiles/batch?addresses=0.0.0.7&scheme=overview&device=hackrf%3Aabc&cells=64&planes=compact",
   );
   assert.equal(addrSpelling(addr(12, { levelF: 3, levelT: 5, tIndex: 218427 })), "3.5.12.218427");
   // What may share one request is exactly what the route takes once.
@@ -81,12 +81,12 @@ test("T-630: a named page's batch carries `client` once, as its single-tile requ
   try {
     assert.equal(
       tilesBatchUrl([addr(3), addr(4)]),
-      "/api/tiles/batch?addresses=0.0.3.7%2C0.0.4.7&client=tab-two&planes=f16",
+      "/api/tiles/batch?addresses=0.0.3.7%2C0.0.4.7&client=tab-two&planes=compact",
     );
   } finally {
     setTileClientId("");
   }
-  assert.equal(tilesBatchUrl([addr(3)]), "/api/tiles/batch?addresses=0.0.3.7&planes=f16");
+  assert.equal(tilesBatchUrl([addr(3)]), "/api/tiles/batch?addresses=0.0.3.7&planes=compact");
 });
 
 test("COUNT: a viewport's eight addresses cost ONE request, not eight", async () => {
@@ -236,5 +236,5 @@ test("the live edge rides ALONE: a `solo` ask is its own single-tile request, ne
   assert.equal(single.length, 1, `requests: ${urls.join(" ")}`);
   const q = new URLSearchParams(single[0].split("?")[1]);
   assert.equal(q.get("f_index"), "2");
-  assert.equal(q.get("planes"), "f16");
+  assert.equal(q.get("planes"), "compact");
 });

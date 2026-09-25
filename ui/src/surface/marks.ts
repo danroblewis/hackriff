@@ -58,6 +58,23 @@ export const PENDING_MARK: readonly [number, number, number, number] = [1, 1, 1,
  * selection (amber) or an explained artifact (grey). */
 export const MEASUREMENT_MARK: readonly [number, number, number, number] = [0.365, 0.686, 0.937, 0.9];
 
+/**
+ * T-994: a feature with an OPEN OUTPUT — a Listen stream, a running decode pipeline, a recording
+ * or a stream-out the backend reports for it. Hot pink: outside every claim-about-the-air ink
+ * (teal/lavender/grey), the user's own marks (amber/sky/white) and the live-edge yellow, so an
+ * active box reads as "something is being done with this", never as a fourth kind of signal. It is
+ * drawn as a separate HALO outside the box's own outline (shape, not hue alone, tells it from
+ * `selected`, which is a heavier outline plus corner handles on the box itself).
+ */
+export const ACTIVE_MARK: readonly [number, number, number, number] = [0.96, 0.33, 0.62, 0.95];
+/** The active halo's gap outside the box's outline, and its resting thickness, CSS px. */
+export const ACTIVE_GAP_CSS_PX = 2;
+export const ACTIVE_RING_CSS_PX = 2;
+/** How much thicker the halo draws at full audio level (the server-reported level, 0..1), CSS px:
+ * the "level pulse" — a presentation of a number the stream's status records carry, never a
+ * measurement made here. */
+export const ACTIVE_PULSE_CSS_PX = 3;
+
 export interface MarkStyle {
   /** Edge thickness, device px. */
   strokePx?: number;
@@ -167,6 +184,12 @@ export interface MarkBox {
   readonly symbology?: MarkSymbology;
   /** T-910: the selected feature — heavier outline and corner handles. */
   readonly selected?: boolean;
+  /** T-994: the feature has an open output (served by the backend's open-output records), drawn as
+   * an [[ACTIVE_MARK]] halo outside its outline. */
+  readonly active?: boolean;
+  /** T-994: the active audio output's level, 0..1 (from the server-reported dBFS), thickening the
+   * halo — the level pulse. `null`/absent = no level to show (a decode, a recording). */
+  readonly activeLevel?: number | null;
 }
 
 /** Confirmed edge / Candidate-and-artifact edge thickness, device px (T-808). */
@@ -216,6 +239,7 @@ const withAlpha = (c: readonly [number, number, number, number], a: number): rea
  */
 export function signalMarkBoxes<R extends MarkRow>(
   rows: readonly R[], focusedId: string | null, unexplained?: (row: R) => boolean,
+  active?: ReadonlyMap<string, { readonly level: number | null }>,
 ): MarkBox[] {
   const out: MarkBox[] = [];
   for (const r of rows) {
@@ -244,6 +268,7 @@ export function signalMarkBoxes<R extends MarkRow>(
       strokePx: base === CONFIRMED_MARK ? CONFIRMED_STROKE_PX : CANDIDATE_STROKE_PX,
       symbology: SYMBOLOGY[cls],
       selected: r.id === focusedId,
+      ...(active?.has(r.id) ? { active: true, activeLevel: active.get(r.id)!.level } : {}),
     });
   }
   return out;
@@ -342,7 +367,12 @@ export function markQuads(
       && isGeneralized(((x1 - x0) / 2) * W / k, ((y1 - y0) / 2) * H / k, style.generalizeBelowPx)) {
       const vx0 = Math.max(x0, -1), vx1 = Math.min(x1, 1), vy0 = Math.max(y0, -1), vy1 = Math.min(y1, 1);
       if (vx1 < vx0 || vy1 < vy0) continue;
-      symbolQuads(push, (vx0 + vx1) / 2, (vy0 + vy1) / 2, b, sym, spx, k, W, H);
+      const scx = (vx0 + vx1) / 2, scy = (vy0 + vy1) / 2;
+      if (b.active) {
+        const hx = (SYMBOL_CSS_PX * k) / W, hy = (SYMBOL_CSS_PX * k) / H;
+        activeQuads(push, scx - hx, scy - hy, scx + hx, scy + hy, b.activeLevel ?? null, 2 * k, k, W, H);
+      }
+      symbolQuads(push, scx, scy, b, sym, spx, k, W, H);
       continue;
     }
     // The drawing floor. Widened about the centre, and never read back as a measurement.
@@ -352,6 +382,8 @@ export function markQuads(
     const cy0 = Math.max(y0, -1), cy1 = Math.min(y1, 1);
     if (!(cx1 > cx0) || !(cy1 > cy0)) continue; // wholly off this pane: draw nothing, claim nothing
     const origin: readonly [number, number] = [x0, y0];
+    // T-994: the active halo first, OUTSIDE the outline, so the feature's own symbology is untouched.
+    if (sym && b.active) activeQuads(push, x0, y0, x1, y1, b.activeLevel ?? null, spx, k, W, H);
     const dashed = sym?.outline === "dashed";
     const dash = (along: "x" | "y"): OverlayPattern | undefined => dashed
       ? { mode: along === "x" ? "dash-x" : "dash-y", periodPx: DASH_PERIOD_CSS_PX * k, onPx: DASH_ON_CSS_PX * k, origin }
@@ -396,6 +428,25 @@ export function markQuads(
 
 type PushQuad = (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number],
   part: OverlayQuad["part"], pattern?: OverlayPattern) => void;
+
+/** The halo's thickness at a level (0..1, `null` = resting), CSS px. */
+export function activeRingCssPx(level: number | null): number {
+  const l = level === null || !Number.isFinite(level) ? 0 : Math.max(0, Math.min(1, level));
+  return ACTIVE_RING_CSS_PX + l * ACTIVE_PULSE_CSS_PX;
+}
+
+/** T-994: the active halo — a solid [[ACTIVE_MARK]] ring just outside the rectangle `(x0,y0)-(x1,y1)`
+ * (clip), one outline width (`spx`, device px) plus [[ACTIVE_GAP_CSS_PX]] out — so it also clears a
+ * selected feature's corner handles, which sit one outline width out. Each edge off the pane is not
+ * drawn, like every other mark's. */
+function activeQuads(
+  push: PushQuad, x0: number, y0: number, x1: number, y1: number, level: number | null,
+  spx: number, k: number, W: number, H: number,
+): void {
+  const off = spx + ACTIVE_GAP_CSS_PX * k, th = activeRingCssPx(level) * k;
+  const ox = (2 * (off + th)) / W, oy = (2 * (off + th)) / H, tx = (2 * th) / W, ty = (2 * th) / H;
+  rectEdges((clip, rgba) => push(clip, rgba, "active"), x0 - ox, y0 - oy, x1 + ox, y1 + oy, tx, ty, ACTIVE_MARK);
+}
 
 /** Four edges of a rectangle in clip space, each clipped to the pane; an edge off the pane is not drawn. */
 function rectEdges(

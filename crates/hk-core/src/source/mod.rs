@@ -461,6 +461,29 @@ impl GainStage {
         };
         Some(q.clamp(self.min_db, self.max_db))
     }
+
+    /// The stage's usable range, dB.
+    pub fn span_db(&self) -> f64 {
+        (self.max_db - self.min_db).max(0.0)
+    }
+
+    /// The stage's one step spans its whole range: an on/off control (a HackRF RF amplifier), not
+    /// something a search can walk through. [`crate::gain`] engages such a stage last.
+    pub fn is_binary(&self) -> bool {
+        self.span_db() > 0.0 && self.step_db >= self.span_db() - 1e-9
+    }
+
+    /// The smallest gain change this stage can make, dB: its own step, or — for a stage declared
+    /// continuous because [`GainStage`] cannot express its real step table (the RTL's 29 uneven
+    /// steps, see [`rtlsdr`]) — a 32nd of its range, which the driver then snaps to whatever the
+    /// device actually has. Never 0, so a search over it terminates.
+    pub fn fine_step_db(&self) -> f64 {
+        if self.step_db > 0.0 {
+            self.step_db.min(self.span_db())
+        } else {
+            (self.span_db() / 32.0).max(f64::MIN_POSITIVE)
+        }
+    }
 }
 
 /// One named gain value (a [`GainStage`] name and dB).

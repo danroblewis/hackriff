@@ -145,8 +145,12 @@ impl Block for Checksum {
             self.bits.clear();
             extend_bits(&mut self.bits, f.bytes, 0, len);
             let upstream_clean = !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
+            // The tally sees the bits the check covers (`start_bit` .. the end of the check
+            // field), never the whole frame: the degenerate-frame guard must trim the register
+            // off the *covered* span (T-928, ADR-0022 §4.3.1 hole A).
+            let covered = result.map_or(0..0, |(_, cpos)| self.span.start..cpos + self.width);
             self.ev.record(
-                &self.bits,
+                &self.bits[covered],
                 ok && upstream_clean,
                 self.width as f64,
                 self.width,

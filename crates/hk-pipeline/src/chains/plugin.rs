@@ -54,7 +54,7 @@ use hk_model::{EmitterId, TrackId};
 
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
-use crate::family::{Evidence, service_family};
+use crate::family::decoder_service_evidence;
 use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{ChainCounters, add, inc};
@@ -517,8 +517,14 @@ fn run_inner(
 /// outputs). The decoder evidence (a plugin's manifest id, a recipe decode mapping's `service`)
 /// maps through [`crate::family`]: `readsb` → `adsb`, `rtl_433` → `ism`. Every emitter the
 /// identity decodes resolved to gets that family as a Classification (only when it maps with
-/// confidence), then `Inventory::chain_emitter` ranks its explanations and sets its known status,
-/// as after the analog and FSK record writers. Legal guardrail: this writes a family label, a
+/// confidence) **at the decoder arbitration rank** ([`crate::family::decoder_service_evidence`],
+/// T-961), then `Inventory::chain_emitter` ranks its explanations and sets its known status, as
+/// after the analog and FSK record writers.
+///
+/// The emitters are the ones the decodes' identities *resolved to* — since T-961 that includes the
+/// detection row a recipe's decode was made from, which is the whole point: the CRC-valid decode
+/// names, confirms and classifies the entry that was already there instead of a second one beside
+/// it. Legal guardrail: this writes a family label, a
 /// band-plan reference and a metadata-only annotation, never an identity or content; identities
 /// stay gated by their decodes' class.
 pub(crate) fn classify_decoder_emitters(
@@ -532,7 +538,9 @@ pub(crate) fn classify_decoder_emitters(
         return;
     }
     let c = &shared.counters.chains;
-    let call = service_family(&Evidence::Decoder(plugin_id));
+    // T-961: decoder rank, not the classifier's. Every emitter here was reached by a CRC-valid
+    // decode's identity sighting, which ADR-0016 §2 ranks above any classifier verdict.
+    let evidence = decoder_service_evidence(plugin_id, t);
     let mut repo = shared.repo();
     let mut inv = shared
         .inventory
@@ -546,10 +554,10 @@ pub(crate) fn classify_decoder_emitters(
                 continue;
             }
         };
-        if let Some(classification) = call.classification(t) {
+        if let Some(classification) = &evidence {
             // T-605: named, not a bare count. A classification the database refused is a stage
             // that did not run, and a silent `continue` makes it look like one that did.
-            if let Err(err) = repo.append_classification(live, &classification) {
+            if let Err(err) = repo.append_classification(live, classification) {
                 crate::stats::storage_error(c, "plugin chain classification", &err);
                 continue;
             }

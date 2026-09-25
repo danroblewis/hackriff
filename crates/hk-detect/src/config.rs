@@ -571,6 +571,16 @@ impl DetectorConfig {
                 g.stat_time_constant_frames,
             )?;
             check_non_negative("step_guard.floor_like_min", g.floor_like_min)?;
+            check_non_negative("step_guard.narrow_feature_db", g.narrow_feature_db)?;
+            if g.narrow_feature_max_db
+                .partial_cmp(&g.narrow_feature_db)
+                .is_none_or(|o| o.is_lt())
+            {
+                return Err(ConfigError::Invalid {
+                    name: "step_guard.narrow_feature_max_db must not be below narrow_feature_db",
+                    value: g.narrow_feature_max_db,
+                });
+            }
             if g.floor_like_max
                 .partial_cmp(&g.floor_like_min)
                 .is_none_or(|o| o.is_lt())

@@ -12,7 +12,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import {
-  BYTES_PER_CELL, capFromRefusal, decodeTile, fetchTile, probeAddr, shareFromRefusal, TileBusyError,
+  BYTES_PER_CELL, capFromRefusal, decodeTile, fetchTile, heldFromRefusal, probeAddr, shareFromRefusal,
+  TileBusyError,
   TileDecodeError, type TileResponse,
 } from "../src/surface/tile";
 import { newClientId, setTileClientId } from "../src/surface/clientid";
@@ -328,7 +329,7 @@ test("fetchTile turns the route's backpressure into an answer, and everything el
     assert.equal(e.limit, 4);
     return true;
   });
-  assert.deepEqual(seen, ["/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&planes=f16"]);
+  assert.deepEqual(seen, ["/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&planes=compact"]);
 
   const ok = await fetchTile(ADDR, "tok", () => Promise.resolve({ ok: true, status: 200, statusText: "", json: () => Promise.resolve(resp()) }));
   assert.equal(ok.key, "any|view|1|2|3|4|2");
@@ -483,17 +484,46 @@ test("T-630: a named page carries `client` on every tile request, and an unnamed
   // Unnamed is the default and is byte-identical to the pre-T-630 request: an undeclared caller
   // shares the route's anonymous bucket, which behaves as the route always did.
   setTileClientId("");
-  assert.equal(tileUrl(ADDR), "/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&planes=f16");
+  assert.equal(tileUrl(ADDR), "/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&planes=compact");
   // Named, and the name is on the request — including the bootstrap probe, which is the ONE request
   // a booting client cannot start without and therefore the whole reason the identity exists.
   setTileClientId("tab-two");
-  assert.equal(tileUrl(ADDR), "/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&client=tab-two&planes=f16");
-  assert.equal(tileUrl(probeAddr()), "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&client=tab-two&planes=f16");
+  assert.equal(tileUrl(ADDR), "/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&client=tab-two&planes=compact");
+  assert.equal(tileUrl(probeAddr()), "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&client=tab-two&planes=compact");
   // Two ids are two clients: the id is per page load, never shared and never remembered.
   const ids = new Set([newClientId(), newClientId(), newClientId()]);
   assert.equal(ids.size, 3);
   for (const id of ids) assert.match(id, /^[A-Za-z0-9-_.:]{1,64}$/, `the route accepts ${id}`);
   setTileClientId("");
+});
+
+test("T-959: a refusal also names what THIS client holds, and zero is a reading, not silence", async () => {
+  // `held` is what separates a refusal over this client's own reads — including the aborted ones
+  // `hk-api` is still producing — from one over another client's slots. The first must not halve
+  // the cap and must re-charge the leftover reads; the second is what AIMD exists for. So `held 0`
+  // has to survive parsing as 0: a "positive numbers only" reader would turn the contention case
+  // into "the server said nothing", which is how the client used to treat every refusal.
+  const own = "too many tile reads in flight (limit 4, share 2, held 2) — you already hold that many, " +
+    "so these are your own reads still being produced";
+  assert.equal(capFromRefusal(own), 4);
+  assert.equal(shareFromRefusal(own), 2);
+  assert.equal(heldFromRefusal(own), 2);
+  const theirs = "too many tile reads in flight (limit 4, share 2, held 0) — 2 client(s) are reading tiles";
+  assert.equal(heldFromRefusal(theirs), 0);
+  // A pre-T-959 server names none, and that is not "holds nothing".
+  assert.equal(heldFromRefusal("too many tile reads in flight (limit 4, share 2)"), null);
+  await assert.rejects(
+    () => fetchTile(ADDR, "tok", () => Promise.resolve({
+      ok: false, status: 503, statusText: "",
+      json: () => Promise.resolve({ error: own, code: "http_503" }),
+    })),
+    (e: unknown) => {
+      assert.ok(e instanceof TileBusyError);
+      assert.equal(e.held, 2, "the refusal's own count must reach the controller");
+      assert.equal(e.share, 2);
+      return true;
+    },
+  );
 });
 
 test("T-630: a refusal names this client's SHARE as well as the server-wide cap", async () => {
@@ -582,6 +612,52 @@ test("T-533: an absent cell stays ABSENT — NaN on the wire is `null`, never a 
   }));
   assert.equal(t.state[1], CELL.AWAITING);
   assert.ok(Number.isNaN(t.value[1]));
+});
+
+/** The `frames` plane the route serves under `planes=compact`: unsigned little-endian, base64. */
+function uintPlane(counts: readonly number[], width: number, over: Record<string, unknown> = {}) {
+  const u = new Uint8Array(counts.length * width);
+  counts.forEach((v, i) => { for (let b = 0; b < width; b++) u[i * width + b] = (v / 256 ** b) & 0xff; });
+  let bin = "";
+  for (const byte of u) bin += String.fromCharCode(byte);
+  const type = { 1: "u8", 2: "u16", 4: "u32", 8: "u64" }[width];
+  return { type, byte_order: "little-endian", transfer: "base64", cells: counts.length,
+           bytes: u.length, scale: "count", absent: "none", data: btoa(bin), ...over };
+}
+
+test("T-1019: `compact` decodes to the same tile — frames from a typed plane, no grid.coverage", () => {
+  const g = resp().grid;
+  // The compact answer: every per-cell plane typed, and `coverage`/`frames`/`max_db` arrays ABSENT
+  // — `frames: 0` over an observed cell must still read AWAITING, which is the whole reason the
+  // counts are on the wire at all.
+  const compact = (width: number) => decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, range_db: g.range_db, encoding: { planes: "compact" },
+            planes: { max_db: f16Plane([-90, null, -70, -60]), frames: uintPlane([3, 0, 1, 1], width) },
+          } as TileResponse["grid"],
+  }));
+  const plain = decodeTile(ADDR, resp({ grid: { ...g, frames: [3, 0, 1, 1], encoding: { planes: "json" } } as TileResponse["grid"] }));
+  for (const width of [1, 2, 4, 8]) {
+    const t = compact(width);
+    assert.deepEqual([...t.state], [...plain.state], `width ${width}: the states are the states, whatever the spelling`);
+    assert.equal(t.state[1], CELL.AWAITING, `width ${width}: frames === 0 over an observed cell`);
+    for (let i = 0; i < plain.value.length; i++) {
+      if (Number.isNaN(plain.value[i])) assert.ok(Number.isNaN(t.value[i]), `width ${width} cell ${i}`);
+      else assert.ok(Math.abs(t.value[i] - plain.value[i]) < 0.07, `width ${width} cell ${i}`);
+    }
+  }
+  // A counts plane that does not decode exactly is refused, never read as "no counts": decoding it
+  // as absent would draw NO_LEVEL over cells the server said are AWAITING.
+  const badFrames = (over: Record<string, unknown>) => assert.throws(() => decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, range_db: g.range_db, encoding: { planes: "compact" },
+            planes: { max_db: f16Plane([-90, null, -70, -60]), frames: uintPlane([3, 0, 1, 1], 1, over) },
+          } as TileResponse["grid"],
+  })), TileDecodeError);
+  badFrames({ type: "i8" });
+  badFrames({ byte_order: "big-endian" });
+  badFrames({ transfer: "hex" });
+  badFrames({ cells: 8 });
+  badFrames({ data: "!!!!" });
+  badFrames({ data: btoa("ab") });
 });
 
 test("T-533: an encoding this client cannot read is REFUSED, never decoded as one it can", () => {

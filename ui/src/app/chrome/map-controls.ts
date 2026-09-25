@@ -28,6 +28,7 @@ import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
 import { registerMapHome } from "./top-chrome";
+import { getTimeLabelMode, onTimeLabelMode, setTimeLabelMode, type TimeLabelMode } from "../../surface/hud";
 import { registerMapInvHome } from "./inv-home";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
@@ -328,7 +329,19 @@ export function mountMapControls(host: MapControlHost): {
   const moreClose = h("button", {
     type: "button", class: "map-layers-close map-more-close", "aria-label": "Close the settings menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
-  const moreBody = h("div", { class: "map-more-body" });
+  // T-998: the time ruler's wording — "seconds ago" or the local clock — a per-viewer preference.
+  const timeModeBtn = h("button", {
+    type: "button", class: "map-pane-item map-time-mode", "data-time-mode": getTimeLabelMode(),
+    title: "Time ruler labels: relative (12 s ago) or local clock time (HH:MM:SS). Display only.",
+  }) as HTMLButtonElement;
+  const paintTimeMode = (m: TimeLabelMode) => {
+    timeModeBtn.setAttribute("data-time-mode", m);
+    timeModeBtn.textContent = m === "absolute" ? "Time ruler: clock time" : "Time ruler: seconds ago";
+  };
+  paintTimeMode(getTimeLabelMode());
+  onTimeLabelMode(paintTimeMode);
+  timeModeBtn.addEventListener("click", () => setTimeLabelMode(getTimeLabelMode() === "absolute" ? "relative" : "absolute"));
+  const moreBody = h("div", { class: "map-more-body" }, timeModeBtn);
   const moreMenu = h("div", { class: "map-glass map-pane-menu map-more-menu", id: "map-more-menu", role: "group", "aria-label": "Settings", hidden: true },
     h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreBody);
   // T-993: the retired bar's other homes. T-1025: the mode switch and the device/stream state are

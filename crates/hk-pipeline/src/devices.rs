@@ -253,6 +253,9 @@ pub(super) fn start(
     let shared = Arc::new(Shared {
         dc_twin: super::dc_twin_rule(common),
         receiver: Arc::clone(&common.receiver),
+        // T-844: a further front end runs no chains, so nothing here classifies; carried for
+        // symmetry with `run::start_segment` so a chain added later observes like the primary's.
+        ml: common.ml.clone(),
         counters: Arc::clone(&counters),
         ring,
         gate,
@@ -277,9 +280,16 @@ pub(super) fn start(
         fs,
         fft_len,
         averages,
-        inventory: Mutex::new(Box::new(crate::inventory::TrackInventory::default())),
+        // T-510: a further front end keeps its own track inventory (module docs). Held in an
+        // `Arc` like the primary's since T-941, because that is what `Shared` holds now.
+        inventory: Arc::new(Mutex::new(Box::new(
+            crate::inventory::TrackInventory::default(),
+        ))),
         specs: Vec::new(),
         display: Arc::clone(&common.display),
+        // T-974: no control plane moves a further front end (`FixedRate`), so its window is
+        // the one it was opened on, for good.
+        commanded: Arc::new(super::CommandedWindow::new((info.center_hz, fs))),
         continues: AtomicBool::new(false),
         successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
         seal_at_end: false,
