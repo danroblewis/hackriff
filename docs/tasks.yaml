@@ -29222,6 +29222,23 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p <crate> -E 'binary(<name>)'; just precheck <crates>), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY review of T-953 2026-09-25: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
+  - id: T-1012
+    milestone: M2-hardening
+    title: "Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-REPLUMB
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY the merge runner, 2026-09-25 09:57-10:28: the 14-branch bulk (base 72f9d76c) went red on hk-pipeline::loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (90.5 s, FAILED alone in the runner's triage; main green on it alone). Bisect: base + t942 t952 t844 t948 t928 t960 green; base + t567 t934 t938 RED; each of t567 / t934 / t938 alone GREEN - no single culprit, so the runner fell back to isolating every branch (hours of gates). Flake history (ops flakes registry): red 2x in 7 days, passed alone 1, failed alone 1 - 'both ways'. Also red in that gate: hk-api analyze::tests::t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity (T-844's handback already recorded it as a load flake that passes alone, 'got resolution not-searched').
+      DELIVER (deflake-triage rules): on base 72f9d76c + task-t567 + task-t934 + task-t938 merged, run the test ALONE N>=5 times and on base alone N>=5 times. Fails alone on the merge but never on base => a real interaction defect: name the pair (t938 refines WFM/RDS centres; t934 changed three wall-clock waits to counted events; t567 the sealed Resolution) and fix the root cause (on the owning branch, or here). Intermittent on both => a real nondeterminism in the test or the replay/recovery path (a wall-clock choice of what to assert, a race with fail_reads_for) - make it deterministic, prove it goes red when the defect returns. Never retry/quarantine/loosen. Do the same triage for t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity (alone x5 on the same merge).
+      TESTING PROTOCOL: targeted only (cargo nextest run -p hk-pipeline -E 'binary(loop_survives_replumb)'; -p hk-api -E 'test(t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity)'), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY merge runner bisect 2026-09-25: Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix
+    dispatch: manual
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
