@@ -27275,7 +27275,7 @@ tasks:
   - id: T-919
     milestone: MMAP
     title: The floating status box (up to 560x184 px over the map since T-918) should be a compact, closeable status line - honesty statements always visible (P1/P4)
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-918
@@ -27299,6 +27299,7 @@ tasks:
       Commits: d0e496ce
       Observed, not chased: app-trace.e2e.mjs test 1 ('the trace is the spectrum at the viewport's time position') is load-flaky on this box: it went red on an UNMODIFIED main checkout ('the drawn trace spans only rows 0..0 of 96') and red once then green twice on this branch. Both failure modes are the trace having no tiles yet for the pane span; not caused by this change. | Under 3 parallel e2e lanes on a loaded box, app-dismiss (once) and app-phone (once, 'timed out after 5000 ms waiting for the sheet's close to collapse it') each failed one batch run and passed alone immediately after — load-flakes for the deflaker, not regressions. | chrome/phone.css's <=900 px rule and T-918's insets were the second place the bar/dock heights are encoded; any further layout work should read the canvas's data-inset-top/-bottom rather than re-guessing them in a media query.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 37bf55ff
   - id: T-920
     milestone: M2-hardening
     title: "IQ ring unavailable / lossless-gate test red on Linux (node2) but green on the Mac: view_pause_keeps_capture + api_contract coverage iq-ring available:false - Jetson portability"
