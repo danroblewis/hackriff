@@ -19,6 +19,27 @@ Rebuilds the `hk` binary and restarts the "bears" demo on every **code** commit 
 (ignores docs/tasks-only commits), smoke-tests it, and keeps a cloudflared tunnel up. Prefers
 the live HackRF; falls back to a looping SigMF replay when the device is busy. Also self-heals:
 if the live spectrum stream dies it restarts.
+
+**The radio lock (T-922).** One owner of the HackRF at a time, recorded in
+**`$HACKRIFF_OPS/radio-lock`** — `key=value` lines `owner=`, `since=` and `until=` (epoch seconds),
+`why=`. Past `until` a lock is **stale**. It is managed only through `just radio`
+(`py/hkpy/radio.py`, tested in `py/tests/test_radio.py`):
+```bash
+just radio take <owner> <duration e.g. 3h|90m|2h30m> <why...>   # refuses while a live lock is held (even your own)
+just radio release <owner>                                       # releases only <owner>'s lock
+just radio status                                                # holder, until, and the staging mode
+```
+`stage.sh` respects it. While the lock is held by anyone other than `stage` it **never opens the
+HackRF** and serves its looping SigMF replay; each 45 s tick it notices a lock taken while live
+(stops the live server, restarts on replay — so a new owner waits up to ~1 min, until `just radio
+status` shows `staging: replay (radio-lock: …)`) and a lock released while on a lock-driven replay
+(back to **LIVE**). Both transitions are logged in `stage.log`, and the mode is in
+`$HACKRIFF_OPS/hk-serve-source` (`live`, `replay (radio-lock: <owner> until HH:MM)`, `replay (hackrf
+busy)`), which the dashboard and `just radio status` show. Its busy check reads **`hackrf_info`'s
+output, not its exit status**: the tool exits 0 even when the open fails (`Found HackRF … hackrf_open()
+failed: Access denied`, T-356's HIL), so the radio counts as free only with `Found HackRF` and no
+`failed`/`Access denied`/`busy`/`No HackRF` line. The watchdog releases a stale lock (rule g, below);
+the capture-agent and the explorer take and release it.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup bash ops/stage.sh >/dev/null 2>&1 & disown
 # demo:      http://127.0.0.1:8899   (token in $HACKRIFF_OPS/hk-token-bears)
@@ -296,8 +317,10 @@ ancestors are all gone can be unowned. Five rules:
 | c | more than one merge gate running | red |
 | d | `ops/monitor.py` >200 % CPU or >1.5 GB for >120 s | amber |
 | e | load1 over the plan (owners' budgets, capped at the core count, +4) for >5 min | amber + top 5 |
+| g | `$HACKRIFF_OPS/radio-lock` past its `until` (T-922) | **release the lock** + red |
 
-**Rule (b) is the only thing it kills**, and only on that signature, only when unowned, only
+**Rule (b) is the only thing it kills** (rule g removes a file, never a process: an owner that overran
+its window or died holding the radio would otherwise keep staging on replay indefinitely), and only on that signature, only when unowned, only
 sustained: a live agent's shell has a live parent, so it is *owned* and can never match. Every
 kill is logged to `watchdog.log` with its full command line. Everything else is an alert through
 `ops/alert.py` (deduped 30 min per key). The last tick is `$HACKRIFF_OPS/watchdog.json`, which

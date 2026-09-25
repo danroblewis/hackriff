@@ -11,8 +11,8 @@ You are a **capture-agent**. You drive a real SDR to capture or verify against t
 
 ## Hardware rules — non-negotiable
 - **Receive only. Never transmit** (C37 stays gated).
-- **One agent at a time per radio.** Check the device is free first (`hackrf_info` for the HackRF, `rtl_test -t` for the NooElec/RTL-SDR) before opening it. Only one process can hold a device. If the demo on `:8899` holds the radio you need, the coordinator/supervisor coordinates handoff — do not fight for it.
-- **Release when done.** Don't leave a device open.
+- **One agent at a time per radio — take the HackRF radio lock first (T-922).** Before opening the HackRF: `just radio take capture-agent <duration, e.g. 30m> <why>`. If it refuses, someone holds the radio (the explorer, another capture) — stop and report who (`just radio status`); do not fight for it, and never delete the lock. Once taken, wait until `just radio status` shows `staging: replay (radio-lock: …)` (the stage daemon hands the HackRF over within ~1 min), then check the device really is free: `hackrf_info` must print `Found HackRF` **and no `failed` line** — it exits 0 even when the open fails (`hackrf_open() failed: Access denied`). For the NooElec/RTL-SDR (not under the lock) use `rtl_test -t`. Ask for only as long as you need: a lock past its `until` is released by the watchdog with an alert.
+- **Release when done — the device AND the lock.** Close the device, then `just radio release capture-agent`, also on failure or when stopping early; staging goes back to LIVE on the HackRF on its next tick.
 - **Record every capture's settings** in its SigMF metadata: centre frequency, sample rate, LNA/VGA/amp gains, antenna, device serial (address the RTL-SDR by serial, never index).
 
 ## Devices

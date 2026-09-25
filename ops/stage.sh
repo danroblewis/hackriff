@@ -2,6 +2,8 @@
 # Staging watcher for the bears demo (port 8899, tunnel via cloudflared).
 # Rebuilds + restarts on every CODE commit to main and smoke-tests it.
 # Prefers the live HackRF; falls back to a looping SigMF replay when the device is busy.
+# RADIO LOCK (T-922): while $HACKRIFF_OPS/radio-lock is held by anyone but `stage` (and not past its
+# `until`), staging serves the replay and never opens the HackRF; on release it goes back to LIVE.
 set -uo pipefail
 
 REPO=/Users/daniellewis/hackriff
@@ -56,15 +58,42 @@ stop_server(){
 # behaviour - rather than a directory that does not exist, which serves "UI not built" and still smokes OK.
 ui_dist(){ if [ -f "$DIST/index.html" ]; then echo "$DIST"; else log "no $DIST yet - serving $REPO/ui/dist until a snapshot build" >&2; echo "$REPO/ui/dist"; fi; }
 
-start_replay(){
+# The radio lock (py/hkpy/radio.py; `just radio take|release|status`). Prints "<owner> until HH:MM" and
+# succeeds while someone other than stage holds a live lock. A lock past its `until` (or unparseable) is
+# stale and ignored here - the watchdog releases it with an alert.
+LOCK=$S/radio-lock
+radio_holder(){
+  [ -f "$LOCK" ] || return 1
+  local owner upto
+  owner=$(sed -n 's/^owner=//p' "$LOCK" | head -1); upto=$(sed -n 's/^until=//p' "$LOCK" | head -1)
+  case "$upto" in ''|*[!0-9]*) return 1;; esac
+  [ "$(date +%s)" -le "$upto" ] || return 1
+  [ "${owner:-?}" = stage ] && return 1
+  echo "${owner:-?} until $(date -r "$upto" '+%H:%M')"
+}
+
+# Is the HackRF free to open? NOT hackrf_info's exit status: it exits 0 when the open FAILS (T-356's HIL:
+# "Found HackRF ... hackrf_open() failed: Access denied"). Judge by what it printed.
+HACKRF_INFO=${HACKRF_INFO:-hackrf_info}
+hackrf_free(){
+  local out; out=$("$HACKRF_INFO" 2>&1)
+  printf '%s\n' "$out" | grep -qiE 'failed|access denied|busy|no hackrf' && return 1
+  printf '%s\n' "$out" | grep -q 'Found HackRF'
+}
+
+start_replay(){  # $1 = why, recorded in hk-serve-source (the dashboard and `just radio status` show it)
   HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$(ui_dist)" \
     --data-dir "$DATA" --replay "$FIX" --loop > "$S/hk-serve-bears.log" 2>&1 &
-  echo "source: replay" > "$S/hk-serve-source"
+  echo "source: replay${1:+ ($1)}" > "$S/hk-serve-source"
 }
 
 start_server(){
   rm -rf "$DATA"; mkdir -p "$DATA"   # fresh data dir avoids stale-lock startup hangs
-  if hackrf_info >/dev/null 2>&1; then
+  local held
+  if held=$(radio_holder); then   # never even probe the radio while someone else holds it
+    log "radio-lock held by $held -> replay"; start_replay "radio-lock: $held"; log "started (replay, radio-lock)"; return
+  fi
+  if hackrf_free; then
     HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$(ui_dist)" \
       --data-dir "$DATA" --hackrf --center-hz 100800000 --rate 2400000 --lna 32 --vga 30 --amp \
       --iq-retention 30m --iq-buffer-max 9GiB \
@@ -73,12 +102,12 @@ start_server(){
     for _ in $(seq 1 25); do
       grep -q "listening on" "$S/hk-serve-bears.log" && { log "started (live)"; return; }
       if grep -q "Access denied\|receive failed" "$S/hk-serve-bears.log"; then
-        log "hackrf busy -> replay"; stop_server; start_replay; log "started (replay)"; return; fi
+        log "hackrf busy -> replay"; stop_server; start_replay "hackrf busy"; log "started (replay)"; return; fi
       sleep 1
     done
-    log "live start slow -> replay"; stop_server; start_replay; log "started (replay, live timed out)"
+    log "live start slow -> replay"; stop_server; start_replay "live start timed out"; log "started (replay, live timed out)"
   else
-    log "hackrf busy at start -> replay"; start_replay; log "started (replay)"
+    log "hackrf busy at start (hackrf_info could not open it) -> replay"; start_replay "hackrf busy"; log "started (replay)"
   fi
 }
 
@@ -151,6 +180,20 @@ while true; do
   elif ! healthy; then
     sleep 3
     if ! healthy; then log "unhealthy (root down or live stream gone, HEAD $HEAD) — restarting"; stop_server; start_server; smoke; fi
+  fi
+  # The radio lock, checked every tick: taken while live -> hand the HackRF over (replay); released
+  # while on a lock-driven replay -> back to LIVE. A busy-fallback replay is relabelled, not restarted.
+  SRCNOW=$(cat "$S/hk-serve-source" 2>/dev/null || true)
+  if HELD=$(radio_holder); then
+    case "$SRCNOW" in
+      *radio-lock*) ;;
+      *live*) log "radio-lock taken by $HELD -> releasing the HackRF, switching to replay"; stop_server; start_server; smoke ;;
+      *replay*) echo "source: replay (radio-lock: $HELD)" > "$S/hk-serve-source"; log "radio-lock taken by $HELD (already on replay)" ;;
+    esac
+  else
+    case "$SRCNOW" in
+      *radio-lock*) log "radio-lock released -> back to LIVE on the HackRF"; stop_server; start_server; smoke ;;
+    esac
   fi
   sleep 45
 done
