@@ -44,7 +44,7 @@
 //! segment without one sync-1 is abandoned, so a carrier cannot hold a slot for its lifetime
 //! while the bursty channels that do carry frames wait (measured on `flex-pagers-930p8`: four
 //! continuous non-FLEX carriers held all four slots for the whole 12 s). Memory is the channelised buffer — `retain_s` of a
-//! ~80 kSps complex stream, about 3 MB at 4.5 s whatever the device rate — plus one decode's
+//! ~80 kSps complex stream, about 4 MB at 6.5 s whatever the device rate — plus one decode's
 //! working copies. The DDC runs at the input rate for the track's lifetime; a narrowband track is
 //! short-lived or one of few.
 
@@ -84,6 +84,12 @@ const OVERLAP_S: f64 = flex::frame::FRAME_S + 0.2;
 /// keyed FLEX transmitter sends a frame every 1.875 s, so any stretch this long holds a whole
 /// sync-1 and FIW; a stretch without one is not FLEX, and the chain gives its slot back.
 const PROBE_S: f64 = flex::frame::FRAME_S + 0.3;
+/// How far the stream must run past a transmission's last box before it is taken as ended, s:
+/// member boxes trail their samples by up to ~1.6 s (measured for the classifier, T-886), so a
+/// box extending it could still arrive until then. Without this a one-off key-up would wait for
+/// the *next* transmission — seconds later — and find its samples gone from the buffer (measured
+/// on `flex-pagers-930p8`: the 929.608 MHz frame at 2.13 s, next key-up at 11.5 s).
+const SETTLE_S: f64 = 2.0;
 /// Longest wait for the track's inventory emitter once there is something to write.
 const EMITTER_WAIT: Duration = Duration::from_secs(2);
 /// Most pending transmissions one chain queues (the fsk chain's bound, T-558).
@@ -276,6 +282,7 @@ pub(crate) fn run(
     let segment = ((node.segment_s * fs) as u64).max(1);
     let overlap = (OVERLAP_S * fs) as u64;
     let probe = (PROBE_S * fs) as u64;
+    let settle = (SETTLE_S * fs) as u64;
     let mut cr = ChainReader::new(
         Arc::clone(&shared),
         cand.first_sample.saturating_sub(pad),
@@ -339,7 +346,7 @@ pub(crate) fn run(
             for (i, g) in groups.iter_mut().enumerate() {
                 let arrived = g.end + pad <= have || closed;
                 // Until the chain is detached the newest transmission may still grow.
-                let settled = i + 1 < n || detach;
+                let settled = i + 1 < n || detach || have >= g.end + gap + settle;
                 if settled && arrived {
                     let (s, e) = (g.from.saturating_sub(pad), g.end + pad);
                     decode_span(&shared, chan, g, s, e, true, &mut found);

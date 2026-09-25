@@ -245,7 +245,7 @@ pub enum NodeSpec {
     /// Every field is an admission bound:
     ///
     /// - `pad_s` — pad either side of a transmission, as `fsk-bursts` takes it;
-    /// - `retain_s` — the rolling sample buffer (capped again at the fsk chain's sample ceiling);
+    /// - `retain_s` — the channelised buffer (held at the ~80 kSps channel rate, so its memory does not grow with the device rate) — must cover a segment plus the settle wait;
     /// - `segment_s` — longest stretch decoded at once. A continuous transmitter is decoded in
     ///   segments of this length, overlapping by one frame, so memory and latency stay bounded;
     /// - `max_chains` — most hunting chains alive at once across the run.
@@ -777,7 +777,7 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "trigger": "every-track",
     "bandwidth_hz": [4e3, 60e3],
     "nodes": [
-      { "node": "fsk-frames", "pad_s": 0.05, "retain_s": 4.5, "segment_s": 4.0, "max_chains": 8 }
+      { "node": "fsk-frames", "pad_s": 0.05, "retain_s": 6.5, "segment_s": 4.0, "max_chains": 8 }
     ]
   },
   {
