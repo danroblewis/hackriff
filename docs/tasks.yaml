@@ -28404,7 +28404,7 @@ tasks:
   - id: T-966
     milestone: M2-hardening
     title: Listen status level_dbfs reads above 0 dBFS while the delivered audio is -9.4 dBFS RMS
-    status: todo
+    status: in-progress
     priority: P3
     deps: []
     parallel_group: LISTEN-LEVEL
@@ -28433,7 +28433,7 @@ tasks:
   - id: T-968
     milestone: M2-hardening
     title: hk-store a_disk_stall_longer_than_the_disconnect_policy test fails alone (600 ms wall-clock loop decides whether drops happened)
-    status: todo
+    status: in-progress
     priority: P2
     deps: []
     parallel_group: DEFLAKE-WC2
@@ -28552,7 +28552,7 @@ tasks:
   - id: T-972
     milestone: M2-hardening
     title: "api_contract inventory_entry_promote_and_delete: by-id fetch returns a different id than the listed row under load"
-    status: todo
+    status: in-progress
     priority: P2
     deps: []
     parallel_group: DEFLAKE-API-INV
