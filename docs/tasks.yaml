@@ -27606,7 +27606,7 @@ tasks:
   - id: T-930
     milestone: MAUTO
     title: "Analyze trace panel follow-ups: the trace poll never stops for failed/queued-cancelled jobs (final only when job.trace is set), real-shape fixture, filter-labelled error, doc tidy (T-570 re-review)"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-570
@@ -27632,6 +27632,7 @@ tasks:
       precheck exit 0
       Commits: 38fb8fb8
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: d23f43f0
   - id: T-931
     milestone: MMAP
     title: "RC red: floating controls / left chip covered or off-screen (app-phone, app-dismiss, app-side-chip) at main 92d0f6f1"
