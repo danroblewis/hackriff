@@ -77,8 +77,8 @@ use std::collections::BTreeMap;
 use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::{
-    CrcStatus, Decode, EmitterId, IdentityAccess, InventoryIdentity, LinkTarget, RepoError,
-    Repository, TimeRange,
+    CrcStatus, Decode, EmitterId, IdentityAccess, InventoryIdentity, RepoError, Repository,
+    TimeRange,
 };
 use serde_json::{Map, Value, json};
 
@@ -149,7 +149,9 @@ fn read(state: &ApiState, id: EmitterId, q: &Params) -> Result<Value, Fail> {
         // scheme's bar. Served so "PI 1704 (3 groups, provisional)" is visible; there is no
         // identity here to confirm or withhold.
         InventoryIdentity::None => {
-            let decodes = provisional_decodes(&repo, live).map_err(repo_fail)?;
+            let decodes = repo
+                .provisional_decodes_of_emitter(live)
+                .map_err(repo_fail)?;
             return Ok(json!({ "decodes": latest_per_frame(decodes, window) }));
         }
         // Withheld: never confirm it by naming its decodes.
@@ -159,24 +161,6 @@ fn read(state: &ApiState, id: EmitterId, q: &Params) -> Result<Value, Fail> {
     };
     let decodes = repo.decodes_for_identity(&identity).map_err(repo_fail)?;
     Ok(json!({ "decodes": latest_per_frame(decodes, window) }))
-}
-
-/// The decodes linked to identity-less emitter `id` that carry a **provisional** identity
-/// (`identity_provisional: true` in their metadata, T-962), oldest first, gated at
-/// [`IdentityAccess::Standard`] like every other read here.
-fn provisional_decodes(repo: &Repository, id: EmitterId) -> Result<Vec<Decode>, RepoError> {
-    let mut out = Vec::new();
-    for link in repo.emitter_links(id)? {
-        let LinkTarget::Decode(d) = link.target else {
-            continue;
-        };
-        let d = repo.decode(d)?;
-        if d.identity.is_none() && d.metadata["identity_provisional"] == json!(true) {
-            out.push(d);
-        }
-    }
-    out.sort_by(|a, b| a.t.cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
-    Ok(out)
 }
 
 /// The latest decode per `(decoder_id, frame_model)` **within `window`**, newest first.
