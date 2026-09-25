@@ -19022,7 +19022,8 @@ tasks:
   - id: T-570
     milestone: MAUTO
     title: "MUI: the trace panel - why not PSK, answered with five distinct served answers and no signal logic in the client"
-    status: todo
+    status: in-progress
+    branch: task-t570
     priority: normal
     parallel_group: MUI-X1
     model: sonnet
@@ -27253,7 +27254,8 @@ tasks:
   - id: T-919
     milestone: MMAP
     title: The floating status box (up to 560x184 px over the map since T-918) should be a compact, closeable status line - honesty statements always visible (P1/P4)
-    status: todo
+    status: in-progress
+    branch: task-t919
     priority: normal
     deps:
     - T-918
