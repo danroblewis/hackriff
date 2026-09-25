@@ -268,6 +268,11 @@ fn taxonomy_route_answers_as_documented() {
     let th = &v["thresholds"];
     assert_eq!(th["version"], "thresholds@1");
     assert_eq!(th["max_confidence"], 0.999);
+    // T-953: `unknown` is the residual hypothesis and carries a strictly lower cap.
+    assert_eq!(th["max_unknown_confidence"], 0.9);
+    assert!(
+        th["max_unknown_confidence"].as_f64().unwrap() < th["max_confidence"].as_f64().unwrap()
+    );
     assert_eq!(th["lambda0_min"], 0.1);
     let rows = th["families"].as_array().unwrap();
     assert_eq!(rows.len(), families.len(), "one threshold row per family");
@@ -2846,6 +2851,8 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     assert!(p.is_null() || p.is_object(), "{row}");
     if p.is_object() {
         assert!(p["modulation"].is_string(), "{row}");
+        // T-953: the session's own extent, always a measurement.
+        assert!(p["duration_s"].as_f64().is_some_and(|d| d >= 0.0), "{row}");
         assert!(p["t_s"].is_f64(), "{row}");
         assert!(p["source_session"].is_string(), "{row}");
         for field in [

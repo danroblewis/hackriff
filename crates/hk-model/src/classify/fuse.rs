@@ -4,7 +4,10 @@
 //! a prior may do, and each is a property test below:
 //!
 //! 1. **Priors never touch `unknown`.** Its posterior is `max(open_set_score, L[unknown])`,
-//!    computed before the prior is applied; the known families share what is left.
+//!    computed before the prior is applied, and capped at
+//!    [`MAX_UNKNOWN_CONFIDENCE`](super::MAX_UNKNOWN_CONFIDENCE) (T-953); the known families share
+//!    what is left, which is therefore never zero — with a saturated open set the posterior still
+//!    says what the emission most resembles.
 //! 2. **λ₀ ≥ 0.1.** A prior set with less uniform mass is refused, so no family is ever driven to
 //!    zero by a prior: a family the prior omits is floored at `λ₀/K`.
 //! 3. **Evidence dominance.** When the likelihood top-1 beats the runner-up by
@@ -24,7 +27,10 @@
 //! only has to build the set.
 
 use super::thresholds::EVIDENCE_DOMINANCE_RATIO;
-use super::{ClassFlag, LAMBDA0_MIN, LabelP, MAX_CONFIDENCE, PriorUse, SUM_TOLERANCE, UNKNOWN};
+use super::{
+    ClassFlag, LAMBDA0_MIN, LabelP, MAX_UNKNOWN_CONFIDENCE, PriorUse, SUM_TOLERANCE, UNKNOWN,
+    max_confidence_of,
+};
 
 /// A C17 family prior: `P(family ∣ f, ℓ)` over known families with its mixture weights.
 #[derive(Clone, Debug, PartialEq)]
@@ -208,11 +214,18 @@ fn apply(
 /// Fuses an evidence-only distribution with a C17 prior (ADR-0016 §3).
 ///
 /// `likelihood` is over families **plus** `unknown` and sums to 1; `open_set` is the χ² open-set
-/// score. The unknown posterior is `max(open_set, likelihood[unknown])` and is never scaled by the
-/// prior. With `prior: None` the posterior is the likelihood unchanged.
+/// score. The unknown posterior is `max(open_set, likelihood[unknown])`, capped at
+/// [`MAX_UNKNOWN_CONFIDENCE`] (T-953), and is never scaled by the prior. With `prior: None` the
+/// posterior is the likelihood unchanged apart from that cap.
 pub fn fuse(likelihood: &[LabelP], open_set: f64, prior: Option<&FamilyPriorSet>) -> Fused {
     let l_unknown = p_of(likelihood, UNKNOWN);
-    let p_unknown = l_unknown.max(open_set.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    // T-953: `unknown` is the residual hypothesis, not a measurement, and `open_set` saturates at
+    // 1.0 for anything the shipped densities never saw. Capping it here — before the known mass is
+    // shared out — is what keeps the known families ranked under a saturated open set, rather than
+    // repairing the number afterwards.
+    let p_unknown = l_unknown
+        .max(open_set.clamp(0.0, 1.0))
+        .clamp(0.0, MAX_UNKNOWN_CONFIDENCE);
     let known_mass = 1.0 - p_unknown;
 
     let mut flags = Vec::new();
@@ -313,10 +326,9 @@ pub fn normalise_dist(dist: &mut [LabelP]) {
     }
 }
 
-/// Caps the top entry at [`MAX_CONFIDENCE`] (no call is certain) and makes the distribution sum to
-/// exactly 1.
+/// Caps the top entry at its label's cap — [`MAX_CONFIDENCE`](super::MAX_CONFIDENCE) for a family, and
+/// [`MAX_UNKNOWN_CONFIDENCE`] for `unknown` (T-953) — and makes the distribution sum to exactly 1.
 pub fn cap_and_normalise(dist: &mut [LabelP]) {
-    let max = MAX_CONFIDENCE;
     let sum: f64 = dist.iter().map(|lp| lp.p).sum();
     if sum > 0.0 {
         for lp in dist.iter_mut() {
@@ -338,6 +350,7 @@ pub fn cap_and_normalise(dist: &mut [LabelP]) {
     else {
         return;
     };
+    let max = max_confidence_of(&dist[top].label);
     if dist[top].p > max {
         let excess = dist[top].p - max;
         dist[top].p = max;
@@ -354,7 +367,10 @@ pub fn cap_and_normalise(dist: &mut [LabelP]) {
     let residue = 1.0 - sum;
     if residue.abs() > 0.0 {
         if let Some(i) = (0..dist.len())
-            .filter(|i| dist[*i].p + residue >= 0.0 && dist[*i].p + residue <= max)
+            .filter(|i| {
+                dist[*i].p + residue >= 0.0
+                    && dist[*i].p + residue <= max_confidence_of(&dist[*i].label)
+            })
             .max_by(|a, b| dist[*a].p.total_cmp(&dist[*b].p))
         {
             dist[i].p += residue;
@@ -365,7 +381,7 @@ pub fn cap_and_normalise(dist: &mut [LabelP]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classify::HK_MOD_V1;
+    use crate::classify::{HK_MOD_V1, MAX_CONFIDENCE};
 
     fn lp(label: &str, p: f64) -> LabelP {
         LabelP {
@@ -473,6 +489,62 @@ mod tests {
             "{:?}",
             f.posterior
         );
+    }
+
+    /// T-953: an emission the shipped densities have never seen saturates the χ² tail, and the
+    /// row used to read `unknown` at 0.999 with every known family at exactly 0 — measured on live
+    /// air on 2026-09-25 for FLEX pager bursts *and* for WFM stations with a locked 19 kHz pilot
+    /// and a CRC-valid RDS decode. Two things must hold afterwards: the reported number is honest,
+    /// and the evidence the classifier did have survives underneath it.
+    #[test]
+    fn a_saturated_open_set_never_reports_unknown_as_certain_and_keeps_the_families_ranked() {
+        // The WFM case: the likelihood says `analog`, 10:1 over the runner-up, and the open set
+        // saturates because the density grid never saw an over-the-air stereo multiplex.
+        let l = vec![lp("analog", 0.8), lp("fsk", 0.08), lp(UNKNOWN, 0.12)];
+        let f = fuse(&l, 1.0, None);
+        let u = p(&f, UNKNOWN);
+        assert!(
+            u <= MAX_UNKNOWN_CONFIDENCE + 1e-12,
+            "unknown reported at {u}, above the {MAX_UNKNOWN_CONFIDENCE} cap"
+        );
+        assert!(u < MAX_CONFIDENCE, "unknown must not reach a family's cap");
+        assert!(
+            (u - MAX_UNKNOWN_CONFIDENCE).abs() < 1e-12,
+            "a saturated open set still wins the label: {u}"
+        );
+        // …and the known families share the tenth left over, in the likelihood's own order.
+        assert!(
+            p(&f, "analog") > p(&f, "fsk") && p(&f, "fsk") > 0.0,
+            "the posterior must still say what it most resembles: {:?}",
+            f.posterior
+        );
+        assert!(
+            (1.0 - u - (p(&f, "analog") + p(&f, "fsk"))).abs() < 1e-9,
+            "the known families share exactly the residual mass"
+        );
+        let sum: f64 = f.posterior.iter().map(|x| x.p).sum();
+        assert!((sum - 1.0).abs() < 1e-12, "sum {sum}");
+    }
+
+    /// The cap is on `unknown` alone: a family with the same evidence still reports up to
+    /// [`MAX_CONFIDENCE`], and `cap_and_normalise` cannot push `unknown` back over its own cap.
+    #[test]
+    fn the_unknown_cap_is_lower_than_a_family_s_and_capping_respects_the_label() {
+        let l = vec![lp("fsk", 1.0), lp(UNKNOWN, 0.0)];
+        let f = fuse(&l, 0.0, None);
+        assert!(
+            (p(&f, "fsk") - MAX_CONFIDENCE).abs() < 1e-12,
+            "a family keeps the 0.999 cap: {:?}",
+            f.posterior
+        );
+        let mut dist = vec![lp(UNKNOWN, 0.998), lp("fsk", 0.002)];
+        cap_and_normalise(&mut dist);
+        assert!(
+            p_of(&dist, UNKNOWN) <= MAX_UNKNOWN_CONFIDENCE + 1e-12,
+            "{dist:?}"
+        );
+        let sum: f64 = dist.iter().map(|x| x.p).sum();
+        assert!((sum - 1.0).abs() < 1e-12, "sum {sum}");
     }
 
     #[test]
@@ -597,7 +669,7 @@ mod tests {
                 p(&with, UNKNOWN)
             );
             assert!(
-                (p(&with, UNKNOWN) - want.min(MAX_CONFIDENCE)).abs() < 1e-9,
+                (p(&with, UNKNOWN) - want.min(MAX_UNKNOWN_CONFIDENCE)).abs() < 1e-9,
                 "trial {trial}: p(unknown) {} is not max(open_set, L[unknown]) {want}",
                 p(&with, UNKNOWN)
             );

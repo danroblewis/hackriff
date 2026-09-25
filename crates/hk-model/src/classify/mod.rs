@@ -59,6 +59,42 @@ pub const FEATURES_VERSION_INDETERMINATE: u32 = 1;
 /// Maximum reported confidence: no call is certain.
 pub const MAX_CONFIDENCE: f64 = 0.999;
 
+/// Maximum reported confidence of the **`unknown`** label (T-953).
+///
+/// `unknown` is not a measurement. Its posterior is `max(open_set_score, L[unknown])`
+/// ([`fuse`](fuse::fuse)), and `open_set_score` is `1 − max_c P(χ²_k ≥ d²_c)` over
+/// class-conditional densities fitted on the **synthetic dev grid** (ADR-0016 §4.4, §7). That tail
+/// underflows: any emission a few σ outside every fitted envelope scores a hard `1.0`, so an
+/// emission the shipped densities have simply never seen is indistinguishable from one that is
+/// genuinely out of taxonomy, and the row reads `unknown` at [`MAX_CONFIDENCE`] — the same number
+/// a CRC-valid decode would carry.
+///
+/// That is what the explorer measured on live air on 2026-09-25: FLEX pager bursts, **and WFM
+/// stations with a locked 19 kHz pilot and a CRC-valid RDS decode**, all came back `unknown` at
+/// 0.999 with the known families at exactly 0 — the UI's "100 % unk". Reporting near-certainty of
+/// novelty from an uncalibrated distance is the same overconfidence ADR-0016 rejects softmax for
+/// ("Options considered"), and it destroys the information the classifier *did* have: with
+/// `p_unknown = 1` the known families share a mass of zero, so the posterior no longer says what
+/// the emission most resembles.
+///
+/// So the residual hypothesis is capped strictly below a family's cap. `0.9` is chosen, not
+/// measured: it is the largest round value that leaves a tenth of the mass for the known families
+/// to be *ranked* in (the ranking is what a reader uses when the top label is `unknown`), and it
+/// keeps `unknown` visibly separate from a confident family call. It bounds only the **reported
+/// number** — a saturated open set still wins the label, and [`Classification::open_set_score`]
+/// still carries the raw score, uncapped, which is the explicit open-set output.
+pub const MAX_UNKNOWN_CONFIDENCE: f64 = 0.9;
+
+/// The confidence cap of `label`: [`MAX_UNKNOWN_CONFIDENCE`] for `unknown`, else
+/// [`MAX_CONFIDENCE`].
+pub fn max_confidence_of(label: &str) -> f64 {
+    if label == UNKNOWN {
+        MAX_UNKNOWN_CONFIDENCE
+    } else {
+        MAX_CONFIDENCE
+    }
+}
+
 /// Minimum uniform weight λ₀ of a family prior (ADR-0016 §3).
 pub const LAMBDA0_MIN: f64 = 0.1;
 
@@ -253,7 +289,8 @@ pub struct Classification {
     pub prior: Option<PriorUse>,
     /// Top posterior label (may be `unknown`).
     pub family: String,
-    /// Posterior of `family`, ≤ [`MAX_CONFIDENCE`].
+    /// Posterior of `family`, ≤ [`max_confidence_of`] that family ([`MAX_CONFIDENCE`], or
+    /// [`MAX_UNKNOWN_CONFIDENCE`] when the family is `unknown` — T-953).
     pub confidence: f64,
     /// Within-family class call, `None` below its gate.
     pub class: Option<ClassCall>,
@@ -398,11 +435,9 @@ impl Classification {
         if (self.confidence - p_family).abs() > 1e-9 {
             return bad("confidence differs from the family's posterior");
         }
-        if self.confidence > MAX_CONFIDENCE {
-            return bad(format!(
-                "confidence {} exceeds {MAX_CONFIDENCE}",
-                self.confidence
-            ));
+        let cap = max_confidence_of(&self.family);
+        if self.confidence > cap {
+            return bad(format!("confidence {} exceeds {cap}", self.confidence));
         }
         if self.family != UNKNOWN && tax.coarse_of(&self.family) != Some(self.coarse) {
             return bad(format!(

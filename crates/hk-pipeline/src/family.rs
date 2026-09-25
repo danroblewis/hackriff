@@ -116,6 +116,7 @@ use std::collections::BTreeMap;
 use hk_context::{BandTable, Region, match_known_status};
 // T-218: a user reclassification is written at the user arbitration rank (ADR-0016 §2).
 use hk_detect::TrackSummary;
+use hk_detect::track::HopSetSummary;
 use hk_detect::track::inventory::SUSPECT_FRACTION;
 use hk_model::classify::{ArbRank, Stage};
 use hk_model::{
@@ -360,6 +361,13 @@ const SERVICE_PASSTHROUGH: &[(&str, &str)] = &[
     ("fsk-ism", "ism"),
     ("ook-ism", "ism"),
     ("lora", "lora"),
+    // T-953: the 929-932 MHz paging allocation, and the frequency-hopping *behaviour* the
+    // detector measures directly. `flex`/`pocsag` name the service because nothing else carries
+    // those air interfaces; a bare `2fsk` at 929 MHz still names nothing (the rule above).
+    ("paging", "paging"),
+    ("flex", "paging"),
+    ("pocsag", "paging"),
+    ("fhss", "fhss"),
 ];
 
 /// Canonical services the band plan can suggest as allocation-only candidates.
@@ -375,6 +383,7 @@ const ALLOCATION_SERVICES: &[&str] = &[
     "cellular",
     "public-safety",
     "ism",
+    "paging",
 ];
 
 /// Human label of a canonical service family.
@@ -392,6 +401,8 @@ pub fn service_label(service: &str) -> &'static str {
         "public-safety" => "Public safety / land mobile",
         "ism" => "ISM / Part 15 device",
         "lora" => "LoRa (Part 15)",
+        "paging" => "Paging (929-932 MHz)",
+        "fhss" => "Frequency-hopping system (Part 15 §15.247)",
         _ => "Other service",
     }
 }
@@ -407,6 +418,25 @@ pub struct Occupancy {
     pub symbol_rate_hz: Option<f64>,
 }
 
+/// A measured frequency-hopping set (T-953): what the tracker linked, as evidence.
+///
+/// A [`HopSetSummary`] only exists after the tracker's
+/// own gate has held — ≥ 3 channels with ≥ 2 links each, ≥ 10 hops, over half of each member's
+/// bursts linked, every member above `min_channel_snr_db`, and the periodic-emitter veto passed
+/// (`hk_detect::track`, §7). That gate *is* the measurement of hopping, so nothing is re-gated
+/// here.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HopSet {
+    /// Member channels.
+    pub channels: usize,
+    /// Hops linked.
+    pub hops: u64,
+    /// Channel raster, Hz, when one was fitted.
+    pub raster_hz: Option<f64>,
+    /// Mean dwell, s.
+    pub dwell_s: Option<f64>,
+}
+
 /// Evidence about an emitter's family.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Evidence<'a> {
@@ -416,6 +446,8 @@ pub enum Evidence<'a> {
     Decoder(&'a str),
     /// Occupancy.
     Occupancy(Occupancy),
+    /// A measured hop set (T-953).
+    HopSet(HopSet),
 }
 
 /// The outcome of mapping evidence.
@@ -488,6 +520,25 @@ fn map_name(name: &str) -> FamilyCall {
 pub fn service_family(evidence: &Evidence<'_>) -> FamilyCall {
     match evidence {
         Evidence::Label(l) | Evidence::Decoder(l) => map_name(l),
+        // T-953: the detector linked dwells across channels, which is a measurement of hopping
+        // and of nothing else. It suggests `fhss` — a *behaviour*, not a system: what hops here
+        // could be a Part 15 §15.247 device, a cordless phone, a telemetry link or a radar. It is
+        // shape evidence, so it ranks and never sets a status (see the module docs).
+        Evidence::HopSet(h) => FamilyCall {
+            service: Some("fhss"),
+            confidence: HOP_SET_CONFIDENCE,
+            reason: format!(
+                "{} channels linked by {} hops{}{}: a frequency-hopping emission",
+                h.channels,
+                h.hops,
+                h.raster_hz
+                    .map(|r| format!(" on a {:.1} kHz raster", r / 1e3))
+                    .unwrap_or_default(),
+                h.dwell_s
+                    .map(|d| format!(", {:.1} ms dwell", d * 1e3))
+                    .unwrap_or_default(),
+            ),
+        },
         Evidence::Occupancy(o) => {
             let continuous = o.duty_cycle.is_some_and(|d| d >= CONTINUOUS_DUTY);
             let [lo, hi] = WIDEBAND_FM_OBW_HZ;
@@ -510,6 +561,26 @@ pub fn service_family(evidence: &Evidence<'_>) -> FamilyCall {
             }
         }
     }
+}
+
+/// Confidence of the `fhss` suggestion a measured hop set carries (T-953).
+///
+/// Not 1.0, and not a measurement of *what* is hopping. The tracker's link rule can in principle
+/// chain independent emitters whose bursts abut — which is exactly what its channel count, link
+/// fraction, SNR floor and periodic veto bound, and why they are not re-applied here — and
+/// "something hops across these channels" identifies no system. It is well above
+/// [`MIN_CONFIDENCE`] because the hopping itself was measured, and it is *shape* evidence, so it
+/// can rank an explanation and can never set a `known_status`.
+pub const HOP_SET_CONFIDENCE: f64 = 0.8;
+
+/// The family evidence of a measured hop set (T-953): `fhss`, as a suggestion.
+pub fn hop_set_family(h: &HopSetSummary) -> FamilyCall {
+    service_family(&Evidence::HopSet(HopSet {
+        channels: h.channels_hz.len(),
+        hops: h.hops,
+        raster_hz: h.raster_hz,
+        dwell_s: h.dwell_s,
+    }))
 }
 
 /// The family evidence of a closed channel track: its occupancy. A mostly suspect track (spur,
@@ -1198,7 +1269,12 @@ mod tests {
         }
         for (s, canonical) in SERVICE_PASSTHROUGH {
             assert!(is_service_family(s), "{s}");
-            assert!(ALLOCATION_SERVICES.contains(canonical) || *canonical == "lora");
+            // `lora` and `fhss` are evidence-only services: something has to be measured for
+            // them to be named, so the band plan never suggests them on its own (T-953).
+            assert!(
+                ALLOCATION_SERVICES.contains(canonical) || matches!(*canonical, "lora" | "fhss"),
+                "{canonical}"
+            );
             assert_ne!(service_label(canonical), "Other service");
         }
         let wfm = service_family(&Evidence::Label("wfm"));
@@ -1232,6 +1308,90 @@ mod tests {
         assert_eq!(occ(333e3, None).service, None, "duty unknown");
         assert_eq!(occ(2.0e6, Some(1.0)).service, None, "too wide");
         assert_eq!(occ(14e3, Some(1.0)).service, None, "narrow fragment");
+    }
+
+    /// T-953: a ~25 kHz FSK burst at 929.6 MHz gets the paging allocation as a ranked
+    /// **explanation** and nothing more. Before T-953 the compact table held no row between
+    /// 894 MHz and 960 MHz, so the explorer's FLEX pager emitters came back with `explanations: []`
+    /// — not a wrong suggestion, no suggestion at all.
+    #[test]
+    fn t953_a_pager_burst_at_929_6_mhz_is_explained_by_the_paging_allocation_and_not_identified() {
+        // The evidence a blind run actually holds there: a modulation label, which names no
+        // service (the module's rule, unchanged).
+        let r = rank_explanations(
+            &table(),
+            &[ev("2fsk", 0.9, "fsk-demod@1")],
+            929.6125e6,
+            25e3,
+        );
+        let paging = r
+            .iter()
+            .find(|e| e.service == "paging")
+            .unwrap_or_else(|| panic!("no paging explanation in {r:#?}"));
+        assert!(paging.rank <= TOP_K as u32, "rank {}", paging.rank);
+        assert_eq!(paging.label, "Paging (929-932 MHz)");
+        assert_eq!(paging.status, KnownStatus::Known, "the band expects paging");
+        assert_eq!(
+            paging.prior_ref.as_deref(),
+            Some("us-47cfr2106-compact:paging-929")
+        );
+        // A suggestion, never an identification: no signal evidence backs it, and nothing that
+        // can set a status does.
+        assert!(paging.has_flag("allocation-only"), "{:?}", paging.flags);
+        assert!(paging.evidence_confidence < 1e-9);
+        assert!(paging.status_evidence_confidence < MIN_CONFIDENCE);
+        let (status, _, _) = status_from(&r);
+        assert_eq!(
+            status,
+            KnownStatus::Unknown,
+            "a band-plan row must never identify an emitter"
+        );
+    }
+
+    /// T-953: the same allocation, once something *decodes* the service, is what promotes it —
+    /// the decoder arbitrates, the band plan only agrees.
+    #[test]
+    fn t953_a_decoded_pager_is_identified_by_the_decode_and_agreed_with_by_the_band_plan() {
+        let r = rank_explanations(
+            &table(),
+            &[ev("flex", 0.95, "decoder:flex")],
+            929.6125e6,
+            25e3,
+        );
+        let top = &r[0];
+        assert_eq!(top.service, "paging");
+        assert!(!top.has_flag("allocation-only"), "{:?}", top.flags);
+        assert!(top.status_evidence_confidence >= MIN_CONFIDENCE);
+        assert_eq!(status_from(&r).0, KnownStatus::Known);
+    }
+
+    /// T-953: a measured hop set suggests `fhss`, above the band's own allocation-only row, and
+    /// still sets no status — the hopping was measured, the system was not identified.
+    #[test]
+    fn t953_a_hopping_population_in_the_ism_band_is_explained_as_frequency_hopping() {
+        let call = service_family(&Evidence::HopSet(HopSet {
+            channels: 25,
+            hops: 312,
+            raster_hz: Some(400e3),
+            dwell_s: Some(0.4e-3),
+        }));
+        assert_eq!(call.confident_service(), Some("fhss"));
+        assert!(call.reason.contains("frequency-hopping"), "{}", call.reason);
+        let r = rank_explanations(
+            &table(),
+            &[ev("fhss", HOP_SET_CONFIDENCE, FAMILY_MAP_VERSION)],
+            915e6,
+            12e6,
+        );
+        let top = &r[0];
+        assert_eq!(top.service, "fhss", "{r:#?}");
+        assert_eq!(top.label, "Frequency-hopping system (Part 15 §15.247)");
+        assert!(top.has_flag("shape-only"), "{:?}", top.flags);
+        assert!(top.evidence_confidence > ALLOCATION_ONLY_SCORE);
+        // The Part 15 band itself is still suggested beside it.
+        assert!(r.iter().any(|e| e.service == "ism"), "{r:#?}");
+        // Shape evidence ranks and suggests; it never sets a status.
+        assert_eq!(status_from(&r).0, KnownStatus::Unknown);
     }
 
     #[test]

@@ -128,6 +128,9 @@ fn estimated_params_is_null_then_serves_the_latest_measured_session() {
     assert!(p["source_session"].is_string(), "{v}");
     assert!(p["source_recording"].is_null(), "{v}");
     assert_eq!(p["t_s"], json!((T0 + 1) as f64), "{v}");
+    // T-953: the session's own extent, from the stored row's `time` — a burst's length where the
+    // session is one burst. `session()` spans exactly one second.
+    assert_eq!(p["duration_s"], json!(1.0), "{v}");
 
     // A newer session with different numbers: the route tracks storage, not the first insert.
     let second = EstimatedParams {

@@ -49,6 +49,13 @@ fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
         "gnss" => Some(&["gnss"]),
         "cellular" | "lte" => Some(&["cellular"]),
         "public-safety" | "p25" | "dmr" => Some(&["public-safety"]),
+        // T-953: 929-932 MHz paging (Part 90 Subpart P private paging, Part 24 narrowband PCS,
+        // Part 22 Subpart E common-carrier paging). `flex` and `pocsag` are the air interfaces
+        // the service is carried on, and they name the service; a bare `2fsk` never does.
+        "paging" | "flex" | "pocsag" => Some(&["paging"]),
+        // T-953: frequency hopping is a measured *behaviour*, and 47 CFR 15.247 is where it is
+        // expressly authorised. The tag says "hopping is expected here", never "this hops".
+        "fhss" => Some(&["fhss"]),
         _ => None,
     }
 }
@@ -235,6 +242,44 @@ mod tests {
     }
 
     /// AWARE-053: a frequency with no allocation-table row at all is `unknown`, never `known`.
+    /// T-953: the paging allocation exists and places a paging emission at 929.6 MHz. It is a
+    /// *suggestion* — the family has to come from somewhere else first — and nothing that is not
+    /// paging becomes paging by sitting there.
+    #[test]
+    fn t953_paging_allocation_places_a_pager_at_929_6_mhz() {
+        let t = table();
+        let m = match_known_status(&t, "paging", 929.6125e6, 25e3);
+        assert_eq!(m.status, KnownStatus::Known, "{m:?}");
+        assert_eq!(
+            m.prior_ref.as_deref(),
+            Some("us-47cfr2106-compact:paging-929")
+        );
+        // The Part 22 Subpart E common-carrier half, and narrowband PCS between them.
+        let m = match_known_status(&t, "paging", 931.4e6, 25e3);
+        assert_eq!(
+            m.prior_ref.as_deref(),
+            Some("us-47cfr2106-compact:paging-931")
+        );
+        assert_eq!(m.status, KnownStatus::Known);
+        assert_eq!(
+            match_known_status(&t, "paging", 930.5e6, 25e3).status,
+            KnownStatus::Known,
+            "narrowband PCS carries paging traffic and is tagged for it"
+        );
+        // A service that does not belong there is still flagged, not placed.
+        assert_eq!(
+            match_known_status(&t, "fm-broadcast", 929.6e6, 200e3).status,
+            KnownStatus::UnexpectedHere
+        );
+        // And the band is not a Part 15 band, so the Part 15 pass does not apply here: an `ism`
+        // family falls through to "no service mapping", which is `unknown` — never `known`.
+        assert_eq!(
+            match_known_status(&t, "ism", 929.6e6, 25e3).status,
+            KnownStatus::Unknown
+        );
+        assert!(is_service_family("paging"));
+    }
+
     #[test]
     fn aware_053_no_data_is_unknown() {
         let m = match_known_status(&table(), "unknown-emitter-type", 300e6, 10e3);

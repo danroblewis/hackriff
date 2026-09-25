@@ -39,6 +39,23 @@
 # (docs/04 §1.1). Coverage is deliberately partial — the bands named in the T-019 task brief plus
 # enough neighbouring context for sane interval lookups, not the whole CFR table.
 #
+# T-953 (2026-09-25): the 929-932 MHz paging rows. The explorer found FLEX/FSK pager bursts at
+# 929-932 MHz with `explanations: []` — not a wrong suggestion, but no band-plan row at all,
+# because the compact table jumped from `cellular-850-dl` (ends 894 MHz) to
+# `aero-radionav-960-1215` (starts 960 MHz). Sources (not individually re-checked against a primary
+# source this session, hence `unverified=true`): 929-930 MHz is private/internal paging under 47
+# CFR Part 90 Subpart P (§90.494 "Paging operations in the 929-930 MHz band"); 930-931 MHz is
+# Narrowband PCS (47 CFR Part 24 Subpart D); 931-932 MHz is common-carrier paging in the Paging and
+# Radiotelephone Service, 47 CFR Part 22 Subpart E. All three carry the `paging` tag except
+# Narrowband PCS's own service, which is tagged both because narrowband PCS carries paging traffic.
+# The underlying 47 CFR 2.106 allocation across 929-932 MHz is non-federal FIXED and MOBILE; the
+# `paging` refinement is the FCC service-rule part, not the table's own service column.
+#
+# T-953: the `fhss` tag marks the three bands where 47 CFR 15.247 expressly authorises frequency
+# hopping (902-928, 2400-2483.5, 5725-5850 MHz). It is what a *measured* hop set is matched
+# against; hopping is a behaviour, not an allocated service, so `fhss` is never an allocation-only
+# suggestion — it appears only when the tracker linked dwells across channels.
+#
 # Columns:
 #   id                 stable slug; used to build an emitter's prior_ref as
 #                      "us-47cfr2106-compact:<id>"
@@ -74,7 +91,7 @@ amateur-2m,144000000,148000000,us,non-federal,amateur,,amateur;vhf,false
 amateur-1-25m,222000000,225000000,us,non-federal,amateur,,amateur;vhf,false
 amateur-70cm,420000000,450000000,us,shared,radiolocation,amateur,amateur;uhf,false
 ism-433-part15,433050000,434790000,us,shared,radiolocation,amateur,part15;short-range-device;ism-eu-band,false
-ism-902,902000000,928000000,us,shared,radiolocation;amateur,,ism;part15;33cm,false
+ism-902,902000000,928000000,us,shared,radiolocation;amateur,,ism;part15;33cm;fhss,false
 amateur-23cm,1240000000,1300000000,us,shared,radiolocation;radionavigation-satellite,amateur,amateur;uhf,false
 aero-radionav-960-1215,960000000,1215000000,us,shared,aeronautical-radionavigation,radionavigation-satellite,adsb;dme;tacan,false
 gnss-l5,1164000000,1215000000,us,shared,aeronautical-radionavigation;radionavigation-satellite,,gnss;l5;galileo-e5,false
@@ -82,8 +99,8 @@ gnss-l2,1215000000,1240000000,us,shared,radionavigation-satellite,radiolocation,
 gnss-l1,1559000000,1610000000,us,shared,aeronautical-radionavigation;radionavigation-satellite,,gnss;l1;galileo-e1;glonass-g1,false
 maritime-vhf,156000000,162025000,us,non-federal,maritime-mobile,,maritime;vhf;ais,false
 noaa-wx,162400000,162550000,us,federal,fixed;mobile,,noaa-wx;weather,false
-ism-2400,2400000000,2483500000,us,shared,fixed;mobile;radiolocation,amateur,ism;part15;wifi;bluetooth,false
-ism-5800,5725000000,5875000000,us,shared,radiolocation,amateur,ism;part15;wifi-5g8,false
+ism-2400,2400000000,2483500000,us,shared,fixed;mobile;radiolocation,amateur,ism;part15;wifi;bluetooth;fhss,false
+ism-5800,5725000000,5875000000,us,shared,radiolocation,amateur,ism;part15;wifi-5g8;fhss,false
 cellular-700-ul,698000000,722000000,us,non-federal,mobile,,cellular;lte-700,false
 cellular-700-dl,728000000,746000000,us,non-federal,mobile,,cellular;lte-700,false
 public-safety-700-a,758000000,775000000,us,non-federal,mobile,,public-safety;700mhz;p25;firstnet,false
@@ -92,6 +109,9 @@ public-safety-800-a,806000000,824000000,us,non-federal,mobile,,public-safety;800
 public-safety-800-b,851000000,869000000,us,non-federal,mobile,,public-safety;800mhz;smr,false
 cellular-850-ul,824000000,849000000,us,non-federal,mobile,,cellular;lte-band5,false
 cellular-850-dl,869000000,894000000,us,non-federal,mobile,,cellular;lte-band5,false
+paging-929,929000000,930000000,us,non-federal,mobile,,paging;private-paging;part90,true
+npcs-930,930000000,931000000,us,non-federal,mobile,,narrowband-pcs;paging;part24,true
+paging-931,931000000,932000000,us,non-federal,mobile,,paging;common-carrier-paging;part22,true
 aws-ul,1710000000,1755000000,us,non-federal,fixed;mobile,,cellular;aws;lte-band4,false
 aws-dl,2110000000,2155000000,us,non-federal,fixed;mobile,,cellular;aws;lte-band4,false
 pcs-ul,1850000000,1910000000,us,non-federal,fixed;mobile,,cellular;pcs;lte-band2,false
