@@ -1507,7 +1507,7 @@ impl Pipeline {
             sup,
             thread: Some(thread),
             started: Instant::now(),
-            recipes: std::sync::OnceLock::new(),
+            recipes: Arc::new(std::sync::OnceLock::new()),
         })
     }
 }
@@ -2820,8 +2820,36 @@ pub struct PipelineHandle {
     sup: Arc<Supervisor>,
     thread: Option<JoinHandle<Finished>>,
     started: Instant,
-    /// The run's recipe runtime (T-088), created on first use.
-    recipes: std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+    /// The run's recipe runtime (T-088), created on first use. Shared (rather than owned) so a
+    /// service handed out by this handle — the `listen` opener's recipe path, T-869 — can build
+    /// it later without holding the handle.
+    recipes: Arc<std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>>,
+}
+
+/// The run's recipe runtime, built on first use ([`PipelineHandle::recipe_runtime`]). A free
+/// function so a service can hold the cell and the supervisor instead of the handle.
+fn recipe_runtime_of(
+    sup: &Arc<Supervisor>,
+    cell: &std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+) -> Arc<crate::recipes::runtime::RecipeRuntime> {
+    Arc::clone(cell.get_or_init(|| {
+        let seg = Arc::clone(sup);
+        let builtin = std::env::var_os("HK_RECIPES_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
+                    .filter(|p| p.is_dir())
+            });
+        let rt = crate::recipes::runtime::RecipeRuntime::new(
+            Arc::clone(&sup.common.counters),
+            Arc::new(move || seg.lock().shared.clone()),
+            Arc::clone(&sup.common.listen),
+            crate::recipes::store::RecipeStore::new(builtin, sup.common.data_dir.join("recipes")),
+        );
+        // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
+        rt.attach_default_capture_store(&sup.common.data_dir);
+        rt
+    }))
 }
 
 /// Detection resolution of the run.
@@ -3184,11 +3212,17 @@ impl PipelineHandle {
     /// the run's listen limits in force at each request ([`Self::set_listen_settings`]).
     pub fn listen_service(&self) -> Arc<crate::chains::listen::ListenManager> {
         let sup = Arc::clone(&self.sup);
-        Arc::new(crate::chains::listen::ListenManager::new(
-            Arc::clone(&self.sup.common.counters),
-            Arc::new(move || sup.lock().shared.clone()),
-            Arc::clone(&self.sup.common.listen),
-        ))
+        // T-869 (ADR-0015 §12.9 stage 4): the chooser's recipe path, wired lazily — the runtime
+        // is built only if a request actually goes down it (`HK_LISTEN_PIPELINE`).
+        let (rt_sup, cell) = (Arc::clone(&self.sup), Arc::clone(&self.recipes));
+        Arc::new(
+            crate::chains::listen::ListenManager::new(
+                Arc::clone(&self.sup.common.counters),
+                Arc::new(move || sup.lock().shared.clone()),
+                Arc::clone(&self.sup.common.listen),
+            )
+            .with_recipes(Arc::new(move || recipe_runtime_of(&rt_sup, &cell))),
+        )
     }
 
     /// The run's detection FFT override (`PipelineSettings::fft_len`; `None` sizes it per rate).
@@ -3279,27 +3313,7 @@ impl PipelineHandle {
     /// `$HK_RECIPES_DIR` or the repository's `recipes/`; user versions live in
     /// `<data dir>/recipes/`.
     pub fn recipe_runtime(&self) -> Arc<crate::recipes::runtime::RecipeRuntime> {
-        Arc::clone(self.recipes.get_or_init(|| {
-            let sup = Arc::clone(&self.sup);
-            let builtin = std::env::var_os("HK_RECIPES_DIR")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
-                        .filter(|p| p.is_dir())
-                });
-            let rt = crate::recipes::runtime::RecipeRuntime::new(
-                Arc::clone(&self.sup.common.counters),
-                Arc::new(move || sup.lock().shared.clone()),
-                Arc::clone(&self.sup.common.listen),
-                crate::recipes::store::RecipeStore::new(
-                    builtin,
-                    self.sup.common.data_dir.join("recipes"),
-                ),
-            );
-            // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
-            rt.attach_default_capture_store(&self.sup.common.data_dir);
-            rt
-        }))
+        recipe_runtime_of(&self.sup, &self.recipes)
     }
 
     /// The run's decoded-stream capture store (T-092): every pipeline's inspector output is
