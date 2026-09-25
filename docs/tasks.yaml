@@ -19062,6 +19062,8 @@ tasks:
       well-specified but the tried/not-tried register is an honesty invariant, not styling.
 
       Review FAIL fixed: mountTracePanel in ui/src/app/explore/analyze-trace-panel.ts was rebuilding the whole panel (including a fresh family <input>) on every ~1s AnalyzeJob poll and every 2s trace poll via el.replaceChildren, wiping focus/typed text so 'Why not PSK?' could not be used, and could drop a Re-run click straddling a redraw. Fixed by building the filter row (input + Why not?/Clear buttons) once per watched job and splitting out renderTraceResults as the only thing redrawn, driven solely by the trace fetch's own completion (setJob now no-ops when the job id is unchanged). Also added a monotonic request sequence in fetchTrace so a stale trace response arriving after a newer filter/job cannot overwrite the current answer, and the 2s poll now stops once a response reports final:true. No pure-function signatures changed; just test-ui: 82/82 test files pass (build+typecheck+node tests).
+
+      Merge-gate FAIL fixed (attempt 2): an uncommitted docs/tasks.yaml change (the previous round's own 'just task note' append) was left in the worktree, tripping the gate's ahead-but-dirty check. Committed it (9fa5b3fd); no code change needed. Re-verified: git merge against the cited last-gated main (b7e9dc03) reports already up to date, and just test-ui passes 82/82 test files (build+typecheck+node tests) with a clean working tree afterward.
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
