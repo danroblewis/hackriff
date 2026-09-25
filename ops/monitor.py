@@ -624,7 +624,11 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
-let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
+let last='',scope='frontier',flt={done:false,todo:true,blocked:false,collapse:true},msFilter='';
+// Defaults (user, 2026-09-24 23:20): 'todo' shown and 'collapse done' on. A choice made here is remembered in
+// this browser (localStorage 'graph.flt') and overrides them.
+try{ Object.assign(flt, JSON.parse(localStorage.getItem('graph.flt')||'{}')); }catch(e){}
+function saveFlt(){ try{localStorage.setItem('graph.flt',JSON.stringify(flt));}catch(e){} }
 // Open milestones live for THIS TAB only (sessionStorage): a persisted "M2 open" survived a reload
 // on 2026-09-22 and read as "the map always shows everything". The chips in the top bar say what
 // is open and close it.
@@ -641,10 +645,9 @@ renderOpenChips();
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
-// "collapse done" is off by default (it removes nodes); it is remembered like the other filters.
-if(flt.collapse===undefined) flt.collapse=false; document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
-document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);last='';draw();};
+['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).classList.toggle('on',flt[k]); document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);saveFlt();last='';draw();};});
+document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
+document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);saveFlt();last='';draw();};
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
