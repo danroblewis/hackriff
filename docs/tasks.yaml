@@ -27365,7 +27365,7 @@ tasks:
   - id: T-920
     milestone: M2-hardening
     title: "IQ ring unavailable / lossless-gate test red on Linux (node2) but green on the Mac: view_pause_keeps_capture + api_contract coverage iq-ring available:false - Jetson portability"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: SDR
@@ -27393,6 +27393,7 @@ tasks:
       Observed, not chased: A THIRD test is red on this Linux host on UNMODIFIED main, deterministically and alone, and it is NOT one of the two T-920 names: hk-cli api_contract the_band_collapsed_activity_series_is_measured_and_states_its_fold, panicking at crates/hk-cli/tests/api_contract.rs:7102, 'two timeline answers over the same capture window'. EVIDENCE: I reverted all three files this ticket edits (crates/hk-cli/tests/api_contract.rs, crates/hk-api/src/coverage.rs, crates/hk-cli/tests/iq_buffer_allocation_http.rs) to main's version with `git checkout --`, ran the single test, and got the identical failure at the identical line in 3.3 s; restored afterwards. Nothing in this diff touches /api/timeline. The cause is the same CLASS as the one T-920 half I fixed: the test takes two sequential GET /api/timeline answers (rows=4 and rows=1) and retries 40 times at 50 ms for the pair to report the SAME window.t0_s/t1_s, but the capture window's t1 is the live edge and advances continuously, so on a fast box no two requests ever agree and all 40 tries miss. The honest fix is to pin the window with explicit t0/t1 query parameters rather than hoping two live-edge reads coincide - the same 'ask for the thing you are asserting on' move made here. Left alone because it is outside T-920's stated scope and needs its own ticket. | The flow gate engaging at all during a normal phase is genuinely rate-dependent on this hardware - `playing`/`held`/`back` showed gate_waits of 0, 1, 31, 36, 48 across runs with no pattern. Nothing depends on it any more, but any future test tempted to assert `gate_waits > 0` over a fixed window will flake the same way; the property to assert is the pinned-cursor demonstration this ticket added. | `ring_can_answer` treats every non-`allocating` state with `enabled: true` as available, and `allocation: "shrunk"` (fewer slots than the quota) therefore reads as fully available with no note. That is arguably right - a shrunk ring does hold a journal - but the new `state` field now surfaces it, so a client sees `state: "shrunk", available: true` and may want a hint about the reduced horizon. Not changed; no test asserts it either way.
       Use cases: AWARE-036, SIGNAL-062
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 3c3abbe5
   - id: T-921
     milestone: MAUTO
     title: Re-measure the confirm false-positive rate with T-577's harness driving the REAL CheckTally (and assist::codes on the new count); lower min_check_width to 8 only if the measurement allows (T-575 residue)
