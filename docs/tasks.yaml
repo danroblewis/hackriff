@@ -5116,7 +5116,7 @@ tasks:
   - id: T-277
     milestone: M5
     title: 'M5 HF/VLF science front ends (accessory-gated)'
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: M5C
@@ -5139,6 +5139,7 @@ tasks:
       2026-09-24 coordinator: RE-SCOPED after its Opus review FAILED the 'done' (review.json): T-277 = the VLF/LF science analyses (task-t277, hk-dsp::vlf, reviewed correct: PROP-019 sign, SPACE-001 step, accessory gating). The accessory-fed hk-core source and the pipeline/API wiring that make them reachable are split to T-891, which now carries SPACE-001/SPACE-041/PROP-019 end to end. T-277 lands done on that narrower scope; the retiered_2026_09_21 note's 'tagging only' reading was already wrong (the tags predated the ticket).
     result: |
       DONE 2026-09-24 (work-runner hand-back, re-scoped by the coordinator after the Opus review): T-277 = the VLF/LF science ANALYSES in hk-dsp::vlf (SPACE-001 SID step, PROP-019 phase -> reflection height, sferic detection), accessory-gated, reviewed correct (PROP-019 sign fix 2d2d5b08). Tests: cargo nextest run -p hk-dsp --lib vlf -> exit 0 (4 passed); precheck exit 0. Commits: f1785ca1, 2d2d5b08, 78159094. NOT in this ticket (split out): the accessory-fed hk-core source, its mock and the pipeline/API wiring that make SPACE-001/SPACE-041/PROP-019 reachable, plus the detect_sferics zero-median threshold floor - all T-891.
+    commit: 3273643b
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -18849,7 +18850,7 @@ tasks:
   - id: T-568
     milestone: MAUTO
     title: "MAUTO: the negative-control guard suite - four populations, a stated false-label budget, and zero labels on input with nothing to find"
-    status: todo
+    status: done
     priority: high
     parallel_group: M-E
     model: opus
@@ -18885,6 +18886,7 @@ tasks:
       Observed, not chased: No ticket owns the production SearchBackend. Nothing wires hk_synth::engine::search to hk_blocks::run_window over acquired IQ (hk_pipeline::synth::jobs ends every job failed/no_evaluator; the only Evaluator impls are in tests: crates/hk-pipeline/tests/analyze_jobs.rs:221, crates/hk-synth/tests/search_engine.rs:114). Until something does, the must-return column of this suite (and T-576/T-863) cannot be reached: every negative answers not-searched. | N3 dsss_m_sequence (defaults) produced 0 emitters in all 3 seeds, so no DSSS answer was scored. The run also found only 2 of 3 OFDM scenes. N5 adjacent_leakage: nothing was detected inside the analysed box in any of the 3 seeds (only ~1 kHz fragments at 433.868/433.955/433.962 MHz), so it scores abstain and is not evidence about mismatch. | N4 433 MHz quiet window: 8 emitters and none marked artifact-of, although the fixture README calls the 434.000 MHz line a likely sample-clock harmonic (one row sits at 433.9943-434.0060 MHz). So the spur rule has no artifact row to bind on today. | The Resolution served by /api/analyze has no missing_block field, so N3's 'naming the structure + missing_block' is checked against resolution.summary text. T-566/T-567 should decide whether it becomes a field.
       Use cases: SIGNAL-001, SIGNAL-062, RESEARCH-009
       Resources: 68 CPU-s, peak 3.5 GB
+    commit: 6b1c55fe
   - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
@@ -19464,7 +19466,7 @@ tasks:
   - id: T-590
     milestone: M3
     title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     model: opus
@@ -19496,6 +19498,7 @@ tasks:
       Observed, not chased: Before this change, a psk-qam verifier run whose candidates included a declined label (fewer than 2 scored) reported SkipReason::Geometry, which is a misleading code for 'no model for the candidates'. It no longer fires for QAM; it would recur for any future declined label. | C14 locks genuine qam64 on only 4 of 6 seeds at 15-30 dB (t590 exploration), so the verifier cannot run on the rest; this is the one remaining qam64 wrong call on the e2e grid. | Only hk-classify was tested. A downstream crate or an e2e test that pins exact psk-qam class calls could see the verifier now re-ranking QAM priors; the coordinator's gate covers that.
       Use cases: SIGNAL-062
       Resources: 626 CPU-s, peak 1.3 GB
+    commit: 03c941bc
   - id: T-583
     milestone: MLIVE
     title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
@@ -25563,7 +25566,7 @@ tasks:
   - id: T-860
     milestone: MAUTO
     title: "MAUTO M-9: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out"
-    status: in-progress
+    status: done
     branch: task-t860
     priority: normal
     deps:
@@ -25586,6 +25589,7 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
     core_interface: true
+    commit: 4fb3da00
   - id: T-861
     milestone: MAUTO
     title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
@@ -25769,7 +25773,7 @@ tasks:
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-866
@@ -25799,6 +25803,7 @@ tasks:
       Observed, not chased: test_work_accounting: test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed failed in gate, pass alone
       Resources: 63 CPU-s, peak 0.4 GB
     branch: task-t867
+    commit: 6d350b8a
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
@@ -25946,7 +25951,7 @@ tasks:
   - id: T-874
     milestone: MAUTO
     title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-873
@@ -25979,6 +25984,7 @@ tasks:
       Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails with 'assertion records > 20: 9 records' (ondemand.rs:365). It fails identically with this ticket's hk-stream change reverted to HEAD (checked twice). It is a wall-clock throughput assertion (records counted over 1.5 s with a 20 ms ticker), and the load average was 17–22. It looks like a timing-tier candidate for the deflaker; unrelated to T-874. | Recipe `audio` outputs (audio/<pipeline>/<output>) and the `playback` opener stay mono (channels: 1): audio_out takes one real input, and hk-recipe validates audio outputs as mono. Recipe-side stereo needs stereo_decode → a two-input audio_out (L in re, R in im through its Rate, as stereo_decode does) plus the recipe validation change. It is the natural companion to LP-3/T-867. | Listen's CPU-budget costing (ListenConfig::chain_mcores) does not add the stereo path's extra FIR (one more 15 kHz low-pass at 240 kS/s per WFM listener); it is small against the source-rate DDC but unmeasured. | On the synthetic stereo station, T-070 refinement narrowed the WFM channel to about 106 kHz (occupied BW), below Carson's bandwidth for a stereo multiplex. Separation was still 28–35 dB, but on real stations a narrow refined channel may cost stereo separation. Untested on a real stereo recording.
       Use cases: SIGNAL-062
       Resources: 165 CPU-s, peak 2.4 GB
+    commit: 33ddeda1
   - id: T-875
     milestone: MAUTO
     title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
@@ -26054,7 +26060,7 @@ tasks:
   - id: T-878
     milestone: M3
     title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
-    status: in-progress
+    status: done
     branch: task-t878
     priority: high
     deps: []
@@ -26068,6 +26074,7 @@ tasks:
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
     core_interface: true
+    commit: 9075575a
   - id: T-879
     milestone: M3
     title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
@@ -26136,7 +26143,7 @@ tasks:
   - id: T-883
     milestone: M2-hardening
     title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: E2E-HARNESS
@@ -26159,6 +26166,7 @@ tasks:
       Commits: d0656c3d
       Observed, not chased: selftest-crosstalk (like the timeout/orphan selftests) is in no gate. It is ~5 s and needs no browser, so it could run under test-ui; adding a justfile recipe was skipped because touching the justfile forces this ui-only diff onto the full gate. | Lock files written before this change have no `root`, so the scoped sweep skips them; they age out after 24 h (STALE_LOCK_MAX_AGE_MS). An orphan from a SIGKILLed run in a worktree that is later removed is now never swept by another checkout's run.
       Resources: 270 CPU-s, peak 3.8 GB
+    commit: 15ec8607
   - id: T-880
     milestone: MCANVAS
     title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
@@ -26270,7 +26278,7 @@ tasks:
   - id: T-887
     milestone: M3
     title: "Device-path FSK features disagree with the dev grid: cyclic_db ~7 dB low on short bursts, sigma_aa ~2x - the rows T-877 cannot claim"
-    status: in-progress
+    status: done
     branch: task-t887
     priority: high
     deps:
@@ -26290,10 +26298,11 @@ tasks:
 
       2026-09-24 coordinator: landed scope = sigma_aa fix (half-level edges) + T-888 merged; device FSK 16/16. cyclic_db fix (packet_window) held behind T-908 (verifier). Observed, not chased: device burst 25 dB seed 854 #5 looks split/collided (OBW 15 kHz vs ~25, envelope variation 0.85, no deviation estimate, sigma_aa z +14.6) - a detection/overlap question, not estimator bias; file if it recurs.
     effort_reason: root-causing a feature bias across the estimator and the synthetic generator, blind, on the classification contract
+    commit: dd29c157
   - id: T-888
     milestone: M3
     title: blind_qpsk/blind_bpsk carry a default when unmeasured (0.200 veto floor), breaking T-311's absent-not-default rule
-    status: in-progress
+    status: done
     branch: task-t888
     priority: normal
     deps: []
@@ -26306,6 +26315,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-877 worker 2026-09-24.
+    commit: f6cf5be6
   - id: T-889
     milestone: M2-hardening
     title: "fog-of-war.e2e.mjs band-A wait gives up on a 10 s wall-clock stall: make it event-counted (load flake that sank the 10:15 batch)"
@@ -26380,7 +26390,7 @@ tasks:
   - id: T-892
     milestone: M2-hardening
     title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-356
@@ -26403,6 +26413,7 @@ tasks:
       Commits: eac91fe4
       Observed, not chased: Load flake, pre-existing and untouched by this diff: hk-core source::hackrf::tests::a_slow_reader_gets_counted_drops_and_an_exact_gap panicked 'the pool overflowed' (hackrf.rs ~1412) in 1 of 3 and 2 of 5 isolated runs at load average ~18-21; it sleeps 200 ms of wall clock and assumes the fake producer thread overflowed a 2-buffer pool in that time. Passed in the second full `just test-crate hk-core`. A deflaker should make it wait on the drop counter rather than a fixed sleep. | If a future DeviceAction ever (re)opens a device (e.g. device hot-swap), LiveControlError should map SourceError::DeviceInUse to its own 409 code in docs/api.md + api_contract.rs rather than 502 device_error; not done here because no route reaches it today. | Classification of -1000 matches libusb's English strerror text (libusb's default locale); a non-English libusb_setlocale would fall back to the plain Device error, never to a false 'in use'.
       Resources: 51 CPU-s, peak 1.4 GB
+    commit: e2e57dd3
   - id: T-893
     milestone: MLIVE
     title: "Following panes still poll for new rows: wire /ws/tiles/rows (rowfeed.ts is parsed but unused), refresh coarse stand-ins, look ahead on still-pending columns (T-890 residue)"
