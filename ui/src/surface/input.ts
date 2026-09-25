@@ -18,7 +18,9 @@
 // Screen y runs down and the drawing buffer's runs up, so the vertical delta is negated exactly
 // once, here, and every consumer below is in one convention.
 
-import { dragIntent, isShadowGainWheel, type SurfacePreview, wheelDelta, wheelZoom } from "./preview";
+import {
+  dragIntent, isShadowGainWheel, pinchZoom, type SurfacePreview, touchIntent, wheelDelta, wheelZoom,
+} from "./preview";
 
 /** A point in drawing-buffer coordinates, GL convention (origin bottom-left). */
 export interface GlPoint { x: number; y: number }
@@ -144,8 +146,25 @@ export function attachSurfaceInput(
       x: number; y: number; x0: number; y0: number; map: boolean; pane: string | null; travel: number;
       region: SurfaceRegion | null; measuring: SurfaceRegion | null;
       annotating: SurfaceRegion | null; tool: "annotate" | "pin" | null;
+      /** T-824: a finger's stroke whose meaning is not decided yet — pan, or (held first) a region.
+       * It moves nothing until it has travelled `DRAG_PX` from the press; then `touchIntent` decides,
+       * once. `t0` is the press's own `timeStamp`, so the hold is read off the events, not a clock. */
+      undecided: boolean; t0: number; press: GlPoint;
     }
     | null = null;
+
+  // **Touch (T-824, docs/23 §10.5).** Fingers on the canvas, by pointer id, in client px. Two of them
+  // are a pinch: zoom both axes about their midpoint and pan with it — view arithmetic on the same
+  // `preview` methods a wheel and a drag use, so it reaches exactly what they reach: nothing. A third
+  // finger is ignored. When a pinch ends, the finger left down does nothing until it lifts: carrying
+  // it on as a pan would move the view by however far the fingers drifted apart.
+  const fingers = new Map<number, { x: number; y: number }>();
+  let pinch: { map: boolean; pane: string | null; spread: number; mid: { x: number; y: number } } | null = null;
+  const spreadMid = () => {
+    const [a, b] = [...fingers.values()];
+    return { spread: Math.hypot(a.x - b.x, a.y - b.y), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+  };
+  const isTouch = (e: PointerEvent) => e.pointerType === "touch";
 
   const endRegion = () => {
     if (dragging?.region) opts.onRegionDrag?.(null);
@@ -169,6 +188,25 @@ export function attachSurfaceInput(
   // invalidated nor created by one, which is correct — the viewport did not move.
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
+    if (isTouch(e)) {
+      if (fingers.size >= 2) return; // a third finger means nothing
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (fingers.size === 2) {
+        // The second finger turns whatever the first began into a pinch. A region or measurement
+        // stroke in progress is abandoned (not committed); a pan already made stays made.
+        endRegion();
+        const d = dragging;
+        dragging = null;
+        const { spread, mid } = spreadMid();
+        const p = point({ clientX: mid.x, clientY: mid.y });
+        const map = d ? d.map : preview.onMap(p);
+        const pane = map ? null : d?.pane ?? preview.paneAt(p);
+        if (pane) preview.activePane = pane;
+        pinch = { map, pane, spread, mid };
+        canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     const p = point(e);
     const map = preview.onMap(p);
     const pane = map ? null : preview.paneAt(p);
@@ -183,8 +221,13 @@ export function attachSurfaceInput(
     // measurement is claimed; the map strip keeps its own meaning in every mode.
     const tool = !region && !measuring && pane && opts.annotateMode ? opts.annotateMode : null;
     const annotating = tool === "annotate" && pane && opts.onAnnotateBox ? { pane, a: p, b: p } : null;
+    // A finger with no mode of its own to follow waits to see whether it was held (T-824). A tool
+    // mode is a mode of its own: Annotate claims the stroke like Measure does, and in Pin a finger
+    // pans and taps exactly as a mouse does, so a tap drops the marker rather than focusing a row.
+    const undecided = isTouch(e) && !region && !measuring && !tool;
     dragging = {
       x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region, measuring, annotating, tool,
+      undecided, t0: e.timeStamp, press: p,
     };
     if (region) opts.onRegionDrag?.(region);
     if (measuring) opts.onMeasureDrag?.(measuring);
@@ -193,7 +236,43 @@ export function attachSurfaceInput(
   };
 
   const onMove = (e: PointerEvent) => {
+    if (isTouch(e) && fingers.has(e.pointerId)) fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch) {
+      if (!fingers.has(e.pointerId) || fingers.size < 2) return;
+      const { spread, mid } = spreadMid();
+      const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
+      const { factor, axes } = pinchZoom(pinch.spread, spread);
+      const at = point({ clientX: mid.x, clientY: mid.y });
+      const dx = (mid.x - pinch.mid.x) * scale, dy = -(mid.y - pinch.mid.y) * scale;
+      if (pinch.map) { preview.wheelMap(at, factor, axes); preview.dragMap(dx, dy); }
+      else if (pinch.pane) { preview.wheel(pinch.pane, at, factor, axes); preview.drag(pinch.pane, dx, dy); }
+      pinch.spread = spread;
+      pinch.mid = mid;
+      moved();
+      return;
+    }
     if (!dragging || !e.buttons) { opts.onHover?.(point(e), e); return; }
+    if (dragging.undecided) {
+      // Nothing moves until the finger has gone somewhere (a jittery tap stays a tap); then the
+      // stroke's meaning is decided once, from how long it rested first.
+      dragging.travel += Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y);
+      dragging.x = e.clientX;
+      dragging.y = e.clientY;
+      if (Math.hypot(e.clientX - dragging.x0, e.clientY - dragging.y0) < DRAG_PX) return;
+      dragging.undecided = false;
+      if (touchIntent(e.timeStamp - dragging.t0) === "region" && dragging.pane && opts.onRegion) {
+        dragging.region = { pane: dragging.pane, a: dragging.press, b: point(e) };
+        opts.onRegionDrag?.(dragging.region);
+        return;
+      }
+      // A pan: catch the view up with the finger, from the press, so the data under it stays under it.
+      const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
+      const dx = (e.clientX - dragging.x0) * scale, dy = -(e.clientY - dragging.y0) * scale;
+      if (dragging.map) preview.dragMap(dx, dy);
+      else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
+      moved();
+      return;
+    }
     const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
     const dx = (e.clientX - dragging.x) * scale, dy = -(e.clientY - dragging.y) * scale;
     dragging.travel += Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y);
@@ -236,7 +315,17 @@ export function attachSurfaceInput(
     moved();
   };
 
+  // A pinch ends when either finger lifts: its target commits its follow/pause decision exactly as
+  // a drag's does (T-486), and the finger still down is inert until it lifts too.
+  const endPinch = () => {
+    const p = pinch;
+    pinch = null;
+    if (p) { settle({ map: p.map, pane: p.pane, region: null, measuring: null, annotating: null }); }
+  };
+
   const onUp = (e: PointerEvent) => {
+    if (isTouch(e)) fingers.delete(e.pointerId);
+    if (pinch) { endPinch(); return; }
     const d = dragging;
     dragging = null;
     if (!d) return;
@@ -280,9 +369,24 @@ export function attachSurfaceInput(
       if (d.travel < DRAG_PX && d.pane) opts.onAnnotatePoint?.({ pane: d.pane, at: point(e) }, "marker");
       return;
     }
+    if (d.undecided) {
+      // A finger that never travelled: a tap selects, as a click does; one that was HELD is the
+      // touch long-press — the context menu, at the press (docs/23 §10.5). Decided here rather than
+      // by the browser's own `contextmenu`, which fires mid-hold and would open the menu under a
+      // finger about to drag out a region (see `onMenu`).
+      if (touchIntent(e.timeStamp - d.t0) === "region") { if (!d.map) opts.onContext?.(d.press, e); }
+      else if (!d.map) opts.onClick?.(point(e), e);
+      return;
+    }
     if (d.travel < DRAG_PX && !d.map) opts.onClick?.(point(e), e);
   };
-  const onCancel = () => { endRegion(); if (dragging) settle(dragging); dragging = null; };
+  const onCancel = (e: PointerEvent) => {
+    if (e && isTouch(e)) fingers.delete(e.pointerId);
+    if (pinch) { endPinch(); return; }
+    endRegion();
+    if (dragging && !dragging.undecided) settle(dragging);
+    dragging = null;
+  };
   const onLeave = (e: PointerEvent) => { if (!dragging) opts.onHover?.(null, e); };
 
   // **Every wheel over the canvas is the surface's, whatever is held down (T-456).**
@@ -326,6 +430,9 @@ export function attachSurfaceInput(
   const onMenu = (e: MouseEvent) => {
     if (!opts.onContext) return;
     e.preventDefault();
+    // A finger is still down (T-824): the browser's long-press menu, fired mid-hold. The stroke
+    // itself decides at release whether it was a long-press (menu) or a hold-then-drag (region).
+    if (fingers.size > 0) return;
     opts.onContext(point(e), e);
   };
 

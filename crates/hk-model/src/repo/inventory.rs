@@ -230,21 +230,37 @@ pub(super) fn upsert_track_on(conn: &Connection, track: &Track) -> Result<(), Re
     Ok(())
 }
 
-/// [`Repository::link_detections_to_track`] inside an open write transaction.
+/// [`Repository::link_detections_to_track`] inside an open write transaction. Returns how many
+/// of `detections` had **no stored row** and were therefore not linked (T-913).
 pub(super) fn link_detections_on(
     conn: &Connection,
     track_id: TrackId,
     detections: &[DetectionId],
     linked_at: Timestamp,
-) -> Result<(), RepoError> {
+) -> Result<usize, RepoError> {
+    // T-904: a link whose detection is gone (aged out by retention while the tracker held it
+    // tentatively) is skipped, not an error: `OR IGNORE` does not cover a foreign-key failure, and
+    // one failed link would fail — and so wedge — every later write of its batch.
     let mut stmt = conn.prepare_cached(
         "INSERT OR IGNORE INTO track_detection (track_id, detection_id, linked_at) \
-         VALUES (?1, ?2, ?3)",
+         SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM detection WHERE detection_id = ?2)",
     )?;
+    // T-913: and it is counted, not silent. A link is skipped for exactly two reasons — the row
+    // was already linked (idempotent re-link), or its detection is not stored — so the skip is
+    // only reported when the pair is absent from `track_detection` afterwards, which is the case
+    // that would hide a drain-before-flush regression.
+    let mut exists = conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM track_detection WHERE track_id = ?1 AND detection_id = ?2)",
+    )?;
+    let mut dropped = 0;
     for d in detections {
-        stmt.execute(params![blob(track_id), blob(*d), linked_at.as_unix_nanos()])?;
+        let n = stmt.execute(params![blob(track_id), blob(*d), linked_at.as_unix_nanos()])?;
+        if n == 0 {
+            let linked: bool = exists.query_row(params![blob(track_id), blob(*d)], |r| r.get(0))?;
+            dropped += usize::from(!linked);
+        }
     }
-    Ok(())
+    Ok(dropped)
 }
 
 /// [`Repository::track_detections`] on any connection or transaction.
@@ -376,17 +392,20 @@ impl Repository {
         )
     }
 
-    /// Appends detections to a track's membership (idempotent).
+    /// Appends detections to a track's membership (idempotent). A detection that is not stored
+    /// (never written, or aged out by retention, T-904) is skipped, never an error; the number
+    /// skipped for that reason is returned (T-913), so a drain-before-flush regression is visible
+    /// rather than silent.
     pub fn link_detections_to_track(
         &mut self,
         track_id: TrackId,
         detections: &[DetectionId],
         linked_at: Timestamp,
-    ) -> Result<(), RepoError> {
+    ) -> Result<usize, RepoError> {
         let tx = self.write_tx()?;
-        link_detections_on(&tx, track_id, detections, linked_at)?;
+        let dropped = link_detections_on(&tx, track_id, detections, linked_at)?;
         tx.commit()?;
-        Ok(())
+        Ok(dropped)
     }
 
     /// Member detections of a track, ordered by detection start time (then id).

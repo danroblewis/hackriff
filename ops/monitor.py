@@ -624,7 +624,11 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
-let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
+let last='',scope='frontier',flt={done:false,todo:true,blocked:false,collapse:true},msFilter='';
+// Defaults (user, 2026-09-24 23:20): 'todo' shown and 'collapse done' on. A choice made here is remembered in
+// this browser (localStorage 'graph.flt') and overrides them.
+try{ Object.assign(flt, JSON.parse(localStorage.getItem('graph.flt')||'{}')); }catch(e){}
+function saveFlt(){ try{localStorage.setItem('graph.flt',JSON.stringify(flt));}catch(e){} }
 // Open milestones live for THIS TAB only (sessionStorage): a persisted "M2 open" survived a reload
 // on 2026-09-22 and read as "the map always shows everything". The chips in the top bar say what
 // is open and close it.
@@ -641,10 +645,9 @@ renderOpenChips();
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
-// "collapse done" is off by default (it removes nodes); it is remembered like the other filters.
-if(flt.collapse===undefined) flt.collapse=false; document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
-document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);last='';draw();};
+['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).classList.toggle('on',flt[k]); document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);saveFlt();last='';draw();};});
+document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
+document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);saveFlt();last='';draw();};
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
@@ -756,6 +759,79 @@ def stage_status():
         if "SMOKE FAIL" in l: smoke = "fail"; break
     return {"alive": alive, "source": rd("hk-serve-source").replace("source: ", ""),
             "built": rd("hk-serve-built-commit"), "smoke": smoke, "lines": lines}
+
+def _radio_module():
+    import sys as _sys
+    py_dir = os.path.join(CODE_ROOT, "py")
+    if py_dir not in _sys.path:
+        _sys.path.insert(0, py_dir)
+    from hkpy import radio as radio_mod
+    return radio_mod
+
+
+def radio_status():
+    """The HackRF radio lock (T-922): who holds it, until when, and whether staging is
+    LIVE or REPLAY because of it. Reads hkpy.radio's own lock file/format - the same
+    module `just radio` and the explorer/capture-agent use - never re-parsed here."""
+    try:
+        radio_mod = _radio_module()
+    except Exception as e:
+        return {"error": str(e)}
+    now = time.time()
+    lock = radio_mod.read(SCRATCH)
+    staging = radio_mod.staging_mode(SCRATCH)
+    if lock is None:
+        return {"held": False, "staging": staging}
+    stale = radio_mod.is_stale(lock, now)
+    return {"held": not stale, "owner": lock["owner"], "since": lock["since"],
+            "until": lock["until"], "why": lock["why"], "stale": stale, "staging": staging}
+
+
+def explorer_status():
+    """The explorer window (T-923/T-925): current target, phase and a journal tail, read
+    from $HACKRIFF_OPS/explorer/ and the radio lock. A READER only - the explorer agent
+    is the sole writer of the journal, wrap-up marker and the lock.
+
+    phase: 'no window' (never run / nothing today) | 'running' (holds the radio lock) |
+           'wrap-up' (inside the last-15-min marker) | 'ended' (journal exists, lock gone)
+    target: the most recent '## HH:MM <target> (<freq range>)' heading in the newest
+            journal file, i.e. what it is on right now (or was on last, once ended).
+    """
+    edir = os.path.join(SCRATCH, "explorer")
+    files = sorted(glob.glob(os.path.join(edir, "journal-*.md")), key=os.path.getmtime)
+    jpath = files[-1] if files else None
+    text = ""
+    if jpath:
+        try:
+            text = open(jpath, encoding="utf-8").read()
+        except OSError:
+            text = ""
+    lines = [l for l in text.splitlines() if l.strip()]
+    target = ""
+    summarized = False
+    for l in reversed(lines):
+        if l.startswith("## "):
+            head = l[3:].strip()
+            if head == "Window summary":
+                summarized = True
+                continue
+            m = re.match(r"^\d{1,2}:\d{2}\s+(.*)$", head)   # drop the leading HH:MM
+            target = m.group(1) if m else head
+            break
+    wrap = os.path.exists(os.path.join(edir, "wrap-up"))
+    rlock = radio_status()
+    running = bool(rlock.get("held")) and rlock.get("owner") == "explorer"
+    if running:
+        phase = "wrap-up" if wrap else "running"
+    elif summarized:
+        phase = "summarized"
+    elif jpath:
+        phase = "ended"
+    else:
+        phase = "no window"
+    return {"phase": phase, "target": target,
+            "journal": os.path.basename(jpath) if jpath else "", "tail": lines[-20:]}
+
 
 def _ms_of(tid):
     try:
@@ -944,7 +1020,11 @@ def merge_status():
         except Exception:
             pass
     state = "merging" if merging else ("gating" if gate else "idle")
-    return {"state": state, "msg": mmsg, "ticket": mticket,
+    try:   # the one "branches not yet on main" number (hkpy.flow.queue_waiting), same as /flow's
+        not_on_main = _flow_modules()[0].queue_waiting(SCRATCH)["waiting"]
+    except Exception:
+        not_on_main = None
+    return {"state": state, "msg": mmsg, "ticket": mticket, "not_on_main": not_on_main,
             "gate": gate, "elapsed_s": elapsed, "queue": queue,
             "testing": testing, "ahead": ahead, "gates_running": gates_running,
             "phase": phase, "progress": progress, "typical_s": typical_s, "merge_age_s": merge_age_s}
@@ -1754,7 +1834,10 @@ def agents(status_map):
         if not alive and (c or s["age_s"] > ACTIVE):
             continue
         s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
-        s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
+        # A remote claim's row names its host (user via supervisor, 2026-09-25 00:40): its transcript is the copy the
+        # work runner appends from that host every tick, its pid the local ssh session holding the run.
+        s["host"] = c.get("host") or "mac"
+        s["label"] = (f"{c['host']} · " if c.get("host") else "") + f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
         best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
     return out
@@ -1879,6 +1962,7 @@ def gather():
         "now": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
+        "radio": radio_status(), "explorer": explorer_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
         "gates": gates, "junit": junit,
         "timing": gate_timing(), "flakes": flake_top(),
@@ -2003,7 +2087,14 @@ def build_flow_panel(ops, now=None):
             "full_gate_p50_min": full_p50, "baseline_full_gate_p50_min": baseline_full_p50,
             "causes_24h": dict(causes), "reds_24h": len(reds24), "gates_24h": len(closed24),
             "blamed_alone": blamed_alone(),
+            # Branches not yet on main (user, 2026-09-24 17:02: 'is the merge queue growing?').
+            "queue_depth": {"now": flow_mod.queue_waiting(ops),
+                            "hourly": flow_mod.queue_depth_hourly(ops, now - timedelta(hours=24), now),
+                            "spark": flow_mod.queue_depth_series(ops, now - timedelta(hours=24), now)},
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
+            # Remote worker hosts (user, 2026-09-25): running/landed per host and its mirror's drift from main.
+            "remote_hosts": (rh := flow_mod.remote_hosts(ops)),
+            "landings_by_host_24h": flow_mod.landings_by_host(ops, hosts=rh),
             "experiment": experiment,
         }
     except Exception as e:
@@ -2172,6 +2263,8 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
     <div class="card" style="max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
     <div class="card" style="height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
+    <div class="card" style="max-height:110px" title="who holds the HackRF (T-922 lock), until when, and whether staging serves live or replay because of it"><h2>Radio owner <em id=radio-sub></em></h2><div class="bd log" id=radio></div></div>
+    <div class="card" style="max-height:220px" title="the explorer agent (T-923): current target, phase, journal tail"><h2>Explorer <em id=explorer-sub></em></h2><div class="bd log" id=explorer></div></div>
   </div>
 </div></div>
 <script>
@@ -2263,7 +2356,7 @@ async function tick(){
     const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju
       +(fl?hdr('Flake ledger · tests that cost gates')+fl:'')
       +hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
-    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
+    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting'+(mg.not_on_main!=null?' · '+mg.not_on_main+' not on main':'');
   }
   const b=d.budget||{}; const bEl=$('#budget');
   if(b.weekly!=null||b.session!=null){
@@ -2327,6 +2420,26 @@ async function tick(){
   const stEl=$('#stage'); const atBottom=stEl.scrollHeight-stEl.scrollTop-stEl.clientHeight<20;
   stEl.innerHTML=(s.lines||[]).map(l=>{const c=l.includes('FAIL')?'#E47B68':l.includes('SMOKE OK')||l.includes('started')?'#52C2AE':l.includes('new code')?'#F0A542':'var(--mut)';return `<div style="color:${c}">${esc(l)}</div>`;}).join('')||'<div class=w>no staging log yet</div>';
   if(atBottom) stEl.scrollTop=stEl.scrollHeight;
+  const r=d.radio||{}; const rsub=$('#radio-sub'), rEl=$('#radio');
+  if(rsub&&rEl){
+    if(r.error){ rsub.innerHTML='<span class="rdot off"></span>?'; rEl.innerHTML=`<div class=w>${esc(r.error)}</div>`; }
+    else if(r.held){
+      const left=r.until?Math.max(0,r.until-Math.floor(Date.now()/1000)):0;
+      rsub.innerHTML=`<span class="rdot on"></span>${esc(r.owner)} · ${dur(left)} left`;
+      rEl.innerHTML=`<div>held by <b>${esc(r.owner)}</b> until ${r.until?new Date(r.until*1000).toLocaleTimeString():'?'}</div><div style="color:#8595A0">staging: ${esc(r.staging||'?')}</div>${r.why?`<div style="color:#5A6973">${esc(r.why)}</div>`:''}`;
+    } else {
+      rsub.innerHTML=`<span class="rdot off"></span>free`;
+      rEl.innerHTML=`<div>free</div><div style="color:#8595A0">staging: ${esc(r.staging||'?')}</div>`;
+    }
+  }
+  const ex=d.explorer||{}; const exsub=$('#explorer-sub'), exEl=$('#explorer');
+  if(exsub&&exEl){
+    const pcol={running:'#52C2AE','wrap-up':'#F0A542',summarized:'#8595A0',ended:'#8595A0','no window':'#5A6973'}[ex.phase]||'#5A6973';
+    exsub.innerHTML=`<span style="color:${pcol}">${esc(ex.phase||'?')}</span>${ex.target?' · '+esc(ex.target):''}`;
+    const exAtBottom=exEl.scrollHeight-exEl.scrollTop-exEl.clientHeight<20;
+    exEl.innerHTML=(ex.tail||[]).map(l=>`<div style="${l.startsWith('## ')?'color:#F0A542':''}">${esc(l)}</div>`).join('')||`<div class=w>${ex.phase==='no window'?'no explorer window yet':'no journal lines yet'}</div>`;
+    if(exAtBottom) exEl.scrollTop=exEl.scrollHeight;
+  }
  }catch(e){ $('#err').textContent='fetch error: '+e; $('#st').textContent='retrying'; }
 }
 tick(); setInterval(tick,5000);
@@ -2940,6 +3053,40 @@ function drawCauses(el, d){
   el.innerHTML=h;
 }
 
+// 4c. remote worker hosts: running / landed, and the mirror's drift from main (it must never serve a stale base).
+function drawRemoteHosts(el, d){
+  if(!el) return; const H=d.remote_hosts||[];
+  if(!H.length){ el.innerHTML='<div class=kv><span>no remote host configured</span></div>'; return; }
+  const by=d.landings_by_host_24h||{};
+  el.innerHTML=(Object.keys(by).length?`<div class=kv><span>landings 24h by host:</span>${Object.entries(by).map(([k,v])=>`<span>${esc(k)} <b>${v}</b></span>`).join('')}</div>`:'')+H.map(h=>{
+    const drift=h.behind==null?'<span>mirror never pushed</span>':(h.behind>0?`<span style="color:${C.amber}">mirror behind by <b>${h.behind}</b></span>`:'<span>mirror current</span>');
+    const when=h.pushed_at?new Date(h.pushed_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'-';
+    const p=h.probe||{}, age=p.at?Math.round(Date.now()/1000-p.at):null;
+    const reach=p.at==null?'<span>not probed yet</span>':(p.reachable?`<span>reachable · ${age}s ago</span>`:`<span style="color:${C.red}">UNREACHABLE · ${age}s ago</span>`);
+    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length}/${h.cap} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed (${h.landed_24h} in 24h)</span><span>${h.dispatched} dispatched</span></div>`+
+           `<div class=kv>${reach}<span>load ${p.load1??'-'} / ${p.cores??'-'} cores</span><span>disk ${p.disk_free_gb??'-'} GB free</span></div>`+
+           `<div class=kv>${drift}<span>mirror ${esc(h.mirror||'-')} · pushed ${when}</span></div>`;
+  }).join('');
+}
+
+// 4b. merge-queue depth: branches not yet on main (queue file + batch + isolation remainder).
+function drawQueueDepth(el, d){
+  const q=d.queue_depth; if(!el) return; if(!q){ el.innerHTML='<div class=kv><span>no data</span></div>'; return; }
+  const n=q.now||{}, sp=q.spark||[], H=q.hourly||[];
+  let h=`<div class=kv><span>not yet on main <b>${n.waiting??'?'}</b></span><span>queued ${n.queued??0}</span><span>gating ${n.gating??0}</span><span>isolating ${n.isolating??0}</span></div>`;
+  if(sp.length>1){
+    const W=300,Hh=40, t0=sp[0][0], t1=sp[sp.length-1][0]||t0+1, mx=Math.max(1,...sp.map(p=>p[1]));
+    const pts=sp.map(p=>((p[0]-t0)/(t1-t0||1)*W).toFixed(1)+','+(Hh-p[1]/mx*Hh).toFixed(1)).join(' ');
+    h+=`<svg viewBox="0 0 ${W} ${Hh}" style="width:100%;height:44px"><polyline fill=none stroke="${C.amber}" stroke-width=1.5 points="${pts}"/></svg><div class=kv><span>24 h, max ${mx}</span></div>`;
+  }
+  if(H.length){
+    h+='<table><thead><tr><th>hour</th><th>in</th><th>out</th><th>min</th><th>mean</th><th>max</th></tr></thead><tbody>';
+    H.slice(-12).forEach(r=>{ const grow=(r.in??0)>r.out; h+=`<tr><td>${esc(r.hour)}</td><td class=num style="color:${grow?C.coral:C.txt}">${r.in??'–'}</td><td class=num>${r.out}</td><td class=num>${r.min??'–'}</td><td class=num>${r.mean??'–'}</td><td class=num>${r.max??'–'}</td></tr>`; });
+    h+='</tbody></table>';
+  }
+  el.innerHTML=h;
+}
+
 // 5. touchpoints, 24h.
 function drawTouchpoints(el, d){
   const tp=d.touchpoints_24h||{count:0,items:[]};
@@ -2978,13 +3125,17 @@ async function load(){
       <div class="card wide"><h2><span>Per hour, last 24h</span></h2><div id=cHourly class=chart></div></div>
       <div class="card wide"><h2><span>Per-gate durations by class, last 48h</span></h2><div id=cGates class=chart></div></div>
       <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
+      <div class=card><h2>Merge queue depth <em>not yet on main</em></h2><div id=cQueueDepth></div></div>
       <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
+      <div class=card><h2>Remote hosts <em>workers off this Mac</em></h2><div id=cRemote></div></div>
       <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
     </div>`;
     drawLandings($('#cLand'), d);
     drawHourly($('#cHourly'), d.hourly_24h||[]);
     drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
     drawCauses($('#cCauses'), d);
+    drawQueueDepth($('#cQueueDepth'), d);
+    drawRemoteHosts($('#cRemote'), d);
     drawTouchpoints($('#cTouch'), d);
     drawExperiment($('#cExp'), d);
   }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }

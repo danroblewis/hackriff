@@ -60,6 +60,7 @@ SMALL: dict[str, dict] = {
     "ofdm_nonstandard_cp": {"duration_s": 0.1},
     "dsss_m_sequence": {"duration_s": 0.4, "n_bits": 100},
     "qam16_unframed": {"duration_s": 0.1},
+    "generic_fsk_sweep": {"duration_s": 0.2, "symbol_rate_bd": 20000.0},
 }
 
 

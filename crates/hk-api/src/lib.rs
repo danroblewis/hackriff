@@ -49,11 +49,14 @@ pub mod measurements; // T-818 MAP-18
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
+pub mod paths; // T-897: traced (t, f) paths over a viewport (docs/23 §10.6 rule 2)
 pub mod playback; // T-463: the one playhead of historical playback
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
+pub mod priors; // T-812 (MAP-12): band-plan priors over a viewport, suggestions never truth
 pub mod query;
 pub mod recipes;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod research_export; // T-823 (MAP-23): the research objects out as one file
 pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of the tile lattice
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
@@ -62,7 +65,9 @@ pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)
 pub mod timeline; // T-338: the capture window, and the compressed overview drawn on it
+pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
+pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122

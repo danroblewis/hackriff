@@ -26,6 +26,7 @@ pub mod iqbuffer; // T-157
 pub mod outputs;
 pub mod radiometry;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod tunepath; // T-898: the device's own route through frequency, from the tune records
 
 // ADR-0012 §9/§11 (pre-added by T-113; the owners fill them in).
 pub mod baseline; // T-119
@@ -37,10 +38,10 @@ pub use coverage::{
 };
 pub use history::{
     CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
-    IngestOutcome, LastKnown, LastKnownCell, LevelConfig, OriginField, OriginFilter, Overview,
-    OverviewCell, ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory,
-    RegionQuery, ResidentBytes, Resolution, ShadowFill, ShadowRun, StoreError, StraddleGuard,
-    ViewLattice,
+    IngestOutcome, LastKnown, LastKnownCell, LastKnownSearch, LastKnownStage, LevelConfig,
+    OriginField, OriginFilter, Overview, OverviewCell, PendingWrites, ProvenanceSummary, Pyramid,
+    PyramidConfig, PyramidStats, RegionHistory, RegionQuery, ResidentBytes, Resolution, ShadowFill,
+    ShadowRun, StoreError, StraddleGuard, ViewLattice, WrittenBatch,
 };
 pub use radiometry::{
     FloorFlags, FloorIngest, FloorIngestQueue, FloorProduct, FloorProductConfig, FloorProductStats,

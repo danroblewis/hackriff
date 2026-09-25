@@ -492,8 +492,10 @@ fn the_analog_class_call_is_right_or_absent_but_never_confidently_wrong() {
 ///   re-ranked it away, because its `h = 0.5` hypothesis fixes the *transmitter's* peak deviation
 ///   and the receiver does not measure that number. `msk` is out of the verifier's hypothesis set.
 /// - `qam16` — nothing to do with the densities, which had it right 21/24. The verifier's ALRT takes
-///   `N₀` from the SNR meter; sweeping only that assumption flips both QAM truths together, so the
-///   ratio was a function of the assumption. The QAM orders are out of its hypothesis set too.
+///   `N₀` from the SNR meter; sweeping only that assumption flipped both QAM truths together, so
+///   the ratio was a function of the assumption, and T-422 took the QAM orders out of its
+///   hypothesis set. T-590 put them back: the flip was T-246's residual-carrier ring, and with that
+///   removed the two orders separate at the measured SNR and either side of it (`verify::tests`).
 ///
 /// The assertions are properties, not today's numbers: every class in both families is nameable,
 /// the class wrong-label rate stays bounded, no wrong name is reported confidently, and below the

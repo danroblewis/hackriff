@@ -714,3 +714,50 @@ def test_liveness_gives_up_after_three_relaunches_that_came_back_dead(monkeypatc
     fake.sessions["dev"] = 100                        # a person brought it back: the count resets
     W.liveness(ALIVE, since, t)
     assert "liveness:failed:coordinator" not in since
+
+
+def test_a_process_running_from_a_live_claims_worktree_is_that_workers():
+    """2026-09-24 22:4x: T-577's own targeted test (a Bash tool shell reparented to launchd) alarmed as
+    'unowned at 93% CPU - kill it'; T-882's and T-901's did the same earlier that day."""
+    claims = {"T-577": {"state": "running", "pid": 800, "ticket": "T-577", "wt": "/r/.claude/worktrees/t577"},
+              "T-607": {"state": "queued", "pid": 900, "ticket": "T-607", "wt": "/r/.claude/worktrees/t607"}}
+    rows = table(
+        row(800, 1, "cpulimit -l 300 -i -- taskpolicy -c background claude -p"),
+        row(44791, 1, "/bin/zsh -c source /Users/d/.claude/shell-snapshots/snapshot-zsh-1.sh"),
+        row(44793, 44791, "/opt/homebrew/bin/cargo-nextest nextest run -p hk-estimate -E binary(degenerate_null)"),
+        row(44877, 44793, "/r/.claude/worktrees/t577/target/debug/deps/degenerate_null-3765 --exact x", cpu=93.0),
+        row(44900, 1, "/r/.claude/worktrees/t607/target/debug/hk serve --bind 127.0.0.1:9930", cpu=95.0),
+        row(44901, 1, "/r/.claude/worktrees/t5770/target/debug/hk serve", cpu=91.0),   # not t577's: a prefix is a dir
+    )
+    agg, unowned = W.owners(rows, claims)
+    assert 44877 in agg["worker:T-577"]["pids"]
+    assert {r["pid"] for r in unowned} >= {44900, 44901}      # a queued claim owns nothing; t5770 is not t577
+
+
+def test_an_over_budget_episode_ends_in_one_recovered_line():
+    """Supervisor 2026-09-25 01:52 (the user sleeps): one alarm per episode (its key's dedupe), and ONE all-clear when
+    the load has held under plan as long as the alarm needed - its own key, outside the prefixes that page anyone."""
+    rows = table(row(31000, 1, SNAP, cpu=100.0))
+    since = {}
+    fire(rows, since, 0.0, load=40.0)
+    rules, _, _ = fire(rows, since, W.LOAD_FOR, load=45.0)
+    assert "over-budget" in rules
+    fire(rows, since, W.LOAD_FOR + 10, load=1.0)                       # under plan: the clock starts
+    rules, _, alarms = fire(rows, since, 2 * W.LOAD_FOR + 10, load=1.0)
+    rec = [a for a in alarms if a["rule"] == "recovered"]
+    assert len(rec) == 1 and rec[0]["level"] == "green" and "peak 45.0" in rec[0]["body"]
+    assert not rec[0]["key"].startswith(__import__("alert").WAKE_PREFIXES)
+    rules, _, _ = fire(rows, since, 3 * W.LOAD_FOR + 10, load=1.0)
+    assert "recovered" not in rules                                    # once per episode
+
+
+def test_the_explorer_windows_server_and_agent_are_the_explorers():
+    """2026-09-25 04:0x: the explorer's hk serve on the HackRF (ppid 1, started by the agent) alarmed as unowned."""
+    rows = table(
+        row(63953, 1, "/Users/d/.hackriff-ops/target-serve/release/hk serve --hackrf --bind 127.0.0.1:8897 "
+                      "--data-dir /Users/d/.hackriff-ops/explorer/data --center-hz 98000000", cpu=387.0),
+        row(62901, 62445, "claude --agent explorer --model opus --effort high", cpu=20.0),
+        row(62445, 1, "bash /Users/d/hackriff/ops/explorer-window.sh --window 3h"),
+    )
+    agg, unowned = W.owners(rows, {})
+    assert set(agg["explorer"]["pids"]) == {63953, 62901, 62445} and unowned == []

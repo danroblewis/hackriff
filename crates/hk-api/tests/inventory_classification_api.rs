@@ -204,3 +204,67 @@ fn t211_inventory_rows_expose_the_arbitrated_classification_and_m3_fields() {
     assert_eq!(one["classification"], r["classification"]);
     assert_eq!(one["latest_classification"], r["latest_classification"]);
 }
+
+/// **T-886: the classifier's posterior is served on a rank-3-tied emitter, not hidden by the
+/// restatement that keeps the chain's family.**
+///
+/// T-878 resolved the tie between an unlocked demodulator-chain label and the C15 row at the same
+/// rank by writing the posterior and then **re-appending the chain's own label** after it, so
+/// "latest among equals" still leaves the family with the chain. The newest row is then a copy of
+/// the current one, and a reader that served "the latest row when it differs from the current"
+/// answered `null` — losing the posterior for exactly the emitters the classifier had measured.
+/// Both routes now serve the latest row **unlike** the current one.
+#[test]
+fn t886_a_restated_chain_label_does_not_hide_the_classifiers_posterior() {
+    let mut repo = Repository::open_in_memory().unwrap();
+    let s = seed::seed(&mut repo, T0).unwrap();
+    let id = s.carrier;
+    // The write order of `hk_pipeline::classify::record` on the rank-3 tie.
+    let chain = m3("analog", Some("nbfm"), Stage::Chain, T0 + 10);
+    repo.record_classification(id, &chain, ArbRank::Classifier)
+        .unwrap();
+    let keeps = repo.current_classification(id).unwrap().unwrap();
+    let posterior = m3(UNKNOWN, None, Stage::FeatureTree, T0 + 20);
+    repo.record_classification(id, &posterior, ArbRank::Classifier)
+        .unwrap();
+    repo.append_classification_ranked(id, &keeps.classification, keeps.stage, keeps.arb_rank)
+        .unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        Token::from_config(TOKEN).unwrap(),
+    );
+    let state = ApiState {
+        inventory: Some(Arc::new(Mutex::new(repo))),
+        ..ApiState::default()
+    };
+    let server = Server::start(config, state).unwrap();
+    let addr = server.local_addr();
+
+    let (st, v) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{v}");
+    let r = row(&v, id);
+    // The chain keeps the family, exactly as T-878 decided.
+    assert_eq!(r["family"], json!("analog"), "{r}");
+    assert_eq!(r["classification"]["stage"], json!("chain"), "{r}");
+    // ... and the measurement made beside it is still readable.
+    let l = &r["latest_classification"];
+    assert_eq!(l["stage"], json!("feature-tree"), "{r}");
+    assert_eq!(l["family"], json!("unknown"), "{r}");
+    assert_eq!(l["arb_rank"], json!(3), "{r}");
+
+    // The per-emitter route follows the same rule, with the full posterior. Its
+    // `classification` is `null` here because the restated row is legacy-shaped (T-878 re-appends
+    // family, confidence and open-set score, not a distribution), which is the documented reading
+    // of `null` — "that row carries no M3 detail" — and exactly why this route tells a client to
+    // read `latest` first.
+    let (st, c) = get(addr, &format!("/api/inventory/{id}/classification"));
+    assert_eq!(st, 200, "{c}");
+    assert!(c["classification"].is_null(), "{c}");
+    assert_eq!(c["latest"]["stage"], json!("feature-tree"), "{c}");
+    assert_eq!(c["latest"]["family"], json!("unknown"), "{c}");
+    assert!(
+        c["latest"]["posterior"].is_array(),
+        "the posterior itself is served: {c}"
+    );
+}

@@ -937,6 +937,7 @@ dependencies = [
  "hk-sim",
  "hk-store",
  "hk-stream",
+ "hk-synth",
  "num-complex",
  "serde_json",
  "sha2 0.11.0",
@@ -1105,7 +1106,9 @@ name = "hk-synth"
 version = "0.1.0"
 dependencies = [
  "hk-blocks",
+ "hk-core",
  "hk-demod",
+ "hk-dsp",
  "hk-estimate",
  "hk-model",
  "hk-recipe",

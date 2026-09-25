@@ -15,7 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  LAYER_DEFS, PLANE_ORDER, composeOverlays, defaultPaneLayers, inheritPaneLayers, isLayerVisible, layerDef,
+  COLLECTION_Z, LAYER_DEFS, PLANE_ORDER, composeOverlays, defaultPaneLayers, inheritPaneLayers, isLayerVisible, layerDef,
   loadPaneLayers, paintOrder, parsePaneLayers, savePaneLayers, serializePaneLayers, withBase, withLayer,
   type LayerId, type OverlayLayerFn,
 } from "../src/surface/layers";
@@ -178,12 +178,54 @@ test("MAP-06: persistence — per pane id, ignores stored planes, and renders de
 
 test("MAP-06: the surface routes its overlays through the registry, into the one marks hook", () => {
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(src, /marks: \(pane, edge\) => \{[^]*?composeOverlays\(layersFor\(pane\.id\), overlayFns, pane, edge\)/,
-    "the marks hook is not composed from the pane's registry");
   assert.equal([...src.matchAll(/\bmarks: \(/g)].length, 1, "a second overlay path appeared");
-  assert.match(src, /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{ rules: ringQuads, detections: detectionQuads \}/);
+  // The marks hook's body, then what it is about: every registry overlay it draws comes out of
+  // `composeOverlays` over THIS pane's registry (`layersFor(pane.id)`, possibly split into z bands
+  // around marks drawn outside the registry) and the one renderer table — asserted on the calls,
+  // not on the hook's exact text, so a layer ticket that re-orders the bands does not break it.
+  const hook = /marks: \(pane, edge\) => \{([^]*?)\n {8}\},\n/.exec(src);
+  assert.ok(hook, "the one marks hook");
+  const calls = [...hook[1].matchAll(/composeOverlays\((.+?), overlayFns, pane, edge\)/g)];
+  assert.ok(calls.length >= 1, "the marks hook is not composed from the registry's renderer table");
+  assert.equal(calls.length, [...hook[1].matchAll(/composeOverlays\(/g)].length, "a composeOverlays call not over overlayFns");
+  for (const c of calls) {
+    assert.match(c[1], /^(layersFor\(pane\.id\)|reg|band\(.*\))$/, `composeOverlays over something other than the pane's registry: ${c[1]}`);
+  }
+  if (calls.some((c) => !c[1].startsWith("layersFor("))) {
+    assert.match(hook[1], /const reg = layersFor\(pane\.id\);/, "the marks hook is not composed from the pane's registry");
+  }
+  if (calls.some((c) => c[1].startsWith("band("))) {
+    assert.match(hook[1], /const band = \(keep: \(z: number\) => boolean\) => \(\{ \.\.\.reg, layers: reg\.layers\.filter\(\(l\) => keep\(l\.z\)\) \}\);/,
+      "a z band is not a filter of the pane's own registry");
+  }
+  // The renderer table, then the entries this check is about: capture rules and detections are drawn
+  // by their registry renderers (other layer tickets add their own entries alongside).
+  const fns = /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{([^}]*)\}/.exec(src);
+  assert.ok(fns, "the overlay renderer table the marks hook composes from");
+  assert.match(fns[1], /\brules: ringQuads\b/);
+  assert.match(fns[1], /\bdetections: detectionQuads\b/);
+  assert.match(fns[1], /\bartifacts: artifactQuads\b/);
+  assert.match(fns[1], /\bpaths: pathQuadsFn\b/);
+  assert.match(fns[1], /\bpriors: priorsQuads\b/);
   // The base style reaches the trace by the pane's own registry, per frame.
   assert.match(src, /const phosphor = layersFor\(pane\.id\)\.base === "phosphor";/);
   // A split inherits the creating pane's registry.
   assert.match(src, /store\.set\(inheritPane\(from, p\.activePane, seedFor\(from\)\)\)/);
+});
+
+test("T-821: research and collection marks paint in z order — between the registry's bands around COLLECTION_Z", () => {
+  // Research (z 30) and collections (z COLLECTION_Z = 40) are drawn outside the registry, so the
+  // hook must split the registry's overlays around them: below first, the research marks, then the
+  // registry overlays ABOVE (artifacts z 50, priors z 60). Appending them after every overlay would
+  // paint collections over artifacts.
+  assert.equal(COLLECTION_Z, 40);
+  assert.ok(layerDef("research")!.z < COLLECTION_Z && layerDef("detections")!.z < COLLECTION_Z);
+  assert.ok(layerDef("artifacts")!.z > COLLECTION_Z && layerDef("priors")!.z > COLLECTION_Z);
+  const src = readFileSync("src/app/centre/surface.ts", "utf8");
+  const hook = /marks: \(pane, edge\) => \{([^]*?)\n {8}\},\n/.exec(src);
+  assert.ok(hook, "the one marks hook");
+  const below = hook[1].indexOf("composeOverlays(band((z) => z < COLLECTION_Z), overlayFns, pane, edge)");
+  const research = hook[1].indexOf("markQuads(researchBoxesFor(pane), edge, pane.box, pane.rect)");
+  const above = hook[1].indexOf("composeOverlays(band((z) => z > COLLECTION_Z), overlayFns, pane, edge)");
+  assert.ok(below >= 0 && research > below && above > research, "paint order is not below-band, research/collections, above-band");
 });

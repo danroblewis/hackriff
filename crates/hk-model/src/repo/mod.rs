@@ -70,6 +70,7 @@ mod cluster;
 mod cluster_tests;
 mod clusters; // T-202 C18 clusters of unknown emissions
 mod collections; // T-817 (MAP-17): marker collections; bookmarks are a facade over one
+mod confirm_rate; // T-575 ADR-0022 §8 confirm-decision counter
 mod gating;
 mod harmonic; // T-374 (C40): harmonic families
 #[cfg(test)]
@@ -88,6 +89,9 @@ mod refined;
 mod relate; // T-219
 #[cfg(test)]
 mod relate_tests;
+mod retention; // T-904 per-frame detection retention and rollup
+#[cfg(test)]
+mod retention_tests;
 mod retune; // T-598 persisted cross-centre retune verdict
 #[cfg(test)]
 mod retune_tests;
@@ -130,6 +134,7 @@ pub use collections::{
     Collection, CollectionSummary, MARKERS_PER_COLLECTION_MAX, Marker, MarkerWindow,
     PROVENANCE_TEXT_MAX, StorePage, ViewTier,
 };
+pub use confirm_rate::CONFIRM_DECISION_WINDOW_NS;
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
@@ -153,6 +158,9 @@ pub use authored::{
     AuthoredKind, AuthoredPage, authored_block,
 };
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
+pub use retention::{
+    DetectionRetention, DetectionRollup, DetectionStorage, KEEP_PER_EMITTER, PruneReport,
+};
 pub use retune::{
     MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, RETUNE_RULE, RetuneFamily,
     RetuneOutcome, RetuneVerdict,
@@ -189,6 +197,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0016_tdma_slots.sql"), // T-272 C23 P25 Phase 2 TDMA slot count
     include_str!("migrations/0017_multipath_relation.sql"), // T-222 C40 content-correlated multipath
     include_str!("migrations/0018_call_observed_until.sql"), // T-308 C23 truncated-call boundary
+    include_str!("migrations/0019_detection_retention.sql"), // T-904 detection retention + rollup
+    include_str!("migrations/0020_explanation_detection.sql"), // T-913 pin cited detections
 ];
 
 /// Schema version this build creates and understands.
@@ -287,6 +297,10 @@ pub struct ProvenanceChain {
     pub spur_mask: Option<SpurMask>,
 }
 
+/// `PRAGMA journal_size_limit` for file databases (T-904): the WAL file is truncated back to
+/// this after each reset.
+const WAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// The relational store.
 pub struct Repository {
     conn: Connection,
@@ -304,6 +318,10 @@ impl Repository {
                 "could not enable WAL journal (got {mode})"
             )));
         }
+        // T-904: SQLite never shrinks the WAL file on its own, so a burst of writes (a retention
+        // pass's deletes) would leave its high-water mark on disk for good. With a limit, the
+        // file is truncated back to it whenever the WAL is reset.
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
         Self::init(conn)
     }
 
@@ -387,6 +405,15 @@ impl Repository {
         Ok(())
     }
 
+    /// Rolls back the batch [`Self::begin_write_batch`] opened: none of its writes land. A no-op
+    /// when no batch is open (SQLite may already have rolled it back on an error).
+    pub fn rollback_write_batch(&mut self) -> Result<(), RepoError> {
+        if !self.conn.is_autocommit() {
+            self.conn.execute_batch("ROLLBACK")?;
+        }
+        Ok(())
+    }
+
     /// A write transaction that holds the write lock from its first statement, or a savepoint
     /// inside an open write batch.
     fn write_tx(&mut self) -> Result<Tx<'_>, RepoError> {
@@ -455,13 +482,14 @@ impl RepoBatch<'_> {
         inventory::upsert_track_on(self.conn, track)
     }
 
-    /// [`Repository::link_detections_to_track`] in this transaction.
+    /// [`Repository::link_detections_to_track`] in this transaction (returns the number of
+    /// detections that were not stored and so could not be linked, T-913).
     pub fn link_detections_to_track(
         &mut self,
         track_id: TrackId,
         detections: &[DetectionId],
         linked_at: Timestamp,
-    ) -> Result<(), RepoError> {
+    ) -> Result<usize, RepoError> {
         inventory::link_detections_on(self.conn, track_id, detections, linked_at)
     }
 

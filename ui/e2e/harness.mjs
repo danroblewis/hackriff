@@ -244,6 +244,24 @@ export class Browser {
   close() { this.conn.close(); kill(this.b); }
 }
 
+/**
+ * The share a tile answer STATED to its client (T-630), or null when it stated none: an answered
+ * tile's `cost.in_flight_share`, or the `share N` a `503` refusal names in its message. The same two
+ * places the client reads it from (`tile.ts`), so a spec can compare what the route said with what
+ * the page then claims.
+ */
+export function statedShare(cost, error) {
+  if (typeof cost?.in_flight_share === "number") return cost.in_flight_share;
+  const m = /\bshare\s+(\d+)/.exec(typeof error === "string" ? error : "");
+  return m ? Number(m[1]) : null;
+}
+
+/** Every share `rec`'s answer stated — one for a single read, one per stating entry of a batch. */
+export function sharesStated(rec) {
+  if (rec.entries) return rec.entries.map((e) => e.share).filter((v) => v !== null && v !== undefined);
+  return rec.share === null || rec.share === undefined ? [] : [rec.share];
+}
+
 /** One page target, with its console, its exceptions and its network recorded from before load. */
 export class Page {
   static async open(conn, url, { width = 1440, height = 900, initScript = null, newWindow = false } = {}) {
@@ -327,6 +345,12 @@ export class Page {
     this.requests = [];
     /** Live and peak concurrency, per url predicate name — see `watchConcurrency`. */
     this.watches = [];
+    /**
+     * Record, on each single `GET /api/tiles` read, the share the route stated in it (`r.share`).
+     * Batch entries always carry theirs (`r.entries[].share`); a single read's needs its body, so
+     * this is opt-in: a spec about the T-630 share turns it on, nothing else pays for it.
+     */
+    this.tileShares = false;
   }
 
   #sent(m) {
@@ -379,9 +403,23 @@ export class Page {
           const j = JSON.parse(text);
           // `fCellHz` is the answered tile's own frequency cell, which is how a caller places an
           // ADDRESS in Hz (T-889): the lattice's level-0 cell is `fCellHz / 2^level_f`, origin 0 Hz.
+          // `share` is what the route TOLD this client about its allowance in that entry (T-630):
+          // an answered tile's `cost.in_flight_share`, or the `share N` a per-address refusal names.
+          // Recorded so a spec can tell a read that stated a share from one that merely came back.
           r.entries = (j.tiles ?? []).map((e) => ({ spelling: e.address?.spelling ?? null, status: e.status ?? null,
-            fCellHz: e.tile?.grid?.f_cell_hz ?? null }));
+            fCellHz: e.tile?.grid?.f_cell_hz ?? null, share: statedShare(e.tile?.cost, e.error) }));
           r.remaining = j.remaining ?? [];
+        })
+        .catch((e) => { r.bodyError = String(e?.message ?? e); });
+      this.#bodies.add(got);
+      void got.finally(() => this.#bodies.delete(got));
+    } else if (!error && this.tileShares && r.status !== null && /\/api\/tiles\?/.test(r.url)) {
+      // A single-tile read's statement of the share, answer or refusal alike — opt-in
+      // ([[tileShares]]), because it means reading every tile body back over CDP.
+      const got = this.conn.send("Network.getResponseBody", { requestId: id }, this.sessionId)
+        .then(({ body, base64Encoded }) => {
+          const j = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+          r.share = statedShare(j.cost, j.error);
         })
         .catch((e) => { r.bodyError = String(e?.message ?? e); });
       this.#bodies.add(got);
@@ -430,19 +468,36 @@ export class Page {
   }
 
   /**
-   * Wait for the preview to finish addressing the surface, and fail immediately — with the card's
-   * own words — if it puts up its failure card instead.
+   * Wait for the surface to finish mounting — on EITHER page that hosts it — and fail immediately,
+   * with the page's own words, if it gave up instead.
    *
-   * `preview-main.ts`'s `fail()` replaces the stage and leaves the note reading "Addressing the
-   * surface…", so a wait on the note alone turns every abort into a 20-second timeout with no
-   * diagnosis. This is the difference between a suite people read and one they learn to ignore.
+   * **The event, not a page-specific proxy** (T-907). Both entry points (`/`'s
+   * `app/centre/surface.ts` and `/surface.html`'s `preview-main.ts`) write `data-surface` on
+   * `<html>` (`ui/src/surface/mounted.ts`): `mounted` once `SurfacePreview` exists over an
+   * addressed probe, `failed` on every abort path with `data-surface-reason` carrying the text the
+   * page put on screen. Absent means still addressing. This used to wait for the preview's
+   * `[data-slot="note"]` to stop reading "Addressing…" — and on the app page, which has no such
+   * element, `"".startsWith("Addressing")` is false, so it returned at once and the spec raced a
+   * surface that did not exist yet. `timeoutMs` is the failure bound; a green run returns the
+   * moment the page says it mounted.
    */
   async waitForSurfaceMounted({ timeoutMs = 30000 } = {}) {
-    await this.waitFor("the surface to finish addressing, or to say why it could not",
-      `!(document.querySelector('[data-slot="note"]')?.textContent ?? "").startsWith("Addressing")
-       || !!document.querySelector(".sp-fail")`, { timeoutMs });
-    const card = await this.$text(".sp-fail");
-    if (card !== null) throw new Error(`the surface put up its failure card instead of mounting: ${card}`);
+    try {
+      await this.waitFor("the surface to finish mounting, or to say why it could not",
+        `document.documentElement.dataset.surface === "mounted" || document.documentElement.dataset.surface === "failed"`,
+        { timeoutMs });
+    } catch (e) {
+      // A mount that never happened is the boot flake's signature; say what the probe was stuck on
+      // (the API requests on the wire, answered or still open, oldest first) instead of only "timed out".
+      const now = Date.now();
+      const api = this.requests.filter((r) => r.url.includes("/api/")).slice(-12).map((r) =>
+        `${r.url.replace(/^https?:\/\/[^/]+/, "")} → ${r.error ?? r.status ?? "open"} ` +
+        `(${r.endedMs ? r.endedMs - r.startedMs : now - r.startedMs} ms${r.endedMs ? "" : ", still open"})`);
+      throw new Error(`${e.message}\n  api requests (last ${api.length}):\n    ${api.join("\n    ") || "(none)"}`);
+    }
+    const state = await this.eval(`({ s: document.documentElement.dataset.surface,
+      why: document.documentElement.dataset.surfaceReason ?? null })`);
+    if (state.s !== "mounted") throw new Error(`the surface refused to mount: ${state.why ?? "(no reason given)"}`);
   }
 
   /** Poll an in-page boolean expression. Every wait in this suite is one of these, named. */
@@ -519,6 +574,17 @@ export class Page {
   async $count(selector) {
     return this.eval(`document.querySelectorAll(${JSON.stringify(selector)}).length`);
   }
+  /**
+   * T-918: the insets the app's surface keeps its CONTENT clear of on its full-bleed canvas — the
+   * floating top bar above and the dock below (CSS px, `data-inset-top/-bottom` on `.sf-canvas`,
+   * set by `centre/surface.ts`'s `fit`). The canvas is 100vw x 100vh (docs/23 §10.1); the panes and
+   * map strip are laid out between these. 0/0 where the page states none (the `/surface` preview).
+   */
+  async canvasInsets(selector = ".sf-canvas") {
+    return this.eval(`(() => { const d = document.querySelector(${JSON.stringify(selector)})?.dataset ?? {};
+      return { top: Number(d.insetTop ?? 0) || 0, bottom: Number(d.insetBottom ?? 0) || 0 }; })()`);
+  }
+
   /** An element's CSS box, in page coordinates. */
   async $rect(selector) {
     return this.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)});
@@ -614,6 +680,18 @@ export class Page {
     await this.mouse("mousePressed", at.x, at.y, { buttons: 1, clickCount: 1 });
     await this.mouse("mouseReleased", at.x, at.y, { buttons: 0, clickCount: 1 });
     return at;
+  }
+
+  /**
+   * A real key press (keyDown + keyUp) delivered to the focused element (T-900: Escape). `code` and
+   * the Windows virtual key code default to the common keys' values, which is what Chrome needs to
+   * build a `KeyboardEvent` whose `key` is the one named.
+   */
+  async key(key, { code = key, keyCode = { Escape: 27, Enter: 13, Tab: 9 }[key] ?? 0 } = {}) {
+    for (const type of ["keyDown", "keyUp"]) {
+      await this.conn.send("Input.dispatchKeyEvent",
+        { type, key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode }, this.sessionId);
+    }
   }
 
   /**

@@ -142,6 +142,8 @@ def parse_suite_runs(text: str, year: int) -> list[SuiteRun]:
             if _GATE_BEGIN.match(rest):
                 cur = SuiteRun(when=when)
                 out.append(cur)
+            elif rest.startswith("RC gate ("):   # the daily release candidate: no merge gate's suites
+                cur = None
             continue
         hit = _SUITE.match(line)
         if not hit or cur is None or when is None:

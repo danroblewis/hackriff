@@ -223,3 +223,67 @@ def test_the_tick_line_shows_what_the_one_solo_pass_rule_saved(tmp_path):
     (tmp_path / "merge-runner.log").write_text("")
     line = flow.tick_line(str(tmp_path), flow.summary(str(tmp_path)))
     assert "flake-accepts 2 (saved 15 min; 1 after one solo pass, 3 min of it)" in line
+
+
+def test_branches_not_yet_on_main_is_one_number(tmp_path):
+    """User, 2026-09-24 17:02: the dashboard said 14 and the queue file 8 - an isolation's remainder
+    lives in the runner's memory. One union: queue file, batch, isolation remainder, merging now."""
+    (tmp_path / "merge-queue.txt").write_text("task-a\n# a comment\ntask-b\ntask-a\n")
+    (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-c task-d\n")
+    (tmp_path / "isolate-remaining").write_text("task-e task-f task-b\n")
+    (tmp_path / "merging-now").write_text("task-g\n")
+    q = flow.queue_waiting(str(tmp_path))
+    assert q["waiting"] == 7 and q["queued"] == 2 and q["gating"] == 3 and q["isolating"] == 3
+    assert flow.queue_waiting(str(tmp_path / "empty"))["waiting"] == 0
+
+
+def test_queue_depth_hourly_shows_in_versus_out(tmp_path):
+    t0 = datetime(2026, 9, 24, 16, 0)
+    rows = [{"ts": (t0.timestamp() + m * 60), "waiting": w} for m, w in ((1, 8), (30, 12), (59, 14), (61, 14), (119, 13))]
+    (tmp_path / "queue-depth.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "landed.jsonl").write_text("".join(json.dumps({"ticket": f"T-{i}", "merge_ts": t0.timestamp() + 3600 + i * 60}) + "\n"
+                                                   for i in range(3)))
+    h = flow.queue_depth_hourly(str(tmp_path), t0, t0.replace(hour=18))
+    assert h[0] == {"hour": "09-24 16", "out": 0, "min": 8, "max": 14, "mean": 11.3, "in": 6}     # grew by 6, nothing left
+    assert h[1] == {"hour": "09-24 17", "out": 3, "min": 13, "max": 14, "mean": 13.5, "in": 2}     # 3 out, depth -1 -> 2 in
+    s = flow.queue_depth_series(str(tmp_path), t0, t0.replace(hour=18), points=2)
+    assert len(s) <= 3 and s[0][1] == 8
+
+
+def test_remote_hosts_report_running_landed_and_the_mirrors_drift(tmp_path):
+    """User, 2026-09-25: 'node2: N running, M landed' on every tick line, and the node2 tile shows 'mirror behind
+    by N' - the drift is read from this repo's remote-tracking ref (what it last pushed), no network."""
+    import json
+    import subprocess
+    repo, ops = tmp_path / "repo", tmp_path / "ops"
+    ops.mkdir()
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    for step in (("config", "user.email", "t@t"), ("config", "user.name", "t"), ("commit", "-q", "--allow-empty", "-m", "base"),
+                 ("update-ref", "refs/remotes/node2/main", "HEAD"),               # what the last push put on the mirror
+                 ("checkout", "-q", "-b", "task-t9"), ("commit", "-q", "--allow-empty", "-m", "t9"),
+                 ("checkout", "-q", "main"), ("merge", "-q", "--no-ff", "-m", "Merge task-t9 (task-t9): gate passed", "task-t9"),
+                 ("checkout", "-q", "-b", "task-t10"), ("commit", "-q", "--allow-empty", "-m", "t10"),   # never landed
+                 ("checkout", "-q", "main"),
+                 ("checkout", "-q", "-b", "task-t099"), ("commit", "-q", "--allow-empty", "-m", "t099"),  # zero-padded id
+                 ("checkout", "-q", "main"), ("merge", "-q", "--no-ff", "-m", "Merge T-099 (task-t099): batch, gated together", "task-t099"),
+                 ("branch", "task-t11")):                                          # just dispatched: no commits yet
+        g(*step)
+    (ops / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h"}}))
+    (ops / "work-claims.json").write_text(json.dumps({"T-11": {"host": "node2", "state": "running"},
+                                                      "T-13": {"host": "node2", "state": "running", "kind": "review"},   # on this Mac
+                                                      "T-12": {"state": "running"}}))
+    (ops / "work-runner.log").write_text("[09-25 00:20:00] DISPATCH T-9 [opus/high] pid=1 -> node2:/r/wt (remote)\n"
+                                         "[09-25 00:21:00] DISPATCH T-10 [opus/high] pid=2 -> node2:/r/wt (remote)\n"
+                                         "[09-25 00:22:00] DISPATCH T-12 [opus/high] pid=3 -> /Users/x/wt (target clone)\n"
+                                         "[09-25 00:23:00] DISPATCH T-099 [opus/high] pid=4 -> node2:/r/wt (remote)\n"
+                                         "[09-25 00:31:21] DISPATCH T-11 [opus/medium] pid=5 -> node2:/r/wt (remote)\n")
+    [h] = flow.remote_hosts(str(ops), str(repo))
+    assert h["name"] == "node2" and h["running"] == ["T-11"] and h["dispatched"] == 4 and h["landed"] == 2   # T-11: not landed
+    assert h["behind"] == 4 and h["mirror"]                              # t9 + its merge, t099 + its merge
+    assert flow.remote_hosts(str(tmp_path / "nowhere"), str(repo)) == []
+    # a batch gating on main: its provisional merges are not drift - measured against the bulk marker's base
+    (ops / "bulk-in-progress").write_text(f"base={g('rev-parse', 'refs/remotes/node2/main')}\n")
+    assert flow.remote_hosts(str(ops), str(repo))[0]["behind"] == 0

@@ -107,3 +107,15 @@ mod signal_085;
 // T-627: the coverage manifest, the sealed hold-out and the expected-failure rows (docs/22 §6).
 #[path = "acceptance/mauto_corpus.rs"]
 mod mauto_corpus;
+// T-568: the negative-control guard suite (docs/22 §4.3, §6.2): five populations, the stated
+// false-label budget, and a stub that proves the suite can fail.
+#[path = "acceptance/mauto_negatives.rs"]
+mod mauto_negatives;
+// T-863 (MAUTO M-12): ADR-0015 §7's blind evaluation — the generic FSK/OOK sweep and the partial-
+// quality clause through the mock SDR and `/api/analyze`, armed on `server_backend()`.
+#[path = "acceptance/mauto_eval.rs"]
+mod mauto_eval;
+// T-576: the false-confirm acceptance suite (ADR-0022 §10, docs/22 §3): A1 zero confirms on the
+// negatives, A2 the analytic null's measured tail, A3 the recall control.
+#[path = "acceptance/mauto_false_confirm.rs"]
+mod mauto_false_confirm;

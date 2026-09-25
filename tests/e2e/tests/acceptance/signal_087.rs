@@ -1172,7 +1172,7 @@ fn h_the_measured_receiver_clock_is_recorded_once_as_calibration_state() {
 /// is present, so `POST /api/analyze` reaches its own answer instead of being refused with
 /// `503 control is disabled: this server has no audit log`. Without this, assertion (3) would fail
 /// for a harness reason and teach T-546 nothing — the exact trap this ticket names.
-fn serve_api_with_control(dir: &std::path::Path) -> hk_api::Server {
+pub fn serve_api_with_control(dir: &std::path::Path) -> hk_api::Server {
     let config = hk_api::ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         hk_api::Token::from_config(API_TOKEN).unwrap(),
@@ -1189,7 +1189,7 @@ fn serve_api_with_control(dir: &std::path::Path) -> hk_api::Server {
 }
 
 /// An authenticated POST; returns `(status, body)`. Mirrors [`api_get`].
-fn api_post(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, Vec<u8>) {
+pub fn api_post(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, Vec<u8>) {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(std::time::Duration::from_secs(30)))

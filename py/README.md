@@ -31,13 +31,16 @@ python3 py/examples/hk_bits.py --port 8788                    # print decoded bu
 python3 py/examples/hk_bits.py --symbols --emitter <id>       # soft symbols of one emitter
 python3 py/examples/hk_bits.py --file bursts.hkstream         # parse a netcat dump
 python3 py/examples/hk_audio_wav.py --emitter <id> --seconds 10 --out station.wav
+python3 py/examples/hk_audio_wav.py --emitter <id> --stereo --out station-stereo.wav
 ```
 
 - `hkstream.py` is the reusable parser: frames, header (or a refusal frame), binary records,
   status records, drop markers, `connect()` and `pack_bits()`.
 - `hk_bits.py` pairs each burst's status record (sync and payload offsets, bit order, CRC,
   emitter) with its data record and prints the payload bytes.
-- `hk_audio_wav.py` writes 48 kHz mono 16-bit WAV, filling `sample_index` gaps with silence.
+- `hk_audio_wav.py` writes 48 kHz 16-bit WAV with the stream's own channel count (mono, or
+  two channels after `--stereo` — which sends `channels=2` — on a broadcast-FM station; the
+  header's `audio.channels` says which it got, T-874), filling `sample_index` gaps with silence.
 - `tests/test_stream_examples.py` runs the parser on `tests/data/t060_fsk_bits.hkstream`, bytes read
   over TCP from the mock-SDR e2e test (regenerate with `HK_T060_CAPTURE=<path> cargo test -p
   hk-e2e --test stream_external`).
@@ -60,6 +63,7 @@ any extra truth files, and `manifest.json` listing them. Lists are comma-separat
 |---|---|---|
 | `tone` | building block | CW at +100 kHz, −20 dBFS, in −40 dBFS noise; 1 Msps, 50 ms |
 | `fsk_burst_train` | AWARE-036 | 433.92 MHz, channel +50 kHz, CFO +3 kHz; 2-FSK 4800 bd ±9.6 kHz; bursts every 120 ms ±10 ms; 32-bit `1010…` preamble, sync `2DD4`, 48-bit payload (sensor id `5A3C`, seq, temperature, humidity, flags), **CRC-16/CCITT-FALSE** (poly 0x1021, init 0xFFFF, no reflection, xorout 0); SNR 20 dB in the Carson bandwidth; 500 kSps, 0.6 s. **T-622:** `check_width` (8/16/24/32, default 16 preserves the CRC-16/CCITT-FALSE default exactly), `check_poly_hex` (override to land off the RevEng catalogue on purpose, e.g. `0x8F45`), `constant_payload` (beacon mode: the identical payload/CRC every burst, for the "does NOT confirm on repeat count alone" case, docs/22 P7) |
+| `generic_fsk_sweep` | RESEARCH-002, SIGNAL-052 | **T-863 (MAUTO M-12): ADR-0015 §7's generic FSK/OOK population**, one draw per seed (`hkpy.synth.generic_fsk`): `modulation` 2-FSK (h 0.8–2) or NRZ OOK, 300 Bd–50 kBd log-uniform, a random 16–32-bit sync (balanced, low autocorrelation sidelobe), `check` = `catalogue` (a RevEng CRC-8/16) · `random-poly` (off-catalogue) · `absent`, `snr_db` in the emission's own bandwidth, CFO uniform within ±0.2 × bandwidth; up to 10 distinct frames in 2 s at 500 kSps (one analyze window). The scenario annotation's `generic_fsk` truth carries every drawn parameter plus **`deepest_achievable`**, stated a priori (`solved` needs a check and ≥ 3 whole frames in the hold-out, else `framed`); per-frame `generic-fsk-frame` annotations carry the exact bits. Draws depend only on the seed, so an SNR sweep over one seed is a paired comparison |
 | `noise_floor_rise` | AWARE-006 | L1 centred 1575.42 MHz, 2 Msps; +10 dB floor step at t0 = 0.1 s (whole band, or `rise_bandwidth_hz`); two weak CW; `start_utc`, `lat`/`lon` for correlation with a frozen feed |
 | `injected_floor` | SPACE-050 | six 50 ms captures at 10/144/433.92/915/2450/5800 MHz, each with its own floor (seeded −42…−28 dBFS) and calibration constant K (seeded −80…−60 dB), per-capture provenance; one CW 10 dB below the floor power per segment |
 | `occupancy_multi_hour` | AWARE-042 | 8 PMR446-style NBFM channels over 3 h: seeded burst schedule (`schedule.json`) plus two 250 ms IQ windows rendered on demand |

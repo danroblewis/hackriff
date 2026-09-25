@@ -120,20 +120,42 @@ test("T-522: the toggle is pure presentation — the source names no route, and 
   // code whose comments legitimately name `GET /api/timeline`. Asserting on the span would make
   // this guard fail for whatever a neighbour does; asserting on the blocks is the actual claim.
   const helpers = src.slice(src.indexOf("SHOW_SIGNALS_KEY"), src.indexOf("function mount("));
-  const handler = src.slice(src.indexOf("signalsBtn.addEventListener"), src.indexOf("signalsBtn.addEventListener") + 400);
-  for (const [what, region] of [["the preference helpers", helpers], ["the click handler", handler]] as const) {
+  // T-882: the toolbar button is gone; the switch is the layers menu's `detections` overlay row,
+  // whose press is the host's `toggleOverlay` → `setSignals`. Both are guarded.
+  const at = (needle: string, len: number) => {
+    const i = src.indexOf(needle);
+    assert.ok(i > 0, `${needle} moved; re-point this guard`);
+    return src.slice(i, i + len);
+  };
+  const handler = at("const setSignals = (", 200);
+  // The whole press handler, to the next host member — T-821's collection rows lengthened it past
+  // any fixed window, and a window that stops short would stop guarding the handler's tail.
+  const pressAt = src.indexOf("toggleOverlay: (id) =>");
+  assert.ok(pressAt > 0, "toggleOverlay: (id) => moved; re-point this guard");
+  const press = src.slice(pressAt, src.indexOf("toggleViewWide:", pressAt));
+  assert.ok(press.length > 0, "toggleViewWide: no longer follows toggleOverlay; re-point this guard");
+  for (const [what, region] of [["the preference helpers", helpers], ["the switch", handler], ["the menu's press", press]] as const) {
     assert.ok(!/\/api\//.test(region), `no route is named in ${what}`);
     assert.ok(!/store\.set/.test(region), `${what} writes no store state directly`);
   }
-  assert.ok(!/s\.inventory|inventory:/.test(handler), "the click handler touches no inventory state");
-  // T-806: the button is now the ACTIVE pane's `detections` layer, so its one write is the
+  assert.ok(!/s\.inventory|inventory:/.test(handler), "the switch touches no inventory state");
+  assert.ok(!/s\.inventory|inventory:/.test(press), "the menu's press touches no inventory state");
+  // T-806: the switch is the ACTIVE pane's `detections` layer, so its one write is the
   // per-pane layer registry (presentation state, `app/map/layers-slice.ts`) — nothing else.
   assert.match(handler, /editLayers\(setPaneLayer\(id, "detections", on, seedFor\(id\)\), id\)/);
+  assert.match(press, /if \(lid === "detections"\) setSignals\(pv\.activePane, on\)/);
 });
 
-test("T-522: the button carries an accessible label and a pressed state", () => {
+test("T-522/T-882: the switch is a labelled checkbox in the layers menu, not a toolbar button", () => {
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(src, /signalsBtn = h\("button",/);
-  assert.match(src, /aria-pressed/);
-  assert.match(src, /"Signals"/);
+  assert.ok(!/signalsBtn/.test(src), "the retired toolbar button came back");
+  // The menu offers every overlay this build draws, `detections` among them, as a checkbox row.
+  // Whatever other overlays this build registers (each layer ticket adds one), `detections` is drawn by
+  // detectionQuads - asserted on the object's entries, not its exact literal, so a new layer's renderer
+  // does not break this check.
+  const fns = /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{([^}]*)\}/.exec(src);
+  assert.ok(fns, "the overlay renderer table is where the menu reads its layers from");
+  assert.match(fns[1], /\bdetections: detectionQuads\b/);
+  const menu = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  assert.match(menu, /h\("input", \{ type: "checkbox", "data-layer": l\.id \}\)/);
 });

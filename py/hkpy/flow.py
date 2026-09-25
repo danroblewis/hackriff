@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -38,6 +39,8 @@ _SUITE = re.compile(r"^gate: (just [\w-]+) took (\d+)s \(exit (-?\d+)\)")
 _GATE_BEGIN = re.compile(r"^(?:BULK gate \(|GATE (\S+) \(just gate-merge)")
 _GATE_END_OK = re.compile(r"^(?:BULK MERGED ✓(.*)|MERGED (\S+) ✓)")
 _GATE_END_BAD = re.compile(r"^(?:BULK gate FAILED|GATE FAILED|GATE TIMEOUT|BULK gate TIMED OUT)")
+#: The daily release candidate: not a merge gate - its suites belong to no gate here.
+_RC_BEGIN = re.compile(r"^RC gate \(")
 _ATTEMPT = re.compile(r"^BULK attempt \((\d+)\): (.*)$")
 _CONFLICT = re.compile(r"^BULK conflict merging (\S+)")
 _WAIT = re.compile(r"^WAIT: ")
@@ -89,6 +92,68 @@ def _read(path: str) -> str:
             return fh.read()
     except FileNotFoundError:
         return ""
+
+
+QUEUE_DEPTH_JSONL = "queue-depth.jsonl"
+
+
+def queue_waiting(ops: str) -> dict:
+    """Branches NOT YET ON MAIN, as one number (user, 2026-09-24 17:02: the dashboard said 14 and the
+    queue file 8, because an isolation's remaining branches live in the runner's memory, not the file).
+    The union of merge-queue.txt, the bulk marker's branches=, the isolation's remainder
+    (isolate-remaining) and the branch being single-merged now (merging-now) - both written by
+    ops/merge-runner.sh."""
+    queued = {ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines()
+              if ln.strip() and not ln.strip().startswith("#")}
+    bulk = set()
+    for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+        if ln.startswith("branches="):
+            bulk = set(ln[len("branches="):].split())
+    isolating = set(_read(os.path.join(ops, "isolate-remaining")).split())
+    merging = set(_read(os.path.join(ops, "merging-now")).split())
+    waiting = queued | bulk | isolating | merging
+    return {"waiting": len(waiting), "queued": len(queued), "gating": len(bulk | merging),
+            "isolating": len(isolating), "branches": sorted(waiting)}
+
+
+def queue_depth_series(ops: str, since: datetime, until: datetime, points: int = 288) -> list[list]:
+    """[[epoch, waiting], ...] inside the window, thinned to at most `points` (a sparkline)."""
+    lo, hi = since.timestamp(), until.timestamp()
+    rows = [[float(o["ts"]), int(o.get("waiting") or 0)] for o in _jsonl(os.path.join(ops, QUEUE_DEPTH_JSONL))
+            if isinstance(o.get("ts"), (int, float)) and lo <= float(o["ts"]) <= hi]
+    step = max(1, -(-len(rows) // points))
+    return rows[::step]
+
+
+def queue_depth_hourly(ops: str, since: datetime, until: datetime) -> list[dict]:
+    """Per hour: min/max/mean of the sampled depth, out = branches landed (landed.jsonl), and
+    in = out + (depth at the hour's end - depth at its start), so growth reads straight off in > out."""
+    samples = []
+    for o in _jsonl(os.path.join(ops, QUEUE_DEPTH_JSONL)):
+        try:
+            t = datetime.fromtimestamp(float(o["ts"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if since <= t <= until:
+            samples.append((t, int(o.get("waiting") or 0)))
+    out_by = Counter()
+    for ld in _jsonl(os.path.join(ops, "landed.jsonl")):
+        t = datetime.fromtimestamp(float(ld.get("merge_ts", 0)))
+        if since <= t <= until:
+            out_by[_hour(t)] += 1
+    by = defaultdict(list)
+    for t, n in sorted(samples):
+        by[_hour(t)].append(n)
+    rows = []
+    for h in sorted(set(by) | set(out_by)):
+        vals = by.get(h, [])
+        out = out_by.get(h, 0)
+        row = {"hour": h, "out": out}
+        if vals:
+            row.update({"min": min(vals), "max": max(vals), "mean": round(sum(vals) / len(vals), 1),
+                        "in": out + vals[-1] - vals[0]})
+        rows.append(row)
+    return rows
 
 
 def _jsonl(path: str) -> list[dict]:
@@ -162,6 +227,9 @@ def gates_from(events: list[Ev]) -> list[Gate]:
         m = _CONFLICT.match(s)
         if m:
             pending_conflicts.append(m.group(1))
+            continue
+        if _RC_BEGIN.match(s):
+            cur = None
             continue
         if _GATE_BEGIN.match(s):
             if cur is not None and cur.end is None:   # a gate that never reported (killed runner)
@@ -472,6 +540,75 @@ DIGEST_EVERY_S = 2 * 3600
 BREAK_LOOKBACK_S = 2 * 3600
 
 
+REPO = "/Users/daniellewis/hackriff"
+
+
+def _git(repo: str, *args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _bulk_base(ops: str) -> str:
+    try:
+        for ln in open(os.path.join(ops, "bulk-in-progress")):
+            if ln.startswith("base="):
+                return ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
+    """Per remote worker host (hosts.json; user, 2026-09-25): its mirror's main as this repo last pushed it (the
+    remote-tracking ref - local, no network) and how far main is ahead of it, its running claims, and how many of
+    the tickets the work runner dispatched to it are on main."""
+    try:
+        hosts = json.load(open(os.path.join(ops, "hosts.json")))
+    except (OSError, ValueError):
+        return []
+    try:
+        claims = json.load(open(os.path.join(ops, "work-claims.json")))
+    except (OSError, ValueError):
+        claims = {}
+    wlog = _read(os.path.join(ops, "work-runner.log"))
+    out = []
+    for h in hosts:
+        tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/remotes/{h}/main")
+        # Drift from the LANDED main: while a batch gates, main holds its provisional merges, which no mirror should have.
+        landed = _bulk_base(ops) or "main"
+        behind = _git(repo, "rev-list", "--count", f"{tip}..{landed}") if tip else ""
+        pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
+        # Work on the host: a review keeps its claim's host but runs on this Mac (the work runner's busy_workers).
+        running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running"
+                         and c.get("kind", "work") in ("work", "fix", "deflake"))
+        sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
+        # Landed = main carries the runner's merge commit for the ticket's branch ('... (task-t567): gate passed' or
+        # '... (task-t567): batch, gated together'); a just-dispatched branch with no commits is 'merged' but not landed.
+        subjects = _git(repo, "log", "main", "--merges", "--since=30 days ago", "--format=%s")
+        landed = [t for t in sent if f"(task-{t.lower().replace('-', '')})" in subjects]   # the runner's branch_of
+        recent = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+        try:
+            probe = json.load(open(os.path.join(ops, "hosts", f"{h}.json")))      # the work runner's per-tick probe
+        except (OSError, ValueError):
+            probe = {}
+        out.append({"name": h, "cap": (hosts[h] or {}).get("cap", 2), "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+                    "landed_24h": sum(1 for t in sent if f"(task-{t.lower().replace('-', '')})" in recent), "probe": probe,
+                    "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
+                    "landed": len(landed)})
+    return out
+
+
+def landings_by_host(ops: str, repo: str = REPO, hosts: list[dict] | None = None) -> dict:
+    """Landed task branches on main in the last 24 h, split by the host their worker ran on (remote hosts from
+    remote_hosts(); the rest ran on this Mac). `hosts` = an already computed remote_hosts() result."""
+    subjects = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+    total = len(set(re.findall(r"\((task-t\d+[a-z]?)\)", subjects)))
+    remote = {h["name"]: h["landed_24h"] for h in (hosts if hosts is not None else remote_hosts(ops, repo))}
+    return {"mac": total - sum(remote.values()), **remote} if remote else {}
+
+
 def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     """Invariant 23: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> ·
     <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`."""
@@ -493,7 +630,10 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
             + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min"
                + (f"; {s['flake_solo_24h']} after one solo pass, {s['flake_solo_saved_min_24h']} min of it" if s.get("flake_solo_24h") else "")
                + ")"
-               if s.get("flake_accepts_24h") else ""))
+               if s.get("flake_accepts_24h") else "")
+            # user, 2026-09-25: every tick line says what the remote hosts add
+            + "".join(f" · {h['name']}: {len(h['running'])} running, {h['landed']} landed"
+                      + (f", mirror behind by {h['behind']}" if h.get("behind") else "") for h in remote_hosts(ops)))
 
 
 def _holding(ops: str, now: datetime) -> str:

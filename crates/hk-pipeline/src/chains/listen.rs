@@ -58,8 +58,8 @@ use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_model::{ContentClass, EmitterId, SampleTime, Timestamp};
 use hk_stream::audio::{
-    AUDIO_DATATYPE, AUDIO_FRAME_SAMPLES, AUDIO_MAX_FRAME_LEN, AUDIO_SAMPLE_RATE_HZ, AgcInfo,
-    AudioInfo, AudioStatus, ListenTarget, SquelchInfo, encode_pcm,
+    AUDIO_DATATYPE, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ, AgcInfo, AudioInfo, AudioStatus,
+    ListenRequest, ListenTarget, SquelchInfo, audio_max_frame_len, encode_pcm,
 };
 use hk_stream::{
     BinaryRecord, OpenRefusal, OpenRequest, OpenedStream, Publisher, PublisherConfig,
@@ -192,6 +192,46 @@ impl ListenConfig {
             None => self.wfm_cores_per_msps.max(self.narrow_cores_per_msps),
         };
         mcores(rate_hz / 1e6 * per_msps)
+    }
+}
+
+/// How long a wait for the probe's samples may go on: the limit is charged **only while the
+/// source is free to deliver**.
+///
+/// In lossless replay ([`crate::gate`]) the capture thread is deliberately stopped whenever a
+/// reader still needs samples the next block would overwrite, for as long as that reader takes -
+/// `hk-survey`'s one-off receiver-line measurement holds it for its whole duration *by design*, so
+/// that a replay answers the same however slowly the machine runs. A probe that charged that hold
+/// to its own deadline refused the request 504 `probe-timeout` while the writer was stopped on
+/// purpose: T-929 measured `hk-survey` frozen 2 015 232 samples behind a head of 4 014 080 (exactly
+/// the gate's slack) for the full 20 s, every other reader at the head, and not one sample
+/// delivered to the probe. The refusal was reporting a stall it had caused nobody and could not
+/// cure, against the gate module's own promise that a lossless replay is unchanged "however slowly
+/// a debug build runs".
+///
+/// So held time is not charged, and the refusal keeps its meaning: **no samples arrived while the
+/// source could have sent them**. The wait is still bounded - a segment that ends reads as
+/// [`Next::Closed`] and refuses - and on a live source the gate is disabled, so nothing changes.
+struct Patience {
+    left: Duration,
+    last: Instant,
+}
+
+impl Patience {
+    /// A limit of `left`, counted from `now`.
+    fn new(left: Duration, now: Instant) -> Self {
+        Self { left, last: now }
+    }
+
+    /// Charges the time since the previous call unless capture was `held`, and reports whether
+    /// the limit is spent.
+    fn spent(&mut self, now: Instant, held: bool) -> bool {
+        let since = now.saturating_duration_since(self.last);
+        self.last = now;
+        if !held {
+            self.left = self.left.saturating_sub(since);
+        }
+        self.left.is_zero()
     }
 }
 
@@ -424,7 +464,11 @@ impl ListenManager {
     fn open_inner(&self, req: &OpenRequest) -> Result<OpenedStream, OpenRefusal> {
         let cfg = &self.config();
         publish_limits(&self.counters, cfg);
-        let target = ListenTarget::from_request(req)?;
+        // T-874: `channels=2` asks for stereo (opt-in); absent, the stream is today's mono.
+        let ListenRequest {
+            target,
+            channels: want_channels,
+        } = ListenRequest::from_request(req)?;
         let shared = (self.segment)().ok_or_else(|| {
             OpenRefusal::new(
                 503,
@@ -481,9 +525,10 @@ impl ListenManager {
         };
         let mut iq: Vec<Complex<i8>> = Vec::with_capacity(want);
         let mut head: Option<(SampleTime, ProvenanceHandle)> = None;
-        let deadline = Instant::now() + cfg.probe_timeout;
+        // The limit is charged only while capture is free to run ([`Patience`]).
+        let mut patience = Patience::new(cfg.probe_timeout, Instant::now());
         while iq.len() < want {
-            if Instant::now() > deadline {
+            if patience.spent(Instant::now(), shared.gate.holding()) {
                 return Err(OpenRefusal::new(
                     504,
                     "probe-timeout",
@@ -579,13 +624,17 @@ impl ListenManager {
                 "the demodulated channel is not inside the tuned window",
             ));
         }
-        let demod = AudioDemod::new(
+        let demod = build_demod(
             plan.clone(),
-            cfg.audio.clone(),
+            &cfg.audio,
             tune.sample_rate_hz,
             tune.center_hz,
+            want_channels,
         )
         .map_err(|e| OpenRefusal::new(500, "demod", e.to_string()))?;
+        // What the stream carries is what the demodulator delivers, not what was asked: only
+        // broadcast FM has a second channel (T-874).
+        let channels = demod.channels();
 
         slot.set_mcores(cfg.chain_mcores(
             tune.sample_rate_hz,
@@ -619,9 +668,9 @@ impl ListenManager {
         header.bandwidth_hz = Some(plan.channel_bandwidth_hz);
         header.emitter_id = emitter;
         header.provenance_ref = Some(prov.id());
-        header.max_frame_len = AUDIO_MAX_FRAME_LEN;
+        header.max_frame_len = audio_max_frame_len(channels);
         header.audio = Some(AudioInfo {
-            channels: 1,
+            channels,
             frame_samples: AUDIO_FRAME_SAMPLES as u32,
             mode: plan.mode_name().into(),
             mode_confidence: pr.mode.confidence,
@@ -673,12 +722,15 @@ impl ListenManager {
             shared: Arc::clone(shared),
             reader,
             demod,
+            channels: want_channels,
+            stereo_losses: 0,
             publisher,
             handle: handle.clone(),
             stop: Arc::clone(&stop),
             config: cfg.clone(),
             tune: (tune.center_hz, tune.sample_rate_hz),
             t0: time.host_time,
+            t0_anchored: false,
             refiner,
             refine_emitter: refine_emitter.or(emitter),
             refined: refined_tuning,
@@ -732,28 +784,52 @@ impl StreamOpener for ListenManager {
             "kind": "audio",
             "datatype": AUDIO_DATATYPE,
             "sample_rate_hz": AUDIO_SAMPLE_RATE_HZ,
-            "params": ["emitter", "detection", "f_lo", "f_hi"],
+            "params": ["emitter", "detection", "f_lo", "f_hi", "channels"],
             "records": format!(
-                "data (type 1, {AUDIO_FRAME_SAMPLES} i16 LE mono samples) and status (type 3: \
-                 level_dbfs, snr_db, squelch_open, agc_gain_db, ...); mode and parameters are \
-                 estimated (header audio profile)"
+                "data (type 1, {AUDIO_FRAME_SAMPLES} i16 LE samples per channel; mono unless \
+                 channels=2 was asked and the header's audio.channels is 2, then interleaved L, R) \
+                 and status (type 3: level_dbfs, snr_db, squelch_open, agc_gain_db, ..., stereo \
+                 on two-channel streams); mode and parameters are estimated (header audio profile)"
             ),
         })
     }
+}
+
+/// The demodulator for `plan`, with the L−R path when `channels` is 2 (T-874; a no-op on modes
+/// with no second channel).
+fn build_demod(
+    plan: hk_demod::audio::AudioPlan,
+    cfg: &AudioConfig,
+    rate_hz: f64,
+    center_hz: f64,
+    channels: u32,
+) -> Result<AudioDemod, hk_demod::DemodError> {
+    let d = AudioDemod::new(plan, cfg.clone(), rate_hz, center_hz)?;
+    Ok(if channels == 2 { d.with_stereo() } else { d })
 }
 
 struct Session {
     shared: Arc<Shared>,
     reader: ChainReader,
     demod: AudioDemod,
+    /// Channels the client asked for (T-874): every rebuilt demodulator gets the same.
+    channels: u32,
+    /// Pilot lock losses of demodulators already replaced (a rebuild that drops a locked pilot is
+    /// one), so the status count covers the whole stream.
+    stereo_losses: u64,
     publisher: Publisher,
     handle: PublisherHandle,
     stop: Arc<AtomicBool>,
     config: ListenConfig,
     /// Tuned centre and rate the demodulator was built for.
     tune: (f64, f64),
-    /// Host time of the first probed sample (audio time origin).
+    /// Audio time origin: the capture time of the first sample the demodulator processes. Until
+    /// that chunk arrives it holds the probe head's time; `run` re-anchors it on the first chunk
+    /// (T-868: anchoring on the probe head stamped every record one probe window — ~1 s — early,
+    /// because audio starts after the probe and refinement window, not at its head).
     t0: Timestamp,
+    /// `t0` has been anchored on the first processed chunk.
+    t0_anchored: bool,
     /// Background re-refinement (T-070).
     refiner: Option<LiveRefiner>,
     /// Emitter refined tunings are stored on.
@@ -778,11 +854,16 @@ impl Session {
         if !in_window(self.tune.0, self.tune.1, lo, hi) || gate(&self.shared, lo, hi).is_err() {
             return;
         }
-        let Ok(demod) = AudioDemod::new(plan, self.config.audio.clone(), self.tune.1, self.tune.0)
-        else {
+        let Ok(demod) = build_demod(
+            plan,
+            &self.config.audio,
+            self.tune.1,
+            self.tune.0,
+            self.channels,
+        ) else {
             return;
         };
-        self.demod = demod;
+        self.replace_demod(demod);
         self.refined = Some((next.tuning.center_hz, next.tuning.bandwidth_hz));
         *gap = true;
         if self.refine_emitter.is_some() {
@@ -794,6 +875,14 @@ impl Session {
                 t,
             );
         }
+    }
+
+    /// Swaps in a rebuilt demodulator, carrying its stereo lock losses over (T-874): the new one
+    /// starts unlocked, so dropping a locked pilot is itself a loss.
+    fn replace_demod(&mut self, demod: AudioDemod) {
+        self.stereo_losses +=
+            self.demod.stereo_lock_losses() + u64::from(self.demod.stereo_locked());
+        self.demod = demod;
     }
 
     /// Why this chain stopped when its session guard was dropped (T-633).
@@ -823,7 +912,10 @@ impl Session {
         let counters = Arc::clone(&self.shared.counters);
         let lc = &counters.listen;
         let fs = self.shared.fs;
-        let frame = AUDIO_FRAME_SAMPLES;
+        // A record is AUDIO_FRAME_SAMPLES sample frames of `channels` interleaved samples each;
+        // `sample_index` counts frames (time), whatever the channel count (T-874).
+        let channels = self.demod.channels() as usize;
+        let frame = AUDIO_FRAME_SAMPLES * channels;
         let mut pending: Vec<f32> = Vec::with_capacity(4 * frame);
         let mut payload: Vec<u8> = Vec::with_capacity(2 * frame);
         let mut audio_index: u64 = 0;
@@ -871,13 +963,14 @@ impl Session {
                             inc(&lc.retune_ends);
                             break End::Retune;
                         }
-                        match AudioDemod::new(
+                        match build_demod(
                             self.demod.plan().clone(),
-                            self.config.audio.clone(),
+                            &self.config.audio,
                             tune.1,
                             tune.0,
+                            self.channels,
                         ) {
-                            Ok(d) => self.demod = d,
+                            Ok(d) => self.replace_demod(d),
                             Err(_) => {
                                 inc(&lc.errors);
                                 break End::Error;
@@ -914,6 +1007,10 @@ impl Session {
                         },
                         provenance: &chunk.provenance,
                     };
+                    if !self.t0_anchored {
+                        self.t0 = chunk.time.host_time;
+                        self.t0_anchored = true;
+                    }
                     let processed = self.demod.process(info, &self.reader.buf[..chunk.len]);
                     if let Some(r) = self.refiner.as_mut() {
                         r.feed(chunk.time, &chunk.provenance, &self.reader.buf[..chunk.len]);
@@ -933,7 +1030,7 @@ impl Session {
                         let samples = &pending[offset..offset + frame];
                         offset += frame;
                         let index = audio_index;
-                        audio_index += frame as u64;
+                        audio_index += AUDIO_FRAME_SAMPLES as u64;
                         if !self.demod.squelch_open() {
                             squelched += 1;
                             inc(&lc.squelched_frames);
@@ -1013,6 +1110,10 @@ impl Session {
                     refined_center_hz: self.refined.map(|r| r.0),
                     refined_bandwidth_hz: self.refined.map(|r| r.1),
                     refine_updates: self.refiner.as_ref().map_or(0, LiveRefiner::updates),
+                    // T-874: two-channel streams say whether L−R is really being decoded.
+                    stereo: (channels == 2).then(|| self.demod.stereo_locked()),
+                    stereo_lock_losses: (channels == 2)
+                        .then(|| self.stereo_losses + self.demod.stereo_lock_losses()),
                 };
                 let t = self.t0.saturating_add_nanos(
                     (audio_index as f64 * 1e9 / AUDIO_SAMPLE_RATE_HZ).round() as i64,
@@ -1060,6 +1161,40 @@ fn round2(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-929: the probe's limit is time the source could have delivered in. A lossless hold
+    /// (`hk-survey` measuring, holding the flow gate) is not charged, however long it lasts; the
+    /// 504 still fires promptly once capture is free again and nothing arrives.
+    #[test]
+    fn a_held_capture_never_spends_the_probes_patience() {
+        let t0 = Instant::now();
+        let limit = Duration::from_secs(20);
+
+        // Held for a hundred times the limit: still patient, because no sample could arrive.
+        let mut p = Patience::new(limit, t0);
+        for k in 1..=200 {
+            assert!(
+                !p.spent(t0 + Duration::from_secs(10 * k), true),
+                "spent while capture was held, at {} s",
+                10 * k
+            );
+        }
+        // Capture is free again: the whole limit is still there, and it is spent in real time.
+        assert!(!p.spent(t0 + Duration::from_secs(2000 + 19), false));
+        assert!(p.spent(t0 + Duration::from_secs(2000 + 20), false));
+
+        // Free throughout: unchanged behaviour - the limit expires after exactly `limit`.
+        let mut p = Patience::new(limit, t0);
+        assert!(!p.spent(t0 + Duration::from_millis(19_999), false));
+        assert!(p.spent(t0 + limit, false));
+
+        // Mixed: 15 s free, an hour held, 5 s free.
+        let mut p = Patience::new(limit, t0);
+        assert!(!p.spent(t0 + Duration::from_secs(15), false));
+        assert!(!p.spent(t0 + Duration::from_secs(3615), true));
+        assert!(!p.spent(t0 + Duration::from_secs(3619), false));
+        assert!(p.spent(t0 + Duration::from_secs(3620), false));
+    }
 
     #[test]
     fn replumbing_is_503_and_a_finished_run_is_410() {

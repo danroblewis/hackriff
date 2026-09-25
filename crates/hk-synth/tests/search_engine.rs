@@ -23,6 +23,7 @@ use hk_synth::engine::{
     ProposalReply, ProposeRequest, RecipeHead, Root, SearchOutcome, SearchSpec, Suggestion,
     UnsupportedStructure, search,
 };
+use hk_synth::result::{CheckOrigin, CheckSummary, HoldoutFrame};
 use hk_synth::search::{JobState, Profile, StopReason};
 use hk_synth::trace::{Outcome, OutcomeKind, Reason};
 use hk_synth::{
@@ -68,6 +69,19 @@ struct World {
     truth: Truth,
     calls: AtomicU64,
     holdout_calls: AtomicU64,
+    /// Evaluations over ADR-0021 §8.2's null windows.
+    null_calls: AtomicU64,
+    /// The null windows carry the "signal" too: structure the search finds in structureless data.
+    null_fits: bool,
+    /// Valid frames on hold-out at the true CRC (the check's `n`, and its `raw` too unless
+    /// `holdout_payloads` says the payloads repeat).
+    holdout_frames: u32,
+    /// `Some(k)`: those frames carry only `k` distinct payloads — a beacon repeating itself. The
+    /// S5 record then says `raw = k` (ADR-0022 §4.2's `differences`) over `n = holdout_frames`,
+    /// while its `bits` still claim every frame (an evaluator over-reporting).
+    holdout_payloads: Option<u32>,
+    /// The CRC's width, as the check summary reports it.
+    width: u32,
     proposals: AtomicU64,
     grants: Mutex<Vec<u64>>,
     hook: Option<Hook>,
@@ -79,6 +93,11 @@ impl World {
             truth,
             calls: AtomicU64::new(0),
             holdout_calls: AtomicU64::new(0),
+            null_calls: AtomicU64::new(0),
+            null_fits: false,
+            holdout_frames: 12,
+            holdout_payloads: None,
+            width: 16,
             proposals: AtomicU64::new(0),
             grants: Mutex::new(Vec::new()),
             hook: None,
@@ -106,11 +125,18 @@ impl Evaluator for World {
         if req.window == EvalWindow::Holdout {
             self.holdout_calls.fetch_add(1, Ordering::SeqCst);
         }
+        let null = matches!(req.window, EvalWindow::Null(_));
+        if null {
+            self.null_calls.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(h) = &self.hook {
             h(k);
         }
         let t = &self.truth;
-        let upstream = req.parent.is_none_or(|p| p.on_truth);
+        // A phase-randomised or time-reversed null keeps the PSD (S0) and destroys everything
+        // after it — unless this world plants structure in the nulls too.
+        let upstream = req.parent.is_none_or(|p| p.on_truth)
+            && !(null && req.stage > Stage::S0 && !self.null_fits);
         let nodes = &req.candidate.recipe.nodes[req.new_nodes.clone()];
         let last = nodes.last().expect("every alternative here has nodes");
         let p = |name: &str| last.params.get(name).cloned().unwrap_or(Value::Null);
@@ -204,24 +230,54 @@ impl Evaluator for World {
             }
             Stage::S5 => {
                 let hit = upstream && p("poly").as_str() == Some(t.poly);
-                let frames = match (hit, holdout) {
+                let frames = match (hit, holdout || null) {
                     (true, false) => 20,
-                    (true, true) => 12,
+                    (true, true) => self.holdout_frames,
                     _ => 0,
+                };
+                let distinct = match (holdout || null, self.holdout_payloads) {
+                    (true, Some(k)) => k.min(frames),
+                    _ => frames,
                 };
                 (
                     ev(
                         Stage::S5,
                         MetricId::CheckDistinctValid,
                         GroupId::Undeclared,
-                        frames as f32,
+                        distinct as f32,
                         frames,
-                        16.0 * frames as f32,
+                        self.width as f32 * frames as f32,
                     ),
                     hit,
                 )
             }
             Stage::S6 => (EvidenceSet::new(), upstream),
+        };
+        let check = (req.stage == Stage::S5).then(|| CheckSummary {
+            kind: "crc".into(),
+            model: format!("CRC-{}", self.width),
+            width: self.width,
+            pass_rate: if on_truth { 1.0 } else { 0.0 },
+            distinct_valid: if on_truth { self.holdout_frames } else { 0 },
+            corrected_excluded: 0,
+            tested: self.holdout_frames.max(1),
+            holdout,
+            node: None,
+        });
+        let frames = if holdout && on_truth && req.stage == Stage::S5 {
+            (0..self.holdout_frames)
+                .map(|i| HoldoutFrame {
+                    t_ns: 1_000_000 * i64::from(i),
+                    check_valid: true,
+                    corrected: false,
+                    frame_model: "hk-framing".into(),
+                    identity: None,
+                    metadata: json!({ "len": 64 }),
+                    content: None,
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
         Ok(Evaluated {
             evidence: vec![NodeEvidence {
@@ -230,7 +286,8 @@ impl Evaluator for World {
             }],
             output: Sig { on_truth },
             output_bytes: 1024,
-            check: None,
+            check,
+            frames,
         })
     }
 
@@ -326,6 +383,7 @@ fn root(sk: Skeleton, prior_bits: f32, polys: &[&str]) -> Root {
         seed_source: hk_synth::candidate::SeedSource::Open,
         family: None,
         deferred: None,
+        check_origin: CheckOrigin::Searched,
     }
 }
 
@@ -417,6 +475,29 @@ fn check_outcome(o: &SearchOutcome, world: &World) {
     }
     assert!(o.trace_cost.fraction >= 0.0 && o.trace_cost.fraction <= 1.0);
     assert!(o.trace_cost.bytes > 0 || o.trace.nodes.is_empty());
+    // ADR-0021 §5: only a not-tried node whose cause was time or an external event is flagged,
+    // and any flagged node makes the whole job non-replayable.
+    for n in o.trace.nodes.iter().filter(|n| n.nondeterministic) {
+        assert!(
+            matches!(
+                n.outcome.kind(),
+                OutcomeKind::DeferredBudget | OutcomeKind::RefusedPower
+            ),
+            "{} flagged as {:?}",
+            n.id,
+            n.outcome.kind()
+        );
+        assert!(
+            o.nondeterministic,
+            "{} flagged but the job is replayable",
+            n.id
+        );
+    }
+    // ADR-0021 §2.3: the peak (sampled after every insert) is never below the end state.
+    assert!(o.trace.peak_nodes >= o.trace.nodes.len() as u64);
+    assert!(o.trace.peak_bytes >= o.trace.bytes);
+    assert_eq!(o.replay_key.engine, hk_synth::ENGINE);
+    assert_eq!(o.replay_key.seed_ref.len(), 64);
 }
 
 fn param<'a>(r: &'a hk_synth::PipelineResult, node: &str, name: &str) -> &'a Value {
@@ -572,7 +653,7 @@ fn shared_prefixes_are_memoised_not_paid_twice() {
         ),
     ];
     let mut s = spec(roots, Profile::Deep);
-    s.solve.min_holdout_bits = 1e9; // never solves: both searches run to the end
+    s.solve.min_analytic_holdout_bits = 1e9; // never solves: both searches run to the end
     let o = run(&s, &world, &Control::new());
     check_outcome(&o, &world);
     let memo: Vec<_> = o
@@ -878,7 +959,7 @@ fn the_trace_stays_within_its_bound_and_is_complete_in_counts() {
     let world = World::new(FSK);
     let mut s = spec(roots, Profile::Quick);
     s.budget.max_proposal_calls = Some(100);
-    s.solve.min_holdout_bits = 1e9;
+    s.solve.min_analytic_holdout_bits = 1e9;
     let bound = Profile::Quick.trace_bounds().max_trace_nodes as usize;
     let o = run(&s, &world, &Control::new());
     check_outcome(&o, &world);
@@ -922,4 +1003,794 @@ fn memoised_prefixes_survive_cache_eviction_by_recomputing() {
         o.used.evaluations > cached,
         "recomputation is charged, not free"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-565: the trace, produced inside the beam (ADR-0021 §1–§3, §5)
+// ---------------------------------------------------------------------------------------------
+
+/// Many hypotheses: `polys` CRC polynomials under every surviving S4 node of three skeletons,
+/// never solving, so the whole space is walked and the trace bound has to bite.
+fn crowded_spec(n_polys: usize, profile: Profile) -> SearchSpec {
+    let polys: Vec<String> = (0..n_polys)
+        .map(|i| format!("0x{:04X}", 0x1000 + i))
+        .collect();
+    let mut polys: Vec<&str> = polys.iter().map(String::as_str).collect();
+    polys.push(FSK.poly);
+    let roots = vec![
+        root(skeleton("fsk-a", fsk_s1(), false, &polys), -0.5, &polys),
+        root(skeleton("fsk-b", fsk_s1(), false, &polys), -0.6, &polys),
+        root(skeleton("ook-a", ook_s1(), false, &polys), -1.0, &polys),
+    ];
+    let mut s = spec(roots, profile);
+    s.budget.max_proposal_calls = Some(100);
+    s.budget.max_evaluations = Some(20_000);
+    s.solve.min_analytic_holdout_bits = 1e9;
+    s
+}
+
+fn unsupported(structure: &str, block: &str) -> UnsupportedStructure {
+    UnsupportedStructure {
+        structure: structure.into(),
+        missing_block: block.into(),
+        reference: "ADR-0011 §1.5".into(),
+        family: Some(structure.into()),
+        slot: Stage::S1,
+        posterior: Some(0.05),
+    }
+}
+
+/// The trace minus its only non-deterministic field (`cpu_ms` is measured time).
+fn deterministic_bytes(o: &SearchOutcome) -> Vec<u8> {
+    let nodes: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut n = n.clone();
+            n.cpu_ms = 0;
+            n
+        })
+        .collect();
+    serde_json::to_vec(&(&nodes, &o.trace.elided, o.trace.nodes_elided)).unwrap()
+}
+
+#[test]
+fn the_trace_accounts_for_all_of_the_work() {
+    // ADR-0021 §1's identity, with the bound biting so the elided side is not empty: the trace
+    // names a subset of the decisions and accounts for ALL of the work.
+    let world = World::new(FSK);
+    let o = run(&crowded_spec(120, Profile::Quick), &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(o.trace.nodes_elided > 0 && !o.trace.elided.is_empty());
+    let recorded: u64 = o.trace.nodes.iter().map(|n| n.evaluations).sum();
+    let elided: u64 = o.trace.elided.iter().map(|e| e.evaluations).sum();
+    assert!(elided > 0, "some of the work is only in the elided buckets");
+    assert_eq!(recorded + elided, o.used.evaluations);
+    assert_eq!(world.calls.load(Ordering::SeqCst), o.used.evaluations);
+    // Every drop is counted in exactly one bucket, and only tried kinds are ever dropped.
+    let counted: u64 = o.trace.elided.iter().map(|e| e.count).sum();
+    assert_eq!(counted, o.trace.nodes_elided);
+    for e in &o.trace.elided {
+        assert!(e.outcome.tried(), "{:?} was elided", e.outcome);
+        assert!(e.count > 0 && e.bits_min <= e.bits_max);
+    }
+}
+
+#[test]
+fn residency_never_exceeds_the_bound_during_the_search() {
+    // The node cap binding: peak residency is sampled after EVERY insert, so a transient
+    // overshoot mid-search would show here even though the finished trace is back under.
+    let world = World::new(FSK);
+    let mut s = crowded_spec(120, Profile::Quick);
+    s.trace_bounds.max_trace_nodes = 48;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(!o.trace.over_bound, "the protected set fits 48 nodes");
+    assert!(o.trace.nodes_elided > 0);
+    assert!(o.trace.peak_nodes <= 48, "peak {} > 48", o.trace.peak_nodes);
+    assert!(o.trace.peak_bytes <= u64::from(s.trace_bounds.max_trace_bytes));
+    // The byte cap binding instead (ADR-0021 §2.3: the hard limit, first to bind at `deep`).
+    let world = World::new(FSK);
+    let mut s = crowded_spec(120, Profile::Deep);
+    s.trace_bounds.max_trace_bytes = 24 * 1024;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(!o.trace.over_bound);
+    assert!(o.trace.nodes_elided > 0);
+    assert!(
+        o.trace.peak_bytes <= 24 * 1024,
+        "peak {} bytes > 24 KiB",
+        o.trace.peak_bytes
+    );
+    assert!(o.trace.bytes <= 24 * 1024);
+    assert!(o.trace.peak_nodes < u64::from(Profile::Deep.trace_bounds().max_trace_nodes));
+}
+
+#[test]
+fn a_grid_sweep_is_one_node_with_a_swept_descriptor() {
+    // ADR-0021 §1 rule 2: the symbol-rate grid around the seed is evaluated point by point but
+    // recorded as ONE node per S2 hypothesis, carrying a `swept` descriptor and the points'
+    // evaluations — never one node per grid point.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.trace_bounds.max_trace_nodes = 100_000;
+    s.trace_bounds.max_trace_bytes = u32::MAX;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(
+        o.trace.nodes_elided, 0,
+        "nothing elided: every node is visible"
+    );
+    let s2: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.stage == Stage::S2 && n.tried)
+        .collect();
+    assert!(!s2.is_empty());
+    let mut per_parent: BTreeMap<&str, usize> = BTreeMap::new();
+    for n in &s2 {
+        *per_parent
+            .entry(n.parent.as_deref().unwrap_or(""))
+            .or_default() += 1;
+        if n.outcome.kind() == OutcomeKind::Memoised {
+            continue;
+        }
+        assert_eq!(n.hypothesis.swept.len(), 1, "{}: one swept axis", n.id);
+        let sw = &n.hypothesis.swept[0];
+        assert_eq!(sw.path, "nodes[clock].params.symbol_rate_bd");
+        assert!(sw.points >= 7 && sw.lo < sw.hi, "{sw:?}");
+        assert!(
+            n.evaluations >= u64::from(sw.points),
+            "{}: the node carries its points' evaluations ({} < {})",
+            n.id,
+            n.evaluations,
+            sw.points
+        );
+    }
+    // One S2 slot alternative and no discrete S2 parameter: one node per parent.
+    for (parent, count) in per_parent {
+        assert_eq!(
+            count, 1,
+            "{parent} has {count} S2 children: a node per grid point?"
+        );
+    }
+}
+
+#[test]
+fn the_same_replay_key_gives_the_same_trace_byte_for_byte() {
+    // ADR-0021 §5: count-bounded, so a re-run makes every decision again — including the
+    // `deferred_budget` nodes a COUNT cap leaves, which are therefore not flagged.
+    let run_once = || {
+        let world = World::new(FSK);
+        let mut s = crowded_spec(120, Profile::Quick);
+        s.budget.max_evaluations = Some(150);
+        s.unsupported.push(unsupported("css", "css_demod"));
+        let o = run(&s, &world, &Control::new());
+        check_outcome(&o, &world);
+        o
+    };
+    let (a, b) = (run_once(), run_once());
+    assert_eq!(a.replay_key, b.replay_key);
+    assert_eq!(a.stop, Some(StopReason::Budget));
+    assert!(
+        !a.nondeterministic && !b.nondeterministic,
+        "count-bounded: replayable"
+    );
+    let deferred: Vec<_> = a
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.outcome.kind() == OutcomeKind::DeferredBudget)
+        .collect();
+    assert!(!deferred.is_empty(), "the count cap left work untried");
+    assert!(deferred.iter().all(|n| !n.nondeterministic));
+    assert!(a.trace.nodes_elided > 0, "retention decisions replay too");
+    assert_eq!(deterministic_bytes(&a), deterministic_bytes(&b));
+    assert_eq!(a.used.evaluations, b.used.evaluations);
+    assert_eq!(a.results, b.results);
+    // The key really keys: a different budget or seeding is a different key.
+    let world = World::new(FSK);
+    let mut s = crowded_spec(120, Profile::Quick);
+    s.budget.max_evaluations = Some(151);
+    s.unsupported.push(unsupported("css", "css_demod"));
+    let c = run(&s, &world, &Control::new());
+    assert_ne!(c.replay_key.budget, a.replay_key.budget);
+    assert_eq!(c.replay_key.seed_ref, a.replay_key.seed_ref);
+    let mut s2 = crowded_spec(121, Profile::Quick);
+    s2.budget.max_evaluations = Some(150);
+    let d = run(&s2, &World::new(FSK), &Control::new());
+    assert_ne!(d.replay_key.seed_ref, a.replay_key.seed_ref);
+    // It names what the decisions depend on: the blocks at their versions, the profile.
+    let names: Vec<&str> = a
+        .replay_key
+        .blocks
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    for want in [
+        "fsk_demod",
+        "am_demod",
+        "clock_recovery",
+        "sync_search",
+        "crc",
+        "nrzi",
+    ] {
+        assert!(names.contains(&want), "{want} missing from {names:?}");
+    }
+    assert_eq!(a.replay_key.profile, Profile::Quick);
+}
+
+#[test]
+fn a_time_caused_stop_flags_what_it_left_and_the_job_is_not_replayable() {
+    // The wall backstop decides the stop: whatever it left untried is flagged, and the job says
+    // it cannot be replayed.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.budget.wall_s = 1e-9;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.stop, Some(StopReason::Budget));
+    assert!(o.nondeterministic);
+    let deferred: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.outcome.kind() == OutcomeKind::DeferredBudget)
+        .collect();
+    assert!(!deferred.is_empty());
+    assert!(deferred.iter().all(|n| n.nondeterministic));
+    let v = serde_json::to_value(deferred[0]).unwrap();
+    assert_eq!(v["nondeterministic"], true);
+    // …and the flag is absent, not `false`, on every deterministic node.
+    let settled = o
+        .trace
+        .nodes
+        .iter()
+        .find(|n| n.tried)
+        .map(|n| serde_json::to_value(n).unwrap());
+    if let Some(v) = settled {
+        assert!(v.get("nondeterministic").is_none());
+    }
+}
+
+#[test]
+fn not_tried_nodes_survive_a_cap_that_drops_95_percent_of_the_tried() {
+    let mut deferred = root(
+        skeleton("generic-ook-framed", ook_s1(), false, &POLYS),
+        -6.0,
+        &POLYS,
+    );
+    deferred.deferred = Some(0.01);
+    deferred.family = Some("ook".into());
+    let world = World::new(FSK);
+    let mut s = crowded_spec(250, Profile::Deep);
+    let polys: Vec<String> = (0..250).map(|i| format!("0x{:04X}", 0x2000 + i)).collect();
+    let polys: Vec<&str> = polys.iter().map(String::as_str).collect();
+    for (i, prior) in [-0.7f32, -0.8, -0.9].into_iter().enumerate() {
+        s.roots.push(root(
+            skeleton(&format!("fsk-x{i}"), fsk_s1(), false, &polys),
+            prior,
+            &polys,
+        ));
+    }
+    s.roots.push(deferred);
+    for (st, b) in [
+        ("css", "css_demod"),
+        ("ofdm", "ofdm_demod"),
+        ("psk", "psk_demod"),
+    ] {
+        s.unsupported.push(unsupported(st, b));
+    }
+    // The whole space is ~530 evaluations: a 420 cap stops the main pass part-way, so the
+    // budget leaves live nodes untried and the side queue is never reached.
+    s.budget.max_evaluations = Some(420);
+    s.trace_bounds.max_trace_nodes = 40;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+
+    let tried_kept = o.trace.nodes.iter().filter(|n| n.tried).count() as u64;
+    let tried_elided: u64 = o.trace.elided.iter().map(|e| e.count).sum();
+    let tried_total = tried_kept + tried_elided;
+    let dropped = tried_elided as f64 / tried_total as f64;
+    assert!(
+        dropped >= 0.95,
+        "the cap drops {:.1} % of {tried_total} tried nodes",
+        dropped * 100.0
+    );
+    let not_tried: Vec<_> = o.trace.nodes.iter().filter(|n| !n.tried).collect();
+    // Every not-tried node the engine made is still here: none was elided …
+    assert!(o.trace.elided.iter().all(|e| e.outcome.tried()));
+    // … and they are the honesty rows: the budget's leftovers, the deferred family and one
+    // row per unsupported structure.
+    let kinds: std::collections::BTreeSet<OutcomeKind> =
+        not_tried.iter().map(|n| n.outcome.kind()).collect();
+    assert!(kinds.contains(&OutcomeKind::DeferredBudget), "{kinds:?}");
+    assert!(kinds.contains(&OutcomeKind::DeferredPrior), "{kinds:?}");
+    let structures: std::collections::BTreeSet<&str> = not_tried
+        .iter()
+        .filter_map(|n| match &n.outcome {
+            Outcome::Unsupported { structure, .. } => Some(structure.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        structures,
+        ["css", "ofdm", "psk"].into_iter().collect(),
+        "one node per distinct unsupported structure"
+    );
+    let not_tried_made = {
+        // The live progress counter saw every not-tried decision the engine made.
+        let world = World::new(FSK);
+        let mut last = Progress::default();
+        let mut obs = |p: &Progress| last = *p;
+        let _ = search(&s, &Registry::builtin(), &world, &Control::new(), &mut obs);
+        last.not_tried
+    };
+    assert_eq!(not_tried.len() as u64, not_tried_made);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The trace's cost, measured (ADR-0021 §3; T-453's constraint: measured, not assumed)
+// ---------------------------------------------------------------------------------------------
+
+/// Counts every allocation on the current thread, and separately those made while the engine
+/// is building or retaining a trace node (`hk_synth::trace_sink::in_trace_scope`). Thread-local,
+/// so tests running in parallel in this binary do not pollute each other; the measured search
+/// runs at `threads = 1`, where evaluation happens on the calling thread too.
+struct Counting;
+
+thread_local! {
+    static ALLOC_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ALLOC_TRACE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_alloc(bytes: usize) {
+    let b = bytes as u64;
+    let _ = ALLOC_TOTAL.try_with(|c| c.set(c.get() + b));
+    if hk_synth::trace_sink::in_trace_scope() {
+        let _ = ALLOC_TRACE.try_with(|c| c.set(c.get() + b));
+    }
+}
+
+// SAFETY: every call is forwarded unchanged to the system allocator; counting touches only
+// const-initialised, destructor-free thread-locals, which never allocate.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_alloc(layout.size());
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_alloc(layout.size());
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        count_alloc(new_size.saturating_sub(layout.size()));
+        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// One measured search: (outcome, total bytes allocated, bytes allocated for the trace).
+fn measured(s: &SearchSpec) -> (SearchOutcome, u64, u64) {
+    let world = World::new(FSK);
+    let control = Control::new();
+    let registry = Registry::builtin();
+    ALLOC_TOTAL.with(|c| c.set(0));
+    ALLOC_TRACE.with(|c| c.set(0));
+    let o = search(s, &registry, &world, &control, &mut ());
+    let total = ALLOC_TOTAL.with(std::cell::Cell::get);
+    let trace = ALLOC_TRACE.with(std::cell::Cell::get);
+    check_outcome(&o, &world);
+    (o, total, trace)
+}
+
+#[test]
+fn the_trace_cost_is_measured_not_assumed() {
+    // Two shapes: quick's 128-node bound under a crowded space (retention busy on almost every
+    // insert), and deep's 2 048-node / 256 KiB bound (the largest retained set to scan).
+    let mut rows = Vec::new();
+    for (label, profile) in [("quick", Profile::Quick), ("deep", Profile::Deep)] {
+        let mut s = crowded_spec(250, profile);
+        s.budget.threads = 1;
+        let (o, total, trace) = measured(&s);
+        assert!(trace > 0 && trace <= total, "{trace} of {total}");
+        let c = o.trace_cost;
+        assert!(c.retention_s <= c.wall_s + 1e-9);
+        assert_eq!(
+            c.decisions,
+            o.trace.nodes.len() as u64 + o.trace.nodes_elided
+        );
+        // The synthetic evaluator is nearly free, so `fraction` here is an upper bound on what a
+        // real search pays. Projected against docs/27 §3's measured ≤ 5 ms per cached-stage
+        // evaluation, the same trace work is:
+        let projected = c.wall_s / (c.wall_s + o.used.evaluations as f64 * 5e-3);
+        rows.push(format!(
+            "{label}: {} decisions ({} kept, {} elided), {} evaluations; trace wall {:.1} ms \
+             ({:.1} us/decision, retention {:.1} ms) = {:.1} % of a free-evaluator search, \
+             {:.2} % projected at 5 ms/evaluation; trace allocations {} of {} bytes = {:.1} %; \
+             retained {} bytes (peak {} nodes / {} bytes)",
+            c.decisions,
+            o.trace.nodes.len(),
+            o.trace.nodes_elided,
+            o.used.evaluations,
+            c.wall_s * 1e3,
+            c.wall_s * 1e6 / c.decisions.max(1) as f64,
+            c.retention_s * 1e3,
+            c.fraction * 100.0,
+            projected * 100.0,
+            trace,
+            total,
+            trace as f64 * 100.0 / total as f64,
+            c.bytes,
+            o.trace.peak_nodes,
+            o.trace.peak_bytes,
+        ));
+    }
+    for r in &rows {
+        eprintln!("T-565 trace cost: {r}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// MAUTO M-9 (T-860): ADR-0022's solve rule on hold-out, and ADR-0021 §8.2's null control
+// ---------------------------------------------------------------------------------------------
+
+/// The winning open-search result solves only through ADR-0022's inequality on hold-out — the
+/// analytic-null currency, per-stage look-elsewhere — and only after the shuffled-null control
+/// ran and passed. Everything the confirm gate reads is on the result.
+#[test]
+fn m9_an_open_search_solves_on_analytic_hold_out_bits_after_the_null_control_passes() {
+    let world = World::new(FSK);
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    let h = top
+        .holdout
+        .as_ref()
+        .expect("a solved result carries its hold-out evidence");
+    // The confirm key is the analytic part only: S4's sync excess and S5's check, each net of its
+    // own stage's L — never the calibrated S0–S3 bits.
+    let analytic_on_ladder: f32 = h
+        .stages
+        .iter()
+        .filter(|e| e.metric.pays_for_confirm())
+        .map(|e| e.bits)
+        .sum();
+    assert!(
+        h.analytic_bits < analytic_on_ladder,
+        "look-elsewhere is charged per stage: {} vs {analytic_on_ladder}",
+        h.analytic_bits
+    );
+    assert!(h.analytic_bits < h.evidence_bits + 1e3);
+    assert_eq!(top.analytic_holdout_bits, Some(h.analytic_bits));
+    assert!(h.analytic_bits >= 24.0);
+    assert_eq!(h.check_width, Some(16));
+    assert_eq!(h.differences, 12);
+    assert!(h.check_bits.unwrap() >= 16.0);
+    let l_check = h
+        .l_check
+        .expect("an open search's L_check is the S5 stage's own");
+    assert!(l_check > 0.0, "three polynomials were tried at S5");
+    assert!((h.check_bits.unwrap() - (16.0 * 12.0 - l_check)).abs() < 1e-3);
+    assert_eq!(h.check_origin, CheckOrigin::Searched);
+    // ADR-0021 §8.2: K = 2 at standard, the unchanged prefix over each null, recorded.
+    let nc = h
+        .null_control
+        .expect("a searched check runs the null control");
+    assert!(nc.ran && !nc.capped && nc.passed());
+    assert_eq!(nc.k, 2);
+    assert!(nc.margin_bits >= 8.0);
+    assert_eq!(
+        world.null_calls.load(Ordering::SeqCst),
+        2 * top
+            .stages
+            .iter()
+            .map(|e| e.stage)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64,
+        "K nulls × the chain's stages, no more"
+    );
+    // The decodes the attach step stores are the solved rank-1's hold-out frames.
+    assert_eq!(o.holdout_frames.len(), 12);
+    assert!(
+        o.holdout_frames
+            .iter()
+            .all(|f| f.check_valid && !f.corrected)
+    );
+    assert!(o.null_control().is_some_and(|n| n.passed()));
+    assert_eq!(
+        o.seal(None, None, "t"),
+        None,
+        "a solved search seals no negative result"
+    );
+}
+
+/// A search that finds its structure in the null windows too cannot tell the fit from chance:
+/// ADR-0021 §8.2 caps the verdict at `framed`, the resolution says `tied`, and the record says why.
+#[test]
+fn m9_the_null_control_caps_a_fit_that_the_nulls_reproduce() {
+    let mut world = World::new(FSK);
+    world.null_fits = true;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    assert!(
+        o.results.iter().all(|r| r.verdict != Verdict::Solved),
+        "the control can only cap, and here it must"
+    );
+    assert_ne!(o.stop, Some(StopReason::Solved));
+    assert_eq!(o.reason, Some(Reason::Tied));
+    let capped = o
+        .results
+        .iter()
+        .find(|r| r.holdout.as_ref().and_then(|h| h.null_control).is_some())
+        .expect("the capped candidate keeps its null-control record");
+    assert!(capped.verdict <= Verdict::Framed);
+    let nc = capped.holdout.as_ref().unwrap().null_control.unwrap();
+    assert!(nc.ran && nc.capped && !nc.passed());
+    assert!(nc.margin_bits < 8.0);
+    assert!(
+        o.holdout_frames.is_empty(),
+        "nothing solved, nothing to store"
+    );
+    let res = o
+        .seal(None, None, "t")
+        .expect("an unsolved search seals a resolution");
+    assert_eq!(res.kind, hk_synth::ResolutionKind::Unknown);
+    assert_eq!(res.null_control, Some(nc));
+    assert!(res.summary.contains("null windows"), "{}", res.summary);
+}
+
+/// A template that fixes the whole check has `L_check = 0` beyond its own S5 count and needs no
+/// null control; at `quick` (K = 0) no control runs either. Neither is charged for one.
+#[test]
+fn m9_a_template_fixed_check_and_a_quick_job_run_no_null_control() {
+    let world = World::new(FSK);
+    let mut fixed = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &["0x8005"]),
+        0.0,
+        &["0x8005"],
+    );
+    fixed.check_origin = CheckOrigin::TemplateFixed;
+    let o = run(
+        &spec(vec![fixed], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    let h = top.holdout.as_ref().unwrap();
+    assert_eq!(
+        h.l_check,
+        Some(0.0),
+        "one polynomial: zero look-elsewhere at S5"
+    );
+    assert_eq!(h.null_control, None);
+    assert_eq!(world.null_calls.load(Ordering::SeqCst), 0);
+
+    let world = World::new(FSK);
+    let o = run(
+        &spec(standard_roots(), Profile::Quick),
+        &world,
+        &Control::new(),
+    );
+    assert_eq!(world.null_calls.load(Ordering::SeqCst), 0, "quick: K = 0");
+    assert!(
+        o.results
+            .iter()
+            .all(|r| { r.holdout.as_ref().is_none_or(|h| h.null_control.is_none()) })
+    );
+}
+
+/// T-884 item 4, ADR-0022 §5.1: a **template-fixed** check tried zero hypotheses, so its
+/// `L_check` is **0** — not the S5 stage's job-wide count, which other roots' polynomial searching
+/// filled in. Red before the fix: the template-fixed root was charged `l5 > 0` because a second,
+/// searched root in the same job had tried three polynomials at S5.
+#[test]
+fn t884_a_template_fixed_check_pays_no_look_elsewhere_however_much_the_job_searched() {
+    let world = World::new(FSK);
+    let mut fixed = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &["0x8005"]),
+        0.0,
+        &["0x8005"],
+    );
+    fixed.check_origin = CheckOrigin::TemplateFixed;
+    // A second root that *does* search polynomials and reaches S5 in the same world, so the
+    // job-wide S5 count (item 5's conservatism) is > 1.
+    let searching = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &POLYS),
+        -1.0,
+        &POLYS,
+    );
+    let o = run(
+        &spec(vec![fixed, searching], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let top = o
+        .results
+        .iter()
+        .find(|r| {
+            r.holdout
+                .as_ref()
+                .is_some_and(|h| h.check_origin == CheckOrigin::TemplateFixed)
+        })
+        .expect("the template-fixed root was evaluated on hold-out");
+    let h = top.holdout.as_ref().unwrap();
+    assert_eq!(
+        h.l_check,
+        Some(0.0),
+        "ADR-0022 §5.1: zero hypotheses were tried for this check"
+    );
+    // And the check bits it pays with are the undiscounted width x differences.
+    let check = h.check_bits.expect("the prefix carried a check");
+    assert!(
+        (check - f32::from(u16::try_from(h.check_width.unwrap()).unwrap()) * h.differences as f32)
+            .abs()
+            < 1e-3,
+        "check_bits {check} != width {:?} x differences {}",
+        h.check_width,
+        h.differences
+    );
+}
+
+/// ADR-0022 §4: the three constants that replaced 64 bits / 3 frames / width 16. A check under the
+/// 8-bit width floor never solves however many frames it passes; a single hold-out frame of a
+/// searched CRC-16 cannot carry 16 bits after its L; and a discovered template whose discovery
+/// cost was never recorded never solves — an unknown charge is not a zero one.
+#[test]
+fn m9_width_floor_hard_check_floor_and_the_laundering_rule() {
+    let mut narrow = World::new(FSK);
+    narrow.width = 4;
+    narrow.holdout_frames = 40;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &narrow,
+        &Control::new(),
+    );
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    let h = o.results[0].holdout.as_ref().expect("validated");
+    assert_eq!(h.check_width, Some(4));
+
+    let mut one = World::new(FSK);
+    one.holdout_frames = 1;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &one,
+        &Control::new(),
+    );
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    let h = o.results[0].holdout.as_ref().expect("validated");
+    assert_eq!(h.differences, 1);
+    assert!(h.check_bits.unwrap() < 16.0, "{:?}", h.check_bits);
+
+    let world = World::new(FSK);
+    let mut laundered = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &["0x8005"]),
+        0.0,
+        &["0x8005"],
+    );
+    laundered.check_origin = CheckOrigin::Discovered {
+        look_elsewhere_bits: None,
+    };
+    let o = run(
+        &spec(vec![laundered.clone()], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    assert_eq!(o.results[0].holdout.as_ref().unwrap().l_check, None);
+    // With the discovering search's cost recorded, it is inherited as L_check and paid for.
+    laundered.check_origin = CheckOrigin::Discovered {
+        look_elsewhere_bits: Some(20.0),
+    };
+    let world = World::new(FSK);
+    let o = run(
+        &spec(vec![laundered], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    let h = o.results[0].holdout.as_ref().unwrap();
+    assert_eq!(h.l_check, Some(20.0));
+    assert!((h.check_bits.unwrap() - (16.0 * 12.0 - 20.0)).abs() < 1e-3);
+    assert!(
+        h.null_control.is_some(),
+        "a discovered check counts as searched"
+    );
+    assert_eq!(o.results[0].verdict, Verdict::Solved);
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-575: ADR-0022 §4.2's `differences`, and the job-total look-elsewhere never reaching the gate
+// ---------------------------------------------------------------------------------------------
+
+/// A beacon sending one payload twelve times is one fact, not twelve (ADR-0022 §4.2). The engine
+/// reads `differences` from the check block's chance-corrected `raw`, not its tested support `n`,
+/// and clamps the check to `width × differences − L_check` however many bits the block claims —
+/// so the repeat count solves nothing. Before T-575 this solved, with `differences` = 12.
+#[test]
+fn t575_a_repeated_payload_beacon_does_not_solve_on_its_repeat_count() {
+    let mut beacon = World::new(FSK);
+    beacon.holdout_payloads = Some(1);
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &beacon,
+        &Control::new(),
+    );
+    assert!(
+        o.results.iter().all(|r| r.verdict != Verdict::Solved),
+        "{:?}",
+        o.results.iter().map(|r| r.verdict).collect::<Vec<_>>()
+    );
+    let h = o
+        .results
+        .iter()
+        .find_map(|r| r.holdout.as_ref().filter(|h| h.check_width.is_some()))
+        .expect("validated on hold-out");
+    assert_eq!(h.differences, 1, "one payload, however often it repeats");
+    let l_check = h.l_check.unwrap();
+    assert!(
+        (h.check_bits.unwrap() - (16.0 - l_check)).abs() < 1e-3,
+        "clamped to width × differences − L_check: {:?}, L {l_check}",
+        h.check_bits
+    );
+
+    // The same frames with distinct payloads solve, so it is the repetition that refused.
+    let world = World::new(FSK);
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    assert_eq!(o.results[0].verdict, Verdict::Solved);
+    assert_eq!(o.results[0].holdout.as_ref().unwrap().differences, 12);
+}
+
+/// ADR-0022 §2.3: the job-total `coverage.look_elsewhere_bits` is a reporting field, never charged
+/// against the hypothesis being confirmed. One CRC-24 frame plus its sync: the paying ladder less
+/// the job total is under 24 bits, yet the result solves with ≥ 24 analytic bits — each stage
+/// charged its own `L_j` only. Had the job total been subtracted, it could not have.
+#[test]
+fn t575_the_job_total_look_elsewhere_never_reaches_the_solve_or_confirm_key() {
+    let mut world = World::new(FSK);
+    world.width = 24;
+    world.holdout_frames = 1;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    let h = top.holdout.as_ref().unwrap();
+    let paying: f32 = h
+        .stages
+        .iter()
+        .filter(|e| e.metric.pays_for_confirm())
+        .map(|e| e.bits)
+        .sum();
+    let job_total = o.coverage.look_elsewhere_bits;
+    assert!(h.analytic_bits >= 24.0);
+    assert!(
+        paying - job_total < 24.0,
+        "the fixture must make the job total decisive: {paying} − {job_total}"
+    );
+    assert!(h.analytic_bits > paying - job_total);
 }

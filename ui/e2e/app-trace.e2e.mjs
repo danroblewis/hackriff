@@ -145,7 +145,9 @@ const SNAPSHOT = `(() => {
     headline: row ? row.children[1].textContent : "",
     // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
     // the words** — see [[heldObservation]] for what a stale one costs.
-    rect: box ? { x: box.x, y: box.y, w: box.width, h: box.height } : null,
+    // T-918: the canvas is full-bleed; the pane (trace strip on top) starts below the inset it states.
+    rect: box ? { x: box.x, y: box.y + (Number(canvas.dataset.insetTop) || 0), w: box.width,
+      h: box.height - (Number(canvas.dataset.insetTop) || 0) - (Number(canvas.dataset.insetBottom) || 0) } : null,
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
     counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
@@ -536,9 +538,12 @@ async function whileTilesArrive(page, what, expr) {
 async function scrubOntoCell(page, lagS, tries = 8) {
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
+  // T-882: the follow/freeze control is the FAB, which mounts once the surface has booted (the
+  // retired `.sf-live` existed from the first paint).
+  await page.waitFor("the follow-live FAB to mount", "!!document.querySelector('.map-fab')", { timeoutMs: 60000 });
   let last = "";
   for (let i = 0; i < tries; i++) {
-    // Back to the growing edge. `.sf-live` toggles, so this presses until the pane says it is
+    // Back to the growing edge. The FAB (T-882: the retired `.sf-live`) toggles, so this presses until the pane says it is
     // following rather than assuming one press means one direction.
     //
     // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
@@ -555,12 +560,12 @@ async function scrubOntoCell(page, lagS, tries = 8) {
       // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
       // clicked three times every attempt and left the viewport frozen.
       if ((await page.eval(FOLLOWING_EXPR)) === true) break;
-      await page.click(`document.querySelector('.sf-live')`);
+      await page.click(`document.querySelector('.map-fab')`);
       await page.frames(8);
     }
     await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR,
       { timeoutMs: 30000 });
-    await page.click(`document.querySelector('.sf-live')`);
+    await page.click(`document.querySelector('.map-fab')`);
     try {
       const w = await whileTilesArrive(page, `a pyramid-cell slice at least ${lagS} s behind the live edge`,
         scrubbedExpr(lagS));
@@ -708,6 +713,8 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   assert.equal(await page.eval("JSON.stringify(window.__cspViolations ?? [])"), "[]",
     "the app violated its own CSP — the tap changes nothing about that");
   assert.deepEqual(page.exceptions, [], "uncaught exception during load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
 
   // The tap has to be the thing that sees the stream, or everything below is vacuous.
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
@@ -857,6 +864,8 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
 
   // The canvas became a real render. Its BOX is deliberately not kept: the rectangle the pixels
   // below are indexed by comes back with them, from `heldObservation` — see the note there.
@@ -972,6 +981,8 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   // As above: the box that indexes the pixels is the observation's own, not this one.
   const opened = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
@@ -1095,6 +1106,8 @@ test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a rea
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the trace to draw",
     `/slice [\\d:]+Z/.test(document.querySelector('.sf-trace')?.textContent ?? "")`, { timeoutMs: 90000 });
   const rect = await page.$rect(".sf-canvas");
@@ -1128,6 +1141,8 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   const page = await browser.page(undefined, { initScript: TAP });
 
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   // The pre-scrub reading, captured by the read that matched it (see `traceMatching`): this line
   // used to wait for a peak and then read the readout again, and the second read is a later frame
   // which need not still have one. It is a *baseline*, not the claim — the claim below is stated
@@ -1141,7 +1156,7 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   // Upward: the pointer is in GL coordinates (y up) and a pane's time runs up, so dragging toward
   // the top of the screen walks the window BACKWARD. Repeated because one drag is half a window and
   // the window has to clear the live row entirely.
-  await page.click(`document.querySelector('.sf-live')`);
+  await page.click(`document.querySelector('.map-fab')`);
   for (let i = 0; i < 4; i++) {
     await page.drag(
       { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.75 },
@@ -1203,6 +1218,8 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   const LAG_S = 2;

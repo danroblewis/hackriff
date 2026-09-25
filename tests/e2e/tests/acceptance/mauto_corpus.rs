@@ -135,12 +135,27 @@ fn rows() -> Vec<Row> {
             ],
         });
     }
+    // T-568: the negative-control populations, run blind through the mock SDR.
+    rows.extend(crate::mauto_negatives::manifest_rows());
+    // T-863 (MAUTO M-12): ADR-0015 §7's generic FSK/OOK sweep and partial-quality rows, run blind
+    // through the mock SDR and `/api/analyze`. Populated = the jobs ran; while
+    // `server_backend()` is None every one answers not-searched, and the suite's report says so.
+    rows.extend(crate::mauto_eval::manifest_rows());
     rows
 }
 
-/// No generic synthesis engine: the sweep and recall grid for a family with blocks but no search.
-const NO_ENGINE: &str = "no generic synthesis engine: the only EmitterSynthesis writer is the \
-                         trunk-CC analysis, so the S1 sweep / recall grid cannot run";
+/// No production search backend: the sweep and recall grid for a family with blocks but no
+/// search. T-565 (the trace inside the beam) landed; what is missing is an owner-less piece —
+/// `hk_pipeline::synth::jobs::server_backend()` is `None`, nothing implements the engine's
+/// `Evaluator` over acquired IQ, so every `/api/analyze` job ends `failed / no_evaluator`.
+const NO_ENGINE: &str = "no production search backend: server_backend() is None (no Evaluator over \
+                         acquired IQ), so every /api/analyze job ends no_evaluator and the S1 \
+                         sweep / recall grid cannot run";
+
+/// OOK/ASK now has a generator (T-863) but the same missing backend.
+const NO_BACKEND_OOK: &str = "OOK generator exists (hkpy.synth generic_fsk_sweep, T-863) and the S7 \
+                              rows run it at 6/10/20 dB bursts, templates on and off; every other \
+                              cell needs the production search backend (server_backend() is None)";
 
 /// The declared-unreachable regions. **Order matters: first match wins**, so narrow before wide.
 /// Every declaration names its family; there is no catch-all.
@@ -151,8 +166,7 @@ fn declarations() -> Vec<Unreachable> {
         family: "ook-ask",
         planes: &[],
         when: &[],
-        reason: "no OOK/ASK generator (S2); docs/22 §9 names T-621 but that id is an unrelated \
-                 done ticket, so this gap has no owner",
+        reason: NO_BACKEND_OOK,
         ticket: Ticket::Unfiled,
     });
     // --- Negative families whose generator now exists (T-623 N3, T-624 N2): the gap is no
@@ -160,21 +174,21 @@ fn declarations() -> Vec<Unreachable> {
     for (fam, reason) in [
         (
             "ofdm",
-            "N3 generator exists (hkpy.synth ofdm_nonstandard_cp, T-623) but no row runs it: its \
-             `unsupported-structure` + missing_block assertion needs an engine that writes a \
-             Resolution, run by the negative-control suite",
+            "N3 negative: run blind by the NEG row (hkpy.synth ofdm_nonstandard_cp, T-568: 0 solved, \
+             framed only on a measured framing); the recall grid does not apply to it, and its \
+             `unsupported-structure` + missing_block answer needs the sealed Resolution",
         ),
         (
             "dsss",
-            "N3 generator exists (hkpy.synth dsss_m_sequence, T-623) but no row runs it: its \
-             `unsupported-structure` + missing_block assertion needs an engine that writes a \
-             Resolution, run by the negative-control suite",
+            "N3 negative: run blind by the NEG row (hkpy.synth dsss_m_sequence, T-568: 0 solved, \
+             framed only on a measured framing); the recall grid does not apply to it, and its \
+             `unsupported-structure` + missing_block answer needs the sealed Resolution",
         ),
         (
             "16qam",
-            "N3 generator exists (hkpy.synth qam16_unframed, T-623) but no row runs it: its \
-             `unsupported-structure` + missing_block assertion needs an engine that writes a \
-             Resolution, run by the negative-control suite",
+            "N3 negative: run blind by the NEG row (hkpy.synth qam16_unframed, T-568: 0 solved, \
+             framed only on a measured framing); the recall grid does not apply to it, and its \
+             `unsupported-structure` + missing_block answer needs the sealed Resolution",
         ),
     ] {
         d.push(Unreachable {
@@ -182,21 +196,21 @@ fn declarations() -> Vec<Unreachable> {
             planes: &[],
             when: &[],
             reason,
-            ticket: Ticket::Filed("T-568"),
+            ticket: Ticket::Filed("T-567"),
         });
     }
     for (fam, reason) in [
         (
             "fm-voice",
-            "N2 generator exists (hkpy.synth nbfm_voice, T-624) but no row runs it: its \
-             `nothing-scored`, deepest_verdict <= demodulated assertion needs an engine that \
-             writes a Resolution, run by the negative-control suite",
+            "N2 negative: run blind by the NEG row (hkpy.synth nbfm_voice, T-568: 0 labels >= \
+             framed); the recall grid does not apply to it, and its `nothing-scored`, \
+             deepest_verdict <= demodulated answer needs the sealed Resolution",
         ),
         (
             "am-voice",
-            "N2 generator exists (hkpy.synth am_voice, T-624) but no row runs it: its \
-             `nothing-scored`, deepest_verdict <= demodulated assertion needs an engine that \
-             writes a Resolution, run by the negative-control suite",
+            "N2 negative: run blind by the NEG row (hkpy.synth am_voice, T-568: 0 labels >= \
+             framed); the recall grid does not apply to it, and its `nothing-scored`, \
+             deepest_verdict <= demodulated answer needs the sealed Resolution",
         ),
     ] {
         d.push(Unreachable {
@@ -204,26 +218,30 @@ fn declarations() -> Vec<Unreachable> {
             planes: &[],
             when: &[],
             reason,
-            ticket: Ticket::Filed("T-568"),
+            ticket: Ticket::Filed("T-567"),
         });
     }
     d.push(Unreachable {
         family: "thermal-noise",
         planes: &[],
         when: &[],
-        reason: "the structureless population (N1) belongs to the negative-control suite; \
-                 SNR/support/check/CFO and an edge to fail past do not apply to it",
-        ticket: Ticket::Filed("T-568"),
+        reason: "the structureless population (N1) is the NEG plane's n1-thermal row (T-568), \
+                 also run by T-576's false-confirm suite at both profiles over an ad-hoc band; \
+                 SNR/support/check/CFO and an edge to fail past do not apply to it, and its \
+                 full-n run (docs/22 n = 400, and ADR-0022 §10.2's n ~ 60 000) is a \
+                 milestone/nightly batch nobody owns yet -- it needs the production search \
+                 backend before a job becomes a decision (T-576's stated position)",
+        ticket: Ticket::Unfiled,
     });
     d.push(Unreachable {
         family: "css-lora",
         planes: &[],
         when: &[],
         reason: "LoRa generator exists (lora_ism_burst) but no MAUTO block dechirps or scores CSS \
-                 and there is no generic synthesis engine, so no row is wired; P9 would also stay \
+                 and there is no production search backend, so no row is wired; P9 would also stay \
                  report-only, because T-619 measured the calibrated-bit discount on AM/OOK and \
                  C4FM only, not CSS (docs/22 §7.2, docs/21 §10)",
-        ticket: Ticket::Filed("T-565"),
+        ticket: Ticket::Unfiled,
     });
     d.push(Unreachable {
         family: "cw",
@@ -231,37 +249,41 @@ fn declarations() -> Vec<Unreachable> {
         when: &[],
         reason: "tone generator exists but no MAUTO block scores a keyed carrier and no row is \
                  wired",
-        ticket: Ticket::Filed("T-565"),
+        ticket: Ticket::Unfiled,
     });
     // --- Families with blocks. The check axis: T-622 put CRC width / off-catalogue polynomial /
     // constant payload on the 2-level FSK generator (`fsk_burst_train`, which also yields MSK at
     // deviation = rate / 4), so for 2-FSK the gap is now the confirm-gate rows that consume it
-    // (ADR-0022 §10.1 A3 (b)/(c), T-576's recall control). The C4FM generators (the trunk
-    // scenes) still carry only the fixed P25 framing: that is a generator gap nobody owns.
+    // (ADR-0022 §10.1 A3 (b)/(c)). T-576 landed that recall control **over the shipped gate**
+    // (`mauto_false_confirm::false_confirm_recall_control_*`), which is what can be asserted while
+    // nothing searches; running it over these fixtures needs a result that reached `solved` on
+    // hold-out, and so the production search backend. The C4FM generators (the trunk scenes) still
+    // carry only the fixed P25 framing: that is a generator gap nobody owns.
     d.push(Unreachable {
         family: "2fsk",
         planes: &["A1xA7"],
         when: &[],
-        reason: "check parameterisation exists on fsk_burst_train (T-622) but no row runs it: the \
-                 CRC-8 / off-catalogue-poly / constant-payload rows are the confirm-gate recall \
-                 control of the false-confirm suite, which needs the derived ConfirmPolicy",
-        ticket: Ticket::Filed("T-576"),
+        reason: "check parameterisation exists on fsk_burst_train (T-622) and T-576's recall \
+                 control asserts the CRC-8 / repeated-payload rows against the shipped gate, but \
+                 no row runs them over IQ: that needs a production search backend to reach \
+                 solved-on-hold-out (unowned)",
+        ticket: Ticket::Unfiled,
     });
     d.push(Unreachable {
         family: "msk",
         planes: &["A1xA7"],
         when: &[],
         reason: "check parameterisation exists on fsk_burst_train at h = 0.5 (T-622) but no row \
-                 runs it: no generic synthesis engine binds or refuses a check on an MSK emitter",
-        ticket: Ticket::Filed("T-565"),
+                 runs it: no production search backend binds or refuses a check on an MSK emitter",
+        ticket: Ticket::Unfiled,
     });
     d.push(Unreachable {
         family: "4fsk-c4fm",
         planes: &["A1xA7"],
         when: &[],
         reason: "check parameterisation exists on c4fm_burst_train (T-850) but no row runs it: no \
-                 generic synthesis engine binds or refuses a check on a C4FM emitter",
-        ticket: Ticket::Filed("T-565"),
+                 production search backend binds or refuses a check on a C4FM emitter",
+        ticket: Ticket::Unfiled,
     });
     for fam in ["2fsk", "4fsk-c4fm", "msk"] {
         // The F ladder: the generator is built (hkpy.synth.fill, T-625) and T-619 measured the
@@ -272,17 +294,36 @@ fn declarations() -> Vec<Unreachable> {
             planes: &["A1xA3"],
             when: &[],
             reason: "F ladder generator exists (hkpy.synth.fill, T-625) but no row runs it: its \
-                     per-fill C-R pass rate and resolution.reason need a generic synthesis engine",
-            ticket: Ticket::Filed("T-565"),
+                     per-fill C-R pass rate and resolution.reason need the production search backend",
+            ticket: Ticket::Unfiled,
         });
         d.push(Unreachable {
             family: fam,
             planes: &[],
             when: &[],
             reason: NO_ENGINE,
-            ticket: Ticket::Filed("T-565"),
+            ticket: Ticket::Unfiled,
         });
     }
+    // --- The negative plane (T-568): the two sub-populations with no IQ.
+    d.push(Unreachable {
+        family: "n3-css",
+        planes: &[],
+        when: &[],
+        reason: "CSS is P9 (docs/22 §4.3): lora_ism_burst exists but no MAUTO block dechirps or \
+                 scores CSS, so an unsupported-structure answer on it cannot yet be told from a \
+                 missing block",
+        ticket: Ticket::Unfiled,
+    });
+    d.push(Unreachable {
+        family: "n4-terminator-50ohm",
+        planes: &[],
+        when: &[],
+        reason: "SKIPPED: the 50-ohm terminator capture is a user action, outstanding (docs/22 \
+                 §10); until it lands the receiver-only null is UNMEASURED and N4 is the 433 MHz \
+                 antenna window alone",
+        ticket: Ticket::Filed("T-375"),
+    });
     d
 }
 
@@ -412,10 +453,12 @@ fn manifest_populated_rows_name_tests_that_exist_and_are_not_ignored() {
 fn manifest_declarations_cite_open_tickets_and_none_is_a_catch_all() {
     let yaml = std::fs::read_to_string(hk_e2e::paths::repo_root().join("docs/tasks.yaml"))
         .expect("read docs/tasks.yaml");
-    let families = &corpus::docs22_axes()[0];
+    let axes = corpus::docs22_axes();
+    let families = &axes[0];
+    let negatives = axes.iter().find(|a| a.id == "NP").expect("the NP axis");
     for d in declarations() {
         assert!(
-            families.levels.contains(&d.family),
+            families.levels.contains(&d.family) || negatives.levels.contains(&d.family),
             "declaration names unknown family {}",
             d.family
         );

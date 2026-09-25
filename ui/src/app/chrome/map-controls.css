@@ -1,18 +1,24 @@
 /* T-802 (MAP-02): the floating control cluster (`map-controls.ts`). docs/23 §10.1 band 2: SCREEN
    space, laid out on interaction only, docked to the canvas's edges; §10.2: translucent, fading to
    ~35 % after ~6 s idle, and never fading while focused, while a menu is open, or on the retune
-   offer. Mounted inside `.sf-stage`, so it floats over the picture only — never over the surface's
-   own toolbar or the rows below the stage.
+   offer. Mounted inside `.sf-stage`, so it floats over the picture only — never over the rows below
+   the stage. Since T-882 it is the ONLY control surface over the canvas (no toolbar row).
 
    `.map-ctl` is a pointer-transparent box inset 8 px from the stage (T-895: the inventory
    column no longer shares its rows — collapsed it is a mid-height chip, open it starts below Go-to,
    `map-layout.css`), so no control is ever drawn under a panel; only its children take the pointer, so every other pixel still reaches the canvas. */
 .map-ctl {
   position: absolute; z-index: 20; pointer-events: none;
-  top: 8px; bottom: 8px;
+  /* `--chrome-top` (T-882, set by the surface's `fit`): how far the app's top bar overlaps the
+     stage, so no control starts under it when the bar wraps on a narrow window. */
+  top: calc(8px + var(--chrome-top, 0px)); bottom: 8px;
   left: var(--panel-gap, 8px);
   right: 8px;
   font: 12px var(--ui); color: var(--text);
+  /* T-824: the top-right cluster's real width (four 36 px buttons, their gaps, padding and border,
+     plus Go-to's gap to it), so Go-to and the retune offer stop short of it at phone width rather
+     than sliding under it (the old 132 px fallback was one button short). */
+  --topright-w: 170px;
 }
 /* T-803: no right-hand focus column any more (it became the bottom sheet, which leaves this
    cluster's right-edge column clear — `sheet.css`'s `--sheet-gutter`), so the right inset is fixed. */
@@ -37,7 +43,7 @@
 .map-ctl svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Go-to: top-left. */
-.map-goto { top: 0; left: 0; display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 10px; width: min(300px, calc(100% - 56px)); box-sizing: border-box; color: var(--muted); }
+.map-goto { top: 0; left: 0; display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 10px; width: min(300px, calc(100% - var(--topright-w, 132px))); box-sizing: border-box; color: var(--muted); }
 .map-goto input { flex: 1; min-width: 0; min-height: 30px; background: none; border: 0; padding: 4px 2px; color: var(--text); font: 13px var(--mono); }
 .map-goto input::placeholder { color: var(--dim); }
 .map-goto input:focus { outline: none; }
@@ -45,7 +51,7 @@
 .map-hint { color: var(--dim); font-size: 11px; }
 
 /* The retune offer under Go-to. Never faded (§10.2). */
-.map-offer { top: 44px; left: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; max-width: min(460px, calc(100% - 56px)); border-color: var(--amber); }
+.map-offer { top: 44px; left: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; max-width: min(460px, calc(100% - var(--topright-w, 132px))); border-color: var(--amber); }
 .map-offer-why { flex: 1; min-width: 0; font-size: 11.5px; }
 .map-offer-go { min-height: 28px; border: 1px solid var(--amber); color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
 .map-offer-go:disabled { opacity: .5; cursor: not-allowed; }
@@ -53,7 +59,17 @@
 
 /* Layers: top-right, its panel beneath it. */
 .map-topright { top: 0; right: 0; padding: 2px; display: flex; gap: 4px; }
+/* An open menu paints over the zoom stack beside it (z-index), and scrolls rather than running off
+   a short stage (T-882 made the layers menu taller by the colour-scale group). */
+/* T-918: the stage is full-bleed now, so it runs under the app's floating dock; `--chrome-bottom`
+   (set by the surface's `fit`, the mirror of `--chrome-top`) is how far that dock reaches up over it,
+   and a menu stops short of it rather than scrolling its last item under the dock. */
+.map-layers, .map-pane-menu { z-index: 2; max-height: calc(100% - 54px - var(--chrome-bottom, 0px)); overflow-y: auto; }
 .map-layers { top: 46px; right: 0; width: min(280px, 100%); box-sizing: border-box; padding: 10px 12px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
+/* T-900: the layers menu's visible dismiss (P1: closeable, never only faded). */
+.map-layers-head { display: flex; align-items: center; justify-content: space-between; margin: -4px -4px 6px 0; font: 600 11px var(--ui); color: var(--muted); }
+.map-layers-close { min-width: 28px; min-height: 28px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.map-layers-close:hover, .map-layers-close:focus-visible { border-color: var(--line); color: var(--text); }
 .map-layers h4 { margin: 0 0 6px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .map-row { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; }
 .map-row input { margin: 0; accent-color: var(--amber); }
@@ -62,6 +78,16 @@
 .map-layers-axis:last-of-type { border-bottom: 0; }
 .map-layers-note { color: var(--muted); font-size: 11px; line-height: 1.35; }
 .map-note { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+/* T-882: the viewport menu (pane management + Record IQ) under the top-right cluster, like Layers. */
+.map-pane-menu { top: 46px; right: 0; width: min(240px, 100%); box-sizing: border-box; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
+.map-pane-menu h4 { margin: 0 0 4px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.map-pane-item { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
+.map-pane-item:hover { background: var(--raise); }
+.map-pane-item:disabled { opacity: .5; cursor: not-allowed; }
+
+/* T-882: measure mode's banner (the mockup's `#mode`), top-centre under Go-to's row. Never faded. */
+.map-mode { top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
 
 /* Zoom: right edge, vertically centred. */
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
@@ -83,3 +109,8 @@
 @media (max-width: 900px) {
   .map-ctl { left: 8px; right: 8px; }
 }
+
+/* T-807 (MAP-07): the coverage fog's key, under its switch. Swatches are painted by the one cell rule. */
+.map-layer-key { list-style: none; margin: 2px 0 4px 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; font-size: 10.5px; color: var(--muted); }
+.map-layer-key li { display: flex; align-items: center; gap: 5px; }
+.map-key-swatch { width: 22px; height: 12px; flex: none; image-rendering: pixelated; border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); }

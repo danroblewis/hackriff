@@ -1,7 +1,8 @@
 //! Batched track persistence: upserts of the Track aggregates, then append-only
 //! track↔detection links, then merged tracks' links re-pointed to their survivors, then segment
 //! boundaries, through the repository. Write the member detections first (e.g. with
-//! [`DetectionWriter`](crate::DetectionWriter)); the link table references them.
+//! [`DetectionWriter`](crate::DetectionWriter)): a link whose detection is not stored — never
+//! written, or already aged out by detection retention (T-904) — is skipped, not written.
 //!
 //! One batch is **one** `BEGIN IMMEDIATE` transaction ([`Repository::batch`], T-035): it is
 //! written completely or not at all.
@@ -23,6 +24,7 @@ pub struct TrackBatch {
     /// Stream time of the drain (`linked_at`).
     pub linked_at: Timestamp,
     ids: Vec<DetectionId>,
+    links_dropped: u64,
 }
 
 impl Default for TrackBatch {
@@ -41,7 +43,17 @@ impl TrackBatch {
             segments: Vec::with_capacity(64),
             linked_at: Timestamp::UNIX_EPOCH,
             ids: Vec::with_capacity(256),
+            links_dropped: 0,
         }
+    }
+
+    /// T-913: links this batch has asked for whose **detection was not stored** — never written,
+    /// or aged out by retention before the link was drained. Cumulative over every [`Self::write`]
+    /// of this batch (a `write` that fails counts nothing), and not cleared with the batch: a
+    /// non-zero, growing figure is how a drain-before-flush regression becomes visible instead of
+    /// silently losing membership.
+    pub fn links_dropped(&self) -> u64 {
+        self.links_dropped
     }
 
     /// Nothing to write.
@@ -54,7 +66,9 @@ impl TrackBatch {
 
     /// Writes the upserts, then the links (grouped per track), then the re-pointed links of merged
     /// tracks, then the segment boundaries, in one transaction, and clears the batch. Returns
-    /// `(tracks upserted, links written)` (re-pointed links included).
+    /// `(tracks upserted, links written)` (re-pointed links included) — **written**, not
+    /// attempted: a link whose detection is not stored is not written, and is counted in
+    /// [`Self::links_dropped`] (T-913).
     ///
     /// On error nothing is written and the batch is left intact (links may be reordered), so the
     /// caller can retry it.
@@ -66,6 +80,7 @@ impl TrackBatch {
             segments,
             linked_at,
             ids,
+            links_dropped,
         } = self;
         links.sort_by_key(|&(t, _)| t);
         let written = repo.batch(|tx| {
@@ -73,6 +88,7 @@ impl TrackBatch {
                 tx.upsert_track(t)?;
             }
             let mut n = links.len();
+            let mut dropped = 0;
             let mut i = 0;
             while i < links.len() {
                 let track = links[i].0;
@@ -81,20 +97,21 @@ impl TrackBatch {
                     ids.push(links[i].1);
                     i += 1;
                 }
-                tx.link_detections_to_track(track, ids, *linked_at)?;
+                dropped += tx.link_detections_to_track(track, ids, *linked_at)?;
             }
             for &(from, into) in repoints.iter() {
                 let moved = tx.track_detections(from)?;
-                tx.link_detections_to_track(into, &moved, *linked_at)?;
+                dropped += tx.link_detections_to_track(into, &moved, *linked_at)?;
                 n += moved.len();
             }
             tx.append_track_segments(segments)?;
-            Ok((upserts.len(), n))
+            Ok((upserts.len(), n - dropped.min(n), dropped as u64))
         })?;
+        *links_dropped += written.2;
         upserts.clear();
         links.clear();
         repoints.clear();
         segments.clear();
-        Ok(written)
+        Ok((written.0, written.1))
     }
 }

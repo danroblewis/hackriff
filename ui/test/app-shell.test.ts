@@ -25,7 +25,7 @@ const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n
 // next to and the Centre readout they change.
 // T-803's "sheet": the bottom sheet that wraps the focus slot (index.html nests "focus" inside it).
 // T-895's "side": the left column that wraps "inventory" and "selections" (its collapsed chip).
-const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "drawer", "side", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
+const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "drawer", "side", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue", "research"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {
@@ -146,7 +146,7 @@ test("every panel slot is mounted by exactly one area index", () => {
 });
 
 test("app.css is an import list: base first, then one file per area", () => {
-  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css", "chrome/map-layout.css", "chrome/sheet.css", "chrome/map-controls.css"]);
+  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css", "chrome/map-layout.css", "chrome/sheet.css", "chrome/map-controls.css", "map/research.css", "chrome/phone.css"]);
   assert.doesNotMatch(entryCss.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@import "[^"]+";/g, ""), /\S/, "no rules in app.css itself");
 });
 

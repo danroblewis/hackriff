@@ -353,13 +353,22 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
     let (state, f_lo, t_ns) = departed_band_fixture(&dir.0);
     eprintln!(
         "\n=== T-523: a zoom burst's tiles over a DEPARTED band (coverage short-circuit) ===\n\
-         {:>7}  {:>11}  {:>11}  {:>10}  {:>8}  {:>7}  {:>6}",
-        "level_f", "tile width", "route ms", "shadow ms", "src cells", "chunks", "runs"
+         {:>7}  {:>12}  {:>11}  {:>11}  {:>9}  {:>8}  {:>8}  {:>6}  {:>5}",
+        "level_f",
+        "tile width",
+        "route ms",
+        "shadow ms",
+        "src cells",
+        "own-lvl",
+        "ladder",
+        "chunks",
+        "runs"
     );
     let mut worst: f64 = 0.0;
     let mut worst_level = 0;
     let mut short_circuited = 0;
     let mut shadowless = Vec::new();
+    let mut overspent = Vec::new();
     for level_f in 0..=9u32 {
         let (ms, v) = shadow_cost(&state, level_f, f_lo, t_ns);
         let applied = v["resolution"]["short_circuit"]["applied"] == Value::Bool(true);
@@ -368,15 +377,22 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
         }
         let sh = &v["shadow"]["search"];
         let sh_ms = sh["build_ms"].as_f64().unwrap_or(0.0);
+        // T-916: WHICH search spent the cells. The own-level search (T-911) runs first and the
+        // ladder gets only what it leaves, so the two must be named apart or a regression that let
+        // both run a full pass would show up only as a slightly slower total.
+        let own_cells = sh["own_level"]["source_cells"].as_u64().unwrap_or(0);
         let width_mhz = (v["extent"]["f_hi_hz"].as_f64().unwrap()
             - v["extent"]["f_lo_hz"].as_f64().unwrap())
             / 1e6;
+        let total_cells = sh["source_cells"].as_u64().unwrap_or(0);
+        let ladder_cells = total_cells.saturating_sub(own_cells);
+        let (chunks, runs) = (
+            sh["chunks"].as_u64().unwrap_or(0),
+            v["shadow"]["runs"].as_u64().unwrap_or(0),
+        );
+        let tail = if applied { "" } else { "   (no short-circuit)" };
         eprintln!(
-            "{level_f:>7}  {width_mhz:>8.1} MHz  {ms:>8.2} ms  {sh_ms:>8.2} ms  {:>8}  {:>7}  {:>6}{}",
-            sh["source_cells"],
-            sh["chunks"],
-            v["shadow"]["runs"],
-            if applied { "" } else { "   (no short-circuit)" }
+            "{level_f:>7}  {width_mhz:>8.1} MHz  {ms:>8.2} ms  {sh_ms:>8.2} ms  {total_cells:>9}  {own_cells:>8}  {ladder_cells:>8}  {chunks:>6}  {runs:>5}{tail}"
         );
         if applied && sh_ms > worst {
             worst = sh_ms;
@@ -385,7 +401,22 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
         if applied && v["shadow"]["runs"].as_u64() == Some(0) {
             shadowless.push(level_f);
         }
+        // T-911 review: the bound is on what was READ, not only what is stated. The own-level
+        // search and the ladder share one budget; a ladder given a second whole budget read
+        // 152 576 / 217 088 / 229 376 cells at level_f 1 / 3 / 9 under a stated 131 072.
+        let (read, max) = (
+            sh["source_cells"].as_u64().expect("source_cells"),
+            sh["max_source_cells"].as_u64().expect("max_source_cells"),
+        );
+        if read > max {
+            overspent.push((level_f, read, max));
+        }
     }
+    assert!(
+        overspent.is_empty(),
+        "the shadow search READ more source cells than its stated budget at (level_f, read, max) \
+         {overspent:?}: T-523's bound is on the whole search"
+    );
     eprintln!(
         "  worst short-circuited shadow search: {worst:.2} ms at level_f {worst_level}\n\
          budget now {} source cells (cells x 512 rows), was {} — the tile read's own, which is what T-519\n\
@@ -426,6 +457,157 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
         searched,
         (CELLS * hk_api::tiles::SHADOW_SEARCH_ROWS) as u64,
         "the budget is the TILE's scale: cells x SHADOW_SEARCH_ROWS (T-523)"
+    );
+}
+
+// ——— T-916: the case where the LADDER answers, what it is labelled, and what the two searches cost —
+//
+// T-911 put an own-level search in front of the ladder so a recently-departed band's shadow is the
+// very cell its last live row was drawn with. That search is deliberately SHORT-REACHED
+// (`hk_store::history::PINNED_REACH_BLOCKS` = 256 blocks of its own level, ~4 h at scheme 1's level
+// 0): the time a band spent unobserved costs no cell read to cross, but the index scan that crosses
+// it is bounded. A band that departed longer ago than that reach still gets a shadow — from the
+// ladder, whose cells are coarser in both axes, so its max-hold reads at or HOTTER than the row the
+// band was last live on. Two things follow, and both are measured here rather than assumed:
+//
+//   1. **The answer must SAY which search found each run**, or the client cannot state the
+//      resolution it drew (the pane readout does, T-916). `sources[].search` is that label.
+//   2. **Two searches must still cost one budget** (T-911's review blocker 1). This is the shape
+//      where they BOTH run — the own-level search spends cells and finds nothing, then the ladder
+//      answers on the remainder — so it is the worst case for T-523's bound, and the one the
+//      zoom-burst fixture above never exercises.
+
+/// The mirror of [`departed_band_fixture`] with the departure pushed **past the own-level reach**:
+/// band `B` is recorded for one window, the radio then sits at 5 GHz for hours, and the tile under
+/// test is `GAP_WINDOWS` tile windows later. Returns the state, `B`'s low edge and the tile's start.
+fn stale_departed_band_fixture(dir: &std::path::Path) -> (ApiState, f64, i64) {
+    let state = fixture(dir);
+    let (t_cell, f_cell) = {
+        let p = state.history.as_ref().unwrap().lock().unwrap();
+        let g = p.geometry();
+        (g.levels[0].t_cell_ns, g.levels[0].f_cell_hz)
+    };
+    let t0 = T_INDEX * t_cell * CELLS as i64;
+    let f_lo = F_INDEX as f64 * f_cell * CELLS as f64;
+    let window = t_cell * CELLS as i64;
+    // 100 tile windows = 25 600 s at scheme 1's level 0, against a pinned reach of 256 blocks of
+    // 60 s = 15 360 s. Comfortably past it, and still a plain integer number of tile addresses so
+    // the tile under test is a whole `t_index` rather than a straddle.
+    const GAP_WINDOWS: i64 = 100;
+    const AWAY_LO: f64 = 5.0e9;
+    const NB: usize = 64;
+    let tile_t0 = t0 + window + GAP_WINDOWS * window;
+    {
+        let mut p = state.history.as_ref().unwrap().lock().unwrap();
+        for k in 0..CELLS as i64 {
+            let mut psd = [1e-12f32; NB];
+            psd[7] = 1e-6;
+            p.ingest(&FrameInput::new(
+                Timestamp::from_unix_nanos(tile_t0 + k * t_cell),
+                t_cell,
+                AWAY_LO,
+                f_cell,
+                PowerUnit::Dbfs,
+                &psd,
+            ))
+            .unwrap();
+        }
+    }
+    // ONE record for the whole time away, gap included: the radio was elsewhere the entire time, so
+    // `B` reads `unobserved` over the tile and the record horizon reaches past it.
+    let obs = state.observations.as_ref().unwrap();
+    obs.append(&dwell(
+        AWAY_LO,
+        AWAY_LO + f_cell * NB as f64,
+        t0 + window,
+        tile_t0 + window,
+    ));
+    obs.flush();
+    (state, f_lo, tile_t0)
+}
+
+/// **T-916 (1) and (3).** A departure older than the own-level reach is answered by the ladder, the
+/// answer **says so per run**, and the two searches together stay inside the one T-523 budget.
+#[test]
+fn a_departure_older_than_the_own_level_reach_is_labelled_ladder_and_costs_one_budget() {
+    let dir = TempDir::new("stale-shadow");
+    let (state, f_lo, t_ns) = stale_departed_band_fixture(&dir.0);
+    let (ms, v) = shadow_cost(&state, 0, f_lo, t_ns);
+    let sh = &v["shadow"];
+    let search = &sh["search"];
+    assert!(
+        sh["runs"].as_u64().unwrap_or(0) > 0,
+        "a band this far past the own-level reach must still carry a shadow — the ladder is what \
+         reaches it, and grey would be the lie T-881 closed: {sh}"
+    );
+    // Every value carried in from before the tile, and where it came from. `src = 0` is the tile's
+    // own grid (the carry / backward fill), which makes no claim about an older cell.
+    let sources = sh["sources"].as_array().expect("a source table");
+    let carried: Vec<&Value> = sh["src"]
+        .as_array()
+        .expect("per-run source indices")
+        .iter()
+        .filter_map(|i| i.as_u64())
+        .filter(|&i| i > 0)
+        .map(|i| &sources[i as usize])
+        .collect();
+    assert!(
+        !carried.is_empty(),
+        "no run came from before the tile: {sh}"
+    );
+    for s in &carried {
+        assert_eq!(
+            s["search"],
+            serde_json::json!("ladder"),
+            "past the own-level reach only the ladder can answer, and the run must say so: {s}"
+        );
+        assert!(
+            s["f_cell_hz"].as_f64().unwrap_or(0.0) > 0.0
+                && s["t_cell_s"].as_f64().unwrap_or(0.0) > 0.0,
+            "a ladder-sourced run must state the cell it was measured over — it is the number the \
+             client tells the user, and it is coarser than this tile's own: {s}"
+        );
+    }
+    // The own-level search ran and found nothing: that is what makes this the two-search case.
+    let own = &search["own_level"];
+    assert!(
+        !own.is_null(),
+        "the own-level search must have been attempted: {search}"
+    );
+    assert_eq!(
+        own["columns_used"],
+        serde_json::json!(0),
+        "own-level found nothing here: {own}"
+    );
+    let (total, own_cells, max) = (
+        search["source_cells"].as_u64().expect("source_cells"),
+        own["source_cells"].as_u64().unwrap_or(0),
+        search["max_source_cells"]
+            .as_u64()
+            .expect("max_source_cells"),
+    );
+    eprintln!(
+        "\n=== T-916: a departure PAST the own-level reach (the ladder's case) ===\n\
+         route {ms:.2} ms, shadow {:.2} ms, {} runs\n\
+         source cells: {total} of {max} allowed — own-level {own_cells}, ladder {}\n\
+         carried runs' source cell: {} Hz x {} s (this tile's own is {} Hz x {} s)\n",
+        search["build_ms"].as_f64().unwrap_or(0.0),
+        sh["runs"],
+        total.saturating_sub(own_cells),
+        carried[0]["f_cell_hz"],
+        carried[0]["t_cell_s"],
+        v["axes"]["frequency"]["cell_hz"],
+        v["axes"]["time"]["cell_s"],
+    );
+    assert!(
+        total <= max,
+        "the own-level search and the ladder read {total} source cells under a stated budget of \
+         {max}: T-523's bound is on the WHOLE search, and this is the shape where both run"
+    );
+    assert!(
+        own_cells < total,
+        "the ladder read nothing ({own_cells} of {total}) though every run says it answered: the \
+         accounting and the labels disagree"
     );
 }
 

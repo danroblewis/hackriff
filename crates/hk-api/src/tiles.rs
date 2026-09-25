@@ -1486,8 +1486,20 @@ pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<Ti
 /// than its own on either axis, because then a measured value is repeating across output cells
 /// rather than each one carrying its own measurement.
 fn tier(key: &TileKey, r: &TileRead, max_live_span_hz: Option<f64>) -> DetailSource {
-    let replicated = r.src_f_cell_hz > key.f_cell_hz * 1.000_001
-        || r.src_t_cell_ns as f64 > key.t_cell_ns as f64 * 1.000_001;
+    tier_of(key, r.src_f_cell_hz, r.src_t_cell_ns, max_live_span_hz)
+}
+
+/// [`tier`]'s rule over the answering level's source cells, so `/ws/tiles/rows` (T-902) states a
+/// pushed block's tier by the **same** rule the tile route states a tile's — one definition, never
+/// a second one the two routes could drift apart on.
+pub(crate) fn tier_of(
+    key: &TileKey,
+    src_f_cell_hz: f64,
+    src_t_cell_ns: i64,
+    max_live_span_hz: Option<f64>,
+) -> DetailSource {
+    let replicated = src_f_cell_hz > key.f_cell_hz * 1.000_001
+        || src_t_cell_ns as f64 > key.t_cell_ns as f64 * 1.000_001;
     if replicated {
         return DetailSource::SurveyOverview;
     }
@@ -1659,7 +1671,12 @@ fn unobserved_tile_json(
     })
 }
 
-fn axis_fold(source_cell: f64, tile_cell: f64, source_cells: usize, served: usize) -> Value {
+pub(crate) fn axis_fold(
+    source_cell: f64,
+    tile_cell: f64,
+    source_cells: usize,
+    served: usize,
+) -> Value {
     let direction = if source_cell > tile_cell * 1.000_001 {
         "replicated"
     } else if source_cell < tile_cell * 0.999_999 {
@@ -1969,12 +1986,19 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
 ///
 /// # Where the value comes from
 ///
-/// Down each column the carried value starts as the newest one **before `t0`**, read from the
+/// Down each column the carried value starts as the newest one **before `t0`** — read first at the
+/// tile's OWN level in the tile's own store ([`hk_store::Pyramid::last_known_search_at`], T-911), so
+/// it is the very cell the band's last live row was drawn with and the shadow keeps that row's
+/// colour; a value found at any other level is a max-hold over a different box, which is exactly how
+/// a departed band's shadow used to change colour at the first tile boundary after it was left. For
+/// the columns that level does not reach, it is then read from the
 /// spectrum-history pyramid by [`hk_store::Pyramid::last_known_search`] — a query over tiles it
 /// already holds, newest-first and fine-to-coarse, so nothing is maintained for it and capture pays
 /// nothing (T-453) — and is **replaced by this tile's own value** at every row where the grid holds
 /// one. A row where the grid holds a value gets no run: the shadow never stands in for a
-/// measurement. Rows at or after the store's newest frame get no run either.
+/// measurement. Rows at or after the store's newest frame get no run either — except, since
+/// T-881, where the tune record reaches past it and the coverage plane says the radio was not
+/// looking: the fold trails capture, and those rows are a departed band's newest.
 ///
 /// # Every gap in an observed column, not only the ones after a sample (T-527)
 ///
@@ -2004,7 +2028,18 @@ struct Shadow {
     runs: Vec<hk_store::ShadowRun>,
     known: hk_store::LastKnown,
     store: TileStore,
+    /// T-911: the search pinned to the tile's own level in the tile's own store, when it ran, and
+    /// that store's per-level `(f_cell_hz, t_cell_ns)`. Its values are carried in `known` for every
+    /// column `from_own` marks.
+    own: Option<OwnSearch>,
+    /// Per column: whether `known`'s value came from `own` rather than from `store`'s search.
+    from_own: Vec<bool>,
+    /// Whether the ladder (`store`'s search) ran at all: not when `own` resolved every column.
+    ladder_ran: bool,
     edge_ns: Option<i64>,
+    /// How far past `edge_ns` runs may reach over cells the coverage plane calls unobserved
+    /// (T-881): the answer's own `as_of_s`, or `None` when it reaches no further than the edge.
+    reach_ns: Option<i64>,
     chunks: usize,
     elapsed_ms: f64,
     /// Source cells this search was allowed (T-523), on the wire as `search.max_source_cells`.
@@ -2025,11 +2060,70 @@ fn shadow_store(state: &ApiState, tile: TileStore) -> TileStore {
     }
 }
 
+/// The level [`tile_read`] would answer `key` from first — the finest affordable one — or `None`
+/// when none is (T-911). A tile the coverage map answers on its own is never read, so this is how
+/// its shadow finds the level its neighbours' live rows were drawn at.
+fn answering_level(
+    state: &ApiState,
+    store: TileStore,
+    key: &TileKey,
+) -> Result<Option<u8>, ApiError> {
+    with_tile_history(state, store, |p| {
+        Ok(read_affordable_levels(p.geometry(), key)
+            .into_iter()
+            .find(|&l| fold_affordable(p, key, l))
+            .and_then(|l| u8::try_from(l).ok()))
+    })
+}
+
+/// The last-known search pinned to a tile's own level (T-911): see [`Shadow`].
+struct OwnSearch {
+    store: TileStore,
+    level: u8,
+    known: hk_store::LastKnown,
+    /// Per level of `store`: `(f_cell_hz, t_cell_ns)`.
+    levels: Vec<(f64, i64)>,
+}
+
+/// Levels of `store`'s geometry as `(f_cell_hz, t_cell_ns)`.
+fn store_levels(state: &ApiState, store: TileStore) -> Result<Vec<(f64, i64)>, ApiError> {
+    with_tile_history(state, store, |p| {
+        Ok(p.geometry()
+            .levels
+            .iter()
+            .map(|g| (g.f_cell_hz, g.t_cell_ns))
+            .collect())
+    })
+}
+
+/// Runs a last-known search to completion, one lock hold per step. Returns it and the holds taken.
+fn run_search(
+    state: &ApiState,
+    store: TileStore,
+    mut search: hk_store::LastKnownSearch,
+) -> Result<(hk_store::LastKnown, usize), ApiError> {
+    let mut chunks = 0;
+    while !search.done() {
+        // One lock hold per step, released in between, exactly as the tile read's chunks are.
+        with_tile_history(state, store, |p| {
+            p.last_known_step(&mut search)
+                .map_err(|e| ApiError::new(500, format!("last-known search failed: {e}")))
+        })?;
+        chunks += 1;
+    }
+    Ok((search.finish(), chunks))
+}
+
+/// `own_level` is the level of `tile_store` whose cells are this tile's — the level that answered
+/// the grid, or on the coverage short-circuit the address's own store node — or `None` when there
+/// is none. See [`Shadow`] for why the value before the tile is read there first (T-911).
 fn shadow(
     state: &ApiState,
     tile_store: TileStore,
     key: &TileKey,
     grid: Option<&Overview>,
+    own_level: Option<u8>,
+    overlay: &crate::coverage::TileOverlay,
 ) -> Result<Shadow, ApiError> {
     let started = std::time::Instant::now();
     let store = shadow_store(state, tile_store);
@@ -2069,15 +2163,73 @@ fn shadow(
             t1
         },
     };
-    let (mut search, levels) = with_tile_history(state, store, |p| {
-        let levels = p
-            .geometry()
-            .levels
+    // T-911: first, the tile's OWN level in the tile's OWN store — the cells the band's last live
+    // row was drawn with. See [`Shadow`].
+    let mut chunks = 0;
+    // Only where the level's time cell divides the tile's row. A coarser (or misaligned) level has
+    // a cell straddling `t0`, which the pinned search cannot admit without the ladder's straddle
+    // guard, and letting it override the guarded ladder per column would make such tiles worse
+    // (spectrum-history level 1's 60 s cell under 2^k s overview rows is the case).
+    let own_levels = store_levels(state, tile_store)?;
+    let own_level = own_level.filter(|&l| {
+        own_levels
+            .get(usize::from(l))
+            .is_some_and(|&(_, t_cell)| t_cell > 0 && key.t_cell_ns % t_cell == 0)
+    });
+    let own = match own_level {
+        Some(l) => {
+            let search = with_tile_history(state, tile_store, |p| {
+                Ok(p.last_known_search_at(
+                    usize::from(l),
+                    key.region.freq,
+                    Timestamp::from_unix_nanos(t0),
+                    n,
+                    key.t_cell_ns,
+                    budget,
+                    budget,
+                ))
+            })?;
+            let (k, c) = run_search(state, tile_store, search)?;
+            chunks += c;
+            Some(OwnSearch {
+                store: tile_store,
+                level: l,
+                known: k,
+                levels: own_levels,
+            })
+        }
+        None => None,
+    };
+    let levels = store_levels(state, store)?;
+    let own_found: Vec<bool> = match &own {
+        Some(o) => o
+            .known
+            .cells
             .iter()
-            .map(|g| (g.f_cell_hz, g.t_cell_ns))
-            .collect::<Vec<_>>();
-        Ok((
-            p.last_known_search(
+            .map(hk_store::LastKnownCell::found)
+            .collect(),
+        None => vec![false; n],
+    };
+    // Then the spectrum-history ladder, for the columns the tile's own level does not reach: it is
+    // time-deep, so a band departed long ago still carries a value — at that ladder's cells, which
+    // `sources` states per run.
+    // T-523's bound is on the WHOLE search: the ladder gets only what the own-level search left.
+    let ladder_budget = budget.saturating_sub(own.as_ref().map_or(0, |o| o.known.source_cells));
+    let ladder_ran = !own_found.iter().all(|&f| f);
+    let mut known = if !ladder_ran {
+        // Every column resolved at the tile's own level: the ladder is not searched, and its
+        // search block states no stage and no cell read.
+        let mut k = own
+            .as_ref()
+            .map(|o| o.known.clone())
+            .expect("found implies searched");
+        k.stages.clear();
+        k.source_cells = 0;
+        k.searched_from_ns = k.before_ns;
+        k
+    } else {
+        let search = with_tile_history(state, store, |p| {
+            Ok(p.last_known_search(
                 key.region.freq,
                 Timestamp::from_unix_nanos(t0),
                 n,
@@ -2087,27 +2239,39 @@ fn shadow(
                 // only add lock acquisitions. The search still takes several holds — one per
                 // stage/slice — but no single one can exceed the route's per-hold cap.
                 budget,
-                budget,
-            ),
-            levels,
-        ))
-    })?;
-    let mut chunks = 0;
-    while !search.done() {
-        // One lock hold per step, released in between, exactly as the tile read's chunks are.
-        with_tile_history(state, store, |p| {
-            p.last_known_step(&mut search)
-                .map_err(|e| ApiError::new(500, format!("last-known search failed: {e}")))
+                ladder_budget,
+            ))
         })?;
-        chunks += 1;
+        let (k, c) = run_search(state, store, search)?;
+        chunks += c;
+        k
+    };
+    if let Some(OwnSearch { known: k, .. }) = &own {
+        for (f, cell) in known.cells.iter_mut().enumerate() {
+            if own_found[f] {
+                *cell = k.cells[f];
+            }
+        }
     }
-    let known = search.finish();
-    let runs = known.carry_forward(grid, key.t_cell_ns as f64, n, edge_ns);
+    // T-881: past the store's newest FOLDED frame, as far as the tune record reaches — the same
+    // `as_of_s` this answer's coverage serves — over the cells that record says the radio was not
+    // looking at. The fold trails capture, so without this a departed band's newest rows carried
+    // no run: coverage `unobserved`, no shadow, drawn as THE grey.
+    let reach_ns = overlay
+        .as_of_ns()
+        .filter(|&r| edge_ns.is_some_and(|e| r > e));
+    let mask = reach_ns.and_then(|_| overlay.unobserved_mask(&key.device));
+    let beyond = reach_ns.zip(mask.as_deref());
+    let runs = known.carry_forward_to(grid, key.t_cell_ns as f64, n, edge_ns, beyond);
     Ok(Shadow {
         runs,
         known,
         store,
+        own,
+        from_own: own_found,
+        ladder_ran,
         edge_ns,
+        reach_ns: beyond.map(|(r, _)| r),
         chunks,
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
         budget,
@@ -2135,30 +2299,75 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
             sample, where nothing older exists — that first sample carried UP (fill \"backward\", \
             T-527). Which one a run is, is `fill[i]`, never inferred from this entry.",
     })];
-    let mut src_of_level: Vec<(u8, usize)> = Vec::new();
+    // Keyed by (from the tile's own-level search?, level): the two searches may read different
+    // stores, whose level numbers are not comparable (T-911).
+    let mut src_of_level: Vec<((bool, u8), usize)> = Vec::new();
     let mut src = Vec::with_capacity(sh.runs.len());
     for r in &sh.runs {
         src.push(match r.level {
             None => 0,
-            Some(l) => match src_of_level.iter().find(|(x, _)| *x == l) {
-                Some(&(_, i)) => i,
-                None => {
-                    let (f_cell, t_cell) =
-                        sh.levels.get(usize::from(l)).copied().unwrap_or_default();
-                    sources.push(json!({
-                        "from": "before-tile",
-                        "store": store_name(sh.store),
-                        "level": l,
-                        "f_cell_hz": f_cell,
-                        "t_cell_s": s_of(t_cell),
-                    }));
-                    src_of_level.push((l, sources.len() - 1));
-                    sources.len() - 1
+            Some(l) => {
+                let own = sh.from_own.get(r.f).copied().unwrap_or(false);
+                match src_of_level.iter().find(|(x, _)| *x == (own, l)) {
+                    Some(&(_, i)) => i,
+                    None => {
+                        let (store, levels) = match (&sh.own, own) {
+                            (Some(o), true) => (o.store, &o.levels),
+                            _ => (sh.store, &sh.levels),
+                        };
+                        let (f_cell, t_cell) =
+                            levels.get(usize::from(l)).copied().unwrap_or_default();
+                        sources.push(json!({
+                            "from": "before-tile",
+                            "store": store_name(store),
+                            "level": l,
+                            "f_cell_hz": f_cell,
+                            "t_cell_s": s_of(t_cell),
+                            "search": if own { "own-level" } else { "ladder" },
+                        }));
+                        src_of_level.push(((own, l), sources.len() - 1));
+                        sources.len() - 1
+                    }
                 }
-            },
+            }
         });
     }
     let k = &sh.known;
+    let stage_json = |s: &hk_store::LastKnownStage| {
+        json!({
+            "level": s.level,
+            "from_s": s_of(s.from_ns),
+            "to_s": s_of(s.to_ns),
+            "source_cells": s.source_cells,
+            "found": s.found,
+            "skipped": s.skipped,
+        })
+    };
+    let own_json = sh.own.as_ref().map(|own| {
+        let o = &own.known;
+        json!({
+            "store": store_name(own.store),
+            "level": own.level,
+            "columns_found": o.found(),
+            "columns_used": sh.from_own.iter().filter(|&&f| f).count(),
+            "source_cells": o.source_cells,
+            "stages": o.stages.iter().map(stage_json).collect::<Vec<_>>(),
+            "rule": "T-911: searched FIRST, at the tile's own level in the store that answers \
+                the tile, so a carried value is a cell of exactly the time-frequency box the \
+                band's last live row was drawn with: the shadow keeps the colour that row had. \
+                Newest block first over the last PINNED_REACH_BLOCKS blocks, skipping blocks that \
+                hold nothing over this tile without reading a cell; the ladder (`search`) is read \
+                only for the columns this does not resolve, with the budget this search left.",
+        })
+    });
+    let unsearched: Vec<Value> = k
+        .stages
+        .iter()
+        .chain(sh.own.iter().flat_map(|o| o.known.stages.iter()))
+        .filter(|s| s.skipped)
+        .map(|s| json!([s_of(s.from_ns), s_of(s.to_ns)]))
+        .collect();
+    let own_cells = sh.own.as_ref().map_or(0, |o| o.known.source_cells);
     json!({
         "encoding": "column-runs",
         "runs": sh.runs.len(),
@@ -2185,30 +2394,23 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
             .filter(|r| r.fill == hk_store::ShadowFill::Backward)
             .count(),
         "edge_s": sh.edge_ns.map(s_of),
+        // T-881: how far past `edge_s` a run may reach — this answer's `coverage.horizon.as_of_s`
+        // — or null when runs stop at `edge_s`.
+        "reach_s": sh.reach_ns.map(s_of),
         "search": {
-            "store": store_name(sh.store),
+            // The store the ladder read, or — when the tile's own level resolved every column and
+            // the ladder never ran — the store that did.
+            "store": store_name(match (&sh.own, sh.ladder_ran) {
+                (Some(o), false) => o.store,
+                _ => sh.store,
+            }),
             "before_s": s_of(k.before_ns),
             "searched_from_s": s_of(k.searched_from_ns),
             "columns_found": k.found(),
-            "unsearched": k
-                .stages
-                .iter()
-                .filter(|s| s.skipped)
-                .map(|s| json!([s_of(s.from_ns), s_of(s.to_ns)]))
-                .collect::<Vec<_>>(),
-            "stages": k
-                .stages
-                .iter()
-                .map(|s| json!({
-                    "level": s.level,
-                    "from_s": s_of(s.from_ns),
-                    "to_s": s_of(s.to_ns),
-                    "source_cells": s.source_cells,
-                    "found": s.found,
-                    "skipped": s.skipped,
-                }))
-                .collect::<Vec<_>>(),
-            "source_cells": k.source_cells,
+            "unsearched": unsearched,
+            "stages": k.stages.iter().map(stage_json).collect::<Vec<_>>(),
+            "own_level": own_json,
+            "source_cells": k.source_cells + own_cells,
             "max_source_cells": sh.budget,
             "chunks": sh.chunks,
             "build_ms": (sh.elapsed_ms * 1000.0).round() / 1000.0,
@@ -2236,7 +2438,12 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
             forward. Either way last_t_s[i] is the boundary NEAREST the run, so |row time - \
             last_t_s[i]| is the smallest age the evidence supports. A row where `grid` holds a \
             value is never covered: a shadow never replaces a measurement. Rows at or after \
-            `edge_s` (the newest frame) are never covered. A column with NO sample and NO older \
+            `edge_s` (the newest FOLDED frame) are covered only up to `reach_s` (the tune \
+            record's reach, this answer's `coverage.horizon.as_of_s`; null = not at all), and only \
+            where the selected coverage plane says \"unobserved\": the fold trails capture, and a \
+            departed band's rows up to where the record reaches are time the radio spent \
+            elsewhere (T-881). A column meeting a not-unobserved cell past `edge_s` stops there. \
+            A column with NO sample and NO older \
             value carries NO run at all — it was never observed. GREY IS UNCHANGED AND IS STILL \
             DECIDED BY `coverage` ALONE: draw a shadow only where the coverage plane says \
             \"unobserved\", and a cell with no run over it stays grey — no retained measurement \
@@ -2415,7 +2622,8 @@ fn tile_body(
         // T-519: a tile the coverage map greys end to end is exactly where a departed band's
         // shadow lives, so the last-known search runs here too — against no grid, because the
         // coverage map just said no tune touched this tile.
-        let sh = shadow(state, store, &key, None)?;
+        let own = answering_level(state, store, &key)?;
+        let sh = shadow(state, store, &key, None, own, &overlay)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         let mut v = unobserved_tile_json(
             &key,
@@ -2431,7 +2639,7 @@ fn tile_body(
         return Ok(cache_put(state, &cache_key, epoch, v));
     }
     let r = tile_read(state, store, &key)?;
-    let sh = shadow(state, store, &key, Some(&r.grid))?;
+    let sh = shadow(state, store, &key, Some(&r.grid), Some(r.level), &overlay)?;
     let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
     let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -5964,6 +6172,30 @@ mod tests {
                 .any(|c| c.as_ref().is_some_and(|(db, ..)| *db == carrier))
         );
         assert_eq!(next["shadow"]["search"]["columns_found"], json!(n));
+        // T-911: and that level is THE TILE'S OWN, so the carried value is exactly the cell of the
+        // band's last live row, column for column — never a max-hold over some other box, which is
+        // the colour change the user saw at the first tile boundary after leaving a band.
+        let before: Vec<&Value> = next["shadow"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["from"] == json!("before-tile"))
+            .collect();
+        assert!(!before.is_empty(), "{}", next["shadow"]);
+        for s in &before {
+            assert_eq!(s["search"], json!("own-level"), "{s}");
+            assert_eq!(s["f_cell_hz"].as_f64(), Some(tile_f_cell), "{s}");
+        }
+        for f in 0..n {
+            let (db, ..) = plane[f].clone().expect("row 0 carries");
+            assert_eq!(db, grid[(h - 1) * n + f].as_f64().unwrap(), "column {f}");
+        }
+        assert_eq!(
+            next["shadow"]["search"]["own_level"]["columns_used"],
+            json!(n),
+            "{}",
+            next["shadow"]["search"]
+        );
 
         // Never swept: NO shadow anywhere, and the search says it found nothing — grey stays grey.
         let never = tiles_json(&state, &tile_params(F_INDEX + 1, T_INDEX + 1)).unwrap();
@@ -5983,6 +6215,210 @@ mod tests {
             next["shadow"]["search"]["build_ms"],
             next["shadow"]["search"]["source_cells"],
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-881's fixture — the fog-of-war scene with the fold **trailing** capture, as it does on a
+    /// live server. Band X (tile `F_INDEX`) is swept for the first `half` rows of tile `T_INDEX`
+    /// (a sealed dwell) and then departed; the radio moves to band Y (tile `F_INDEX + 2`, the dwell
+    /// in flight), whose tune record reaches `record` rows past `t0` — but the spectrum history has
+    /// folded Y's frames only as far as `folded` rows. Tile `F_INDEX + 1` is never observed.
+    fn state_departed_with_fold_lag(
+        dir: &std::path::Path,
+        half: i64,
+        folded: i64,
+        record: i64,
+    ) -> (ApiState, i64, i64) {
+        let mut p = hk_store::Pyramid::open(dir, PyramidConfig::default()).unwrap();
+        let g = p.geometry().clone();
+        let (t_cell, f_cell) = (g.levels[0].t_cell_ns, g.levels[0].f_cell_hz);
+        let band = |b: i64| (F_INDEX + b) as f64 * f_cell * N as f64;
+        let t0 = T_INDEX * t_cell * N as i64;
+        const NB: usize = 128;
+        let bin_hz = f_cell * N as f64 / NB as f64;
+        for k in 0..folded {
+            let mut psd = [1e-12f32; NB];
+            psd[40] = 1e-6;
+            let bands = if k < half {
+                &[0i64, 2][..]
+            } else {
+                &[2i64][..]
+            };
+            for &b in bands {
+                p.ingest(&hk_store::history::FrameInput::new(
+                    Timestamp::from_unix_nanos(t0 + k * t_cell),
+                    t_cell,
+                    band(b),
+                    bin_hz,
+                    hk_model::PowerUnit::Dbfs,
+                    &psd,
+                ))
+                .unwrap();
+            }
+        }
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        let width = f_cell * N as f64;
+        store.append(&dwell(band(0), band(0) + width, t0, t0 + half * t_cell));
+        store.flush();
+        let hk_model::attention::observation::ObservationRecord::Dwell(open) = dwell(
+            band(2),
+            band(2) + width,
+            t0 + half * t_cell,
+            t0 + record * t_cell,
+        ) else {
+            unreachable!("dwell builds a dwell")
+        };
+        store.note_open_dwell(open);
+        let state = ApiState {
+            history: Some(Arc::new(std::sync::Mutex::new(p))),
+            observations: Some(store),
+            ..ApiState::default()
+        };
+        (state, t0, t_cell)
+    }
+
+    /// The selected coverage plane of a tile answer, one state name per cell.
+    fn selected_states(v: &Value) -> Vec<String> {
+        let states = v["coverage"]["states"].as_array().unwrap();
+        let sel = v["coverage"]["selected"]["plane"].as_u64().unwrap() as usize;
+        let runs = v["coverage"]["planes"][sel]["runs"].as_array().unwrap();
+        let mut plane = Vec::with_capacity(N * N);
+        for pair in runs.chunks(2) {
+            let s = states[pair[0].as_u64().unwrap() as usize].as_str().unwrap();
+            for _ in 0..pair[1].as_u64().unwrap() {
+                plane.push(s.to_string());
+            }
+        }
+        assert_eq!(plane.len(), N * N, "{}", v["coverage"]);
+        plane
+    }
+
+    /// The cells a client following docs/api.md draws as **THE grey** from this answer: drawn at
+    /// all (the row starts before `coverage.horizon.as_of_s`, or there is no horizon — T-532), the
+    /// selected plane says `unobserved`, and no `shadow` run covers the cell (T-520).
+    fn drawn_grey(v: &Value) -> Vec<(usize, usize)> {
+        let plane = selected_states(v);
+        let shade = shadow_plane(v);
+        let (t0_s, dt) = (
+            v["extent"]["t0_s"].as_f64().unwrap(),
+            v["extent"]["t_cell_s"].as_f64().unwrap(),
+        );
+        let as_of = v["coverage"]["horizon"]["as_of_s"].as_f64();
+        (0..N * N)
+            .map(|i| (i / N, i % N))
+            .filter(|&(r, f)| {
+                as_of.is_none_or(|a| t0_s + r as f64 * dt < a)
+                    && plane[r * N + f] == "unobserved"
+                    && shade[r * N + f].is_none()
+            })
+            .collect()
+    }
+
+    /// **T-881: a departed band's newest rows are its shadow, never THE grey.**
+    ///
+    /// Observed by the fog-of-war guard: the top of a departed band's pane was plain grey — no
+    /// pending, no stand-ins — over 10–60 % of it. Two things made that strip, both here:
+    ///
+    /// 1. **The shadow stopped at the store's newest FOLDED frame** (`shadow.edge_s`), and the fold
+    ///    trails capture. The rows between it and the newest instant the tune record reaches are
+    ///    time the radio spent on another band — the band's last-known value is exactly as true of
+    ///    them — and they carried no run.
+    /// 2. **The horizon was read over this band alone.** A tile wholly after the departure has no
+    ///    record of *this* band in it, so it named no `as_of_s` and was drawn as served — grey — for
+    ///    as long as a client kept it; a tile straddling the departure named the departure itself,
+    ///    so every row after it stayed the pane's pending ground for good, never the shadow.
+    ///
+    /// RED before T-881: tile `T_INDEX + 1` of band X has no horizon and its rows from the fold
+    /// edge up are drawn grey; tile `T_INDEX`'s horizon is the departure.
+    #[test]
+    fn a_departed_band_reads_as_shadow_up_to_the_record_reach_not_grey_past_the_fold_edge() {
+        let dir = temp_dir("t881-fold-lag");
+        let (half, folded, record) = (
+            N as i64 / 2,
+            N as i64 + N as i64 / 4,
+            N as i64 + 3 * N as i64 / 4,
+        );
+        let (state, t0, t_cell) = state_departed_with_fold_lag(&dir, half, folded, record);
+        let s_of = |rows: i64| (t0 + rows * t_cell) as f64 / 1e9;
+        let rows_in_next = |rows: i64| (rows - N as i64) as usize;
+
+        // The tile wholly after the departure: band X's newest rows.
+        let next = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+        assert_eq!(
+            next["shadow"]["edge_s"],
+            json!(s_of(folded)),
+            "{}",
+            next["shadow"]
+        );
+        assert_eq!(
+            next["coverage"]["horizon"]["as_of_s"],
+            json!(s_of(record)),
+            "the answer's evidence reaches as far as the radio's record does, over ANY band — the \
+             radio was on band Y, so band X was unobserved up to there: {}",
+            next["coverage"]["horizon"]
+        );
+        assert_eq!(
+            next["shadow"]["reach_s"],
+            json!(s_of(record)),
+            "{}",
+            next["shadow"]
+        );
+        let grey = drawn_grey(&next);
+        assert!(
+            grey.is_empty(),
+            "departed band X draws {} cells as THE grey (rows {:?}..): swept then left is the \
+             last-known shadow, never 'never observed'",
+            grey.len(),
+            grey.first()
+        );
+        let plane = shadow_plane(&next);
+        for f in 0..N {
+            for r in 0..N {
+                assert_eq!(
+                    plane[r * N + f].is_some(),
+                    r < rows_in_next(record),
+                    "band X ({r}, {f}): shadow up to the record's reach (row {}), and none in the \
+                     future past it",
+                    rows_in_next(record)
+                );
+            }
+        }
+
+        // The tile the departure falls in: drawn to its end, the rows after the departure shadow.
+        let here = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let t1_s = here["extent"]["t1_s"].as_f64().unwrap();
+        assert_eq!(
+            here["coverage"]["horizon"]["as_of_s"],
+            json!(t1_s),
+            "the record reaches past this tile, so nothing in it is left as 'not reached yet' — \
+             before T-881 the horizon was the departure, and the rows after it never drew: {}",
+            here["coverage"]["horizon"]
+        );
+        assert!(drawn_grey(&here).is_empty(), "{:?}", drawn_grey(&here));
+
+        // Band Y past the fold edge: observed, its frames not folded yet — NOT a shadow's to cover.
+        let y = tiles_json(&state, &tile_params(F_INDEX + 2, T_INDEX + 1)).unwrap();
+        let y_states = selected_states(&y);
+        assert!(
+            (0..rows_in_next(record)).all(|r| y_states[r * N] == "observed"),
+            "{:?}",
+            &y_states[..N]
+        );
+        assert_eq!(
+            y["shadow"]["runs"],
+            json!(0),
+            "a band the radio is on carries no shadow, folded or not: {}",
+            y["shadow"]
+        );
+
+        // Never swept: no shadow at all, and grey only as far as the record reaches.
+        let never = tiles_json(&state, &tile_params(F_INDEX + 1, T_INDEX + 1)).unwrap();
+        assert_eq!(never["shadow"]["runs"], json!(0), "{}", never["shadow"]);
+        assert_eq!(never["coverage"]["horizon"]["as_of_s"], json!(s_of(record)));
+        assert_eq!(drawn_grey(&never).len(), rows_in_next(record) * N);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -188,7 +188,7 @@ def test_a_single_branch_red_that_main_shares_is_not_charged_and_stops_an_isolat
     assert "return 1" in single and "MAIN_RED_STOP=1" in single           # re-queued by the caller, no attempt
     assert '>> "$S/main-red-parked"' in single                               # ... and parked until main moves
     loop = text[text.index('        MAIN_RED_STOP=""'):]
-    assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:600]
+    assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:loop.index("\n        done")]
 
 
 def _park_block() -> str:
@@ -330,3 +330,230 @@ def test_a_single_branch_main_side_red_is_held_once_per_tip_not_charged():
     assert 'echo "$branch $tip" >> "$S/main-side-seen"' in block                     # the second time on this tip is charged
     assert '>> "$S/main-red-parked"' in block and "return 1" in block and "BLOCKED_ON_SPEC" in block
     assert '"main-side defect - deflaker/ticket needed"' in block
+
+
+def _bisect(tmp_path, branches, culprits, filt="t", specs="", merge_fail="", together=False):
+    """bisect_culprit over stubbed git/cargo/npm: the triaged test is red whenever a culprit is merged."""
+    state, calls = tmp_path / "merged", tmp_path / "calls"
+    state.write_text("")
+    culprit_re = "|".join(culprits) or "NONE"
+    need = len(culprits) if together else 1
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}; mkdir -p {tmp_path}/ui
+log(){{ echo "LOG $*" >&2; }}
+ticket_of(){{ echo "$1"; }}
+git(){{ shift 2
+  case "$1" in
+    rev-parse) [ -s {state} ] && echo moved || echo base ;;
+    reset) : > {state} ;;
+    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; b=${{b#sha-}}; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
+  esac; return 0; }}
+probe(){{ echo "$1 $(tr '\\n' ' ' < {state})" >> {calls}; [ "$(grep -cxE '{culprit_re}' {state})" -ge {need} ] && return 1; return 0; }}
+cargo(){{ [ "$1" = build ] && return 0; probe cargo; }}
+npm(){{ [ "$2" = build ] && return 0; probe npm; }}
+TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
+{_function("bisect_red")}
+{_function("bisect_culprit")}
+echo "CULPRIT=[$(bisect_culprit base {' '.join(f"{b}=sha-{b}" for b in branches)})]"
+cat {state} | wc -l | tr -d ' ' | sed 's/^/LEFT_MERGED=/'
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    probes = calls.read_text().splitlines() if calls.exists() else []
+    return out.stdout, probes, (tmp_path / "isolate-remaining").read_text()
+
+
+def test_bisection_names_the_one_branch_red_alone_in_log2_probes(tmp_path):
+    """Supervisor for the user, 2026-09-24: bisect a red batch by the failing test alone, not n gates."""
+    bs = [f"b{i}" for i in range(8)]
+    out, probes, remaining = _bisect(tmp_path, bs, ["b5"])
+    assert "CULPRIT=[b5=sha-b5]" in out          # by the tip recorded before the bisect
+    assert len(probes) == 5                      # 3 halvings + b5 ALONE, twice
+    assert probes[-2].split() == probes[-1].split() == ["cargo", "b5"]  # base + the culprit only
+    assert "LEFT_MERGED=0" in out                # every probe is reset back to base
+    assert remaining.split() == bs               # a restart mid-bisect re-queues the whole batch
+
+
+def test_bisection_blames_nobody_when_the_red_needs_two_branches(tmp_path):
+    """b1 and b6 only break it together: no single branch is red alone -> nothing, and the caller isolates."""
+    out, probes, _ = _bisect(tmp_path, [f"b{i}" for i in range(8)], ["b1", "b6"], together=True)
+    assert "CULPRIT=[]" in out and len(probes) == 4 and "LEFT_MERGED=0" in out   # green alone: no 2nd confirm
+
+
+def test_bisection_gives_up_on_a_merge_it_cannot_make(tmp_path):
+    out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2", "b3"], ["b3"], merge_fail="b1")
+    assert "CULPRIT=[]" in out and probes == [] and "LEFT_MERGED=0" in out
+
+
+def test_bisection_runs_the_browser_specs_when_the_red_is_a_spec(tmp_path):
+    out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2"], ["b0"], filt="", specs="app-surface.e2e.mjs")
+    assert "CULPRIT=[b0=sha-b0]" in out and probes and all(p.startswith("npm ") for p in probes)
+
+
+def test_a_red_alone_only_once_is_not_blamed(tmp_path):
+    """Flaky even alone: the first confirmation red, the second green -> no culprit (review, 2026-09-24)."""
+    state, calls, flip = tmp_path / "merged", tmp_path / "calls", tmp_path / "flip"
+    state.write_text("")
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}
+log(){{ :; }}; ticket_of(){{ echo "$1"; }}
+git(){{ shift 2; case "$1" in rev-parse) [ -s {state} ] && echo moved || echo base ;; reset) : > {state} ;;
+  merge) b="${{@: -1}}"; echo "${{b#sha-}}" >> {state} ;; esac; return 0; }}
+cargo(){{ echo x >> {calls}; grep -qx b1 {state} || return 0; [ -e {flip} ] && return 0; touch {flip}; return 1; }}
+TRIAGE_FILTER=t; TRIAGE_SPECS=""
+{_function("bisect_red")}
+{_function("bisect_culprit")}
+echo "CULPRIT=[$(bisect_culprit base b0=sha-b0 b1=sha-b1)]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert "CULPRIT=[]" in out.stdout, out.stdout + out.stderr
+
+
+def test_a_bisected_culprit_is_failed_and_the_rest_go_back_as_one_batch():
+    """The try_bulk wiring: bisect only for a triaged test red with main green, re-queue the others FIRST."""
+    text = RUNNER.read_text()
+    i = text.index("if main_is_red; then", text.index("\ntry_bulk(){"))
+    block = text[i:text.index("return 1\n}", i)]
+    assert "bisect_culprit" in block
+    assert '[ "${TRIAGE_KIND:-test}" = "test" ]' in block and '"${#branches[@]}" -ge 2' in block
+    assert '"${TRIAGE_ALONE_FIRST:-0}" = 1' in block        # never for a red that once passed alone
+    assert "main_side_of \"$culprit\"" in block            # main-side reds are not blamed here
+    assert 'record_attempt "$culprit" "$tip"' in block      # the tip that was probed
+    assert "\"GATE FAILED $culprit (bisected" in block      # hkpy.fixes / flakes read this wording
+    assert '{ printf \'%s\\n\' "${others[@]}"; cat "$QUEUE"' in block   # others at the FRONT
+    assert "GATE_FAIL\" >> \"$NEEDS\"" in block
+    assert "isolate by merging each individually" in block             # the fallback is kept
+
+
+def test_a_landing_pushes_main_to_every_mirror_in_the_background_never_forced(tmp_path):
+    """User, 2026-09-25 00:15: the merge runner pushes main to each remote host's mirror after every landing,
+    logging 'PUSHED <host> <sha>'; never --force (a push that is not a fast-forward fails and says so)."""
+    text = RUNNER.read_text()
+    assert text.count("    push_mirrors") == 2
+    single = text[text.index('log "MERGED $branch ✓"'):]
+    assert single.index("board_sync_now") < single.index("push_mirrors") < single.index("worktree_of")
+    bulk = text[text.index('log "BULK MERGED ✓ $tickets"'):]
+    # review 2026-09-25: never while the bulk marker stands (a killed runner's startup still rewinds the batch)
+    assert bulk.index('rm -f "$BULKMARK"') < bulk.index("board_sync_now") < bulk.index("push_mirrors") < bulk.index("notify_ok")
+    fn = _function("push_mirrors")
+    assert "-f" not in fn.split() and "--force" not in fn
+    repo, mirror = tmp_path / "repo", tmp_path / "mirror.git"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "init", "-q", "--bare", str(mirror)], check=True)
+    for a in (["config", "user.email", "t@t"], ["config", "user.name", "t"], ["commit", "-q", "--allow-empty", "-m", "x"],
+              ["remote", "add", "node2", str(mirror)]):
+        subprocess.run(["git", "-C", str(repo), *a], check=True)
+    (tmp_path / "hosts.json").write_text('{"node2": {"ssh": "u@h"}}')
+    script = f"""
+S={tmp_path}; REPO={repo}; LOG={tmp_path}/log
+log(){{ echo "LOG $*" >> {tmp_path}/log; }}
+{fn}
+push_mirrors; wait
+"""
+    subprocess.run(["bash", "-c", script], check=True, timeout=60)
+    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=8", "HEAD"], capture_output=True, text=True).stdout.strip()
+    assert f"LOG PUSHED node2 {sha}" in (tmp_path / "log").read_text()
+    assert subprocess.run(["git", "-C", str(mirror), "rev-parse", "main"], capture_output=True, text=True).stdout.strip().startswith(sha)
+
+
+def test_the_gate_never_waits_for_a_remote_hosts_workers(tmp_path):
+    """2026-09-25: a claim with a host runs on that host - the merge runner's worker count leaves it out."""
+    import json
+    (tmp_path / "work-claims.json").write_text(json.dumps({
+        "T-1": {"state": "running"}, "T-2": {"state": "running", "host": "node2"}, "T-3": {"state": "queued"}}))
+    script = f"""
+S={tmp_path}
+{_function("workers_running")}
+workers_running >/dev/null 2>&1
+python3 - "$S/work-claims.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(sum(1 for c in d.values() if c.get("state") == "running" and not c.get("host")))
+PY
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.stdout.strip().splitlines()[-1] == "1"
+    assert 'and not c.get("host")' in _function("workers_running")
+
+
+
+def _suite_split(tmp_path, branches, culprits, base_rc=0, merge_fail="", absent_on="", flaky_once=""):
+    """suite_split over stubbed git/uv: the named pytest ids exit 1 whenever a culprit is merged."""
+    state, calls, flip = tmp_path / "merged", tmp_path / "calls", tmp_path / "flip"
+    state.write_text("")
+    culprit_re = "|".join(culprits) or "NONE"
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}; mkdir -p {tmp_path}/py
+log(){{ echo "LOG $*" >&2; }}
+git(){{ shift 2
+  case "$1" in
+    reset) : > {state} ;;
+    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; b=${{b#sha-}}; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
+  esac; return 0; }}
+uv(){{ echo "$* | $(tr '\n' ' ' < {state})" >> {calls}
+  [ -s {state} ] || return {base_rc}
+  grep -qx '{absent_on or "NONE"}' {state} && return 4
+  if grep -qx '{flaky_once or "NONE"}' {state}; then [ -e {flip} ] && return 0; touch {flip}; return 1; fi
+  grep -qxE '{culprit_re}' {state} && return 1; return 0; }}
+{_function("suite_red_alone")}
+{_function("suite_split")}
+suite_split base "tests/test_board.py::test_a tests/test_board.py::test_b" {' '.join(f"{b}=sha-{b}" for b in branches)}
+echo "LEFT_MERGED=$(wc -l < {state} | tr -d ' ')"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    probes = calls.read_text().splitlines() if calls.exists() else []
+    return out.stdout, probes, (tmp_path / "isolate-remaining").read_text()
+
+
+def test_a_pytest_red_batch_names_the_branch_that_breaks_it_alone(tmp_path):
+    """Twice fixed by hand (2026-09-24 18:12-18:15, 2026-09-25 04:43): a py red held a whole batch
+    while a person found the one branch. Base first, then each branch alone (a red twice), the named ids only."""
+    out, probes, remaining = _suite_split(tmp_path, ["b0", "b1", "b2"], ["b1"])
+    assert out.splitlines()[:3] == ["GREEN b0=sha-b0", "RED b1=sha-b1", "GREEN b2=sha-b2"]
+    assert len(probes) == 5 and probes[0].endswith("| ")                      # the base, alone
+    assert [p.split("| ")[1].strip() for p in probes[1:]] == ["b0", "b1", "b1", "b2"]   # b1 confirmed
+    assert all("pytest -q -p no:cacheprovider tests/test_board.py::test_a tests/test_board.py::test_b" in p
+               for p in probes)
+    assert "LEFT_MERGED=0" in out                                             # every probe reset to base
+    assert remaining.split() == ["b0", "b1", "b2"]                            # a restart re-queues the batch
+
+
+def test_a_pytest_red_on_the_base_itself_blames_no_branch(tmp_path):
+    for rc in (1, 2):                                                         # failed, or a collection error
+        out, probes, _ = _suite_split(tmp_path, ["b0", "b1"], ["b1"], base_rc=rc)
+        assert "RED" not in out and "GREEN" not in out and len(probes) == 1
+        (tmp_path / "calls").unlink()
+
+
+def test_a_test_new_in_the_batch_is_not_mains_red(tmp_path):
+    """pytest exit 4 on the base (no such node) -> the base is not red; the branch that adds it is probed."""
+    out, _, _ = _suite_split(tmp_path, ["b0", "b1"], ["b1"], base_rc=4)
+    assert "RED b1=sha-b1" in out and "GREEN b0=sha-b0" in out
+
+
+def test_a_branch_that_lacks_the_test_or_cannot_merge_alone_is_not_blamed(tmp_path):
+    out, _, _ = _suite_split(tmp_path, ["b0", "b1"], ["b0", "b1"], absent_on="b0")
+    assert "GREEN b0=sha-b0" in out and "RED b1=sha-b1" in out
+    (tmp_path / "m").mkdir()
+    out, _, _ = _suite_split(tmp_path / "m", ["b0", "b1"], ["b0"], merge_fail="b0")
+    assert "GREEN b0=sha-b0" in out and "LEFT_MERGED=0" in out
+
+
+def test_a_pytest_red_alone_only_once_is_not_blamed(tmp_path):
+    out, _, _ = _suite_split(tmp_path, ["b0", "b1"], [], flaky_once="b1")
+    assert "GREEN b1=sha-b1" in out and "RED" not in out
+
+def test_try_bulk_sets_the_pytest_culprits_aside_and_re_queues_the_rest_first():
+    text = RUNNER.read_text()
+    i = text.index("\ntry_bulk(){")
+    block = text[text.index("suite_split", i):text.index('batch_sig "${branches[@]}" > "$S/suite-broken"', i)]
+    assert '"${TRIAGE_WHAT#pytest red: }" != "${TRIAGE_WHAT:-}"' in text[i:]           # only a NAMED pytest red
+    assert '"${#culprits[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0' in block               # all red = interaction/main
+    assert '{ printf \'%s\\n\' "${rest[@]}"; cat "$QUEUE"' in block                     # the rest at the FRONT
+    assert '"GATE FAILED $b (its own' in block and 'GATE_FAIL" >> "$NEEDS"' in block   # hkpy.fixes reads these
+    assert 'record_attempt "${b%%=*}" "${b#*=}"' in block                        # the tip probed, not a later one
+    assert "held as before" in block                                                    # the fallback is kept

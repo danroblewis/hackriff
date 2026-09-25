@@ -233,6 +233,12 @@ def anchor_owner(row: dict, claim_pids: dict[int, str]) -> str | None:
         return "fuzz-rig"
     if "ops/stage.sh" in cmd or "hk serve --bind 127.0.0.1:8899" in cmd:
         return "demo"
+    # The explorer window (T-923): its window script, its agent, and the server it runs on the HackRF (:8897, data under
+    # $HACKRIFF_OPS/explorer/) - started detached by the agent, so ancestry alone never finds it (2026-09-25 04:0x: the
+    # live-HackRF server alarmed 'unowned at 387 %, kill it' mid-window).
+    if ("ops/explorer-window.sh" in cmd or "--agent explorer" in cmd or "127.0.0.1:8897" in cmd
+            or "/.hackriff-ops/explorer/" in cmd):
+        return "explorer"
     if "--append-system-prompt-file" in cmd or "ops/launch.sh" in cmd or row.get("env"):
         return "role:" + role_name(cmd, row.get("env", ""))
     return None
@@ -295,12 +301,15 @@ def attribute(rows: list[dict], claims: dict | None = None) -> dict[int, str]:
     `owners()` reports them as UNOWNED rather than folding them into a neighbour."""
     claims = claims or {}
     claim_pids: dict[int, str] = {}
+    claim_wts: list[tuple[str, str]] = []
     for tid, c in claims.items():
         if isinstance(c, dict) and c.get("state") == "running" and c.get("pid"):
             try:
                 claim_pids[int(c["pid"])] = str(c.get("ticket") or tid)
             except (TypeError, ValueError):
                 pass
+            if c.get("wt"):
+                claim_wts.append((str(c["wt"]).rstrip("/") + "/", str(c.get("ticket") or tid)))
 
     by_pid = {r["pid"]: r for r in rows}
     direct = {r["pid"]: o for r in rows if (o := anchor_owner(r, claim_pids))}
@@ -324,6 +333,11 @@ def attribute(rows: list[dict], claims: dict | None = None) -> dict[int, str]:
         up = owner_of(row["ppid"], depth + 1)
         if up is None and row["pgid"] != pid:
             up = owner_of(row["pgid"], depth + 1)
+        # A worker's background shell is reparented to launchd, so its test binaries and servers lose
+        # the ancestry to the claim; they still RUN FROM its worktree (2026-09-24: T-577's own
+        # degenerate_null test, T-882's and T-901's twice - each alarmed 'unowned, kill it').
+        if up is None:
+            up = next(("worker:" + t for wt, t in claim_wts if wt in row["cmd"]), None)
         if up is None:
             up = fallback_owner(row)
         if up is not None:
@@ -460,6 +474,18 @@ def evaluate(rows: list[dict], agg: dict, unowned: list[dict], load1: float,
                        "body": "Owners: " + ", ".join(f"{k} {v['cpu']:.0f}%" for k, v in
                                                       sorted(agg.items(), key=lambda kv: -kv[1]["cpu"]))
                                + "\nTop 5:\n" + "\n".join(top_consumers(rows, attr))})
+        since.setdefault("ob:start", now)
+        since["ob:peak"] = max(since.get("ob:peak", 0.0), load1)
+    # ONE 'recovered' line per episode (supervisor 2026-09-25 01:52: the user sleeps; an episode is one alarm - the
+    # key's dedupe - and one all-clear). Held under plan as long as the alarm needed to fire; its own key per episode,
+    # outside the prefixes that wake the pipeline manager, so it reaches Discord and pages nobody.
+    live.add("load-ok")
+    if "ob:start" in since and _held(since, "load-ok", load1 <= plan, now, LOAD_FOR):
+        start, peak = since.pop("ob:start"), since.pop("ob:peak", load1)
+        alarms.append({"rule": "recovered", "level": "green", "key": f"recovered:over-budget:{int(start)}",
+                       "title": f"box load recovered: {load1:.1f} vs plan {plan:.0f}",
+                       "body": f"over budget from {time.strftime('%H:%M', time.localtime(start))} for "
+                               f"{(now - start) / 60:.0f} min, peak {peak:.1f}"})
 
     for k in [k for k in since if k.split(":")[0] in ("unowned", "zombie") and k not in live]:
         since.pop(k, None)                          # the process is gone; forget its clock
@@ -639,6 +665,39 @@ def kill_now(rows: list[dict]) -> list[int]:
     return done
 
 
+# ---------------------------------------------------------------- radio lock (T-922)
+RADIO_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "py", "hkpy", "radio.py")
+
+
+def _radio():
+    """py/hkpy/radio.py by path (stdlib only), so the watchdog needs no uv environment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hk_radio", RADIO_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def radio_stale(now: float, dry: bool = False) -> list[dict]:
+    """(g) A radio lock past its `until` is released, with a red alert: its owner overran its window
+    or died holding the radio, and staging stays on replay until the lock is gone. `--dry-run`
+    reports without removing it."""
+    try:
+        R = _radio()
+        lock = R.read(S)
+        if lock is None or not R.is_stale(lock, now):
+            return []
+        what = R.describe(lock, now)
+        if not dry:
+            R.release_stale(S, now)
+    except Exception as e:  # never let the lock path stop the watchdog
+        logline(f"radio-lock check failed: {e}")
+        return []
+    return [{"rule": "radio-stale", "level": "red", "key": "watchdog:radio-stale",
+             "title": f"stale radio lock {'would be ' if dry else ''}released: {lock['owner']}",
+             "body": f"{what}\nstaging goes back to LIVE on its next tick (ops/stage.sh)."}]
+
+
 def tick(since: dict, dry: bool = False) -> dict:
     rows = read_ps()
     claims = load_claims()
@@ -649,6 +708,7 @@ def tick(since: dict, dry: bool = False) -> dict:
         load1 = 0.0
     alarms, kills = evaluate(rows, agg, unowned, load1, since, time.time(), claims)
     alarms += liveness(rows, since, time.time(), dry)
+    alarms += radio_stale(time.time(), dry)
     killed = [] if dry else kill_now(kills)
     snap = {
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),

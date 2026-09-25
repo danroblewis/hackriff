@@ -52,6 +52,8 @@ pub struct FlowGate {
     slack: u64,
     cursors: Mutex<Vec<Arc<AtomicU64>>>,
     waits: AtomicU64,
+    /// Capture threads held back right now (see [`Self::holding`]).
+    holding: AtomicU64,
 }
 
 impl FlowGate {
@@ -62,6 +64,7 @@ impl FlowGate {
             slack: (capacity as u64 / 2).max(1),
             cursors: Mutex::new(Vec::new()),
             waits: AtomicU64::new(0),
+            holding: AtomicU64::new(0),
         }
     }
 
@@ -142,8 +145,12 @@ impl FlowGate {
             if !waited {
                 waited = true;
                 self.waits.fetch_add(1, Ordering::Relaxed);
+                self.holding.fetch_add(1, Ordering::SeqCst);
             }
             std::thread::sleep(Duration::from_micros(200));
+        }
+        if waited {
+            self.holding.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -158,6 +165,29 @@ impl FlowGate {
     /// Blocks that had to wait.
     pub fn waits(&self) -> u64 {
         self.waits.load(Ordering::Relaxed)
+    }
+
+    /// Whether a capture thread is being **held back right now** by some reader's claim.
+    ///
+    /// While this is true no sample can arrive for anybody: the writer is not slow, it is
+    /// deliberately stopped, for as long as the slowest reader takes (`hk-survey`'s one-off
+    /// receiver-line measurement is the long one — 785 ms of a core in release, seconds in a debug
+    /// build on a loaded box). So a consumer waiting for samples must not read **its own wall
+    /// clock** as evidence the source has failed while this holds: that is what turned a
+    /// deliberate hold into a 504 `probe-timeout` in T-929, and it contradicts this module's own
+    /// promise that a lossless replay is unchanged "however slowly a debug build runs".
+    pub fn holding(&self) -> bool {
+        self.holding.load(Ordering::SeqCst) > 0
+    }
+
+    /// **How far a block may extend past the slowest cursor**: half the ring, in samples.
+    ///
+    /// The bound a caller needs to state what the gate guarantees — a stalled reader stops the
+    /// capture thread after *at most* this many samples, whatever the relative speed of the two.
+    /// T-920 uses it to demonstrate the backpressure path deterministically instead of waiting to
+    /// observe [`Self::waits`] grow, which is a race between threads rather than a property.
+    pub fn slack(&self) -> u64 {
+        self.slack
     }
 }
 
@@ -221,6 +251,47 @@ mod tests {
             released,
             "the writer stayed blocked after the reader advanced"
         );
+        assert_eq!(gate.waits(), 1);
+    }
+
+    /// T-929: while the writer is held for a slow reader the gate says so, so a consumer waiting
+    /// for samples can tell a deliberate hold from a source that has failed.
+    #[test]
+    fn the_gate_reports_while_it_is_holding_the_writer() {
+        let gate = Arc::new(FlowGate::new(true, 100));
+        let cursor = gate.register(0);
+        assert!(!gate.holding(), "nothing has been written yet");
+        // Fill the ring's first block, then a block the reader's claim of 0 will not admit.
+        let g = Arc::clone(&gate);
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = Arc::clone(&stop);
+        let (tx, rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            g.wait_for_block(0, 40, None, None, &s);
+            let _ = tx.send(());
+            g.wait_for_block(40, 90, Some(0), Some(40), &s);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the first block is admitted at once");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !gate.holding() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer never reported the hold"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "the writer must still be held"
+        );
+        cursor.set(60);
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the writer resumes once the reader advances");
+        stop.store(true, Ordering::SeqCst);
+        writer.join().unwrap();
+        assert!(!gate.holding(), "the hold is over");
         assert_eq!(gate.waits(), 1);
     }
 

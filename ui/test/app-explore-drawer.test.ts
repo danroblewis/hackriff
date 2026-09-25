@@ -2,12 +2,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { foldSurveyRecords, groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { PaneModel } from "../src/surface/panes";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
 import type { SchedulerResponse } from "../src/scheduler";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
-import { initialState, type AppState } from "../src/app/state";
+import { gotoWindow, initialState, requestGoto, type AppState } from "../src/app/state";
 
 test("unknown emitters lead, newest first, one per emitter; known ones are not listed", () => {
   const r: EventsResp = {
@@ -233,4 +234,92 @@ test("P4 CSS: the go-to target is at least 24 px; P1: the sheet has a visible, l
   const sheet = readFileSync("src/app/chrome/sheet.ts", "utf8");
   assert.match(sheet, /sheet-close/);
   assert.match(sheet, /aria-label", `Close /);
+});
+
+// ---- T-906: the T-815 review's follow-ups ----
+
+test("T-906: Go on a past survey restores its frequency SPAN as well as its centre and time window", async () => {
+  const srv = fakeObsServer([{ record: "dwell", window: { usable: { lo_hz: 430e6, hi_hz: 440e6 } }, observed: { start_ns: 50e9, end_ns: 90e9 } }]);
+  const { store, el } = await mountedDrawer({ obs: srv.serve });
+  const li = el.all().find((e) => e.tag === "li" && e.children[0]?.children[0]?.textContent === "survey · observed then")!;
+  li.children[1].fire("click");
+  assert.deepEqual(store.get().nav.gotoHz, 435e6);
+  assert.equal(store.get().nav.gotoSpanHz, 10e6, "the survey's band width, not the pane's old span");
+  assert.deepEqual(store.get().time, { live: false, tS: 90, spanS: 40 });
+  // The surface's own step: the request becomes a pane window, snapped by the real PaneModel.
+  const m = new PaneModel({ bounds: { f0Hz: 1e6, f1Hz: 6e9, t0Ns: 0, t1Ns: 100e9 }, width: 1000, height: 600,
+    freq: { centerHz: 100e6, spanHz: 2e6 }, minSpanHz: 1e3 });
+  const id = m.list()[0].id;
+  const w = gotoWindow(store.get().nav, m.get(id)!.freq.spanHz)!;
+  m.setFreq(id, w.centerHz, w.spanHz);
+  assert.deepEqual(m.get(id)!.freq, { centerHz: 435e6, spanHz: 10e6 });
+  // A span beyond the device range is a view zoom snapped to the realizable extent, never a retune.
+  m.setFreq(id, 3e9, 1e12);
+  assert.deepEqual(m.get(id)!.freq, { centerHz: (1e6 + 6e9) / 2, spanHz: 6e9 - 1e6 });
+  // A plain go-to (no span) keeps the pane's span.
+  store.set(requestGoto(101e6));
+  assert.deepEqual(gotoWindow(store.get().nav, 2e6), { centerHz: 101e6, spanHz: 2e6 });
+  // The surface wires the request through gotoWindow on every request (keyed on the request, so a
+  // second Go to the same centre with a different span still moves the pane).
+  const surface = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(surface, /store\.select\(\(s\) => s\.nav, \(nav\) =>/);
+  assert.match(surface, /gotoWindow\(nav, pane\.freq\.spanHz\)/);
+});
+
+test("T-906: survey sweep passes are listed as past surveys (one row per pass, visited hops only), stated as sweeps", () => {
+  const geometries = [{ id: 7, hops: [
+    { usable: { lo_hz: 100e6, hi_hz: 115e6 } }, { usable: { lo_hz: 115e6, hi_hz: 130e6 } }, { usable: { lo_hz: 130e6, hi_hz: 145e6 } },
+  ] }];
+  const sw = (a: number, b: number, visits: { hop: number; observed_ms: number }[], id = "s1") =>
+    ({ record: "sweep", survey_id: id, geometry: 7, span: { start_ns: a * 1e9, end_ns: b * 1e9 }, visits });
+  const r = { records: [
+    sw(1000, 1060, [{ hop: 0, observed_ms: 50 }, { hop: 1, observed_ms: 50 }]),
+    sw(1060, 1120, [{ hop: 1, observed_ms: 50 }, { hop: 2, observed_ms: 0 }]), // hop 2 was never heard
+    { record: "sweep", survey_id: "lost", geometry: 99, span: { start_ns: 1e12, end_ns: 2e12 }, visits: [{ hop: 0, observed_ms: 5 }] },
+  ], geometries } as never;
+  const items = pastSurveyItems(r, 1200);
+  assert.equal(items.length, 1, "one pass, one row; a sweep with no geometry on the page is skipped, not guessed");
+  assert.equal(items[0].tag, "survey · swept then");
+  assert.equal(items[0].title, "100.000 MHz – 130.000 MHz", "only the hops actually visited");
+  assert.deepEqual(items[0].time, { t0: 1000, t1: 1120 });
+  assert.equal(items[0].spanHz, 30e6);
+  assert.match(items[0].why, /survey sweep/);
+  assert.match(items[0].why, /each step was heard only during its own dwell/);
+  // A dwell on the same band never merges into the sweep's row.
+  const both = foldSurveyRecords([], [{ record: "dwell", window: { usable: { lo_hz: 100e6, hi_hz: 130e6 } }, observed: { start_ns: 1000e9, end_ns: 1100e9 } }, ...(r as { records: never[] }).records], 120, geometries);
+  assert.equal(both.length, 2);
+});
+
+test("T-906: the drawer never claims nothing was looked at outside its rows", () => {
+  const src = readFileSync("src/app/chrome/explore-drawer.ts", "utf8");
+  assert.doesNotMatch(src, /nothing was looked at/);
+});
+
+test("T-906: an older slice that failed to load is retried on the next refresh, and the note clears", async () => {
+  const edge = T0 + 3 * 86400;
+  const srv = fakeObsServer(scanLog(T0, edge));
+  let down = true;
+  const get = async <T,>(p: string) => {
+    const t1 = Number(new URLSearchParams(p.split("?")[1]).get("t1"));
+    if (down && t1 < edge) return null; // the network drops every older slice once
+    return srv.serve(p) as T;
+  };
+  const log = new SurveyLog();
+  await log.refresh(get, edge);
+  assert.equal(log.truncatedBefore, edge - 86400, "stated as not fully loaded");
+  const oldest = Math.min(...log.wins.map((w) => w.t0));
+  assert.ok(oldest >= edge - 86400 - 3600);
+  down = false;
+  await log.refresh(get, edge + 30);
+  assert.equal(log.truncatedBefore, null, "the note does not stick until the day ages out");
+  assert.equal(log.retryBefore, null);
+  assert.ok(Math.min(...log.wins.map((w) => w.t0)) <= T0 + 10, "the older days are now listed");
+  // A budget-bound truncation is not a failure and is NOT retried every refresh.
+  const dense = new SurveyLog(3, 5000);
+  const calls: string[] = [];
+  await dense.refresh(async <T,>(p: string) => { calls.push(p); return srv.serve(p) as T; }, edge);
+  assert.equal(dense.retryBefore, null);
+  const n = calls.length;
+  await dense.refresh(async <T,>(p: string) => { calls.push(p); return srv.serve(p) as T; }, edge + 30);
+  assert.equal(calls.length - n, 1, "only the new 30 s is read");
 });

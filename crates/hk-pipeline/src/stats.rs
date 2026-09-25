@@ -137,8 +137,12 @@ counter_group!(
         track_merges,
         /// Track rows upserted.
         track_rows,
-        /// Track↔detection links written.
+        /// Track↔detection links written (T-913: written, not attempted).
         track_links,
+        /// Track↔detection links asked for whose detection was not stored — never written, or
+        /// aged out by retention before the link was drained (T-913). Any growth here is lost
+        /// track membership, not a rounding detail.
+        track_links_dropped,
         /// Tracks confirmed (offered as POIs / chain candidates).
         tracks_confirmed,
         /// Floor-change events.
@@ -459,6 +463,22 @@ counter_group!(
         /// Characterisations measured but not written: no inventory emitter covered the region
         /// within the bounded wait, so the measurement had nothing to be evidence about.
         sweep_no_emitter,
+        /// T-878: classifying chains attached ([`crate::chains::classify`]). Counted apart from
+        /// `attached` and from `sweep_attached`, for the reason `sweep_attached` is.
+        classify_attached,
+        /// Classifying chains that finished.
+        classify_detached,
+        /// Classifying chains the concurrency cap refused to attach.
+        classify_admission_refused,
+        /// Member boxes a classifying chain could not use: their samples had left its buffer, or
+        /// arrived after the ring closed.
+        classify_missed,
+        /// Classifications the cascade abstained on upstream (the box could not be extracted or
+        /// normalised), so nothing was written. Not an `unknown`: nothing was measured.
+        classify_abstained,
+        /// Classifications made but not written: the inventory recorded no entry for the track
+        /// within the bounded wait, so the row had nothing to be evidence about.
+        classify_no_emitter,
         /// Chain errors (demod, repository).
         errors,
         /// T-605: chain errors that came back from the **storage engine** — a write the database
@@ -1036,6 +1056,9 @@ pub struct Counters {
     pub compute: crate::compute::ComputeReport,
     /// Observation log producers (T-115).
     pub observations: ObservationCounters,
+    /// T-904: the detection store's size and the retention thread's last pass
+    /// (`/api/status` `storage`).
+    pub storage: crate::retention::StorageCounters,
 }
 
 impl Counters {
@@ -1086,6 +1109,7 @@ impl Counters {
             "tune": { "center_hz": center, "sample_rate_hz": rate },
             "compute": self.compute.to_json(),
             "observations": self.observations.to_json(),
+            "storage": self.storage.to_json(),
         })
     }
 

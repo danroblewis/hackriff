@@ -89,6 +89,14 @@ export interface PaneView {
    * T-470's browser-tier measurements are calibrated against it.
    */
   readonly scales?: boolean;
+  /**
+   * **The pane's coverage-fog layer** (T-807 / MAP-07, docs/24 §13.3). Default `true` (shown). When
+   * `false`, the fog states (`cellrule.ts`'s `FOG_STATES`: unobserved, unknown) draw as the flat
+   * `FOG_HIDDEN` ground instead of the grey and the hatch. A flag on the one cell rule, read by the
+   * one data pass — never a quad and never a second rule. Every measurement-bearing state is drawn
+   * either way.
+   */
+  readonly fog?: boolean;
 }
 
 /** What one pane drew, this frame. `levelF`/`levelT` are §8.5a's "state the level per pane": two
@@ -150,6 +158,23 @@ export interface PaneReport {
    * Counted apart from `pending` because nothing is coming: that is the point.
    */
   readonly surveyed: number;
+  /**
+   * **Tiles drawn in this pane whose last-known (shadow) cells came from a COARSER source than the
+   * tile's own level** (T-916) — the spectrum-history ladder's fallback, or a source the answer did
+   * not label.
+   *
+   * It is a resolution statement, not an error count. Since T-911 a recently-departed band's shadow
+   * is read at the tile's own level and so is the very cell the band's last live row was drawn
+   * with; a band that left longer ago than that search's reach is answered by the ladder, whose
+   * max-hold over a ~260× larger box measured 10–15 dB hotter. Both are honest last-known values
+   * and neither is grey — but they are not the same resolution, and this surface's rule is that a
+   * pane states the level it was actually drawn at.
+   */
+  readonly shadowLadder: number;
+  /** The coarsest such source cell now on screen, `(Hz, s)`; `0` on an axis nothing stated, and
+   * both `0` when `shadowLadder` is `0`. */
+  readonly shadowCellHz: number;
+  readonly shadowCellS: number;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -268,6 +293,7 @@ uniform vec2  uSrcPx;       // the on-screen size of one cell the front end ACTU
 uniform float uShadowGain;  // the shadow's brightness multiplier (T-526): client-adjustable, default
                              // SHADOW_MARK.gain (0.32) from ./shadow-gain.ts; the shadow shape itself
                              // (scanlines, which ramp) stays whatever CELL_MARKS says
+uniform bool  uFog;         // the pane's coverage-fog layer (T-807): false draws FOG_STATES as FOG_HIDDEN
 ${CMAP_GLSL}
 ${CELL_RULE_GLSL}
 void main() {
@@ -279,7 +305,7 @@ void main() {
   vec2 px = vQ * uSizePx;
   int s = int(floor(texture(uState, vUv).r * 255.0 + 0.5));
   float v = texture(uValue, vUv).r;
-  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px, uShadowGain);
+  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px, uShadowGain, uFog);
   // **The honesty tier qualifies a measurement and nothing else** (docs/16 §8.3). Only an OBSERVED
   // cell carries a resolution claim to overstate; a tier wash over an unobserved cell would make a
   // second grey, which is the one thing this shader may not contain.
@@ -449,11 +475,13 @@ export class Surface {
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(String(gl.getProgramInfoLog(p)));
     this.prog = p;
-    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx", "uShadowGain"]) {
+    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx", "uShadowGain", "uFog"]) {
       this.u[n] = gl.getUniformLocation(p, n);
     }
     this.vao = gl.createVertexArray()!;
     this.cache = typeof cache === "function" ? cache(new GlTileTextures(gl)) : cache;
+    // Every lane that can start a request reads the survey, not only [[render]] (T-905).
+    this.cache.setSettled((a) => this.settledBySurvey(a));
   }
 
   /** The **detail** lattice both axes are addressed on. Set once from a probe; changing it drops
@@ -469,6 +497,21 @@ export class Surface {
   /** Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580). */
   setSurvey(s: Survey | "awaiting" | null): void { this.survey = s; }
   get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /**
+   * **May no request be started for this place?** (T-905) — the cache's gate for every miss lane.
+   * True while a survey is awaited (coverage FIRST: nothing is requested before it answers) and
+   * where the survey settles the place as never sampled; false with no survey, and for an address
+   * on a lattice this surface does not know (the conservative direction: fetch).
+   */
+  private settledBySurvey(a: TileAddr): boolean {
+    const s = this.survey;
+    if (s === null) return false;
+    if (s === "awaiting") return true;
+    const { detail, overview } = this.lattices;
+    const lat = a.scheme === detail.scheme ? detail : a.scheme === overview.scheme ? overview : null;
+    return lat !== null && s.unobservedThrough(extentOf(lat, a)) !== null;
+  }
 
   /** When the survey settles `region` as never sampled, the instant it is grey up to; else null. */
   private surveyedThrough(region: Box): number | null {
@@ -586,6 +629,9 @@ export class Surface {
       // cleared panes to grey; that is precisely finding F3, one line long.
       gl.clearColor(PENDING[0], PENDING[1], PENDING[2], 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
+      // T-807: the pane's coverage-fog layer, for every cell this pane draws (tiles, stand-ins and
+      // surveyed places alike — they all reach the one `cellMark`).
+      gl.uniform1i(this.u.uFog, pane.fog === false ? 0 : 1);
 
       // **Which tier answers this viewport** (T-505). Decided per pane, per frame, from the pane's
       // own box and rectangle — the same pass that lays out everything else, never a mode a host
@@ -598,6 +644,19 @@ export class Surface {
       this.lastTier.set(pane.id, tier);
       viewports.push({ box: pane.box, levelF, levelT, lat });
       let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0;
+      // T-916: the shadow's provenance, counted over the tiles this pane actually DREW (stand-ins
+      // included — their cells are what is on the screen here), so the readout names a coarser
+      // last-known source only when one is visible.
+      let shadowLadder = 0, shadowCellHz = 0, shadowCellS = 0;
+      const shadowOf = (d: TileData): void => {
+        const src = d.shadowSource;
+        if (!src || src.ladder + src.unstated === 0) return;
+        shadowLadder++;
+        if (src.coarsest) {
+          shadowCellHz = Math.max(shadowCellHz, src.coarsest.fHz);
+          shadowCellS = Math.max(shadowCellS, src.coarsest.tS);
+        }
+      };
       let drawnToNs = -Infinity;
       const awaiting = this.survey === "awaiting";
       for (const a of addrs) {
@@ -630,6 +689,7 @@ export class Surface {
           // short, so the scale is measured over what was DRAWN and never over rows this copy does
           // not reach.
           if (shown.drawn) measure?.add(res.entry.data, region, shown.drawn, pane.box);
+          if (shown.drawn) shadowOf(res.entry.data);
           // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
           // is on screen decides the scale only when the user has asked for that; otherwise the
           // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
@@ -660,6 +720,7 @@ export class Surface {
             // extent, not the child's. Getting that pair the wrong way round would read a different
             // corner of the ancestor than the one being displayed.
             if (shown.drawn) measure?.add(stand.data, extentOf(lat, stand.addr), shown.drawn, pane.box);
+            if (shown.drawn) shadowOf(stand.data);
           }
           for (const c of finer) {
             this.cache.standIn(c);
@@ -668,6 +729,7 @@ export class Surface {
             late ||= shown.behind;
             if (shown.drawn) { drew = true; drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); }
             if (shown.drawn) measure?.add(c.data, own, shown.drawn, pane.box);
+            if (shown.drawn) shadowOf(c.data);
           }
           if (late) behind++;
           if (!drew) blank++;
@@ -694,7 +756,7 @@ export class Surface {
         }
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {

@@ -431,7 +431,7 @@ pub fn class_guess(
 // histogram is less cleanly bimodal"). It does — *relative to* a rectangular keying measured at the
 // transmitter. But nothing downstream of the antenna sees a rectangle: C13 hands the classifier a
 // snippet filtered to ±0.75 × OBW99, and that filter smooths the instantaneous-frequency trajectory
-// of **every** FSK emission it passes ([`crate::verify::CHANNEL_BT`] exists for exactly this
+// of **every** FSK emission it passes ([`crate::verify::CHANNEL_BT_GRID`] exists for exactly this
 // reason). So the whole family sits in one band and the classes differ only by their position
 // inside it: measured `if_bimodality` at gate+5/+10 is **0.695–0.833 for `gfsk`** against
 // 0.785–0.906 for `2fsk` — overlapping ranges, and **both entirely above 0.66**. The conjunct

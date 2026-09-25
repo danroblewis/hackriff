@@ -15,12 +15,15 @@
 
 use std::collections::BTreeMap;
 
+use hk_model::ContentClass;
 use hk_model::signature::RecipeRef;
 use hk_recipe::OutputPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::candidate::FreeParam;
+use crate::result::CheckOrigin;
+use crate::result::PipelineResult;
 use crate::skeleton::{Skeleton, SkeletonSlots};
 use crate::stage::Stage;
 
@@ -57,6 +60,13 @@ pub struct TemplateProvenance {
     /// `discovered` only: when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t: Option<String>,
+    /// `discovered` only, and **required** there: the look-elsewhere the discovering search spent
+    /// finding the check (its `L_check`), recorded at save-as-template time (ADR-0022 §5.1). Every
+    /// later use **inherits** it as `L_check`, so a search cannot launder its own multiplicity by
+    /// saving the winner and confirming free forever. The loader refuses a discovered template
+    /// without it (`discovery_unpriced`) and a builtin or user template with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_look_elsewhere_bits: Option<f32>,
     /// Where each fact-bearing field came from. Every such field of a **builtin** must be covered
     /// (the loader refuses `fact_unsourced`); a user template's uncovered fields default to
     /// `{kind: user}`.
@@ -356,12 +366,134 @@ impl Template {
         }
     }
 
+    /// Where the check a search seeded from this template reaches comes from (ADR-0022 §5.1),
+    /// which decides its `L_check` and whether ADR-0021 §8.2's null control gates it.
+    ///
+    /// - A template **discovered** by an earlier search inherits that search's look-elsewhere —
+    ///   [`CheckOrigin::Discovered`] with `discovery_look_elsewhere_bits` — and counts as searched,
+    ///   whatever else it fixes. This is the laundering rule; no other input can make a
+    ///   discovered template template-fixed.
+    /// - A `builtin` or `user` template is [`CheckOrigin::TemplateFixed`] only when it is
+    ///   recipe-backed and leaves **no** parameter free: generator, width, start bit, tail, bit
+    ///   order and class count were then all fixed before the data was seen. A free parameter
+    ///   anywhere is read as a possibly-searched check ([`CheckOrigin::Searched`]) — this build
+    ///   cannot yet tell a check slot's parameter from a clock's, and the conservative reading
+    ///   costs recall (the null control must pass), never soundness.
+    /// - A skeleton is an open search: [`CheckOrigin::Searched`].
+    pub fn check_origin(&self) -> CheckOrigin {
+        match self.provenance.kind {
+            AuthorKind::Discovered => CheckOrigin::Discovered {
+                look_elsewhere_bits: self
+                    .provenance
+                    .discovery_look_elsewhere_bits
+                    .filter(|b| b.is_finite() && *b >= 0.0),
+            },
+            AuthorKind::Builtin | AuthorKind::User
+                if self.recipe.is_some() && self.skeleton.is_none() && self.free.is_empty() =>
+            {
+                CheckOrigin::TemplateFixed
+            }
+            AuthorKind::Builtin | AuthorKind::User => CheckOrigin::Searched,
+        }
+    }
+
     /// The skeleton this template offers, for a generic template.
     pub fn as_skeleton(&self) -> Option<Skeleton> {
         self.skeleton
             .clone()
             .filter(|_| self.recipe.is_none())
             .map(|body| Skeleton::from_body(self.id.clone(), self.version, body))
+    }
+}
+
+/// A recipe can restrict its output ceiling, never upgrade it (`OutputPolicy`'s own doc comment):
+/// [`save_as_template`] applies the same rule to a saved template, so a discovered template can
+/// never promise more than the job that discovered it was allowed to see.
+fn clamp_output_policy(mut policy: OutputPolicy, source_class: ContentClass) -> OutputPolicy {
+    if source_class != ContentClass::Unrestricted
+        && policy.content_class == ContentClass::Unrestricted
+    {
+        policy.content_class = source_class;
+    }
+    policy
+}
+
+/// ADR-0015 §4.3: `POST /api/analyze/{id}/results/{rank}/template` writes a user template with
+/// `provenance.discovered` from one of a finished job's [`PipelineResult`]s.
+///
+/// - **Solved stages become fixed parameters.** [`PipelineResult::recipe`] is already concrete —
+///   "every free parameter bound" (its own doc comment) — so a discovered template simply carries
+///   that recipe with an **empty** `free` list: every node's value is what the search found,
+///   never narrowed to a range. (§4.3 also widens *unsolved* stages to "the job's ranges" at twice
+///   their measured uncertainty; `PipelineResult` does not carry the original search-space domains
+///   for stages past [`PipelineResult::stage_reached`], so a discovered template today is always
+///   fully bound rather than partly free — a narrower, but still runnable and rankable, document.
+///   Widening it is follow-up work once a result exposes those domains.)
+/// - **`output_policy` is clamped** to `source_class`, the acquired IQ's content class, per
+///   [`clamp_output_policy`].
+/// - **Discovered templates rank like any other and confirm nothing** (§4.3): nothing here writes
+///   `Validation::Field`, which only accrues once a *later* job's winning pipeline actually comes
+///   from this template (§15.6's fourth, accrued level).
+///
+/// [`save_as_template`]'s request: the id/name/description a caller (the API route) supplies plus
+/// the discovery provenance §4.3 requires. Bundled so the function stays under clippy's argument
+/// cap and a caller can name each field instead of ordering positionals.
+#[derive(Clone, Debug)]
+pub struct SaveAsTemplate {
+    /// Stable id for the new template.
+    pub id: String,
+    /// Display name, written fresh.
+    pub name: String,
+    /// Description, written fresh.
+    pub description: String,
+    /// The analyze job the result came from.
+    pub job_id: String,
+    /// The emitter the job attached to, if any.
+    pub emitter_id: Option<String>,
+    /// When the template was saved.
+    pub t: String,
+    /// The acquired IQ's content class, which [`clamp_output_policy`] never lets the saved
+    /// template's ceiling exceed.
+    pub source_class: ContentClass,
+}
+
+/// Callers validate the id (`hk_model::signature::is_signature_id`-shaped) and uniqueness against
+/// the library themselves; this only builds the document.
+pub fn save_as_template(result: &PipelineResult, req: SaveAsTemplate) -> Template {
+    Template {
+        schema: TEMPLATE_SCHEMA.into(),
+        schema_version: TEMPLATE_SCHEMA_VERSION,
+        id: req.id,
+        version: 1,
+        name: req.name,
+        description: req.description,
+        provenance: TemplateProvenance {
+            kind: AuthorKind::Discovered,
+            job_id: Some(req.job_id),
+            emitter_id: req.emitter_id,
+            t: Some(req.t),
+            // ADR-0022 §5.1, the laundering rule: the discovering search's `L_check` rides with
+            // the template and every later use inherits it. A result with no priced hold-out
+            // records none, and such a template is refused at load and can never confirm.
+            discovery_look_elsewhere_bits: result
+                .holdout
+                .as_ref()
+                .and_then(|h| h.l_check)
+                .filter(|b| b.is_finite() && *b >= 0.0),
+            facts: Vec::new(),
+        },
+        recipe: Some(RecipeRef {
+            id: result.recipe.id.clone(),
+            version: result.recipe.version,
+        }),
+        skeleton: None,
+        free: Vec::new(),
+        priors: TemplatePriors::default(),
+        timing: None,
+        evidence_targets: BTreeMap::new(),
+        plausibility: Vec::new(),
+        output_policy: clamp_output_policy(result.recipe.output_policy.clone(), req.source_class),
+        validation: Vec::new(),
     }
 }
 
@@ -429,5 +561,145 @@ mod tests {
     fn an_unknown_key_is_refused_not_ignored() {
         let bad = POCSAG.replacen("\"timing\"", "\"tune_to_hz\": 1.0, \"timing\"", 1);
         assert!(serde_json::from_str::<Template>(&bad).is_err());
+    }
+
+    /// §4.3's `save_as_template` (M-10, T-861).
+    mod save_as_template_tests {
+        use hk_recipe::Recipe;
+
+        use super::*;
+        use crate::result::{PipelineResult, Verdict};
+        use crate::stage::Stage as SynthStage;
+
+        fn recipe() -> Recipe {
+            serde_json::from_str(include_str!("../../../recipes/adsb.recipe.json")).unwrap()
+        }
+
+        fn solved() -> PipelineResult {
+            PipelineResult {
+                rank: 1,
+                verdict: Verdict::Solved,
+                summary: "s".into(),
+                recipe: recipe(),
+                template: None,
+                stage_reached: SynthStage::S5,
+                stages: Vec::new(),
+                evidence_bits: 40.0,
+                prior_bits: 0.0,
+                analytic_holdout_bits: Some(30.0),
+                check: None,
+                frames_preview: Vec::new(),
+                characterisation: None,
+                holdout: None,
+            }
+        }
+
+        /// T-575 × T-861: save-as-template records the discovering search's `L_check`
+        /// (ADR-0022 §5.1), and the saved template hands it on as an inherited charge.
+        #[test]
+        fn a_saved_template_carries_its_discovery_look_elsewhere() {
+            let mut r = solved();
+            r.holdout = Some(crate::result::HoldoutEvidence {
+                evidence_bits: 40.0,
+                analytic_bits: 30.0,
+                check_bits: Some(27.0),
+                l_check: Some(21.0),
+                check_width: Some(16),
+                differences: 3,
+                check_origin: CheckOrigin::Searched,
+                stages: Vec::new(),
+                null_control: None,
+            });
+            let t = save_as_template(
+                &r,
+                SaveAsTemplate {
+                    id: "found".into(),
+                    name: "Found".into(),
+                    description: String::new(),
+                    job_id: "a9".into(),
+                    emitter_id: None,
+                    t: "2026-09-25T00:00:00Z".into(),
+                    source_class: ContentClass::Unrestricted,
+                },
+            );
+            assert_eq!(t.provenance.discovery_look_elsewhere_bits, Some(21.0));
+            assert_eq!(t.check_origin().inherited_bits(), Some(21.0));
+            assert!(t.check_origin().searched());
+        }
+
+        #[test]
+        fn writes_a_discovered_template_with_the_recipe_fully_bound() {
+            let r = solved();
+            let t = save_as_template(
+                &r,
+                SaveAsTemplate {
+                    id: "my-adsb".into(),
+                    name: "My ADS-B".into(),
+                    description: "Saved from a run.".into(),
+                    job_id: "a3".into(),
+                    emitter_id: Some("e7".to_owned()),
+                    t: "2026-09-25T00:00:00Z".into(),
+                    source_class: ContentClass::Unrestricted,
+                },
+            );
+            assert_eq!(t.schema, TEMPLATE_SCHEMA);
+            assert_eq!(t.schema_version, TEMPLATE_SCHEMA_VERSION);
+            assert_eq!(t.id, "my-adsb");
+            assert_eq!(t.version, 1);
+            assert_eq!(t.provenance.kind, AuthorKind::Discovered);
+            assert_eq!(t.provenance.job_id.as_deref(), Some("a3"));
+            assert_eq!(t.provenance.emitter_id.as_deref(), Some("e7"));
+            assert!(t.provenance.t.is_some());
+            assert_eq!(
+                t.recipe,
+                Some(RecipeRef {
+                    id: r.recipe.id.clone(),
+                    version: r.recipe.version
+                })
+            );
+            assert!(t.skeleton.is_none());
+            assert!(t.free.is_empty(), "the result's recipe is already bound");
+            // No priced hold-out: no discovery charge, so the template can never confirm.
+            assert_eq!(t.provenance.discovery_look_elsewhere_bits, None);
+            assert_eq!(
+                t.check_origin(),
+                CheckOrigin::Discovered {
+                    look_elsewhere_bits: None
+                }
+            );
+            assert_eq!(t.output_policy, r.recipe.output_policy);
+            // Never confirms anything and accrues no field validation on save.
+            assert!(t.validation.is_empty());
+            // A discovered template still parses back through the shared schema.
+            let back: Template = serde_json::from_value(serde_json::to_value(&t).unwrap()).unwrap();
+            assert_eq!(back, t);
+        }
+
+        #[test]
+        fn output_policy_is_clamped_to_the_source_class_never_upgraded() {
+            let r = solved();
+            assert_eq!(
+                r.recipe.output_policy.content_class,
+                ContentClass::Unrestricted,
+                "the fixture recipe is unrestricted, so the clamp is exercised below"
+            );
+            fn req(source_class: ContentClass) -> SaveAsTemplate {
+                SaveAsTemplate {
+                    id: "id".into(),
+                    name: "n".into(),
+                    description: "d".into(),
+                    job_id: "a1".into(),
+                    emitter_id: None,
+                    t: "t".into(),
+                    source_class,
+                }
+            }
+            let t = save_as_template(&r, req(ContentClass::MetadataOnly));
+            assert_eq!(t.output_policy.content_class, ContentClass::MetadataOnly);
+
+            // A source class at least as permissive never downgrades the recipe's own ceiling.
+            let t2 = save_as_template(&r, req(ContentClass::Unrestricted));
+            assert_eq!(t2.output_policy.content_class, ContentClass::Unrestricted);
+        }
     }
 }

@@ -33,7 +33,7 @@ Write **`handback.json` at the exact path your brief names** (`$HACKRIFF_OPS/wor
  "observed_but_not_chased": ["follow-ups you saw and correctly left alone, one line each"]}
 ```
 
-`done` is refused over a failing test, so the `tests` entries must be real exit codes from the commands you ran. `cancel` is a **proposal** with evidence — a reviewer confirms it, you do not close the ticket. If you cannot write the file, print one line `HANDBACK: <the same JSON>` as your last output. Then stop — you don't merge, you don't spawn subagents.
+`done` is refused over a failing test, so the `tests` entries must be real exit codes from the commands you ran. A deliberate **red proof** — your new test run on the old code, or with the defect re-injected — is listed with its real non-zero exit **and `"expect": "red"`**; it counts only beside a green run (list the same test passing with your fix). `cancel` is a **proposal** with evidence — a reviewer confirms it, you do not close the ticket. If you cannot write the file, print one line `HANDBACK: <the same JSON>` as your last output. Then stop — you don't merge, you don't spawn subagents.
 
 ## The board is not yours to edit
 Never edit `docs/tasks.yaml` by hand (a hook blocks it). Your result reaches the board through `handback.json` (the runner writes it with `just task result`); anything else about the ticket — a note, a dependency you found — goes in `observed_but_not_chased` or via `just task note <T-id> --text "<text>"`.

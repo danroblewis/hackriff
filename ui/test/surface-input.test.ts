@@ -23,7 +23,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { attachSurfaceInput, DRAG_PX, type SurfaceRegion } from "../src/surface/input";
-import { dragIntent } from "../src/surface/preview";
+import { dragIntent, HOLD_TO_MARK_MS, pinchZoom, touchIntent } from "../src/surface/preview";
 import type { SurfacePreview } from "../src/surface/preview";
 
 // ---------------------------------------------------------------------------
@@ -56,8 +56,8 @@ function harness(opts: Parameters<typeof attachSurfaceInput>[2] = {}) {
     paneAt: () => "p0",
     drag: (id: string, dx: number, dy: number) => calls.push({ fn: "drag", args: [dx, dy] }),
     dragMap: (dx: number, dy: number) => calls.push({ fn: "dragMap", args: [dx, dy] }),
-    wheel: () => calls.push({ fn: "wheel", args: [] }),
-    wheelMap: () => calls.push({ fn: "wheelMap", args: [] }),
+    wheel: (_id: string, _p: unknown, factor: number) => calls.push({ fn: "wheel", args: [factor] }),
+    wheelMap: (_p: unknown, factor: number) => calls.push({ fn: "wheelMap", args: [factor] }),
     goToOnMap: () => calls.push({ fn: "goToOnMap", args: [] }),
     endDrag: (id: string) => settles.push(id),
     endDragMap: () => settles.push("map"),
@@ -474,4 +474,156 @@ test("annotate/pin: T-340's control — NO call reaches the network over the who
   } finally { if (real) g.fetch = real; else delete g.fetch; }
   assert.deepEqual(net, [], "an authoring gesture reached the network from the input layer");
   assert.equal(produced, 3, "box + note in Annotate, marker in Pin — or the run proves nothing");
+});
+
+// ---------------------------------------------------------------------------
+// T-824 (docs/23 §10.5): touch. The view/device line must survive a finger: pinch = zoom (view),
+// two-finger drag = pan (view), hold-then-drag = region select (the input to the retune OFFER, never
+// a retune), long-press = the context menu. A quick finger drag still pans, and a tap still selects.
+// ---------------------------------------------------------------------------
+
+/** A finger: `pointerType: "touch"`, with the event's own `timeStamp` (the hold is read off it). */
+const finger = (id: number, x: number, y: number, t: number, extra: Record<string, unknown> = {}) =>
+  ({ button: 0, buttons: 1, pointerType: "touch", pointerId: id, clientX: x, clientY: y, timeStamp: t, ...extra });
+
+test("touch: a finger that moves at once pans; one HELD first marks out a region and pans nothing", () => {
+  const got: SurfaceRegion[] = [];
+  const h = harness({ onRegion: (r) => got.push(r), onRegionDrag: () => {} });
+  h.fire("pointerdown", finger(1, 400, 300, 1000));
+  h.fire("pointermove", finger(1, 402, 301, 1020)); // under DRAG_PX: nothing moves yet
+  assert.deepEqual(h.calls, [], "a finger's first jitter must not pan (a tap stays a tap)");
+  h.fire("pointermove", finger(1, 460, 340, 1060));
+  h.fire("pointermove", finger(1, 520, 380, 1100));
+  h.fire("pointerup", finger(1, 520, 380, 1120, { buttons: 0 }));
+  assert.deepEqual(h.calls.map((c) => c.fn), ["drag", "drag"], "a quick finger drag pans");
+  // The catch-up drag starts from the PRESS, so the data under the finger stays under it.
+  assert.deepEqual(h.calls[0].args, [60, -40]);
+  assert.deepEqual(got, [], "…and commits no region");
+
+  const h2 = harness({ onRegion: (r) => got.push(r), onRegionDrag: () => {} });
+  h2.fire("pointerdown", finger(1, 400, 300, 1000));
+  h2.fire("pointermove", finger(1, 401, 300, 1000 + HOLD_TO_MARK_MS + 10)); // still resting
+  h2.fire("pointermove", finger(1, 460, 340, 1000 + HOLD_TO_MARK_MS + 50));
+  h2.fire("pointermove", finger(1, 520, 380, 1000 + HOLD_TO_MARK_MS + 90));
+  h2.fire("pointerup", finger(1, 520, 380, 1000 + HOLD_TO_MARK_MS + 100, { buttons: 0 }));
+  assert.deepEqual(h2.calls, [], "a region stroke moved the viewport");
+  assert.equal(got.length, 1, "a held finger's drag commits exactly one region");
+  assert.deepEqual(got[0].a, { x: 400, y: H - 300 }, "the region starts at the PRESS, not where it was decided");
+  assert.deepEqual(got[0].b, { x: 520, y: H - 380 });
+});
+
+test("touch: the meaning is latched — a pan that later pauses never becomes a region", () => {
+  const got: SurfaceRegion[] = [];
+  const h = harness({ onRegion: (r) => got.push(r), onRegionDrag: () => {} });
+  h.fire("pointerdown", finger(1, 400, 300, 0));
+  h.fire("pointermove", finger(1, 440, 300, 50));
+  h.fire("pointermove", finger(1, 441, 300, 50 + 5 * HOLD_TO_MARK_MS)); // rests mid-pan
+  h.fire("pointermove", finger(1, 500, 360, 60 + 5 * HOLD_TO_MARK_MS));
+  h.fire("pointerup", finger(1, 500, 360, 70 + 5 * HOLD_TO_MARK_MS, { buttons: 0 }));
+  assert.deepEqual(got, []);
+  assert.ok(h.calls.every((c) => c.fn === "drag") && h.calls.length === 3);
+});
+
+test("touch: a tap selects; a long-press without travel is the context menu, at the press", () => {
+  const clicks: unknown[] = [], menus: unknown[] = [];
+  const h = harness({ onClick: (p) => clicks.push(p), onContext: (p) => menus.push(p), onRegion: () => {} });
+  h.fire("pointerdown", finger(1, 400, 300, 0));
+  h.fire("pointerup", finger(1, 402, 301, 80, { buttons: 0 }));
+  assert.equal(clicks.length, 1, "a tap is a click");
+  assert.deepEqual(menus, []);
+  // The browser's own mid-hold `contextmenu` is swallowed while the finger is down…
+  let prevented = false;
+  h.fire("pointerdown", finger(1, 400, 300, 1000));
+  h.fire("contextmenu", { clientX: 400, clientY: 300, preventDefault: () => { prevented = true; } });
+  assert.ok(prevented, "the browser menu must not open over a finger that may still drag a region");
+  assert.deepEqual(menus, [], "…and not acted on mid-hold");
+  h.fire("pointerup", finger(1, 401, 300, 1000 + HOLD_TO_MARK_MS + 1, { buttons: 0 }));
+  assert.deepEqual(menus, [{ x: 400, y: H - 300 }], "…the release of a long-press opens it, at the press");
+  assert.equal(clicks.length, 1, "a long-press is not also a click");
+  assert.deepEqual(h.calls, []);
+});
+
+test("touch: two fingers pinch — spreading zooms IN about their midpoint, and moving them pans", () => {
+  const regions: SurfaceRegion[] = [];
+  const h = harness({ onRegion: (r) => regions.push(r), onRegionDrag: () => {} });
+  h.fire("pointerdown", finger(1, 300, 300, 0));
+  h.fire("pointerdown", finger(2, 500, 300, 10)); // spread 200
+  h.fire("pointermove", finger(2, 700, 300, 30)); // spread 400, midpoint +100 px
+  assert.deepEqual(h.calls.map((c) => c.fn), ["wheel", "drag"]);
+  assert.equal(h.calls[0].args[0], 0.5, "fingers twice as far apart halve the span (factor < 1 zooms in)");
+  assert.deepEqual(h.calls[1].args, [100, -0], "the midpoint's travel pans the view with it");
+  h.fire("pointerup", finger(2, 700, 300, 40, { buttons: 0 }));
+  assert.deepEqual(h.settles, ["p0"], "a pinch commits its follow/pause decision when it ends (T-486)");
+  // The finger left down is inert: carrying it on as a pan would jump the view.
+  h.fire("pointermove", finger(1, 200, 200, 50));
+  h.fire("pointerup", finger(1, 200, 200, 60, { buttons: 0 }));
+  assert.equal(h.calls.length, 2, "the finger left after a pinch moved the view");
+  assert.deepEqual(regions, []);
+
+  // A held first finger's region stroke is ABANDONED by a second finger, never committed.
+  const seen: (SurfaceRegion | null)[] = [];
+  const h2 = harness({ onRegion: (r) => regions.push(r), onRegionDrag: (r) => seen.push(r) });
+  h2.fire("pointerdown", finger(1, 300, 300, 0));
+  h2.fire("pointermove", finger(1, 360, 340, HOLD_TO_MARK_MS + 5));
+  h2.fire("pointerdown", finger(2, 500, 300, HOLD_TO_MARK_MS + 10));
+  assert.equal(seen[seen.length - 1], null, "the pending region box is retracted");
+  h2.fire("pointerup", finger(1, 360, 340, HOLD_TO_MARK_MS + 20, { buttons: 0 }));
+  h2.fire("pointerup", finger(2, 500, 300, HOLD_TO_MARK_MS + 30, { buttons: 0 }));
+  assert.deepEqual(regions, [], "a region was committed by a stroke a pinch took over");
+});
+
+test("touch: pinchZoom/touchIntent are the one statement of what a finger means", () => {
+  assert.equal(pinchZoom(100, 200).factor, 0.5);
+  assert.equal(pinchZoom(200, 100).factor, 2);
+  assert.equal(pinchZoom(0, 0).factor, 1, "two fingers meeting cannot divide by zero");
+  assert.equal(pinchZoom(10_000, 1).factor, 4, "one event is clamped like a wheel");
+  assert.deepEqual(pinchZoom(1, 2).axes, { freq: true, time: true }, "a pinch is uniform, like a plain wheel");
+  assert.equal(touchIntent(HOLD_TO_MARK_MS - 1), "pan");
+  assert.equal(touchIntent(HOLD_TO_MARK_MS), "region");
+  assert.equal(touchIntent(Number.NaN), "pan");
+});
+
+test("touch: T-340's control — pinch, pan, hold-drag, tap and long-press reach NO network", () => {
+  const g = globalThis as { fetch?: unknown };
+  const real = g.fetch;
+  const net: unknown[] = [];
+  g.fetch = (...args: unknown[]) => { net.push(args); return Promise.reject(new Error("a gesture must not reach the network")); };
+  const regions: SurfaceRegion[] = [];
+  try {
+    const h = harness({ onRegion: (r) => regions.push(r), onRegionDrag: () => {}, onClick: () => {}, onContext: () => {}, onHover: () => {} });
+    h.fire("pointerdown", finger(1, 300, 300, 0));
+    h.fire("pointerdown", finger(2, 500, 300, 5));
+    h.fire("pointermove", finger(2, 600, 350, 10));
+    h.fire("pointerup", finger(2, 600, 350, 15, { buttons: 0 }));
+    h.fire("pointerup", finger(1, 300, 300, 20, { buttons: 0 }));
+    h.fire("pointerdown", finger(1, 400, 300, 100));
+    h.fire("pointermove", finger(1, 480, 360, 110));
+    h.fire("pointerup", finger(1, 480, 360, 120, { buttons: 0 }));
+    h.fire("pointerdown", finger(1, 400, 300, 1000));
+    h.fire("pointermove", finger(1, 480, 360, 2000));
+    h.fire("pointerup", finger(1, 480, 360, 2010, { buttons: 0 }));
+    h.fire("pointerdown", finger(1, 400, 300, 3000));
+    h.fire("pointerup", finger(1, 400, 300, 3010, { buttons: 0 }));
+    h.fire("pointerdown", finger(1, 400, 300, 4000));
+    h.fire("pointerup", finger(1, 400, 300, 5000, { buttons: 0 }));
+    assert.ok(h.calls.some((c) => c.fn === "wheel") && h.calls.some((c) => c.fn === "drag"), "the vocabulary ran");
+  } finally { if (real) g.fetch = real; else delete g.fetch; }
+  assert.deepEqual(net, [], "a touch gesture reached the network");
+  assert.equal(regions.length, 1, "the hold-drag produced no region, so the run proves nothing");
+});
+
+test("touch: a finger in Annotate strokes a box and in Pin taps a marker — a tool mode is a mode of its own", () => {
+  const boxes: SurfaceRegion[] = [];
+  const h = harness({ annotateMode: "annotate", onAnnotateBox: (r) => boxes.push(r), onAnnotateDrag: () => {} });
+  h.fire("pointerdown", finger(1, 400, 300, 0));
+  h.fire("pointermove", finger(1, 460, 340, 20));
+  h.fire("pointerup", finger(1, 460, 340, 30, { buttons: 0 }));
+  assert.equal(boxes.length, 1, "a quick finger drag in Annotate draws the box, it does not pan");
+  assert.deepEqual(h.calls, []);
+  const points: string[] = [], clicks: unknown[] = [];
+  const h2 = harness({ annotateMode: "pin", onAnnotatePoint: (_p, kind) => points.push(kind), onClick: (p) => clicks.push(p) });
+  h2.fire("pointerdown", finger(1, 400, 300, 0));
+  h2.fire("pointerup", finger(1, 401, 300, 40, { buttons: 0 }));
+  assert.deepEqual(points, ["marker"], "a finger tap in Pin drops a marker");
+  assert.deepEqual(clicks, [], "…and is not also a focus");
 });

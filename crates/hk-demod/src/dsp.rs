@@ -62,6 +62,12 @@ impl<T: FirSample> FirDecimator<T> {
         self.phase = 0;
     }
 
+    /// Zeroes the history but keeps the decimation phase, so a filter cloned from a running
+    /// one emits on the same input samples without inheriting its signal (no allocation).
+    pub fn clear_history(&mut self) {
+        self.hist.fill(T::default());
+    }
+
     /// Group delay in input samples.
     pub fn group_delay(&self) -> f64 {
         (self.taps.len() as f64 - 1.0) / 2.0

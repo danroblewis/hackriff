@@ -204,6 +204,19 @@ pub fn stage(
     registry: &Registry,
     input: PortInfo,
 ) -> Result<Staged, StageError> {
+    stage_moved(old, recipe, registry, input, false)
+}
+
+/// [`stage`] for an edit that also moves the channel centre (`moved`, an applied refinement,
+/// T-870): planned with [`EditPlan::with_channel_moved`], so every surviving node is rebuilt as
+/// for any `input` change.
+pub fn stage_moved(
+    old: Option<(&Recipe, &Shape)>,
+    recipe: Arc<Recipe>,
+    registry: &Registry,
+    input: PortInfo,
+    moved: bool,
+) -> Result<Staged, StageError> {
     let resolved = recipe.validate(registry).map_err(|errors| StageError {
         status: 400,
         code: "invalid",
@@ -219,7 +232,10 @@ pub fn stage(
             format!("this runtime delivers {} input", input.ty),
         ));
     }
-    let plan = old.map(|(r, _)| EditPlan::between(r, &recipe, registry));
+    let plan = old.map(|(r, _)| {
+        let p = EditPlan::between(r, &recipe, registry);
+        if moved { p.with_channel_moved() } else { p }
+    });
     let input_changed = plan.as_ref().is_some_and(|p| p.input_changed);
     let doc_index: BTreeMap<&str, usize> = recipe
         .nodes

@@ -235,3 +235,149 @@ fn hk_serve_answers_status_and_capture_routes_while_a_144gb_ring_allocates() {
     gate.release();
     stop_server(serving);
 }
+
+/// **T-920: while the ring allocates, `/api/coverage` already answers — and says the ring is not
+/// the one answering.**
+///
+/// The failure this pins, observed on a loaded Linux host and never on a quiet Mac: the IQ ring
+/// opens on a background thread (T-178/T-217), while the **open dwell** (T-596) rasterises the
+/// tuned band from the first poll. So there is a real window — microseconds on an idle box, whole
+/// seconds under load or with a large quota — in which `/api/coverage` reports
+/// `any.observed_cells > 0` with `sources[iq-ring].available: false`. A test that waits on the
+/// observed count and then asserts something about the ring walks straight into it; that is
+/// exactly what `api_contract::coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked`
+/// did, 4/4 red on node2 and green on the Mac, for a reason that has nothing to do with Linux.
+///
+/// Two things are asserted, and the first is the one that makes the second matter:
+///
+///  1. the window is **real** — coverage genuinely answers `observed` while the ring is held in
+///     `allocating`, from the open dwell alone;
+///  2. the ring's row **says so**: `available: false` with `state: "allocating"` and the ring's
+///     own reason — never a bare `false` a client has to guess at. That is T-920's product
+///     change, proved through the real HTTP API rather than at the seam.
+///
+/// RED before the change: (2) finds no `state` or `reason` key at all on the row.
+#[test]
+fn coverage_answers_while_the_ring_allocates_and_the_ring_row_says_it_is_not_answering() {
+    let gate = Arc::new(GatedAllocation::default());
+    let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
+    let serving = start(&ServeOptions {
+        source: ServeSource::HackRf {
+            spec: format!("mock:{}", fixture_path().display()),
+            live: LiveArgs::default(),
+            extra: Vec::new(),
+        },
+        data_dir: Some(dir.clone()),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        // The same 144 GB staging quota the test above uses, so the gate holds allocation open
+        // for as long as the assertions need without reserving or writing any of it.
+        iq_buffer: IqBufferArgs {
+            retention_s: Some(3600.0),
+            max_bytes: None,
+        },
+        iq_buffer_hooks: Some(IqBufferHooksOverride(gate.clone())),
+    })
+    .unwrap();
+    let addr = serving.server.local_addr();
+
+    // The fixture's own band (100.8 MHz ± 1.2 MHz): what the mock front end is tuned to, and what
+    // the dwell in flight is therefore a record of.
+    let (lo, hi) = (100.8e6 - 1.2e6, 100.8e6 + 1.2e6);
+    let query = format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let coverage = loop {
+        let (st, v) = get(addr, &query);
+        // The gate must still be holding allocation open, or this proves nothing about the
+        // window — it would just be a normal, fully-opened ring.
+        let (_, b) = get(addr, "/api/iqbuffer");
+        assert_eq!(
+            b["allocation"], "allocating",
+            "the ring finished opening before the window could be observed (gate released \
+             early?): {b}"
+        );
+        if st == 200 && v["any"]["observed_cells"].as_u64().unwrap_or(0) > 0 {
+            break v;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "coverage never reported an observed cell while the ring allocated: {v}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let src = |kind: &str| -> Value {
+        coverage["sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .find(|s| s["kind"] == kind)
+            .unwrap_or_else(|| panic!("the {kind} source row: {coverage}"))
+            .clone()
+    };
+
+    // 1. The window is real: the band reads observed, and it is NOT the ring that said so.
+    let open = src("open-dwell");
+    assert!(
+        open["spans"].as_u64().unwrap_or(0) > 0,
+        "the dwell in flight is what carried the tuned band here: {coverage}"
+    );
+    assert_eq!(src("iq-ring")["spans"], 0, "{coverage}");
+
+    // 2. And the ring's row states which negative it is, in the ring's own words.
+    let ring = src("iq-ring");
+    assert_eq!(ring["available"], false, "{coverage}");
+    assert_eq!(
+        ring["state"], "allocating",
+        "a ring that is still being laid down must say so, not serve a bare `available: false` \
+         a client cannot tell from a refusal: {coverage}"
+    );
+    let (_, iq) = get(addr, "/api/iqbuffer");
+    assert_eq!(
+        ring["reason"], iq["reason"],
+        "the coverage row quotes the ring's own reason, the one /api/iqbuffer is serving: \
+         {coverage}"
+    );
+    assert!(
+        ring["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("allocating")),
+        "{coverage}"
+    );
+
+    // 3. Non-vacuity: once the ring is open the same row flips, so none of the above passes by
+    //    the server simply never calling a ring available.
+    gate.release();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (st, v) = get(addr, &query);
+        if st == 200 {
+            let ring = v["sources"]
+                .as_array()
+                .expect("sources")
+                .iter()
+                .find(|s| s["kind"] == "iq-ring")
+                .cloned()
+                .expect("the iq-ring row");
+            if ring["available"] == true {
+                assert_eq!(ring["state"], "open", "{v}");
+                assert_eq!(ring["reason"], Value::Null, "{v}");
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the ring never became available after the gate was released: {v}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    stop_server(serving);
+}

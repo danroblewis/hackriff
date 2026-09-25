@@ -122,6 +122,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // emitter's presence track
     ("GET", "/api/events"),
     ("GET", "/api/inventory/{id}/presence"),
+    // T-812 (MAP-12): ranked band-plan allocations over a viewport, as explanations - suggestions,
+    // never truth, never a tile channel, never pre-populating the inventory
+    ("GET", "/api/priors"),
     ("GET", "/api/analysis/strongest"),
     // T-341: the achievable (centre, span) grid, and which tier answers for a requested state
     ("GET", "/api/navigation"),
@@ -135,6 +138,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     // coarse-zoom event aggregate that a tile deliberately does not carry (docs/16 §5.3)
     ("GET", "/api/tiles"),
     ("GET", "/api/tiles/events"),
+    // T-897: traced (t, f) paths - chirps, sweeps, hop sequences - over a viewport (the map's
+    // `paths` layer, docs/23 §10.6 rule 2)
+    ("GET", "/api/paths"),
+    // T-898: the device's own route through frequency - the recorded tune intervals as a traced
+    // path per front end (the map's `tune` layer, docs/23 §10.6 rule 2)
+    ("GET", "/api/tune-history"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
     // T-463: the one playhead of historical playback (view state over recorded history; audio at
@@ -178,6 +187,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/measurements/{id}"),
     ("PUT", "/api/measurements/{id}"),
     ("DELETE", "/api/measurements/{id}"),
+    // T-823 MAP-23 research export
+    ("GET", "/api/research/export"),
     // T-816 MAP-16 human-authored annotations
     ("GET", "/api/annotations"),
     ("POST", "/api/annotations"),
@@ -298,6 +309,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/anomalies/{id}/reopen"),
     // T-273 trunking load index (metadata only, AWARE-067)
     ("GET", "/api/trunking/load"),
+    // T-891 VLF/LF science on the accessory-fed source (SPACE-001, SPACE-041, PROP-019)
+    ("GET", "/api/vlf"),
 ];
 
 /// Server settings.
@@ -411,6 +424,9 @@ pub struct ApiState {
     /// T-273: the trunking store behind `GET /api/trunking/load` ([`crate::trunking`]), the
     /// metadata-only load index over the GrantEvent stream (AWARE-067); `None` answers 503.
     pub trunking: Option<Arc<Mutex<Repository>>>,
+    /// T-891: the run's accessory-fed VLF services behind `GET /api/vlf` ([`crate::vlf`]); `None`
+    /// answers 503, an attached-but-empty set answers an empty `accessories` list.
+    pub vlf: Option<Arc<dyn crate::vlf::VlfControl>>,
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
@@ -1283,10 +1299,13 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::measurements::route(state, &ctl)) // T-818
         .or_else(|| crate::annotations::route(state, &ctl)) // T-816
         .or_else(|| crate::views::route(state, &ctl)) // T-819
+        .or_else(|| crate::research_export::route(state, &ctl)) // T-823 (MAP-23)
         .or_else(|| crate::collections::route(state, &ctl)) // T-817 (MAP-17)
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
+        .or_else(|| crate::paths::route(state, &ctl)) // T-897
+        .or_else(|| crate::tune_history::route(state, &ctl)) // T-898
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
         .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))
@@ -1308,6 +1327,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::schedule::route(state, &ctl)) // T-120
         .or_else(|| crate::reports::route(state, &ctl)) // T-121
         .or_else(|| crate::trunking::route(state, &ctl)) // T-273
+        .or_else(|| crate::vlf::route(state, &ctl)) // T-891
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122
     {
@@ -1332,6 +1352,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/floor"
         | "/api/inventory"
         | "/api/events"
+        | "/api/priors"
         | "/api/analysis/strongest"
         | "/api/navigation"
         | "/api/timeline"
@@ -1374,6 +1395,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/inventory" => inventory(state, &req),
         // T-264 (ADR-0017 TM-8): the durable all-time catalogue, where Explore is window-scoped.
         "/api/events" => events(state, &req),
+        // T-812 (MAP-12): the band plan as ranked suggestions for this box, computed on demand.
+        "/api/priors" => crate::priors::priors_json(state, &req.query),
         "/api/analysis/strongest" => strongest(state, &req),
         // T-341: the backend owns which capture states are realizable; the client snaps against
         // this grid rather than deciding for itself what the front end can do.

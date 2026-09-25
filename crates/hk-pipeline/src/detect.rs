@@ -1048,6 +1048,8 @@ impl Writer {
                     Ok((tracks, links)) => {
                         add(&dc.track_rows, tracks as u64);
                         add(&dc.track_links, links as u64);
+                        // T-913: links whose detection was not stored are counted, not silent.
+                        set(&dc.track_links_dropped, self.tracks.links_dropped());
                         true
                     }
                     Err(_) => {

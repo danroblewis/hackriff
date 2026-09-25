@@ -10,7 +10,8 @@
 //! What is frozen (§12.4's table, §12.9 stage 0's list):
 //!
 //! 1. **Discovery** — `GET /api/streams` `on_demand[listen]`: `kind`, `datatype`,
-//!    `sample_rate_hz`, and `params` exactly `emitter, detection, f_lo, f_hi` (no `mode`, ever).
+//!    `sample_rate_hz`, and `params` exactly `emitter, detection, f_lo, f_hi, channels` (no
+//!    `mode`, ever). `channels` is T-874's deliberate, opt-in addition (ADR-0015 §12.13, LP-10).
 //! 2. **Header keys** — the header's top-level key set is exactly today's; the `audio` profile's
 //!    key set is exactly today's plus only the additive keys ADR-0011 §8.2 names inside it
 //!    (`pipeline_id`, `recipe`, `output_id`, `edit_rev` — T-866 serves them there, on a recipe's
@@ -37,6 +38,12 @@
 //!    reconnect (§12.6, docs/20 D5: kept for the whole migration).
 //! 8. **Per-consumer** — closing the socket stops the chain (`running` back to 0,
 //!    `closed_client`).
+//! 9. **Stereo is opt-in (T-874, LP-10, §12.13)** — a request without `channels` is exactly the
+//!    mono stream above (header, records, status keys); `channels=2` on a WFM station gives
+//!    `audio.channels: 2`, 960-frame records of interleaved `L, R` (3840 bytes), the same
+//!    `sample_index`/`t` clock, and status records saying `stereo` (pilot locked) and
+//!    `stereo_lock_losses`; the left and right programmes arrive on their own channels; anything
+//!    but `1`/`2` is `4400`.
 //!
 //! **Not frozen here:** the audio's *content* (level, SNR) and CPU cost, which stage 3's parity
 //! harness compares sample-wise; refinement convergence tolerances (T-070's own tests); emitter
@@ -188,8 +195,10 @@ type Ws = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 // The source: a synthetic WFM station, served by the mock SDR
 // ---------------------------------------------------------------------------------------------
 
-/// Writes the station recording (see the module docs) as `wfm.sigmf-meta/-data` in `dir`.
-fn wfm_recording(dir: &Path) -> PathBuf {
+/// Writes the station recording (see the module docs) as `wfm.sigmf-meta/-data` in `dir`. With
+/// `stereo` (T-874) the programme is left = 1 kHz, right = 2.9 kHz on a BS.450 multiplex (L+R,
+/// the 19 kHz pilot, L−R on 38 kHz); without it the recording is byte-for-byte the frozen one.
+fn wfm_recording(dir: &Path, stereo: bool) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let n = (RECORDING_S * FS) as usize;
     let mut state = 0x2545_f491_4f6c_dd1du64;
@@ -205,9 +214,18 @@ fn wfm_recording(dir: &Path) -> PathBuf {
     for i in 0..n {
         let t = i as f64 / FS;
         // Programme (two tones) plus a 19 kHz pilot at 10 % of the peak deviation.
-        let m = 0.5 * (tau * 1000.0 * t).sin()
-            + 0.3 * (tau * 2900.0 * t).sin()
-            + 0.1 * (tau * 19_000.0 * t).sin();
+        let m = if stereo {
+            let (l, r) = (
+                0.5 * (tau * 1000.0 * t).sin(),
+                0.5 * (tau * 2900.0 * t).sin(),
+            );
+            0.9 * (0.5 * (l + r) + 0.5 * (l - r) * (tau * 38_000.0 * t).sin())
+                + 0.1 * (tau * 19_000.0 * t).sin()
+        } else {
+            0.5 * (tau * 1000.0 * t).sin()
+                + 0.3 * (tau * 2900.0 * t).sin()
+                + 0.1 * (tau * 19_000.0 * t).sin()
+        };
         phase = (phase + tau * (STATION_OFFSET_HZ + 75e3 * m) / FS) % tau;
         let re = (40.0 * phase.cos() + noise()).round().clamp(-128.0, 127.0) as i8;
         let im = (40.0 * phase.sin() + noise()).round().clamp(-128.0, 127.0) as i8;
@@ -242,8 +260,13 @@ struct Run {
 
 impl Run {
     fn start(tag: &str, max_listeners: usize) -> Self {
+        Self::start_station(tag, max_listeners, false)
+    }
+
+    /// As [`Self::start`], on the stereo station when `stereo` (T-874).
+    fn start_station(tag: &str, max_listeners: usize, stereo: bool) -> Self {
         let dir = TempDir::new(tag);
-        let meta = wfm_recording(&dir.0.join("rec"));
+        let meta = wfm_recording(&dir.0.join("rec"), stereo);
         let driver = MockSdrDriver::new(
             &meta,
             MockOptions {
@@ -486,6 +509,8 @@ fn next(ws: &mut Ws) -> Option<Rec> {
 /// Follows one stream's records and checks each against §§3–5 of the module docs.
 #[derive(Default)]
 struct Checker {
+    /// Channels the header announced (0 is read as 1: mono).
+    channels: u64,
     last_seq: Option<u64>,
     drops: u64,
     /// The index the next data record has if nothing was squelched (0 at the start).
@@ -525,10 +550,12 @@ impl Checker {
                 payload_len,
                 ..
             } => {
+                let channels = self.channels.max(1) as usize;
                 assert_eq!(
                     *payload_len,
-                    2 * FRAME as usize,
-                    "a data record is one 20 ms frame of {FRAME} i16 LE mono samples"
+                    2 * FRAME as usize * channels,
+                    "a data record is one 20 ms frame of {FRAME} i16 LE samples per channel \
+                     ({channels})"
                 );
                 assert_eq!(index % FRAME, 0, "sample_index {index} is not on a frame");
                 assert!(
@@ -628,8 +655,8 @@ fn listen_freeze_discovery_header_records_status_squelch_and_detach() {
     assert_eq!(listen["sample_rate_hz"], RATE_HZ, "{listen}");
     assert_eq!(
         listen["params"],
-        serde_json::json!(["emitter", "detection", "f_lo", "f_hi"]),
-        "listen takes a target and nothing else — never a mode: {listen}"
+        serde_json::json!(["emitter", "detection", "f_lo", "f_hi", "channels"]),
+        "listen takes a target and an opt-in channel count (T-874) — never a mode: {listen}"
     );
     assert_eq!(listen["ws_path"], "/ws/open/listen", "{listen}");
     assert_eq!(listen["tcp_target"], "open/listen", "{listen}");
@@ -797,6 +824,15 @@ fn listen_freeze_refusal_codes() {
         "bad-request",
     );
     check("emitter=x", 400, "bad-request");
+    // T-874: channels is 1 or 2, nothing else.
+    for bad in ["0", "3", "stereo"] {
+        let r = check(
+            &format!("{}&channels={bad}", station_query()),
+            400,
+            "bad-request",
+        );
+        assert!(r["reason"].as_str().unwrap().contains("channels"), "{r}");
+    }
     check("", 400, "bad-request");
     // 4404: well-formed ids nobody knows.
     check(
@@ -964,6 +1000,116 @@ fn listen_freeze_replumb_ends_the_stream_and_the_client_reconnects() {
     assert_eq!(h2["audio"]["mode"], "wfm");
     close(ws2);
     run.finish();
+}
+
+/// §9 (T-874, ADR-0015 §12.13 LP-10): stereo is opt-in, interleaved, on the same clock, and
+/// honest about the pilot; mono is untouched.
+#[test]
+fn listen_stereo_is_opt_in_interleaved_and_reports_the_pilot() {
+    let run = Run::start_station("t874-stereo", 8, true);
+    let addr = run.addr();
+
+    // A client that never mentions channels: today's mono stream, key for key.
+    let (mut ws, mono) = open_admitted(addr, &station_query());
+    assert_eq!(keys(&mono), set(HEADER_KEYS), "{mono}");
+    assert_eq!(mono["audio"]["channels"], 1, "{mono}");
+    assert_eq!(mono["max_frame_len"], MAX_FRAME_LEN, "{mono}");
+    let mut c = Checker::default();
+    while c.statuses < 2 {
+        c.check(&next(&mut ws).expect("mono stream"));
+    }
+    let st = c.last_status.clone().unwrap();
+    assert!(
+        st.get("stereo").is_none() && st.get("stereo_lock_losses").is_none(),
+        "a mono stream's status is unchanged: {st}"
+    );
+    close(ws);
+
+    // channels=2: the same header keys, two channels, and a frame limit that fits them.
+    let (mut ws, h) = open_admitted(addr, &format!("{}&channels=2", station_query()));
+    eprintln!("[T-874] stereo header: {h}");
+    assert_eq!(keys(&h), set(HEADER_KEYS), "no new header keys: {h}");
+    assert_eq!(keys(&h["audio"]), keys(&mono["audio"]), "{h}");
+    assert_eq!(h["audio"]["channels"], 2, "{h}");
+    assert_eq!(
+        h["audio"]["frame_samples"], FRAME,
+        "frames, not values: {h}"
+    );
+    assert_eq!(h["audio"]["mode"], "wfm");
+    assert_eq!(h["datatype"], DATATYPE);
+    assert_eq!(h["max_frame_len"], 32 + 8 * FRAME, "{h}");
+    assert!(
+        h["version"].as_str().is_some_and(|v| v.starts_with("1.")),
+        "{h}"
+    );
+
+    // Records: the checker holds them to the mono clock rules at 2 × 960 values per record;
+    // status says whether L−R is decoded. Once the pilot is locked, collect 0.5 s of L/R.
+    let mut c = Checker {
+        channels: 2,
+        ..Checker::default()
+    };
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let want = (0.5 * RATE_HZ) as usize;
+    let mut n = 0u64;
+    while left.len() < want {
+        let b = loop {
+            match ws.read().expect("the stereo stream ended") {
+                Message::Binary(b) => break b,
+                _ => continue,
+            }
+        };
+        let r = rec_of(&b);
+        c.check(&r);
+        n += 1;
+        assert!(n < 20_000, "the pilot never locked in {n} records");
+        if let Rec::Status { v, .. } = &r {
+            assert!(
+                v["stereo"].is_boolean(),
+                "two-channel status says stereo: {v}"
+            );
+            assert!(v["stereo_lock_losses"].is_u64(), "{v}");
+        }
+        let locked = c.last_status.as_ref().is_some_and(|v| v["stereo"] == true);
+        if locked && matches!(r, Rec::Data { .. }) {
+            let pcm = &b[RECORD_HEADER_LEN..];
+            for lr in pcm.chunks_exact(4) {
+                left.push(f64::from(i16::from_le_bytes([lr[0], lr[1]])));
+                right.push(f64::from(i16::from_le_bytes([lr[2], lr[3]])));
+            }
+        }
+    }
+    let last = c.last_status.clone().unwrap();
+    assert_eq!(
+        last["stereo_lock_losses"], 0,
+        "a steady pilot is never lost: {last}"
+    );
+    let (l1, l2) = (tone_db(&left, 1000.0), tone_db(&left, 2900.0));
+    let (r1, r2) = (tone_db(&right, 1000.0), tone_db(&right, 2900.0));
+    eprintln!("[T-874] left 1k {l1:.1} dB, 2.9k {l2:.1} dB; right 1k {r1:.1} dB, 2.9k {r2:.1} dB");
+    assert!(
+        l1 > -3.0 && r2 > -3.0,
+        "each channel carries its own programme"
+    );
+    assert!(
+        l1 - l2 > 20.0 && r2 - r1 > 20.0,
+        "≥ 20 dB separation through the device: left {l1:.1}/{l2:.1}, right {r1:.1}/{r2:.1}"
+    );
+    close(ws);
+    run.finish();
+}
+
+/// Tone power at `f` relative to the total power of 48 kS/s `x`, dB (single-bin DFT).
+fn tone_db(x: &[f64], f: f64) -> f64 {
+    let (mut re, mut im, mut total) = (0.0f64, 0.0f64, 0.0f64);
+    for (n, &v) in x.iter().enumerate() {
+        let ph = std::f64::consts::TAU * f * n as f64 / RATE_HZ;
+        re += v * ph.cos();
+        im += v * ph.sin();
+        total += v * v;
+    }
+    let tone = 2.0 * (re * re + im * im) / x.len() as f64;
+    10.0 * (tone / total.max(1e-30)).log10()
 }
 
 /// Decodes one binary message as the client does.

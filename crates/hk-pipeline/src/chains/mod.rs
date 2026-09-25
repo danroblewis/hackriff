@@ -10,7 +10,8 @@
 //! - Chain bodies: [`analog`] (C19 auto mode + RDS), [`fsk`] (C13/C14/C20/C21), [`plugin`]
 //!   (DDC + subprocess decoder), [`record`] (pre-trigger SigMF, C25), [`trunk`] (C23
 //!   control-channel hunt, T-287; metadata only), [`sweep`] (sweep characterisation of a candidate
-//!   region, T-297; metadata only).
+//!   region, T-297; metadata only), [`classify`] (the C15 classifier over a candidate region,
+//!   T-878; metadata only).
 //!
 //! **Selection versus measurement (T-297).** [`Trigger::ConfirmedTrack`] *selects*: the first
 //! matching spec wins and the rest never run. That is right for decoding and wrong for measuring,
@@ -30,6 +31,7 @@
 
 pub(crate) mod analog;
 pub mod budget;
+pub(crate) mod classify;
 pub(crate) mod fsk;
 pub mod iq;
 pub mod listen;
@@ -43,7 +45,7 @@ pub(crate) mod trunk;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -188,8 +190,44 @@ struct Running {
     id: u64,
     tx: Option<Sender<ChainMsg>>,
     join: JoinHandle<()>,
-    /// A [`Trigger::EveryTrack`] measuring chain (T-297), counted apart from the decode chains.
-    measuring: bool,
+    /// Set when the chain's thread has finished its body — including its writes — or unwound
+    /// (T-878: what a classifying chain waits on, see [`DecodeSlot`]).
+    finished: Arc<AtomicBool>,
+    /// A [`Trigger::EveryTrack`] measuring chain (T-297, T-878) and which kind, counted apart
+    /// from the decode chains; `None` for everything else.
+    measuring: Option<Measure>,
+}
+
+/// T-878: the decode chain a classifying chain must let finish before it writes, filled by the
+/// manager when (if ever) a decode chain attaches to the same track.
+///
+/// Both write classification rows for the same emission, and an emitter's classification history
+/// is in insertion order; left to thread timing, identical runs recorded the chain's label and the
+/// classifier's posterior in either order. Before T-878 the one fsk chain wrote label, promotion
+/// and posterior in that order on one thread; waiting here keeps that order. `None` (no decode
+/// chain matched) means nothing to wait for.
+pub(crate) type DecodeSlot = Arc<Mutex<Option<Arc<AtomicBool>>>>;
+
+/// Sets its flag when dropped: at the end of a chain's thread, including an unwinding one, so a
+/// chain that panicked never leaves a classifier waiting on it for the whole bound.
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The kinds of [`Trigger::EveryTrack`] measuring chain. At most one of each runs per track, each
+/// kind under its own node spec's `max_chains`, and each is counted apart from the decode chains
+/// and from the other kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Measure {
+    /// Sweep characterisation ([`sweep`], T-297).
+    Sweep,
+    /// The C15 classifier ([`classify`], T-878). Unlike the characteriser it needs the track's
+    /// member boxes, so it is sent them.
+    Classify,
 }
 
 /// Longest wait for a chain row's parent detection ([`stored_detection`]).
@@ -402,7 +440,7 @@ impl EmissionClaims {
 fn chain_start(shape: &ChainShape, cand: &Candidate, fs: f64) -> u64 {
     let pre_s = match shape {
         ChainShape::Analog { pre_s, .. } => *pre_s,
-        ChainShape::Fsk { pad_s, .. } => *pad_s,
+        ChainShape::Fsk { pad_s, .. } | ChainShape::Classify { pad_s, .. } => *pad_s,
         // The hunt and the characteriser read forward from where they attached: there is no
         // trigger box to precede.
         ChainShape::Plugin { .. } | ChainShape::TrunkCc { .. } | ChainShape::Sweep { .. } => 0.0,
@@ -425,10 +463,30 @@ pub(crate) struct ChainManager {
     cooldown: ChannelMemory,
     /// T-297: the measuring chains ([`Trigger::EveryTrack`]) running for each track, kept apart
     /// from `by_track` because they attach *beside* the decode chain rather than instead of it.
-    measuring: HashMap<TrackId, Vec<u64>>,
+    measuring: HashMap<TrackId, Vec<(Measure, u64)>>,
+    /// T-878: each open track's classifying-chain [`DecodeSlot`], filled when a decode chain
+    /// attaches to the track.
+    slots: HashMap<TrackId, DecodeSlot>,
+    /// T-886: open tracks a measuring chain was **refused** for because its kind was at its
+    /// `max_chains` cap, with the candidate to retry from. Without it, first come was first
+    /// served for the whole life of a track: a track that matched a decode spec left `pending`
+    /// the moment that chain attached, and `attach_measuring` — which only ever ran from
+    /// `try_attach`, and `try_attach` only for a *pending* track — was never reached again, so a
+    /// region refused a classifier at the wrong second was never classified at all. Retried when
+    /// a chain of that kind finishes ([`Self::reap`]) and as further member boxes arrive.
+    /// Bounded by [`MAX_AWAITING_MEASURE`]; entries are dropped when the track ends or merges.
+    awaiting_measure: HashMap<TrackId, Candidate>,
+    /// T-886: inside [`Self::retry_measuring`] (see the guard there).
+    retrying: bool,
 }
 
 const BACKLOG_PER_TRACK: usize = 512;
+
+/// T-886: most tracks whose refused measuring chain is remembered for retry. Entries live only
+/// while a track is open and its kind is at its cap, and each is one small candidate; the bound
+/// is the same guard [`BACKLOG_PER_TRACK`] is — a detector flooding tracks must not grow this
+/// without limit. Past it a refusal is final, exactly as it was before the retry existed.
+const MAX_AWAITING_MEASURE: usize = 1024;
 
 /// Most runtime chains and recorders alive at once, across the whole run (T-558).
 ///
@@ -448,7 +506,21 @@ const BACKLOG_PER_TRACK: usize = 512;
 /// queued: the candidate that could not be decoded now is still in the inventory, and a survey
 /// that keeps moving is worth more than one that stalls holding every region it ever saw. This
 /// counts recorders too, because a recorder is also a thread this run has to carry.
-pub(crate) const MAX_RUNTIME_CHAINS: usize = 16;
+///
+/// **Classifying chains are not counted** (T-878): they are bounded by their own node spec's
+/// `max_chains` alone. Counted, they held run-wide slots that decode chains needed — a track's
+/// classifying chain attaches before its decode chain, so one taking the last slot refused the
+/// decode chain for good (a refused decode attach is never retried).
+pub const MAX_RUNTIME_CHAINS: usize = 16;
+
+/// Whether the run-wide cap ([`MAX_RUNTIME_CHAINS`]) admits a chain of kind `new` beside the
+/// `running` chains' kinds. A classifying chain neither counts nor is refused here.
+fn admits(running: impl Iterator<Item = Option<Measure>>, new: Option<Measure>) -> bool {
+    if new == Some(Measure::Classify) {
+        return true;
+    }
+    running.filter(|m| *m != Some(Measure::Classify)).count() < MAX_RUNTIME_CHAINS
+}
 
 impl ChainManager {
     pub fn new(shared: Arc<Shared>) -> Self {
@@ -465,6 +537,9 @@ impl ChainManager {
             by_channel: HashMap::new(),
             cooldown: ChannelMemory::default(),
             measuring: HashMap::new(),
+            slots: HashMap::new(),
+            awaiting_measure: HashMap::new(),
+            retrying: false,
         }
     }
 
@@ -486,15 +561,22 @@ impl ChainManager {
 
     /// Spawns `spec` for `cand`; returns the chain id.
     pub fn attach(&mut self, spec: &ChainSpec, cand: Candidate) -> Option<u64> {
+        self.attach_with(spec, cand, None)
+    }
+
+    /// [`Self::attach`], handing a classifying chain the [`DecodeSlot`] it waits on (a fresh,
+    /// empty one when `slot` is `None`; other shapes ignore it).
+    fn attach_with(
+        &mut self,
+        spec: &ChainSpec,
+        cand: Candidate,
+        slot: Option<DecodeSlot>,
+    ) -> Option<u64> {
         // T-558: the run-wide bound. Reap first so the cap counts chains that are still running
         // rather than slots a finished thread has not been joined out of yet (`is_finished` is an
         // atomic load, so asking is cheap enough to ask on every attach).
         self.reap();
         let c = &self.shared.counters.chains;
-        if self.running.len() >= MAX_RUNTIME_CHAINS {
-            inc(&c.admission_refused);
-            return None;
-        }
         let shape = match spec.shape() {
             Ok(s) => s,
             Err(e) => {
@@ -506,7 +588,15 @@ impl ChainManager {
         let class = self.shared.cfg.source_class;
         // T-297: a measuring chain runs beside the decode chain rather than instead of it, and is
         // counted apart from it (see `Running::measuring`).
-        let measuring = spec.trigger == Trigger::EveryTrack;
+        let measuring = match (&shape, spec.trigger) {
+            (ChainShape::Classify { .. }, Trigger::EveryTrack) => Some(Measure::Classify),
+            (_, Trigger::EveryTrack) => Some(Measure::Sweep),
+            _ => None,
+        };
+        if !admits(self.running.iter().map(|r| r.measuring), measuring) {
+            inc(&c.admission_refused);
+            return None;
+        }
         if crate::debug_enabled() {
             eprintln!(
                 "hk-pipeline: attach {} for {:.4}..{:.4} MHz (bursty {:?}) from sample {} trigger {}",
@@ -563,7 +653,9 @@ impl ChainManager {
                         id,
                         tx: None,
                         join,
-                        measuring: false,
+                        // A recorder writes no classification: nothing waits on it.
+                        finished: Arc::new(AtomicBool::new(false)),
+                        measuring: None,
                     });
                 }
             } else {
@@ -589,9 +681,13 @@ impl ChainManager {
         let channel_tolerance_hz = spec.raster_hz.map_or(f64::INFINITY, |r| 0.5 * r);
         // T-287: the hunt's grid. `validate` refuses an occupancy spec without one.
         let raster_hz = spec.raster_hz.unwrap_or(0.0);
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = SetOnDrop(Arc::clone(&finished));
+        let slot = slot.unwrap_or_default();
         let spawned = thread::Builder::new()
             .name(format!("hk-chain-{}-{id}", spec.id))
             .spawn(move || {
+                let _done = done;
                 let mut clock = CpuClock::new();
                 stat.account_cpu(&mut clock);
                 set_thread_stat(Some(stat.stat()));
@@ -664,6 +760,23 @@ impl ChainManager {
                         },
                         cursor,
                     ),
+                    ChainShape::Classify {
+                        pad_s,
+                        retain_s,
+                        window_s,
+                        ..
+                    } => classify::run(
+                        shared,
+                        rx,
+                        cand,
+                        classify::ClassifyNode {
+                            pad_s,
+                            retain_s,
+                            window_s,
+                        },
+                        cursor,
+                        slot,
+                    ),
                     ChainShape::Sweep {
                         window_s,
                         frame_s,
@@ -686,15 +799,16 @@ impl ChainManager {
             });
         match spawned {
             Ok(join) => {
-                inc(if measuring {
-                    &c.sweep_attached
-                } else {
-                    &c.attached
+                inc(match measuring {
+                    Some(Measure::Sweep) => &c.sweep_attached,
+                    Some(Measure::Classify) => &c.classify_attached,
+                    None => &c.attached,
                 });
                 self.running.push(Running {
                     id,
                     tx: Some(tx),
                     join,
+                    finished,
                     measuring,
                 });
                 Some(id)
@@ -748,28 +862,38 @@ impl ChainManager {
         self.attach_track(track, &spec, cand);
     }
 
-    /// Measuring chains alive now, across every track.
-    fn live_measuring(&self) -> usize {
-        self.measuring
-            .values()
-            .flatten()
-            .filter(|id| self.running.iter().any(|r| r.id == **id))
+    /// Measuring chains of `kind` alive now, across every track.
+    fn live_measuring(&self, kind: Measure) -> usize {
+        self.running
+            .iter()
+            .filter(|r| r.measuring == Some(kind))
             .count()
     }
 
     /// Attaches every [`Trigger::EveryTrack`] spec matching this track, **in addition to** the
-    /// decode chain [`select_for_track`] chooses (T-297).
+    /// decode chain [`select_for_track`] chooses (T-297, T-878).
     ///
-    /// At most one measuring chain per track, and at most the node spec's `max_chains` alive at
-    /// once across the run — the bound that matters, since the trigger is per confirmed track and a
-    /// busy band has many. Above the cap the attach is refused and counted, never queued.
+    /// At most one measuring chain **of each kind** per track, and at most the node spec's
+    /// `max_chains` of that kind alive at once across the run — the bound that matters, since the
+    /// trigger is per confirmed track and a busy band has many. Above the cap the attach is refused
+    /// and counted, never queued. A classifying chain is handed the track's member boxes so far
+    /// (the backlog stays for the decode chain).
+    ///
+    /// T-886: a refusal is **remembered, not final**. The cap is on chains alive *now*, so a
+    /// track refused while four classifiers were running is retried when one of them finishes,
+    /// whether or not a decode chain has since claimed the track — the candidate is kept in
+    /// [`Self::awaiting_measure`] for exactly that. The refusal is counted **once per track**
+    /// (`classify_admission_refused` / `sweep_admission_refused`), not once per retry, so the
+    /// counter still reads "regions this cap cost a measurement", not "attempts".
     fn attach_measuring(&mut self, track: TrackId) {
-        let Some(cand) = self.pending.get(&track).cloned() else {
+        let Some(cand) = self
+            .pending
+            .get(&track)
+            .or_else(|| self.awaiting_measure.get(&track))
+            .cloned()
+        else {
             return;
         };
-        if self.measuring.contains_key(&track) {
-            return;
-        }
         // A confirmed track has at least one detection by definition — the confirming one — which
         // `members` has not necessarily counted yet.
         let count = self.members.get(&track).copied().unwrap_or(0).max(1);
@@ -784,20 +908,94 @@ impl ChainManager {
             })
             .cloned()
             .collect();
+        let mut refused = false;
         for spec in specs {
-            let cap = match spec.shape() {
-                Ok(ChainShape::Sweep { max_chains, .. }) => max_chains,
+            let (kind, cap) = match spec.shape() {
+                Ok(ChainShape::Sweep { max_chains, .. }) => (Measure::Sweep, max_chains),
+                Ok(ChainShape::Classify { max_chains, .. }) => (Measure::Classify, max_chains),
                 _ => continue,
             };
-            if self.live_measuring() >= cap {
-                inc(&self.shared.counters.chains.sweep_admission_refused);
+            // One measuring chain of a kind per track: a second would measure the same region
+            // twice.
+            if self
+                .measuring
+                .get(&track)
+                .is_some_and(|v| v.iter().any(|(k, _)| *k == kind))
+            {
                 continue;
             }
-            if let Some(id) = self.attach(&spec, cand.clone()) {
-                self.measuring.entry(track).or_default().push(id);
+            if self.live_measuring(kind) >= cap {
+                if !self.awaiting_measure.contains_key(&track) {
+                    let c = &self.shared.counters.chains;
+                    inc(match kind {
+                        Measure::Sweep => &c.sweep_admission_refused,
+                        Measure::Classify => &c.classify_admission_refused,
+                    });
+                }
+                refused = true;
+                continue;
             }
-            // One measuring chain per track: a second would read the same region twice.
-            break;
+            let slot = (kind == Measure::Classify).then(|| {
+                let slot = DecodeSlot::default();
+                // Normally the decode chain attaches after this one (measuring chains attach
+                // first), but a slot is filled from whatever is already there.
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = self.decode_finished(track);
+                slot
+            });
+            if let Some(id) = self.attach_with(&spec, cand.clone(), slot.clone()) {
+                self.measuring.entry(track).or_default().push((kind, id));
+                if let Some(slot) = slot {
+                    self.slots.insert(track, slot);
+                    for m in self.backlog.get(&track).cloned().unwrap_or_default() {
+                        self.send(id, ChainMsg::Member(m));
+                    }
+                }
+            }
+        }
+        if refused {
+            // Keep the candidate (with whatever the member boxes have widened it to) for the
+            // retry; a track already waiting keeps its place rather than being re-counted.
+            if self.awaiting_measure.contains_key(&track)
+                || self.awaiting_measure.len() < MAX_AWAITING_MEASURE
+            {
+                self.awaiting_measure.insert(track, cand);
+            }
+        } else {
+            self.awaiting_measure.remove(&track);
+        }
+    }
+
+    /// T-886: retries every track a measuring chain was refused for, now that one has finished.
+    /// Ordered by track id so which of several waiting tracks takes a freed slot is deterministic
+    /// rather than a hash order that changes per run.
+    fn retry_measuring(&mut self) {
+        // `attach_with` reaps before it attaches, and `reap` calls this: without the guard a
+        // retry that attaches could re-enter through its own reap.
+        if self.awaiting_measure.is_empty() || self.retrying {
+            return;
+        }
+        self.retrying = true;
+        let mut waiting: Vec<TrackId> = self.awaiting_measure.keys().copied().collect();
+        waiting.sort();
+        for track in waiting {
+            self.attach_measuring(track);
+        }
+        self.retrying = false;
+    }
+
+    /// The finished flag of `track`'s decode chain, if one is attached.
+    fn decode_finished(&self, track: TrackId) -> Option<Arc<AtomicBool>> {
+        let id = self.by_track.get(&track)?;
+        self.running
+            .iter()
+            .find(|r| r.id == *id)
+            .map(|r| Arc::clone(&r.finished))
+    }
+
+    /// Hands `track`'s classifying chain (if any) its decode chain's finished flag.
+    fn fill_slot(&self, track: TrackId) {
+        if let (Some(slot), Some(flag)) = (self.slots.get(&track), self.decode_finished(track)) {
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(flag);
         }
     }
 
@@ -828,6 +1026,7 @@ impl ChainManager {
         }
         if let Some(id) = self.attach(spec, cand) {
             self.by_track.insert(track, id);
+            self.fill_slot(track);
             if let Some(k) = key {
                 self.by_channel.insert(k, id);
             }
@@ -853,8 +1052,23 @@ impl ChainManager {
 
     pub fn on_member(&mut self, track: TrackId, member: MemberBox) {
         *self.members.entry(track).or_insert(0) += 1;
+        // T-878: the classifier chooses its box from the track's members, whatever decode chain
+        // (if any) receives them below.
+        for &(kind, id) in self.measuring.get(&track).into_iter().flatten() {
+            if kind == Measure::Classify {
+                self.send(id, ChainMsg::Member(member.clone()));
+            }
+        }
         let fs = self.shared.fs;
-        if let Some(c) = self.pending.get_mut(&track) {
+        // T-886: the retry candidate is widened by the same boxes as the pending one, so a track
+        // that waits for a slot is re-offered the region as it is now, not as it was at the
+        // refusal.
+        for c in self
+            .pending
+            .get_mut(&track)
+            .into_iter()
+            .chain(self.awaiting_measure.get_mut(&track))
+        {
             c.f_lo_hz = c.f_lo_hz.min(member.f_lo_hz);
             c.f_hi_hz = c.f_hi_hz.max(member.f_hi_hz);
             c.first_sample = c.first_sample.min(member.samples.start);
@@ -876,16 +1090,23 @@ impl ChainManager {
         }
         if self.pending.contains_key(&track) {
             self.try_attach(track);
+        } else if self.awaiting_measure.contains_key(&track) {
+            // T-886: a track whose decode chain already attached is no longer pending, so this is
+            // the only place a refused measuring chain gets another look before a slot frees.
+            self.attach_measuring(track);
         }
     }
 
     pub fn on_track_closed(&mut self, track: TrackId) {
         self.backlog.remove(&track);
         self.members.remove(&track);
+        // T-886: nothing left to measure, so the retry entry goes with the track.
+        self.awaiting_measure.remove(&track);
         // The measuring chain writes what it measured at detach, against a settled inventory.
-        for id in self.measuring.remove(&track).unwrap_or_default() {
+        for (_, id) in self.measuring.remove(&track).unwrap_or_default() {
             self.send(id, ChainMsg::Detach);
         }
+        self.slots.remove(&track);
         if let Some(c) = self.pending.remove(&track) {
             if crate::debug_enabled() {
                 eprintln!(
@@ -906,9 +1127,12 @@ impl ChainManager {
     pub fn on_merged(&mut self, from: TrackId, into: TrackId) {
         // The survivor keeps its own measuring chain; the absorbed track's finishes and writes
         // whatever it had already measured (the repository re-points a merged emitter).
-        for id in self.measuring.remove(&from).unwrap_or_default() {
+        for (_, id) in self.measuring.remove(&from).unwrap_or_default() {
             self.send(id, ChainMsg::Detach);
         }
+        self.slots.remove(&from);
+        // T-886: the absorbed track measures nothing further; the survivor carries the region.
+        self.awaiting_measure.remove(&from);
         let moved = self.members.remove(&from).unwrap_or(0);
         *self.members.entry(into).or_insert(0) += moved;
         if let Some(mut b) = self.backlog.remove(&from) {
@@ -919,6 +1143,8 @@ impl ChainManager {
         if let Some(id) = self.by_track.remove(&from) {
             if let std::collections::hash_map::Entry::Vacant(e) = self.by_track.entry(into) {
                 e.insert(id);
+                // The survivor's classifier now waits on the decode chain it inherited.
+                self.fill_slot(into);
             } else {
                 self.send(id, ChainMsg::Detach);
             }
@@ -1015,10 +1241,13 @@ impl ChainManager {
         self.by_track.clear();
         self.manual.clear();
         self.measuring.clear();
+        self.slots.clear();
+        self.awaiting_measure.clear();
     }
 
-    /// Joins finished chains.
+    /// Joins finished chains, and retries any measuring chain a full cap refused (T-886).
     pub fn reap(&mut self) {
+        let mut freed = false;
         let mut i = 0;
         while i < self.running.len() {
             if self.running[i].join.is_finished() {
@@ -1026,12 +1255,14 @@ impl ChainManager {
                 let _ = r.join.join();
                 if r.tx.is_some() {
                     let c = &self.shared.counters.chains;
-                    inc(if r.measuring {
-                        &c.sweep_detached
-                    } else {
-                        &c.detached
+                    inc(match r.measuring {
+                        Some(Measure::Sweep) => &c.sweep_detached,
+                        Some(Measure::Classify) => &c.classify_detached,
+                        None => &c.detached,
                     });
                 }
+                // T-886: a measuring slot just freed, so a track refused one may have it.
+                freed |= r.measuring.is_some();
                 self.by_track.retain(|_, v| *v != r.id);
                 let now = self.shared.ring.next_sample().unwrap_or(0);
                 let cooldown = (CHANNEL_COOLDOWN_S * self.shared.fs) as u64;
@@ -1050,6 +1281,9 @@ impl ChainManager {
             } else {
                 i += 1;
             }
+        }
+        if freed {
+            self.retry_measuring();
         }
     }
 }
@@ -1096,6 +1330,25 @@ mod tests {
         assert!(c.claim(5, station, 100e3, 0.0, 1_500));
         // A worse-ranked late claimant is refused by an uncommitted better claim.
         assert!(!c.claim(6, station, 100e3, 1.0, 1_600));
+    }
+
+    /// T-878 (review blocker): with the run-wide cap full but for one slot, a track's classifying
+    /// chain attaching first must not take the slot its decode chain needs, and a busy band's
+    /// classifying chains never crowd decode chains out.
+    #[test]
+    fn classifying_chains_never_take_a_decode_chains_run_wide_slot() {
+        let mut running: Vec<Option<Measure>> = vec![None; MAX_RUNTIME_CHAINS - 5];
+        running.extend([Some(Measure::Sweep); 4]);
+        // One slot left. The track's classifier attaches first ...
+        assert!(admits(running.iter().copied(), Some(Measure::Classify)));
+        running.push(Some(Measure::Classify));
+        // ... and its decode chain still attaches after it.
+        assert!(admits(running.iter().copied(), None));
+        running.push(None);
+        // The cap still binds decode and sweep chains once it is genuinely full.
+        running.extend([Some(Measure::Classify); 3]);
+        assert!(!admits(running.iter().copied(), None));
+        assert!(!admits(running.iter().copied(), Some(Measure::Sweep)));
     }
 
     #[test]

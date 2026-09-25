@@ -873,6 +873,12 @@ struct Replumb {
 
 /// Parts of a run that outlive segments.
 struct Common {
+    /// T-884: `ConfirmPolicy.synthesized` as the run's inventory holds it, read **once** at start
+    /// and kept as a value. MAUTO's attach step runs on its own repository connection outside the
+    /// inventory (`hk_cli::pipeline`), so it has to be handed the configured rule; reading it here
+    /// rather than through `Shared.inventory` keeps an API read off a mutex a capture worker may
+    /// hold. A re-plumb carries the inventory across unchanged, so the value stays true.
+    synthesized_confirm: crate::inventory::SynthesizedConfirm,
     data_dir: PathBuf,
     db_path: PathBuf,
     survey_id: SurveyId,
@@ -899,6 +905,8 @@ struct Common {
     compute: hk_dsp::compute::Compute,
     /// Occupancy engine and series (T-118), closed when the run ends.
     occupancy: Arc<crate::occupancy::OccupancyService>,
+    /// T-904: the detection-retention thread, stopped when the run ends (`None`: not configured).
+    retention: Option<Arc<crate::retention::RetentionService>>,
     /// T-128: the run's C12 attention service (baselines, candidates), fed by the occupancy
     /// thread and the scheduler; `None` when it could not open.
     attention: Option<Arc<crate::attention::AttentionService>>,
@@ -1183,6 +1191,16 @@ impl Pipeline {
             t_end: None,
             summary: None,
         };
+        // T-913: a run that crashed left its survey open, and retention ages an open survey from
+        // its own newest row — so its last hour is never aged out until something closes it. One
+        // process writes a store, so any survey still open here belongs to a process that is gone.
+        match repo.abort_orphaned_surveys() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("hk-pipeline: aborted {n} survey(s) left open by an earlier run"),
+            Err(e) => {
+                eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}")
+            }
+        }
         repo.insert_survey(&survey)?;
         store_calibrations(&mut repo, &cfg.calibrations)?;
         let product = FloorProduct::open(
@@ -1294,25 +1312,36 @@ impl Pipeline {
                     &dir,
                     crate::history::view_config(view_f_cell_hz, view_t_cell),
                 )
+                // T-901: a seal only indexes and queues; the view writer does the file work with
+                // the lock released, so a live row push never waits out a seal.
+                .and_then(|mut p| p.set_deferred_writes(true).map(|()| p))
                 .map(|p| Arc::new(Mutex::new(p)))
                 .map_err(|e| eprintln!("view-scheme history disabled: {e}"))
                 .ok()
             })
             .flatten();
+        // T-322: the C36 L1 dwell service, configured from the plan's `extra.gnss`.
+        let gnss = Arc::new(crate::gnss::GnssDwell::new(crate::gnss::gnss_config(
+            &cfg.plan,
+        )?));
+        // T-904: detection retention runs on its own thread and connection, off the real-time
+        // path. Started after the last fallible step above, so a failed start leaks no thread.
+        let retention = cfg.retention.map(|s| {
+            crate::retention::RetentionService::start(db_path.clone(), s, Arc::clone(&counters))
+        });
         let common = Common {
+            synthesized_confirm: inventory.synthesized_confirm(),
             view,
             iq_buffer,
             receiver: Arc::default(),
-            // T-322: the C36 L1 dwell service, configured from the plan's `extra.gnss`.
-            gnss: Arc::new(crate::gnss::GnssDwell::new(crate::gnss::gnss_config(
-                &cfg.plan,
-            )?)),
+            gnss,
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
             counters,
             compute,
             occupancy,
+            retention,
             attention,
             alarms,
             product,
@@ -1397,6 +1426,9 @@ impl Pipeline {
                         }
                         devices::finish(&common, &mut errors);
                         common.occupancy.finish();
+                        if let Some(r) = &common.retention {
+                            r.finish();
+                        }
                         if !errors.is_empty() {
                             eprintln!("hk-pipeline: while ending the run: {}", errors.join("; "));
                         }
@@ -1476,6 +1508,7 @@ impl Pipeline {
             thread: Some(thread),
             started: Instant::now(),
             recipes: std::sync::OnceLock::new(),
+            vlf: Arc::default(),
         })
     }
 }
@@ -1658,6 +1691,11 @@ fn start_segment(
     // (T-508) — the source is already back in the slot by then, because whatever held it has been
     // dropped with this closure.
     let spawned = (|| -> anyhow::Result<()> {
+        // T-915: the spectrum reader's claim on the view queue, taken before ANY reader starts —
+        // the history reader (spawned first) must not be able to end the view writer ahead of the
+        // rows the spectrum reader has yet to push. If this closure fails before that reader is
+        // spawned, the claim drops with it and the writer is not left waiting.
+        let mut view_producer = shared.view_queue.as_ref().map(|q| q.producer());
         // T-541: every reader goes through `guarded`, so none of them can die unnoticed.
         let spawn = |name: &'static str,
                      f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
@@ -1704,10 +1742,14 @@ fn start_segment(
             )?);
         }
         {
-            let (s, a) = (Arc::clone(&shared), common.attention.clone());
+            let (s, a, vp) = (
+                Arc::clone(&shared),
+                common.attention.clone(),
+                view_producer.take(),
+            );
             workers.push(spawn(
                 "hk-spectrum",
-                Box::new(move || crate::spectrum::run(s, a)),
+                Box::new(move || crate::spectrum::run(s, a, vp)),
             )?);
         }
         {
@@ -2157,6 +2199,9 @@ fn end_run(
     // reader finished first. A no-op on a single-device run.
     devices::finish(&sup.common, &mut errors);
     sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
+    if let Some(r) = &sup.common.retention {
+        r.finish(); // T-904
+    }
     st.finished = true;
     st.recovering = false;
     // A requested stop or a recording's end carries no note, whatever an earlier, recovered
@@ -2778,6 +2823,8 @@ pub struct PipelineHandle {
     started: Instant,
     /// The run's recipe runtime (T-088), created on first use.
     recipes: std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+    /// T-891: accessory-fed VLF services attached to this run (none by default); stopped with it.
+    vlf: Arc<crate::vlf::VlfServices>,
 }
 
 /// Detection resolution of the run.
@@ -2901,12 +2948,13 @@ impl RunSummary {
             c("/detect/dense_frames")
         ));
         line(format!(
-            "tracks:      {} opened, {} closed, {} confirmed, {} rows, {} links",
+            "tracks:      {} opened, {} closed, {} confirmed, {} rows, {} links ({} dropped)",
             c("/detect/tracks_opened"),
             c("/detect/tracks_closed"),
             c("/detect/tracks_confirmed"),
             c("/detect/track_rows"),
-            c("/detect/track_links")
+            c("/detect/track_links"),
+            c("/detect/track_links_dropped")
         ));
         line(format!(
             "anomalies:   {} opened, {} closed, {} explanations",
@@ -2933,6 +2981,15 @@ impl RunSummary {
             c("/chains/sweep_passes"),
             c("/chains/sweep_characterised"),
             c("/chains/sweep_uncharacterised")
+        ));
+        line(format!(
+            "classify:    {} chain(s), {} row(s) written, {} abstained, {} without an entry, {} \
+             refused at the cap",
+            c("/chains/classify_attached"),
+            c("/chains/classifications"),
+            c("/chains/classify_abstained"),
+            c("/chains/classify_no_emitter"),
+            c("/chains/classify_admission_refused")
         ));
         line(format!(
             "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s) + {} CAC(s), {} grant(s) \
@@ -3068,6 +3125,15 @@ impl PipelineHandle {
         Arc::clone(&self.sup.common.scheduler)
     }
 
+    /// The `ConfirmPolicy.synthesized` clause this run's inventory confirms under (T-884).
+    ///
+    /// The MAUTO attach step (`hk_pipeline::synth::attach`) is built outside the run's inventory
+    /// and must be given the configured rule rather than a fresh default — otherwise the
+    /// configuration field that gates an irreversible confirm is never read.
+    pub fn synthesized_confirm(&self) -> crate::inventory::SynthesizedConfirm {
+        self.sup.common.synthesized_confirm.clone()
+    }
+
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).
     pub fn data_dir(&self) -> &Path {
         &self.sup.common.data_dir
@@ -3081,6 +3147,13 @@ impl PipelineHandle {
     /// Stops capture; the readers and chains then drain and finish.
     pub fn stop(&self) {
         self.stopper().stop();
+        self.vlf.stop_all();
+    }
+
+    /// T-891: the run's accessory-fed VLF services ([`crate::vlf`]); attach one with
+    /// [`crate::vlf::VlfServices::attach`]. Empty unless an accessory was given.
+    pub fn vlf(&self) -> Arc<crate::vlf::VlfServices> {
+        Arc::clone(&self.vlf)
     }
 
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while
@@ -3224,7 +3297,7 @@ impl PipelineHandle {
                     Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
                         .filter(|p| p.is_dir())
                 });
-            let rt = Arc::new(crate::recipes::runtime::RecipeRuntime::new(
+            let rt = crate::recipes::runtime::RecipeRuntime::new(
                 Arc::clone(&self.sup.common.counters),
                 Arc::new(move || sup.lock().shared.clone()),
                 Arc::clone(&self.sup.common.listen),
@@ -3232,7 +3305,7 @@ impl PipelineHandle {
                     builtin,
                     self.sup.common.data_dir.join("recipes"),
                 ),
-            ));
+            );
             // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
             rt.attach_default_capture_store(&self.sup.common.data_dir);
             rt
@@ -3318,6 +3391,29 @@ impl PipelineHandle {
         std::iter::once(primary)
             .chain(c.aux.iter().map(devices::AuxDevice::run_device))
             .collect()
+    }
+
+    /// **The run's lossless flow gate** ([`crate::gate::FlowGate`]), while a segment is running.
+    ///
+    /// The gate is what makes a lossless replay lossless: every reader holds a [`crate::gate::GateCursor`] and
+    /// the capture thread refuses to write a block that would lap the slowest of them. That is a
+    /// *property of the run*, observable the same way [`Self::ring_position`] is, and a caller
+    /// that wants to establish the backpressure path is armed has no other way to ask.
+    ///
+    /// **Why this exists** (T-920). `view_pause_keeps_capture` guarded against a vacuous claim —
+    /// "no view control stalled the source" means nothing if a stalled reader could not have
+    /// stalled it either — by asserting the gate happened to hold a block back during its
+    /// measurement window (`gate_waits > 0`). But whether the writer runs a *half ring* ahead of
+    /// the readers inside any given 5 s of capture is a race between a replay thread and three
+    /// FFT threads, not a property of the system: on one Linux box, alone, on current `main`, that
+    /// assertion failed 5 runs in 7 while the run itself stayed perfectly lossless. The guard is
+    /// now a deterministic demonstration instead — pin a cursor, watch the source stop, release
+    /// it, watch it resume — and it needs the gate.
+    ///
+    /// `None` before the first segment's shared state exists (the same window in which
+    /// [`Self::ring_position`] answers 0).
+    pub fn flow_gate(&self) -> Option<Arc<FlowGate>> {
+        self.sup.lock().shared.as_ref().map(|s| Arc::clone(&s.gate))
     }
 
     /// The newest ring sample index.

@@ -301,6 +301,54 @@ fn the_carry_runs_down_each_column_yield_to_the_grid_and_stop_at_the_data_edge()
     );
 }
 
+/// **T-881: past the data edge, as far as the tune record reaches, over the cells it says the
+/// radio was not looking at.** The data edge is the newest FOLDED frame and the fold trails
+/// capture; a departed band's rows between the two are time the radio spent elsewhere, and with no
+/// run over them they were drawn as THE grey. RED before T-881: every column stopped at row 3.
+#[test]
+fn the_carry_continues_past_the_fold_edge_only_over_unobserved_cells_up_to_the_record_reach() {
+    let before = T0 + 1000 * S;
+    let seed = |db: f32| LastKnownCell {
+        max_db: db,
+        t_ns: before - 5 * S,
+        level: 2,
+    };
+    let k = LastKnown {
+        before_ns: before,
+        f_lo_hz: 0.0,
+        f_cell_hz: 1000.0,
+        nf: 3,
+        cells: vec![seed(-50.0), seed(-60.0), LastKnownCell::NONE],
+        stages: Vec::new(),
+        searched_from_ns: T0,
+        source_cells: 0,
+    };
+    let nt = 8;
+    let (edge, reach) = (before + 3 * S, before + 6 * S);
+    // Column 0: departed, unobserved throughout. Column 1: the radio came back at row 4 (its
+    // frames are not folded yet). Column 2: never observed, no value anywhere.
+    let mask: Vec<bool> = (0..nt * 3).map(|i| !(i % 3 == 1 && i / 3 >= 4)).collect();
+    let runs = k.carry_forward_to(None, S as f64, nt, Some(edge), Some((reach, &mask)));
+    assert_eq!(
+        runs_of(&k, &runs),
+        vec![
+            // Up to the record's reach (row 6), and not into the future past it.
+            (0, 0, 6, -50.0, -5, Some(2), ShadowFill::Forward),
+            // Stops for good at the first cell past the edge the radio DID look at: its newer
+            // measurement is on its way, and an older number must not stand in for it.
+            (1, 0, 4, -60.0, -5, Some(2), ShadowFill::Forward),
+        ]
+    );
+    // Without the record's word, the edge stands exactly as before; a mask that is not this
+    // grid's is no extension at all.
+    let at_edge = k.carry_forward(None, S as f64, nt, Some(edge));
+    assert!(at_edge.iter().all(|r| r.row + r.rows <= 3), "{at_edge:?}");
+    assert_eq!(
+        k.carry_forward_to(None, S as f64, nt, Some(edge), Some((reach, &mask[..5]))),
+        at_edge
+    );
+}
+
 /// **T-527, the fill rule and its one exception.** Every gap in a column that was ever observed is
 /// filled; a column never observed at all carries **no run**, which is what keeps grey meaning
 /// *we never looked*.
@@ -536,4 +584,207 @@ fn last_known_cost_is_bounded_on_a_tuned_and_a_device_wide_viewport() {
             assert!(c.level >= 3, "{name}: {c:?}");
         }
     }
+}
+
+/// T-911: a search **pinned to one level** reads only that level's cells, and crosses the time a
+/// band spent unobserved without paying for it.
+///
+/// The shadow is judged against the band's last live row, which is a cell of the tile's own level;
+/// the ladder search above answers band A from level 2 (a 4 kHz × 60 s max-hold), a different box
+/// and so a different number. Pinned to level 0, both bands come back from level 0 — B from its
+/// last 1-s cell, A from ITS last 1-s cell 95 s further back — and the 190 s between B and the
+/// search, and the 95 s between A and B, which no tile covers, cost nothing: only the two blocks
+/// that hold anything are read.
+#[test]
+fn a_pinned_search_reads_one_level_and_skips_empty_blocks_for_free() {
+    let dir = TempDir::new("lastknown-pinned");
+    let p = swept(&dir);
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(BAND.0, BAND.1),
+        ts(T0 + 300 * S),
+        16,
+        0,
+        1_000_000,
+        1_000_000,
+    );
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    let k = s.finish();
+    for f in 0..4 {
+        let c = k.cells[f];
+        assert_eq!(
+            (c.max_db, c.level, c.t_ns),
+            (-60.0, 0, T0 + 5 * S),
+            "A col {f}: {c:?}"
+        );
+    }
+    for f in 8..12 {
+        let c = k.cells[f];
+        assert_eq!(
+            (c.max_db, c.level, c.t_ns),
+            (-70.0, 0, T0 + 103 * S),
+            "B col {f}: {c:?}"
+        );
+    }
+    for f in (4..8).chain(12..16) {
+        assert!(!k.cells[f].found(), "never observed: {:?}", k.cells[f]);
+    }
+    // Two 10-s blocks of 16 columns: the gaps were jumped by the tile index, never walked.
+    assert_eq!(k.source_cells, 2 * 10 * 16, "stages {:?}", k.stages);
+    assert!(
+        k.stages.iter().all(|s| s.level == 0 && !s.skipped),
+        "{:?}",
+        k.stages
+    );
+}
+
+/// T-911: when the output grid's row is coarser than the pinned level's, "newest" is the newest
+/// OUTPUT row, and every source cell inside it folds by max-hold — the value the output grid's own
+/// cell holds — never just the single newest source cell.
+#[test]
+fn a_pinned_search_folds_the_newest_output_row_by_max_hold() {
+    let dir = TempDir::new("lastknown-pinned-quantum");
+    let mut p = Pyramid::open(&dir.0, ladder()).unwrap();
+    // 16-20 kHz: -60, -50, -55, -65 dB in the four seconds from T0. With 2-s output rows the newest
+    // row is [T0+2, T0+4): max(-55, -65) = -55. The newest 1-s cell alone is -65.
+    for (k, v) in [-60.0, -50.0, -55.0, -65.0].into_iter().enumerate() {
+        let psd = vec![lin(v); 4];
+        p.ingest(&frame(T0 + k as i64 * S, S, 16_000.0, 1000.0, &psd))
+            .unwrap();
+    }
+    p.seal_through(ts(T0 + 100 * S)).unwrap();
+    let run = |quantum: i64| {
+        let mut s = p.last_known_search_at(
+            0,
+            FreqRange::new(BAND.0, BAND.1),
+            ts(T0 + 10 * S),
+            16,
+            quantum,
+            1_000_000,
+            1_000_000,
+        );
+        while !s.done() {
+            p.last_known_step(&mut s).unwrap();
+        }
+        s.finish().cells[0]
+    };
+    let per_row = run(2 * S);
+    assert_eq!(
+        (per_row.max_db, per_row.t_ns),
+        (-55.0, T0 + 4 * S),
+        "{per_row:?}"
+    );
+    let per_cell = run(0);
+    assert_eq!(
+        (per_cell.max_db, per_cell.t_ns),
+        (-65.0, T0 + 4 * S),
+        "{per_cell:?}"
+    );
+}
+
+/// T-911: the budget is paid honestly. A block it cannot afford one row of is reported unsearched,
+/// never answered as empty.
+#[test]
+fn a_pinned_search_out_of_budget_says_so() {
+    let dir = TempDir::new("lastknown-pinned-budget");
+    let p = swept(&dir);
+    // 16 columns: 160 cells reads B's whole block, and nothing is left for A's.
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(BAND.0, BAND.1),
+        ts(T0 + 300 * S),
+        16,
+        0,
+        1_000_000,
+        160,
+    );
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    let k = s.finish();
+    assert!(k.cells[8].found(), "B is in the affordable block");
+    assert!(!k.cells[0].found(), "A's block was not read");
+    let skipped: Vec<_> = k.stages.iter().filter(|s| s.skipped).collect();
+    assert_eq!(skipped.len(), 1, "{:?}", k.stages);
+    assert_eq!((skipped[0].from_ns, skipped[0].to_ns), (T0, T0 + 10 * S));
+}
+
+/// T-911 review: the stage top is the output row holding the newest block's END, rounded UP — the
+/// row the tile drew the block's last cells in — never rounded down past it to an older row.
+///
+/// 10-s blocks, 4-s output rows: −60 dB over `[T0, T0+4)`, −50 dB over `[T0+8, T0+10)`. The tile
+/// row `[T0+8, T0+12)` draws −50, so that is what the band carries into the next tile. Rounding
+/// the block end (T0+10) down to T0+8 skipped that row as "unsearched" and carried −60.
+#[test]
+fn a_pinned_search_reads_the_output_row_holding_the_block_end() {
+    let dir = TempDir::new("lastknown-pinned-block-end");
+    let mut p = Pyramid::open(&dir.0, ladder()).unwrap();
+    for (k, v) in [
+        (0, -60.0),
+        (1, -60.0),
+        (2, -60.0),
+        (3, -60.0),
+        (8, -50.0),
+        (9, -50.0),
+    ] {
+        let psd = vec![lin(v); 4];
+        p.ingest(&frame(T0 + k * S, S, 16_000.0, 1000.0, &psd))
+            .unwrap();
+    }
+    p.seal_through(ts(T0 + 100 * S)).unwrap();
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(BAND.0, BAND.1),
+        ts(T0 + 12 * S),
+        16,
+        4 * S,
+        1_000_000,
+        1_000_000,
+    );
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    let k = s.finish();
+    let c = k.cells[0];
+    assert_eq!(
+        (c.max_db, c.t_ns),
+        (-50.0, T0 + 12 * S),
+        "{c:?} stages {:?}",
+        k.stages
+    );
+    assert!(k.stages.iter().all(|s| !s.skipped), "{:?}", k.stages);
+}
+
+/// T-911 review: the pinned search's index scan is bounded to [`PINNED_REACH_BLOCKS`] blocks back
+/// from `before`; a band last seen further back is left to the ladder, not found by walking every
+/// older sealed tile of the level under the store's lock.
+#[test]
+fn a_pinned_search_looks_back_no_further_than_its_reach() {
+    let dir = TempDir::new("lastknown-pinned-reach");
+    let p = swept(&dir);
+    // Level 0's blocks are 10 s; B was last seen in the block starting at T0+100 s.
+    let run = |before_s: i64| {
+        let mut s = p.last_known_search_at(
+            0,
+            FreqRange::new(BAND.0, BAND.1),
+            ts(T0 + before_s * S),
+            16,
+            0,
+            1_000_000,
+            1_000_000,
+        );
+        while !s.done() {
+            p.last_known_step(&mut s).unwrap();
+        }
+        s.finish().cells[8]
+    };
+    let within = 110 + (PINNED_REACH_BLOCKS - 1) * 10;
+    assert!(run(within).found(), "B's block is inside the reach");
+    let beyond = 110 + (PINNED_REACH_BLOCKS + 1) * 10;
+    assert!(
+        !run(beyond).found(),
+        "B's block is past the reach: the ladder's"
+    );
 }

@@ -24,7 +24,7 @@
 // which is reported in, and a closed one stops exactly at the `t_end_s` the API served.
 
 import type { Box } from "./lattice";
-import type { OverlayQuad } from "./minimap";
+import type { OverlayPattern, OverlayQuad } from "./minimap";
 import { toClip, type PaneRect } from "./surface";
 
 const S_TO_NS = 1e9;
@@ -61,6 +61,16 @@ export const MEASUREMENT_MARK: readonly [number, number, number, number] = [0.36
 export interface MarkStyle {
   /** Edge thickness, device px. */
   strokePx?: number;
+  /** Device px per CSS px (T-910). The symbology's lengths — dash, hatch, symbol, handles and the
+   * generalization threshold — are CSS px, so a feature reads the same on a dpr-2 screen. */
+  dpr?: number;
+  /**
+   * T-910's scale-dependent generalization threshold, CSS px. When set, a box carrying
+   * [[MarkBox.symbology]] whose on-screen extent is under this in BOTH axes is drawn as a small
+   * symbol at its centre, with the same symbology ([[isGeneralized]]). Absent: never generalize
+   * (selections, measurements and the rubber band have no symbology and never do).
+   */
+  generalizeBelowPx?: number;
   /** Thickness of an open interval's live-edge cap, device px. */
   openPx?: number;
   /**
@@ -72,11 +82,75 @@ export interface MarkStyle {
   minPx?: number;
 }
 
+// ---- T-910: GIS feature symbolization (docs/23 §10.6 rule 6) ----
+//
+// The map is GIS, not Google Maps: a feature is drawn at its TRUE (t, f) extent, and a marker is a
+// generalization of it, never the representation. So:
+//
+//  - **Symbology by attribute, on the polygon.** Confirmed = solid outline + a light hatch fill;
+//    Candidate = dashed outline, no fill; unexplained = a plain thin outline (its '?' is the label
+//    layer's, `pins.ts`); an explained artifact = thin grey; curated/human = a double outline. The
+//    class is carried by outline and fill (and the label) — never by glyph shape, never by hue alone.
+//  - **Scale-dependent generalization.** Under [[GENERALIZE_BELOW_CSS_PX]] in BOTH axes a feature
+//    collapses to a small square symbol at the centre of its visible part, in the same symbology.
+//    Both, not either: a single-frame impulse is by rule 6 "a thin bar of its measured bandwidth",
+//    and a narrow carrier that has been on for an hour is a thin bar of its duration — collapsing
+//    either to a dot would throw away the one extent it does have on screen. (docs/23's own words:
+//    "Only when a box is under ~6 px on screen"; the user's handoff: "< 6 px in BOTH axes".)
+//  - **Selected** = a heavier outline plus corner handles.
+//
+// Every one of these is still a stroke: the dashes and the hatch are cut by `overlay.ts`'s
+// screen-door pattern, which DISCARDS off-pattern fragments, so the pixels between two hatch lines
+// are the measurement exactly as the data pass drew it.
+
+/** Below this many CSS px in BOTH axes a feature is drawn as its symbol, not its box. */
+export const GENERALIZE_BELOW_CSS_PX = 6;
+/** The generalized symbol's side, CSS px. */
+export const SYMBOL_CSS_PX = 9;
+/** A dashed outline: `DASH_ON` inked of every `DASH_PERIOD`, CSS px. */
+export const DASH_ON_CSS_PX = 5;
+export const DASH_PERIOD_CSS_PX = 8;
+/** The light fill: 1 px diagonal hatch lines every `HATCH_PERIOD`, at `FILL_ALPHA` of the ink. */
+export const HATCH_PERIOD_CSS_PX = 7;
+export const HATCH_ON_CSS_PX = 1;
+export const FILL_ALPHA = 0.45;
+/** A selected feature's outline is this much heavier, CSS px, and carries corner handles. */
+export const SELECTED_EXTRA_CSS_PX = 2;
+export const HANDLE_LEN_CSS_PX = 8;
+export const HANDLE_THICK_CSS_PX = 3;
+/** Inner outline of a `double` (curated) outline: inset and thickness, CSS px. */
+export const DOUBLE_GAP_CSS_PX = 2;
+
+/** The feature classes symbology is keyed on. Presentation of served attributes only. */
+export type FeatureClass = "confirmed" | "candidate" | "unexplained" | "artifact" | "curated";
+
+export interface MarkSymbology {
+  readonly cls: FeatureClass;
+  readonly outline: "solid" | "dashed" | "double";
+  /** A light hatch fill over the interior (a screen-door pattern, never a wash). */
+  readonly fill: boolean;
+}
+
+/** The symbology table (docs/23 §10.6 rule 6; palette T-813). */
+export const SYMBOLOGY: Readonly<Record<FeatureClass, MarkSymbology>> = {
+  confirmed: { cls: "confirmed", outline: "solid", fill: true },
+  candidate: { cls: "candidate", outline: "dashed", fill: false },
+  unexplained: { cls: "unexplained", outline: "solid", fill: false },
+  artifact: { cls: "artifact", outline: "solid", fill: false },
+  curated: { cls: "curated", outline: "double", fill: false },
+};
+
+/** The generalization rule, in CSS px — the ONE predicate both the overlay pass (what is drawn) and
+ * the pin layer (what is hit/focused, `pins.ts`) decide by, so they cannot disagree. */
+export function isGeneralized(wCssPx: number, hCssPx: number, belowPx = GENERALIZE_BELOW_CSS_PX): boolean {
+  return wCssPx < belowPx && hCssPx < belowPx;
+}
+
 /** One rectangle to stroke, in absolute surface coordinates. Presentation input only: every number
  * came off the API, and `t1Ns === null` means *open at the live edge*, never *unknown*. */
 export interface MarkBox {
   readonly id: string;
-  readonly kind: "signal-box" | "selection-box" | "pending-region" | "measurement-box";
+  readonly kind: "signal-box" | "selection-box" | "pending-region" | "measurement-box" | "research-box";
   readonly f0Hz: number;
   readonly f1Hz: number;
   readonly t0Ns: number;
@@ -88,6 +162,11 @@ export interface MarkBox {
   /** Per-box edge thickness (device px), overriding the style's: a Confirmed box is the stronger
    * claim and is drawn heavier than a Candidate (T-808). Presentation only. */
   readonly strokePx?: number;
+  /** T-910: a feature's class symbology. Present on signal and research boxes; absent on the
+   * user's own interaction marks (selections, measurements, the rubber band), which stay plain. */
+  readonly symbology?: MarkSymbology;
+  /** T-910: the selected feature — heavier outline and corner handles. */
+  readonly selected?: boolean;
 }
 
 /** Confirmed edge / Candidate-and-artifact edge thickness, device px (T-808). */
@@ -130,8 +209,14 @@ const withAlpha = (c: readonly [number, number, number, number], a: number): rea
  *
  * A **user band** override wins over the detected one where the API reports it (T-193): the box
  * shows the band in force, not the one that was superseded.
+ *
+ * T-910: each box carries its class's [[SYMBOLOGY]]. Whether a row is *unexplained* is not this
+ * file's question — `unexplained` is `pins.ts`'s `isUnexplained`, the one place that reads the
+ * served family/explanations — so absent it, a row is its served state (or an artifact).
  */
-export function signalMarkBoxes(rows: readonly MarkRow[], focusedId: string | null): MarkBox[] {
+export function signalMarkBoxes<R extends MarkRow>(
+  rows: readonly R[], focusedId: string | null, unexplained?: (row: R) => boolean,
+): MarkBox[] {
   const out: MarkBox[] = [];
   for (const r of rows) {
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
@@ -143,9 +228,10 @@ export function signalMarkBoxes(rows: readonly MarkRow[], focusedId: string | nu
     if (relKind === "suppressed-by" || relKind === "duplicate-of") continue;
     // T-587: an explained artifact draws its own neutral ink, on either tab — the point is that
     // the box on screen is no longer indistinguishable from an unexplained signal's.
-    const base = relKind === "artifact-of" || relKind === "retune-sibling-of"
-      ? ARTIFACT_MARK
-      : r.state === "confirmed" ? CONFIRMED_MARK : CANDIDATE_MARK;
+    const artifact = relKind === "artifact-of" || relKind === "retune-sibling-of";
+    const base = artifact ? ARTIFACT_MARK : r.state === "confirmed" ? CONFIRMED_MARK : CANDIDATE_MARK;
+    const cls: FeatureClass = artifact ? "artifact" : unexplained?.(r) ? "unexplained"
+      : r.state === "confirmed" ? "confirmed" : "candidate";
     const band = r.user_band ?? null;
     out.push({
       id: r.id, kind: "signal-box",
@@ -156,6 +242,8 @@ export function signalMarkBoxes(rows: readonly MarkRow[], focusedId: string | nu
       rgba: r.id === focusedId ? withAlpha(base, FOCUS_ALPHA) : base,
       open: iv.open,
       strokePx: base === CONFIRMED_MARK ? CONFIRMED_STROKE_PX : CANDIDATE_STROKE_PX,
+      symbology: SYMBOLOGY[cls],
+      selected: r.id === focusedId,
     });
   }
   return out;
@@ -218,6 +306,10 @@ export function measurementMarkBoxes(items: readonly MarkMeasurement[], focusedI
  * A box wholly outside the pane draws nothing — a rectangle clamped to the pane's border would
  * claim a boundary the signal does not have (`paneOutlineQuads`' rule, one subject over). A box
  * only partly on screen draws only the edges that are genuinely on it.
+ *
+ * T-910: a box carrying [[MarkBox.symbology]] is drawn in its class's outline (solid / dashed /
+ * double) and fill, and — with `style.generalizeBelowPx` set — as its symbol when it is under that
+ * size in both axes. A selected feature gets a heavier outline and corner handles.
  */
 export function markQuads(
   boxes: readonly MarkBox[], edgeNs: number, paneBox: Box, rect: PaneRect, style: MarkStyle = {},
@@ -225,36 +317,145 @@ export function markQuads(
   const strokePx = style.strokePx ?? 2;
   const openPx = style.openPx ?? 3;
   const minPx = style.minPx ?? 2;
-  const minW = (2 * minPx) / Math.max(1, rect.w);
-  const minH = (2 * minPx) / Math.max(1, rect.h);
+  const k = style.dpr && style.dpr > 0 ? style.dpr : 1;
+  const W = Math.max(1, rect.w), H = Math.max(1, rect.h);
+  const minW = (2 * minPx) / W;
+  const minH = (2 * minPx) / H;
   const out: OverlayQuad[] = [];
   for (const b of boxes) {
     const t1Ns = b.t1Ns ?? edgeNs;
-    const spx = b.strokePx ?? strokePx;
-    const sx = (2 * spx) / Math.max(1, rect.w);
-    const sy = (2 * spx) / Math.max(1, rect.h);
+    const sym = b.symbology;
+    const spx = (b.strokePx ?? strokePx) + (b.selected && sym ? SELECTED_EXTRA_CSS_PX * k : 0);
+    const sx = (2 * spx) / W;
+    const sy = (2 * spx) / H;
     if (!(b.f1Hz > b.f0Hz) || !(t1Ns > b.t0Ns)) continue;
     let [x0, y0, x1, y1] = toClip({ f0Hz: b.f0Hz, f1Hz: b.f1Hz, t0Ns: b.t0Ns, t1Ns }, paneBox);
+    const push = (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number],
+      part: OverlayQuad["part"], pattern?: OverlayPattern) =>
+      // A mark with no symbology (a selection, a measurement, the rubber band) is the plain stroke
+      // it always was — no `part`, no pattern — so nothing about the user's own marks changes.
+      out.push(!sym ? { clip, rgba, kind: b.kind, id: b.id }
+        : pattern ? { clip, rgba, kind: b.kind, id: b.id, part, pattern } : { clip, rgba, kind: b.kind, id: b.id, part });
+    // The generalization decision is made on the box's TRUE on-screen size (scale-dependent, not
+    // pan-dependent), in CSS px — [[isGeneralized]], the predicate `pins.ts` also decides by.
+    if (sym && style.generalizeBelowPx !== undefined
+      && isGeneralized(((x1 - x0) / 2) * W / k, ((y1 - y0) / 2) * H / k, style.generalizeBelowPx)) {
+      const vx0 = Math.max(x0, -1), vx1 = Math.min(x1, 1), vy0 = Math.max(y0, -1), vy1 = Math.min(y1, 1);
+      if (vx1 < vx0 || vy1 < vy0) continue;
+      symbolQuads(push, (vx0 + vx1) / 2, (vy0 + vy1) / 2, b, sym, spx, k, W, H);
+      continue;
+    }
     // The drawing floor. Widened about the centre, and never read back as a measurement.
     if (x1 - x0 < minW) { const m = (x0 + x1) / 2; x0 = m - minW / 2; x1 = m + minW / 2; }
     if (y1 - y0 < minH) { const m = (y0 + y1) / 2; y0 = m - minH / 2; y1 = m + minH / 2; }
     const cx0 = Math.max(x0, -1), cx1 = Math.min(x1, 1);
     const cy0 = Math.max(y0, -1), cy1 = Math.min(y1, 1);
     if (!(cx1 > cx0) || !(cy1 > cy0)) continue; // wholly off this pane: draw nothing, claim nothing
-    const edge = (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number]) =>
-      out.push({ clip, rgba, kind: b.kind, id: b.id });
-    if (x0 >= -1) edge([x0, cy0, Math.min(x0 + sx, cx1), cy1], b.rgba);
-    if (x1 <= 1) edge([Math.max(x1 - sx, cx0), cy0, x1, cy1], b.rgba);
-    if (y0 >= -1) edge([cx0, y0, cx1, Math.min(y0 + sy, cy1)], b.rgba);
+    const origin: readonly [number, number] = [x0, y0];
+    const dashed = sym?.outline === "dashed";
+    const dash = (along: "x" | "y"): OverlayPattern | undefined => dashed
+      ? { mode: along === "x" ? "dash-x" : "dash-y", periodPx: DASH_PERIOD_CSS_PX * k, onPx: DASH_ON_CSS_PX * k, origin }
+      : undefined;
+    // A thin bar (one axis no thicker than two strokes — an impulse, a narrow carrier): one quad at
+    // its true extent on the long axis, dashed along it when the class is dashed.
+    if (sym && (x1 - x0 <= 2 * sx || y1 - y0 <= 2 * sy)) {
+      const alongX = x1 - x0 > y1 - y0;
+      push([cx0, cy0, cx1, cy1], b.rgba, "edge", dash(alongX ? "x" : "y"));
+      if (b.selected) handleQuads(push, x0, y0, x1, y1, b.rgba, spx, k, W, H);
+      continue;
+    }
+    // The light fill first, so the outline is drawn over it.
+    if (sym?.fill) {
+      push([cx0, cy0, cx1, cy1], withAlpha(b.rgba, b.rgba[3] * FILL_ALPHA), "fill",
+        { mode: "hatch", periodPx: HATCH_PERIOD_CSS_PX * k, onPx: HATCH_ON_CSS_PX * k, origin });
+    }
+    const edge = (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number], pat?: OverlayPattern) =>
+      push(clip, rgba, "edge", pat);
+    if (x0 >= -1) edge([x0, cy0, Math.min(x0 + sx, cx1), cy1], b.rgba, dash("y"));
+    if (x1 <= 1) edge([Math.max(x1 - sx, cx0), cy0, x1, cy1], b.rgba, dash("y"));
+    if (y0 >= -1) edge([cx0, y0, cx1, Math.min(y0 + sy, cy1)], b.rgba, dash("x"));
     if (y1 <= 1) {
       // The newest edge. Open → this *is* the live edge, and it says so by being marked
       // differently from a measured end (ADR-0019's open cap, expressed as an edge rather than a
-      // fill because this pass can only stroke).
-      const h = (2 * (b.open ? Math.max(openPx, spx) : spx)) / Math.max(1, rect.h);
-      edge([cx0, Math.max(y1 - h, cy0), cx1, y1], b.open ? OPEN_EDGE_MARK : b.rgba);
+      // fill because this pass can only stroke). The live edge is always solid: it is a statement
+      // about the air, not about the class.
+      const h = (2 * (b.open ? Math.max(openPx, spx) : spx)) / H;
+      edge([cx0, Math.max(y1 - h, cy0), cx1, y1], b.open ? OPEN_EDGE_MARK : b.rgba, b.open ? undefined : dash("x"));
     }
+    if (sym?.outline === "double") {
+      // Curated/human: a second, thinner outline just inside the first.
+      const ix = (2 * (spx + DOUBLE_GAP_CSS_PX * k)) / W, iy = (2 * (spx + DOUBLE_GAP_CSS_PX * k)) / H;
+      const tx = (2 * k) / W, ty = (2 * k) / H;
+      const a0 = x0 + ix, a1 = x1 - ix, b0 = y0 + iy, b1 = y1 - iy;
+      if (a1 - a0 > 2 * tx && b1 - b0 > 2 * ty) rectEdges(edge, a0, b0, a1, b1, tx, ty, b.rgba);
+    }
+    if (b.selected && sym) handleQuads(push, x0, y0, x1, y1, b.rgba, spx, k, W, H);
   }
   return out;
+}
+
+type PushQuad = (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number],
+  part: OverlayQuad["part"], pattern?: OverlayPattern) => void;
+
+/** Four edges of a rectangle in clip space, each clipped to the pane; an edge off the pane is not drawn. */
+function rectEdges(
+  edge: (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number], pat?: OverlayPattern) => void,
+  x0: number, y0: number, x1: number, y1: number, tx: number, ty: number,
+  rgba: readonly [number, number, number, number], pat?: (along: "x" | "y") => OverlayPattern | undefined,
+): void {
+  const cx0 = Math.max(x0, -1), cx1 = Math.min(x1, 1), cy0 = Math.max(y0, -1), cy1 = Math.min(y1, 1);
+  if (!(cx1 > cx0) || !(cy1 > cy0)) return;
+  if (x0 >= -1) edge([x0, cy0, Math.min(x0 + tx, cx1), cy1], rgba, pat?.("y"));
+  if (x1 <= 1) edge([Math.max(x1 - tx, cx0), cy0, x1, cy1], rgba, pat?.("y"));
+  if (y0 >= -1) edge([cx0, y0, cx1, Math.min(y0 + ty, cy1)], rgba, pat?.("x"));
+  if (y1 <= 1) edge([cx0, Math.max(y1 - ty, cy0), cx1, y1], rgba, pat?.("x"));
+}
+
+/** A selected feature's corner handles: an L-bracket just outside each corner that is on the pane. */
+function handleQuads(
+  push: PushQuad, x0: number, y0: number, x1: number, y1: number,
+  rgba: readonly [number, number, number, number], spx: number, k: number, W: number, H: number,
+): void {
+  const ink = withAlpha(rgba, FOCUS_ALPHA);
+  const off = spx, len = HANDLE_LEN_CSS_PX * k, th = HANDLE_THICK_CSS_PX * k;
+  const ox = (2 * off) / W, oy = (2 * off) / H, lx = (2 * len) / W, ly = (2 * len) / H, tx = (2 * th) / W, ty = (2 * th) / H;
+  for (const [cx, sxg] of [[x0 - ox, 1], [x1 + ox, -1]] as const) {
+    for (const [cy, syg] of [[y0 - oy, 1], [y1 + oy, -1]] as const) {
+      if (cx < -1 || cx > 1 || cy < -1 || cy > 1) continue; // a corner off the pane has no handle
+      const hx: readonly [number, number, number, number] = sxg > 0 ? [cx, cy, cx + lx, cy + syg * ty] : [cx - lx, cy, cx, cy + syg * ty];
+      const vx: readonly [number, number, number, number] = sxg > 0 ? [cx, cy, cx + tx, cy + syg * ly] : [cx - tx, cy, cx, cy + syg * ly];
+      for (const q of [hx, vx]) {
+        push([Math.max(-1, Math.min(q[0], q[2])), Math.max(-1, Math.min(q[1], q[3])), Math.min(1, Math.max(q[0], q[2])), Math.min(1, Math.max(q[1], q[3]))], ink, "handle");
+      }
+    }
+  }
+}
+
+/** A generalized feature: a [[SYMBOL_CSS_PX]] square at `(cx, cy)` (clip), in the class's outline
+ * and fill, with handles when selected. The same symbology as its box, at a readable size. */
+function symbolQuads(
+  push: PushQuad, cx: number, cy: number, b: MarkBox, sym: MarkSymbology, spx: number, k: number, W: number, H: number,
+): void {
+  const hx = (SYMBOL_CSS_PX * k) / W, hy = (SYMBOL_CSS_PX * k) / H; // half-side, in clip units (2 * side/2 / W)
+  const x0 = cx - hx, x1 = cx + hx, y0 = cy - hy, y1 = cy + hy;
+  const origin: readonly [number, number] = [x0, y0];
+  const th = Math.min(spx, 2 * k) + (b.selected ? SELECTED_EXTRA_CSS_PX * k : 0) / 2;
+  const tx = (2 * Math.max(k, th)) / W, ty = (2 * Math.max(k, th)) / H;
+  if (sym.fill) {
+    push([Math.max(x0, -1), Math.max(y0, -1), Math.min(x1, 1), Math.min(y1, 1)], withAlpha(b.rgba, b.rgba[3] * FILL_ALPHA), "fill",
+      { mode: "hatch", periodPx: 3 * k, onPx: HATCH_ON_CSS_PX * k, origin });
+  }
+  const dashed = sym.outline === "dashed";
+  const edge = (clip: readonly [number, number, number, number], rgba: readonly [number, number, number, number], pat?: OverlayPattern) =>
+    push(clip, rgba, "symbol", pat);
+  rectEdges(edge, x0, y0, x1, y1, tx, ty, b.rgba, dashed
+    ? (along) => ({ mode: along === "x" ? "dash-x" : "dash-y", periodPx: 4 * k, onPx: 2 * k, origin })
+    : undefined);
+  if (sym.outline === "double") {
+    const ix = (2 * 3 * k) / W, iy = (2 * 3 * k) / H;
+    rectEdges(edge, x0 + ix, y0 + iy, x1 - ix, y1 - iy, (2 * k) / W, (2 * k) / H, b.rgba);
+  }
+  if (b.selected) handleQuads(push, x0, y0, x1, y1, b.rgba, 2 * k, k, W, H);
 }
 
 /**

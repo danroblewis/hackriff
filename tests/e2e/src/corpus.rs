@@ -178,6 +178,26 @@ pub fn docs22_axes() -> Vec<Axis> {
             name: "templates",
             levels: &["on", "off"],
         },
+        // docs/22 §4.3's negative populations (T-568). Not one of §2's A-axes: a negative is a
+        // population with nothing to find, so it gets its own plane rather than a family level.
+        Axis {
+            id: "NP",
+            name: "negative population (docs/22 §4.3)",
+            levels: &[
+                "n1-thermal",
+                "n2-cw",
+                "n2-fm-voice",
+                "n2-am-voice",
+                "n3-ofdm",
+                "n3-dsss",
+                "n3-16qam",
+                "n3-css",
+                "n4-quiet-433",
+                "n4-terminator-50ohm",
+                "n5-off-grid",
+                "n5-adjacent-leakage",
+            ],
+        },
     ]
 }
 
@@ -185,13 +205,18 @@ pub fn docs22_axes() -> Vec<Axis> {
 /// placed deliberately past the edge (6 dB at 112 symbols) and asserted to fail honestly.
 pub const EXPECTED_FAILURE_PLANE: &str = "EF";
 
+/// The **negative-control** plane's name (docs/22 §4.3, T-568): one cell per negative
+/// sub-population, anchored on `NP` instead of `A1`.
+pub const NEGATIVE_PLANE: &str = "NEG";
+
 /// The declared planes of the manifest.
 ///
 /// docs/22 §2 is a **stratified sample of an axis product**, not a full crossing (~10⁵ jobs), so
 /// the manifest declares the crossings the corpus is argued over rather than the full product:
 /// the recall grid the bars are indexed on (family × SNR × support), family against each other
-/// axis, and the expected-failure plane. Every plane is anchored on A1, because every claim in
-/// docs/22 §6.1 is per family.
+/// axis, the expected-failure plane, and the negative-control plane. Every recall plane is
+/// anchored on A1, because every claim in docs/22 §6.1 is per family; the negative plane is
+/// anchored on `NP`, because its claims (C-L, C-M) are per population.
 pub const DOCS22_PLANES: &[(&str, &[&str])] = &[
     ("A1xA2xA4", &["A1", "A2", "A4"]),
     ("A1xA3", &["A1", "A3"]),
@@ -200,6 +225,7 @@ pub const DOCS22_PLANES: &[(&str, &[&str])] = &[
     ("A1xA7", &["A1", "A7"]),
     ("A1xA8", &["A1", "A8"]),
     (EXPECTED_FAILURE_PLANE, &["A1"]),
+    (NEGATIVE_PLANE, &["NP"]),
 ];
 
 /// One cell: a plane and one level per axis in it.
@@ -313,7 +339,7 @@ impl Ticket {
 /// declaration **not apply** — so a narrow declaration can never leak into a wider plane.
 #[derive(Clone, Debug)]
 pub struct Unreachable {
-    /// The family (A1 level) — mandatory.
+    /// The family (A1 level; on the negative plane, the `NP` level) — mandatory.
     pub family: &'static str,
     /// Planes it covers; empty = all.
     pub planes: &'static [&'static str],
@@ -328,7 +354,7 @@ pub struct Unreachable {
 impl Unreachable {
     /// Whether this declaration marks `cell`.
     pub fn applies(&self, cell: &Cell) -> bool {
-        cell.level("A1") == Some(self.family)
+        cell.level("A1").or_else(|| cell.level("NP")) == Some(self.family)
             && (self.planes.is_empty() || self.planes.contains(&cell.plane.as_str()))
             && self
                 .when
