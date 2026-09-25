@@ -77,6 +77,11 @@ BULK_MAX=${BULK_MAX:-15}
 # The acceptance phase's home under `check` is the daily release-candidate run (`just rc`, user rule
 # the same evening: its reds become P1 tickets, never an un-land). Rollback: GATE_TIERS=full.
 GATE_TIERS=${GATE_TIERS:-full}
+# THE RELEASE CANDIDATE (user rule, 2026-09-24 20:00): under GATE_TIERS=check the acceptance phase leaves the
+# merge gate and runs once a day - at the first gap between gates after RC_HOUR - and on `just rc`, over main's
+# landed tip. Green tags rc-YYYYMMDD; each red is one P1 attention item. Never an un-land.
+RC_HOUR=${RC_HOUR:-3}
+RCMARK=$S/rc-in-progress
 case "$GATE_TIERS" in full) GATE_PHASE="" ;; check) GATE_PHASE="--phase check" ;;
   *) echo "merge-runner: GATE_TIERS=$GATE_TIERS is not full|check - using full" >&2; GATE_TIERS=full; GATE_PHASE="" ;; esac
 DRY_RUN=${DRY_RUN:-0}
@@ -272,6 +277,56 @@ bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (t
   # nothing else, and one red run cannot tell a defect from a test that is flaky even alone.
   bisect_red "$base" "${cand[0]}" || return 0
   bisect_red "$base" "${cand[0]}" && echo "${cand[0]}"
+  return 0
+}
+
+rc_due(){ # 0 = run the release candidate now
+  [ -e "$S/rc-requested" ] && return 0
+  [ "$GATE_TIERS" = check ] || return 1      # under full every merge already runs the acceptance phase
+  [ $((10#$(date +%H))) -ge "$RC_HOUR" ] || return 1
+  [ "$(sed -n 's/^day=//p' "$S/rc-last" 2>/dev/null)" = "$(date +%Y%m%d)" ] && return 1
+  return 0
+}
+run_rc(){ # main is ready (landed, clean, nothing staged) - checked by the caller
+  local sha tag rc from failed item last reds r
+  sha=$(git -C "$REPO" rev-parse HEAD); tag="rc-$(date +%Y%m%d)"
+  printf 'sha=%s\nstarted=%s\n' "$sha" "$(date +%s)" > "$RCMARK"; rm -f "$S/rc-requested"
+  # Its own announcement, so hkpy.flow / cycletime start no merge gate here and credit its suites to none.
+  log "RC gate (just gate --files crates/ --phase acceptance on main ${sha:0:8})…"
+  from=$(( $(wc -l < "$LOG") ))
+  limited just gate --files crates/ --phase acceptance; rc=$?
+  # The gate stops at its first red suite; an RC must still run the browser tier after an acceptance-ci red.
+  failed=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: FAILED just ([a-z0-9-]+) .*/\1/p' | tail -1)
+  if [ "$rc" -ne 0 ] && [ "$failed" = "acceptance-ci" ]; then
+    limited just gate --files crates/ --phase acceptance --resume-after acceptance-ci
+  fi
+  printf 'day=%s\nsha=%s\nrc=%s\nat=%s\n' "$(date +%Y%m%d)" "$sha" "$rc" "$(date +%s)" > "$S/rc-last"
+  rm -f "$RCMARK"
+  if [ "$rc" -eq 0 ]; then
+    git -C "$REPO" tag -f "$tag" "$sha" >/dev/null 2>&1
+    log "RC GREEN ${sha:0:8} -> tagged $tag"
+    return 0
+  fi
+  last=$(git -C "$REPO" describe --tags --match 'rc-*' --abbrev=0 "$sha" 2>/dev/null || echo "none yet")
+  # One item per red: nextest's FAIL/TIMEOUT/crash lines (crate::binary test) and the browser runner's failed specs.
+  reds=$(tail -n +"$from" "$LOG" | sed -n -E \
+      -e 's/^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|LEAK) \[[^]]*\] \([^)]*\) ([^ ]+) ([^ ]+).*/rust \2 \3/p' \
+      -e 's/^e2e: .*failed: (.*)$/spec \1/p' | sort -u)
+  [ -z "$reds" ] && reds="suite ${failed:-unknown}"
+  printf '%s\n' "$reds" | while read -r kind a b; do
+    case "$kind" in
+      rust) item="$a $b"
+            case "$a" in *::*) r="cargo nextest run -p ${a%%::*} -E 'binary(${a#*::}) & test(=$b)'" ;;
+                         *) r="cargo nextest run -p $a --lib -E 'test(=$b)'" ;; esac ;;
+      spec) for sp in $(echo "$a $b" | tr ',' ' '); do
+              echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - spec $sp red in the release candidate; last green: $last; first red tip: ${sha:0:8}; repro: cd ui && node e2e/run.mjs ${sp%.e2e.mjs}; assertion: $(tail -n +"$from" "$LOG" | grep -m1 -A3 "✖ .*" | grep -m1 -E 'AssertionError|Error' | sed 's/^ *//' | cut -c1-200)" >> "$NEEDS"
+            done; continue ;;
+      *) item="suite $a"; r="just gate --files crates/ --phase acceptance" ;;
+    esac
+    echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - $item red in the release candidate; last green: $last; first red tip: ${sha:0:8}; repro: $r; assertion: $(tail -n +"$from" "$LOG" | grep -m1 -A40 -F "$b" | grep -m1 -E 'panicked at|assertion|Error' | sed 's/^ *//' | cut -c1-200)" >> "$NEEDS"
+  done
+  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | wc -l | tr -d ' ') red) -> P1 items in $NEEDS; nothing un-lands"
+  notify_coordinator "the release candidate at ${sha:0:8} is RED - $(printf '%s\n' "$reds" | wc -l | tr -d ' ') P1 item(s) (RC_RED, last green $last); file them found_by rc-$(date +%Y%m%d)." "RC red - P1 tickets"
   return 0
 }
 
@@ -501,7 +556,7 @@ workers_drained(){ # 0 = no worker running and the box is clear (or waited long 
   fi
   return 1
 }
-rm -f "$GATEWANT"   # a marker from a previous run must not outlive it
+rm -f "$GATEWANT" "$RCMARK"   # markers from a previous run must not outlive it
 
 # preconditions for touching main; 0 = OK to proceed, 1 = wait
 main_ready(){
@@ -972,7 +1027,7 @@ fi
 log "GATE TARGET: $CARGO_TARGET_DIR (main's target/ is the workers' clone source and is not rebuilt by gates)"
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 # What this process is actually running with - `just knobs show` reads it back as "effective".
-log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0} GATE_TIERS=$GATE_TIERS"
+log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0} GATE_TIERS=$GATE_TIERS RC_HOUR=$RC_HOUR"
 self_version
 # STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
 # happen automatically?"). This runner is the only writer of main, so a staged merge or a
@@ -1079,6 +1134,7 @@ while true; do
     fi
   fi
   HOLD_SAID=""
+  if rc_due && [ ! -e "$BULKMARK" ] && main_ready && workers_drained; then run_rc; continue; fi
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
