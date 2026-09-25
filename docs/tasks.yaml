@@ -27447,6 +27447,17 @@ tasks:
       2026-09-25 coordinator, from the explorer's first window (journal-20260925.md): STEP (1) IS MEASURED - live 88-108 MHz tonight, this antenna: 19 stations present, 6 pilot-locked, 2 gave RDS, PI decoded UNPROMPTED for 1 (101.3, PI 1694 - PS never committed unprompted), prompted PI for 2 (101.3, 98.9 A4FF); every other station rds57.quality 0.006-0.07. Only the strongest station got the wfm chain unprompted; station-shaped detections sit family=null, resolution not-searched - auto-attaching the pilot/RDS probe to every WFM-shaped candidate is THIS ticket's core. So T-926 no longer needs live air to start: work on the fixtures T-935 and make T-936's blind tests green. Split out as their own tickets: T-937 (FM fragmented into 349 narrow candidates at 2.4 Msps - prerequisite for one chain per station), T-938 (centre refinement from pilot/discriminator), T-945 (closed-loop gain: overload at every clip; reducing gain made RDS worse - front-end limited beyond the two strongest stations at this location), T-940 (on-air stations read ended).
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): SECOND PASS with the independent oracle (py/fixtures/rds_ref.py), 2.4 Msps per window: the RDS decode chain is NOT the limit once pointed at a station - prompted, 5 of 19 stations give a PI (88.5 3AAB, 98.1 1704, 98.9 A4FF, 101.3 1694, 106.1 1323), matching the oracle 4/4 where the oracle decodes; the oracle found NO RDS station the app missed. The gaps are unprompted + presentation: (1) the always-on hk-rds chain runs only on rows the app classifies WFM (101.3, 98.9); (2) it decodes ONE ~4-group snapshot (~0.35 s of RDS), commits PI and stops - PS (four 0A segments) and RT can never appear unprompted; it must keep decoding a confirmed WFM station incrementally (extend the region) at least until PS is stable. Updated live ratio: 19 present / 11 pilot / 5 with RDS / PI unprompted 2 / PS unprompted 0. Split out: T-961 (identity on a split row), T-962 (PI from 3 groups), T-967 (identity not shown in lists); fixtures T-935 (landed) + T-960 (88.5, 106.1).
+
+      2026-09-25 05:50 supervisor -> coordinator (verbatim, ~/.hackriff-ops/handoffs/coordinator-0550.md §B): FM/RDS P1 - the measured baseline from window 1.
+      - Unprompted PI came for 2 of 19 FM stations (~10 %).
+      - Root causes named by the explorer:
+        1. RDS auto-attaches only to rows the app classes WFM, but the classifier says `unknown 0.999` on WFM stations WITH pilot and CRC-valid RDS -> sub-ticket: classifier must class pilot+RDS as WFM.
+        2. The unprompted hk-rds chain decodes 4-group snapshots -> PI only, never PS/RT -> sub-ticket: continuous RDS accumulation on the detection row (PS/RT/PTY).
+        3. The RDS identity lands on a separate overlapping row (106.1: an `rds-pi:1323` row beside an `unknown 0.999` row) -> sub-ticket: identity onto the detection row (overlap = re-analysis).
+        4. In a 2.4 Msps sweep FM stations fragment into 9-80 kHz candidates (349 for 19 stations); at 20 MHz span the detect reader drops ~3.1 G samples (39 overruns) -> sub-ticket: WFM-width merge + overrun accounting.
+        5. 98.085 was Confirmed with PI 1704 from ~3 groups while the oracle saw no RDS -> sub-ticket: RDS confirm needs a minimum group count / CRC-valid ratio.
+      - The 4 FM/RDS fixtures (88.5 / 98.9 / 101.3 / 106.1) join the 'all captured signals decode' set (T-936).
+      SUB-TICKETS (coordinator): (1) T-970 classifier classes pilot+RDS as WFM; (2) T-971 continuous RDS accumulation on the detection row (after this ticket's auto-attach lands); (3) T-961; (4) T-937 (WFM-width merge) + T-939 (overrun accounting); (5) T-962. Set: T-936 (101.3, 98.9) + T-969 (88.5, 106.1); fixtures T-935 + T-960. THIS ticket keeps: auto-attach of the RDS probe to every WFM-shaped detection, and the ratio measurement against the four fixtures + live.
     core_interface: true
   - id: T-927
     milestone: MMAP
@@ -27634,6 +27645,8 @@ tasks:
       core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer ISM entry: the opposite merge error too - a 4.81 MHz-wide candidate at 914.8385 MHz (8 Msps at 915) is almost certainly several bursts plus DC merged. Fix both directions: the overlap/re-analysis invariant should split it.
+
+      2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
   - id: T-938
     milestone: MAUTO
     title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
@@ -27666,6 +27679,8 @@ tasks:
       DELIVER: measure (T-453: measure, don't assume) where the detect reader spends its time at 20 Msps on the release build (profile per stage), and fix so detection keeps up at 20 Msps on the Mac (decimate/segment, bound per-frame work, or shed detection frames honestly with a coverage mark - never silently); the waterfall rows must never go empty because detection is behind (live is never gated on another reader). Also say why source_dropped is non-zero when only the detect reader lags (does a slow reader back-pressure the source?). Test: a throughput bound goes in the timing tier (just timing, docs/10 §3.6); a deterministic test in the gate that a lagging detect reader never starves the waterfall/history readers.
       WHAT THE USER WILL SEE ON STAGING: at 20 MHz span the waterfall is solid and detection shows no loss counters climbing.
       Real-time path. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
   - id: T-940
     milestone: M2-hardening
     title: "On-air FM stations (incl. Confirmed 101.3 while decoding) read liveness: ended; lists show Nothing on the air"
@@ -27838,7 +27853,7 @@ tasks:
   - id: T-950
     milestone: MAUTO
     title: FLEX pager decode (2/4-FSK 1600-6400 bps, BCH(31,21)) - the dominant 929-932 MHz protocol; app has only POCSAG
-    status: todo
+    status: in-progress
     priority: P2
     deps:
     - T-949
@@ -27856,6 +27871,7 @@ tasks:
       2026-09-25 coordinator, user: this is THE FLEX decoder recipe ticket, and the flex-pagers-930p8 fixture (T-949, external; fetch it in your worktree) is its BLIND TEST: write the FLEX member of the 'all captured signals decode' set FIRST, T-545 pattern (mock SDR replaying the capture, blind - no frequency/protocol passed; per truth channel 929.608/929.933/931.733: one burst region, FSK params estimated, the FLEX chain auto-selected, frames sync + BCH(31,21)-valid, a paging-allocation explanation in the top-k), confirm it is red on main for the right reason, then build the recipe until it is green. Use case SIGNAL-088.
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
     dispatch: manual
+    branch: task-t950
   - id: T-951
     milestone: MAUTO
     title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
@@ -27997,7 +28013,7 @@ tasks:
   - id: T-960
     milestone: MAUTO
     title: "Two more explorer FM captures into fixtures/ with hidden truth: 88.5 PI 3AAB, 106.1 PI 1323 (oracle-confirmed)"
-    status: todo
+    status: in-progress
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
@@ -28014,6 +28030,7 @@ tasks:
       DELIVER: exactly as T-935 did (fixtures/hackrf/explorer-2026-09-25/, Git LFS if <= 25 MB else external per fixtures/README.md; hackriff:truth via py/fixtures/annotate.py so the mock SDR cannot read it; manifest.json; py/fixtures/build_explorer_2026_09_25.py extended; capture settings LNA 32 / VGA 30 / amp on, overload flagged, stock antenna; SIGNAL-062); re-run rds_ref.py on each and record the votes.
       MAC ONLY (the captures are in ~/.hackriff-ops on the Mac Studio). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     dispatch: manual
+    branch: task-t960
   - id: T-961
     milestone: MAUTO
     title: "RDS identity lands on a separate overlapping row (106.1: rds-pi:1323 beside an unknown-0.999 detection); a CRC-valid decode never confirms the emitter"
@@ -28028,6 +28045,8 @@ tasks:
       FOUND 2026-09-25 by the explorer (FM second pass, 106.1 MHz): an RDS identity lands on a DIFFERENT, OVERLAPPING row from the detection - the recipe decode created/used a 200 kHz candidate '106.1126 id=rds-pi:1323' while the blind-detection row '106.1127, 160 kHz' stayed family: unknown, confidence 0.999 (and the UI list shows it as 'unknown 100% unk'). Two overlapping boxes for one station break the overlap invariant (CLAUDE.md: overlap is an error signal that triggers re-analysis), and a CRC-valid decode neither confirms the station nor overrides the classifier. By contrast 88.5 was confirmed fm-broadcast by the same recipe. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, 03:43-05:16, live HackRF in SF) - sections named below; fm-gap.json, shots/, hk-serve-run*.log beside it. (section '04:45-05:00 FM/RDS, second pass').
       DELIVER: a decode result attaches to the emitter whose (t,f) region it came from (attach, don't duplicate - the T-869 principle), and a CRC-valid decoded identity is evidence that confirms the emitter and supersedes an 'unknown' classification (ranked, never a database identification); any overlap that still arises triggers the re-analysis path, not a second box. Test through the mock SDR on the 106.1 fixture (or a synthetic WFM+RDS station detected blind, then decoded by the recipe): one row, confirmed, carrying the PI; red on current code.
       core_interface (inventory). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
     core_interface: true
   - id: T-962
     milestone: MAUTO
@@ -28043,6 +28062,8 @@ tasks:
       FOUND 2026-09-25 by the explorer (FM second pass): 98.085 MHz was CONFIRMED with PI 1704 from ~3 CRC-valid groups in 45 s, while the independent oracle (py/fixtures/rds_ref.py) found no RDS on the same station and clip - app > oracle. A PI committed from 2-3 groups is weak evidence (RDS's CRC is a 10-bit check with offset words; a handful of groups can pass by chance on a noisy slice). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, 03:43-05:16, live HackRF in SF) - sections named below; fm-gap.json, shots/, hk-serve-run*.log beside it. (FM second pass table, 98.088 row).
       DELIVER: RDS identity commits carry their vote count and stay PROVISIONAL until the evidence clears a stated bound (N agreeing CRC-valid groups, or the ADR-0022 evidence-bits budget if RDS verification goes through the confirm gate - say which applies and cite it); a Confirmed state resting on an identity needs that bound; the UI can show 'PI 1704 (3 groups, provisional)'. Test: a synthetic noisy slice that yields 2-3 chance CRC passes does not confirm; a clean station does; red on current code. The confirm gate is a one-way door: only stricter.
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
     core_interface: true
   - id: T-963
     milestone: MAUTO
@@ -28154,6 +28175,41 @@ tasks:
       User 2026-09-25: all 4 explorer FM/RDS fixtures (88.5 / 98.9 / 101.3 / 106.1) go into the 'all captured signals decode' set. T-936 (running) builds the set on T-935's two captures (101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot-only); this ticket adds the other two members from T-960's fixtures, same shape, same file: 88.5 MHz PI 3AAB (the app confirmed it fm-broadcast when prompted) and 106.1 MHz PI 1323 (the app decoded it only on a SPLIT overlapping row - the member also asserts ONE row per station, red until T-961).
       DELIVER: two members, T-545 pattern exactly as T-936 set it up: through the MOCK SDR replaying the fixture, BLIND (no frequency/modulation/protocol passed), per truth emission: one (t,f) region, WFM with pilot, RDS auto-attached unprompted, PI decoded and checked against the HIDDEN truth, 'FM broadcast' in the top explanations; red for the right reason, each red naming the ticket that turns it green (T-926 auto-attach/PS, T-937 fragmentation, T-961 one row, T-962 provisional identity); registered in the same milestone target (never the per-merge gate).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the set's binary alone), then HAND BACK. Never `just gate`.
+    core_interface: true
+  - id: T-970
+    milestone: MAUTO
+    title: "FM/RDS sub-1: classifier classes a pilot+RDS station as WFM (today unknown 0.999 on 106.1/98.085)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: CLASSIFY-WFM
+    use_cases:
+    - SIGNAL-062
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      FM/RDS P1 (T-926) sub-ticket 1 of 5 (supervisor 05:50, from the explorer's window-1 baseline: unprompted PI on 2 of 19 stations): RDS auto-attaches only to rows the app classes WFM, but the classifier says unknown at confidence 0.999 on WFM stations WITH a locked 19 kHz pilot and CRC-valid RDS (106.1 PI 1323; 98.085; the UI shows '100% unk'). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, FM second pass; fixtures fixtures/hackrf/explorer-2026-09-25/ (T-935, T-960).
+      DELIVER: a station-shaped emission (~120-200 kHz OBW, FM deviation, a 19 kHz pilot line, a 57 kHz RDS subcarrier) is classified WFM with a calibrated confidence - pilot/RDS subcarrier are evidence features the classifier or a pre-classification rule reads, measured from the signal (never from the band plan; the allocation stays an explanation); an 'unknown' output never carries 0.999 (open-set honesty - coordinate with T-953, which owns the burst side). Blind test through the mock SDR on the four FM fixtures: every truth station classifies WFM; red on current code.
+      core_interface (classification). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    core_interface: true
+  - id: T-971
+    milestone: MAUTO
+    title: "FM/RDS sub-2: continuous RDS accumulation on the detection row (PS/RT/PTY), not a 4-group PI snapshot"
+    status: todo
+    priority: P1
+    deps:
+    - T-926
+    parallel_group: PIPE-RDS-ACCUM
+    use_cases:
+    - SIGNAL-062
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      FM/RDS P1 (T-926) sub-ticket 2 of 5 (supervisor 05:50): the unprompted hk-rds chain decodes ONE ~4-group snapshot (~0.35 s of RDS), commits PI and stops - so PS (four 0A segments), RT and PTY can never appear unprompted (window 1: PS unprompted 0 of 19; 101.3 'ps: null, ps_frames: []' after a 3+ min dwell). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, 'FM: Listen, the UI decode path, and the unprompted RDS dwell'.
+      DELIVER: continuous RDS accumulation on the DETECTION row - once a WFM emitter has RDS, the chain keeps decoding it incrementally (CLAUDE.md: decode extends with the region, never re-decoding what is done) and accumulates PS (segment-assembled, stable-until-changed, dynamic PS tracked as a sequence), RT (A/B flag), PTY, AF, CT into the emitter's decode record as an accumulated field view (the user's 'RDS as accumulated field view, not packets'); bounded CPU per station (listener-budget, T-872) and it stops when the emitter ends. Tests through the mock SDR on the FM fixtures: PS/RT/PTY accumulate on the station's own row matching the hidden truth / the rds_ref oracle; red on current code. Depends on T-926 (auto-attach, touching the same chains) to avoid two workers in chains/.
+      core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
