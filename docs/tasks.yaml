@@ -29990,6 +29990,54 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the spec alone and at 3 lanes on ports >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1026 and T-997 workers 2026-09-25: Selected-region drawer asks /api/coverage for a stale scope (0-9.8 GHz instead of the selected region) when the selection lands mid-flight: send the current scope, drop superseded responses
+  - id: T-1031
+    milestone: MMAP
+    title: "app-top-chrome spec (T-1025) samples the canvas 60 px below the chip gap and sometimes hits a detection box / guide line / grey: red 1 in 4 on main - sample a known-empty canvas point deterministically"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: UI-TOPCHROME-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the UI integrator (2026-09-25 16:2x, T-996/T-1026/T-1007): ui/e2e/app-top-chrome.e2e.mjs (T-1025, landed) compares a pixel in the gap between the translucent top chips with a canvas sample 60 px lower; that lower sample sometimes lands on a detection box, a guide line or grey. Red 1 in 4 on the base commit 954e342f itself, more often on busier branches.
+      DELIVER: make the 'canvas visible between the chips' assertion deterministic - compare against the canvas's own rendered pixel at the SAME point with the chips hidden (or read the WebGL framebuffer at that point), or pick the comparison point from the view's known-empty region via the page's own state; never widen the tolerance.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone and at 3 lanes on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been ~a day stale; build hk-cli once), then HAND BACK. Never `just gate`. Never loosen an assertion; make it deterministic and prove it goes red when the defect returns.
+    notes: |
+      FOUND BY coordinator triage 2026-09-25: app-top-chrome spec (T-1025) samples the canvas 60 px below the chip gap and sometimes hits a detection box / guide line / grey: red 1 in 4 on main - sample a known-empty canvas point deterministically
+  - id: T-1032
+    milestone: MMAP
+    title: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: UI-CARD-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the UI integrator (2026-09-25 16:2x): ui/e2e/app-card.e2e.mjs (T-1026) passed 2 of 3 alone at load 30-47, failing differently each time: (a) the card's label 99.7754 vs the box's 99.7755 MHz (two roundings of one centre - compare the served numbers, or format both through the same formatter); (b) a 5 s wait for the card's x to close it (wait on the store/DOM state the close sets, not a timeout); (c) boxes disappearing mid-test (the detections churn by design - pin the feature by id from the served inventory, or use the mock SDR's steady fixture).
+      DELIVER: fix each cause deterministically (triage alone first per deflake-triage: a product race - e.g. the close handler lost under load - is fixed in ui/src, not in the spec); 10/10 alone and 5/5 at 3 lanes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone and at 3 lanes on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been ~a day stale; build hk-cli once), then HAND BACK. Never `just gate`. Never loosen an assertion; make it deterministic and prove it goes red when the defect returns.
+    notes: |
+      FOUND BY coordinator triage 2026-09-25: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
+  - id: T-1033
+    milestone: MAUTO
+    title: "explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it"
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: OPS-EXPLORER
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      FOUND BY the T-1029 deflaker (2026-09-25): ops/explorer-window.sh - (1) both the rogue-server watcher and cleanup send an unconditional `kill -KILL <pid>` after the process has already exited; if the pid is reused in between, an unrelated process is killed (narrow window). (2) If cleanup stops the watcher between its detecting a rogue `hk serve` and killing it, the rogue survives the window.
+      DELIVER: signal only a pid still verified to be the same process (check its start time/command via ps right before the kill, or hold it as a child and wait on it); make cleanup finish the watcher's pending rogue kill (or re-scan once after stopping it). Tests in py/tests/test_explorer_launcher.py (hermetic: tmp ops dir, own port, never the real radio lock/staging): a reused-pid simulation is not killed; a rogue detected at cleanup time is still stopped. Red on the old script.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q py/tests/test_explorer_launcher.py`, `just lint-py`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator triage 2026-09-25: explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
