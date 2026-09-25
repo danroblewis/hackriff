@@ -124,6 +124,61 @@ def test_reap_on_an_empty_window_reclaims_nothing(tmp_path):
     assert plan == [] and total == 0
 
 
+# --------------------------------------------------------------------- exclude (T-983 review round 2)
+
+
+def test_reap_excludes_the_kept_dir_when_a_rogue_claims_the_same_one(tmp_path):
+    """The review's reproduction: a rogue hk serve reports the SAME --data-dir as the kept server
+    (a second listener on it, exactly what explorer.md hands the agent). Reaping the rogue's
+    claimed dir must never take the kept server's still-live ring with it."""
+    kept = tmp_path / "data"
+    _make_ring(kept, "iqbuffer", 4096)
+    plan, total = er.reap(kept, dry_run=False, exclude=kept)
+    assert plan == [] and total == 0
+    assert (kept / "iqbuffer").is_dir()  # the kept server's live ring: untouched
+
+
+def test_reap_excludes_the_kept_dir_when_a_rogue_claims_its_parent(tmp_path):
+    """The review's second trigger: a rogue's claimed --data-dir is a PARENT of the kept server's
+    (killed before it ever made its own ring). Walking down from that parent must stop at the
+    kept dir rather than reaping straight through it."""
+    kept = tmp_path / "data"
+    _make_ring(kept, "iqbuffer", 4096)
+    plan, total = er.reap(tmp_path, dry_run=False, exclude=kept)  # tmp_path is kept's parent
+    assert plan == [] and total == 0
+    assert (kept / "iqbuffer").is_dir()
+
+
+def test_reap_with_exclude_still_reaps_a_genuinely_separate_rogue_ring(tmp_path):
+    """Excluding the kept dir must not blunt reaping a rogue's own, separate ring."""
+    kept = tmp_path / "data-fm"
+    _make_ring(kept, "iqbuffer", 4096)
+    rogue = tmp_path / "data-rogue"
+    _make_ring(rogue, "iqbuffer", 2048)
+    plan, total = er.reap(tmp_path, dry_run=False, exclude=kept)
+    assert total == 2048
+    assert (kept / "iqbuffer").is_dir()  # untouched
+    assert not (rogue / "iqbuffer").exists()  # reaped
+
+
+def test_find_data_dirs_excludes_by_resolved_path_not_just_string_match(tmp_path):
+    kept = tmp_path / "data"
+    _make_ring(kept, "iqbuffer", 100)
+    unresolved = tmp_path / "." / "data"  # same directory, spelled differently
+    assert er.find_data_dirs(tmp_path, exclude=unresolved) == []
+
+
+def test_cli_reap_with_exclude_protects_the_kept_dir(tmp_path):
+    kept = tmp_path / "data"
+    _make_ring(kept, "iqbuffer", 4096)
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "reap", "--window", str(kept), "--exclude", str(kept)],
+        capture_output=True, text=True, check=True,
+    )
+    assert r.stdout.strip().splitlines()[-1] == "TOTAL\t0"
+    assert (kept / "iqbuffer").is_dir()
+
+
 # -------------------------------------------------------------------------- process table parsing
 
 

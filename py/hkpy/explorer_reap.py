@@ -51,17 +51,26 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def find_data_dirs(window_dir: Path) -> list[Path]:
+def find_data_dirs(window_dir: Path, exclude: Path | None = None) -> list[Path]:
     """Every directory under `window_dir` that looks like an `hk serve --data-dir` (it has a ring
     subdirectory), including `window_dir` itself. Stops descending once a data dir is found — a
     rogue server's `--data-dir` is a sibling under the window tree, never nested inside another
-    server's own data dir — so this never walks a live ring's own file tree looking for more."""
+    server's own data dir — so this never walks a live ring's own file tree looking for more.
+
+    `exclude`, if given, is never returned and is never descended into: a rogue's reported
+    `--data-dir` is a process's own claim, not something to trust blindly, and a rogue that shares
+    the kept server's data dir (or names a parent of it) must never cause a walk into the kept
+    server's still-live ring (T-983 fix round 2 - `reap`'s caller passes the kept server's own
+    data dir here when reaping anything found under a *rogue's* claimed dir)."""
     window_dir = Path(window_dir)
     if not window_dir.is_dir():
         return []
+    excl = exclude.resolve() if exclude is not None else None
     found: list[Path] = []
 
     def walk(d: Path) -> None:
+        if excl is not None and d.resolve() == excl:
+            return
         if ring_dirs(d):
             found.append(d)
             return
@@ -76,23 +85,30 @@ def find_data_dirs(window_dir: Path) -> list[Path]:
     return found
 
 
-def plan_reap(window_dir: Path) -> list[tuple[Path, int]]:
+def plan_reap(window_dir: Path, exclude: Path | None = None) -> list[tuple[Path, int]]:
     """`(ring_dir, bytes)` for every ring directory under `window_dir` — what `reap` would
-    delete. Used for the dry-run print and for the real reap's own accounting."""
+    delete. Used for the dry-run print and for the real reap's own accounting. `exclude`: see
+    `find_data_dirs`."""
     out: list[tuple[Path, int]] = []
-    for dd in find_data_dirs(window_dir):
+    for dd in find_data_dirs(window_dir, exclude=exclude):
         for rd in ring_dirs(dd):
             out.append((rd, _dir_size(rd)))
     return out
 
 
-def reap(window_dir: Path, dry_run: bool = False) -> tuple[list[tuple[Path, int]], int]:
+def reap(window_dir: Path, dry_run: bool = False, exclude: Path | None = None) -> tuple[list[tuple[Path, int]], int]:
     """Delete every ring directory under `window_dir` (unless `dry_run`) and return the plan plus
     the total bytes reclaimed. Only entries named in `RING_DIRNAMES` are ever removed; history,
-    the journal, captures and server.* records are untouched because they are never a ring dir."""
+    the journal, captures and server.* records are untouched because they are never a ring dir.
+
+    `exclude` (T-983 fix round 2): a data dir that is never reaped and never walked into, however
+    it's reached — equal to `window_dir` itself, nested under it, or an ancestor a rogue's claimed
+    `--data-dir` walks down through. The watcher passes the window's KEPT server's data dir here
+    whenever it reaps a rogue's claimed dir, so a rogue that shares (or contains) the kept dir can
+    never take the kept server's still-live ring down with it - only ever a genuine, separate one."""
     import shutil
 
-    plan = plan_reap(window_dir)
+    plan = plan_reap(window_dir, exclude=exclude)
     total = sum(b for _, b in plan)
     if not dry_run:
         for rd, _ in plan:
@@ -164,7 +180,8 @@ def find_rogue(processes: list[ServerProc], window_dir: Path, keep_pid: int | No
 
 
 def _cmd_reap(args: argparse.Namespace) -> int:
-    plan, total = reap(Path(args.window), dry_run=args.dry_run)
+    exclude = Path(args.exclude) if args.exclude else None
+    plan, total = reap(Path(args.window), dry_run=args.dry_run, exclude=exclude)
     for rd, b in plan:
         print(f"{rd}\t{b}")
     print(f"TOTAL\t{total}")
@@ -191,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("reap", help="delete (or --dry-run print) every ring dir under --window")
     r.add_argument("--window", required=True)
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--exclude", default=None, help="a data dir never reaped or walked into (the kept server's)")
     r.set_defaults(func=_cmd_reap)
 
     g = sub.add_parser("rogue", help="print pid<TAB>data-dir for every hk serve under --window that isn't --keep-pid")

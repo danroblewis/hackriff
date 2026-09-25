@@ -304,6 +304,59 @@ def test_a_second_server_under_the_window_is_stopped_and_reaped_untouched_first(
     assert _radio_calls(radio_log) == ["take", "release"]
 
 
+def test_a_second_listener_sharing_the_kept_data_dir_never_reaps_the_kept_ring(tmp_path):
+    """Review round 2: a rogue hk serve that reports the SAME --data-dir as the kept server (a
+    second listener on it - exactly the shape explorer.md hands the agent, since the agent gets
+    that literal EXPLORER_SERVER_DATADIR path) must be stopped, but its ring must never be
+    reaped, because that directory IS the kept server's own still-live ring."""
+    env, ops, radio_log = _stubs(tmp_path, claude_body="sleep 30", ring_kb=32)
+    ps_file = tmp_path / "ps.txt"
+    ps_file.write_text("")
+    env["EXPLORER_PS_OUTPUT"] = str(ps_file)
+    p = subprocess.Popen([str(WINDOW), "--window", "20s"], env=env, start_new_session=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    rogue = None
+    try:
+        server_pidf = ops / "explorer" / "server.pid"
+        for _ in range(100):
+            if server_pidf.exists():
+                break
+            time.sleep(0.1)
+        assert server_pidf.exists(), "the window's own hk serve never started"
+        kept_pid = server_pidf.read_text().strip()
+        kept_datadir = pathlib.Path((ops / "explorer" / "server.datadir").read_text().strip())
+        kept_ring = kept_datadir / "iqbuffer" / "ring.bin"
+        for _ in range(100):  # the stub hk drops its ring right at start; wait for it to land
+            if kept_ring.exists():
+                break
+            time.sleep(0.1)
+        assert kept_ring.exists()
+        kept_ring_bytes = kept_ring.stat().st_size
+
+        rogue = subprocess.Popen(["sleep", "100"])  # a second listener, the SAME --data-dir as kept
+        ps_file.write_text(
+            f"{kept_pid} hk serve --hackrf --data-dir {kept_datadir} --bind 127.0.0.1:65531\n"
+            f"{rogue.pid} hk serve --hackrf --data-dir {kept_datadir} --bind 127.0.0.1:65532\n"
+        )
+
+        log_path = ops / "explorer" / "window.log"
+        for _ in range(100):
+            if log_path.exists() and "rogue server's ring reaped" in log_path.read_text():
+                break
+            time.sleep(0.1)
+        assert "rogue server's ring reaped" in log_path.read_text()
+        assert rogue.poll() is not None, "the rogue listener was never stopped"
+        # The point of this test: the kept server's OWN ring must survive, byte for byte.
+        assert kept_ring.exists() and kept_ring.stat().st_size == kept_ring_bytes
+        assert os.kill(int(kept_pid), 0) is None  # the kept server itself is untouched too
+    finally:
+        os.killpg(p.pid, signal.SIGTERM)
+        p.wait(timeout=15)
+        if rogue is not None and rogue.poll() is None:
+            rogue.kill()
+    assert _radio_calls(radio_log) == ["take", "release"]
+
+
 @pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGTERM, signal.SIGINT])
 def test_a_kill_of_the_pane_releases(tmp_path, sig):
     """tmux kill-session HUPs the pane's whole process group; the trap still releases."""

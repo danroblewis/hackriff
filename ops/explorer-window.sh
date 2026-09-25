@@ -26,7 +26,9 @@
 #     agent retunes it between targets and never starts its own.
 #   * A background watcher polls every EXPLORER_WATCH_POLL seconds for a SECOND `hk serve` under the
 #     window's tree (a fresh --data-dir, or a second listener on the one already in use) and stops it
-#     the moment it's seen, with a window.log line and a red alert, before reaping its ring.
+#     the moment it's seen, with a window.log line and a red alert, before reaping its ring - EXCLUDING
+#     the kept server's own data dir always, however the rogue's claimed --data-dir relates to it (the
+#     same dir, or a parent of it), so a rogue can never take the kept server's still-live ring with it.
 #   * On every way out this script stops its own `hk serve` (specifically, then by the old
 #     pattern-match as a fallback) BEFORE releasing the lock, so staging can reopen the HackRF, and
 #     reaps every IQ ring directory left under the window's tree (`iqbuffer`/`iqbuffer-devices` -
@@ -241,9 +243,13 @@ watch_rogues(){
       kill -TERM "$rpid" 2>/dev/null
       for _ in $(seq 1 "$GRACE"); do kill -0 "$rpid" 2>/dev/null || break; sleep 1; done
       kill -KILL "$rpid" 2>/dev/null
-      rplan="$(python3 "$PY_REAP" reap --window "$rdd" 2>/dev/null)"
+      # --exclude "$DATADIR": a rogue's --data-dir is its own claim, not something to trust - one
+      # that names the kept server's data dir (or a parent of it) must never cost the kept
+      # server's still-live ring (T-983 fix round 2). Only a genuinely separate ring is ever
+      # removed here; the window-end reap_rings() still takes the kept ring once it too is stopped.
+      rplan="$(python3 "$PY_REAP" reap --window "$rdd" --exclude "$DATADIR" 2>/dev/null)"
       rtotal="$(printf '%s\n' "$rplan" | awk -F'\t' '/^TOTAL/{print $2}')"
-      log "rogue server's ring reaped: ${rtotal:-0} bytes freed from $rdd"
+      log "rogue server's ring reaped: ${rtotal:-0} bytes freed from $rdd (the kept server's own ring at $DATADIR is never touched here)"
       alert red "explorer: rogue hk serve stopped" "pid $rpid data-dir $rdd (window $D, kept pid $SERVER_PID)" --key "explorer:rogue-$rpid"
     done <<< "$rogue_out"
   done
