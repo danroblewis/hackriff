@@ -28338,7 +28338,8 @@ tasks:
   - id: T-961
     milestone: MAUTO
     title: "RDS identity lands on a separate overlapping row (106.1: rds-pi:1323 beside an unknown-0.999 detection); a CRC-valid decode never confirms the emitter"
-    status: todo
+    status: in-progress
+    branch: task-t961
     priority: P1
     deps: []
     parallel_group: INV-DECODE-ATTACH
@@ -28372,7 +28373,8 @@ tasks:
   - id: T-963
     milestone: MAUTO
     title: AIS recipe (GMSK 9600, NRZI, HDLC, CRC-16/X.25) + a validated AIS reference oracle
-    status: todo
+    status: in-progress
+    branch: task-t963
     priority: P2
     deps: []
     parallel_group: RECIPE-AIS
@@ -28548,7 +28550,8 @@ tasks:
   - id: T-974
     milestone: M2-hardening
     title: hk-cli api_contract tests fail alone in worker worktrees but pass in the merge gate (retune stream, recipe routes, ws header, band-collapsed activity)
-    status: todo
+    status: in-progress
+    branch: task-t974
     priority: P1
     deps: []
     parallel_group: DEFLAKE-API-CONTRACT
@@ -28671,7 +28674,8 @@ tasks:
   - id: T-981
     milestone: M2-hardening
     title: Full-span overload stripes drawn as signal with no overload flag; /api/status reports no front-end overload
-    status: todo
+    status: in-progress
+    branch: task-t981
     priority: P1
     deps: []
     parallel_group: FRONTEND-OVERLOAD
@@ -28821,7 +28825,8 @@ tasks:
   - id: T-990
     milestone: M2-hardening
     title: Noise-only band yields ~6 candidates/min, each given a band-plan explanation with no measured support (airband, spurs as AIS)
-    status: todo
+    status: in-progress
+    branch: task-t990
     priority: P1
     deps: []
     parallel_group: DETECT-FALSEALARM
@@ -28836,7 +28841,8 @@ tasks:
   - id: T-991
     milestone: M2-hardening
     title: Content class computed for the whole window from one sub-band (152-162 MHz reads restricted-paging)
-    status: todo
+    status: in-progress
+    branch: task-t991
     priority: P2
     deps: []
     parallel_group: CONTENT-CLASS
