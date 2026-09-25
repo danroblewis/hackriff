@@ -17,8 +17,8 @@
 //! | POST | `/api/control/bias_tee` | `{"enabled"}` | `tuning` (501 without a bias tee) |
 //! | POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `tuning` (validated against `device.baseband_filter`; 501 without one) |
 //! | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067) | `display` |
-//! | GET | `/api/control/scan[?f_lo_hz&f_hi_hz&dwell_s]` (T-452) | – | `scan` (state, plan, budget, progress, `yielded`) and, for a proposed range/dwell, `proposed` — **what a sweep would cost, without starting it** |
-//! | POST | `/api/control/scan` (T-452) | `{"f_lo_hz"?, "f_hi_hz"?, "dwell_s"?}` or `{"resume": true}` | `scan`, `proposed`, `device.commissions` |
+//! | GET | `/api/control/scan[?f_lo_hz&f_hi_hz&dwell_s&step&windows]` (T-452) | – | `scan` (state, `device_id`, plan, budget, progress, `yielded`) and, for a proposed range/dwell, `proposed` — **what a sweep would cost, without starting it**; `windows=1` adds each step's slice (T-1008) |
+//! | POST | `/api/control/scan` (T-452) | `{"f_lo_hz"?, "f_hi_hz"?, "dwell_s"?, "step"?}` or `{"resume": true}` | `scan`, `proposed` (both with `plan.windows`), `device.commissions` |
 //! | POST | `/api/control/scan/stop` (T-452) | `{}` or empty | `scan` (never refused) |
 //! | POST | `/api/control/record/start` | `{"label"?, "max_s"?}` | `recording` (409 `refused` under a class that forbids content) |
 //! | POST | `/api/control/record/stop` | `{}` or empty | `recording` (the stored Recording) |
@@ -1558,6 +1558,20 @@ fn scan_proposal(query: &[(String, String)]) -> Result<Option<crate::scan::ScanR
     )
 }
 
+/// `windows` on `GET /api/control/scan` (T-1008): `1`/`true` asks for each step's slice; absent,
+/// `0` or `false` leaves them out. Anything else is refused rather than read as either.
+fn scan_windows(query: &[(String, String)]) -> Result<bool, Fail> {
+    match query
+        .iter()
+        .find(|(n, _)| n == "windows")
+        .map(|(_, v)| v.as_str())
+    {
+        None | Some("0" | "false") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some(v) => Err(Fail::invalid(format!("windows must be 1 or 0, got {v:?}"))),
+    }
+}
+
 /// A `step` (T-517): `"fine"` or `"coarse"`, nothing else.
 fn scan_step(v: &str) -> Result<hk_core::scheduler::ScanStep, Fail> {
     hk_core::scheduler::ScanStep::parse(v).ok_or_else(|| {
@@ -1630,11 +1644,26 @@ fn read(state: &ApiState, action: Action, query: &[(String, String)]) -> Result<
         // the arithmetic belongs in front of the button, not in the log after it.
         Action::ScanState => {
             let runner = scan_runner(state)?;
+            // T-1008: `windows=1` adds every step's slice to `plan` (and `proposed.plan`), so a
+            // client draws the steps the engine will execute instead of tiling the range itself.
+            let windows = scan_windows(query)?;
             let proposed = match scan_proposal(query)? {
-                Some(req) => runner.prepare(&req).map_err(scan_fail)?.json(),
+                Some(req) => {
+                    let p = runner.prepare(&req).map_err(scan_fail)?;
+                    if windows {
+                        p.json_with_windows()
+                    } else {
+                        p.json()
+                    }
+                }
                 None => Value::Null,
             };
-            Ok(json!({ "scan": runner.json(), "proposed": proposed }))
+            let scan = if windows {
+                runner.json_with_windows()
+            } else {
+                runner.json()
+            };
+            Ok(json!({ "scan": scan, "proposed": proposed }))
         }
         Action::ListBookmarks => {
             let repo = bookmarks(state)?;
@@ -1850,7 +1879,7 @@ fn apply_action(
                         step,
                     })
                     .map_err(scan_fail)?
-                    .json()
+                    .json_with_windows()
             };
             let new = runner.json();
             // A coarse step from a narrower window also commits the front end to one rate change
@@ -1863,7 +1892,9 @@ fn apply_action(
             device["commissions_rate_hz"] = rate.unwrap_or(Value::Null);
             Ok(ok(
                 json!({
-                    "scan": new.clone(),
+                    // T-1008: the answer carries the steps it committed to (the audit entry keeps
+                    // the compact form).
+                    "scan": runner.json_with_windows(),
                     "proposed": plan,
                     "device": device,
                 }),
