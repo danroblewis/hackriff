@@ -682,7 +682,8 @@ def remote_attach(c):
 # e2e harness and Chrome each start their own session, and all were reparented to init. What they do share is the
 # run's WORKTREE: every one's cwd is inside it (Chrome's is `<wt>/ui`), and `hk serve`'s cmdline names it; Chrome's
 # cmdline does not. So a process of the host's account is this run's when its cwd is inside the worktree or its
-# cmdline names it - and never when it also matches another live claim's worktree on that host. The scan runs
+# cmdline names it - and never when it has a controlling terminal (a person's) or also matches another live claim's
+# worktree on that host. The scan runs
 # python3 on the host (Linux: /proc; macOS, the tests' host: ps + lsof), excludes itself and its ancestors, sends
 # SIGTERM, waits up to 10 s, and SIGKILLs only what still matches after a fresh scan (pids recycle).
 _REMOTE_REAP_PY = r'''
@@ -700,20 +701,22 @@ def procs():
                 if os.stat("/proc/" + p).st_uid != me:
                     continue
                 cmd = open("/proc/%s/cmdline" % p, "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
-                ppid = int(open("/proc/%s/stat" % p).read().rsplit(")", 1)[1].split()[1])
+                st = open("/proc/%s/stat" % p).read().rsplit(")", 1)[1].split()
+                ppid, tty = int(st[1]), int(st[4]) != 0
                 try:
                     cwd = os.readlink("/proc/%s/cwd" % p)
                 except OSError:
                     cwd = ""
             except (OSError, ValueError, IndexError):
                 continue
-            rows[int(p)] = {"pid": int(p), "ppid": ppid, "cwd": cwd, "cmd": cmd}
-    else:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,command="], capture_output=True, text=True).stdout
+            rows[int(p)] = {"pid": int(p), "ppid": ppid, "tty": tty, "cwd": cwd, "cmd": cmd}
+    else:   # macOS: only the TEST host (py/tests' remote_host is this Mac); production hosts take the /proc branch
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,tty=,command="], capture_output=True, text=True).stdout
         for l in out.splitlines():
-            f = l.split(None, 3)
-            if len(f) >= 3 and int(f[2]) == me:
-                rows[int(f[0])] = {"pid": int(f[0]), "ppid": int(f[1]), "cwd": "", "cmd": f[3] if len(f) > 3 else ""}
+            f = l.split(None, 4)
+            if len(f) >= 4 and int(f[2]) == me:
+                rows[int(f[0])] = {"pid": int(f[0]), "ppid": int(f[1]), "tty": f[3] != "??", "cwd": "",
+                                   "cmd": f[4] if len(f) > 4 else ""}
         out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-u", str(me)], capture_output=True, text=True).stdout
         pid = None
         for l in out.splitlines():
@@ -736,7 +739,10 @@ while p > 1 and p not in keep:
     p = first.get(p, {}).get("ppid", 0)
 
 def leaked(rows):
-    return [r for p, r in sorted(rows.items()) if p > 1 and p not in keep and mine(r) and not any(t(r) for t in theirs)]
+    # a process with a controlling terminal is a person's (node2 is also the user's desktop: their shell, editor or
+    # interactive claude cd'd into a worktree); every worker and e2e process runs without one (ssh without -t, setsid)
+    return [r for p, r in sorted(rows.items())
+            if p > 1 and p not in keep and not r["tty"] and mine(r) and not any(t(r) for t in theirs)]
 
 found, killed, still = leaked(first), [], []
 if mode == "kill" and found:
@@ -1441,8 +1447,9 @@ def _reap_one(claims, tid, c, dry, killed):
                     log(f"LEAKED {tid} on {c['host']}: pid {r['pid']} (cwd {r['cwd']}) {r['cmd'][:160]}"
                         + (" - DRY-RUN, left running" if dry else " - killed"))
                 attention(tid, c["branch"], "LEAKED",
-                          f"{len(gone)} process(es) outlived the run on {c['host']} and were killed there (SIGTERM then "
-                          "SIGKILL): " + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in gone[:5]))
+                          f"{len(gone)} process(es) outlived the run on {c['host']} and "
+                          + ("would be killed there (DRY-RUN)" if dry else "were killed there (SIGTERM then SIGKILL)")
+                          + ": " + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in gone[:5]))
         except Exception as e:
             log(f"remote leak check error for {tid} on {c['host']}: {e}")
     if c.get("deflake"):

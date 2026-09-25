@@ -2211,6 +2211,28 @@ def test_a_finished_remote_runs_leftovers_are_stopped_on_the_host(node2_leftover
     assert R.remote_leaked(claims["T-9"], claims, dry=False) == []                    # nothing left the second time
 
 
+def test_a_process_with_a_terminal_is_a_persons_and_never_signalled(node2_leftovers):
+    """Review 2026-09-25: node2 is also the user's desktop. Their shell, editor or interactive claude cd'd into a
+    worktree matches by cwd, but it has a controlling terminal and no worker or e2e process does."""
+    import fcntl
+    import os
+    import termios
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    master, slave = os.openpty()
+    procs["person"] = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"],
+                                       cwd=far / "repo" / ".claude" / "worktrees" / "t9", stdin=slave, stdout=slave,
+                                       stderr=slave, start_new_session=True,
+                                       preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+    os.close(slave)
+    try:
+        time.sleep(0.3)
+        found = R.remote_leaked(claims["T-9"], claims, dry=False)
+        assert {r["pid"] for r in found} == {procs["chrome"].pid, procs["serve"].pid}
+        assert _ended(procs["chrome"]) and procs["person"].poll() is None
+    finally:
+        os.close(master)
+
+
 def test_a_dry_run_names_the_leftovers_and_stops_nothing(node2_leftovers):
     local_ops, local_repo, far, procs, claims = node2_leftovers
     ours = {procs[k].pid for k in ("chrome", "serve")}
@@ -2228,9 +2250,10 @@ def test_a_claim_sharing_the_worktree_protects_everything_in_it(node2_leftovers)
     assert all(p.poll() is None for p in procs.values())
 
 
-def test_the_reap_stops_a_remote_runs_leftovers_and_says_so(node2_leftovers, monkeypatch):
+@pytest.mark.parametrize("dry", [False, True])
+def test_the_reap_stops_a_remote_runs_leftovers_and_says_so(node2_leftovers, monkeypatch, dry):
     """The wiring: a remote run the host reports gone, synced back - its leftovers there are killed, logged with host,
-    pid and cmdline, and one LEAKED attention names the host."""
+    pid and cmdline, and one LEAKED attention names the host. A dry run says what it would do and signals nothing."""
     local_ops, local_repo, far, procs, claims = node2_leftovers
     (local_repo / ".claude" / "worktrees" / "t9").mkdir(parents=True)
     c = dict(claims["T-9"], pid=1, started=0, deflake="d")          # a deflake claim: its own outcomes, stubbed below
@@ -2243,10 +2266,14 @@ def test_the_reap_stops_a_remote_runs_leftovers_and_says_so(node2_leftovers, mon
     seen, logged = [], []
     monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
     monkeypatch.setattr(R, "log", logged.append)
-    R._reap_one(claims, "T-9", c, dry=False, killed=[])
-    assert _ended(procs["chrome"]) and _ended(procs["serve"]) and procs["other_claim"].poll() is None
+    R._reap_one(claims, "T-9", c, dry=dry, killed=[])
     [a] = seen
-    assert a[2] == "LEAKED" and "on node2" in a[3] and str(procs["serve"].pid) in a[3]
+    assert a[2] == "LEAKED" and str(procs["serve"].pid) in a[3]
+    if dry:
+        assert "on node2 and would be killed there" in a[3] and procs["chrome"].poll() is None
+        return
+    assert "on node2 and were killed there" in a[3]
+    assert _ended(procs["chrome"]) and _ended(procs["serve"]) and procs["other_claim"].poll() is None
     lines = [x for x in logged if x.startswith("LEAKED T-9 on node2")]
     assert len(lines) == 2 and any(f"pid {procs['chrome'].pid} (cwd " in x and "/t9/ui)" in x for x in lines)
     assert c["leaked"] == 2

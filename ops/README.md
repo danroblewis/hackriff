@@ -190,7 +190,8 @@ in the result. **A remote run's leftovers are reaped on its host (2026-09-25):**
 reports the run's group gone and it is synced back, one python3 scan there (`remote_leaked`) stops
 every process of the ssh account whose cwd is inside the run's worktree or whose cmdline names it -
 the e2e harness's Chrome carries only its cwd (`<wt>/ui`), `hk serve` its cmdline; neither stays in
-the run's group or session - never one that also names another live claim's worktree on that host.
+the run's group or session - never one with a controlling terminal (node2 is also the user's
+desktop; no worker or e2e process has one) or that also names another live claim's worktree on that host.
 Each is logged as `LEAKED <ticket> on <host>: pid … (cwd …) …`, with one `LEAKED` attention.
 **The worker's output contract is a file:** its last step writes `work/<ticket>/handback.json`
 (`outcome: done|blocked|cancel`, `summary`, `commits`, `files`, `tests[{cmd,exit,summary}]`,
