@@ -1176,6 +1176,8 @@ pub fn serve_api(
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::clone(&db)),
         trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
+        // T-891: the run's accessory-fed VLF services (an empty list without an accessory).
+        vlf: Some(Arc::new(PipelineVlf(handle.vlf()))),
         status: Some(Arc::new(move || {
             let mut v = counters.to_json();
             if let Some(o) = v.as_object_mut() {
@@ -1385,11 +1387,51 @@ pub fn plan_class(plan: &ScanPlan, fs: f64) -> ContentClass {
     band_class(&centres, fs)
 }
 
+/// `GET /api/vlf` over the run's [`hk_pipeline::vlf::VlfServices`] (T-891).
+struct PipelineVlf(Arc<hk_pipeline::vlf::VlfServices>);
+
+impl hk_api::vlf::VlfControl for PipelineVlf {
+    fn reports(&self, include_points: bool) -> Vec<serde_json::Value> {
+        self.0
+            .list()
+            .iter()
+            .map(|s| serde_json::to_value(s.report(include_points)).unwrap_or_default())
+            .collect()
+    }
+}
+
 /// `mock:<file.sigmf-meta>` → the recording behind the mock SDR device (T-049).
 pub fn mock_path(spec: &str) -> Option<PathBuf> {
     spec.strip_prefix("mock:")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
+}
+
+/// T-891: `spec` names an **accessory** — `vlf-mock:<file.sigmf-meta>` (the mock VLF receiver,
+/// a real-valued recording in real time) or `vlf[:<device>]` (a live soundcard receiver). An
+/// accessory is attached beside the radio and feeds the VLF service (`hk_pipeline::vlf`, served at
+/// `GET /api/vlf`), never the RF pipeline.
+pub fn is_accessory_spec(spec: &str) -> bool {
+    spec == "vlf" || spec.starts_with("vlf:") || spec.starts_with("vlf-mock:")
+}
+
+/// Opens the accessory `spec` names ([`is_accessory_spec`]).
+pub fn open_accessory(spec: &str) -> anyhow::Result<Box<dyn Source>> {
+    if let Some(path) = spec.strip_prefix("vlf-mock:").filter(|p| !p.is_empty()) {
+        let driver = hk_core::source::AccessoryMockDriver::new(
+            path,
+            hk_core::source::AccessoryMockOptions {
+                realtime: true,
+                ..Default::default()
+            },
+        )
+        .with_context(|| format!("opening the mock VLF accessory recording {path}"))?;
+        return Ok(driver.open(&driver.default_request())?);
+    }
+    anyhow::bail!(
+        "{spec}: a live VLF soundcard receiver needs an audio backend, and none is linked in this \
+         build; use vlf-mock:<file.sigmf-meta> to replay a recording through the accessory"
+    )
 }
 
 /// `spec` names a device (the live HackRF One or the mock SDR), not a recording played back.
@@ -1835,7 +1877,13 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     // whole rather than leaving a half-started pipeline.
     let mut extra = Vec::new();
     let mut extra_controls = Vec::new();
-    for (spec, args) in &opts.extra {
+    // T-891: accessories open here too (a missing one fails the run whole), but feed the VLF
+    // service, not the RF pipeline.
+    let mut accessories = Vec::new();
+    for (spec, _) in opts.extra.iter().filter(|(s, _)| is_accessory_spec(s)) {
+        accessories.push(open_accessory(spec).with_context(|| format!("--device {spec}"))?);
+    }
+    for (spec, args) in opts.extra.iter().filter(|(s, _)| !is_accessory_spec(s)) {
         let l = open_live(spec, args).with_context(|| format!("--device {spec}"))?;
         extra_controls.push((
             Arc::clone(&l.control),
@@ -1860,6 +1908,12 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         Box::new(TrackInventory::default()),
         extra,
     )?;
+    for source in accessories {
+        handle.vlf().attach(
+            hk_pipeline::vlf::VlfService::start(source, hk_pipeline::vlf::VlfConfig::default())
+                .context("starting the VLF accessory service")?,
+        );
+    }
     let live_control = (!opts.schedule).then(|| {
         Arc::new(
             SourceLiveControl::new(Arc::clone(&control), initial)
@@ -2604,6 +2658,21 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no samples");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// T-891: accessory specs are recognised apart from radios, and a live soundcard receiver
+    /// is refused with the reason rather than opened as something it is not.
+    #[test]
+    fn accessory_specs_route_to_the_vlf_service_not_the_radio_path() {
+        for spec in ["vlf", "vlf:hw:1", "vlf-mock:/tmp/x.sigmf-meta"] {
+            assert!(is_accessory_spec(spec) && !is_device_spec(spec), "{spec}");
+        }
+        for spec in ["hackrf", "mock:/tmp/x.sigmf-meta", "rtlsdr", "vlfx"] {
+            assert!(!is_accessory_spec(spec), "{spec}");
+        }
+        let err = open_accessory("vlf:hw:1").err().unwrap().to_string();
+        assert!(err.contains("audio backend"), "{err}");
+        assert!(open_accessory("vlf-mock:/nonexistent.sigmf-meta").is_err());
     }
 
     /// T-514: `rtlsdr` / `rtlsdr:<serial>` names the RTL-SDR driver, and the serial form is what

@@ -33,14 +33,15 @@ pub use ring::{
 pub use rt::MemoryLock;
 pub use scheduler::{ScheduleStep, Scheduler, SchedulerConfig};
 pub use source::{
-    BasebandFilters, ControlMailbox, Coverage, DeviceInfo, GainStage, Gains, HackRfConfig,
-    HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats, InUseCertainty, MockClock, MockEnd,
-    MockFault, MockOptions, MockSdrControl, MockSdrDriver, MockSdrSource, MockStats, NamedGain,
-    OpenRequest, Pacing, PendingControl, R820T_GAINS_DB, R820T_MAX_HZ, R820T_MIN_HZ,
-    R820T_RATES_HZ, R820T_TUNING_STEP_HZ, Recording, ReplayOptions, RtlSdrConfig, RtlSdrControl,
-    RtlSdrDeviceInfo, RtlSdrDriver, RtlSdrSource, RtlSdrStats, SigmfReplaySource, Source,
-    SourceCapabilities, SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability,
-    SweepPlan, TuningStep,
+    AccessoryKind, AccessoryMockDriver, AccessoryMockOptions, AccessorySource, AudioInput,
+    AudioRead, BasebandFilters, ControlMailbox, Coverage, DeviceInfo, GainStage, Gains,
+    HackRfConfig, HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats, InUseCertainty,
+    MockClock, MockEnd, MockFault, MockOptions, MockSdrControl, MockSdrDriver, MockSdrSource,
+    MockStats, NamedGain, OpenRequest, Pacing, PendingControl, R820T_GAINS_DB, R820T_MAX_HZ,
+    R820T_MIN_HZ, R820T_RATES_HZ, R820T_TUNING_STEP_HZ, Recording, ReplayOptions, RtlSdrConfig,
+    RtlSdrControl, RtlSdrDeviceInfo, RtlSdrDriver, RtlSdrSource, RtlSdrStats, SigmfReplaySource,
+    Source, SourceCapabilities, SourceControl, SourceDriver, SourceError, SourceStats,
+    SweepCapability, SweepPlan, TuningStep,
 };
 
 #[cfg(test)]

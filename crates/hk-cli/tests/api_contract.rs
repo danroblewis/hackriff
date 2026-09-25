@@ -13241,3 +13241,110 @@ fn saved_views_crud_share_and_paging_answer_as_documented() {
     assert_eq!(back["share"], share);
     stop_server(serving);
 }
+
+// T-891 VLF accessory
+
+/// T-891 (SPACE-001, SPACE-041, PROP-019): `hk serve --device mock:<radio> --device
+/// vlf-mock:<recording>` attaches the mock VLF receiver **beside** the radio, and `/api/vlf`
+/// answers the documented shape for it — the accessory's provenance on every report — while the
+/// radio's routes are untouched. The science itself is asserted blind in
+/// `crates/hk-pipeline/tests/vlf_accessory.rs`; this pins the wire.
+#[test]
+fn vlf_accessory_route_answers_documented_shape_through_serve() {
+    let fs = 48_000.0;
+    let rec_dir = temp_data_dir();
+    let _rec_guard = TempDataDirGuard::new(rec_dir.clone());
+    std::fs::create_dir_all(&rec_dir).unwrap();
+    let meta = rec_dir.join("vlf.sigmf-meta");
+    let x: Vec<f32> = (0..(fs as usize * 3))
+        .map(|i| 0.01 * (2.0 * std::f64::consts::PI * 19_800.0 * i as f64 / fs).cos() as f32)
+        .collect();
+    hk_core::source::write_real_sigmf(&meta, &x, fs, "2026-09-25T12:00:00Z", "t891", None).unwrap();
+
+    let dir = temp_data_dir();
+    let guard = TempDataDirGuard::new(dir.clone());
+    let serving = start(&ServeOptions {
+        source: ServeSource::HackRf {
+            spec: format!("mock:{}", fixture_path().display()),
+            extra: vec![(format!("vlf-mock:{}", meta.display()), LiveArgs::default())],
+            live: LiveArgs::default(),
+        },
+        data_dir: Some(dir),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(64 << 20),
+        },
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = serving.server.local_addr();
+
+    // The accessory runs in real time; wait (bounded) for its first block.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let v = loop {
+        let (st, v) = get(addr, "/api/vlf");
+        assert_eq!(st, 200, "{v}");
+        if v["accessories"][0]["state"] != "waiting" || Instant::now() > deadline {
+            break v;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(is_array(&v["accessories"]), "{v}");
+    assert_eq!(v["accessories"].as_array().unwrap().len(), 1, "{v}");
+    let r = &v["accessories"][0];
+    for field in [
+        "state",
+        "device_id",
+        "accessory",
+        "provenance_ref",
+        "provenance",
+        "sample_rate_hz",
+        "phase_disciplined",
+        "window",
+        "samples",
+        "gaps",
+        "dropped_samples",
+        "carriers",
+        "sferics",
+        "sferic_total",
+    ] {
+        assert!(r.get(field).is_some(), "missing {field}: {r}");
+    }
+    assert!(
+        ["discovering", "tracking", "finished"].contains(&r["state"].as_str().unwrap()),
+        "{r}"
+    );
+    assert_eq!(r["accessory"], "vlf-receiver");
+    let device = r["device_id"].as_str().unwrap().to_string();
+    assert!(device.starts_with("vlf-receiver:"), "{r}");
+    assert_eq!(r["provenance"]["device_id"], device.as_str());
+    assert_eq!(r["provenance"]["antenna_port"], "accessory:vlf-receiver");
+    assert_eq!(r["provenance"]["tune"]["center_hz"], 0.0);
+    assert_eq!(r["sample_rate_hz"], fs);
+    assert!(is_array(&r["carriers"]) && is_array(&r["sferics"]), "{r}");
+    assert!(r["window"]["start_ns"].is_i64(), "{r}");
+
+    let (st, v) = get(addr, &format!("/api/vlf?device={device}&points=1"));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["accessories"][0]["device_id"], device.as_str());
+    let (st, _) = get(addr, "/api/vlf?device=hackrf:nope");
+    assert_eq!(st, 404);
+    let (st, _) = get(addr, "/api/vlf?points=2");
+    assert_eq!(st, 400);
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(addr, "POST", "/api/vlf", Some(&auth), Some("{}"));
+    assert_eq!(st, 405);
+    let (st, _) = call(addr, "GET", "/api/vlf", None, None);
+    assert_eq!(st, 401);
+
+    stop_server(serving);
+    drop(guard);
+}

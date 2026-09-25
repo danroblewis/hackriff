@@ -2568,6 +2568,27 @@ A derived view over the [`GrantEvent`](07-data-model.md) stream (`hk_model::trun
 
 Errors: `400 invalid` (missing/non-numeric `t0`/`t1`, `t1 <= t0`, or `system` not a UUID), `405` for other methods, `500 failed` for a store error, `503 unavailable` without a trunking store.
 
+## VLF accessory (T-891; SPACE-001, SPACE-041, PROP-019)
+
+VLF/LF science on an **accessory-fed source**: a VLF/LF E-field or loop receiver into a soundcard, attached as its own device behind the generic source interface (`hk_core::source::accessory`). The HackRF tunes no lower than 1 MHz, so all three use cases stay `needs-accessory`; a run with no accessory answers an empty list, and the analysis service refuses any stream whose provenance does not say it came through an accessory.
+
+Attach one with a further device spec, next to the radio: `hk serve --device <radio> --device vlf-mock:<file.sigmf-meta>` (the mock accessory, replaying a real-valued `rf32_le`/`ri16_le` SigMF recording — captured or synthetic VLF — in real time). `vlf:<device>` names a live soundcard receiver; no audio backend is linked in this build, so it is refused at start with that reason.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/vlf[?device=<device_id>][&points=1]` | One report per accessory source attached to the run; `device` narrows to one, `points=1` adds each carrier's amplitude/phase track |
+
+- **Response:** `{accessories: [report]}`. A report is `{state, error?, device_id, accessory, provenance_ref, provenance, sample_rate_hz, phase_disciplined, window, samples, gaps, dropped_samples, carriers, sferics, sferic_total}`.
+  - `state`: `waiting` (no block yet), `discovering` (collecting the blind carrier-search window, 10 s by default), `tracking`, `finished` (the source ended), `failed` (`error` says why — e.g. the stream is not accessory-fed).
+  - `device_id` is `<accessory kind>:<device>` (e.g. `vlf-receiver:mock:sid`) and `provenance.antenna_port` is `accessory:<kind>`: every result says it came through the accessory. The stream is real audio at baseband, so `provenance.tune.center_hz` is `0` and `bandwidth_hz` is `fs/2`.
+  - `phase_disciplined`: the stream's clock is GNSS/external-referenced and locked — what makes absolute VLF phase meaningful (PROP-019). Phase *steps* are reported either way, with the tracker's linear drift removed.
+  - `window` is `{start_ns, end_ns}` over the analysed samples; `gaps`/`dropped_samples` count soundcard overruns.
+  - `carriers`: narrowband transmitters **found blind** in the receiver band (no transmitter list is consulted), each `{carrier_hz, carrier_hz_refined, snr_db, point_count, points?, amplitude_steps, phase_steps}`. `amplitude_steps` (SPACE-001, a SID flare's signature) are `{t_ns, relative_change}`; `phase_steps` (PROP-019) are `{t_ns, dphi_rad, reflection_height_change_km, path_km}`, the height change present only where the server was given that transmitter's path geometry (a positive `dphi_rad` is a phase advance: a shorter path, a lower reflection). `points` are `{t_ns, amplitude, phase_rad}`, the most recent 36,000 per carrier.
+  - `sferics` (SPACE-041) are [`Detection`](07-data-model.md)s — each a time–frequency region with its own `time: {start_ns, end_ns}`, `flags.impulsive: true` and the accessory stream's `provenance_ref`. A sferic is broadband, so `f_center_hz`/`obw_hz` state the receiver band (`fs/4`, `fs/2`), not a measured occupancy, and `xdb_bandwidth_hz` is absent. The most recent 10,000 are held; `sferic_total` counts all.
+- Every time is absolute capture time (Unix nanoseconds, `_ns`), from the accessory stream's own sample clock.
+
+Errors: `400 invalid` (`points` not `0`/`1`), `404 not_found` (`device` names no accessory on this run), `405` for other methods, `503 unavailable` on a server with no accessory services at all.
+
 ## Attention and memory (planned, M2; ADR-0012)
 
 **Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, the attention scheduler's, the survey report's and T-122's anomalies have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
