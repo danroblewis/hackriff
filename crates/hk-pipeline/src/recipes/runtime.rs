@@ -1515,7 +1515,8 @@ impl RecipeRuntime {
             .ok_or_else(|| RuntimeError::new(409, "ended", "the pipeline has ended"))?;
         let recipe = Arc::clone(&lock(&ctl.control).recipe);
         let (lo, hi, _) = self.resolve(&shared, &ctl.target)?;
-        let set = hops::resolve_channels(&shared, &recipe, &ctl.target, (lo, hi))?;
+        let dc = planning_tune(&shared, 0.5 * (lo + hi)).0;
+        let set = hops::resolve_channels(&shared, &recipe, &ctl.target, (lo, hi), Some(dc))?;
         self.set_channels(id, &set.channels_hz)
     }
 
