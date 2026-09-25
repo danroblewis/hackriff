@@ -29417,6 +29417,24 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile latency review): After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking
+  - id: T-1022
+    milestone: MMAP
+    title: "app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)"
+    status: todo
+    priority: high
+    deps:
+    - T-993
+    parallel_group: UI-SURFACE-RC
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-25 by T-955's fix-round worker; main 166117b4 reproduces): ui/e2e/app-surface.e2e.mjs fails 4 tests expecting 10 map controls and finding 12. Cause: T-957 (daf76a79, which fixed app-surface's two RC reds) and T-993 (a7f58d37, which retired the top bar and MOVED its controls into the map's floating cluster) landed in the SAME 12:13 batch; the per-merge gate is check-tier (no browser e2e since the user's 2026-09-24 test-tier rule), so the combination was never run together. The daily RC (just rc) would red on it.
+      DELIVER (rcfix rule): decide per assertion whether the spec's count/layout expectation is now stale (T-993 intentionally added the mode pill / status controls to the cluster -> update the spec to T-993's documented layout, asserting each control by role, not a bare count) or whether T-993 put a control somewhere the map-UI principles forbid (docs/23 §10: small floating chrome, fadeable, never over the time ruler) -> fix the product. Never loosen an assertion to pass; a bare count is brittle - assert the set of controls by name/role and their non-overlap.
+      ACCEPTANCE: `cd ui && node e2e/run.mjs app-surface app-top-chrome` green alone 3/3 on your own ports (HK_E2E_PORT / HK_E2E_JOURNEY_PORT >= 9216); red-proof that the rewritten spec still catches a missing or duplicated control.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the two specs alone), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-955 fix-round worker 2026-09-25 (red on main 166117b4): app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
