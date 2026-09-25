@@ -32,6 +32,17 @@
 //!      the holder (recorded, never deleted);
 //!    - the context holds a *different* identity → nothing is merged and an
 //!      [`IdentityConflictReport`] is returned.
+//!
+//!    **2b — the region it came from (T-961).** A decode is made *from* a region somebody was
+//!    already watching, and a producer that ran over a band or a selection resolves no context at
+//!    all. So when nobody holds the identity and there is no context, the target is the live,
+//!    listed, **unidentified** entry whose centre is within the fingerprint centre tolerance of
+//!    the decode's channel and one of whose observations covers the decode's own time — the
+//!    pairing "Same emission" uses, applied before a second entry exists rather than after.
+//!    Closest centre wins, then the most recently seen. It is restricted to schemes that do not
+//!    share a channel (today `rds-pi`), exactly as the context rule above is: where one channel
+//!    carries many transmitters, "the region it came from" names no one of them. Nothing matching
+//!    → rule 5, as before.
 //! 3. **Context.** Without an identity, an existing context emitter is the target.
 //! 4. **Fingerprint.** Otherwise the live emitter whose fingerprint is within every per-feature
 //!    tolerance with the lowest score wins (ties: most recently seen). Emitters identified by a
@@ -745,6 +756,12 @@ pub enum Assignment {
     Identity,
     /// The context emitter.
     Context,
+    /// T-961: the live, unidentified entry whose (t, f) region the decode came from, when the
+    /// identity is held by nobody and the producer named no context.
+    Region {
+        /// Centre error over its tolerance.
+        score: f64,
+    },
     /// The closest fingerprint within tolerance.
     Fingerprint {
         /// Mean normalised error.
