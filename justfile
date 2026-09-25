@@ -714,7 +714,8 @@ test-ui-e2e:
     fi
     # The tier drives the PRODUCT's server, so the CSP and the /api/tiles backpressure under test
     # are the real ones rather than a mock's restatement of them.
-    if [ -z "${HK_BIN:-}" ] && [ ! -x target/release/hk ] && [ ! -x target/debug/hk ]; then
+    T="${CARGO_TARGET_DIR:-target}"   # the merge runner's gate builds in its own target dir
+    if [ -z "${HK_BIN:-}" ] && [ ! -x "$T/release/hk" ] && [ ! -x "$T/debug/hk" ]; then
         echo "test-ui-e2e: building the hk binary the browser tier serves from..." >&2
         cargo build -p hk-cli --bin hk
     fi

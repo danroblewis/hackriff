@@ -1118,3 +1118,36 @@ def test_a_resumed_gate_is_never_a_whole_gate_duration():
     runs_ = [{"finished": True, "result": "pass", "seconds": 2400.0, "class": "full", "phase": "all"},
              {"finished": True, "result": "pass", "seconds": 300.0, "class": "full", "phase": "resume:test"}]
     assert cycletime.rolling_medians(runs_)["full"] == (2400.0, 1)
+
+
+def test_the_gate_keeps_junit_from_the_runners_own_target_dir(tmp_path, monkeypatch):
+    """2026-09-24 17:20: the merge runner builds in CARGO_TARGET_DIR=$HACKRIFF_OPS/gate-target so main's
+    target/ stays the workers' clone source; the gate's junit must be found there too."""
+    import time as _time
+    tgt = tmp_path / "gate-target"
+    (tgt / "nextest" / "ci").mkdir(parents=True)
+    (tgt / "nextest" / "ci" / "junit.xml").write_text("<testsuites/>")
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(tgt))
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path / "ops"))
+    from hkpy import gate as _gate
+    kept = _gate.keep_junit(str(tmp_path / "repo"), "run1", 0, ["just", "test"], _time.time() - 60)
+    assert len(kept) == 1 and kept[0].endswith(".xml")
+
+
+def test_the_browser_tier_serves_the_hk_the_runner_built(tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    (tmp_path / "debug").mkdir()
+    (tmp_path / "debug" / "hk").write_text("")
+    backend = Path(__file__).resolve().parents[2] / "ui" / "e2e" / "backend.mjs"
+    out = subprocess.run(["node", "-e", f"import({str(backend)!r}).then(m=>console.log(m.hkBinary()))"],
+                         env={**__import__("os").environ, "CARGO_TARGET_DIR": str(tmp_path), "HK_BIN": ""}, capture_output=True, text=True, timeout=30)
+    assert out.stdout.strip() == str(tmp_path / "debug" / "hk"), out.stderr
+
+
+def test_the_merge_runner_builds_in_its_own_target_dir():
+    text = (Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert 'export CARGO_TARGET_DIR="${HK_GATE_TARGET:-$S/gate-target}"' in text
+    assert 'cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR"' in text

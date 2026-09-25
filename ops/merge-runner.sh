@@ -40,6 +40,12 @@ ATTEMPTS=$S/merge-attempts.txt
 # from staged-but-ungated main that silently absorbed three other tickets' work.
 # So the bulk declares itself. The file exists ONLY while main is provisional.
 BULKMARK=$S/bulk-in-progress
+# THE GATE BUILDS IN ITS OWN TARGET DIR (supervisor for the user, 2026-09-24 17:20, disk 303 -> 179 GB in
+# 70 min): every gate rebuild of main's target/ in place turned the shared blocks of every worker worktree
+# target - each a `cp -c` clone of main's - exclusive, ~2 GB/min. Every cargo this runner starts (gates,
+# flake re-runs, main-red rebuilds) builds here instead, so main's target/ stays a stable clone source.
+# Seeded as a clone of main's target/ at startup, so the first gate is warm. CI and hand gates unaffected.
+export CARGO_TARGET_DIR="${HK_GATE_TARGET:-$S/gate-target}"
 # T-543: one JSON line per LANDED ticket - {ticket, branch, first_commit_ts, merge_ts,
 # land_minutes, gate_attempts}. `merge-done.txt` records THAT a branch merged; this records
 # what it COST, which is the number T-543 exists to watch. Written next to the gate's own
@@ -873,6 +879,10 @@ self_version(){
 # that must never be tripped by a setup step nobody ran.
 ( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
 
+if [ ! -d "$CARGO_TARGET_DIR" ] && [ -d "$REPO/target" ]; then
+  cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR" 2>>"$LOG" && log "STARTUP: seeded the gate's target dir $CARGO_TARGET_DIR as a clone of $REPO/target"
+fi
+log "GATE TARGET: $CARGO_TARGET_DIR (main's target/ is the workers' clone source and is not rebuilt by gates)"
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 # What this process is actually running with - `just knobs show` reads it back as "effective".
 log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0}"
