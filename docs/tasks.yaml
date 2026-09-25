@@ -27587,6 +27587,8 @@ tasks:
       SUB-TICKETS (coordinator): (1) T-970 classifier classes pilot+RDS as WFM; (2) T-971 continuous RDS accumulation on the detection row (after this ticket's auto-attach lands); (3) T-961; (4) T-937 (WFM-width merge) + T-939 (overrun accounting); (5) T-962. Set: T-936 (101.3, 98.9) + T-969 (88.5, 106.1); fixtures T-935 + T-960. THIS ticket keeps: auto-attach of the RDS probe to every WFM-shaped detection, and the ratio measurement against the four fixtures + live.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): SECOND DATA POINT (supervisor 07:17), FM/RDS unprompted re-measure 06:48 with the same 10 x 2.4 Msps windows as window 1's second pass (one server, retuned): 19 present / 12 with a WFM-width row / 1 PI unprompted (101.3, PI 1694) / 0 PS - vs the window-1 baseline 2/19 PI unprompted, 0 PS. CAVEAT: this run is INVALIDATED by T-941's new variant (marine -> FM retune: emitters_created 23 -> 24 while tracks_confirmed ~128 -> 494 - tracks confirm but no emitters are created, so no rows carry RDS). Re-measure after T-941 lands; the ratio target stays >= 90 %.
+
+      2026-09-25 coordinator: the live-air verification (acceptance (1)/(2) on air) is split out as T-992 (blocked on a radio window); this ticket lands with the code fix, the fixtures and the guard once merged with main and deduplicated against T-935's explorer fixtures (Opus worker on it now).
     core_interface: true
     branch: task-t926
   - id: T-927
@@ -28826,6 +28828,26 @@ tasks:
       DELIVER: a window's content class is computed per sub-band (the class map at the resolution of its allocations), the most-restrictive class applied only to the sub-band it covers (metadata-only there), never to the whole window; /api/status reports the per-sub-band classes. Test: a 152-162 window -> marine/AIS/NOAA sub-bands unrestricted, only the paging sub-bands restricted; red on current code.
       core_interface (content gating). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     core_interface: true
+  - id: T-992
+    milestone: MAUTO
+    title: "T-926 live-air verification: unprompted FM/RDS ratio >= 90 % over 88-108 MHz after the fix (needs ~15 min of radio in a scheduled window)"
+    status: blocked
+    priority: P1
+    deps:
+    - T-926
+    - T-941
+    parallel_group: LIVE-RDS-VERIFY
+    use_cases:
+    - SIGNAL-062
+    needs: hardware
+    model: opus
+    effort: medium
+    notes: |
+      Split from T-926 (2026-09-25 07:53, its worker handed back BLOCKED on the radio): the code fix is done and landing (chains/analog.rs collect() dropped the tail of every ring chunk at a stage boundary, so live WFM windows were 0.5/1.0 s and never the 4 s RDS needs - a live HackRF's 65,536-sample transfers never divide the stage lengths, replay's 5 ms blocks always do, which is why CI never saw it; A/B on the mock SDR: baseline 0.5 s windows, A4FF not decoded; fixed 4.0 s, A4FF decoded). What remains is T-926's acceptance (1)/(2) ON LIVE AIR: the post-fix unprompted ratio over 88-108 MHz >= 90 % (present / pilot+RDS / PI decoded unprompted / PS), measured the same way as the explorer's window-1 second pass (10 x 2.4 Msps windows, one server retuned, py/fixtures/rds_ref.py as the independent oracle) - baseline 2/19 PI unprompted, 0 PS; window 3's re-measure was invalidated by T-941.
+      NEEDS: ~15 min of the HackRF under the radio lock (`just radio take <owner> 20m ...`), on a build containing T-926 AND T-941 (the freeze empties rows after a class-changing retune; start the server IN the FM band and retune only within it). Staging stays live for the user in the daytime, so run it inside a scheduled explorer/nightly window (the pipeline manager schedules those from 2026-09-25 night) or when the user gives the radio.
+      DELIVER: the ratio table per station (app vs oracle), PI and PS unprompted counts, written to T-926's result; if < 90 %, name the remaining cause per station and file it through the coordinator.
+      TESTING PROTOCOL: live measurement only; no code changes expected. HAND BACK with the table.
+    blocked_on: "a radio window: ~15 min of the HackRF under the radio lock in a scheduled explorer/nightly window (staging stays live in the daytime); T-926 + T-941 landed"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
