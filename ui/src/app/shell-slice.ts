@@ -105,12 +105,19 @@ export const cycleTheme = (s: AppState): Partial<AppState> => ({ theme: THEMES[(
 /** `time`, when given (T-999), names the (t0, t1) window a past-survey Go-to also asks for — a
  * single request carrying both axes, so the surface's one `nav` subscriber moves the pane's
  * frequency AND time together and nothing later in the frame (`mirror()`) can overwrite the half
- * that was written some other way. */
+ * that was written some other way.
+ *
+ * `gotoTS` is the window's MIDPOINT `(t0S + t1S) / 2`, not its end: `PaneModel.goTo` takes a
+ * CENTRE (`centre/surface.ts` passes `t.tS` straight through as `centerNs`), so a `gotoTS` of `t1S`
+ * would land the pane with the whole survey window in the OLDER half of the frame and the newer
+ * half off-screen — a real gate finding (review, 2026-09-25): "centres the pane on the survey's end
+ * time t1 ... so half the window is off-screen". The midpoint is what actually shows `[t0S, t1S]`
+ * centred, matching `gotoSpanS = t1S - t0S`. */
 export const requestGoto = (hz: number, spanHz?: number, time?: { t0S: number; t1S: number }) =>
   (s: AppState): Partial<AppState> => ({
     nav: {
       gotoHz: hz, gotoSpanHz: spanHz !== undefined && Number.isFinite(spanHz) && spanHz > 0 ? spanHz : null,
-      gotoTS: time && Number.isFinite(time.t1S) ? time.t1S : null,
+      gotoTS: time && Number.isFinite(time.t0S) && Number.isFinite(time.t1S) ? (time.t0S + time.t1S) / 2 : null,
       gotoSpanS: time && Number.isFinite(time.t1S) && Number.isFinite(time.t0S) && time.t1S > time.t0S ? time.t1S - time.t0S : null,
       seq: s.nav.seq + 1,
     },

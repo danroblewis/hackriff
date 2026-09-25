@@ -130,8 +130,11 @@ test("mode, theme, time cursor and goto actions", () => {
   s.set(requestGoto(101.3e6));
   assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: null, gotoTS: null, gotoSpanS: null, seq: 2 });
   // T-999: a request naming a time window (a past-survey Go-to) carries it on the same nav write.
+  // `gotoTS` is the window's MIDPOINT (70 = (40+100)/2), not its end: `PaneModel.goTo` takes a
+  // centre, so an end-time `gotoTS` would land the pane with half the named window off-screen
+  // (review finding, 2026-09-25).
   s.set(requestGoto(101.3e6, 2e6, { t0S: 40, t1S: 100 }));
-  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: 2e6, gotoTS: 100, gotoSpanS: 60, seq: 3 });
+  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: 2e6, gotoTS: 70, gotoSpanS: 60, seq: 3 });
 });
 
 test("review drawer toggles and opens on a tab and region", () => {

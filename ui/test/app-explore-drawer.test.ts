@@ -99,8 +99,11 @@ test("T-815 review: with a 7-day, 60k-record oldest-first log the NEWEST surveys
   assert.equal(survey.length, 4);
   const got: number[] = [];
   for (const li of survey) { li.children[1].fire("click"); got.push(gotoTimeWindow(store.get().nav)!.tS); }
-  assert.deepEqual(got, [edge, edge - 3600, edge - 7200, edge - 10800], "the four newest band-hours, newest first — never the oldest pages' windows");
-  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: edge - 10800, spanS: 3600 });
+  // Each row is a clean 3600 s band-hour; `gotoTimeWindow`'s `tS` is the window's MIDPOINT (T-999
+  // review fix), so it sits 1800 s before each window's end.
+  assert.deepEqual(got, [edge - 1800, edge - 5400, edge - 9000, edge - 12600],
+    "the four newest band-hours, newest first — never the oldest pages' windows");
+  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: edge - 12600, spanS: 3600 });
   assert.ok(srv.calls.every((c) => c.limit === 10_000), "the documented max page");
   assert.equal(srv.calls[0].t1, edge, "the newest slice is read first");
   assert.ok(!el.all().some((e) => e.textContent === "survey · not fully loaded"), "a complete read claims no truncation");
@@ -230,7 +233,9 @@ test("P4: the small per-row go-to button is the one that jumps the view (view ar
   // T-999: a past survey's time rides the SAME `nav` request as its frequency, not a separate
   // `reviewAt` write — see `gotoTimeWindow` (`app/state.ts`) and the test below that this is what
   // the surface actually moves a pane with.
-  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: 100, spanS: 60 }, "a past survey window is named");
+  // `tS` is the window's MIDPOINT (T-999 review fix: `goTo` takes a centre, so an end-time `tS`
+  // left half the window off-screen), not its end: (40+100)/2 = 70.
+  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: 70, spanS: 60 }, "a past survey window is named");
   assert.ok(calls.every((c) => !/\/api\/(device|retune|control)/.test(c)), "never a device route");
 });
 
@@ -253,8 +258,10 @@ test("T-906: Go on a past survey restores its frequency SPAN as well as its cent
   assert.deepEqual(store.get().nav.gotoHz, 435e6);
   assert.equal(store.get().nav.gotoSpanHz, 10e6, "the survey's band width, not the pane's old span");
   // T-999: the time half rides the same request — `gotoTimeWindow`, not a separate `reviewAt` write
-  // that a later `mirror()` pass could overwrite before it ever reached a pane.
-  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: 90, spanS: 40 });
+  // that a later `mirror()` pass could overwrite before it ever reached a pane. `tS` is the MIDPOINT
+  // of [50, 90], not the end: `PaneModel.goTo` takes a centre, so an end-time `tS` would land the
+  // pane with the whole window in the older half of the frame (the review finding this fixes).
+  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: 70, spanS: 40 });
   // The surface's own step: the request becomes a pane window, snapped by the real PaneModel — BOTH
   // axes, exactly as `centre/surface.ts`'s `store.select((s) => s.nav, ...)` applies them.
   // Bounds wide enough that a centre of 90 s with a 40 s span is not clamped against the capture
@@ -268,8 +275,9 @@ test("T-906: Go on a past survey restores its frequency SPAN as well as its cent
   const t = gotoTimeWindow(store.get().nav)!;
   if (t.spanS !== null) m.zoomTime(id, (t.spanS * 1e9) / Math.max(1, m.get(id)!.time.spanNs), 0.5);
   m.goTo(id, t.tS * 1e9);
-  assert.deepEqual(m.get(id)!.time, { live: false, centerNs: 90e9, spanNs: 40e9 },
-    "the pane freezes on the survey's own window, not the pane's previous (live) one");
+  assert.deepEqual(m.get(id)!.time, { live: false, centerNs: 70e9, spanNs: 40e9 },
+    "the pane freezes CENTRED on the survey's own window ([50,90], centre 70), not its end (90) " +
+    "and not the pane's previous (live) one");
   // A span beyond the device range is a view zoom snapped to the realizable extent, never a retune.
   m.setFreq(id, 3e9, 1e12);
   assert.deepEqual(m.get(id)!.freq, { centerHz: (1e6 + 6e9) / 2, spanHz: 6e9 - 1e6 });

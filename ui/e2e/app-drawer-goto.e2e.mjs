@@ -2,23 +2,24 @@
 //
 // The unit tier (`ui/test/app-explore-drawer.test.ts`) already proves the pure wiring: `gotoItem`
 // folds a row's time window into the same `nav` request as its frequency, `gotoTimeWindow` reads it
-// back out, and `centre/surface.ts` applies it to the active pane via the real `PaneModel`. What
-// that tier CANNOT see is the defect this ticket was actually filed against: `gotoItem` used to
-// write the store's `time` field directly (`reviewAt`), and `centre/surface.ts`'s own per-frame
+// back out (as the window's MIDPOINT, not its end — the review fix), and `centre/surface.ts`
+// applies it to the active pane via the real `PaneModel`, with exact expected values. What that
+// tier CANNOT see is the defect this ticket was actually filed against: `gotoItem` used to write
+// the store's `time` field directly (`reviewAt`), and `centre/surface.ts`'s own per-frame
 // `mirror()` — which republishes `s.time` FROM the active pane every render — ran on the very next
 // frame and overwrote it with the pane's OLD (unmoved) time before a user ever saw the jump. Only a
 // real render loop, over real frames, can demonstrate that the jump survives past the first paint.
 //
 // So this file: starts a real backend with the mock SDR sweeping (`--device mock:…`, the one legal
 // way this tier drives a "device" — CLAUDE.md), waits for the sweep to leave at least one band
-// behind (a genuine PAST survey window, not a synthesized one), reads that window from the SAME
-// server record the drawer itself reads (`GET /api/observations`), presses the row's "Go" button in
-// the real DOM, and then reads the pane's post-click time back from the browser two ways that need
-// no debug hook: (a) the periodic `GET /api/annotations` poll, which every render frame keeps
-// pointed at the union of the panes' own boxes (`centre/surface.ts`, T-820) — a request that
-// disagreed with the survey's window would be `mirror()`'s stale echo caught on the wire; and (b)
-// that no later poll ever drifts the window back toward "live" once the jump lands, since a
-// following pane would advance every poll and a frozen one holds still (the T-347 pause invariant).
+// behind (a genuine PAST survey window, not a synthesized one), presses the row's "Go" button in
+// the real DOM, and reads the pane's post-click state back from the browser with no debug hook:
+// (a) the Live/frozen FAB (`map-controls.ts`'s `.map-fab`), which reads the pane's own `time.live`
+// directly — the one thing the pre-fix bug got wrong (the pane never froze, so the FAB stayed lit
+// "following"); and (b) the periodic `GET /api/annotations` poll, which every render frame keeps
+// pointed at the union of the panes' own (rendered) boxes (`centre/surface.ts`, T-820) — checked
+// across two polls a few seconds apart to prove the frozen window HOLDS STILL rather than sliding
+// back toward "live" (a following pane would advance every poll; a frozen one does not).
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
