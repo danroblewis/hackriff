@@ -501,3 +501,142 @@ fn silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay() {
     assert!(live_is(0), "a hang-up drops the session");
     assert_eq!(opener.opened.load(Ordering::SeqCst), 3);
 }
+
+/// Publishes nothing for `quiet`, then floods full-size records until its session drops, so a
+/// peer that never reads fills the socket's send buffer and leaves the per-consumer writer thread
+/// blocked mid-write — holding the connection's lock — for up to a whole peer timeout (T-954,
+/// review attempt 3). Records how its session ended and the instants the transport set that end
+/// and dropped the session, read off the server's own calls rather than guessed from outside.
+struct Flooding {
+    quiet: Duration,
+    end: hk_stream::SessionEndSlot,
+    dropped: Arc<std::sync::Mutex<Option<Instant>>>,
+}
+
+struct FloodGuard(Arc<AtomicBool>, Arc<std::sync::Mutex<Option<Instant>>>);
+impl Drop for FloodGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+        *self.1.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+impl StreamOpener for Flooding {
+    fn open(&self, _req: &OpenRequest) -> Result<OpenedStream, OpenRefusal> {
+        let mut h = StreamHeader::new(
+            "listen/flooding",
+            StreamKind::Audio,
+            ContentClass::Unrestricted,
+            "test",
+        );
+        h.datatype = Some(AUDIO_DATATYPE.into());
+        h.sample_rate_hz = Some(AUDIO_SAMPLE_RATE_HZ);
+        h.max_frame_len = AUDIO_MAX_FRAME_LEN;
+        h.audio = Some(AudioInfo {
+            mode: "nbfm".into(),
+            channels: 1,
+            frame_samples: 4,
+            ..AudioInfo::default()
+        });
+        let mut p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
+        let handle = p.handle();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let quiet = self.quiet;
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let payload =
+                vec![0u8; AUDIO_MAX_FRAME_LEN as usize - hk_api::stream::BINARY_RECORD_HEADER_LEN];
+            let mut i = 0u64;
+            while !stopped.load(Ordering::SeqCst) {
+                if t0.elapsed() < quiet {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                for _ in 0..16 {
+                    let _ = p.publish_binary(BinaryRecord {
+                        t: Timestamp::from_unix_nanos(1),
+                        sample_index: 4 * i,
+                        flags: RecordFlags::empty(),
+                        payload: &payload,
+                    });
+                    i += 1;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        Ok(OpenedStream {
+            header: h,
+            handle,
+            session: Box::new(FloodGuard(stop, Arc::clone(&self.dropped))),
+            end: self.end.clone(),
+        })
+    }
+}
+
+/// T-954, review attempt 3: a peer that vanished (no FIN, no RST) while records large enough to
+/// fill the send buffer were streaming. The writer thread is then blocked inside a socket write,
+/// holding the connection's lock, when `watch` declares the peer unresponsive; `serve` must not
+/// wait that write out (and then a second, full-timeout close-frame write) before it releases the
+/// session — that held the session guard, the producer chain and its budget slot for up to one
+/// extra peer timeout.
+///
+/// The flood starts at 3/4 of the peer timeout, so the stuck write outlives the reap by about that
+/// much: before the fix the session outlived `watch`'s verdict by >= 0.75 x the peer timeout
+/// (1.5 s here). The bound asserted, 0.4 x the peer timeout (0.8 s), is the fix's own budget —
+/// one bounded lock wait plus one bounded close-frame write, 200 ms each — plus 400 ms of margin
+/// for a loaded machine. No pings are sent (their interval is longer than the test), so this
+/// measures only the writer-lock path.
+#[test]
+fn a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck() {
+    let peer_timeout = Duration::from_secs(2);
+    let opener = Arc::new(Flooding {
+        quiet: peer_timeout * 3 / 4,
+        end: hk_stream::SessionEndSlot::default(),
+        dropped: Arc::default(),
+    });
+    let mut config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        Token::from_config(TOKEN).unwrap(),
+    );
+    config.ondemand_ping_interval = Duration::from_secs(60);
+    config.ondemand_peer_timeout = peer_timeout;
+    let state = ApiState {
+        on_demand: OpenerRegistry::new().with("listen", opener.clone()),
+        ..ApiState::default()
+    };
+    let server = Server::start(config, state).unwrap();
+
+    // Reads up to the header, then never reads or answers again: the socket stays open.
+    let _vanished = raw_open(server.local_addr());
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let ended_at = loop {
+        if opener.end.get() != hk_stream::SessionEnd::Unattributed {
+            break Instant::now();
+        }
+        assert!(Instant::now() < deadline, "the peer was never reaped");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(
+        opener.end.get(),
+        hk_stream::SessionEnd::Unresponsive,
+        "the scenario is a vanished peer reaped for silence"
+    );
+    let dropped_at = loop {
+        if let Some(t) = *opener.dropped.lock().unwrap() {
+            break t;
+        }
+        assert!(Instant::now() < deadline, "the session was never dropped");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let held = dropped_at.saturating_duration_since(ended_at);
+    eprintln!(
+        "vanished peer: session dropped {:.0} ms after it was reaped",
+        held.as_secs_f64() * 1e3
+    );
+    assert!(
+        held < peer_timeout * 2 / 5,
+        "the session outlived the reap by {held:?}: serve waited on a write stuck on a dead peer"
+    );
+}

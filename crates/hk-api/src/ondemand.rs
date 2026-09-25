@@ -31,7 +31,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use hk_stream::{
@@ -69,9 +69,18 @@ use crate::http::ServerConfig;
 /// Longest close reason (the WebSocket limit is 123 bytes).
 const MAX_CLOSE_REASON: usize = 120;
 
-/// Write timeout for the close-frame attempt on a peer already reaped for silence (T-954): short,
-/// because the full peer timeout already established it is not answering.
-const UNRESPONSIVE_CLOSE_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+/// Write timeout for every close-frame attempt (T-954, review attempt 3). A close frame is a few
+/// bytes: to a peer that is reading it goes out at once, and a peer whose send buffer is full is
+/// not reading, so the full peer timeout the socket otherwise carries would only hold the session
+/// (its guard, producer chain and budget slot) that much longer. The socket is shut down right
+/// after every close attempt, so shortening its timeout here cannot fail a later record write.
+const CLOSE_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Longest a closer waits for `conn`'s lock before giving up on the close frame (T-954, review
+/// attempt 3). A writer mid-write to a live peer releases it within milliseconds; one that still
+/// holds it after this is stuck on a peer that is not reading, which would not read the frame
+/// either — and only the raw shutdown that follows can unblock it.
+const CLOSE_LOCK_WAIT: Duration = Duration::from_millis(200);
 
 fn http_error(stream: &mut TcpStream, status: u16, message: &str) {
     let body = json!({ "error": message }).to_string();
@@ -156,9 +165,37 @@ impl Conn {
     /// no-op here (the socket still gets shut down either way, by its own caller).
     fn send_close(&mut self, code: CloseCode, reason: &str) {
         if self.started && !self.close_sent {
+            self.sink.set_write_timeout(CLOSE_WRITE_TIMEOUT);
             self.sink.close(code, reason);
             self.close_sent = true;
         }
+    }
+}
+
+/// `conn`'s lock if it can be had within `wait` (`Duration::ZERO`: only if free right now).
+/// **Never `conn.lock()` on a close path (T-954, review attempt 3):** [`ConnSink::write`] holds
+/// that lock for a whole socket write, whose timeout is the full peer timeout, so a closer that
+/// blocks on it waits out a write stuck on a vanished peer — the one the close is meant to cut
+/// short.
+fn lock_within(conn: &Mutex<Conn>, wait: Duration) -> Option<MutexGuard<'_, Conn>> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match conn.try_lock() {
+            Ok(g) => return Some(g),
+            Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// Sends the close frame if `conn` can be had within `wait` (see [`lock_within`]); otherwise skips
+/// it — a writer that has held the lock that long is stuck on a peer that is not reading.
+fn send_close_within(conn: &Mutex<Conn>, wait: Duration, code: CloseCode, reason: &str) {
+    if let Some(mut c) = lock_within(conn, wait) {
+        c.send_close(code, reason);
     }
 }
 
@@ -201,22 +238,22 @@ fn close_frame_for_reason(reason: hk_stream::CloseReason) -> (CloseCode, &'stati
 /// Subscribes the connection as a remote consumer, like [`bridge::attach`], through a writer
 /// [`watch`] can ping between messages.
 ///
-/// **The subscribe closer must never block a thread it cannot afford to (T-954, review
-/// attempt 2).** hk-stream's own contract for it (`publisher.rs`) is to unblock a writer thread
-/// that may be stuck inside [`ConnSink::write`] holding `conn`'s lock, by shutting the raw socket
-/// down — and two of its five [`hk_stream::CloseReason`]s run on threads that must never wait on a
-/// peer: `SlowConsumer` fires straight out of `Publisher::publish_binary`/`publish_status`, on the
-/// *producer's own real-time thread* ("the producer never waits on a browser", [`bridge`]'s module
-/// docs), and `DrainTimeout` fires from a watchdog thread shared by every consumer draining after
-/// the publisher finished. Attempt 1 took `conn`'s lock before shutting down for every reason,
-/// which is exactly backwards for these two: that lock is the one a writer thread stuck mid-write
-/// already holds, so the closer can't get it, `shutdown` never runs, and the caller — the producer
-/// itself, for `SlowConsumer` — blocks for up to the peer's own write timeout, starving every
-/// other consumer of the stream. So those two only ever shut down, unconditionally, no lock taken.
-/// The other three — `PublisherFinished` and `PeerGone` (both called by the *per-consumer* writer
-/// thread itself, only once its own last write has already returned, so `conn` is never held when
-/// they run) and `Detached` (only ever `serve`'s own explicit close, on `serve`'s own thread, after
-/// it has already sent its own frame and dropped the lock) — are safe to close with a frame here.
+/// **The subscribe closer must never block on a stuck write (T-954, review attempts 2 and 3).**
+/// hk-stream's own contract for it (`publisher.rs`) is to unblock a writer thread that may be
+/// stuck inside [`ConnSink::write`] holding `conn`'s lock, by shutting the raw socket down — so no
+/// reason may wait on that lock unboundedly, and what each one may afford differs:
+/// - `SlowConsumer` fires straight out of `Publisher::publish_binary`/`publish_status`, on the
+///   *producer's own real-time thread* ("the producer never waits on a browser", [`bridge`]'s
+///   module docs), and `DrainTimeout` from a watchdog thread shared by every draining consumer:
+///   they never touch the lock at all, only shut down.
+/// - `PeerGone` fires after the writer's own write already failed (timed out on a peer that is
+///   not reading, or cut short by a shutdown), and `Detached` is `serve`'s own close, after it has
+///   already made its own close-frame attempt: both try the lock once, without waiting.
+/// - `PublisherFinished` fires from the writer thread once its last write returned, so the lock is
+///   normally free; it may briefly wait ([`CLOSE_LOCK_WAIT`]) behind a ping or `serve`'s own
+///   close attempt, so a normal end is not left to read as `1006` over that race.
+///
+/// Every close-frame write runs with the short [`CLOSE_WRITE_TIMEOUT`], never the peer timeout.
 fn attach(
     handle: &PublisherHandle,
     stream: &TcpStream,
@@ -243,14 +280,14 @@ fn attach(
 /// deterministic test (below) instead of one that hopes to stall a real TCP write.
 fn on_close(reason: hk_stream::CloseReason, conn: &Mutex<Conn>, closer: &TcpStream) {
     use hk_stream::CloseReason;
-    if !matches!(
-        reason,
-        CloseReason::SlowConsumer | CloseReason::DrainTimeout
-    ) {
+    let wait = match reason {
+        CloseReason::SlowConsumer | CloseReason::DrainTimeout => None,
+        CloseReason::PeerGone | CloseReason::Detached => Some(Duration::ZERO),
+        CloseReason::PublisherFinished => Some(CLOSE_LOCK_WAIT),
+    };
+    if let Some(wait) = wait {
         let (code, msg) = close_frame_for_reason(reason);
-        conn.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .send_close(code, msg);
+        send_close_within(conn, wait, code, msg);
     }
     let _ = closer.shutdown(Shutdown::Both);
 }
@@ -448,25 +485,16 @@ pub(crate) fn serve(
                 PeerEnd::Unresponsive => hk_stream::SessionEnd::Unresponsive,
                 PeerEnd::Reset => hk_stream::SessionEnd::Transport,
             });
-            // T-954: an honest close frame, not a bare TCP hang-up — see [`close_frame_for`].
-            // `watch` already returned, so this thread holds `conn` uncontended: send *this*
-            // reason (the one `watch` actually observed) if nobody has already, i.e. the
-            // producer did not close this consumer first — see [`Conn::send_close`] and
-            // [`close_frame_for_reason`] for that race. Sending here, before `handle.close(id)`,
-            // is what makes this side usually win it: that call's subscribe callback (`attach`)
-            // hands its own shutdown-then-close-attempt to a short-lived thread rather than doing
-            // it inline (review attempt 2 — that closer must never block *its* caller, which can
-            // be the producer's own real-time thread), so it is rarely faster than this line.
+            // T-954: an honest close frame, not a bare TCP hang-up — see [`close_frame_for`] —
+            // for the reason `watch` actually observed, unless the producer already closed this
+            // consumer with its own (see [`Conn::send_close`]). `watch` returning does NOT mean
+            // `conn` is free (review attempt 3): the writer thread may be stuck in a socket write
+            // to a vanished peer, holding it for up to the full peer timeout. So wait for it only
+            // briefly and skip the frame if it stays busy (that peer is not reading); the closer
+            // that `handle.close` runs then shuts the socket down, which is what cuts that write
+            // short, instead of this thread waiting it out.
             let (code, reason) = close_frame_for(end);
-            let mut c = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            if end == PeerEnd::Unresponsive {
-                // Already waited out the full peer timeout to conclude the peer is gone: do not
-                // wait it out a second time on a write that will, for the same reason, very
-                // likely also time out.
-                c.sink.set_write_timeout(UNRESPONSIVE_CLOSE_WRITE_TIMEOUT);
-            }
-            c.send_close(code, reason);
-            drop(c);
+            send_close_within(&conn, CLOSE_LOCK_WAIT, code, reason);
             opened.handle.close(id);
             let _ = stream.shutdown(Shutdown::Both);
             if std::env::var_os("HK_PIPELINE_DEBUG").is_some() {
@@ -518,15 +546,22 @@ mod tests {
         (conn, closer, client)
     }
 
-    /// T-954, review attempt 2: this is the regression itself, made deterministic instead of
+    /// T-954, review attempts 2 and 3: the regression itself, made deterministic instead of
     /// depending on actually stalling a TCP write. `conn`'s lock stands in for a writer thread
-    /// stuck mid-write holding it; `on_close(SlowConsumer, ...)` — the call a producer's own
-    /// real-time publish thread makes — must return long before that lock is ever released.
+    /// stuck mid-write holding it (for 1 s here, a peer timeout in miniature). No closer may wait
+    /// that out: `SlowConsumer`/`DrainTimeout` (the producer's own real-time thread, the drain
+    /// watchdog) and `PeerGone`/`Detached` never wait at all, and `PublisherFinished` waits at
+    /// most [`CLOSE_LOCK_WAIT`]. Each still shuts the socket down, which is what frees the writer.
     #[test]
-    fn slow_consumer_and_drain_timeout_never_wait_on_conns_lock() {
-        for reason in [
-            hk_stream::CloseReason::SlowConsumer,
-            hk_stream::CloseReason::DrainTimeout,
+    fn no_closer_waits_out_a_writer_stuck_holding_conns_lock() {
+        use hk_stream::CloseReason;
+        let no_wait = Duration::from_millis(100);
+        for (reason, bound) in [
+            (CloseReason::SlowConsumer, no_wait),
+            (CloseReason::DrainTimeout, no_wait),
+            (CloseReason::PeerGone, no_wait),
+            (CloseReason::Detached, no_wait),
+            (CloseReason::PublisherFinished, CLOSE_LOCK_WAIT + no_wait),
         ] {
             let (conn, closer, client) = loopback_conn();
             let held = Arc::clone(&conn);
@@ -534,7 +569,7 @@ mod tests {
             let holder = std::thread::spawn(move || {
                 let _g = held.lock().unwrap_or_else(PoisonError::into_inner);
                 tx.send(()).unwrap();
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(Duration::from_secs(1));
             });
             rx.recv().unwrap(); // the lock is now held, simulating a stuck writer_loop write.
 
@@ -542,18 +577,22 @@ mod tests {
             on_close(reason, &conn, &closer);
             let elapsed = t0.elapsed();
             assert!(
-                elapsed < Duration::from_millis(200),
-                "{reason:?} waited {elapsed:?} on a lock a stuck writer holds \
-                 (the producer's own real-time thread must never do this)"
+                elapsed < bound,
+                "{reason:?} waited {elapsed:?} (bound {bound:?}) on a lock a stuck writer holds"
+            );
+            let mut probe = [0u8; 1];
+            let _ = client.set_read_timeout(Some(Duration::from_secs(1)));
+            assert!(
+                matches!((&client).read(&mut probe), Ok(0) | Err(_)),
+                "{reason:?} must still shut the socket down"
             );
 
             holder.join().unwrap();
-            drop(client);
         }
     }
 
-    /// The other three reasons run only where `conn`'s lock is never contended (see [`attach`]'s
-    /// doc comment), so they close with a real frame, not just a hang-up.
+    /// With `conn`'s lock free — the normal case for these three (see [`attach`]'s doc comment) —
+    /// they close with a real frame, not just a hang-up.
     #[test]
     fn the_other_reasons_still_send_a_close_frame() {
         for reason in [
