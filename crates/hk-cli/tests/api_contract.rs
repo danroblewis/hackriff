@@ -3584,6 +3584,12 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
         json!(null),
         "an aborted-or-absent look rules nothing out: {v}"
     );
+    // T-567 (ADR-0021 §7A.6): `suspected` belongs to `unsupported-structure` and to no other
+    // kind. A look that never happened suspects nothing, and must not appear to.
+    assert!(
+        v["resolution"].get("suspected").is_none(),
+        "not-searched names no missing block: {v}"
+    );
     let (st, v) = post(
         addr,
         "/api/analyze",

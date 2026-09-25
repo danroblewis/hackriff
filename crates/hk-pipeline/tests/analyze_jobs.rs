@@ -328,6 +328,7 @@ impl Evaluator for World {
             output_bytes: 256,
             check,
             frames,
+            characterisation: None,
         })
     }
 }

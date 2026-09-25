@@ -25,7 +25,9 @@ use hk_synth::engine::{
 };
 use hk_synth::result::{CheckOrigin, CheckSummary, HoldoutFrame};
 use hk_synth::search::{JobState, Profile, StopReason};
-use hk_synth::trace::{Outcome, OutcomeKind, Reason};
+use hk_synth::trace::{
+    Outcome, OutcomeKind, Reason, ResolutionKind, RetryOn, RetryReason, SuspectedBy,
+};
 use hk_synth::{
     Control, Evidence, EvidenceSet, GroupId, MetricId, PowerPolicy, ProposalOp, Skeleton, Stage,
     Verdict,
@@ -75,6 +77,8 @@ struct World {
     null_fits: bool,
     /// Distinct valid frames on hold-out at the true CRC.
     holdout_frames: u32,
+    /// ADR-0021 §7A.5's characterisation the evaluator reports on the true prefix's hold-out run.
+    characterisation: Option<serde_json::Value>,
     /// The CRC's width, as the check summary reports it.
     width: u32,
     proposals: AtomicU64,
@@ -91,6 +95,7 @@ impl World {
             null_calls: AtomicU64::new(0),
             null_fits: false,
             holdout_frames: 12,
+            characterisation: None,
             width: 16,
             proposals: AtomicU64::new(0),
             grants: Mutex::new(Vec::new()),
@@ -277,6 +282,11 @@ impl Evaluator for World {
             output_bytes: 1024,
             check,
             frames,
+            // ADR-0021 §7A.5: only the hold-out run of the true prefix characterises.
+            characterisation: self
+                .characterisation
+                .clone()
+                .filter(|_| holdout && on_truth && req.stage == Stage::S5),
         })
     }
 
@@ -512,6 +522,7 @@ fn blind_search_solves_the_hidden_fsk_signal() {
         reference: "ADR-0011 §1.5".into(),
         family: Some("css".into()),
         slot: Stage::S1,
+        suspected_by: SuspectedBy::Classification,
         posterior: Some(0.05),
     });
     let o = run(&s, &world, &Control::new());
@@ -1025,6 +1036,7 @@ fn unsupported(structure: &str, block: &str) -> UnsupportedStructure {
         reference: "ADR-0011 §1.5".into(),
         family: Some(structure.into()),
         slot: Stage::S1,
+        suspected_by: SuspectedBy::Classification,
         posterior: Some(0.05),
     }
 }
@@ -1651,4 +1663,223 @@ fn m9_width_floor_hard_check_floor_and_the_laundering_rule() {
         "a discovered check counts as searched"
     );
     assert_eq!(o.results[0].verdict, Verdict::Solved);
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-567: the sealed Resolution (ADR-0021 §7A, §10)
+// ---------------------------------------------------------------------------------------------
+
+/// Roots nothing can solve, so every seal below is a real negative result.
+fn hopeless_roots() -> Vec<Root> {
+    vec![
+        root(skeleton("fsk-faint", fsk_s1(), true, &POLYS), -6.0, &POLYS),
+        root(skeleton("ook-faint", ook_s1(), true, &POLYS), -6.5, &POLYS),
+    ]
+}
+
+/// A bare carrier: energy, no symbols. `nothing-scored`, never `no-signal`.
+fn carrier() -> World {
+    World::new(Truth {
+        s0_bits: 11.0,
+        family: None,
+        ..FSK
+    })
+}
+
+/// ADR-0021 §7A.6: the absence of a LoRa decode must not read like a LoRa signal decoded as
+/// noise. The sealed resolution **names** the structure, the missing block's stable id and who
+/// suspected it — as fields, so ADR-0021 §9.4's backlog is a group-by and not a text search —
+/// and §10's policy row says never to re-run the same catalogue against it.
+#[test]
+fn t567_unsupported_structure_names_the_block_and_the_retry_policy_refuses_to_burn_battery() {
+    let world = carrier();
+    let mut s = spec(hopeless_roots(), Profile::Standard);
+    let mut css = unsupported("css", "css_dechirp");
+    css.posterior = Some(0.61);
+    css.suspected_by = SuspectedBy::Classification;
+    s.unsupported.push(css);
+    // A second, weaker suspicion: the resolution names the highest-posterior one, not both.
+    let mut ofdm = unsupported("ofdm", "ofdm_sync");
+    ofdm.posterior = Some(0.12);
+    s.unsupported.push(ofdm);
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.reason, Some(Reason::UnsupportedStructure));
+    let sus = o.suspected.clone().expect("the engine names its suspicion");
+    assert_eq!(sus.structure, "css");
+    assert_eq!(sus.missing_block, "css_dechirp");
+    assert_eq!(sus.suspected_by, SuspectedBy::Classification);
+    assert_eq!(sus.posterior, Some(0.61));
+
+    let res = o.seal(None, None, "1000").expect("nothing solved");
+    assert_eq!(res.kind, ResolutionKind::UnsupportedStructure);
+    assert_eq!(res.suspected, Some(sus));
+    // The id is a field on the served object, not a phrase to be parsed out of the summary.
+    let v = serde_json::to_value(&res).unwrap();
+    assert_eq!(v["suspected"]["missing_block"], "css_dechirp");
+    assert_eq!(v["suspected"]["suspected_by"], "classification");
+    assert_eq!(v["kind"], "unsupported-structure");
+    // §10: never retry until the named block exists.
+    let retry = res.retry.clone().expect("a finished search advises");
+    assert_eq!(retry.reason_code, RetryReason::Unsupported);
+    assert!(!retry.worthwhile);
+    assert_eq!(retry.on, vec![RetryOn::NewBlock]);
+    assert!(retry.not_on.contains(&RetryOn::MoreBudget));
+    assert_eq!(v["retry"]["reason_code"], "unsupported");
+}
+
+/// ADR-0021 §10: a finished `unknown` says whether **more budget** is the missing ingredient,
+/// and the two answers are different policies, not a shrug. The hard floor rides on the seal so
+/// no scheduler has to re-derive it.
+#[test]
+fn t567_the_seal_says_whether_more_budget_would_help() {
+    // The queue was non-empty when the cap hit: the space was not covered.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Quick);
+    s.budget.max_evaluations = Some(20);
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.stop, Some(StopReason::Budget));
+    assert_eq!(
+        o.reason,
+        Some(Reason::BudgetExhausted),
+        "the queue was non-empty when the cap hit"
+    );
+    let res = o.seal(None, None, "1000").expect("nothing solved");
+    let retry = res.retry.clone().unwrap();
+    assert_eq!(retry.reason_code, RetryReason::BudgetBinding);
+    assert!(retry.worthwhile);
+    assert_eq!(retry.on, vec![RetryOn::MoreBudget]);
+    assert_eq!(
+        retry.not_before.as_deref(),
+        Some("4600"),
+        "the 1 h floor, from the job's end"
+    );
+
+    // The space *was* covered and nothing was there: more budget buys nothing, and only a
+    // changed replay key is a reason to look again.
+    let world = carrier();
+    let o = run(
+        &spec(hopeless_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    assert_eq!(o.stop, Some(StopReason::Exhausted));
+    assert_eq!(o.reason, Some(Reason::NothingScored));
+    let res = o.seal(None, None, "1000").expect("nothing solved");
+    assert_eq!(res.kind, ResolutionKind::Unknown);
+    let retry = res.retry.clone().unwrap();
+    assert_eq!(retry.reason_code, RetryReason::BudgetNotBinding);
+    assert!(!retry.worthwhile);
+    assert_eq!(retry.not_on, vec![RetryOn::MoreBudget]);
+    assert!(retry.on.contains(&RetryOn::NewBlock));
+    assert!(retry.on.contains(&RetryOn::NewTemplate));
+    assert!(retry.on.contains(&RetryOn::NewEngine));
+}
+
+/// ADR-0021 §7A.2: a negative result about a **named** format is the durable half of "unknown".
+/// The seal lists each template this look tried and did not solve, once, with how far it got.
+#[test]
+fn t567_the_seal_lists_the_templates_this_look_ruled_out() {
+    let world = carrier();
+    let mut roots = hopeless_roots();
+    roots[0].template = Some(hk_synth::result::TemplateRef {
+        id: "pocsag".into(),
+        version: 1,
+    });
+    roots[1].template = Some(hk_synth::result::TemplateRef {
+        id: "flex".into(),
+        version: 3,
+    });
+    let o = run(&spec(roots, Profile::Standard), &world, &Control::new());
+    check_outcome(&o, &world);
+    let res = o.seal(None, None, "1000").expect("nothing solved");
+    let mut got: Vec<(&str, u32)> = res
+        .ruled_out
+        .iter()
+        .map(|r| (r.template.as_str(), r.version))
+        .collect();
+    got.sort_unstable();
+    assert_eq!(got, [("flex", 3), ("pocsag", 1)]);
+    assert!(
+        res.ruled_out.iter().all(|r| r.best_bits.is_finite()),
+        "how close each came is part of the finding"
+    );
+    // A solved search seals nothing, so nothing is "ruled out" by a search that succeeded.
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &World::new(FSK),
+        &Control::new(),
+    );
+    assert_eq!(o.seal(None, None, "1000"), None);
+}
+
+/// ADR-0021 §7A.5: framed, check-valid and unidentified is a **result**, not a failure. The
+/// evaluator's characterisation of the hold-out is carried onto the rank-1 result and the seal
+/// reads it as `structured-unidentified` — a different finding from `unknown`.
+#[test]
+fn t567_a_characterised_hold_out_seals_structured_unidentified() {
+    let mut world = World::new(FSK);
+    world.characterisation = Some(json!({
+        "framing": { "sync_word": "0x2DD4", "sync_bits": 16, "frames": 12 },
+        "payload": { "bytes": 14, "entropy_bits_per_byte": 7.91 },
+        "note": "framed, CRC-16 valid on hold-out, payload entropy 7.91 bits/byte"
+    }));
+    let mut s = spec(standard_roots(), Profile::Standard);
+    // The check is real and validated on hold-out; it is 16 bits wide and the rule wants 64, so
+    // nothing solves. The hold-out still ran, which is what characterisation rests on.
+    s.solve.min_check_width = 64;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    let top = &o.results[0];
+    assert!(
+        top.characterisation.is_some(),
+        "the hold-out characterisation rides on the rank-1 result"
+    );
+    let res = o.seal(None, None, "1000").expect("nothing solved");
+    assert_eq!(res.kind, ResolutionKind::StructuredUnidentified);
+    assert_ne!(res.kind, ResolutionKind::Unknown);
+    assert!(res.deepest_verdict >= Some(Verdict::Framed));
+
+    // A solved search carries no characterisation: it is identified, so nothing is left
+    // uncharacterised, and `structured-unidentified` can never be manufactured from one.
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &World::new(FSK),
+        &Control::new(),
+    );
+    assert_eq!(o.results[0].verdict, Verdict::Solved);
+    assert!(o.results[0].characterisation.is_none());
+}
+
+/// ADR-0021 §7A.4, the invariant this ticket exists for: **not-yet-analysed and
+/// analysed-and-found-nothing are different states, and neither may be rendered as the other.**
+/// An aborted look ruled nothing out, so it seals `not-searched` with no coverage, no reason and
+/// no retry advice — there is nothing to advise about.
+#[test]
+fn t567_an_aborted_look_seals_not_searched_and_never_unknown() {
+    let control = Arc::new(Control::new());
+    let c2 = Arc::clone(&control);
+    let world = World::new(FSK).with_hook(move |k| {
+        if k == 20 {
+            c2.cancel();
+        }
+    });
+    let o = run(&spec(standard_roots(), Profile::Standard), &world, &control);
+    check_outcome(&o, &world);
+    assert_eq!(o.state, JobState::Cancelled);
+    let res = o
+        .seal(None, None, "1000")
+        .expect("an aborted look still answers");
+    assert_eq!(res.kind, ResolutionKind::NotSearched);
+    assert_eq!(res.reason, None);
+    assert_eq!(res.deepest_verdict, None);
+    assert!(res.coverage.is_none(), "it searched nothing to completion");
+    assert!(res.retry.is_none());
+    assert_eq!(res.last_attempt.as_deref(), Some("1000"));
+    let v = serde_json::to_value(&res).unwrap();
+    assert_eq!(v["kind"], "not-searched");
+    assert!(v.get("coverage").is_none() || v["coverage"].is_null());
 }
