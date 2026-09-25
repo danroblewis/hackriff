@@ -26829,6 +26829,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-904 Opus review + worker 2026-09-24.
+
+      2026-09-24 coordinator, ADDED from T-904's fix round (a2ee94ff): (11) CRASHED RUNS KEEP THEIR LAST HOUR - a survey switches to DB-wide ageing only once closed; after a crash the open survey's newest hour stays until something closes it - close/age orphaned open surveys at startup. (12) DROPPED LINKS ARE SILENT - with the WHERE EXISTS guard a link to a pruned detection is skipped without an error, and TrackBatch::write reports links ATTEMPTED not INSERTED - count and report skipped links (a counter in storage/last_pass or the track stats) so a drain-before-flush regression is visible.
   - id: T-914
     milestone: MMAP
     title: app-surface.e2e.mjs layers-menu checks derive the overlay list from the registry, not a literal - every layer ticket (T-811/T-812/T-821/T-897) stops being blamed
