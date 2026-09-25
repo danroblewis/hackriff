@@ -332,7 +332,17 @@ def test_new_records_deps_and_use_cases_and_found_by(board: Path, capsys, monkey
     t5 = next(t for t in doc["tasks"] if t["id"] == "T-005")
     assert t5["deps"] == ["T-001", "T-002"]
     assert t5["use_cases"] == ["SIGNAL-01", "SIGNAL-02"]
-    assert "FOUND BY T-002." in t5["notes"]
+    assert t5["notes"].startswith("FOUND BY T-002: Depends on stuff")
+
+
+def test_new_tickets_from_one_source_open_with_distinct_provenance(board: Path, monkeypatch) -> None:
+    ids = iter(["T-007", "T-008"])
+    monkeypatch.setattr(tasks, "next_id", lambda text: next(ids))
+    for title in ("First finding", "Second finding"):
+        run(["new", "--title", title, "--milestone", "M2", "--found-by", "explorer-x", "--file", str(board)])
+    doc = yaml.safe_load(_text(board))
+    firsts = [t["notes"].split("\n", 1)[0] for t in doc["tasks"] if t["id"] in ("T-007", "T-008")]
+    assert len(firsts) == 2 and firsts[0] != firsts[1], firsts
 
 
 def test_new_title_with_colon_space_is_quoted_correctly(board: Path, monkeypatch) -> None:

@@ -33,6 +33,37 @@ this short window, matching the explorer's own weaker-signal finding there (3 gr
 0 in this 5 s clip). Had the oracle disagreed with the explorer's truth, this README and the
 fixture's `hackriff:truth` would record the disagreement rather than silently preferring one.
 
-A paging-band capture from the same session (`flex-pagers-930p8`, FLEX 929-932 MHz, oracle-confirmed
-sync but not decoded) is **not** included here: it needs a new paging use-case id, which is the
-coordinator's call (`~/.hackriff-ops/explorer/journal-20260925.md` §"04:27-04:33").
+## The FLEX paging capture (T-949): external store, not this directory
+
+A paging-band capture from the same session, `flex-pagers-930p8` (929-932 MHz, 12 s x 2.4 Msps),
+got its use-case id from T-949 (`SIGNAL-088`, terrestrial FLEX/POCSAG paging) but is **not
+committed under this directory**: at 57.6 MB the raw capture is over `fixtures/README.md`'s 25 MB
+Git-LFS cap (three FLEX channels' frames are 1.875 s apart, so a 12 s clip was needed to see more
+than one sync — see the journal's "Pagers" entry). It lives in the **external store**,
+`fixtures/store/explorer-2026-09-25/flex-pagers-930p8.sigmf-{meta,data}` (gitignored, indexed by
+the committed `fixtures/manifest.json`, `status: external`), built by the same
+`py/fixtures/build_explorer_2026_09_25.py` this directory's FM/RDS pair uses.
+
+Every emission's `hackriff:truth.paging` is decoded independently by the oracle
+`py/fixtures/flex_ref.py` (FM discriminator -> 1600 Bd 2-level sync correlation against FLEX's
+frame sync `0xA6C6AAAA`, both bit orders and polarities, then a 1600/3200 Bd re-slice of the data
+following each sync to count clean FSK levels), not copied from the explorer's own
+`tools/oracle_pager.py` claim, which is kept alongside each annotation under
+`paging.explorer_claim`.
+
+**Oracle cross-check (T-949): sync counts agree; level counts disagree on two of three channels.**
+The oracle found the same number of frame syncs the explorer's own oracle claimed in this 12 s
+clip at every channel — **3** at 929.6084 MHz, **1** at 929.9331 MHz, **2** at 931.1580 MHz (all
+Hamming <= 3/32 of the exact sync word) — so no sync-count disagreement. Level counting is harder
+on real, mostly-idle-between-frames air: at 931.1580 MHz (explorer: "2FSK") the oracle found a
+clean 2-level split at both 1600 and 3200 Bd, agreeing; at 929.6084 and 929.9331 MHz (explorer:
+4-level FSK payload) the oracle's re-slice found only 1-2 clean levels in the 2 s window following
+each sync, not 4 — recorded as a **disagreement** in the fixture's truth and `manifest.json`
+(`truth_summary`), not silently resolved either way. A 4-level channel with a short, low-duty-cycle
+burst is a genuinely hard level-count case in 12 s of mostly-noise air; the disagreement is honest,
+not a bug being hidden.
+
+A fourth FLEX channel, 931.7331 MHz, was active in the explorer's wider 30 s live-detection window
+but is idle in this 12 s clip (`hackriff:truth.paging.explorer_claim`, scenario annotation's
+`not_in_clip_but_seen`) — recorded for context, not annotated as an emission since there is nothing
+in this clip's samples to point at.

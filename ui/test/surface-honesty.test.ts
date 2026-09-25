@@ -409,3 +409,10 @@ test("a missing tile with a resident ancestor draws the ancestor, marked — nev
   assert.equal(marked.length, r.fallbacks, "every stand-in must carry the mark that says it is one");
   for (const d of h.g.draws()) assert.ok(!(d.u?.uFlat && near(d.u.uFlat, [...GREY])));
 });
+
+test("T-946(a): scanlines rule a minority of rows, so a station in shadow stays legible", () => {
+  let hits = 0;
+  const p = SHADOW_MARK.pitchPx;
+  for (let y = 0; y < p; y++) if (patternHit(SHADOW_MARK.pattern, { x: 3.5, y: y + 0.5 }, { x: p, y: p })) hits++;
+  assert.ok(hits >= 1 && hits / p <= 0.25, `${hits} of ${p} rows are inked`);
+});

@@ -476,3 +476,135 @@ PY
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
     assert out.stdout.strip().splitlines()[-1] == "1"
     assert 'and not c.get("host")' in _function("workers_running")
+
+
+
+def _suite_split(tmp_path, branches, culprits, base_rc=0, merge_fail="", absent_on="", flaky_once=""):
+    """suite_split over stubbed git/uv: the named pytest ids exit 1 whenever a culprit is merged."""
+    state, calls, flip = tmp_path / "merged", tmp_path / "calls", tmp_path / "flip"
+    state.write_text("")
+    culprit_re = "|".join(culprits) or "NONE"
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}; mkdir -p {tmp_path}/py
+log(){{ echo "LOG $*" >&2; }}
+git(){{ shift 2
+  case "$1" in
+    reset) : > {state} ;;
+    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; b=${{b#sha-}}; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
+  esac; return 0; }}
+uv(){{ echo "$* | $(tr '\n' ' ' < {state})" >> {calls}
+  [ -s {state} ] || return {base_rc}
+  grep -qx '{absent_on or "NONE"}' {state} && return 4
+  if grep -qx '{flaky_once or "NONE"}' {state}; then [ -e {flip} ] && return 0; touch {flip}; return 1; fi
+  grep -qxE '{culprit_re}' {state} && return 1; return 0; }}
+{_function("suite_red_alone")}
+{_function("suite_split")}
+suite_split base "tests/test_board.py::test_a tests/test_board.py::test_b" {' '.join(f"{b}=sha-{b}" for b in branches)}
+echo "LEFT_MERGED=$(wc -l < {state} | tr -d ' ')"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    probes = calls.read_text().splitlines() if calls.exists() else []
+    return out.stdout, probes, (tmp_path / "isolate-remaining").read_text()
+
+
+def test_a_pytest_red_batch_names_the_branch_that_breaks_it_alone(tmp_path):
+    """Twice fixed by hand (2026-09-24 18:12-18:15, 2026-09-25 04:43): a py red held a whole batch
+    while a person found the one branch. Base first, then each branch alone (a red twice), the named ids only."""
+    out, probes, remaining = _suite_split(tmp_path, ["b0", "b1", "b2"], ["b1"])
+    assert out.splitlines()[:3] == ["GREEN b0=sha-b0", "RED b1=sha-b1", "GREEN b2=sha-b2"]
+    assert len(probes) == 5 and probes[0].endswith("| ")                      # the base, alone
+    assert [p.split("| ")[1].strip() for p in probes[1:]] == ["b0", "b1", "b1", "b2"]   # b1 confirmed
+    assert all("pytest -q -p no:cacheprovider tests/test_board.py::test_a tests/test_board.py::test_b" in p
+               for p in probes)
+    assert "LEFT_MERGED=0" in out                                             # every probe reset to base
+    assert remaining.split() == ["b0", "b1", "b2"]                            # a restart re-queues the batch
+
+
+def test_a_pytest_red_on_the_base_itself_blames_no_branch(tmp_path):
+    for rc in (1, 2):                                                         # failed, or a collection error
+        out, probes, _ = _suite_split(tmp_path, ["b0", "b1"], ["b1"], base_rc=rc)
+        assert "RED" not in out and "GREEN" not in out and len(probes) == 1
+        (tmp_path / "calls").unlink()
+
+
+def test_a_test_new_in_the_batch_is_not_mains_red(tmp_path):
+    """pytest exit 4 on the base (no such node) -> the base is not red; the branch that adds it is probed."""
+    out, _, _ = _suite_split(tmp_path, ["b0", "b1"], ["b1"], base_rc=4)
+    assert "RED b1=sha-b1" in out and "GREEN b0=sha-b0" in out
+
+
+def test_a_branch_that_lacks_the_test_or_cannot_merge_alone_is_not_blamed(tmp_path):
+    out, _, _ = _suite_split(tmp_path, ["b0", "b1"], ["b0", "b1"], absent_on="b0")
+    assert "GREEN b0=sha-b0" in out and "RED b1=sha-b1" in out
+    (tmp_path / "m").mkdir()
+    out, _, _ = _suite_split(tmp_path / "m", ["b0", "b1"], ["b0"], merge_fail="b0")
+    assert "GREEN b0=sha-b0" in out and "LEFT_MERGED=0" in out
+
+
+def test_a_pytest_red_alone_only_once_is_not_blamed(tmp_path):
+    out, _, _ = _suite_split(tmp_path, ["b0", "b1"], [], flaky_once="b1")
+    assert "GREEN b1=sha-b1" in out and "RED" not in out
+
+def test_try_bulk_sets_the_pytest_culprits_aside_and_re_queues_the_rest_first():
+    text = RUNNER.read_text()
+    i = text.index("\ntry_bulk(){")
+    block = text[text.index("suite_split", i):text.index('printf \'%s\' "$gated_sig" > "$S/suite-broken"', i)]
+    assert '"${TRIAGE_WHAT#pytest red: }" != "${TRIAGE_WHAT:-}"' in text[i:]           # only a NAMED pytest red
+    assert '"${#culprits[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0' in block               # all red = interaction/main
+    assert '{ printf \'%s\\n\' "${rest[@]}"; cat "$QUEUE"' in block                     # the rest at the FRONT
+    assert '"GATE FAILED $b (its own' in block and 'GATE_FAIL" >> "$NEEDS"' in block   # hkpy.fixes reads these
+    assert 'record_attempt "${b%%=*}" "${b#*=}"' in block                        # the tip probed, not a later one
+    assert "held as before" in block                                                    # the fallback is kept
+
+
+def test_a_suite_hold_names_the_tips_the_gate_merged_not_a_tip_pushed_mid_gate(tmp_path):
+    """2026-09-25 06:51: task-t943 was merged into the batch at 820bd656, a fix 09d0a797 was pushed at 06:51:40 while the
+    batch gated, and the suite-broken hold (06:51:44) recorded 09d0a797 - so the fixed batch would have been held as
+    'unchanged'. The hold now records the merged tips, in exactly batch_sig's format (the release compares the two)."""
+    repo = tmp_path / "r"
+
+    def run(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (repo / "f").write_text("0")
+    run("add", "f")
+    run("commit", "-qm", "base")
+    for b in ("task-t1", "task-t2"):
+        run("checkout", "-qb", b, "main")
+        (repo / b).write_text(b)
+        run("add", b)
+        run("commit", "-qm", b)
+    run("checkout", "-q", "main")
+    text = RUNNER.read_text()
+    i = text.index("\ntry_bulk(){")
+    loop = text[text.index("  local merged=() gated=()", i):text.index('  [ -n "$skipped" ]', i)]
+    sig = text[text.index("  local gated_sig;", i):text.index("\n", text.index("  local gated_sig;", i))]
+    batch_sig = re.search(r"^batch_sig\(\)\{.*$", text, re.M).group(0)
+    script = f"""
+set -u
+REPO={repo}; LOG={tmp_path}/log; NEEDS={tmp_path}/needs
+log(){{ :; }}; ticket_of(){{ echo "$1"; }}
+{batch_sig}
+probe(){{
+branches=(task-t1 task-t2)
+{loop}
+branches=("${{merged[@]}}")
+{sig}
+echo "UNMOVED=$([ "$gated_sig" = "$(batch_sig "${{branches[@]}}")" ] && echo same || echo DIFFERENT)"
+git -C $REPO checkout -q task-t2; echo fix > $REPO/fix; git -C $REPO add fix; git -C $REPO commit -qm fix; git -C $REPO checkout -q main
+echo "MOVED=$([ "$gated_sig" = "$(batch_sig "${{branches[@]}}")" ] && echo same || echo DIFFERENT)"
+echo "GATED=${{gated[*]}}"
+}}
+probe
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0 and "local" not in out.stderr, out.stderr
+    assert "UNMOVED=same" in out.stdout           # an unchanged batch still matches its hold
+    assert "MOVED=DIFFERENT" in out.stdout        # a tip pushed after the merge releases it
+    t1, t2 = run("rev-parse", "task-t1"), run("rev-parse", "task-t2~1")
+    assert f"GATED=task-t1={t1} task-t2={t2}" in out.stdout     # bisect and the pytest probe get the merged tips
+    assert run("log", "-1", "--format=%s", "HEAD") == "Merge task-t2 (task-t2): batch, gated together (automated, no AI)"
