@@ -1384,7 +1384,12 @@ def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_h
         if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
             break
         time.sleep(0.1)
-    time.sleep(0.3)
+    # The pgid file is written before the fixture's python setsid shim has called setsid() - under load (1-min 39,
+    # 2026-09-25 06:00) longer than a fixed 0.3 s. Wait for the group, bounded; the host's util-linux setsid has no gap.
+    for _ in range(100):
+        if R.remote_run_state(c) == "running":
+            break
+        time.sleep(0.1)
     assert R.remote_run_state(c) == "running"
     assert R.remote_stop(c, wait_s=5)
     assert R.remote_run_state(c) == "gone"
