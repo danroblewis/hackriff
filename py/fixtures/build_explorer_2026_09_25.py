@@ -1,15 +1,19 @@
-"""Build the 2026-09-25 explorer-agent FM/RDS fixture pair's truth annotations and manifest rows.
+"""Build the 2026-09-25 explorer-agent FM/RDS fixtures' truth annotations and manifest rows.
 
     uv run --project py python py/fixtures/build_explorer_2026_09_25.py
 
 Inputs (read-only): ``fixtures/hackrf/explorer-2026-09-25/*.sigmf-{meta,data}`` (already placed,
 clipped live via ``POST /api/iqbuffer/clip`` on the explorer agent's staging build, 2026-09-25
-~04:00-04:11 PDT, SF) and the explorer's own hidden-truth claim at
+~04:00-04:58 PDT, SF) and the explorer's own hidden-truth claim at
 ``~/.hackriff-ops/explorer/captures/20260925/*.truth.json``. Cross-checks every station against
 the independent oracle ``py/fixtures/rds_ref.py`` and writes what the oracle found alongside the
 explorer's claim — it does not silently "fix" either one.
 
-Outputs: rewrites ``hackriff:truth`` annotations into the two ``.sigmf-meta`` files (via
+T-935 added the first two FM/RDS captures (101.3 MHz PI 1694, 98.9/98.1 MHz PI A4FF); T-960
+added the second pair (88.5 MHz PI 3AAB + 89.435 MHz weak carrier, 106.1 MHz PI 1323 + 106.907
+MHz pilot-only) via the same ``STATIONS`` table and oracle discipline.
+
+Outputs: rewrites ``hackriff:truth`` annotations into each ``.sigmf-meta`` file (via
 ``annotate.annotate``) and appends/refreshes their rows in ``fixtures/manifest.json``.
 
 Legal: receive-only capture; RDS PI/PS/PTY are public broadcast station identity, not third-party
@@ -42,6 +46,9 @@ EXPLORER_HOME = Path.home() / ".hackriff-ops" / "explorer" / "captures" / DATE.r
 STATIONS = {
     "fm-101p3-pi1694": [(101_300_000.0, "FM 101.3 MHz")],
     "fm-98p9-piA4FF": [(98_900_000.0, "FM 98.9 MHz"), (98_100_000.0, "FM 98.1 MHz")],
+    #: T-960: two more explorer FM/RDS captures, same discipline.
+    "fm-88p5-pi3AAB": [(88_500_000.0, "FM 88.5 MHz"), (89_435_000.0, "FM 89.435 MHz")],
+    "fm-106p1-pi1323": [(106_100_000.0, "FM 106.1 MHz"), (106_907_000.0, "FM 106.907 MHz")],
 }
 
 #: The FLEX paging capture (T-949): 12 s at 2.4 Msps, 57.6 MB -- over fixtures/README.md's 25 MB
@@ -194,6 +201,7 @@ def build_one(name: str) -> dict[str, Any]:
             "antenna": explorer_truth["capture"]["antenna"],
         },
         identification_source=explorer_truth["source"],
+        explorer_oracle_note=explorer_truth.get("oracle"),
         annotation_completeness=(
             "partial: the station(s) named in the explorer's truth file, plus the whole-file "
             "overload artefact"
@@ -399,6 +407,12 @@ def update_manifest_external(row: dict[str, Any], name: str, use_case: str,
     fxlib.MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n")
 
 
+#: T-935 built the first pair; T-960 added the second pair. Both go through the same oracle
+#: cross-check discipline, so the manifest purpose names both.
+FM_RDS_PURPOSE = ("explorer-agent captured live FM/RDS stations, blind truth cross-checked "
+                  "against the rds_ref.py oracle (T-935, T-960)")
+
+
 def update_manifest(rows: list[dict[str, Any]]) -> None:
     manifest = json.loads(fxlib.MANIFEST.read_text())
     entries = manifest["entries"]
@@ -415,8 +429,7 @@ def update_manifest(rows: list[dict[str, Any]]) -> None:
                 "name": name, "status": "committed", "path": path, "size_bytes": size, "sha256": sha,
                 "kind": kind, "use_cases": ["SIGNAL-062"], "license": LICENSE,
                 "truth_summary": r["truth_summary"],
-                "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked "
-                           "against the rds_ref.py oracle (T-935)",
+                "purpose": FM_RDS_PURPOSE,
                 "datetime": "2026-09-25",
                 "clip_count": r["clip_count"],
             }

@@ -663,7 +663,7 @@
       ],
       "license": "project-owned capture",
       "truth_summary": "101.3: oracle PI 1694 (56 groups, BLER 0.000); overload clip_fraction 0.984",
-      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
       "datetime": "2026-09-25",
       "clip_count": 11811945,
       "lfs": true
@@ -672,15 +672,15 @@
       "name": "fm-101p3-pi1694",
       "status": "committed",
       "path": "hackrf/explorer-2026-09-25/fm-101p3-pi1694.sigmf-meta",
-      "size_bytes": 7112,
-      "sha256": "d8890553558b6e6025e597f852b3080f288118d7684ba601c58ecbb646eb8e46",
+      "size_bytes": 7274,
+      "sha256": "898f915c849958af46f4b2e738abed20d9931f400e5688a8aa0b9bca46505293",
       "kind": "sigmf-meta",
       "use_cases": [
         "SIGNAL-062"
       ],
       "license": "project-owned capture",
       "truth_summary": "101.3: oracle PI 1694 (56 groups, BLER 0.000); overload clip_fraction 0.984",
-      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
       "datetime": "2026-09-25",
       "clip_count": 11811945
     },
@@ -696,7 +696,7 @@
       ],
       "license": "project-owned capture",
       "truth_summary": "98.9: oracle PI A4FF (3 groups, BLER 0.639); 98.1: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.120",
-      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
       "datetime": "2026-09-25",
       "clip_count": 1441836,
       "lfs": true
@@ -705,17 +705,83 @@
       "name": "fm-98p9-piA4FF",
       "status": "committed",
       "path": "hackrf/explorer-2026-09-25/fm-98p9-piA4FF.sigmf-meta",
-      "size_bytes": 8933,
-      "sha256": "b51be97b3570e3a90f07f0d6e0f4c3d93a9faf250d2668b7fbb5bfd590d62097",
+      "size_bytes": 9223,
+      "sha256": "0d12ad01ec21c6db5d66141ffb9e81fb5bcded0275bd8a6200bb943441f4a6a5",
       "kind": "sigmf-meta",
       "use_cases": [
         "SIGNAL-062"
       ],
       "license": "project-owned capture",
       "truth_summary": "98.9: oracle PI A4FF (3 groups, BLER 0.639); 98.1: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.120",
-      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
       "datetime": "2026-09-25",
       "clip_count": 1441836
+    },
+    {
+      "name": "fm-88p5-pi3AAB",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-88p5-pi3AAB.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "c4f2d073bb4b19498f8914c9f15fb875bfef57314cf9253de27366684fdceac0",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "88.5: oracle PI 3AAB (4 groups, BLER 0.507); 89.435: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
+      "datetime": "2026-09-25",
+      "clip_count": 0,
+      "lfs": true
+    },
+    {
+      "name": "fm-88p5-pi3AAB",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-88p5-pi3AAB.sigmf-meta",
+      "size_bytes": 8824,
+      "sha256": "002b10b40131b8a6017fb85dc6f63c6a789be02d65446bde009e6ca8b1376951",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "88.5: oracle PI 3AAB (4 groups, BLER 0.507); 89.435: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
+    },
+    {
+      "name": "fm-106p1-pi1323",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-106p1-pi1323.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "eb12f730c3214a7f483386e8f5f994b2a7775101a763df2c7b1dc67c25a6a485",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "106.1: oracle PI 1323 (22 groups, BLER 0.227); 106.907: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
+      "datetime": "2026-09-25",
+      "clip_count": 0,
+      "lfs": true
+    },
+    {
+      "name": "fm-106p1-pi1323",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-106p1-pi1323.sigmf-meta",
+      "size_bytes": 8926,
+      "sha256": "0baeedb69d7465be5c1afadbb1d626f9ec4a4b919dbcd7f0bcd25c8cbfa29ed4",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "106.1: oracle PI 1323 (22 groups, BLER 0.227); 106.907: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935, T-960)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
     },
     {
       "name": "flex-pagers-930p8",
