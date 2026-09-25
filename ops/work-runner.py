@@ -1435,7 +1435,8 @@ def _run_fix(c, n, prompt, out_name=None, fail_line=""):
     p.stdin.close()
     log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] {c.get('fix_reason', '')[:120]}: "
         f"resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
-    return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
+    return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n,
+                held_warned=False)
 
 
 def branches_waiting():
@@ -2014,7 +2015,7 @@ def reap_worktrees(claims, dry):
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
-    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}   # a held fix resumes there
     if not dry:
         sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
@@ -2240,7 +2241,7 @@ def reclaim_idle_targets(claims, dry):
     (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
-    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
@@ -2598,6 +2599,11 @@ def relaunch_held_fixes(claims):
         if c.get("state") == "fix-held":
             if host_room(claims, c.get("host"), exclude=tid):
                 continue                  # no room where its session lives yet: stays held, said once when held
+            if not c.get("host") and not os.path.isdir(c.get("wt", "")):
+                claims[tid] = dict(c, state="gate-failed")
+                attention(tid, c.get("branch", ""), "GATE_FAIL_NO_SESSION", f"held fix not relaunched: its worktree {c.get('wt')} is gone")
+                changed = True
+                continue
             log(f"FIX {tid}: hold cleared - relaunching the held fix ({(c.get('fail_line') or '')[:80]})")
             claims[tid] = launch_fix(dict(c, kind="work"), c.get("fail_line") or "held fix", claims=claims)
             changed = True

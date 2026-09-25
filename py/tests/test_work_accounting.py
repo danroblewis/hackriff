@@ -753,7 +753,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     g("init", "-q", "-b", "main")
     g("commit", "-q", "--allow-empty", "-m", "base")
     wts = repo / ".claude" / "worktrees"
-    for name in ("t356", "t900", "tgone"):
+    for name in ("t356", "t900", "tgone", "t844"):
         g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
     (wts / "t356" / ".githooks").mkdir()
     (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
@@ -761,7 +761,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
     shutil.rmtree(wts / "tgone")                                   # registered, directory gone
     old = 1_000_000_000
-    for name in ("t356", "t900"):
+    for name in ("t356", "t900", "t844"):
         os.utime(wts / name, (old, old))
 
     real_sh = R.sh
@@ -772,10 +772,12 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     monkeypatch.setattr(R, "_REAP_SAID", set())
     said = []
     monkeypatch.setattr(R, "log", said.append)
-    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")}}
+    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")},
+              "T-844": {"state": "fix-held", "wt": str(wts / "t844")}}   # review 07:30: a held fix resumes there
 
     R.reap_worktrees(claims, dry=False)
     assert not (wts / "t356").exists()                             # only build output: reaped
+    assert (wts / "t844").exists()                                 # clean and old, but a held fix's: kept
     assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
     assert "tgone" not in g("worktree", "list").stdout             # pruned
     kept = [m for m in said if "kept - untracked" in m]
@@ -888,7 +890,7 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     import os
     root = tmp_path / ".claude" / "worktrees"
     old = 1_000_000_000
-    for name in ("idle", "fresh", "inuse", "claimed", "t87"):
+    for name in ("idle", "fresh", "inuse", "claimed", "t87", "held"):
         (root / name / "target" / "debug").mkdir(parents=True)
         (root / name / "src.rs").write_text("kept\n")
     (root / "linked").mkdir()
@@ -900,11 +902,11 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
     said = []
     monkeypatch.setattr(R, "log", said.append)
-    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}}
+    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}, "T-2": {"state": "fix-held", "wt": str(root / "held")}}
     R.reclaim_idle_targets(claims, dry=True)
     assert all((root / n / "target").exists() for n in ("idle", "fresh", "inuse", "claimed", "t87"))
     R.reclaim_idle_targets(claims, dry=False)
-    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87") if not (root / n / "target").exists())
+    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87", "held") if not (root / n / "target").exists())
     assert gone == ["idle", "t87"]
     assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
     assert len([m for m in said if m.startswith("RECLAIM")]) == 2
@@ -1633,7 +1635,7 @@ def test_a_remote_host_over_its_load_bound_takes_no_new_work(tmp_path, monkeypat
     assert R.host_room({}, "node2") == "no 1-min load reading (bound 24)"
 
 
-def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(monkeypatch):
+def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(tmp_path, monkeypatch):
     """Supervisor 2026-09-25 07:17: the Mac ran 4 at cap 3 - a local fix run bypassed the cap exactly as node2's did.
     A local fix waits under the Mac's dispatch cap and WORK_LOAD_MAX, and the held-fix pass relaunches it first."""
     notes = []
@@ -1644,7 +1646,7 @@ def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(monkeypatc
     load = [5.0]
     monkeypatch.setattr(R.os, "getloadavg", lambda: (load[0], 0.0, 0.0))
     busy = {f"T-{i}": {"state": "running", "kind": "work"} for i in (1, 2)}
-    fixme = {"ticket": "T-844", "branch": "task-t844", "wt": "/w", "state": "queued", "kind": "work", "session_id": "s"}
+    fixme = {"ticket": "T-844", "branch": "task-t844", "wt": str(tmp_path), "state": "queued", "kind": "work", "session_id": "s"}
     claims = {**busy, "T-844": fixme, "T-7": {"state": "running", "kind": "work", "host": "node2"}}   # remote: not the Mac's
     held = R.launch_fix(dict(fixme), "GATE_FAIL x", claims=claims)
     assert held["state"] == "fix-held" and "2/2 running" in notes[-1][3] and "this Mac" in notes[-1][3]
@@ -1658,3 +1660,8 @@ def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(monkeypatc
     assert R.relaunch_held_fixes(claims) is False                              # the load bound holds it too
     load[0] = 5.0
     assert R.relaunch_held_fixes(claims) is True and relaunched == ["T-844"]
+    # review 07:30: a held local fix whose worktree is gone is never relaunched into a missing cwd (it crashed every tick)
+    claims["T-844"] = dict(held, wt="/nonexistent/wt")
+    relaunched.clear()
+    assert R.relaunch_held_fixes(claims) is True and relaunched == [] and claims["T-844"]["state"] == "gate-failed"
+    assert notes[-1][2] == "GATE_FAIL_NO_SESSION"
