@@ -28106,6 +28106,8 @@ tasks:
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
     dispatch: manual
     branch: task-t950
+    result: |
+      T-950 (SIGNAL-088) complete on task-t950: native Rust FLEX decoder hk-demod::flex (sync-1, FIW, BCH(31,21)+parity, interleave, pages; 1600/3200 Bd, 2/4-level; data rate and level count MEASURED per frame by codeword-checked hypotheses, FIW declaration kept beside) - no GPL code, so no plugin boundary (ADR-0010); not an hk-blocks recipe because the mode changes per frame and must be chosen inside the slicing loop, and hk-blocks depends on hk-demod. hk-pipeline chains::frames attaches to every narrowband track (EveryTrack) and writes Demodulation + flex-frame/flex-page Decodes + decoder evidence -> paging explanation. Blind member tests/e2e acceptance captured_flex (mock SDR, json!({}) config, sealed truth): 5/5 green with the external fixture; red proof (decode fed no samples) fails b/c/d/e, a passes. FSK level verdict: all 6 frames on all 3 channels (929.6084, 929.9331, 931.1580 MHz) are 4-level, decisive, declared==measured; explorer right on the first two, wrong on 931.158; the oracle's 1-2 levels were the always-2-level 1600 Bd header. Recorded in fixtures/hackrf/explorer-2026-09-25/README.md. Independent of T-953's burst-rate consensus (FLEX does not use hk-demod::fsk).
   - id: T-951
     milestone: MAUTO
     title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
