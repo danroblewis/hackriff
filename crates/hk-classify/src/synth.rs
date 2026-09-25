@@ -460,16 +460,7 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     let analysis_fs = fs;
     // Symbol rate varies with the seed so the densities never learn one rate.
     let rate = 25e3 + 75e3 * rng.unit();
-    let mut packet = None;
-    let (mut x, design_bw) = waveform(
-        class,
-        &mut rng,
-        n,
-        fs,
-        rate,
-        cfg.packet_preamble,
-        &mut packet,
-    );
+    let (mut x, design_bw) = waveform(class, &mut rng, n, fs, rate, cfg.packet_preamble);
     normalise(&mut x);
     let emission = x.clone();
 
@@ -605,16 +596,6 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     } else {
         (samples.clone(), fs)
     };
-    let symbol_samples = match packet {
-        Some(p) => packet_window(
-            symbol_samples,
-            symbol_sample_rate_hz,
-            n as f64 / fs,
-            &p,
-            cfg.seed ^ class as u64 ^ PACKET_STREAM,
-        ),
-        None => symbol_samples,
-    };
     // Resample to the analysis geometry the pipeline actually delivers ([`SAMPLES_PER_OBW`]).
     let decim = ((fs / (SAMPLES_PER_OBW * geometry_obw_hz)).floor() as usize).clamp(1, max_decim);
     let (samples, fs) = if decim > 1 {
@@ -654,7 +635,6 @@ fn waveform(
     fs: f64,
     rate: f64,
     preamble: bool,
-    packet: &mut Option<Packet>,
 ) -> (Vec<Complex64>, f64) {
     match class {
         Class::Am => (am(rng, n, fs, 0.7), 9e3),
@@ -711,10 +691,6 @@ fn waveform(
             let h = 0.4 * 12.5f64.powf(rng.unit());
             let rate = rate.min(100e3 / (1.0 + h));
             let pre = (0.1 + 0.25 * rng.unit()) * f64::from(u8::from(preamble));
-            *packet = Some(Packet {
-                rate_bd: rate,
-                preamble_symbols: preamble_symbols(n, fs, rate, pre),
-            });
             (
                 cpfsk(rng, n, fs, rate, 2, rate * h / 2.0, 0.0, pre),
                 rate * (1.0 + h),
@@ -1065,84 +1041,6 @@ fn ask(rng: &mut Rng, n: usize, fs: f64, rate: f64, levels: &[f64]) -> Vec<Compl
         .collect()
 }
 
-/// Symbols [`cpfsk`] draws for `n` samples at `rate` (one more than the record holds, so the
-/// last partial symbol has a value).
-fn cpfsk_symbols(n: usize, fs: f64, rate: f64) -> usize {
-    (n as f64 / (fs / rate).max(2.0)).ceil() as usize + 1
-}
-
-/// Alternating preamble symbols [`cpfsk`] opens a record of `n` samples with.
-fn preamble_symbols(n: usize, fs: f64, rate: f64, preamble_frac: f64) -> usize {
-    ((cpfsk_symbols(n, fs, rate) as f64) * preamble_frac.clamp(0.0, 0.9)) as usize
-}
-
-/// Shortest packet, symbols, a [`packet_window`] draw can produce: an a-priori floor for a
-/// deployed FSK packet (preamble, sync word and a few bytes of payload), not a figure read off
-/// any scene. The mock-SDR sensor burst (`fsk_burst_train`, 112 symbols) sits inside the range.
-pub const PACKET_MIN_SYMBOLS: f64 = 64.0;
-
-/// Stream separation for the packet-length draw: like [`GEOMETRY_REFERENCE_STREAM`], it must not
-/// consume draws from the stream that builds the waveform, so every other feature of a draw is
-/// exactly what it was before the window existed.
-const PACKET_STREAM: u64 = 0x9AC4_E7B5;
-
-/// What [`waveform`] reports about a packet-class draw, for [`packet_window`].
-#[derive(Clone, Copy, Debug)]
-struct Packet {
-    /// Symbol rate the waveform was keyed at, Bd.
-    rate_bd: f64,
-    /// Alternating preamble symbols at the head of the record.
-    preamble_symbols: usize,
-}
-
-/// **C14's view of a `2fsk` draw, cut to one packet of a drawn length** (T-887).
-///
-/// `cyclic_db` is the significance of a cyclic line, and a line's significance grows with the
-/// number of symbols it is integrated over. T-887 measured it on a device-like h = 4 packet with
-/// everything else held fixed: **20.0 dB at 112 symbols, 22.9 at 224, 25.2 at 336, 26.5 at 448,
-/// 29.3 at 896** — ~9.5 dB a decade, within 0.5 dB whether C14 saw 2.8, 6 or 9 samples per OBW,
-/// and nearly independent of SNR from 25 to 30 dB. Every dev-grid record is 16 384 samples at
-/// 1 MS/s, so a `2fsk` draw held **270–1 170 symbols** and never fewer; the mock-SDR sensor
-/// burst holds 112, and C14 read it at 20.2 dB against a fitted `2fsk` mean of 26.9 ± 2.8 dB
-/// (z ≈ −2.4, and −2.6 to −4.1 against T-877's line-bearing component). The device's measurement
-/// was right; the grid had never shown the density a burst that short.
-///
-/// So the symbol view is cut to a packet of `PACKET_MIN_SYMBOLS … the whole record` symbols,
-/// log-uniform (a length is a scale, and no octave of it is privileged), laid out as a packet
-/// is: the same **share** of alternating preamble as the record, then data. Only C14's view is
-/// cut. The classifier's snippet, and so every other `features@1` dimension, is the draw it was —
-/// the draw itself comes from its own stream ([`PACKET_STREAM`]), so not one waveform, noise or
-/// payload sample moves. That keeps the change to the dimensions C14 measures (`cyclic_db`,
-/// `obw_over_rs`, the `blind_*` scores) and to the post-sync verifier, which tests the same
-/// window: cutting the classifier snippet as well would take the four spectral dimensions out of
-/// most `2fsk` rows (`FEATURE_MIN_SEGMENTS`), and with them out of the class's density.
-///
-/// **Only `2fsk`.** The device rows that measured the gap are 2-FSK; `gfsk`, `msk` and `4fsk`
-/// packets have the same physics and are left for a measurement of their own.
-fn packet_window(
-    view: Vec<Complex32>,
-    view_rate_hz: f64,
-    record_s: f64,
-    p: &Packet,
-    stream: u64,
-) -> Vec<Complex32> {
-    let sps = view_rate_hz / p.rate_bd;
-    let full = view.len() as f64 / sps;
-    if !(sps.is_finite() && sps > 0.0 && full > PACKET_MIN_SYMBOLS) {
-        return view;
-    }
-    let mut rng = Rng::new(stream);
-    let symbols = PACKET_MIN_SYMBOLS * (full / PACKET_MIN_SYMBOLS).powf(rng.unit());
-    let len = ((symbols * sps).round() as usize).clamp(1, view.len());
-    // The record's preamble share, kept in the packet: the window opens a whole number of
-    // symbols before the preamble ends — on a symbol boundary, as a packet does.
-    let share = p.preamble_symbols as f64 / (record_s * p.rate_bd).max(1.0);
-    let lead = (share.clamp(0.0, 1.0) * symbols).round();
-    let start = (((p.preamble_symbols as f64 - lead).max(0.0) * sps).round() as usize)
-        .min(view.len() - len);
-    view[start..start + len].to_vec()
-}
-
 /// Continuous-phase FSK. The parameters are the independent physical knobs of a CPFSK burst —
 /// level count, deviation, carrier drift and preamble length — so there is nothing to group here
 /// that would not just be this list behind a name.
@@ -1158,13 +1056,13 @@ fn cpfsk(
     preamble_frac: f64,
 ) -> Vec<Complex64> {
     let sps = (fs / rate).max(2.0);
-    let count = cpfsk_symbols(n, fs, rate);
+    let count = (n as f64 / sps).ceil() as usize + 1;
     // A real FSK burst is a packet: an alternating preamble for the receiver's clock and AGC,
     // then a sync word, then data. The preamble keys the two outer tones at exactly half the
     // symbol rate, which puts **discrete lines** in the spectrum where i.i.d. data puts a smooth
     // shoulder — the difference between a peaky and a flat channel, which `carrier_line_db` and
     // `flatness` both measure. A grid of nothing but i.i.d. symbols has no such lines at all.
-    let preamble = preamble_symbols(n, fs, rate, preamble_frac);
+    let preamble = ((count as f64) * preamble_frac.clamp(0.0, 0.9)) as usize;
     let syms: Vec<f64> = (0..count)
         .map(|i| {
             if i < preamble {
@@ -1197,7 +1095,7 @@ fn gfsk(
 ) -> Vec<Complex64> {
     let sps = (fs / rate).max(2.0);
     let count = (n as f64 / sps).ceil() as usize + 1;
-    let preamble = preamble_symbols(n, fs, rate, preamble_frac);
+    let preamble = ((count as f64) * preamble_frac.clamp(0.0, 0.9)) as usize;
     let syms: Vec<f64> = (0..count)
         .map(|i| {
             if i < preamble {
@@ -1923,67 +1821,5 @@ mod tests {
         let nbfm = generate(Class::Nbfm, &cfg).obw_hz;
         let wfm = generate(Class::Wfm, &cfg).obw_hz;
         assert!(wfm > 4.0 * nbfm, "nbfm {nbfm} wfm {wfm}");
-    }
-
-    /// T-887: a `2fsk` draw's C14 view is one packet — at least `PACKET_MIN_SYMBOLS`, at most the
-    /// record, of spread lengths, opening on the record's own preamble share — while the
-    /// classifier's snippet is the whole record, and no other class's view is cut.
-    #[test]
-    fn the_2fsk_symbol_view_is_a_packet_of_drawn_length() {
-        let (mut shortest, mut longest) = (f64::INFINITY, 0.0f64);
-        for seed in 0..40 {
-            let cfg = SynthConfig::new(25.0, seed);
-            let s = generate(Class::Fsk2, &cfg);
-            let record_s = s.samples.len() as f64 / s.sample_rate_hz;
-            let view_s = s.symbol_samples.len() as f64 / s.symbol_sample_rate_hz;
-            assert!(view_s <= record_s * 1.01, "seed {seed}: view {view_s} s of {record_s}");
-            // Recover the draw's symbol rate the way the generator drew it.
-            let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ Class::Fsk2 as u64);
-            let rate = 25e3 + 75e3 * rng.unit();
-            let h = 0.4 * 12.5f64.powf(rng.unit());
-            let rate = rate.min(100e3 / (1.0 + h));
-            let symbols = view_s * rate;
-            assert!(
-                symbols >= PACKET_MIN_SYMBOLS - 1.0,
-                "seed {seed}: {symbols} symbols"
-            );
-            shortest = shortest.min(symbols);
-            longest = longest.max(symbols);
-            // Opens inside the alternating preamble: over its first four symbols the instantaneous
-            // frequency (less its mean, so a recentring offset cancels) is anti-correlated with
-            // itself one symbol later, whatever the sampling phase.
-            let x = &s.symbol_samples;
-            let sps = s.symbol_sample_rate_hz / rate;
-            let lag = sps.round() as usize;
-            let span = (4.0 * sps) as usize;
-            let fi: Vec<f64> = (0..span + lag)
-                .map(|i| f64::from((x[i + 1] * x[i].conj()).arg()))
-                .collect();
-            let mean = fi[..span].iter().sum::<f64>() / span as f64;
-            let (mut r1, mut r0) = (0.0, 0.0);
-            for i in 0..span {
-                r1 += (fi[i] - mean) * (fi[i + lag] - mean);
-                r0 += (fi[i] - mean).powi(2);
-            }
-            assert!(
-                r1 < -0.5 * r0,
-                "seed {seed}: the packet does not open on its preamble (lag-1 correlation {:.2})",
-                r1 / r0
-            );
-        }
-        assert!(
-            shortest < 150.0 && longest > 300.0,
-            "packet lengths not spread: {shortest:.0}..{longest:.0} symbols"
-        );
-        // Every other class keeps its whole record in C14's view.
-        for class in [Class::Gfsk, Class::Msk, Class::Fsk4, Class::Bpsk, Class::Am] {
-            let s = generate(class, &SynthConfig::new(25.0, 3));
-            let record_s = s.samples.len() as f64 / s.sample_rate_hz;
-            let view_s = s.symbol_samples.len() as f64 / s.symbol_sample_rate_hz;
-            assert!(
-                (view_s - record_s).abs() <= 0.02 * record_s,
-                "{class:?}: view {view_s} s of {record_s}"
-            );
-        }
     }
 }

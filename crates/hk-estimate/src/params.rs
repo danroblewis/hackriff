@@ -1641,7 +1641,13 @@ mod tests {
         let (b, e) = (300usize, 700usize);
         for (p_noise, p_on) in [(1.0, 4.5), (1.0, 100.0), (1.0, 1e4)] {
             let x: Vec<f64> = (0..n)
-                .map(|i| if (b..e).contains(&i) { p_noise + p_on } else { p_noise })
+                .map(|i| {
+                    if (b..e).contains(&i) {
+                        p_noise + p_on
+                    } else {
+                        p_noise
+                    }
+                })
                 .collect();
             let ma = |i: usize| {
                 let a = i.saturating_sub(win / 2);
@@ -1655,7 +1661,10 @@ mod tests {
             assert!(s.abs_diff(b) <= 1 && t.abs_diff(e) <= 1, "{p_on}: {s}..{t}");
             // The rule it replaced ran a window into the noise at every useful SNR.
             if p_on >= 100.0 {
-                assert!(b - f.saturating_sub(win / 2) >= win - 1, "{p_on}: first {f}");
+                assert!(
+                    b - f.saturating_sub(win / 2) >= win - 1,
+                    "{p_on}: first {f}"
+                );
             }
         }
         // Never wider than the old bounds, whatever the on-level.
