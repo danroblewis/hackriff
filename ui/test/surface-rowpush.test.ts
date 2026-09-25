@@ -20,9 +20,9 @@ import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import { extentOf, keyOf, tCellNs, tTileNs, tilesFor, type Box, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { TileCache, type Viewport } from "../src/surface/tilecache";
-import { LiveRowFeeds, type ColumnAddr, type RowBlock, type RowOpener } from "../src/surface/rowfeed";
+import { LiveRowFeeds, parseRowMessage, type ColumnAddr, type RowBlock, type RowOpener, type RowResolution } from "../src/surface/rowfeed";
 import { Surface, type PaneView } from "../src/surface/surface";
-import type { TileData } from "../src/surface/tile";
+import type { FoldDirection, StatedTier, TileData } from "../src/surface/tile";
 import { stubGl } from "./surface-glstub";
 
 /** The production time floor (T-501): 40 ms cells, so a level-0 tile is 10.24 s. */
@@ -46,11 +46,17 @@ function tile(a: TileAddr, asOfNs: number | null): TileData {
   };
 }
 
+/** What a block's rows were measured at, as the route states it (T-902). */
+function res(tier: StatedTier, answeredLevel = 0, fold: FoldDirection = "exact"): RowResolution {
+  return { tier, answeredLevel, fold: { frequency: fold, time: fold }, measuredNf: LAT.cells, timeStretch: 1 };
+}
+
 /** A pushed block of `rows` rows from `row0`, every cell observed at -70 dB. */
-function block(row0: number, rows: number, cells = LAT.cells): RowBlock {
+function block(row0: number, rows: number, cells = LAT.cells, resolution: RowResolution = res("spectrum-history")): RowBlock {
   return {
     kind: "rows", row0, rows, nf: cells, final: false,
     maxDb: new Float32Array(rows * cells).fill(-70), coverage: new Array<string>(rows * cells).fill("observed"),
+    resolution,
   };
 }
 
@@ -362,4 +368,70 @@ test("T-893 gap 3: EVERY column of a wide following pane gets its next row, incl
   assert.deepEqual(late, [],
     "the next row was not asked for before the edge entered it, for columns of the pane whose current row was still " +
     "pending — the look-ahead extended only resident columns:\n  " + late.join("\n  "));
+});
+
+// ---- T-902: a tile built from pushed rows states the tier the BACKEND stated for them ----------
+
+/** A cache whose route answers `below` at once with `tierBelow`, and never answers anything else. */
+function cacheWithTileBelow(below: TileAddr, tierBelow: StatedTier) {
+  const cache = new TileCache<{ id: number }>({ upload: () => ({ id: 0 }), destroy: () => {} },
+    (a) => (keyOf(a) === keyOf(below) ? Promise.resolve({ ...tile(a, null), tier: tierBelow }) : new Promise<TileData>(() => {})),
+    { inFlight: 4, now: () => 0 });
+  return cache;
+}
+
+test("T-902: a pushed-row tile states the tier its rows' blocks stated, never the tile below's", async () => {
+  const below: TileAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 5, tIndex: ROW - 1, cells: 256 };
+  const a: TileAddr = { ...below, tIndex: ROW };
+  const col: ColumnAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 5, cells: 256 };
+  // The tile below answered `survey-overview`; the backend says the new rows are `spectrum-history`.
+  const cache = cacheWithTileBelow(below, "survey-overview");
+  cache.setViewports(LAT, [{ box: { ...extentOf(LAT, below), t1Ns: extentOf(LAT, a).t1Ns }, levelF: 0, levelT: 0 }]);
+  cache.acquire(below);
+  cache.endFrame();
+  await flush();
+  await flush();
+  assert.equal(cache.peek(below)?.data.tier, "survey-overview", "the tile below never became resident");
+  cache.applyRows(col, block(ROW * 256, 64, 256, res("spectrum-history", 0)));
+  const e = cache.peek(a)!;
+  assert.equal(e.synthetic, true, "the tile was not built from the pushed rows");
+  assert.equal(e.data.tier, "spectrum-history", "the pushed-row tile borrowed its tier from the tile below");
+  assert.equal(e.data.answeredLevel, 0);
+});
+
+test("T-902: with no tile below, a pushed-row tile states the backend's tier — not a default", () => {
+  const a: TileAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 5, tIndex: ROW, cells: 256 };
+  const col: ColumnAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 5, cells: 256 };
+  const cache = cacheWithTileBelow({ ...a, tIndex: -1 }, "live-iq");
+  cache.setViewports(LAT, [{ box: extentOf(LAT, a), levelF: 0, levelT: 0 }]);
+  cache.applyRows(col, block(ROW * 256, 10, 256, res("survey-overview", 2, "replicated")));
+  const e = cache.peek(a)!;
+  assert.equal(e.data.tier, "survey-overview", "the pushed-row tile claimed a tier the backend did not state");
+  assert.equal(e.data.answeredLevel, 2);
+  assert.deepEqual(e.data.fold, { frequency: "replicated", time: "replicated" });
+  // A later block measured at a stronger tier cannot lift the tile's claim over rows it still draws.
+  cache.applyRows(col, block(ROW * 256 + 10, 10, 256, res("spectrum-history", 0)));
+  assert.equal(cache.peek(a)!.data.tier, "survey-overview", "the tile states the weaker of its rows' claims");
+});
+
+test("T-902: a block that states no tier makes the pushed-row tile say `unknown`, not a guess", () => {
+  const a: TileAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 5, tIndex: ROW, cells: 8 };
+  const col: ColumnAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 5, cells: 8 };
+  const wire = (resolution: unknown) => JSON.stringify({
+    type: "rows", row0: ROW * 8, rows: 2, nf: 8, max_db: new Array(16).fill(-70), final: false,
+    coverage: { states: ["unobserved", "observed", "unknown", "excluded"], nt: 2, nf: 8, aligned: true, plane: { runs: [1, 16] } },
+    answered: { level: 0 }, ...(resolution === undefined ? {} : { resolution }),
+  });
+  const stated = parseRowMessage(col, wire({ source: "spectrum-history", fold: { frequency: { direction: "exact" }, time: { direction: "exact" } } }));
+  assert.equal(stated.kind === "rows" && stated.resolution.tier, "spectrum-history");
+  const bare = parseRowMessage(col, wire(undefined));
+  assert.ok(bare.kind === "rows");
+  assert.equal(bare.resolution.tier, "unknown");
+  assert.equal(parseRowMessage(col, wire({ source: "made-up" })).kind === "rows" &&
+    (parseRowMessage(col, wire({ source: "made-up" })) as RowBlock).resolution.tier, "unknown");
+  const lat8: Lattice = { ...LAT, cells: 8 };
+  const cache = cacheWithTileBelow({ ...a, tIndex: -1 }, "live-iq");
+  cache.setViewports(lat8, [{ box: extentOf(lat8, a), levelF: 0, levelT: 0 }]);
+  cache.applyRows(col, bare);
+  assert.equal(cache.peek(a)!.data.tier, "unknown", "a pushed-row tile with no stated tier guessed one");
 });

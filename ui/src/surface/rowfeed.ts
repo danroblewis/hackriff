@@ -20,7 +20,7 @@
 //
 // Presentation only: the server decides what a row holds and whether it is grey (each block's
 // `coverage`); this files the numbers where they belong and refuses anything that does not add up.
-import { expandPlane, TileDecodeError } from "./tile";
+import { expandPlane, isTier, TileDecodeError, weakerTier, type FoldDirection, type StatedTier } from "./tile";
 import { keyOf, type TileAddr } from "./lattice";
 
 /** A tile column: a tile address without its time index. */
@@ -59,6 +59,58 @@ export function rowFeedPath(col: ColumnAddr, range: RowRange, path = "/ws/tiles/
 /** The row address holding capture instant `tNs` at a level whose time cell is `tCellNs`. */
 export const rowAt = (tNs: number, tCellNs: number): number => Math.floor(tNs / tCellNs);
 
+/**
+ * **What a block's rows were measured at, as the route states it** (T-902, `resolution` on each
+ * `rows` message): the honesty tier by the tile route's own rule, the level that answered, and the
+ * per-axis fold. A tile built from pushed rows states exactly this — never a tier borrowed from the
+ * tile below it — so the pane's level reads what the newest rows actually were.
+ */
+export interface RowResolution {
+  /** `"unknown"` when the block stated no recognised tier: said, never defaulted. */
+  readonly tier: StatedTier;
+  /** `answered.level`, or -1 when the block did not say. */
+  readonly answeredLevel: number;
+  readonly fold: { readonly frequency: FoldDirection; readonly time: FoldDirection };
+  /** Frequency cells actually measured, `min(fold.frequency.source_cells, nf)`. */
+  readonly measuredNf: number;
+  /** `fold.time.source_cell / tile_cell` — above 1 on a replicated time axis, else 1. */
+  readonly timeStretch: number;
+}
+
+const FOLD_ORDER: readonly FoldDirection[] = ["exact", "folded", "replicated"];
+const weakerFold = (a: FoldDirection, b: FoldDirection): FoldDirection =>
+  FOLD_ORDER.indexOf(a) >= FOLD_ORDER.indexOf(b) ? a : b;
+
+/** Two blocks' claims about one tile, merged to the weaker of each (the tile states the weaker). */
+export function mergeResolution(a: RowResolution | null, b: RowResolution): RowResolution {
+  if (!a) return b;
+  return {
+    tier: weakerTier(a.tier, b.tier),
+    answeredLevel: Math.max(a.answeredLevel, b.answeredLevel),
+    fold: { frequency: weakerFold(a.fold.frequency, b.fold.frequency), time: weakerFold(a.fold.time, b.fold.time) },
+    measuredNf: Math.min(a.measuredNf, b.measuredNf),
+    timeStretch: Math.max(a.timeStretch, b.timeStretch),
+  };
+}
+
+/** Reads a block's `resolution` + `answered`. A missing or unrecognised tier is `"unknown"`. */
+function parseResolution(j: Record<string, unknown>, nf: number): RowResolution {
+  const res = (j.resolution ?? {}) as { source?: unknown; fold?: Record<string, { direction?: unknown; source_cells?: unknown; source_cell?: unknown; tile_cell?: unknown }> };
+  const ans = (j.answered ?? {}) as { level?: unknown };
+  const dir = (d: unknown): FoldDirection => (FOLD_ORDER.includes(d as FoldDirection) ? (d as FoldDirection) : "exact");
+  const ff = res.fold?.frequency, ft = res.fold?.time;
+  const srcNf = ff?.source_cells;
+  const stretch = typeof ft?.source_cell === "number" && typeof ft?.tile_cell === "number" && ft.tile_cell > 0
+    ? Math.max(1, ft.source_cell / ft.tile_cell) : 1;
+  return {
+    tier: isTier(res.source) ? res.source : "unknown",
+    answeredLevel: typeof ans.level === "number" && Number.isInteger(ans.level) ? ans.level : -1,
+    fold: { frequency: dir(ff?.direction), time: dir(ft?.direction) },
+    measuredNf: typeof srcNf === "number" && Number.isFinite(srcNf) && srcNf > 0 ? Math.min(Math.round(srcNf), nf) : nf,
+    timeStretch: Number.isFinite(stretch) ? stretch : 1,
+  };
+}
+
 /** One decoded block of rows, filed under the tile it patches. */
 export interface RowBlock {
   readonly kind: "rows";
@@ -69,6 +121,8 @@ export interface RowBlock {
   readonly maxDb: Float32Array;
   /** One coverage state per cell, from the block's own plane. */
   readonly coverage: readonly string[];
+  /** What these rows were measured at, as the route stated it (T-902). */
+  readonly resolution: RowResolution;
   readonly final: boolean;
 }
 
@@ -106,7 +160,7 @@ export function parseRowMessage(col: ColumnAddr, text: string): RowMessage {
         throw bad("a block's coverage is not on its own axes");
       }
       const coverage = expandPlane({ ...col, tIndex: Math.floor(row0 / col.cells) }, cov.states, cov.plane.runs, rows * nf);
-      return { kind: "rows", row0, rows, nf, maxDb, coverage, final: j.final === true };
+      return { kind: "rows", row0, rows, nf, maxDb, coverage, resolution: parseResolution(j, nf), final: j.final === true };
     }
     case "unobserved":
       if (!isRow(j.row0) || !isRow(j.rows) || j.rows === 0) throw bad("unobserved without a stretch");
@@ -127,6 +181,9 @@ export interface TileRows {
   readonly maxDb: Float32Array;
   readonly coverage: (string | null)[];
   readonly rowsSeen: Uint8Array;
+  /** What the rows filed here were measured at — the weaker of every block's stated claim, or
+   * `null` when no measured block has been filed (a grey stretch makes no claim). T-902. */
+  resolution: RowResolution | null;
 }
 
 /** A column key: a tile key without its time index. */
@@ -172,7 +229,7 @@ export class RowAccumulator {
     let t = this.tiles.get(k);
     if (!t) {
       const n = col.cells * col.cells;
-      t = { addr, maxDb: new Float32Array(n).fill(NaN), coverage: new Array<string | null>(n).fill(null), rowsSeen: new Uint8Array(col.cells) };
+      t = { addr, maxDb: new Float32Array(n).fill(NaN), coverage: new Array<string | null>(n).fill(null), rowsSeen: new Uint8Array(col.cells), resolution: null };
       this.tiles.set(k, t);
     }
     return t;
@@ -228,6 +285,7 @@ export class RowAccumulator {
       }
       t.rowsSeen[y] = 1;
     }
+    t.resolution = mergeResolution(t.resolution, m.resolution);
     return [t.addr];
   }
 }

@@ -1486,8 +1486,20 @@ pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<Ti
 /// than its own on either axis, because then a measured value is repeating across output cells
 /// rather than each one carrying its own measurement.
 fn tier(key: &TileKey, r: &TileRead, max_live_span_hz: Option<f64>) -> DetailSource {
-    let replicated = r.src_f_cell_hz > key.f_cell_hz * 1.000_001
-        || r.src_t_cell_ns as f64 > key.t_cell_ns as f64 * 1.000_001;
+    tier_of(key, r.src_f_cell_hz, r.src_t_cell_ns, max_live_span_hz)
+}
+
+/// [`tier`]'s rule over the answering level's source cells, so `/ws/tiles/rows` (T-902) states a
+/// pushed block's tier by the **same** rule the tile route states a tile's — one definition, never
+/// a second one the two routes could drift apart on.
+pub(crate) fn tier_of(
+    key: &TileKey,
+    src_f_cell_hz: f64,
+    src_t_cell_ns: i64,
+    max_live_span_hz: Option<f64>,
+) -> DetailSource {
+    let replicated = src_f_cell_hz > key.f_cell_hz * 1.000_001
+        || src_t_cell_ns as f64 > key.t_cell_ns as f64 * 1.000_001;
     if replicated {
         return DetailSource::SurveyOverview;
     }
@@ -1659,7 +1671,12 @@ fn unobserved_tile_json(
     })
 }
 
-fn axis_fold(source_cell: f64, tile_cell: f64, source_cells: usize, served: usize) -> Value {
+pub(crate) fn axis_fold(
+    source_cell: f64,
+    tile_cell: f64,
+    source_cells: usize,
+    served: usize,
+) -> Value {
     let direction = if source_cell > tile_cell * 1.000_001 {
         "replicated"
     } else if source_cell < tile_cell * 0.999_999 {
