@@ -284,6 +284,7 @@ instead of re-proving the defect once per branch. **Every gate has a hard time l
 re-queued once and flagged `GATE_TIMEOUT`. **The runner repairs its own leftovers at startup**: a
 staged merge or a provisional bulk that a killed gate left on `main` is aborted / rewound and
 re-queued automatically — nobody types `git merge --abort` any more.
+**Remote hosts' repos are kept identical to this Mac's (invariant 29, `py/hkpy/reposync.py`):** every tick fetches each host mirror's `task-*` branches and fast-forwards them here (or pushes this Mac's commits there, fast-forward only), the host clone's hooks push every commit, and a hand-back whose branch differs between the host, its mirror and this Mac is held as `SYNC_ERROR`, never judged `NO_WORK`; `python -m hkpy.reposync --status` prints the drift read-only.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)

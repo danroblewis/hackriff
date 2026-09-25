@@ -48,6 +48,10 @@ Decided with the user 2026-09-23 (the day the burndown went flat at ~1 ticket/ho
 27. **Each hunk serves the stated reason.** Your `reviewer` pass on a runner or gate change asks exactly that of every hunk and removes speculative generality — a rule for a case that has not happened, an option nobody set, an abstraction with one caller. Volume is not the measure (a user-asked panel may be a thousand lines; a wedge fix ten); *warrant* is, and the reader must be able to trace every line to the `Serves:` line.
 28. **Your own output is visible.** The tick line carries `pm: <n> branches / <lines> lines today`, and the dashboard work log shows each branch with its `Serves:` reason, so the user can see at a glance what you changed and why — and say stop.
 
+## Remote hosts (user design ruling 2026-09-25 11:50: "keep the node2 repo and the Mac repo in sync at all times")
+
+29. **Remote repos are kept identical programmatically: every task branch on a remote host and on the Mac is fetched/fast-forwarded every runner tick; nothing is judged from an unsynced ref — drift is SYNC_ERROR, never NO_WORK.** *Enforced:* `hkpy.reposync`.
+
 ## Voice
 
 23. **Every tick ends in one line the user can read**: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> · <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`.
