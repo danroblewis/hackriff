@@ -253,6 +253,101 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     .then((ms) => ({ ok: true, ms }), () => ({ ok: false, ms: Date.now() - settlingFrom }));
   t.diagnostic(`the gestures' requests settled after ${drained.ms} ms` +
     (drained.ok ? "" : ` — ${unanswered().length} never came back; opening the steady window anyway`));
+
+  // **…and then until the SERVER says it is done with them, which the wire cannot say** (T-932).
+  //
+  // "Answered" above is the wire's word, and for an ABORTED read the wire's word is false: the
+  // client cancels, CDP records `canceled` at once, and `/api/tiles` goes on producing the tile and
+  // holding its slot until it finishes — the fact T-454's abandoned-slot accounting is built on.
+  // The client charges that slot for the route's *measured mean* service time; under load a slow
+  // overview read outlives the mean by seconds. The release candidate of 2026-09-25 (92d0f6f1, three
+  // lanes, load ~25) opened the window with the page's cap already at 1, share 2, and was refused
+  // once ~4 s in. At a cap of 1 a read is issued only when the page's own budget has nothing else
+  // out, so whatever filled the route was not a read the page was waiting for: the gestures' own
+  // abandoned reads, still being made (the only other asker is this file's serial probe).
+  // That refusal is a cost of the gestures, counted against a window that did not cause it. Alone,
+  // three runs of the same tree were green.
+  //
+  // So the window opens only once the route **states** it holds no producer slot at all apart from
+  // the asker's own: `cost.in_flight` (every slot out, server-wide) minus `cost.in_flight_held` (the
+  // probe's own — 0 when it is answered from the hot-tile cache, which holds none). The probe names
+  // itself, so "its own" is exactly its own and never the anonymous bucket a leaked `curl`-style read
+  // would sit in. Zero is the one reading that cannot hide an abandoned read, whatever the page is
+  // doing at that instant, so the page's backlog may keep draining and is still judged by (2) below —
+  // this only stops (2) judging what the gestures left running inside the route. Refusals the page
+  // takes WHILE this waits are still counted, as the gestures' cost, by (4). Nothing is loosened: the
+  // bound, the window's length and the requests it counts are unchanged, and a slot that is NEVER
+  // released (the leak itself) now fails here, stated by the server, instead of passing whenever the
+  // page happens not to ask for anything.
+  //
+  // Measured against a scratch `hk` whose reads could be told to hold their slot (T-932's hand-back):
+  // with two such reads kept under the page's own client id until 3 s after the last gesture, the
+  // file WITHOUT this wait went red at (2) 3 of 3 — "refused 2-3 of 3-6 … cap trace 1 1 1 …", the
+  // release candidate's message — and WITH it was green 3 of 3, having waited ~3 s for the route; a
+  // slot leaked outright (never released) was green without it and red here, 31 s after the page
+  // went idle.
+  const probeUrl = `${ORIGIN}/api/tiles?` + new URLSearchParams({
+    token: TOKEN, level_f: "0", level_t: "0", f_index: "0", t_index: "0", cells: "8",
+  });
+  const drainUrl = `${probeUrl}&client=surface-nav-drain-probe`;
+  /** What the route holds for anyone but the asker, from its own answer; null if it did not say. */
+  const routeHoldsElsewhere = async () => {
+    const r = await fetch(drainUrl).catch(() => null);
+    if (!r || r.status !== 200) return { status: r?.status ?? 0, others: null };
+    const c = (await r.json().catch(() => ({})))?.cost ?? {};
+    const others = Number.isFinite(c.in_flight) && Number.isFinite(c.in_flight_held)
+      ? c.in_flight - c.in_flight_held : null;
+    return { status: r.status, others, inFlight: c.in_flight, held: c.in_flight_held };
+  };
+  /** The page wants nothing and has nothing on the wire: the only state in which a slot the route
+   * still holds cannot be one the page is waiting for. */
+  const pageIdle = async () => {
+    const st = await page.eval(STATUS);
+    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight/);
+    const q = Number(st.match(/queue (\d+)/)?.[1] ?? -1);
+    const wire = page.requests.some((r) => r.url.includes("/api/tiles") && !r.url.includes("/api/tiles/events") &&
+      r.status === null && r.error === null);
+    return !!f && Number(f[1]) === 0 && q === 0 && !wire;
+  };
+  /**
+   * How long the route may go on holding a slot **while the page wants nothing** before that is the
+   * leak rather than a slow read. The longest service time this client is built to expect is the
+   * map's 5.2 s (`MAX_SERVER_MS` in tilecache.ts); six of them is what a read abandoned at the last
+   * gesture gets, and a slot still out after that with nobody asking is one that will not come back.
+   * Not a deadline on the page's own backlog — while the page is working this does not run.
+   */
+  const LEAK_IDLE_MS = 6 * 5200;
+  const routeDrain = { probes: 0, maxOthers: 0, idleHeldMs: 0, statuses: new Map() };
+  const routeFrom = Date.now();
+  let idleHeldSince = null;
+  for (;;) {
+    const s = await routeHoldsElsewhere();
+    routeDrain.probes++;
+    routeDrain.statuses.set(s.status, (routeDrain.statuses.get(s.status) ?? 0) + 1);
+    if (s.others !== null) routeDrain.maxOthers = Math.max(routeDrain.maxOthers, s.others);
+    if (s.others === 0) break;
+    // A `503` to one serial read is the route saying it is full, which is the same statement with
+    // the count left out; anything else unreadable says nothing either way.
+    const holding = s.others !== null ? s.others > 0 : s.status === 503;
+    if (holding && await pageIdle()) {
+      idleHeldSince ??= Date.now();
+      routeDrain.idleHeldMs = Date.now() - idleHeldSince;
+      assert.ok(routeDrain.idleHeldMs <= LEAK_IDLE_MS,
+        `the route still holds ${s.others ?? "every"} producer slot(s) (${s.others === null
+          ? "it refused a single serial read" : `in_flight ${s.inFlight}, the probe's own ${s.held}`}) ` +
+        `${(routeDrain.idleHeldMs / 1000).toFixed(1)} s after the page stopped wanting ` +
+        "anything — nothing on the wire, nothing queued, nothing in flight. A slot the route holds " +
+        "for a read nobody is waiting for, for longer than any read this client expects to take, is " +
+        "the leak T-454's abandoned-slot accounting exists to close, stated by the server itself.");
+    } else {
+      idleHeldSince = null;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  t.diagnostic(`the route released every slot but the probe's own ${Date.now() - routeFrom} ms after ` +
+    `the wire settled (${routeDrain.probes} probe(s), at most ${routeDrain.maxOthers} slot(s) held ` +
+    `elsewhere, ${routeDrain.idleHeldMs} ms of it with the page idle; statuses ` +
+    `${[...routeDrain.statuses].map(([k, n]) => `${k}×${n}`).join(" ")})`);
   const navigationEnded = Date.now();
   // **Counted per ADDRESS** (T-573): a `GET /api/tiles/batch` answers 200 and carries each
   // address's own 503 inside, so a status-line count would see none of the refusals the client
@@ -294,9 +389,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // client is well-behaved, and the page's own requests are unaffected: the probe is not a browser
   // request, so it never enters `page.requests` and never perturbs the concurrency watch or the
   // counter cross-check below.
-  const probeUrl = `${ORIGIN}/api/tiles?` + new URLSearchParams({
-    token: TOKEN, level_f: "0", level_t: "0", f_index: "0", t_index: "0", cells: "8",
-  });
+  // (`probeUrl` is defined above, beside the drain that shares its address.)
   // **The still-view claim (2c): what the page itself may ask for.** Its premise is measured at
   // both ends of the window rather than assumed. **No pane is
   // following the live edge** by the time the gestures are over — every one of them was dragged or
