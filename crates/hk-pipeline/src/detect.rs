@@ -594,6 +594,9 @@ impl DetectNode {
             }
             b.suspect = false;
             let member = b.clone();
+            // T-948: and the track stops counting it as the receiver's own line, so an emission
+            // the receiver was merely tuned on top of is admitted to the inventory.
+            self.tracker.refute_dc(id);
             if self.dc_goodable.remove(&id) {
                 self.good.insert(id);
             }

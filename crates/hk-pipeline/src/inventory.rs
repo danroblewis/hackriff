@@ -1900,6 +1900,8 @@ mod tests {
             hop_set: None,
             inband_fragment: false,
             suspect_fraction: 0.0,
+            artifact_detections: 0,
+            artifact_reason: None,
             confirmed_detections: bursts,
             bin_hz: 1e3,
             next_burst_eta: None,
