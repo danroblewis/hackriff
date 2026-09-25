@@ -27941,7 +27941,7 @@ tasks:
   - id: T-941
     milestone: M2-hardening
     title: "Class-boundary retune leaves the run with no inventory: detect/control stragglers lock the old segment's inventory"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: PIPE-REPLUMB
@@ -27977,6 +27977,7 @@ tasks:
       Observed, not chased: NOT A BUG, but it cost an hour and is worth knowing: a class-boundary retune in a mock-SDR test that moves far from the recording's band produces ZERO detections in the new segment (detections frozen, tracks_opened frozen, spectrum rows and source samples still rising) -- because MockSdrDriver is an honest radio and serves mock::dsp::Coverage::Noise where nothing was recorded. Measured identically on main, so it is not a regression; I first read it as a second product defect. Any test asserting 'detection keeps working after a retune' must keep recorded content inside the new window (my test moves 107.4 -> 107.6 MHz over the 108 MHz FM edge to cross the class boundary while keeping the tone in band). | Writer::flush_and_wait's SYNC_TIMEOUT is 120 s, 15x the 8 s REPLUMB_JOIN_BOUND past which the supervisor abandons the thread, so a detect writer whose final batch is genuinely slow is always abandoned rather than waited for. Left alone: shortening it would drop inventory work (closes) rather than defer it, and since the inventory is now the run's, the abandoned straggler's late writes land in the right place. A real fix would hand the residue to the next segment's writer -- out of scope here. | Each further front end (T-510 aux device, devices.rs) still keeps its OWN TrackInventory, so an aux device's tracks never reach the run's inventory. Pre-existing and documented in devices.rs's module docs; I only wrapped it in the Arc the new Shared field needs.
       Use cases: AWARE-036
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: f4a8a256
   - id: T-942
     milestone: M2-hardening
     title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
