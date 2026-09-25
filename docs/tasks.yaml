@@ -26115,7 +26115,7 @@ tasks:
   - id: T-882
     milestone: MMAP
     title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-802
@@ -26145,6 +26145,7 @@ tasks:
       Commits: 016d5f7c
       Observed, not chased: Backend: GET /api/coverage stalls as an hk serve --replay --loop process ages. On a server ~20 min old, curl of /api/coverage?f_lo=0&f_hi=9830400000&cells=128&rows=32&t0=..&t1=.. got no answer in 280 s (curl exit 28, 000); on a fresh server the same kind of request took 7.8 s. probeSurface awaits it, so the app surface never boots. That is why every run through `node e2e/run.mjs` (lanes took 125-373 s to start, and warned 'no observed coverage in 60000 ms') failed all app-* tests, including tests this diff does not touch (the sheet drag, GET / mounts). Load average was 33-46 at the time. Binary: target/debug/hk built 16:48, after main's last crates/ change (e199579d). The e2e results above were therefore run with node --test directly against a freshly started server. | Load-flake, not an assertion failure: in a full-file run of app-surface on the final code, 4 of 8 tests timed out at their 60 s boot wait ('the surface to draw ...') because /api/coverage was stalling, at load average 18-24. Each then passed alone (exit 0). Earlier runs through `node e2e/run.mjs` failed every app-* test the same way, including tests this diff does not touch. Flag for the deflaker together with the coverage stall above. | UI client bug, pre-existing, not in this diff: the app requests '/api/scheduler/api/scheduler?f_lo=..&f_hi=..&t0=..&t1=..' (the path is doubled) and gets 404 every poll; seen in the page's request log. ui/src/scheduler.ts:70 builds '/api/scheduler?..', so some caller is prefixing the path a second time. | precheck: the diff touches no Rust crate, so this ran `cargo fmt --all --check` (exit 0) and `tsc --noEmit` rather than a crate-scoped clippy.
       Resources: 2341 CPU-s, peak 4.5 GB
+    commit: 03716e65
   - id: T-883
     milestone: M2-hardening
     title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
