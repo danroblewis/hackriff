@@ -28763,6 +28763,8 @@ tasks:
       From T-820's conflict-fix handback (task-t820 624fbe16), observed not chased: (1) with the Research layer on (off by default) an annotation is drawn TWICE - T-820's dashed rose box plus T-821's research box; (2) a newly saved annotation appears in the Research data only after that panel's 15 s refresh. Also: no e2e spec covers annotation authoring (unit tests only).
       DELIVER: one drawing per annotation whichever layers are on (one owner of the annotation overlay in the registry-driven overlay table, T-821/T-914); a saved annotation shows in the Research panel from the create response, not the next poll; an app e2e that draws an annotation box and a pin and finds each drawn once. Thin client. Red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the new spec alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
+
+      Review round 1 FAILED: annotationGets() in ui/e2e/app-annotate.e2e.mjs matched a relative path prefix against CDP's absolute request URLs, so the GET count was always 0==0 (vacuous). Fixed to compare new URL(r.url).pathname; verified non-vacuous (real counts 3==3) and confirmed the assertion now genuinely goes red when the create-response fix is disabled (temporarily re-injected the defect, reverted, no net diff). Also merged main (2033e9dd) into this branch; only docs/tasks.yaml conflicted, resolved by taking main's copy.
   - id: T-985
     milestone: MAUTO
     title: Explorer window-3 captures into fixtures/ (NBFM+CTCSS 461.125, DMR BS 464.6125) with hidden truth, CTCSS + DMR sync oracles, 4 new use cases
