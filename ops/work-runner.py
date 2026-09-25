@@ -385,7 +385,8 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "use_cases": ["<the use-case ids your tests assert on>", ...]}}
 The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
 "done" if any test exit is non-zero - unless that red is not yours: mark it "known_flake": true or
-"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A CANCEL is yours to propose with evidence in the repo; an Opus review
+"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A deliberate red
+proof (your new test on the old code, or the defect re-injected) is marked "expect": "red" and counts only beside a green run. A CANCEL is yours to propose with evidence in the repo; an Opus review
 confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
