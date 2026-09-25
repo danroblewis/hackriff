@@ -87,6 +87,8 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
+import { densityAddrs, densityQuads, densityUrl, parseDensityTile, type DensityTile } from "../../surface/density";
+import { addrSpelling } from "../../surface/lattice";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
@@ -470,13 +472,46 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
   const artifactQuads: OverlayLayerFn = (pane, edge) =>
     artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
+  // T-810 (MAP-10): the coarse-zoom density layer — `GET /api/tiles/events` counts, laid out here
+  // through the SAME `toClip` and drawn only where a box there would already generalize to a
+  // symbol (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for its
+  // CURRENT address; it never positions anything (T-388's rule, followed by every layer here).
+  const densityByPane = new Map<string, DensityTile[]>();
+  const densityKeyByPane = new Map<string, string>();
+  const densityInflight = new Set<string>();
+  const densityQuadsFn: OverlayLayerFn = (pane) =>
+    densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
+  /** Ask for each density-on pane's tile(s) when its address changed. A `GET` of an inventory
+   * aggregate — never a device route — and only for panes whose layer is on; a pane whose current
+   * address needs no tile (a degenerate box) is simply left empty. */
+  const refreshDensity = () => {
+    const p = preview;
+    if (!p) return;
+    const lat = p.view.surface.lat;
+    const ids = new Set(p.view.panes.list().map((x) => x.id));
+    for (const id of [...densityByPane.keys()]) if (!ids.has(id)) { densityByPane.delete(id); densityKeyByPane.delete(id); }
+    for (const pane of p.view.panes.views(p.view.panes.lastEdgeNs)) {
+      if (!isLayerVisible(layersFor(pane.id), "density")) { densityKeyByPane.delete(pane.id); continue; }
+      const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
+      if (addrs.length === 0) { densityByPane.set(pane.id, []); continue; }
+      const key = addrs.map(addrSpelling).join(",") + "|" + (pane.device ?? "any");
+      if (densityKeyByPane.get(pane.id) === key || densityInflight.has(pane.id)) continue;
+      densityInflight.add(pane.id);
+      Promise.all(addrs.map((a) => client.get<unknown>(densityUrl(a)).then((body) => parseDensityTile(a, body)).catch(() => null)))
+        .then((tiles) => {
+          densityKeyByPane.set(pane.id, key);
+          densityByPane.set(pane.id, tiles.filter((t): t is DensityTile => t !== null));
+        })
+        .finally(() => { densityInflight.delete(pane.id); });
+    }
+  };
   // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
   // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
   // other layer. The poll below only refreshes the records; it never positions anything (T-388).
   let paths: MarkPath[] = [];
   const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
-    rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
+    rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -1279,7 +1314,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
-    startPoll(async () => { mirror(); refreshPriors(); }, 1000);
+    startPoll(async () => { mirror(); refreshPriors(); refreshDensity(); }, 1000);
 
     // T-897: the `paths` layer's records, for every pane that shows the layer — one read over the
     // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane
