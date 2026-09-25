@@ -21,6 +21,8 @@ export interface AudioInfo {
   params: AudioParams; snr_db?: number;
   squelch: { open_snr_db: number; hysteresis_db: number; noise_dbfs?: number };
   agc: { enabled: boolean; target_dbfs: number; max_gain_db: number };
+  /** Additive (T-866): set when a recipe pipeline's `audio` output produced the stream. */
+  pipeline_id?: string; output_id?: string; recipe?: string; edit_rev?: number;
   deemphasis_s?: number; demod?: string;
 }
 export interface AudioHeader {

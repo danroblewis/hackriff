@@ -33,13 +33,17 @@ export interface PipelineLite {
   id: string;
   emitter_id: string | null;
   state: "running" | "ended";
-  outputs: readonly { id: string; kind: "inspector" | "stage" | "messages"; stream_id: string }[];
+  outputs: readonly { id: string; kind: "inspector" | "stage" | "messages" | "audio"; stream_id: string }[];
 }
 
 export type PanelSource =
   | { emitterId: string; kind: "rds"; pipelineId: string }
   | { emitterId: string; kind: "digital"; pipelineId: string }
-  | { emitterId: string; kind: "audio"; outputId: string };
+  /** `outputId` is the dock entry's id (what `AudioSession` keys on). `pipelineId` is the pipeline
+   * that owns the audio output (from the stream header, T-866) or null for a legacy Listen chain;
+   * `rdsSibling` is a running pipeline of this emitter whose `messages` outputs are RDS, so the
+   * panel shows scope + RDS as two outputs of one signal (ADR-0015 §12.7). */
+  | { emitterId: string; kind: "audio"; outputId: string; pipelineId: string | null; rdsSibling: string | null };
 
 /** `messages` output ids `rds.recipe.json` (group-info/station/radiotext) commits its rows under
  * (T-252): a running pipeline offering any of these is recognised as RDS without decoding
@@ -57,26 +61,39 @@ const RDS_MESSAGE_OUTPUT_IDS = new Set(["group-info", "station", "radiotext"]);
  * around as unrelated state changes elsewhere.
  */
 export function collectPanelSources(outputs: readonly OutputEntry[], pipelines: readonly PipelineLite[]): PanelSource[] {
+  // One output model (ADR-0015 §12.7 / LP-7): every output, whichever API produced it, is
+  // `{emitter, pipeline_id, output_id, kind}`; the widget is chosen from the kinds an emitter has.
+  const liveAudio = new Map<string, OutputEntry>();
+  const running = pipelines.filter((p) => p.state === "running");
+  for (const o of outputs) {
+    if (o.kind !== "audio" || (o.state !== "live" && o.state !== "opening")) continue;
+    const em = o.emitterId ?? running.find((p) => p.id === o.pipelineId)?.emitter_id ?? null;
+    if (em && !liveAudio.has(em)) liveAudio.set(em, o);
+  }
   const seen = new Set<string>();
   const sources: PanelSource[] = [];
-  for (const p of pipelines) {
-    if (p.state !== "running" || !p.emitter_id || seen.has(p.emitter_id)) continue;
+  const audioFor = (emitterId: string, rds: string | null): PanelSource | null => {
+    const a = liveAudio.get(emitterId);
+    return a ? { emitterId, kind: "audio", outputId: a.id, pipelineId: a.pipelineId, rdsSibling: rds } : null;
+  };
+  for (const p of running) {
+    if (!p.emitter_id || seen.has(p.emitter_id)) continue;
     const isRds = p.outputs.some((o) => o.kind === "messages" && RDS_MESSAGE_OUTPUT_IDS.has(o.id));
+    const hasInspector = p.outputs.some((o) => o.kind === "inspector");
     if (isRds) {
       seen.add(p.emitter_id);
-      sources.push({ emitterId: p.emitter_id, kind: "rds", pipelineId: p.id });
-      continue;
+      // Audio + RDS are two outputs of one signal: one panel, the scope with the RDS box under it.
+      sources.push(audioFor(p.emitter_id, p.id) ?? { emitterId: p.emitter_id, kind: "rds", pipelineId: p.id });
+    } else if (hasInspector) {
+      seen.add(p.emitter_id);
+      sources.push({ emitterId: p.emitter_id, kind: "digital", pipelineId: p.id });
     }
-    const insp = p.outputs.find((o) => o.kind === "inspector");
-    if (!insp) continue;
-    seen.add(p.emitter_id);
-    sources.push({ emitterId: p.emitter_id, kind: "digital", pipelineId: p.id });
   }
-  for (const o of outputs) {
-    if (o.kind !== "audio" || !o.emitterId || seen.has(o.emitterId)) continue;
-    if (o.state !== "live" && o.state !== "opening") continue;
-    seen.add(o.emitterId);
-    sources.push({ emitterId: o.emitterId, kind: "audio", outputId: o.id });
+  for (const [emitterId] of liveAudio) {
+    if (seen.has(emitterId)) continue;
+    seen.add(emitterId);
+    const a = audioFor(emitterId, null);
+    if (a) sources.push(a);
   }
   return sources;
 }
@@ -430,7 +447,7 @@ class AudioPanel {
   private raf = 0;
   private dirty = false;
 
-  constructor(el: HTMLElement, private ctx: AppContext, private emitterId: string, outputId: string) {
+  constructor(el: HTMLElement, private ctx: AppContext, private emitterId: string, outputId: string, private hasRds: boolean) {
     this.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg") as SVGSVGElement;
     this.svg.setAttribute("viewBox", "0 0 300 64");
     this.svg.setAttribute("preserveAspectRatio", "none");
@@ -458,6 +475,11 @@ class AudioPanel {
   }
 
   private async loadDecode() {
+    // No RDS sibling output on this signal's pipeline: nothing to read (a mono/AM audio panel).
+    if (!this.hasRds && !this.ctx.store.get().inventory.rows[this.emitterId]?.identity_value) {
+      this.rdsEl.replaceChildren();
+      return;
+    }
     const view = await loadDecodeView(this.ctx.client, this.ctx.store.get(), this.emitterId);
     const row = this.ctx.store.get().inventory.rows[this.emitterId];
     renderRdsBox(this.rdsEl, view, rdsIdentity(row));
@@ -537,7 +559,7 @@ class OutputPanels {
           ? new RdsPanel(panelEl, this.ctx, current.emitterId)
           : current.kind === "digital"
             ? new DigitalPanel(panelEl, this.ctx, current.pipelineId)
-            : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId);
+            : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId, current.rdsSibling !== null);
       }
     }
     const empty = panelsEmptyText(this.sources);

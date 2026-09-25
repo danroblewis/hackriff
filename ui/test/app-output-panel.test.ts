@@ -16,7 +16,7 @@ import { FALLBACK_ROWS, viewWindow, windowKey } from "../src/app/explore/invento
 function audioOutput(over: Partial<OutputEntry> = {}): OutputEntry {
   return {
     id: "listen1", kind: "audio", label: "101.3 MHz", sub: "", state: "live", tcpTarget: null,
-    muted: false, levelDbfs: -20, recordsPerS: null, emitterId: "em-fm", pipelineId: null, message: null,
+    muted: false, levelDbfs: -20, recordsPerS: null, emitterId: "em-fm", pipelineId: null, outputId: null, message: null,
     ...over,
   };
 }
@@ -39,8 +39,8 @@ test("collectPanelSources: an ended pipeline, or one with no inspector output, c
 });
 
 test("collectPanelSources: a live or opening Listen entry makes an audio panel; other states don't", () => {
-  assert.deepEqual(collectPanelSources([audioOutput()], []), [{ emitterId: "em-fm", kind: "audio", outputId: "listen1" }]);
-  assert.deepEqual(collectPanelSources([audioOutput({ state: "opening" })], []), [{ emitterId: "em-fm", kind: "audio", outputId: "listen1" }]);
+  assert.deepEqual(collectPanelSources([audioOutput()], []), [{ emitterId: "em-fm", kind: "audio", outputId: "listen1", pipelineId: null, rdsSibling: null }]);
+  assert.deepEqual(collectPanelSources([audioOutput({ state: "opening" })], []), [{ emitterId: "em-fm", kind: "audio", outputId: "listen1", pipelineId: null, rdsSibling: null }]);
   assert.deepEqual(collectPanelSources([audioOutput({ state: "refused" })], []), []);
   assert.deepEqual(collectPanelSources([audioOutput({ state: "ended" })], []), []);
   assert.deepEqual(collectPanelSources([{ ...audioOutput(), kind: "records" }], []), []);
@@ -50,7 +50,7 @@ test("collectPanelSources: a digital pipeline wins over an audio entry for the s
   const sources = collectPanelSources([audioOutput({ emitterId: "em-digi" }), audioOutput({ id: "listen2", emitterId: "em-fm" })], [pipeline()]);
   assert.deepEqual(sources, [
     { emitterId: "em-digi", kind: "digital", pipelineId: "p1" },
-    { emitterId: "em-fm", kind: "audio", outputId: "listen2" },
+    { emitterId: "em-fm", kind: "audio", outputId: "listen2", pipelineId: null, rdsSibling: null },
   ]);
 });
 
@@ -74,9 +74,19 @@ test("collectPanelSources: a running RDS-recipe pipeline (messages output ids gr
   assert.deepEqual(collectPanelSources([], [rdsPipeline()]), [{ emitterId: "em-fm", kind: "rds", pipelineId: "p2" }]);
 });
 
-test("collectPanelSources: an rds panel still wins over an audio Listen entry on the same emitter", () => {
+test("collectPanelSources: audio + RDS on one emitter are two outputs of ONE panel (LP-7, ADR-0015 §12.7)", () => {
   const sources = collectPanelSources([audioOutput({ emitterId: "em-fm" })], [rdsPipeline()]);
-  assert.deepEqual(sources, [{ emitterId: "em-fm", kind: "rds", pipelineId: "p2" }]);
+  assert.deepEqual(sources, [{ emitterId: "em-fm", kind: "audio", outputId: "listen1", pipelineId: null, rdsSibling: "p2" }]);
+});
+
+test("collectPanelSources: a dock audio entry that names its pipeline (header pipeline_id) resolves the emitter through it", () => {
+  const p = rdsPipeline({ id: "p9", outputs: [{ id: "audio", kind: "audio", stream_id: "audio/p9/audio" }, { id: "station", kind: "messages", stream_id: "x" }] });
+  const sources = collectPanelSources([audioOutput({ emitterId: null, pipelineId: "p9", outputId: "audio" })], [p]);
+  assert.deepEqual(sources, [{ emitterId: "em-fm", kind: "audio", outputId: "listen1", pipelineId: "p9", rdsSibling: "p9" }]);
+});
+
+test("collectPanelSources: an RDS pipeline with no live audio entry stays an rds panel", () => {
+  assert.deepEqual(collectPanelSources([], [rdsPipeline()]), [{ emitterId: "em-fm", kind: "rds", pipelineId: "p2" }]);
 });
 
 test("collectPanelSources: a non-RDS pipeline with messages+inspector outputs (e.g. ADS-B) still gets the raw digital inspector", () => {
@@ -90,7 +100,7 @@ test("collectPanelSources: a non-RDS pipeline with messages+inspector outputs (e
 });
 
 test("nextPanelTab keeps the current tab while it's still available, else the first available, else none", () => {
-  const sources: PanelSource[] = [{ emitterId: "a", kind: "audio", outputId: "o" }, { emitterId: "b", kind: "digital", pipelineId: "p" }];
+  const sources: PanelSource[] = [{ emitterId: "a", kind: "audio", outputId: "o", pipelineId: null, rdsSibling: null }, { emitterId: "b", kind: "digital", pipelineId: "p" }];
   assert.equal(nextPanelTab("b", sources), "b");
   assert.equal(nextPanelTab("gone", sources), "a");
   assert.equal(nextPanelTab(null, sources), "a");
@@ -99,7 +109,7 @@ test("nextPanelTab keeps the current tab while it's still available, else the fi
 
 test("panelsEmptyText: a quiet empty-state string with no sources, null once any panel exists", () => {
   assert.match(panelsEmptyText([]) ?? "", /no active outputs/i);
-  assert.equal(panelsEmptyText([{ emitterId: "a", kind: "audio", outputId: "o" }]), null);
+  assert.equal(panelsEmptyText([{ emitterId: "a", kind: "audio", outputId: "o", pipelineId: null, rdsSibling: null }]), null);
 });
 
 // ---- rdsViewModel (T-252: over rds.recipe.json's actual three outputs — group-info/rds-group,
