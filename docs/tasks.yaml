@@ -29102,7 +29102,7 @@ tasks:
   - id: T-1000
     milestone: MMAP
     title: "Split view: make the active pane visible (outline; Go-to/zoom/layers name the pane; click and right-click set it; keys switch panes and toggle Live) + the global-vs-active chrome rule in docs/23 §10"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-PANES
@@ -29125,6 +29125,7 @@ tasks:
       Commits: af55375d
       Observed, not chased: Precheck: no Rust changed, so I ran only its fmt half (cargo fmt --all --check, exit 0). Workspace clippy was not run. | At 400 px the page scrolls horizontally: the OUTPUTS dock is wider than the viewport (visible in app-active-pane-400-*.png). This is pre-existing and not touched here. | The outline excludes the per-pane spectrum-trace strip, because the frame's pane rect is inset by it. It still sits on the pane's waterfall. | The pane status rows are still labelled by id ('pane1'/'pane2') rather than by screen position, and they still collapse and clip at two panes. That is T-e's scope (audit item 4).
       Resources: 920 CPU-s, peak 5.3 GB
+    commit: a018a498
   - id: T-1001
     milestone: MMAP
     title: "Split view: a Live/Freeze button inside each pane's rectangle; the single follow-live FAB retires"
