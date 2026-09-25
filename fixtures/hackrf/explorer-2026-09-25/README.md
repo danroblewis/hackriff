@@ -1,0 +1,38 @@
+# HackRF One fixtures, 2026-09-25 (explorer agent)
+
+Two live captures clipped by the Mac-only explorer agent through `POST /api/iqbuffer/clip` on its
+staging build, 2026-09-25 ~04:00-04:14 PDT, San Francisco (`~/.hackriff-ops/explorer/journal-20260925.md`).
+Hardware: HackRF One serial `0000000000000000d2b861dc263bc293`, firmware 2026.01.3, board rev
+older than r6, libhackrf 0.9.2, antenna unknown (whatever was on the SMA, not changed). LNA 32 /
+VGA 30 / amp on for both; bias-tee **untouched, so unknown** — the fixture's provenance and
+`capture_settings` omit `bias_tee`/`antenna_port` rather than writing `off`/`unknown` literally
+(`docs/sigmf-extension.md`: an absent key is unknown, and unknown is not `off`). Both clips are
+2.4 Msps x 5 s, ci8, 24 000 000 bytes (Git LFS). Licence: project-owned capture.
+
+Regenerate the `hackriff:truth` annotations and manifest rows (data/meta files are placed by hand
+from the explorer agent's `~/.hackriff-ops/explorer/captures/20260925/` output, which sits outside
+the repo): `uv run --project py python py/fixtures/build_explorer_2026_09_25.py`.
+
+Every emission annotation's `hackriff:truth.rds` is decoded **independently** by the oracle
+`py/fixtures/rds_ref.py` run over this fixture's own 5 s window — not copied from the explorer
+agent's live decode — and carries the explorer's original claim alongside it under
+`rds.explorer_claim` plus an `rds.oracle_agrees_with_explorer_pi` flag. The pipeline under test
+never sees any of this: the mock SDR replay source (`crates/hk-core/src/source/sigmf_replay.rs`)
+reads only `global`/`captures` sample data and timing, never `annotations`, so `hackriff:truth` is
+invisible to it exactly as for every other fixture.
+
+| Fixture | Use cases | Truth summary (oracle-decoded) |
+|---|---|---|
+| `fm-101p3-pi1694` (capture centre 100.9 MHz) | SIGNAL-062 | **101.300 MHz WFM + RDS**, oracle PI `1694` (56/56 CRC-valid groups, BLER 0.0 over the 5 s window), PTY 7, TP 0, pilot 18999.890 Hz, clock −5.77 ppm. PS is dynamic (song/artist scroll); the window's only complete frame is `Animals ` (2x), consistent with the explorer's live RT "... Glass Animals - Heat Waves". Whole-file `overload` artefact: 11 811 945 / 12 000 000 samples clipped (98.4 %) at LNA 32/VGA 30/amp on — severe front-end overload in SF's FM environment, not a bug. |
+| `fm-98p9-piA4FF` (capture centre 98.5 MHz) | SIGNAL-062 | **98.900 MHz WFM + RDS**, oracle PI `A4FF` (3/27 CRC-valid groups, BLER 0.639 — weak but internally consistent, all 3 groups vote the same PI), PTY 9, pilot 18999.849 Hz. **98.100 MHz WFM**, pilot present (18999.890 Hz) but 0 CRC-valid groups in the window: oracle agrees with the explorer's "no PI" claim. Whole-file `overload` artefact: 1 441 836 / 12 000 000 samples clipped (12.0 %). |
+
+**Oracle cross-check (T-935): no disagreements.** The independent `rds_ref.py` oracle, run fresh
+over each fixture's own 5 s window, confirms both PI codes the explorer agent's live RDS recipe
+reported (`1694` and `A4FF`) and confirms that 98.1 MHz has a locked pilot but no decodable PI in
+this short window, matching the explorer's own weaker-signal finding there (3 groups in 45 s live,
+0 in this 5 s clip). Had the oracle disagreed with the explorer's truth, this README and the
+fixture's `hackriff:truth` would record the disagreement rather than silently preferring one.
+
+A paging-band capture from the same session (`flex-pagers-930p8`, FLEX 929-932 MHz, oracle-confirmed
+sync but not decoded) is **not** included here: it needs a new paging use-case id, which is the
+coordinator's call (`~/.hackriff-ops/explorer/journal-20260925.md` §"04:27-04:33").

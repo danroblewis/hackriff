@@ -1,0 +1,225 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:version": "1.2.0",
+    "core:sample_rate": 2400000.0,
+    "core:description": "hk-pipeline IQ capture buffer clip (SIGNAL-062, fm-98p9-piA4FF)",
+    "core:hw": "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (USB API 1.10), board rev older than r6, libhackrf 0.9.2 (2026.01.3), antenna unknown (stock/whatever is on the SMA)",
+    "core:recorder": "hk-pipeline:iqbuffer",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ],
+    "hackriff:provenance": {
+      "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+      "tune": {
+        "center_hz": 98500000.0,
+        "sample_rate_hz": 2400000.0,
+        "lna_db": 32.0,
+        "vga_db": 30.0,
+        "amp_on": true,
+        "bandwidth_hz": 1750000.0
+      },
+      "overload": true,
+      "quantisation_limited": false,
+      "clock_source": "internal",
+      "clock_locked": true,
+      "timestamp_method": "host-arrival"
+    },
+    "core:license": "project-owned capture"
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 98500000.0,
+      "core:datetime": "2026-09-25T11:08:00.000000Z",
+      "hackriff:provenance": {
+        "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+        "tune": {
+          "center_hz": 98500000.0,
+          "sample_rate_hz": 2400000.0,
+          "lna_db": 32.0,
+          "vga_db": 30.0,
+          "amp_on": true,
+          "bandwidth_hz": 1750000.0
+        },
+        "overload": true,
+        "quantisation_limited": false,
+        "clock_source": "internal",
+        "clock_locked": true,
+        "timestamp_method": "host-arrival"
+      },
+      "hackriff:clip_count": 1441836,
+      "core:global_index": 12815713792
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "capture",
+      "hackriff:truth": {
+        "role": "scenario",
+        "kind": "capture",
+        "recording": "fm-98p9-piA4FF",
+        "use_cases": [
+          "SIGNAL-062"
+        ],
+        "generator": "py/fixtures/build_explorer_2026_09_25.py",
+        "source": {
+          "capture": "explorer agent live clip",
+          "method": "POST /api/iqbuffer/clip on the explorer agent's staging build",
+          "captured": "2026-09-25 ~04:08 PDT via POST /api/iqbuffer/clip",
+          "device": "hackrf:0000000000000000d2b861dc263bc293"
+        },
+        "datatype": "ci8",
+        "sample_rate_hz": 2400000.0,
+        "n_samples": 12000000,
+        "duration_s": 5.0,
+        "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
+        "clip_count": 1441836,
+        "clip_fraction": 0.120153,
+        "overload": true,
+        "quantisation_limited": false,
+        "quantisation_noise_dbfs_per_hz": -113.65969934007163,
+        "capture_settings": {
+          "lna_db": 32,
+          "vga_db": 30,
+          "amp": true,
+          "bias_tee": "unknown (untouched by the explorer agent; not confirmed off)",
+          "antenna": "unknown (stock/whatever is on the SMA)"
+        },
+        "identification_source": "Blind detection by hackriff live; FCC FM band plan 88-108 MHz (47 CFR 73.201). Station identity only from the app's RDS decode.",
+        "annotation_completeness": "partial: the station(s) named in the explorer's truth file, plus the whole-file overload artefact",
+        "legal": "Receive-only capture. Truth is PHY/metadata only; RDS PI/PS/PTY are public broadcast station identity (CLAUDE.md legal guardrails).",
+        "t_start_s": 0.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 98800000.0,
+      "core:freq_upper_edge": 99000000.0,
+      "core:label": "FM 98.9 MHz",
+      "core:comment": "RDS decoded by the app when prompted (recipe:rds on a region/band target): PI A4FF, PTY 9, 106 CRC-valid groups in 45 s at this tuning; one PS row 'QueBuena' seen (stability across the capture not verified, so not recorded as ps). Carrier: app detection centre 98.925 MHz, recipe fm.offset -24.4 kHz => ~98.900 MHz.",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast+rds",
+        "modulation": "WFM",
+        "center_hz": 98900000.0,
+        "offset_hz": 400000.0,
+        "bandwidth_hz": 200000,
+        "channel_hz": 98900000.0,
+        "pilot": {
+          "present": true,
+          "frequency_hz": 18999.848540890485,
+          "deviation_hz": 5154.298973521399
+        },
+        "clock_ppm_from_pilot": -7.971532079764643,
+        "rds": {
+          "pi_hex": "A4FF",
+          "pi_votes": {
+            "A4FF": 3
+          },
+          "ps": null,
+          "ps_frames": {},
+          "pty": 9,
+          "tp": false,
+          "group_types": {
+            "0A": 2,
+            "2A": 1
+          },
+          "groups_decoded": 3,
+          "groups_on_lattice": 27,
+          "blocks_on_lattice": 108,
+          "blocks_ok": 39,
+          "block_error_rate": 0.6388888888888888,
+          "bitrate_bd": 1187.5,
+          "bitrate_bd_in_sample_clock": 1187.4905338056553,
+          "subcarrier_hz": 57000.0,
+          "decoder": "py/fixtures/rds_ref.py (independent oracle, run over this fixture's own window)",
+          "oracle_agrees_with_explorer_pi": true,
+          "explorer_claim": {
+            "pi": "A4FF",
+            "decoded": "RDS decoded by the app when prompted (recipe:rds on a region/band target): PI A4FF, PTY 9, 106 CRC-valid groups in 45 s at this tuning; one PS row 'QueBuena' seen (stability across the capture not verified, so not recorded as ps). Carrier: app detection centre 98.925 MHz, recipe fm.offset -24.4 kHz => ~98.900 MHz.",
+            "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
+          }
+        },
+        "identity": {
+          "type": "rds_pi",
+          "value": "A4FF"
+        },
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 98000000.0,
+      "core:freq_upper_edge": 98200000.0,
+      "core:label": "FM 98.1 MHz",
+      "core:comment": "pilot locked in the app's RDS recipe (rds57.pilot_locked=1) but only 3 CRC-valid groups in 45 s; PI not decoded. Carrier: detection centre 98.088 MHz + fm.offset +10.0 kHz => ~98.098 MHz.",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "center_hz": 98100000.0,
+        "offset_hz": -400000.0,
+        "bandwidth_hz": 200000,
+        "channel_hz": 98100000.0,
+        "pilot": {
+          "present": true,
+          "frequency_hz": 18999.89001748684,
+          "deviation_hz": 6106.703654008574
+        },
+        "clock_ppm_from_pilot": -5.788553324226342,
+        "rds": {
+          "pi_hex": null,
+          "pi_votes": {},
+          "ps": null,
+          "ps_frames": {},
+          "pty": null,
+          "tp": null,
+          "group_types": {},
+          "groups_decoded": 0,
+          "groups_on_lattice": 0,
+          "blocks_on_lattice": 0,
+          "blocks_ok": 0,
+          "block_error_rate": null,
+          "bitrate_bd": 1187.5,
+          "bitrate_bd_in_sample_clock": 1187.4931260929275,
+          "subcarrier_hz": 57000.0,
+          "decoder": "py/fixtures/rds_ref.py (independent oracle, run over this fixture's own window)",
+          "oracle_agrees_with_explorer_pi": true,
+          "explorer_claim": {
+            "pi": null,
+            "decoded": "pilot locked in the app's RDS recipe (rds57.pilot_locked=1) but only 3 CRC-valid groups in 45 s; PI not decoded. Carrier: detection centre 98.088 MHz + fm.offset +10.0 kHz => ~98.098 MHz.",
+            "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
+          }
+        },
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "overload",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "overload",
+        "clipped_samples": 1441836,
+        "clip_fraction": 0.120153,
+        "overload_rule": "clip_fraction > 0.0001 (component at -128 or 127)",
+        "note": "LNA 32 / VGA 30 / amp on in San Francisco's strong-signal FM environment on an 8-bit HackRF One with no preselector; the explorer agent's one gain-reduction retry (LNA 24 / VGA 24 / amp off) made RDS worse, so this is a front-end/location limit, not a bug (journal-20260925.md)",
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    }
+  ]
+}
