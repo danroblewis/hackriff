@@ -145,7 +145,12 @@ test("T-522/T-882: the switch is a labelled checkbox in the layers menu, not a t
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.ok(!/signalsBtn/.test(src), "the retired toolbar button came back");
   // The menu offers every overlay this build draws, `detections` among them, as a checkbox row.
-  assert.match(src, /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{ rules: ringQuads, detections: detectionQuads \}/);
+  // Whatever other overlays this build registers (each layer ticket adds one), `detections` is drawn by
+  // detectionQuads - asserted on the object's entries, not its exact literal, so a new layer's renderer
+  // does not break this check.
+  const fns = /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{([^}]*)\}/.exec(src);
+  assert.ok(fns, "the overlay renderer table is where the menu reads its layers from");
+  assert.match(fns[1], /\bdetections: detectionQuads\b/);
   const menu = readFileSync("src/app/chrome/map-controls.ts", "utf8");
   assert.match(menu, /h\("input", \{ type: "checkbox", "data-layer": l\.id \}\)/);
 });
