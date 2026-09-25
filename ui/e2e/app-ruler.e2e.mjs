@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
 import { startBackend } from "./backend.mjs";
+import { FOLLOWING } from "./app-chrome.mjs";
 
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 let backendP = null;
@@ -26,7 +27,7 @@ after(async () => { (await backendP?.catch(() => null))?.stop(); });
 const LABELS = `JSON.stringify([...document.querySelectorAll('.sf-hud-label')].filter((e) => !e.hidden).map((e) => {
   const r = e.getBoundingClientRect();
   return { axis: e.classList.contains('time') ? 'time' : 'freq', text: e.textContent, value: Number(e.dataset.value),
-    x: r.x, y: r.y, w: r.width, h: r.height };
+    x: r.x, y: r.y, w: r.width, h: r.height, clipped: e.scrollWidth > e.clientWidth };
 }))`;
 const CHROME = `JSON.stringify([...document.querySelectorAll('.map-glass')].filter((e) => {
   const r = e.getBoundingClientRect(); const cs = getComputedStyle(e);
@@ -59,12 +60,18 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the time ruler 
     assert.ok(time.length > 0, `${what}: no time labels`);
     for (const l of time) {
       assert.ok(l.w <= 40, `${what}: time label "${l.text}" is ${l.w} px wide`);
-      if (mode === "relative") assert.match(l.text, /^(−|\+|live edge)/, `${what}: relative label`);
+      assert.ok(!l.clipped, `${what}: time label "${l.text}" is cut off by the 40 px limit`);
+      if (mode === "relative") assert.match(l.text, /^(−|\+|now)/, `${what}: relative label`);
       else {
-        assert.match(l.text, /^\d\d:\d\d:\d\d$/, `${what}: absolute label`);
-        assert.equal(l.text, local(l.value), `${what}: label is not its own capture time`);
+        // Whole-second steps read HH:MM:SS; finer steps read MM:SS.d.. or SS.ddd — each is a prefix
+        // of the label's own capture time (local), never a browser-clock reading.
+        const [hh, mm, ss] = local(l.value).split(":");
+        const ok = l.text === `${hh}:${mm}:${ss}` || l.text.startsWith(`${mm}:${ss}.`) || l.text.startsWith(`${ss}.`);
+        assert.ok(ok, `${what}: label "${l.text}" is not its own capture time ${local(l.value)}`);
       }
     }
+    // Two different ticks never read the same.
+    assert.equal(new Set(time.map((l) => l.text)).size, time.length, `${what}: repeated time labels ${time.map((l) => l.text).join(" ")}`);
     // Never over floating chrome.
     const chrome = JSON.parse(await page.eval(CHROME));
     for (const l of labels) for (const c of chrome) {
@@ -87,10 +94,15 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the time ruler 
   await check("absolute", "following, absolute");
   assert.equal(await page.eval("localStorage.getItem('hk-hud-time-labels')"), "absolute");
 
-  // Frozen pane: scrub back by a wheel (view arithmetic only), then both modes again.
+  // Frozen pane, then both modes again.
   const c = JSON.parse(await page.eval(`JSON.stringify((() => { const r = document.querySelector('.sf-canvas').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })())`));
-  await page.mouse("mouseWheel", c[0], c[1], { deltaX: 0, deltaY: 120 }).catch(() => {});
+  assert.ok(await page.eval(FOLLOWING), "the pane should be following before the scrub");
+  // Freeze the pane on its window (the FAB, an explicit pause), then scrub it back a little.
+  await page.click("document.querySelector('.map-fab')");
+  await page.waitFor("the pane to freeze", `!(${FOLLOWING})`, { timeoutMs: 10000 });
+  await page.drag({ x: c[0], y: c[1] }, { x: c[0], y: c[1] + 120 }, 10);
   await page.frames(5);
+  assert.equal(await page.eval(FOLLOWING), false, "the pane resumed following after the scrub");
   await check("absolute", "frozen, absolute");
   await toggle();
   await check("relative", "frozen, relative");

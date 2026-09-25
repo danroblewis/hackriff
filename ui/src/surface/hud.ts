@@ -90,12 +90,27 @@ export function fmtRulerClock(tNs: number, stepNs: number): string {
   return `${stepNs < 1e9 ? iso.slice(11, 23) : iso.slice(11, 19)}Z`;
 }
 
-/** The absolute capture instant in the viewer's LOCAL time, `HH:MM:SS` (T-998). Derived from the
- * capture-time ns the pane's mapping produced — never from `Date.now()`. */
-export function fmtRulerLocal(tNs: number): string {
-  const d = new Date(tNs / 1e6);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+/**
+ * The absolute capture instant in the viewer's LOCAL time (T-998), derived from the capture-time ns
+ * the pane's mapping produced — never from `Date.now()`. Whole-second steps print `HH:MM:SS`; a step
+ * under a second gains just enough decimals that neighbouring ticks never read the same (`MM:SS.d`,
+ * `MM:SS.dd`, and below 10 ms `SS.ddd` — the hour and minute are dropped to stay within the narrow
+ * ruler, since a millisecond tick is read against its neighbours, not as a date).
+ */
+export function fmtRulerLocal(tNs: number, stepNs = 1e9): string {
+  // Round to the microsecond first so float error in `ns / 1e6` cannot tip a tick into the ms below.
+  const d = new Date(Math.round(tNs / 1e3) / 1e3);
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  if (!(stepNs < 1e9 * (1 - 1e-9))) return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const decimals = Math.max(1, Math.min(3, Math.ceil(-Math.log10(stepNs / 1e9) - 1e-9)));
+  // Truncate (never round up into the next second): a tick's label names an instant at or before it.
+  const frac = p(Math.floor(d.getMilliseconds() / 10 ** (3 - decimals)), decimals);
+  return decimals === 3 ? `${p(d.getSeconds())}.${frac}` : `${p(d.getMinutes())}:${p(d.getSeconds())}.${frac}`;
+}
+
+/** The relative label squeezed to the narrow ruler: no inner spaces, and `now` for the live edge. */
+export function compactRulerAge(label: string): string {
+  return label === "live edge" ? "now" : label.replace(/ /g, "");
 }
 
 /** How the time ruler words its marks (T-998): "seconds ago" or local clock. Per viewer. */
@@ -262,7 +277,7 @@ export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1, mode: TimeLa
     if (!t.major || t.label === null) continue;
     const y = t.pos / k;
     if (y < CORNER_CSS.timeTop || y > h - CORNER_CSS.timeBottom) continue;
-    out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: mode === "absolute" ? fmtRulerLocal(t.value) : t.label, sub: null, value: t.value });
+    out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: mode === "absolute" ? fmtRulerLocal(t.value, r.timeStepNs) : compactRulerAge(t.label), sub: null, value: t.value });
   }
   return out;
 }
