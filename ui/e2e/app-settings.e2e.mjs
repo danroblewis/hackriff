@@ -38,7 +38,9 @@ const VISIBLE_TABS = `JSON.stringify([...document.querySelectorAll('#review .rv-
   .filter((b) => !b.hidden && b.getBoundingClientRect().height > 0).map((b) => b.textContent))`;
 
 /** One pane's readout headline (frequency · time · the device whose coverage it reads). */
-const HEADLINE = `(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`;
+// T-996 retired the per-viewport panel; the active pane's one-line readout (`.sf-where`) is where a
+// pane names the front end whose coverage decides its grey.
+const HEADLINE = `(document.querySelector('.sf-where')?.textContent ?? "")`;
 
 for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px one small ⋯ holds every moved setting, and Review keeps only review`, async (t) => {
   const be = await backend();

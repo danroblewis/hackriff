@@ -201,12 +201,14 @@ test("a drag on the app's surface moves the view and still reaches no device rou
     { timeoutMs: 60000 });
   const rect = await page.$rect(".sf-canvas");
 
-  const before = (await page.$text(".sf-chrome")) ?? "";
+  // T-996: the kept one-line readout (`.sf-where`, centre ± span · LIVE) is the viewport statement
+  // now — the per-viewport panel it used to sit in is retired.
+  const before = (await page.$text(".sf-where")) ?? "";
   await page.drag(
     { x: rect.x + rect.w * 0.6, y: rect.y + rect.h * 0.4 },
     { x: rect.x + rect.w * 0.3, y: rect.y + rect.h * 0.4 });
-  await page.waitFor("the per-viewport readout to change after a drag",
-    `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`,
+  await page.waitFor("the viewport readout to change after a drag",
+    `(document.querySelector('.sf-where')?.textContent ?? "") !== ${JSON.stringify(before)}`,
     { timeoutMs: 15000 });
 
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
@@ -229,7 +231,7 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-fab') &&
-     / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+     / MHz ± /.test(document.querySelector('.sf-scale')?.dataset.where ?? "")`,
     { timeoutMs: 60000 });
 
   const covered = JSON.parse(await page.eval(`JSON.stringify(
@@ -241,7 +243,8 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
     }).filter((b) => !b.ok))`));
   assert.deepEqual(covered, [], "a floating control is not pressable at its own centre, or is under 24 px");
 
-  const headline = `document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? ""`;
+  // T-996: the pane's window, off its own scale block (the per-viewport panel is retired).
+  const headline = `document.querySelector('.sf-scale')?.dataset.where ?? ""`;
   // Zoom in: the pane's stated window changes.
   let before = await page.eval(headline);
   await page.click("document.querySelector('.map-zoom-in')");

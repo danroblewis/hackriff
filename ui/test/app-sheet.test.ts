@@ -81,9 +81,13 @@ test("per-viewer snap state: remembered, and correct without storage", () => {
   assert.doesNotThrow(() => writeSnap(null, "k", "half"));
 });
 
-test("the peek strip says what is selected — and that nothing is, when nothing is", () => {
-  assert.match(focusSheetTitle({ kind: "none" }), /nothing yet/);
+test("the strip says what is selected — or, with nothing selected, which list the card was opened on", () => {
+  // T-1026: there is no "nothing yet" state to word any more — with nothing selected the card is
+  // simply not on screen, unless a pill opened it on a list, and then it names that list.
+  assert.equal(focusSheetTitle({ kind: "none" }), "Confirmed signals in view");
+  assert.equal(focusSheetTitle({ kind: "none" }, null, "candidate"), "Candidate signals in view");
   assert.equal(focusSheetTitle({ kind: "signal", id: "e1" }), "Selected signal");
+  assert.equal(focusSheetTitle({ kind: "signal", id: "e1" }, 100_800_000), "Selected signal · 100.8000 MHz");
   assert.equal(focusSheetTitle({ kind: "selection", id: "s1" }), "Selected region");
 });
 
@@ -181,6 +185,12 @@ test("the mount wraps, never replaces, the hosted slot; drag/click/keys snap and
     const [grab, head] = host.children;
     assert.equal(host.children[2], body, "the body stays in place");
     assert.equal(body.children[0], focus, "the hosted slot is untouched");
+    // T-1026: the card mounts CLOSED — off the screen, whatever size it is remembered at.
+    assert.equal(ctl.isOpen(), false);
+    assert.equal(host.hidden, true);
+    assert.equal(host.dataset.open, "false");
+    ctl.show("peek");
+    assert.equal(host.hidden, false);
     assert.equal(host.dataset.snap, "peek");
     assert.equal(host.style.height, `${PEEK_PX}px`);
     assert.equal(body.inert, true, "collapsed content is out of the tab order");
@@ -216,17 +226,19 @@ test("the mount wraps, never replaces, the hosted slot; drag/click/keys snap and
     head.fire("click");
     assert.equal(ctl.get(), "half");
 
-    // docs/23 §10.6 P1: a visible, labelled dismiss collapses the open sheet to its strip (its
-    // pixels go back to the map) and is itself hidden once collapsed.
+    // docs/23 §10.6 P1 as T-1026 sharpens it: the visible dismiss takes the sheet OFF the screen —
+    // all of its pixels back to the map, not down to a strip along the bottom edge — and the size it
+    // was at is still the size it remembers for next time.
     const close = head.children[1];
     assert.equal(close.className, "sheet-close");
     assert.match(close.getAttribute("aria-label") ?? "", /^Close Selected sheet/);
     assert.equal((close as unknown as { hidden: boolean }).hidden, false);
     close.fire("click", { stopPropagation() {} });
-    assert.equal(ctl.get(), "peek");
-    assert.equal(mem.get("s"), "peek");
-    assert.equal((close as unknown as { hidden: boolean }).hidden, true);
-    ctl.set("half");
+    assert.equal(ctl.isOpen(), false);
+    assert.equal(host.hidden, true);
+    assert.equal(mem.get("s"), "half", "the dismiss is not a size the viewer chose");
+    assert.equal((close as unknown as { hidden: boolean }).hidden, true, "nothing to dismiss once it is gone");
+    ctl.show("half");
 
     // reveal() raises but never lowers, and is not the viewer's stored choice.
     ctl.set("peek");
@@ -237,9 +249,12 @@ test("the mount wraps, never replaces, the hosted slot; drag/click/keys snap and
     ctl.reveal("half");
     assert.equal(ctl.get(), "full");
 
-    // A remount reads the remembered state; unavailable storage still renders, at the default.
+    // A remount reads the remembered SIZE — and is closed, because openness is never stored.
     const again = sheetHost();
-    assert.equal(mountSheet(again.host as unknown as HTMLElement, { storageKey: "s", label: "x", storage }).get(), "full");
+    const c2 = mountSheet(again.host as unknown as HTMLElement, { storageKey: "s", label: "x", storage });
+    assert.equal(c2.get(), "full");
+    assert.equal(c2.isOpen(), false, "a reload opens on the map, not on the card");
+    assert.equal(again.host.hidden, true);
     const none = sheetHost();
     const c3 = mountSheet(none.host as unknown as HTMLElement, { storageKey: "s", label: "x", storage: null });
     assert.equal(c3.get(), "peek");
@@ -274,10 +289,13 @@ test("SPY CLIENT: selecting raises the sheet, and no sheet gesture reaches any r
       const { host } = sheetHost();
       mountFocusSheet(host as unknown as HTMLElement, spy.ctx);
       const [grab, head] = host.children;
+      // T-1026: nothing selected, so there is no card on screen at all.
+      assert.equal(host.hidden, true);
       assert.equal(host.dataset.snap, "peek");
-      assert.match(head.children[0].textContent, /nothing yet/);
+      assert.equal(head.children[0].textContent, "Confirmed signals in view");
 
       spy.ctx.store.set(focusSignal("e1"));
+      assert.equal(host.hidden, false, "selecting a feature put the card on screen");
       assert.equal(host.dataset.snap, "half", "a new selection opens a collapsed sheet");
       assert.equal(head.children[0].textContent, "Selected signal");
       assert.equal(mem.get(FOCUS_SHEET_KEY), undefined, "…without overwriting the viewer's preference");

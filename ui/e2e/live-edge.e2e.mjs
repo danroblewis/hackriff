@@ -93,8 +93,9 @@ const isRender = (c) => c.distinct >= 32 && c.dominantShare < 0.9;
  * N coarse stand-ins · 0 pending` with nothing asked for again) report FASTER than the deadline did.
  */
 async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 12000 } = {}) {
-  const COUNTS = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
-    return v ? (v.querySelector('.hk-surface-counts')?.textContent ?? '') : ''; })()`;
+  // T-996: the pane's own scale block carries the frame's report (`data-counts`); the per-viewport
+  // panel that used to print it is retired.
+  const COUNTS = `document.querySelector('.sf-scale')?.dataset.counts ?? ''`;
   const r = await waitWhileWorking(page, () => page.eval(COUNTS), (counts) => {
     const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
     return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
@@ -116,9 +117,9 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // The subject has to be a pane that is following the growing edge; a frozen one is a view over
   // data that cannot change, and this test would then be asserting nothing.
   await page.waitFor("the chrome to report a viewport",
-    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+    `!!document.querySelector('.sf-scale')?.dataset.pane`, { timeoutMs: 30000 });
   assert.equal(
-    await page.$count('.hk-surface-viewport[data-viewport="pane"][data-following="true"]'), 1,
+    await page.$count('.sf-scale[data-following="true"]'), 1,
     "no pane is following the live edge, so there is no live view to test");
 
   // Wait for the first fill. THE DEFECT PRODUCES THIS TOO — it is the starting line, not the claim.
@@ -310,7 +311,7 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: inject });
-  const PANE_WINDOW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+  const PANE_WINDOW = `(() => { const v = document.querySelector('.sf-scale');
     return v ? [Number(v.getAttribute('data-t0-ns')), Number(v.getAttribute('data-t1-ns'))] : null; })()`;
   const open = async () => {
     // A cross-document navigation, so the page really loads again: the same URL differing only in
@@ -321,7 +322,7 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
       `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
       { timeoutMs: 60000 });
     await page.waitFor("the chrome to report a viewport",
-      `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+      `!!document.querySelector('.sf-scale')?.dataset.pane`, { timeoutMs: 30000 });
     return page.eval(PANE_WINDOW);
   };
   // 0. **A pane long enough that a refused place is still WANTED when the gate reopens** — the
@@ -382,7 +383,7 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   //    keeps its own level and coarser pins, never finer) — so each one is a new place the pane
   //    must fetch, and one a 502 makes terminal is drawn as a coarse stand-in for good.
   const paneLevel = async () => {
-    const lv = await page.eval(`document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-level')?.textContent ?? ''`);
+    const lv = await page.eval(`document.querySelector('.sf-scale')?.dataset.level ?? ''`);
     const m = /level (\d+)\/(\d+)/.exec(lv);
     return m ? { f: Number(m[1]), t: Number(m[2]) } : { f: NaN, t: NaN };
   };

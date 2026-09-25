@@ -476,7 +476,9 @@ at 1440 px and 340 × 51 at 420 px, after (`ui/e2e/app-status.e2e.mjs`).
 Settled 2026-09-22 (ADR-0023 §7); these were the mockup's two open choices.
 
 - **Bottom sheet, every width.** Three snap states - `peek` (a title strip, ~56 px), `half` (~45 vh),
-  `full` (~90 vh) - draggable by its grab handle and by flick, with keyboard equivalents. It is
+  `full` (~90 vh) - draggable by its grab handle and by flick, with keyboard equivalents. **T-1026: those
+  three are its SIZE; whether it is on screen at all is a fourth thing, and its default is off** (§10.6
+  P1 - the place card opens on a clicked feature or an inventory pill and closes on bare map / × / Esc). It is
   **never modal**: the canvas beneath stays live, pannable and zoomable, and a pointer event that
   starts outside the sheet reaches the canvas. On viewports wider than ~900 px the sheet is
   width-capped (~520 px) and docked bottom-left, so the centre of the surface is never covered. It
@@ -533,7 +535,28 @@ this document, ADR-0023 or the mockup disagrees, these win. An audit on the same
 partly planned; the tickets that close the gaps are named per principle.*
 
 1. **Minimize overlay; expose as much map as possible.** An overlay is temporary: it exists to be
-   **closed**, returning its pixels to the map. Every band-2/3 overlay therefore has a visible
+   **closed**, returning its pixels to the map.
+   **The detail card is HIDDEN until a feature is clicked (T-1026, user 2026-09-25: "the bottom right
+   accordion panel is kind of dumb to show all the time … like on Google Maps how someone clicks
+   something and it opens the detailed view, and if they click on the back of the map it goes away, or
+   if they click on another interest point it changes").** So the bottom sheet's default is not its
+   smallest state — it is *no state*: the first paint of the map has no card on it, nothing opaque
+   spans the bottom edge, and the instruction the peek strip used to print there ("Selected — nothing
+   yet: click a signal or drag a region") is gone with the strip. Openness and size are **separate**:
+   *open* is "on screen at all" and belongs to the current selection (`card.open` in the store, never
+   persisted, `hidden` on the host so it takes no pixels and no hit test); *peek / half / full* is the
+   size, still the per-viewer `localStorage` preference of §10.3. The card opens when a feature is
+   selected — a box, a pin, a generalized symbol, a list row, a marked region — at `half`; **another
+   feature swaps its content** rather than closing and re-opening it; and it closes on a click on
+   **bare map**, on its ×, on `Esc` (the one overlay stack, T-900) and on a downward flick or keyboard
+   shrink past the strip. Closing **clears the selection**, so clicking the same feature re-opens the
+   card; a click on a feature that has no card of its own yet (a measurement box, an annotation) leaves
+   the card exactly as it was rather than dismissing it, and a curated/collection mark still selects its
+   row in the Research slide-in (T-821), which is that mark's own detail surface. The inventory pills
+   (T-997) are the other way in: a pill opens the card **on its list**, inventing no selection. The
+   consequence to keep measured: the closed card releases the strip's worth of lift the map kept clear
+   of it, so the minimap and the surface's bottom-docked rows move back down (`centre/surface.ts`'s
+   `fit` re-runs on `card.open`). Every band-2/3 overlay therefore has a visible
    **dismiss**; §10.2's fade-to-35 % is an idle courtesy for band-2 chrome, **never a substitute for
    closing**. A panel's default state is its smallest: no list keeps a column of the map, and
    expanded it is an overlay with a dismiss — a column that keeps the height it had before the

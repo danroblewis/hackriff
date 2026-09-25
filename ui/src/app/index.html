@@ -60,8 +60,12 @@
     </section>
     <!-- T-803 (MAP-03): the focus panel lives in a non-modal bottom sheet (peek / half / full) that
          floats over the still-live canvas; `chrome/sheet.ts` adds its grab handle and title strip
-         around `.sheet-body` without touching the focus slot inside it. -->
-    <section class="sheet" data-slot="sheet" aria-label="Selected">
+         around `.sheet-body` without touching the focus slot inside it.
+         T-1026: it is the Google-Maps place card — `hidden` until a feature is clicked, so the first
+         paint of the map has no card on it and nothing opaque spans the bottom edge. `hidden` is in
+         the markup as well as in `sheet.ts`'s first `apply()`, so it is not on screen for the frames
+         before the script mounts. -->
+    <section class="sheet" data-slot="sheet" aria-label="Selected" hidden>
       <div class="sheet-body">
         <!-- T-997: the inventory lists and the selections under them live IN the sheet now. The
              T-895 chip that opened them as a left-hand overlay sat at mid-height over each pane's

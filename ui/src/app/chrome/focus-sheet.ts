@@ -5,17 +5,17 @@
 // without overwriting the viewer's stored preference. Clearing the selection leaves the sheet where
 // the viewer put it. Presentation only: it reads the store's `focus`, never the client.
 import type { MountFn } from "../context";
-import type { Focus } from "../explore/slice";
+import { closeCard, type Focus, type InventoryTab } from "../explore/slice";
 import { mountSheet, type SheetController, type SheetSnap } from "./sheet";
 
 // T-997: the one handle other chrome has on this sheet. The inventory pills (`inv-pills.ts`) open
 // the sheet on a list, and the lists live in its body, so they need to raise it — and nothing more.
-// `reveal` never lowers a taller state the viewer chose, so this cannot shrink the sheet either.
+// `show` never lowers a taller state the viewer chose, so this cannot shrink the sheet either.
 let controller: SheetController | null = null;
 
-/** Raise the Selected sheet to at least `snap`. No-op before it mounts. */
+/** Put the card on screen at at least `snap`. No-op before it mounts. */
 export function revealFocusSheet(snap: SheetSnap): void {
-  controller?.reveal(snap);
+  controller?.show(snap);
 }
 
 /** The sheet's persisted-snap key (per viewer; see `sheet.ts`). */
@@ -25,14 +25,21 @@ export const FOCUS_SHEET_KEY = "hk-mui-sheet-selected";
  * clear of. (T-882 retired the surface's toolbar row, `.sf-bar`, which this used to name.) */
 export const FOCUS_SHEET_RESERVED_PX = 170;
 
-/** The peek strip's heading for a focus state — the one line visible while collapsed. T-804: a
- * focused signal whose row is loaded names its served centre, so the collapsed sheet still says
- * *which* signal is selected (the detail sheet's big frequency, in one line). */
-export function focusSheetTitle(f: Focus, centerHz?: number | null): string {
+/**
+ * The card's heading — the one line visible while it is collapsed to its strip. T-804: a focused
+ * signal whose row is loaded names its served centre, so the collapsed card still says *which*
+ * signal is selected (the detail sheet's big frequency, in one line).
+ *
+ * T-1026: with nothing focused the card is only on screen because a pill asked for a list, so the
+ * heading names THAT list. The old wording ("Selected — nothing yet: click a signal or drag a
+ * region") was an instruction printed along the bottom edge of a card that is now simply not there
+ * until something is selected — the bar the user asked to be rid of, and its text with it.
+ */
+export function focusSheetTitle(f: Focus, centerHz?: number | null, tab: InventoryTab = "confirmed"): string {
   switch (f.kind) {
     case "signal": return centerHz != null && Number.isFinite(centerHz) ? `Selected signal · ${(centerHz / 1e6).toFixed(4)} MHz` : "Selected signal";
     case "selection": return "Selected region";
-    default: return "Selected — nothing yet: click a signal or drag a region";
+    default: return tab === "candidate" ? "Candidate signals in view" : "Confirmed signals in view";
   }
 }
 
@@ -80,23 +87,39 @@ export function isPhoneWidth(win: { matchMedia?: (q: string) => { matches: boole
 export const mountFocusSheet: MountFn = (el, ctx) => {
   const sheet = mountSheet(el, {
     storageKey: FOCUS_SHEET_KEY, label: "Selected", reservedPx: FOCUS_SHEET_RESERVED_PX,
+    // T-1026: hidden until something is clicked. The store's `card.open` is the one truth about
+    // that, so the ×, Escape and a flick-to-dismiss report back to it rather than leaving the sheet
+    // off screen with the store still saying a feature is selected.
+    initialOpen: false,
+    onClose: () => ctx.store.set(closeCard()),
     // T-528: nothing may cover a control. Since T-882 the controls float over the canvas, so
     // `full` is bounded by where the floating top chrome actually ends, not by a fixed estimate.
     clearOf: () => floatingChromeBottom(),
   });
   controller = sheet;
   watchToolbar(() => sheet.relayout());
+  // T-1026: the card is on screen exactly while `card.open` — set by selecting a feature (a box, a
+  // pin, a list row) or by an inventory pill, cleared by a click on bare map or by a dismiss.
+  ctx.store.select((s) => s.card.open, (open) => { if (open) sheet.show("half"); else sheet.hide(); }, { immediate: true });
   // The heading follows the focused row's served centre (refined when the server has refined it),
   // which can arrive after the focus does; only a change of focus ever raises the sheet.
+  const retitle = () => {
+    const s = ctx.store.get();
+    const r = s.focus.kind === "signal" ? s.inventory.rows[s.focus.id] : undefined;
+    sheet.title.textContent = focusSheetTitle(s.focus, r ? r.refined?.center_hz ?? r.f_center_hz : null, s.inventory.tab);
+  };
   ctx.store.select((s) => {
     const r = s.focus.kind === "signal" ? s.inventory.rows[s.focus.id] : undefined;
     return (r ? r.refined?.center_hz ?? r.f_center_hz : null) as number | null;
-  }, (hz) => { sheet.title.textContent = focusSheetTitle(ctx.store.get().focus, hz); });
+  }, retitle);
+  // With nothing focused the heading names the list the card was opened on, so it follows the tab.
+  ctx.store.select((s) => s.inventory.tab, retitle);
   ctx.store.select((s) => s.focus, (f, prev) => {
-    const r = f.kind === "signal" ? ctx.store.get().inventory.rows[f.id] : undefined;
-    sheet.title.textContent = focusSheetTitle(f, r ? r.refined?.center_hz ?? r.f_center_hz : null);
+    retitle();
     const changed = prev !== undefined && (f.kind !== prev.kind || (f.kind !== "none" && prev.kind !== "none" && f.id !== prev.id));
-    if (changed && f.kind !== "none") sheet.reveal("half");
+    // A NEW selection raises a card the viewer had left collapsed, so what was just clicked is
+    // visible; `show` opens it if a subscriber ran before `card.open` reached this mount.
+    if (changed && f.kind !== "none") sheet.show("half");
   }, { immediate: true });
   // T-824 (docs/23 §10.3): at phone width Research opening takes the whole height, so the sheet drops
   // to its peek strip rather than sitting half-hidden behind it. Not persisted: it is the layout's
