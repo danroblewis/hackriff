@@ -29029,6 +29029,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Narrow time ruler (<= 40 px) with a 'seconds ago' vs timestamp toggle in the settings menu; same narrow treatment for the frequency ruler
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 14:37).
+      HUD time ruler narrowed to <=40 px (8px type, labels 4px off the edge, ticks 5/3 px, no UTC sub-label); mode toggle 'Time ruler: seconds ago / clock time' in the ⋯ settings menu, persisted per viewer in localStorage key hk-hud-time-labels (try/catch, default relative); absolute mode shows local HH:MM:SS derived from the label's own capture-time ns. Frequency ruler got the same narrow treatment (8px type, 13px above the bottom edge, shorter ticks). New e2e app-ruler.e2e.mjs (1280 and 400 px, following and frozen pane, both modes, width<=40, no overlap with .map-glass chrome, persistence) passes; unit tests added in surface-hud.test.ts; storage key registered in map-overlay-position test. Screenshots in ~/.hackriff-ops/work/T-998/ruler-1280.png and ruler-400.png. No Rust touched so precheck (cargo fmt/clippy) not applicable.
+      Tests: node test/run.mjs (ui, all) -> exit 0 (91/91 files passed); HK_E2E_PORT=9216 node e2e/run.mjs app-ruler -> exit 0 (2 passed)
+      precheck exit 0
+      Commits: 6be9ab92
+      Observed, not chased: e2e without mockDevice never mounted the surface within 240s under load avg ~39 (requests stayed open); unrelated to this change
+      Resources: 1166 CPU-s, peak 2.9 GB — LEAKED 7 processes (killed at reap)
   - id: T-999
     milestone: MMAP
     title: "Past-survey Go-to loses its time jump: the drawer writes reviewAt but no pane moves to it and mirror() overwrites it - move the pane's time + the missing test"
