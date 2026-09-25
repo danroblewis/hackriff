@@ -27154,7 +27154,27 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; app-dismiss + app-surface + app-sheet e2e alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY rc-20260925.
+
+      2026-09-25 coordinator: fixed on task-rcfix-app-dismiss 9cd28e19 (queued) - root cause: map-layout.css padding 56/70 px left from T-801 round 3 after T-882 removed the toolbar it served, plus the surface status rows stacked under the canvas; the canvas was never full-window (T-900 passed its own gate by ~6 px). Now 1440x860 at y=0; status rows float; drawing insets published as data-inset-top/bottom. app-dismiss asserts full-bleed (red on the RC-tip UI). Worker also saw fog-of-war red once alone on the RC-tip UI ('shadow plane carries NO run over band A'), green on the branch - watch for recurrence. Status-box size: T-919.
     branch: task-rcfix-app-dismiss
+  - id: T-919
+    milestone: MMAP
+    title: The floating status box (up to 560x184 px over the map since T-918) should be a compact, closeable status line - honesty statements always visible (P1/P4)
+    status: todo
+    priority: normal
+    deps:
+    - T-918
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-25 by the T-918 worker (task-rcfix-app-dismiss 9cd28e19; handback ~/.hackriff-ops/work/T-918/handback.json): to make the Explore canvas full-bleed (T-801's invariant), the surface's status rows (spectrum-trace readout, IQ ring, fog, priors, per-viewport level, orientation note) moved from grid rows under the canvas into ONE floating box at the bottom-left over the canvas, with the colour-scale/hover readout, above the minimap, never faded. That box can grow to ~560 x 184 px - a large permanent overlay, against the user's P1 (docs/23 §10.6: minimize overlay; overlays are meant to be closed) and P4 (big panels only add/remove things).
+      DELIVER: make the status box small by default and closeable/collapsible per P1 - a compact one-line summary (the level/tier honesty statement stays always visible: honesty statements are never hidden, docs/23 §10.2) expanding on demand, with a visible dismiss; keep every honesty statement legible (tier/level, retention bound, IQ horizon words). Fixed position (P3). Test: collapsed size bound at 1440/420 px, the honesty line always present, expand/collapse and dismiss work, and the canvas stays full-bleed.
+      WHAT THE USER WILL SEE ON STAGING: a small status line at the bottom-left of the map that expands when needed and can be closed, instead of a large box over the waterfall.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched app-*.e2e.mjs alone), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-918 worker 2026-09-25.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
