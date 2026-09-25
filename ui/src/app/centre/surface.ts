@@ -88,6 +88,7 @@ import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { trackOverlay } from "../chrome/dismiss";
+import { PEEK_PX } from "../chrome/sheet";
 import {
   BASE_STYLES, COLLECTION_Z, PLANE_ORDER, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
@@ -1335,7 +1336,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
       const dock = document.querySelector<HTMLElement>(".app > .dock");
       const dr = dock?.getBoundingClientRect();
-      const under = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
+      // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
+      // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
+      // clear the peek strip too, not just the dock.
+      //
+      // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
+      // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
+      // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
+      // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
+      // height transition). Reading the live top/height, as an earlier version of this fix did,
+      // made the minimap — and so every pane, which packs above it — follow the sheet up and down
+      // on every drag and close (review finding on this ticket). The peek clearance itself is a
+      // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
+      // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
+      const sheet = document.querySelector<HTMLElement>(".sheet");
+      const sr = sheet?.getBoundingClientRect();
+      const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - (sr.bottom - PEEK_PX))) : 0;
+      const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
       // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
@@ -1359,6 +1378,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
+    // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
+    // height, see above), so this observer is not about tracking drag/snap changes — it exists so
+    // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
+    // is still picked up once it appears, rather than the minimap staying un-lifted until the next
+    // stage resize.
+    const sheetEl = document.querySelector<HTMLElement>(".sheet");
+    if (sheetEl) ro?.observe(sheetEl);
     window.addEventListener("resize", fit);
     preview.start();
 
