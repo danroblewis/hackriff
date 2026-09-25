@@ -18745,7 +18745,8 @@ tasks:
   - id: T-567
     milestone: MAUTO
     title: "MAUTO: the sealed Resolution - unknown as a durable finding, not-searched as its own state, and the shuffled-null control that caps a manufactured verdict"
-    status: todo
+    status: in-progress
+    branch: task-t567
     priority: high
     parallel_group: W
     model: opus
@@ -26918,7 +26919,8 @@ tasks:
   - id: T-910
     milestone: MMAP
     title: "GIS feature symbolization: signals as (t, f) polygons with class symbology, scale-dependent generalization below ~6 px, hit-test/select on the polygon, labels (re-scope of T-809's pins)"
-    status: todo
+    status: in-progress
+    branch: task-t910
     priority: high
     deps:
     - T-809
