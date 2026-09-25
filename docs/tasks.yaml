@@ -18908,7 +18908,7 @@ tasks:
   - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -18961,6 +18961,7 @@ tasks:
       Observed, not chased: T-575 / the shipped gate: hk-pipeline src/inventory.rs:381 and hk-synth src/engine.rs:339 both still default min_check_width = 8. Per this measurement they should be 16 until the count change of ADR-0022 s4.3.1 lands in CheckTally (hk-blocks src/evidence.rs) and assist::codes. Left unchanged because the ticket is measurement-only and both are core_interface. | hk-blocks CheckTally (src/evidence.rs:~290): is_short_periodic tests the whole frame only. The init-cancel frame for an init-all-ones check (1^w then idle; init||0..||xorout with xorout) passes it and would let a single idle frame confirm at w=32 (2e-2 per decision on the N2 model). Needs the trimmed guard whatever the floor. | assist::codes / search path: zero-padded shifted copies of one no-code burst give a searched generator (any degree-w divisor of the burst) that reaches the gate at 1-15% of beacon windows at every width. The s8.2 null control (time-reversed / phase-randomised) is not expected to cap it - reasoned, not run. Worth an engine-level check in T-576's A2. | Repetition within a frame (payload sent twice) yields a searched check that is a divisor of the real repetition generator 1+x^L: 19-47% of repeat windows at w=8..16. That is real redundancy, not an artefact, but whether it may CONFIRM is an open question for ADR-0022 s4.3 / ADR-0021. | The harness models framings. Whether the engine's framers actually offer shifted copies of one burst (onset jitter, block grid, framing search over offsets) decides how often the s4.3.1 (B) artefact fires in practice; not measured here.
       Use cases: RESEARCH-009, SIGNAL-062
       Resources: 200 CPU-s, peak 0.9 GB
+    commit: 54cf06d6
   - id: T-569
     milestone: MAUTO
     title: "MAUTO: a database suggestion explains a result and never becomes one - explanations[] beside a sealed Resolution, enforced by the crate graph"
