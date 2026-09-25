@@ -12,6 +12,12 @@
 //!   **attaches to that pipeline's `audio` output** instead of building a second DDC. Two browser
 //!   tabs listening to one station must not build two channels — under the pipeline model that
 //!   would also be two rows. This rule is load-bearing, not an optimisation (§12.10 objection 4).
+//!   The match is on the **target** (the same emitter, or a channel containing the chosen
+//!   centre), deliberately **not** on which recipe the chooser picked: what must not exist twice
+//!   is a channel on one station, and §12.7's one-output model wants the listener on the
+//!   pipeline that is already there. While `analog-wfm` is the only audio recipe the two
+//!   readings coincide; when a second one exists, whether a differently-recipe'd pipeline should
+//!   be attached to or replaced is a decision for that ticket, not a silent default.
 //! - **Attaching can never kill a named pipeline.** A listener that leaves stops only an
 //!   [`Owner::Session`] pipeline, and only when it was the last one. Attaching to an
 //!   [`Owner::Explicit`] pipeline (one somebody started with `POST /api/pipelines`) leaves it
@@ -77,6 +83,10 @@ struct Attachment {
 
 impl Drop for Attachment {
     fn drop(&mut self) {
+        // Serialised against [`RecipeRuntime::open_listen_audio`]: the "am I the last one?"
+        // decision and the stop must not race a listener arriving between them, or the new
+        // listener would be handed a stream that ends in its face.
+        let _serial = self.rt.listen_attach();
         let lc = &self.counters.listen;
         let left = self
             .ctl
@@ -137,12 +147,20 @@ impl RecipeRuntime {
         })
     }
 
-    /// Attaches a listener to `ctl`'s `audio` output.
+    /// Attaches a listener to `ctl`'s `audio` output. **Called with [`Self::listen_attach`]
+    /// held**, so no [`Attachment`] is ever constructed — and so no detach can ever run — on a
+    /// path that then fails.
     fn attach(self: &Arc<Self>, ctl: &Arc<PipelineCtl>) -> Result<OpenedStream, NoPipeline> {
         let entry = audio_stream(ctl)
             .ok_or_else(|| NoPipeline::Legacy("the pipeline has no audio output".into()))?;
-        // The count goes up before the running check, so a pipeline that ends here is stopped by
-        // the guard rather than left with a listener nobody counted.
+        // Every check first: a session that is not served counts nothing, so `attached`,
+        // `running` and `detached` stay in balance whatever happens here (a guard built before
+        // the check would count a detach for a session that never attached).
+        if !ctl.running.load(Ordering::SeqCst) {
+            return Err(NoPipeline::Legacy(
+                "the pipeline ended as it started".into(),
+            ));
+        }
         ctl.listeners.fetch_add(1, Ordering::SeqCst);
         let counters = self.counters();
         counters.listen.running.fetch_add(1, Ordering::SeqCst);
@@ -153,11 +171,6 @@ impl RecipeRuntime {
             counters,
             end: end.clone(),
         };
-        if !ctl.running.load(Ordering::SeqCst) {
-            return Err(NoPipeline::Legacy(
-                "the pipeline ended as it started".into(),
-            ));
-        }
         Ok(OpenedStream {
             header: entry.header,
             handle: entry.handle,
@@ -178,6 +191,11 @@ impl RecipeRuntime {
     ) -> Result<OpenedStream, NoPipeline> {
         let (lo, hi) = seed.extent_hz();
         let center = 0.5 * (lo + hi);
+        // Held across "is one already serving this target?" → start → attach. Without it two
+        // openers probing the same station at the same moment both miss and both start a
+        // pipeline — the very duplicate this path exists to prevent — and a pipeline can be
+        // stopped by its last listener leaving between the two steps.
+        let _serial = self.listen_attach();
         if let Some(ctl) = self.audio_pipeline_for(emitter, center) {
             return self.attach(&ctl);
         }
@@ -206,7 +224,8 @@ impl RecipeRuntime {
         match self.attach(&ctl) {
             Ok(s) => Ok(s),
             Err(e) => {
-                // Nothing is listening to a pipeline nobody can reach.
+                // Nothing is listening to a pipeline nobody can reach. `attach` failed before it
+                // built an [`Attachment`], so nothing re-enters the detach path here.
                 let _ = self.stop_json(&id);
                 Err(e)
             }

@@ -573,6 +573,8 @@ pub struct RecipeRuntime {
     pub(crate) capture_replays: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// This runtime: a pipeline's refinement worker applies its results through it (T-870).
     me: Weak<RecipeRuntime>,
+    /// Serialises the `listen` opener's attach and detach decisions ([`Self::listen_attach`]).
+    listen_attach: Mutex<()>,
 }
 
 pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -813,6 +815,7 @@ impl RecipeRuntime {
             pipelines: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
+            listen_attach: Mutex::new(()),
             captures: std::sync::OnceLock::new(),
             capture_replays: std::sync::Arc::default(),
             me: me.clone(),
@@ -1246,6 +1249,14 @@ impl RecipeRuntime {
     /// The run's counters (the `listen` budget an audio pipeline is admitted under).
     pub(crate) fn counters(&self) -> Arc<Counters> {
         Arc::clone(&self.counters)
+    }
+
+    /// Serialises the `listen` opener's attach/detach decisions (T-869,
+    /// [`crate::recipes::session`]): finding-or-starting the audio pipeline for a target, and
+    /// deciding whether the listener that just left was the last one. Held for those two
+    /// sections only.
+    pub(crate) fn listen_attach(&self) -> std::sync::MutexGuard<'_, ()> {
+        lock(&self.listen_attach)
     }
 
     fn found(&self, id: &str) -> Result<Arc<PipelineCtl>, RuntimeError> {

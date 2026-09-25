@@ -265,9 +265,19 @@ pub(crate) type SegmentFn = Arc<dyn Fn() -> Option<Arc<Shared>> + Send + Sync>;
 /// below actually sends a request down the recipe path).
 pub type RecipesFn = Arc<dyn Fn() -> Arc<crate::recipes::runtime::RecipeRuntime> + Send + Sync>;
 
-/// Environment switch of ADR-0015 §12.9 stage 4: `HK_LISTEN_PIPELINE=1` makes `/ws/open/listen`
-/// run the chooser and, when a recipe fits, serve an ephemeral audio pipeline instead of this
-/// chain. Default **off**: unset it and the opener is byte-for-byte today's.
+/// Environment switch of ADR-0015 §12.9 stage 4: `HK_LISTEN_PIPELINE=1` lets the chooser answer
+/// **`recipe`**, so `/ws/open/listen` serves an ephemeral audio pipeline instead of this chain.
+/// Default **off**, and off means no pipeline is ever started: this chain serves every request,
+/// as it does today.
+///
+/// **What the flag does not gate.** The chooser itself
+/// ([`crate::audio::choose`]) runs on every request whatever the flag says, because it is *the*
+/// place a mode is decided and there must not be two of those. Off, it answers only `legacy` or
+/// `refuse` — with one deliberate difference from before this stage, which is a **product
+/// decision, not a side effect of the flag**: the weak-carrier rule (T-869, §12.2's note) means
+/// a narrow selection with measured energy whose mode was not recognised is demodulated as NBFM
+/// with the squelch armed, where it used to be refused `422 no-analog-mode`. A refusal that
+/// nothing measured is still a refusal, in both modes.
 pub const PIPELINE_SWITCH_ENV: &str = "HK_LISTEN_PIPELINE";
 
 /// Whether [`PIPELINE_SWITCH_ENV`] is set to something truthy.

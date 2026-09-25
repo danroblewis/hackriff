@@ -11,8 +11,12 @@
 //!    is served by a pipeline: the stream is `audio/<pipeline>/<output>` and the header carries
 //!    §12.4's additive keys (`pipeline_id`, `recipe`, `output_id`, `edit_rev`).
 //! 2. **The wire contract holds on the pipeline path.** `ri16_le` at 48 kS/s, 960-sample data
-//!    records, `sample_index` advancing one frame per frame and `t` advancing with it, and
-//!    type-3 status records — the LP-1 freeze, met by the other implementation.
+//!    records, a `sample_index` that never goes backwards and advances one frame per published
+//!    record unless the step is **accounted for** — flagged `DISCONTINUITY` (a live-edge seek,
+//!    or a broken input) or behind a drop marker (this consumer was too slow) — with `t` and the
+//!    index agreeing to within a frame inside each contiguous run, and type-3 status records.
+//!    Those are the LP-1 rules that this implementation *does* meet; §5 below says which it does
+//!    not. Gaps are expected on a loaded box and are checked, never tolerated silently.
 //! 3. **The stream says what was measured, not what the recipe declares.** A hand-started
 //!    pipeline reports `mode_rules: recipe-declared` at confidence 0 (it measured nothing); the
 //!    chooser's pipeline reports the probe's own mode, rules version, confidence, SNR and
@@ -27,11 +31,11 @@
 //!
 //! **What stage 4 does not yet deliver** (ADR-0015 §12.9's stage-4 note, measured): on the
 //! recipe path `sample_index` counts the frames the sink published, so a closed squelch is not
-//! the flagged **jump** LP-1 §5 freezes and `sample_index == 960 × (frames + squelched_frames)`
-//! does not hold; and an **attached** listener joins an ongoing stream, so its first record need
-//! not be index 0. This file therefore pins the record contract that does hold — 960-sample
-//! records, `sample_index` advancing one frame per published record, `t` monotone and within a
-//! frame of the index — and the ADR states the rest as stage 5's work.
+//! the flagged **jump** LP-1 §5 freezes, `sample_index == 960 × (frames + squelched_frames)`
+//! does not hold, and a gap after a discontinuity need not be a whole number of frames (the
+//! sink's `audio_out` drops a partial frame). An **attached** listener also joins an ongoing
+//! stream, so its first record need not be index 0. This file therefore pins the record contract
+//! that does hold (2 above), and the ADR states the rest as stage 5's work.
 //!
 //! **Blind.** The station is found by the probe from the user's drag, as in LP-1; nothing here
 //! looks a frequency up, and the recipe is chosen by [`hk_recipe::matching::rank`], whose
@@ -60,7 +64,7 @@ use hk_pipeline::{
     replay_plan,
 };
 use hk_stream::record::parse_status_record;
-use hk_stream::{BinaryRecordHeader, OpenerRegistry};
+use hk_stream::{BinaryRecordHeader, OpenerRegistry, RecordFlags};
 use serde_json::Value;
 use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
@@ -276,16 +280,24 @@ fn close(mut ws: Ws) {
     let _ = ws.read();
 }
 
-/// What a client sees on the wire: data records and status records.
+/// What a client sees on the wire: data records, drop markers and status records.
 #[derive(Default)]
 struct Heard {
     data: u64,
     statuses: u64,
+    /// Drop markers seen since the last data record: the server telling this consumer it missed
+    /// records (a slow reader on a loaded box), so the next index it sees is legitimately ahead.
+    drops_pending: u64,
+    /// Drop markers over the whole read.
+    drops: u64,
+    /// Gaps in `sample_index` (each one flagged, or behind a drop marker).
+    gaps: u64,
     first_index: Option<u64>,
     last_index: u64,
     last_t: f64,
-    /// Capture time of audio sample 0, taken from the first record heard.
-    t0: f64,
+    /// `(sample_index, capture time)` of the first record of the current contiguous run: the
+    /// audio clock's anchor, re-taken after each gap.
+    anchor: Option<(u64, f64)>,
 }
 
 impl Heard {
@@ -313,31 +325,62 @@ impl Heard {
                         "960 mono i16 samples per record"
                     );
                     let t = rh.t.as_unix_nanos() as f64 / 1e9;
-                    if h.first_index.is_none() {
-                        h.first_index = Some(rh.sample_index);
-                        // The audio clock's origin: the capture time of the first frame heard.
-                        h.t0 = t - rh.sample_index as f64 / RATE_HZ;
+                    let flagged = rh.flags.contains(RecordFlags::DISCONTINUITY);
+                    // A step other than one frame is a GAP, and a gap must be accounted for:
+                    // either the producer flagged it (a live-edge seek, or the input broke) or
+                    // the server told this consumer it had dropped records for it. Both happen
+                    // on a loaded box, and both are things the product allows — what must never
+                    // happen is an unexplained jump, or an index going backwards.
+                    let step = if h.first_index.is_some() {
+                        Some(
+                            rh.sample_index
+                                .checked_sub(h.last_index)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "sample_index went backwards: {} < {}",
+                                        rh.sample_index, h.last_index
+                                    )
+                                }),
+                        )
                     } else {
-                        assert_eq!(
-                            rh.sample_index,
-                            h.last_index + FRAME,
-                            "sample_index advances one frame per published record"
+                        None
+                    };
+                    if let Some(step) = step
+                        && step != FRAME
+                    {
+                        assert!(
+                            flagged || h.drops_pending > 0,
+                            "sample_index jumped {} → {} ({step} samples) with no \
+                             DISCONTINUITY flag and no drop marker",
+                            h.last_index,
+                            rh.sample_index
                         );
+                        h.gaps += 1;
+                        h.anchor = None;
                     }
-                    // `t` is capture time and `sample_index` is the audio clock; on the recipe
-                    // path the two agree only to within the sink's own frame bookkeeping (see
-                    // the module docs' "what stage 4 does not yet deliver"), so this bounds the
-                    // skew at a frame rather than pinning it to the nanosecond as LP-1 §3 does
-                    // for the legacy chain.
-                    let want = h.t0 + rh.sample_index as f64 / RATE_HZ;
+                    // `t` is capture time and `sample_index` is the audio clock. Inside a
+                    // contiguous run they must agree to within a frame (on the recipe path they
+                    // agree no better: the sink's index is its own frame count — see the module
+                    // docs' "what stage 4 does not yet deliver"). A gap re-anchors the run
+                    // rather than being smuggled into the comparison.
+                    let (i0, t0) = *h.anchor.get_or_insert((rh.sample_index, t));
+                    let want = t0 + (rh.sample_index - i0) as f64 / RATE_HZ;
                     assert!(
                         (t - want).abs() < FRAME as f64 / RATE_HZ,
-                        "t and sample_index disagree by more than a frame: t {t} vs {want}"
+                        "t and sample_index disagree by more than a frame within one run: \
+                         t {t} vs {want}"
                     );
                     assert!(t >= h.last_t, "capture time went backwards: {t}");
+                    h.first_index.get_or_insert(rh.sample_index);
                     h.last_index = rh.sample_index;
                     h.last_t = t;
+                    h.drops_pending = 0;
                     h.data += 1;
+                }
+                2 => {
+                    // "dropped N": this consumer was too slow (a 0.6 s queue on a loaded box).
+                    h.drops_pending += 1;
+                    h.drops += 1;
                 }
                 3 => {
                     let (_, v) = parse_status_record(&b).expect("status record");
