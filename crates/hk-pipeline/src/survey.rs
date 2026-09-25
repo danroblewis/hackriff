@@ -309,9 +309,14 @@ pub(crate) fn run(shared: Arc<Shared>, survey: Arc<ReceiverSurvey>) -> anyhow::R
                     dropped_before: 0,
                     provenance: &prov,
                 };
-                // The measurement. It runs here, on this thread, holding nothing but the ring
-                // cursor it has already advanced past the samples it copied out — no repository
-                // lock, no chain, nothing the detector or the chains wait on.
+                // The measurement. It runs here, on this thread, holding no repository lock, no
+                // chain and nothing the detector or the chains wait on — but it does still hold
+                // its ring cursor, at the samples it has already copied out, and in **lossless**
+                // mode that cursor stops the capture thread once the writer is a slack (half the
+                // ring) ahead of it. That is the determinism this module promises above, and it is
+                // deliberate; what it is not is a failed source, so nothing waiting for samples
+                // may charge the hold to its own wall clock ([`crate::gate::FlowGate::holding`],
+                // T-929).
                 let t0 = Instant::now();
                 let ran = c14.survey_receiver_lines(info, &window, &survey.cfg);
                 let cost = t0.elapsed();
