@@ -23,7 +23,10 @@
 //!   symbols. The nominal rate is used (drift shows as a slowly moving phase).
 //!
 //! Every decision depends only on the samples seen, never on chunk boundaries, so the output is
-//! identical however the input is split.
+//! identical however the input is split — with one exception: `symbol_rate_candidates_bd`
+//! (T-951) estimates the rate from zero-crossing spacings (the lowest candidate whose symbol
+//! period explains ≥ 85 % of 64 spacings) and applies a changed estimate, restarting timing, at
+//! the next chunk boundary.
 
 use std::f64::consts::PI;
 
@@ -72,9 +75,30 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         "max-contrast" => Algo::MaxContrast,
         _ => Algo::Gardner,
     };
+    // An explicit `symbol_rate_bd` wins over the candidate list (fixed mode): the MAUTO synth
+    // sweeps that key on a template's clock node, and a recipe's candidates must not swallow it.
+    let cands: Vec<f64> = p
+        .get("symbol_rate_candidates_bd")
+        .filter(|_| get_f64(p, "symbol_rate_bd").is_none())
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+        .unwrap_or_default();
+    let rate = if cands.is_empty() {
+        require_f64(p, "symbol_rate_bd")?
+    } else {
+        if pulse == Pulse::Rrc {
+            return Err(BlockError::Params(
+                "clock_recovery: symbol_rate_candidates_bd does not combine with pulse rrc".into(),
+            ));
+        }
+        // Until the estimate lands, the lowest candidate.
+        cands.iter().copied().fold(f64::INFINITY, f64::min)
+    };
     let mut b = Clock {
         params: p.clone(),
-        rate_bd: require_f64(p, "symbol_rate_bd")?,
+        rate_bd: 0.0,
+        cands: Vec::new(),
+        est: RateEst::default(),
         pulse,
         algo,
         magnitude: str_or(p, "soft_from", "in-phase") == "magnitude",
@@ -117,14 +141,37 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         non_finite: 0,
         status: Status::default(),
     };
+    b.rate_bd = rate;
+    b.cands = cands;
+    b.cands.sort_by(f64::total_cmp);
     b.set_loop(f64_or(p, "loop_bandwidth", 0.01));
     b.sized_k1 = b.k1;
     Ok(Box::new(b))
 }
 
+/// Zero-crossing spacing statistics for `symbol_rate_candidates_bd` (T-951).
+#[derive(Default)]
+struct RateEst {
+    last_pos: bool,
+    run: u32,
+    started: bool,
+    /// Spacings (samples) since the last decision.
+    gaps: Vec<u32>,
+}
+
+/// Spacings per decision.
+const EST_GAPS: usize = 64;
+/// A spacing fits a candidate if within this fraction of a symbol of a whole multiple.
+const EST_TOL: f64 = 0.2;
+/// Fraction of spacings that must fit.
+const EST_FIT: f64 = 0.85;
+
 struct Clock {
     params: Params,
     rate_bd: f64,
+    /// Ascending candidate rates (empty = fixed `rate_bd`).
+    cands: Vec<f64>,
+    est: RateEst,
     pulse: Pulse,
     algo: Algo,
     magnitude: bool,
@@ -222,6 +269,52 @@ impl Clock {
             Algo::MaxContrast => WINDOW_SYMBOLS as f64 / (WINDOW_SYMBOLS + 1) as f64,
             _ => (1.0 - self.max_dev - self.k1).max(0.25),
         }
+    }
+
+    /// Feeds `x` to the spacing estimator; returns the new rate when a decision changes it.
+    /// The lowest candidate whose period explains the spacings wins (a 1200 Bd waveform also
+    /// fits 2400 Bd, whose period divides it, so lowest is the right tie-break).
+    fn estimate(&mut self, x: &[f32]) -> Option<f64> {
+        let mut pick = None;
+        for &v in x {
+            if !v.is_finite() {
+                continue;
+            }
+            let pos = v > 0.0;
+            let e = &mut self.est;
+            if !e.started {
+                e.started = true;
+                e.last_pos = pos;
+                e.run = 0;
+            }
+            e.run += 1;
+            if pos != e.last_pos {
+                e.last_pos = pos;
+                let g = e.run;
+                e.run = 0;
+                e.gaps.push(g);
+                if e.gaps.len() >= EST_GAPS {
+                    let n = e.gaps.len() as f64;
+                    let fs = self.fs;
+                    let fit = |rate: f64| {
+                        let sps = fs / rate;
+                        e.gaps
+                            .iter()
+                            .filter(|&&g| {
+                                let k = (f64::from(g) / sps).round();
+                                k >= 1.0 && (f64::from(g) / sps - k).abs() <= EST_TOL
+                            })
+                            .count() as f64
+                            / n
+                    };
+                    if let Some(&r) = self.cands.iter().find(|&&r| fit(r) >= EST_FIT) {
+                        pick = Some(r);
+                    }
+                    self.est.gaps.clear();
+                }
+            }
+        }
+        pick.filter(|&r| (r - self.rate_bd).abs() > 1e-9)
     }
 
     fn integrating(&self) -> bool {
@@ -477,13 +570,18 @@ impl Block for Clock {
     fn init(&mut self, inputs: &[PortInfo]) -> Result<Vec<PortInfo>, BlockError> {
         let input = single_input(inputs, "clock_recovery", &[PortType::Iq, PortType::Real])?;
         self.fs = input.rate_hz;
-        self.sps = self.fs / self.rate_bd;
+        // Candidate mode sizes for the fastest (output bound) and slowest (history) candidate.
+        let top = self.cands.last().copied().unwrap_or(self.rate_bd);
+        let bottom = self.cands.first().copied().unwrap_or(self.rate_bd);
+        self.rate_bd = bottom;
+        self.sps = self.fs / bottom;
+        let fast_sps = self.fs / top;
         let min_sps = if self.pulse == Pulse::Biphase {
             4.0
         } else {
             2.0
         };
-        if self.sps < min_sps {
+        if fast_sps < min_sps {
             return Err(BlockError::Unrealisable(format!(
                 "clock_recovery needs at least {min_sps} samples per symbol"
             )));
@@ -523,19 +621,19 @@ impl Block for Clock {
         // at least the shortest step apart.
         self.sized_k1 = self.k1;
         self.min_step = self.shortest_step();
-        let max_out = ((n + hold + 8) as f64 / (self.sps * self.min_step)).ceil() as usize + 4;
+        let max_out = ((n + hold + 8) as f64 / (fast_sps * self.min_step)).ceil() as usize + 4;
         self.diag = Vec::with_capacity(max_out);
         self.restart(0);
         Ok(vec![
             PortInfo {
                 ty: PortType::Soft,
-                rate_hz: self.rate_bd,
+                rate_hz: top,
                 max_items: max_out,
                 hold_items: hold,
             },
             PortInfo {
                 ty: PortType::Real,
-                rate_hz: self.rate_bd,
+                rate_hz: top,
                 max_items: max_out,
                 hold_items: hold,
             },
@@ -546,6 +644,16 @@ impl Block for Clock {
         let input = io.input(0)?;
         let m = input.meta;
         if restarts(m.flags) {
+            self.restart(m.index);
+        }
+        if !self.cands.is_empty()
+            && let Some(r) = match input.data {
+                PortSlice::Real(x) => self.estimate(x),
+                _ => None,
+            }
+        {
+            self.rate_bd = r;
+            self.sps = self.fs / r;
             self.restart(m.index);
         }
         match input.data {
@@ -605,6 +713,7 @@ impl Block for Clock {
             };
         }
         self.status.extra.set("symbols", self.symbols as f64);
+        self.status.extra.set("symbol_rate_bd", self.rate_bd);
         match self.algo {
             Algo::MaxContrast => {
                 self.status.extra.set("timing_contrast", self.contrast);
@@ -796,6 +905,64 @@ mod tests {
             update(b.as_mut(), mc(0.25), PortType::Real),
             ParamUpdate::Applied
         );
+    }
+
+    /// T-951: `symbol_rate_candidates_bd` picks the rate from the waveform, not the params.
+    #[test]
+    fn candidate_rates_are_estimated_from_zero_crossings() {
+        let fs = 24_000.0;
+        for rate in [512.0, 1_200.0, 2_400.0] {
+            // Alternating preamble then pseudo-random NRZ.
+            let sps = fs / rate;
+            let mut x = Vec::new();
+            let mut lfsr = 0xACE1u16;
+            for k in 0..900 {
+                let bit = if k < 200 {
+                    k % 2 == 0
+                } else {
+                    lfsr = (lfsr >> 1) ^ (if lfsr & 1 == 1 { 0xB400 } else { 0 });
+                    lfsr & 1 == 1
+                };
+                let n = ((k + 1) as f64 * sps).round() as usize - (k as f64 * sps).round() as usize;
+                x.extend(std::iter::repeat_n(if bit { 1.0f32 } else { -1.0 }, n));
+            }
+            let mut b = build(
+                "clock_recovery",
+                json!({"symbol_rate_candidates_bd": [512, 1200, 2400]}),
+                PortType::Real,
+            );
+            run_bounded(b.as_mut(), real_info(fs, 4096), &x, &[1024]);
+            let got = b
+                .status()
+                .extra
+                .iter()
+                .find(|(k, _)| *k == "symbol_rate_bd")
+                .map(|(_, v)| v);
+            assert_eq!(got, Some(rate), "estimated rate for {rate} Bd");
+        }
+    }
+
+    /// T-951 review: a swept/explicit `symbol_rate_bd` disables estimation.
+    #[test]
+    fn an_explicit_rate_overrides_the_candidate_list() {
+        let fs = 24_000.0;
+        // A 2400 Bd waveform: the estimator would say 2400; the fixed 512 must stand.
+        let x: Vec<f32> = (0..20_000)
+            .map(|i| if (i / 10) % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let mut b = build(
+            "clock_recovery",
+            json!({"symbol_rate_candidates_bd": [512, 1200, 2400], "symbol_rate_bd": 512}),
+            PortType::Real,
+        );
+        run_bounded(b.as_mut(), real_info(fs, 4096), &x, &[1024]);
+        let got = b
+            .status()
+            .extra
+            .iter()
+            .find(|(k, _)| *k == "symbol_rate_bd")
+            .map(|(_, v)| v);
+        assert_eq!(got, Some(512.0));
     }
 
     #[test]

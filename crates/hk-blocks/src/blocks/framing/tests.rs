@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 use hk_demod::rds::block::{Offset, encode_block};
 use hk_estimate::framing::CATALOGUE;
 use hk_model::CrcStatus;
-use hk_recipe::{Params, PortType};
+use hk_recipe::{FieldMap, Params, PortType, Recipe};
 use serde_json::{Value, json};
 
-use super::common::testutil::{Owned, bits_of, build, bytes_bits, noise, run_bits, run_frames};
+use super::common::testutil::{
+    Owned, bits_of, build, bytes_bits, noise, run_bits, run_bits_to_bits, run_frames,
+};
 use crate::block::ParamUpdate;
 use crate::blocks::fec::tests::pocsag_word;
 use crate::registry::BuildCtx;
@@ -27,6 +29,18 @@ fn recipe_node(recipe: &str, id: &str) -> Value {
         .iter()
         .find(|n| n["id"] == id)
         .unwrap_or_else(|| panic!("{recipe}.{id}"))["params"]
+        .clone()
+}
+
+fn recipe_field_map(recipe: &str, map: &str) -> FieldMap {
+    let path = format!(
+        "{}/../../recipes/{recipe}.recipe.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let r: Recipe = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    r.field_maps
+        .get(map)
+        .unwrap_or_else(|| panic!("{recipe}.field_maps.{map}"))
         .clone()
 }
 
@@ -509,6 +523,167 @@ fn interleavers_permute_and_invert() {
             truth.bits
         );
     }
+}
+
+// ---- APRS / AX.25 (T-952): destuff over the whole line BEFORE framing, flag .. flag,
+// ---- CRC-16/X-25 FCS, blind field extraction (no frequency, no lookup) ----
+
+fn ax25_callsign_octets(call: &str, ssid: u8, last: bool) -> Vec<u8> {
+    let mut call6: Vec<u8> = call.bytes().collect();
+    call6.resize(6, b' ');
+    let mut out: Vec<u8> = call6.iter().map(|&c| (c & 0x7F) << 1).collect();
+    out.push(0x60 | ((ssid & 0x0F) << 1) | u8::from(last));
+    out
+}
+
+/// HDLC zero-bit stuffing (the transmit direction `bitstuff` inverts): a 0 inserted after every
+/// run of five consecutive 1 bits.
+fn ax25_bit_stuff(bits: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut ones = 0u32;
+    for &b in bits {
+        out.push(b);
+        if b == 1 {
+            ones += 1;
+            if ones == 5 {
+                out.push(0);
+                ones = 0;
+            }
+        } else {
+            ones = 0;
+        }
+    }
+    out
+}
+
+/// AX.25's wire order: every octet, including the flag, least-significant-bit first.
+fn lsb_first_bits(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .flat_map(|&b| (0..8).map(move |k| (b >> k) & 1))
+        .collect()
+}
+
+/// The bug T-952 found and fixed: `bitstuff` must destuff the *whole continuous line* before
+/// `sync_search` cuts a frame, not the other way around. Flags pass through unstuffed (T-613),
+/// so a stuffed zero anywhere in the frame body shifts every later octet's alignment; destuffing
+/// after framing (bitstuff in `frames` mode on `sync_search`'s output) would feed `sync_search`'s
+/// `bit_order: lsb` a still-stuffed span and reverse the wrong 8-bit groups. Destuffing the line
+/// first means every downstream octet boundary is already correct by the time framing runs.
+///
+/// `sync_search`'s terminator match keeps the closing flag *in* the frame (as ACARS's ETX/ETB
+/// stays in its frame), so `crc`'s `span.end_trim_bits: 8` locates the FCS eight bits before the
+/// frame end and `strip` removes only the FCS — the flag stays attached as `info`'s last byte,
+/// which a consumer trims (as ACARS's own test trims ETX/ETB).
+///
+/// A one-bit corruption inside the info field must NOT validate (the negative half of "FCS-valid
+/// frames decode").
+#[test]
+fn known_aprs_ui_frame_destuffs_frames_and_fcs_validates_blind() {
+    let info_text = "!4903.50N/07201.75W-HACKRIFF T952 TEST";
+    let mut content = ax25_callsign_octets("APRS", 0, false);
+    content.extend(ax25_callsign_octets("N0CALL", 9, true));
+    content.push(0x03); // UI
+    content.push(0xF0); // no layer 3
+    content.extend_from_slice(info_text.as_bytes());
+
+    let x25 = CATALOGUE
+        .iter()
+        .find(|e| e.name == "CRC-16/IBM-SDLC") // alias CRC-16/X-25, the AX.25 FCS
+        .unwrap()
+        .params;
+    let fcs = x25.compute(&content) as u16;
+    let mut tx = content.clone();
+    tx.extend(fcs.to_le_bytes());
+    let mut tx_with_flag = tx.clone();
+    tx_with_flag.push(0x7E); // the closing flag, kept in the frame by sync_search's terminator
+
+    let stuffed = ax25_bit_stuff(&lsb_first_bits(&tx));
+    let flag = bits_of(0x7E, 8);
+    let mut stream = flag.clone(); // opening flag
+    stream.extend(&stuffed);
+    stream.extend(&flag); // closing flag
+    stream.extend(&flag); // trailing flag, as a real transmitter would send
+
+    let destuff_params = recipe_node("aprs", "destuff");
+    let mut once = build("bitstuff", destuff_params.clone(), PortType::Bits);
+    let destuffed = run_bits_to_bits(once.as_mut(), &stream, stream.len());
+    for chunk in [1, 7, 64] {
+        let mut d = build("bitstuff", destuff_params.clone(), PortType::Bits);
+        assert_eq!(
+            run_bits_to_bits(d.as_mut(), &stream, chunk),
+            destuffed,
+            "chunk {chunk}"
+        );
+    }
+
+    let mut sync = build("sync_search", recipe_node("aprs", "sync"), PortType::Bits);
+    let frames = run_bits(sync.as_mut(), &destuffed, 17, false);
+    assert_eq!(frames.len(), 1, "one HDLC frame between flags");
+    assert_eq!(
+        frames[0].bits,
+        bytes_bits(&tx_with_flag),
+        "octets reversed to natural order (bit_order: lsb) on an already-destuffed line"
+    );
+
+    let mut bad = frames[0].clone();
+    bad.bits[8 * 20 + 2] ^= 1; // inside the info field
+    let mut crc = build("crc", recipe_node("aprs", "crc"), PortType::Frames);
+    // The recipe's crc.drop_invalid is true (the flag is only 8 bits and chance-matches noise
+    // often, unlike ACARS's 40-bit sync word), so the corrupted frame never reaches the output at
+    // all — the negative half of "FCS-valid frames decode" is proved by its absence.
+    let out = run_frames(crc.as_mut(), &[frames[0].clone(), bad], 2, false);
+    assert_eq!(
+        out.len(),
+        1,
+        "a corrupted frame must not validate (dropped, not just marked)"
+    );
+    assert_eq!(out[0].info.check, CrcStatus::Valid);
+    let mut content_with_flag = content.clone();
+    content_with_flag.push(0x7E);
+    assert_eq!(
+        out[0].bits,
+        bytes_bits(&content_with_flag),
+        "FCS stripped, closing flag kept (span.end_trim_bits skips it for the check only)"
+    );
+
+    // Blind field extraction (no frequency, no lookup): the recipe's own field map over the
+    // FCS-checked, flag-still-attached content, exactly as the pipeline's `frame` node sees it.
+    let map = recipe_field_map("aprs", "ax25_frame");
+    let tree = map
+        .evaluate(&content_with_flag, content_with_flag.len() as u32 * 8)
+        .unwrap();
+    // 56-bit values exceed the JSON-safe integer range, so `uint` renders them as a decimal
+    // string (`hk_recipe::fields::eval`'s `JSON_SAFE` cutoff), not a JSON number.
+    let value_u64 = |path: &str| {
+        let v = tree.node(path).unwrap().value.as_ref().unwrap();
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or_else(|| panic!("{path}: not a uint: {v:?}"))
+    };
+    let dest_expect = ax25_callsign_octets("APRS", 0, false)
+        .iter()
+        .fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+    let src_expect = ax25_callsign_octets("N0CALL", 9, true)
+        .iter()
+        .fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+    assert_eq!(value_u64("destination"), dest_expect);
+    assert_eq!(value_u64("source"), src_expect);
+    assert_eq!(value_u64("control"), 0x03);
+    assert_eq!(value_u64("pid"), 0xF0);
+    let info = tree
+        .node("info")
+        .unwrap()
+        .value
+        .as_ref()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        info.trim_end_matches('\u{7e}'),
+        info_text,
+        "info, closing flag byte trimmed"
+    );
 }
 
 /// T-552 (ADR-0015 §3.3 measurement): S4 `sync_search` release timing over a long noise bit

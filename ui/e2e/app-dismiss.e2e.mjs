@@ -22,8 +22,8 @@ const pressable = (sel) => `(() => { const e = document.querySelector(${JSON.str
 const OVERLAYS = [
   { name: "the bottom sheet", open: ".sheet-head", close: ".sheet-close", box: ".sheet",
     isOpen: "document.querySelector('.sheet').dataset.snap !== 'peek'" },
-  { name: "the left column", open: ".side-chip", close: ".side-close", box: "#view-explore > .side",
-    isOpen: "document.querySelector('#view-explore > .side').classList.contains('is-open')" },
+  // T-997: the left inventory column and its chip are retired — the lists are sheet content now, so
+  // the sheet's own close is their dismiss (the entry above), and there is no second overlay here.
   { name: "the layers menu", open: ".map-layers-btn", close: ".map-layers .map-layers-close", box: ".map-layers",
     isOpen: "!document.querySelector('.map-layers').hidden" },
   // The viewport menu and the layers menu replace each other (one menu at a time), so it is checked
@@ -46,10 +46,10 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   t.after(() => browser.close());
   const page = await browser.page(undefined, { width, height: 860 });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  await page.waitFor("the surface, its floating controls, the sheet and the side chip",
+  await page.waitFor("the surface, its floating controls, the sheet and the inventory pills",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-layers-btn') && !!document.querySelector('.sheet-close') &&
-     !!document.querySelector('.side-chip')`, { timeoutMs: 60000 });
+     !!document.querySelector('.map-inv .map-pill')`, { timeoutMs: 60000 });
   // Every overlay starts closed (a stored snap state from nothing: fresh profile).
   if (await page.eval(OVERLAYS[0].isOpen)) {
     await page.click("document.querySelector('.sheet-close')");
@@ -126,7 +126,7 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     // Nothing of the closed overlay is left over the map: a point inside where it was is not it.
     const cx = box.x + box.w / 2, cy = (y0 + y1) / 2;
     assert.equal(await page.eval(`(() => { const e = document.elementFromPoint(${cx}, ${cy});
-      return !!e?.closest(${JSON.stringify(o.box)}) && !e.closest('.side-chip'); })()`), false, `${o.name} still covers the map after its close`);
+      return !!e?.closest(${JSON.stringify(o.box)}); })()`), false, `${o.name} still covers the map after its close`);
     // ...and closed is exactly the state before it opened: re-open, close again, same columns clear.
     await page.click(`document.querySelector(${JSON.stringify(o.open)})`);
     await page.waitFor(`${o.name} to re-open`, o.isOpen, { timeoutMs: 5000 });

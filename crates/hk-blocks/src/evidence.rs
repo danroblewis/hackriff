@@ -287,31 +287,49 @@ pub(crate) const MAX_COUNTED_FRAMES: usize = 64;
 
 const POLY_WORDS: usize = 64;
 
-/// A frame as a GF(2) vector: bit `j` of the vector is the frame's bit `j`.
+/// A frame as a GF(2) vector: bit `j` of the vector is the frame's bit `j`. Only the scratch
+/// value `record` builds is ever this wide; what the tally **keeps** is `words_for(len)` words
+/// in its [`Arena`].
 type Vector = [u64; POLY_WORDS];
+
+/// Frame length (bits) up to which the tally keeps its full [`MAX_COUNTED_FRAMES`] entries:
+/// every framing the catalogue carries is shorter (ADS-B 112, RDS 104, AIS 168, an ACARS
+/// block). Longer frames fill the arena sooner and are counted until it is full — fewer bits,
+/// never more, the same direction as [`MAX_COUNTED_FRAMES`] itself.
+const TALLY_FULL_FRAME_BITS: usize = 512;
+
+/// Words of GF(2) storage one tally holds: two vectors per counted frame (its zero-trimmed
+/// core, and its affine origin or basis vector) at [`TALLY_FULL_FRAME_BITS`]. **8 KiB**, fixed
+/// at construction and never grown, against the 100 352 bytes of `3 × 64` inline [`Vector`]s
+/// this replaced — paid by every crc/bch/checksum/parity instance, live recipes included
+/// (T-928; T-453: measure, don't assume).
+const TALLY_ARENA_WORDS: usize = 2 * MAX_COUNTED_FRAMES * (TALLY_FULL_FRAME_BITS / 64);
 
 fn words_for(bits: usize) -> usize {
     bits.div_ceil(64).max(1)
 }
 
-fn get(v: &Vector, i: usize) -> bool {
+fn get(v: &[u64], i: usize) -> bool {
     v[i / 64] >> (i % 64) & 1 == 1
 }
 
-fn highest(v: &Vector, words: usize) -> Option<usize> {
-    (0..words)
+/// Highest set bit within the first `words` words; a `v` shorter than `words` reads as zero
+/// beyond its end (a stored vector carries only the words its length needs).
+fn highest(v: &[u64], words: usize) -> Option<usize> {
+    (0..words.min(v.len()))
         .rev()
         .find(|&w| v[w] != 0)
         .map(|w| w * 64 + 63 - v[w].leading_zeros() as usize)
 }
 
-/// `acc ^= p · x^shift` over the first `words` words.
-fn xor_shifted(acc: &mut Vector, p: &Vector, shift: usize, words: usize) {
+/// `acc ^= p · x^shift` over the first `words` words; `p` reads as zero beyond its end.
+fn xor_shifted(acc: &mut [u64], p: &[u64], shift: usize, words: usize) {
     let (ws, bs) = (shift / 64, shift % 64);
+    let word = |i: usize| p.get(i).copied().unwrap_or(0);
     for i in (ws..words).rev() {
-        let lo = p[i - ws] << bs;
+        let lo = word(i - ws) << bs;
         let hi = if bs != 0 && i > ws {
-            p[i - ws - 1] >> (64 - bs)
+            word(i - ws - 1) >> (64 - bs)
         } else {
             0
         };
@@ -319,64 +337,104 @@ fn xor_shifted(acc: &mut Vector, p: &Vector, shift: usize, words: usize) {
     }
 }
 
+/// The tally's GF(2) storage: one fixed [`TALLY_ARENA_WORDS`]-word allocation, handed out in
+/// `words_for(len)`-word vectors and rewound whole by [`CheckTally::clear`]. A full arena stops
+/// the tally counting, exactly as [`MAX_COUNTED_FRAMES`] does, so nothing here can allocate on
+/// the record path or grow with the frames seen.
+struct Arena {
+    words: Box<[u64]>,
+    used: usize,
+}
+
+impl Arena {
+    fn new() -> Self {
+        Self {
+            words: vec![0; TALLY_ARENA_WORDS].into_boxed_slice(),
+            used: 0,
+        }
+    }
+
+    /// Stores the first `words` words of `v`, returning their place, or `None` when full.
+    fn push(&mut self, v: &[u64], words: usize) -> Option<usize> {
+        let at = self.used;
+        let end = at + words;
+        if end > self.words.len() {
+            return None;
+        }
+        self.words[at..end].copy_from_slice(&v[..words]);
+        self.used = end;
+        Some(at)
+    }
+
+    fn get(&self, at: usize, words: usize) -> &[u64] {
+        &self.words[at..at + words]
+    }
+}
+
 /// One counted frame's **zero-trimmed polynomial** (its core, leading and trailing zeros
 /// removed), coefficient `i` = the core's bit `i`: the reciprocal of the transmitted-order
 /// polynomial, which preserves divisibility between polynomials with a nonzero constant term.
+/// The coefficients live at `at` in the [`Arena`], over [`Core::words`] words.
 #[derive(Clone, Copy)]
 struct Core {
-    coef: Vector,
+    at: usize,
     deg: usize,
 }
 
 impl Core {
-    fn of(v: &Vector, len: usize) -> Option<Self> {
-        let words = words_for(len);
-        let top = highest(v, words)?;
-        let low = (0..=top).find(|&i| get(v, i))?;
-        let mut coef = [0u64; POLY_WORDS];
-        for i in low..=top {
-            if get(v, i) {
-                let j = i - low;
-                coef[j / 64] |= 1 << (j % 64);
-            }
-        }
-        Some(Self {
-            coef,
-            deg: top - low,
-        })
-    }
-
-    /// Whether `self` divides `q` over GF(2).
-    fn divides(&self, q: &Self) -> bool {
-        if q.deg < self.deg {
-            return false;
-        }
-        let words = words_for(q.deg + 1);
-        let mut r = q.coef;
-        while let Some(d) = highest(&r, words) {
-            if d < self.deg {
-                return false;
-            }
-            xor_shifted(&mut r, &self.coef, d - self.deg, words);
-        }
-        true
+    fn words(&self) -> usize {
+        words_for(self.deg + 1)
     }
 }
 
+/// The zero-trimmed core of the `len`-bit frame `v`, written into `out`, and its degree; `None`
+/// when `v` is zero.
+fn core_of(v: &[u64], len: usize, out: &mut Vector) -> Option<usize> {
+    let words = words_for(len);
+    let top = highest(v, words)?;
+    let low = (0..=top).find(|&i| get(v, i))?;
+    out.fill(0);
+    for i in low..=top {
+        if get(v, i) {
+            let j = i - low;
+            out[j / 64] |= 1 << (j % 64);
+        }
+    }
+    Some(top - low)
+}
+
+/// Whether the core `p` (degree `pdeg`) divides the core `q` (degree `qdeg`) over GF(2).
+fn divides(p: &[u64], pdeg: usize, q: &[u64], qdeg: usize) -> bool {
+    if qdeg < pdeg {
+        return false;
+    }
+    let words = words_for(qdeg + 1);
+    let mut r = [0u64; POLY_WORDS];
+    r[..words].copy_from_slice(&q[..words]);
+    while let Some(d) = highest(&r, words) {
+        if d < pdeg {
+            return false;
+        }
+        xor_shifted(&mut r, p, d - pdeg, words);
+    }
+    true
+}
+
 /// One basis vector of the affine span of the counted frames of one length (echelon form: its
-/// highest set bit is its pivot, unique within the length).
+/// highest set bit is its pivot, unique within the length), at `at` in the [`Arena`] over
+/// `words_for(len)` words.
 #[derive(Clone, Copy)]
 struct Basis {
     len: usize,
     pivot: usize,
-    v: Vector,
+    at: usize,
 }
 
 /// The first frame of each length: the affine origin its span is measured from.
 #[derive(Clone, Copy)]
 struct Origin {
     len: usize,
-    v: Vector,
+    at: usize,
 }
 
 /// ADR-0022 §4.3.1's degenerate-frame guard: short-periodic as a whole, **or** with up to `w`
@@ -384,6 +442,10 @@ struct Origin {
 /// satisfied by `1^w ‖ 0…0` (the first `w` bits cancel the register, the rest is idle fill), and
 /// with xorout ≠ 0 by `init ‖ 0…0 ‖ xorout`: neither is periodic as a whole, so the whole-frame
 /// guard let one idle frame confirm at width 32 (T-577's hole A).
+///
+/// `bits` is the span the check **covers**, not the frame it was cut from (T-928): with
+/// `span.start_bit > 0` the cancelling `1^w` starts at `start_bit`, so trimming the ends of the
+/// whole frame leaves the idle fill mixed with uncovered bits and misses the same frame.
 pub(crate) fn degenerate_frame(bits: &[u8], w: usize) -> bool {
     let n = bits.len();
     let w = w.min(n);
@@ -408,11 +470,14 @@ pub(crate) fn degenerate_frame(bits: &[u8], w: usize) -> bool {
 /// - The chance per unit is `2^−width`, `width` the **smallest** check width among the units
 ///   tested (a frame-length-dependent check is scored at its weakest).
 ///
-/// Storage is allocated once, at construction; `record` and `evidence` never allocate.
-#[derive(Clone)]
+/// Storage is allocated once, at construction — one 8 KiB [`Arena`] plus the three entry
+/// indices, **11 776 bytes measured** in all (T-928, from 100 352); `record` and `evidence`
+/// never allocate.
 pub(crate) struct CheckTally {
     tested: u64,
     min_width: Option<f64>,
+    /// The counted cores, the per-length affine origins and the basis vectors.
+    arena: Arena,
     counted: Vec<Core>,
     origins: Vec<Origin>,
     basis: Vec<Basis>,
@@ -425,6 +490,7 @@ impl Default for CheckTally {
         Self {
             tested: 0,
             min_width: None,
+            arena: Arena::new(),
             counted: Vec::with_capacity(MAX_COUNTED_FRAMES),
             origins: Vec::with_capacity(MAX_COUNTED_FRAMES),
             basis: Vec::with_capacity(MAX_COUNTED_FRAMES),
@@ -444,12 +510,17 @@ impl std::fmt::Debug for CheckTally {
 }
 
 impl CheckTally {
-    /// Records one checked unit. `register_bits` is the check register's width `w` (the trim of
-    /// the degenerate guard); `width_bits` is the chance width (it may be fractional, e.g. a
-    /// block of offset words charges `log₂` of the alternatives).
+    /// Records one checked unit. `covered` is the unit's bits **as the check covers them** —
+    /// `frame[span.start_bit .. frame_len − end_trim_bits]`, one BCH word, the parity units —
+    /// never the whole frame a span was cut from: everything here (the degenerate guard, the
+    /// polynomial, the affine span) is a statement about the bits the check actually read, and a
+    /// caller passing the whole frame both misses hole A and counts frames that differ only
+    /// outside the span as independent trials (T-928). `register_bits` is the check register's
+    /// width `w` (the trim of the degenerate guard); `width_bits` is the chance width (it may be
+    /// fractional, e.g. a block of offset words charges `log₂` of the alternatives).
     pub(crate) fn record(
         &mut self,
-        bits: &[u8],
+        covered: &[u8],
         clean_valid: bool,
         width_bits: f64,
         register_bits: usize,
@@ -459,51 +530,59 @@ impl CheckTally {
             self.min_width = Some(self.min_width.map_or(width_bits, |w| w.min(width_bits)));
         }
         if !clean_valid
-            || bits.len() > MAX_TALLY_FRAME_BITS
-            || degenerate_frame(bits, register_bits)
+            || covered.len() > MAX_TALLY_FRAME_BITS
+            || degenerate_frame(covered, register_bits)
         {
             return;
         }
-        let len = bits.len();
+        let len = covered.len();
         let mut v = [0u64; POLY_WORDS];
-        for (j, &b) in bits.iter().enumerate() {
+        for (j, &b) in covered.iter().enumerate() {
             if b & 1 == 1 {
                 v[j / 64] |= 1 << (j % 64);
             }
         }
-        let Some(core) = Core::of(&v, len) else {
+        let mut coef = [0u64; POLY_WORDS];
+        let Some(deg) = core_of(&v, len, &mut coef) else {
             return;
         };
+        let words = words_for(deg + 1);
         if self.counted.len() == MAX_COUNTED_FRAMES
-            || self
-                .counted
-                .iter()
-                .any(|c| c.divides(&core) || core.divides(c))
+            || self.counted.iter().any(|c| {
+                let stored = self.arena.get(c.at, c.words());
+                divides(stored, c.deg, &coef[..words], deg)
+                    || divides(&coef[..words], deg, stored, c.deg)
+            })
         {
             return;
         }
-        self.counted.push(core);
-        self.affine_insert(v, len);
+        let Some(at) = self.arena.push(&coef, words) else {
+            return; // storage full: nothing more is counted — fewer bits, never more
+        };
+        self.counted.push(Core { at, deg });
+        self.affine_insert(&v, len);
     }
 
     /// Adds `v` to its length's affine span; counts it when it widens the span.
-    fn affine_insert(&mut self, v: Vector, len: usize) {
+    fn affine_insert(&mut self, v: &Vector, len: usize) {
         let words = words_for(len);
-        let Some(origin) = self.origins.iter().find(|o| o.len == len) else {
-            if self.origins.len() < MAX_COUNTED_FRAMES {
-                self.origins.push(Origin { len, v });
+        let Some(origin) = self.origins.iter().find(|o| o.len == len).copied() else {
+            if self.origins.len() < MAX_COUNTED_FRAMES
+                && let Some(at) = self.arena.push(v, words)
+            {
+                self.origins.push(Origin { len, at });
                 self.affine += 1;
             }
             return;
         };
-        let mut d = v;
-        for (a, b) in d.iter_mut().zip(origin.v.iter()).take(words) {
+        let mut d = *v;
+        for (a, b) in d.iter_mut().zip(self.arena.get(origin.at, words)) {
             *a ^= b;
         }
         // Reduce by this length's basis, highest pivot first (the vector is kept sorted so).
         for b in self.basis.iter().filter(|b| b.len == len) {
             if get(&d, b.pivot) {
-                for (a, x) in d.iter_mut().zip(b.v.iter()).take(words) {
+                for (a, x) in d.iter_mut().zip(self.arena.get(b.at, words)) {
                     *a ^= x;
                 }
             }
@@ -514,12 +593,22 @@ impl CheckTally {
         if self.basis.len() == MAX_COUNTED_FRAMES {
             return;
         }
+        let Some(stored) = self.arena.push(&d, words) else {
+            return; // storage full, as above
+        };
         let at = self
             .basis
             .iter()
             .position(|b| b.pivot < pivot)
             .unwrap_or(self.basis.len());
-        self.basis.insert(at, Basis { len, pivot, v: d });
+        self.basis.insert(
+            at,
+            Basis {
+                len,
+                pivot,
+                at: stored,
+            },
+        );
         self.affine += 1;
     }
 
@@ -533,10 +622,21 @@ impl CheckTally {
     pub(crate) fn clear(&mut self) {
         self.tested = 0;
         self.min_width = None;
+        self.arena.used = 0;
         self.counted.clear();
         self.origins.clear();
         self.basis.clear();
         self.affine = 0;
+    }
+
+    /// Bytes of heap this tally holds: the fixed arena plus the three entry indices. Every
+    /// crc/bch/checksum/parity instance pays it for as long as it lives (T-928).
+    #[cfg(test)]
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.arena.words.len() * size_of::<u64>()
+            + self.counted.capacity() * size_of::<Core>()
+            + self.origins.capacity() * size_of::<Origin>()
+            + self.basis.capacity() * size_of::<Basis>()
     }
 
     /// Emits `check_distinct_valid` at S5 when anything was tested.
@@ -733,6 +833,48 @@ mod tests {
         let mut set = EvidenceSet::new();
         t.evidence(&mut set);
         assert!(set.is_empty());
+    }
+
+    /// T-928 (T-575's review): every crc/bch/checksum/parity instance holds a `CheckTally`, and
+    /// each used to carry `3 × 64` inline 4096-bit vectors — **100 352 bytes measured** (98 KiB:
+    /// `Core` 520 + `Origin` 520 + `Basis` 528, times 64), whatever length the frames were, for
+    /// every block of every live recipe and every searched candidate. The vectors now live in
+    /// one fixed 8 KiB arena sized from `TALLY_FULL_FRAME_BITS`, still allocated once at
+    /// construction so `record` stays allocation-free (ADR-0011 §1.4 rule 1).
+    #[test]
+    fn the_tally_holds_one_small_fixed_allocation() {
+        let mut t = CheckTally::default();
+        let bytes = t.reserved_bytes();
+        eprintln!("[T-928] CheckTally residency {bytes} bytes (was 100352)");
+        assert!(bytes <= 16 * 1024, "{bytes} bytes");
+        // Filling it to the entry cap adds nothing: the storage is fixed at construction.
+        for seed in 0..(MAX_COUNTED_FRAMES as u64 * 2) {
+            t.record(&lcg_bits(128, seed), true, 16.0, 16);
+        }
+        assert_eq!(t.independent(), MAX_COUNTED_FRAMES as u64);
+        assert_eq!(t.reserved_bytes(), bytes, "record never allocates");
+        t.clear();
+        assert_eq!(t.reserved_bytes(), bytes, "clear keeps the storage");
+        t.record(&lcg_bits(128, 999), true, 16.0, 16);
+        assert_eq!(t.independent(), 1, "and the arena is reusable");
+    }
+
+    /// The arena, not the entry cap, bounds the longest frames the tally analyses (4096 bits):
+    /// it counts what fits and then stops — fewer bits, never more, and never a panic.
+    #[test]
+    fn the_longest_frames_are_counted_until_the_storage_is_full() {
+        let mut t = CheckTally::default();
+        for seed in 0..40u64 {
+            t.record(&lcg_bits(MAX_TALLY_FRAME_BITS, 300 + seed), true, 32.0, 32);
+        }
+        let d = t.independent();
+        eprintln!("[T-928] {d} of 40 frames of {MAX_TALLY_FRAME_BITS} bits counted");
+        assert!((4..MAX_COUNTED_FRAMES as u64).contains(&d), "{d}");
+        let mut set = EvidenceSet::new();
+        t.evidence(&mut set);
+        let e = *set.iter().next().unwrap();
+        assert_eq!(e.raw, d as f32);
+        assert_eq!(e.n, 40);
     }
 
     #[test]

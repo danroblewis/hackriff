@@ -535,11 +535,21 @@ partly planned; the tickets that close the gaps are named per principle.*
 1. **Minimize overlay; expose as much map as possible.** An overlay is temporary: it exists to be
    **closed**, returning its pixels to the map. Every band-2/3 overlay therefore has a visible
    **dismiss**; §10.2's fade-to-35 % is an idle courtesy for band-2 chrome, **never a substitute for
-   closing**. A panel's default state is its smallest: the left inventory column collapses to a chip or
-   a peek strip no taller than 56 px on every width, and expanded it is an overlay with a dismiss —
-   a column that keeps the height it had before the redesign is not minimal. (Left column: the
-   collapse ticket; closeability across the sheet, the Research slide-in and the left column: the
+   closing**. A panel's default state is its smallest: no list keeps a column of the map, and
+   expanded it is an overlay with a dismiss — a column that keeps the height it had before the
+   redesign is not minimal. (Closeability across the sheet and the Research slide-in: the
    closeable-overlays ticket, amending T-824.)
+   **T-997 (user, 2026-09-25) finished this for the inventory.** T-895's answer was a chip at the
+   LEFT EDGE, MID-HEIGHT — a hamburger plus "1 cand, 1 conf" — which the user rejected: "I don't like
+   where this is placed, in the vertical center, it overlaps the timeline markers and isn't very
+   useful." Two lessons, both general: a floating puck at mid-height belongs to no cluster, and the
+   left edge at mid-height is **the time ruler's own column** (the HUD axes print the time labels
+   there). The counts are now two small pills docked in the chrome cluster **under Go-to**, each
+   opening the bottom sheet **on its list**, and the lists themselves are a section of that sheet —
+   so the map's left edge carries nothing but its ruler, and the one panel over the canvas is the
+   sheet. The HUD enforces the other half: a time label that would print into the top-left chrome's
+   box is **dropped** (`surface/hud.ts`'s `HudReserve`), never printed underneath a control — a
+   label under chrome is a label lost, the same defect one row further up.
 2. **Anything with coordinates is drawn on the map.** A thing with a (time x frequency) place is
    rendered on the surface — as a point or pin (docs/24), a box, or a **traced path** (an ordered
    (t, f) polyline, like a directions line) — laid out through the pane's capture-time mapping in the
@@ -676,7 +686,7 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
 | Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
-| Left inventory column (Candidate / Confirmed lists + selections), collapsed to a chip by default | T-895 (P1) | `explore` (existing `inventory` / `selections` slices; the chip's open/closed is presentation only) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the chip's counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening, closing and the counts reach no route) |
+| Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
 | Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/observations` (the past-surveys pages), `/api/history` (served; no client reads it since T-445 retired the spectrum-grid pane) | - |
 | Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |

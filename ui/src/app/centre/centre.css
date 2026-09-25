@@ -166,15 +166,15 @@
 .sf-hud { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; transition: opacity .4s; }
 .sf-hud:is(body.chrome-idle *) { opacity: .45; }
 .sf-hud-label {
-  position: absolute; left: 0; top: 0; white-space: nowrap; font: 11px var(--mono); line-height: 1.2;
+  position: absolute; left: 0; top: 0; white-space: nowrap; font: 8px var(--mono); line-height: 1.2; letter-spacing: -.3px;
   color: #d5dee2; text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
 }
 .sf-hud-label span { color: #8595a0; margin-left: 6px; }
 .sf-hud-label span:empty { display: none; }
 /* Frequency: centred on its tick, sitting just above the pane's bottom edge (the ticks rise from it). */
-.sf-hud-label.freq { margin-top: -30px; translate: -50% 0; }
+.sf-hud-label.freq { margin-top: -13px; translate: -50% 0; }
 /* Time: just right of the tick, vertically centred on it. */
-.sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }
+.sf-hud-label.time { margin-left: 4px; max-width: 36px; overflow: hidden; translate: 0 -50%; }
 
 /* T-820 (MAP-20): human-authored annotation labels, placed per frame from the same mapping the
    dashed marks are stroked with; never hit-tested, so a label cannot steal a pan. Rose, like the
@@ -260,6 +260,25 @@
 .sf-flabel.candidate { color: var(--lav); }
 .sf-flabel.unexplained { color: var(--amber); font-weight: 600; }
 .sf-flabel.selected { outline: 1px solid currentColor; }
+/* T-994: the active-output badge — a small chip at a box's top-right corner (inside it) naming each
+   open output by glyph (♪ listening, ⇢ streaming out, 01 decoding, ● recording). Text only: never a
+   pointer target; the feature's button carries the same words in its accessible name. The audio
+   glyph's ring grows with the server-reported level (`--lvl`, 0..1) — the level pulse. */
+.sf-obadges { position: absolute; inset: 0; pointer-events: none; }
+.sf-obadge {
+  position: absolute; left: 0; top: 0; display: flex; gap: 2px; padding: 1px 2px; border-radius: 4px;
+  background: rgba(13, 19, 23, .82); border: 1px solid #f5549e; white-space: nowrap;
+}
+.sf-obadge i {
+  font: normal 600 10px/14px var(--mono); min-width: 14px; height: 14px; padding: 0 2px; box-sizing: border-box;
+  text-align: center; border-radius: 3px; color: #ffd1e6; background: rgba(245, 84, 158, .22);
+}
+.sf-obadge i.k-audio {
+  color: #fff; background: #f5549e;
+  box-shadow: 0 0 0 calc(var(--lvl, 0) * 4px) rgba(245, 84, 158, .45);
+  transition: box-shadow .12s ease-out;
+}
+@media (prefers-reduced-motion: reduce) { .sf-obadge i.k-audio { transition: none; } }
 .sf-pins-over {
   position: absolute; right: 8px; top: 8px; padding: 2px 8px; border-radius: 10px;
   background: rgba(13, 19, 23, .8); color: var(--lav); font: 10.5px var(--mono);

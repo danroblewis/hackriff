@@ -670,6 +670,7 @@ fn analyse(iq: &[Complex32], lead: usize, channel_bw_hz: f64) -> EfOutcome {
                 kind: ResolutionKind::Unknown,
                 deepest_verdict: Some(Verdict::Energy),
                 reason: Some(ResolutionReason::NoSignal),
+                suspected: None,
                 summary: "no energy above the floor".into(),
             },
             claimed_order: None,
@@ -717,6 +718,7 @@ fn analyse(iq: &[Complex32], lead: usize, channel_bw_hz: f64) -> EfOutcome {
             deepest_verdict: Some(verdict),
             // Energy existed and nothing reached a complete candidate: no tie, no budget.
             reason: (!solved).then_some(ResolutionReason::NothingScored),
+            suspected: None,
             summary: format!("deepest {verdict:?}; everything tried measured below its floor"),
         },
         claimed_order,
@@ -864,6 +866,7 @@ fn expected_failure_predicate_is_red_on_every_dishonest_outcome() {
                 kind: ResolutionKind::Unknown,
                 deepest_verdict: Some(v),
                 reason: r,
+                suspected: None,
                 summary: String::new(),
             },
             claimed_order: k,
