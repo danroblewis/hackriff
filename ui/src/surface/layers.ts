@@ -33,7 +33,7 @@ export type LayerPlane = "data" | "overlay" | "dom";
 
 export type LayerId =
   | "base" | "coverage" | "tier"
-  | "detections" | "paths" | "artifacts" | "priors" | "rules" | "research"
+  | "detections" | "density" | "paths" | "artifacts" | "priors" | "rules" | "research"
   | `collection:${string}`
   | "pins";
 
@@ -63,6 +63,11 @@ export const LAYER_DEFS: readonly LayerDef[] = [
   { id: "coverage", plane: "data", z: 10, visibleByDefault: true, label: "Coverage fog", hint: "grey · unknown · excluded" },
   { id: "tier", plane: "data", z: 20, visibleByDefault: false, label: "Honesty-tier bands", hint: "per pane" },
   { id: "rules", plane: "overlay", z: 10, visibleByDefault: true, label: "Capture rules", hint: "retention bound · oldest IQ" },
+  // T-810 (MAP-10, docs/23 §10.6 rule 6 last bullet): features per cell from `/api/tiles/events`,
+  // drawn only where a box there would already generalize to a symbol (`./density.ts`) — the GIS
+  // "aggregate at small scale", never a numbered cluster bubble. Sits below `detections` so a box
+  // large enough to draw always wins the pixel; a density cell only shows where none would appear.
+  { id: "density", plane: "overlay", z: 15, visibleByDefault: true, label: "Density (coarse zoom)", hint: "features per cell · resolves to boxes on zoom-in" },
   { id: "detections", plane: "overlay", z: 20, visibleByDefault: true, label: "Detections", hint: "confirmed · candidate · unknown" },
   // T-897 (docs/23 §10.6 rule 2): traced (t, f) routes — a chirp's diagonal, a sweep's sawtooth, a
   // hopper's staircase — over the boxes they belong to and under the user's own research marks.

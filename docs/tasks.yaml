@@ -24010,6 +24010,15 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): zoomed out, nearby pins merge into numbered clusters; zooming in splits them back into individual pins. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): RE-SCOPED: not pin clustering. Where many features would generalize at coarse zoom, draw a DENSITY/heat layer (features per cell, from /api/tiles/events) - the GIS 'aggregate at small scale' - toggleable per pane in the layers menu, stroke/fill that never tints a measurement (keep the overlays on/off byte-identical guard); zooming in resolves to T-910's boxes. No numbered cluster bubbles. WHAT THE USER WILL SEE ON STAGING: zoomed far out, busy regions glow by how many signals are there; zoom in and they resolve into rectangles.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:49).
+      Merge gate (fix attempt 2) found one uncommitted file left in the worktree: docs/tasks.yaml, modified by a `just task note T-810` I ran after the fix-1 landing to record what the gate found. That note text is not product work — it's a side effect of the note CLI writing the board file locally — and per CLAUDE.md the board reaches its authoritative state through the runner reading handback.json, not through a feature branch's own docs/tasks.yaml diff, so I discarded it (`git checkout -- docs/tasks.yaml`) rather than committing it. The same information is already in this handback's summary and in commit 75102b1c's message. No other uncommitted changes existed; nothing further to fix. Verified the branch already contains the last-gated main (333d8284, an ancestor of my merge commit 17d76234) so no further merge was needed. Re-ran targeted tests clean.
+      Tests: cd ui && node test/run.mjs surface-density -> exit 0 (14/14 pass); just test-ui -> exit 0 (build + typecheck + 80/80 test files passed)
+      precheck exit 0
+      Commits: 75102b1c, 17d76234
+      Observed, not chased: GET /api/tiles/events's ALLOWED query-parameter list (crates/hk-api/src/tiles.rs, tile_events_json) has no `client` entry, unlike /api/tiles and /api/tiles/batch (T-630's per-caller in-flight share). density.ts sidesteps this by building its own URL instead of reusing lattice.ts's tileUrl(), so this FE ticket is unaffected, but the backend gap itself is real. | DENSITY_MIN_CELLS_PER_PX=50 is a first-guess presentation constant (like the hatch/dash lengths T-910 also flagged as unchecked); it has not been tuned against real staging data and may want a follow-up pass once the density layer is visible in practice.
+      Use cases: AWARE-042
+      Resources: 4 CPU-s, peak 0.3 GB
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'

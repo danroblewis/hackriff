@@ -299,10 +299,11 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     for (const d of snap.registry) assert.ok(planes.includes(d.plane), `${d.id} is offered as an overlay but registered on the ${d.plane} plane`);
     const rows = snap.registry.slice().sort((a, b) => planes.indexOf(a.plane) - planes.indexOf(b.plane) || a.z - b.z)
       .map((d) => [d.id, d.visibleByDefault]);
-    // Fixed, so the derivation cannot pass on an empty or gutted registry: the two core overlays
-    // are drawn, they paint first, and they are on by default (unknowns are never hidden by default).
-    assert.deepEqual(rows.slice(0, 2), [["rules", true], ["detections", true]],
-      "the registry must draw capture rules then detections first, both on by default");
+    // Fixed, so the derivation cannot pass on an empty or gutted registry: the core overlays are
+    // drawn, they paint first, and they are on by default (unknowns are never hidden by default).
+    // T-810's coarse-zoom density layer (z 15) paints between the capture rules and the detections.
+    assert.deepEqual(rows.slice(0, 3), [["rules", true], ["density", true], ["detections", true]],
+      "the registry must draw capture rules, density, then detections first, all on by default");
     return rows;
   };
 
