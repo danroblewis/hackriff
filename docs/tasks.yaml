@@ -27858,7 +27858,7 @@ tasks:
   - id: T-937
     milestone: MAUTO
     title: Broadcast FM fragments into many narrow candidates in the 2.4 Msps sweep (349 for ~19 stations)
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: DETECT-MERGE
@@ -27876,6 +27876,7 @@ tasks:
 
       2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
     branch: task-t937
+    commit: 8e67b357
   - id: T-938
     milestone: MAUTO
     title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
