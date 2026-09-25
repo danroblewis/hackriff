@@ -79,7 +79,7 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
-import { requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import {
   BASE_STYLES, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
@@ -1006,12 +1006,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
     startPoll(async () => { mirror(); }, 1000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
-    store.select((s) => s.nav.gotoHz, (hz) => {
+    // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a
+    // different span still moves the pane; a request that names a span restores it (snapped by the
+    // pane model), view arithmetic only.
+    store.select((s) => s.nav, (nav) => {
       const p = preview;
-      if (!p || hz === null || !Number.isFinite(hz)) return;
+      if (!p) return;
       const pane = p.view.panes.get(p.activePane);
-      if (!pane) return;
-      p.view.panes.setFreq(p.activePane, hz, pane.freq.spanHz);
+      const w = pane ? gotoWindow(nav, pane.freq.spanHz) : null;
+      if (!w) return;
+      p.view.panes.setFreq(p.activePane, w.centerHz, w.spanHz);
       mirror();
     });
 
