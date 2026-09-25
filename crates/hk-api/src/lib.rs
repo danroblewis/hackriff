@@ -52,9 +52,11 @@ pub mod outputs;
 pub mod paths; // T-897: traced (t, f) paths over a viewport (docs/23 §10.6 rule 2)
 pub mod playback; // T-463: the one playhead of historical playback
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
+pub mod priors; // T-812 (MAP-12): band-plan priors over a viewport, suggestions never truth
 pub mod query;
 pub mod recipes;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod research_export; // T-823 (MAP-23): the research objects out as one file
 pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of the tile lattice
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;

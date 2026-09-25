@@ -37,6 +37,7 @@ import json
 import zlib
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -275,8 +276,9 @@ def disk_free_gb():
 def gate_running():
     # `gate-wanted` is the merge runner waiting for the running workers to drain so the gate can
     # run alone: to dispatch it is the same as a gate in progress, or the drain never completes.
+    # `rc-in-progress`: the daily release candidate (the acceptance phase on main) holds the gate's reserve too.
     return (os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
-            or os.path.exists(f"{S}/gate-wanted"))
+            or os.path.exists(f"{S}/gate-wanted") or os.path.exists(f"{S}/rc-in-progress"))
 
 
 # THE GATE SHARES THE BOX AGAIN (user, 2026-09-23 13:30). "The gate runs alone" (2026-09-22) was
@@ -407,7 +409,256 @@ def clone_cmd(wt):
     return f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
 
 
-def launch(t, dry):
+# ---------- remote hosts (user, 2026-09-24 23:35: worker agents on a second computer) ----------
+# A remote host only WORKS - builds, targeted tests, hands back; the Mac alone gates and merges. The host has its own
+# roots (hosts.json `repo`, `ops`); every command, file and path that crosses ssh is rewritten from this Mac's REPO and
+# $HACKRIFF_OPS to them at the boundary (to_remote), so the rest of this runner keeps using its own paths.
+# The claim's pid is a plain local `ssh` running the remote wrapper: while it lives the run lives, and its
+# stdout/stderr stream into this Mac's out.json/run.log as for a local worker. The wrapper also records the remote
+# process group ({d}/remote.pgid) and tees both streams into the box's copy of the work dir, so a dropped
+# connection loses nothing: the reap asks the box whether that group still runs, re-attaches if it does, and
+# copies the complete files back when it ends. Every stop and every resume stops that group EXPLICITLY first.
+# {"node2": {"ssh": "ubuntu@10.198.1.109", "repo": "/home/ubuntu/hk/hackriff", "ops": "/home/ubuntu/hk/ops",
+#            "env": {"CHROME": "/snap/bin/chromium"}}} - the name is also this Mac's git remote for the host's mirror.
+HOSTS_FILE = f"{S}/hosts.json"      # absent = no remote host
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]
+_REMOTE_PATH = 'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; '
+
+
+def hosts():
+    try:
+        return json.load(open(HOSTS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+# Stage 2: a host takes work by itself while it is reachable and below its own cap (hosts.json `cap`); the Mac's
+# cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
+# Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
+REMOTE_DEFAULT_CAP = 2
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+PROBE_FRESH_S = 180
+
+
+def remote_eligible(t):
+    text = " ".join(str(t.get(k) or "") for k in ("title", "notes", "acceptance", "parallel_group"))
+    return t.get("needs") in (None, "", "none") and not _MAC_ONLY.search(text)
+
+
+def host_ready(h):
+    """The host's last per-tick probe is fresh and says reachable."""
+    try:
+        p = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        return False
+    return bool(p.get("reachable")) and time.time() - p.get("at", 0) < PROBE_FRESH_S
+
+
+def named_remote():
+    """Tickets named by hand for a remote host (WORK_REMOTE_TICKETS=T-nnn,...): never run on this Mac."""
+    return {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
+
+
+def slot_cap(host):
+    """How many workers a host takes: this Mac's dispatch cap, or the remote host's hosts.json cap."""
+    return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
+
+
+def host_for(t, claims=None):
+    """The remote host a ticket goes to, or None for this Mac. WORK_REMOTE_TICKETS=T-nnn,... still names tickets
+    by hand (they go to the first host whatever its cap)."""
+    named = named_remote()
+    hs = hosts()
+    if not hs:
+        return None
+    if t.get("id") in named:
+        return next(iter(hs))
+    if claims is None or not remote_eligible(t):
+        return None
+    for h, cfg in hs.items():
+        if host_ready(h) and busy_workers(claims, h) < slot_cap(h):
+            return h
+    return None
+
+
+def to_remote(host, text):
+    """This Mac's paths in `text` -> the host's (its ops dir, its clone)."""
+    h = hosts()[host]
+    return text.replace(S, h["ops"]).replace(REPO, h["repo"])
+
+
+def ssh_argv(host, remote_cmd):
+    # Explicit bash: the wrapper's `>(...)` is bash syntax, whatever the account's login shell is.
+    return ["ssh", *SSH_OPTS, hosts()[host]["ssh"], "bash -c " + shlex.quote(_REMOTE_PATH + to_remote(host, remote_cmd))]
+
+
+def remote_sh(host, remote_cmd, timeout=120, input=None):
+    """(returncode, stdout) of a command on the host; 255 = ssh itself failed (unreachable, key refused)."""
+    try:
+        r = subprocess.run(ssh_argv(host, remote_cmd), input=input, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except (subprocess.TimeoutExpired, KeyError) as e:
+        return 255, str(e)
+
+
+def remote_wrapper(wt, branch, script, env, d, out_name):
+    """The remote side of a run: the worker in its own session, its group id and both streams recorded on the box;
+    the branch pushed to the mirror when it ends, whatever its outcome (the Mac fetches it before the reap)."""
+    q = shlex.quote
+    envs = " ".join(f"{k}={q(str(v))}" for k, v in env.items())
+    inner = f"cd {q(wt)} && exec env {envs} nice -n 5 bash -c {q(script)}"
+    return (f"mkdir -p {q(d)}; "
+            # tee -p: a dropped connection (SIGPIPE on the channel) must not kill the copy on the host, nor the worker.
+            f"setsid bash -c {q(inner)} </dev/null > >(tee -p {q(d + '/' + out_name)}) 2> >(tee -p -a {q(d + '/run.log')} >&2) & p=$!; "
+            f"echo $p > {q(d + '/remote.pgid')}; wait $p; rc=$?; rm -f {q(d + '/remote.pgid')}; "
+            f"git -C {q(wt)} push -q --no-verify -f origin HEAD:refs/heads/{branch} >&2; exit $rc")
+
+
+def remote_run_state(c):
+    """'running' | 'gone' | 'unknown' (the host could not be asked) for a remote claim's recorded process group."""
+    d = f"{WORKDIR}/{c['ticket']}"
+    rc, out = remote_sh(c["host"], f"pg=$(cat {shlex.quote(d + '/remote.pgid')} 2>/dev/null) || {{ echo gone; exit 0; }}; "
+                                   f"kill -0 -- -$pg 2>/dev/null && echo running || echo gone", timeout=60)
+    return out.strip() if rc == 0 and out.strip() in ("running", "gone") else "unknown"
+
+
+def remote_stop(c, wait_s=30):
+    """Stop the claim's remote process group and confirm it is gone; False when that cannot be confirmed."""
+    d = f"{WORKDIR}/{c['ticket']}"
+    rc, out = remote_sh(c["host"], f"pg=$(cat {shlex.quote(d + '/remote.pgid')} 2>/dev/null) || {{ echo gone; exit 0; }}; "
+                                   f"kill -TERM -- -$pg 2>/dev/null; for i in $(seq {wait_s}); do kill -0 -- -$pg 2>/dev/null || {{ echo gone; exit 0; }}; sleep 1; done; "
+                                   f"kill -KILL -- -$pg 2>/dev/null; sleep 1; kill -0 -- -$pg 2>/dev/null && echo running || echo gone", timeout=wait_s + 60)
+    return rc == 0 and out.strip().endswith("gone")
+
+
+def remote_prepare(host, wt, branch, d, resume=False):
+    """Mirror the gated base to the box as its `main` (fix prompts merge it) and copy LFS objects. The worktree is made
+    only when it does not exist, and never reset: on a resume (and on a re-dispatch) the host's copy - its commits and
+    its uncommitted files - is the newer one, and this Mac's branch is pushed only when the mirror has none."""
+    base = merge_target()
+    # --no-verify: the only pre-push hook is Git LFS's upload, which the mirror cannot serve - LFS objects go by rsync.
+    # Never --force: the gated base only ever moves forward; a push that is not a fast-forward refuses the start.
+    sh(["git", "push", "-q", "--no-verify", host, f"{base}:refs/heads/main"], check=True)
+    if not resume and sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
+        sh(["git", "push", "-q", "--no-verify", host, f"{branch}:refs/heads/{branch}"])      # no -f: never over the host's
+    sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",
+        f"{hosts()[host]['ssh']}:{to_remote(host, REPO)}/.git/lfs/objects/"], timeout=600, check=True)
+    q = shlex.quote
+    rc, out = remote_sh(host, f"set -e; cd {q(REPO)}; git fetch -q origin; git branch -f main origin/main; git worktree prune; mkdir -p {q(d)}; "
+                              f"if [ ! -d {q(wt)} ]; then "
+                              f"if git rev-parse -q --verify origin/{branch} >/dev/null; then git worktree add -q -B {branch} {q(wt)} origin/{branch}; "
+                              f"else git worktree add -q -b {branch} {q(wt)} origin/main; fi; "
+                              f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true; fi", timeout=600)
+    if rc:
+        raise RuntimeError(f"remote_prepare on {host}: {out.strip()[-200:]}")
+
+
+def remote_put(host, path, text):
+    rc, out = remote_sh(host, f"mkdir -p {shlex.quote(os.path.dirname(path))} && cat > {shlex.quote(path)}", input=to_remote(host, text))
+    if rc:
+        raise RuntimeError(f"remote_put {host}:{path}: {out.strip()[:200]}")
+
+
+def remote_popen(host, wt, branch, script, env, d, out_name, out, err):
+    """The local end of a remote run: a plain ssh in its own session - the claim's pid."""
+    env = dict(env, **hosts()[host].get("env", {}))
+    return subprocess.Popen(ssh_argv(host, remote_wrapper(wt, branch, script, env, d, out_name)), stdin=subprocess.DEVNULL,
+                            stdout=out, stderr=err, start_new_session=True)
+
+
+def remote_attach(c):
+    """The connection dropped but the remote run lives: a new local ssh that waits for its group - the claim's pid."""
+    d = f"{WORKDIR}/{c['ticket']}"
+    p = subprocess.Popen(ssh_argv(c["host"], f"pg=$(cat {shlex.quote(d + '/remote.pgid')}); while kill -0 -- -$pg 2>/dev/null; do sleep 10; done"),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return p.pid
+
+
+def sync_back(c):
+    """A remote run ended: its complete out file and run.log, its handback.json, its branch into this Mac's worktree,
+    and the box's uncommitted files (for the reap's UNCOMMITTED rule). False = could not; the reap waits a tick."""
+    host, tid, branch, wt = c["host"], c["ticket"], c["branch"], c["wt"]
+    d = f"{WORKDIR}/{tid}"
+    try:
+        dest = hosts()[host]["ssh"]
+        out_name = os.path.basename(c.get("out") or f"{d}/out.json")
+        for f in (out_name, "run.log", "handback.json"):
+            r = subprocess.run(["scp", *SSH_OPTS, "-q", f"{dest}:{to_remote(host, d)}/{f}", f"{d}/{f}.remote"], capture_output=True, timeout=120)
+            if r.returncode == 0:
+                os.replace(f"{d}/{f}.remote", f"{d}/{f}")
+            elif f != "handback.json":
+                raise RuntimeError(f"scp {f}: {r.stderr.decode(errors='replace').strip()[:160]}")
+            elif os.path.exists(f"{d}/handback.json"):
+                os.remove(f"{d}/handback.json")          # never judge this run by an older hand-back
+        sh(["git", "fetch", "-q", host, f"+refs/heads/{branch}:refs/remotes/{host}/{branch}"], check=True, timeout=300)
+        if os.path.isdir(wt):
+            sh(["git", "reset", "-q", "--hard", f"{host}/{branch}"], cwd=wt, check=True)
+        rc, dirty = remote_sh(host, f"git -C {shlex.quote(wt)} status --porcelain --untracked-files=no", timeout=60)
+        if rc:
+            raise RuntimeError(f"remote status: {dirty.strip()[:160]}")
+        c["remote_dirty"] = [l for l in dirty.splitlines() if l.strip()]
+        sync_transcript(c)                      # the run's last stretch, which no tick copied
+        log(f"REMOTE {tid}: synced back from {host} at {sh(['git', 'rev-parse', '--short', host + '/' + branch]).strip()}"
+            + (f"; {len(c['remote_dirty'])} file(s) left uncommitted there" if c["remote_dirty"] else ""))
+        return True
+    except Exception as e:
+        log(f"REMOTE {tid}: sync back from {host} FAILED ({e}) - held; retried next tick")
+        if not c.get("sync_warned"):
+            c["sync_warned"] = True
+            attention(tid, branch, "REMOTE_SYNC", f"could not bring the run back from {host}: {str(e)[:200]}")
+        return False
+
+
+PROJECTS = os.path.expanduser("~/.claude/projects")
+
+
+def _proj_dir(path):
+    """Claude Code's per-cwd transcript dir name: the path with '/' and '.' as '-'."""
+    return re.sub(r"[/.]", "-", path)
+
+
+def sync_remote_view(claims, dry):
+    """Every tick (user via supervisor, 2026-09-25 00:40: a remote worker must show on the dashboard like a local one):
+    per remote host, ONE ssh that reports reachability, load, disk and its running claude sessions to
+    $HACKRIFF_OPS/hosts/<host>.json; per running remote claim, its session transcript appended into this Mac's
+    transcript dir for that worktree - the dashboard's worker row and transcript modal read exactly that file."""
+    if dry or not hosts():
+        return
+    os.makedirs(f"{S}/hosts", exist_ok=True)
+    for h in hosts():
+        rc, out = remote_sh(h, "cat /proc/loadavg; nproc; df -BG --output=avail $HOME | tail -1", timeout=20)
+        rec = {"at": int(time.time()), "reachable": rc == 0}
+        if rc == 0:
+            try:
+                parts = out.split()
+                rec.update(load1=float(parts[0]), cores=int(parts[5]), disk_free_gb=int(parts[6].rstrip("G")))
+            except (IndexError, ValueError):
+                pass
+        with open(f"{S}/hosts/{h}.json.tmp", "w") as f:
+            json.dump(rec, f)
+        os.replace(f"{S}/hosts/{h}.json.tmp", f"{S}/hosts/{h}.json")
+        if not rec["reachable"]:
+            continue
+        for tid, c in claims.items():
+            if c.get("host") == h and c.get("state") == "running":
+                sync_transcript(c)
+
+
+def sync_transcript(c):
+    """Append a remote claim's session transcript into this Mac's transcript dir for its worktree."""
+    if not c.get("session_id"):
+        return
+    h = c["host"]
+    remote = f"~/.claude/projects/{_proj_dir(to_remote(h, c['wt']))}/{c['session_id']}.jsonl"
+    local_dir = f"{PROJECTS}/{_proj_dir(c['wt'])}"
+    os.makedirs(local_dir, exist_ok=True)
+    r = subprocess.run(["rsync", "-a", "--append", "-e", "ssh " + " ".join(SSH_OPTS),
+                        f"{hosts()[h]['ssh']}:{remote}", f"{local_dir}/{c['session_id']}.jsonl"], capture_output=True, timeout=120)
+    if r.returncode not in (0, 23):          # 23: the transcript is not there yet (a run's first seconds)
+        log(f"REMOTE {c['ticket']}: transcript copy from {h} failed (rsync {r.returncode}): {(r.stderr or b'')[-160:]!r}")
+
+
+def launch(t, dry, host=None):
     tid, branch, wt = t["id"], branch_of(t["id"]), worktree_of(t["id"])
     model = MODEL_ALIAS.get((t.get("model") or "sonnet").lower(), "sonnet")
     effort = (t.get("effort") or "medium").lower()
@@ -420,7 +671,9 @@ def launch(t, dry):
         else:
             sh(["git", "worktree", "add", wt, branch], check=True)
     else:
-        sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
+        # From the GATED base, never a batch still gating on main (2026-09-25 00:31: T-567 was cut from main while
+        # the T-577/T-915 batch gated, so its branch carried those provisional merges to node2).
+        sh(["git", "worktree", "add", wt, "-b", branch, merge_target()], check=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
@@ -437,6 +690,20 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
+    if host:
+        try:
+            remote_prepare(host, wt, branch, d)
+            remote_put(host, f"{d}/brief.md", brief)
+        except Exception as e:
+            log(f"REMOTE {tid}: could not prepare {host} ({e}) - not dispatched this tick")
+            return None
+        script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
+        env = dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
+        p = remote_popen(host, wt, branch, script, env, d, "out.json", open(f"{d}/out.json", "w"), open(f"{d}/run.log", "a"))
+        log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {host}:{wt} (remote; this Mac holds the ssh session)")
+        return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
+                "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
+                "review": needs_review(t), "session_id": session, "host": host}
     clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
@@ -793,7 +1060,7 @@ def reap(claims, dry):
         pid = c["pid"]
         age_min = (time.time() - c["started"]) / 60
         limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
-        if alive(pid):
+        if alive(pid) and not c.get("detached"):
             if track_usage(c):                      # the only chance to see this run's CPU time
                 changed = True
             if age_min > limit:
@@ -801,6 +1068,8 @@ def reap(claims, dry):
                     os.killpg(pid, signal.SIGTERM)
                 except OSError:
                     pass
+                if c.get("host"):
+                    remote_stop(c)
                 c["state"] = "timeout"
                 c["ended"] = time.time()
                 record_done(c, "timeout", {})
@@ -812,7 +1081,21 @@ def reap(claims, dry):
                 else:
                     attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
             continue
-        # finished
+        # finished - for a remote claim (a review runs on this Mac), the LOCAL ssh ended: ask the box first
+        if c.get("host") and c["kind"] != "review":
+            state = remote_run_state(c)
+            if state == "running":
+                c["pid"], c["detached"] = remote_attach(c), False
+                log(f"REMOTE {tid}: connection to {c['host']} dropped, run still going there - re-attached (pid {c['pid']})")
+                changed = True
+                continue
+            if state == "unknown" or not sync_back(c):
+                if state == "unknown" and not c.get("detached"):
+                    log(f"REMOTE {tid}: {c['host']} unreachable - the claim waits, polled on the host (stage 4 re-dispatches)")
+                    c["detached"] = True           # its local pid is dead: never signal it again (pids recycle)
+                    changed = True
+                continue
+            c["detached"] = False
         changed = True
         # The root is gone; anything of this run still running is a LEAK, holding cores and disk
         # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
@@ -877,6 +1160,8 @@ def reap(claims, dry):
                                 "briefed": os.path.exists(f"{d}/brief.md") and "handback.json" in open(f"{d}/brief.md").read()}) + "\n")
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
+        if c.get("host"):
+            dirty = c.get("remote_dirty", [])        # this Mac's copy was just reset to the pushed branch
         if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
             write_result(c, hb)                    # the board line the worker used to write by hand
             ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
@@ -1000,8 +1285,8 @@ ticket exactly as your original brief says: targeted tests, commit on {branch}, 
 message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main checkout, never the
 full gate, never edit docs/tasks.yaml by hand.
 """
-        r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json")
-        return dict(r, kill_resumes=k)
+        r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json", fail_line=fail_line)
+        return r if r.get("state") == "fix-held" else dict(r, kill_resumes=k)
     if fail_line.startswith("TIMEOUT"):
         t = c.get("timeout_resumes", 0) + 1
         prompt = f"""Your run on {tid} reached its {MAX_MINUTES}-minute limit and was stopped; this resumes the same session ONCE,
@@ -1013,8 +1298,8 @@ blocked.needs, so the coordinator can split or re-brief it - a clear remainder i
 End your final message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main
 checkout, never the full gate, never edit docs/tasks.yaml by hand.
 """
-        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json")
-        return dict(r, timeout_resumes=t)
+        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json", fail_line=fail_line)
+        return r if r.get("state") == "fix-held" else dict(r, timeout_resumes=t)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):
@@ -1032,7 +1317,7 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
-        return _run_fix(c, n, prompt)
+        return _run_fix(c, n, prompt, fail_line=fail_line)
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
     prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
@@ -1048,15 +1333,39 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
-    return _run_fix(c, n, prompt)
+    return _run_fix(c, n, prompt, fail_line=fail_line)
 
 
-def _run_fix(c, n, prompt, out_name=None):
+def _run_fix(c, n, prompt, out_name=None, fail_line=""):
     tid, wt = c["ticket"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     out_path = f"{d}/{out_name or f'fix{n}.json'}"
+    if c.get("host"):      # the session lives on that host: a resume runs there, once the previous run is gone
+        host, pname = c["host"], f"prompt-{os.path.basename(out_path)}.md"
+        try:
+            if not remote_stop(c):
+                raise RuntimeError("the previous remote run could not be confirmed stopped")
+            remote_prepare(host, wt, c["branch"], d, resume=True)
+            remote_put(host, f"{d}/{pname}", prompt)
+            if os.path.exists(f"{d}/review.json"):             # the Mac-side files a fix prompt points at
+                remote_put(host, f"{d}/review.json", open(f"{d}/review.json").read())
+            try:
+                remote_put(host, MERGE_LOG, "".join(open(MERGE_LOG).readlines()[-20000:]))
+            except OSError:
+                pass
+            script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/{pname}'"
+            p = remote_popen(host, wt, c["branch"], script, dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)),
+                             d, os.path.basename(out_path), open(out_path, "w"), open(f"{d}/run.log", "a"))
+        except Exception as e:
+            log(f"FIX {tid} on {host} NOT launched: {e}")
+            if not c.get("held_warned"):          # once per hold, not every tick while the host is away
+                attention(tid, c["branch"], "FIX_HELD", f"fix attempt {n} on {host} not launched: {str(e)[:200]}")
+            return dict(c, state="fix-held", fail_line=fail_line or c.get("fail_line") or "", held_warned=True)
+        log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] on {host}: resumed session {c['session_id'][:8]} pid={p.pid}")
+        return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n,
+                    fail_line=None, held_warned=False, detached=False)
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
@@ -1287,7 +1596,7 @@ def handle_gate_failures(claims, dry):
             # A conflict run is a worker: it waits for a slot under the dispatch cap, one per tick,
             # and never while a hold is in force (a held one would all relaunch at once). The line
             # stays unseen until then, so a backlog cannot burst.
-            if (conflict_runs >= 1 or busy_workers(claims) >= dispatch_cap()
+            if (conflict_runs >= 1 or busy_workers(claims, c.get("host")) >= slot_cap(c.get("host"))
                     or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
                 continue
             c.setdefault("gate_fails_seen", []).append(line)
@@ -1516,24 +1825,53 @@ def dispatch_cap():
     return min(CAP, RESERVE_CAP) if time.time() - _GATE_SEEN[0] < RESERVE_GRACE_S else CAP
 
 
-def busy_workers(claims):
-    """Running work, fix AND deflake runs: each is a worker on the box (dispatch counted only `work`)."""
-    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake"))
+def busy_workers(claims, host=None):
+    """Running work, fix AND deflake runs on one host (None = this Mac): each is a worker there (dispatch counted
+    only `work`). A remote claim holds a slot on its host, not on this Mac (remote workers stage 2)."""
+    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake")
+               and c.get("host") == host)
+
+
+def dispatch_remote(claims, dry):
+    """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
+    (dispatch-paused) does. One launch per host per tick."""
+    # The alone-mode gate hold binds here too: in that mode the merge runner waits for EVERY claim, remote included.
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+        return False
+    try:
+        tasks = board()
+    except Exception:
+        return False
+    changed, launched = False, set()
+    for t in candidates(tasks, claims):
+        h = host_for(t, claims)
+        if not h or h in launched:
+            continue
+        g = t.get("parallel_group")
+        if g and sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
+            continue
+        c = launch(t, dry, host=h)
+        if c:
+            claims[t["id"]] = dict(c, state="running")
+            changed = True
+            launched.add(h)
+    return changed
 
 
 def dispatch(claims, dry):
-    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
+    changed_remote = dispatch_remote(claims, dry)
+    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work" and not c.get("host")]
     cap = dispatch_cap()
-    free = cap - busy_workers(claims)          # fix runs are workers on the box too
+    free = cap - busy_workers(claims)          # this Mac's: fix runs are workers on the box too
     if free <= 0:
-        return False
+        return changed_remote
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
-        return False
+        return changed_remote
     load1 = os.getloadavg()[0]
     if load1 > LOAD_MAX:
         log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
-        return False
+        return changed_remote
     # THE GATE GETS THE BOX TO ITSELF (user, 2026-09-22). Two rules, one cycle:
     #   1. no dispatch while a gate runs (the merge runner only starts one once no worker is
     #      running - see merge-runner.sh workers_running) - so a gate never shares the box;
@@ -1546,36 +1884,39 @@ def dispatch(claims, dry):
     # to stop all dispatch; delete it to resume. Reaping, results and queueing carry on.
     if os.path.exists(f"{S}/dispatch-paused"):
         log(f"HOLD: dispatch-paused file present ({len(running)} running)")
-        return False
+        return changed_remote
     # The three holds below are the alone-mode cycle (WORK_GATE_ALONE=1, see gate_holds_dispatch).
     # In the default overlap mode a gate only lowers the cap to the reserve (above) and the queue
     # never pauses dispatch: the merge runner gates whatever is queued as soon as the previous
     # gate ends, so the batch is "what handed back during the last gate".
     if gate_holds_dispatch():
         log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
-        return False
+        return changed_remote
     depth = queue_depth()
     if GATE_ALONE and depth >= QUEUE_PAUSE:
         log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
-        return False
+        return changed_remote
     # The gate is IMMINENT when something is queued and no worker is running: the merge runner
     # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
     # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
     # dispatch into that window; the gate takes the batch, then dispatch resumes.
     if GATE_ALONE and depth > 0 and not running:
         log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
-        return False
+        return changed_remote
     free = min(free, PER_TICK)
     try:
         tasks = board()
     except Exception as e:
         attention("board", "main", "BOARD_UNREADABLE", str(e)[:200])
-        return False
+        return changed_remote
     changed = False
     taken = {}   # launches per parallel_group this tick, on top of the running-claim count
+    named = named_remote()
     for t in candidates(tasks, claims):
         if free <= 0:
             break
+        if t["id"] in named:              # named for a remote host: waits for it, never falls back to this Mac
+            continue
         g = t.get("parallel_group")
         if g and taken.get(g, 0) + sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
             continue
@@ -1587,7 +1928,7 @@ def dispatch(claims, dry):
             if g:
                 taken[g] = taken.get(g, 0) + 1
             free -= 1
-    return changed
+    return changed or changed_remote
 
 
 #: Untracked paths a worktree regenerates on its own - build output, installed hooks, envs. A
@@ -2205,6 +2546,10 @@ def tick(dry):
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
         log(f"release_stale_claims error: {e}")
+    try:
+        sync_remote_view(claims, dry)
+    except Exception as e:
+        log(f"sync_remote_view error: {e}")
     try:
         sync_board(claims, dry)
     except Exception as e:

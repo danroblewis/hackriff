@@ -624,7 +624,11 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
-let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
+let last='',scope='frontier',flt={done:false,todo:true,blocked:false,collapse:true},msFilter='';
+// Defaults (user, 2026-09-24 23:20): 'todo' shown and 'collapse done' on. A choice made here is remembered in
+// this browser (localStorage 'graph.flt') and overrides them.
+try{ Object.assign(flt, JSON.parse(localStorage.getItem('graph.flt')||'{}')); }catch(e){}
+function saveFlt(){ try{localStorage.setItem('graph.flt',JSON.stringify(flt));}catch(e){} }
 // Open milestones live for THIS TAB only (sessionStorage): a persisted "M2 open" survived a reload
 // on 2026-09-22 and read as "the map always shows everything". The chips in the top bar say what
 // is open and close it.
@@ -641,10 +645,9 @@ renderOpenChips();
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
-// "collapse done" is off by default (it removes nodes); it is remembered like the other filters.
-if(flt.collapse===undefined) flt.collapse=false; document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
-document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);last='';draw();};
+['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).classList.toggle('on',flt[k]); document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);saveFlt();last='';draw();};});
+document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
+document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);saveFlt();last='';draw();};
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
@@ -1758,7 +1761,10 @@ def agents(status_map):
         if not alive and (c or s["age_s"] > ACTIVE):
             continue
         s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
-        s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
+        # A remote claim's row names its host (user via supervisor, 2026-09-25 00:40): its transcript is the copy the
+        # work runner appends from that host every tick, its pid the local ssh session holding the run.
+        s["host"] = c.get("host") or "mac"
+        s["label"] = (f"{c['host']} · " if c.get("host") else "") + f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
         best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
     return out
@@ -2012,6 +2018,9 @@ def build_flow_panel(ops, now=None):
                             "hourly": flow_mod.queue_depth_hourly(ops, now - timedelta(hours=24), now),
                             "spark": flow_mod.queue_depth_series(ops, now - timedelta(hours=24), now)},
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
+            # Remote worker hosts (user, 2026-09-25): running/landed per host and its mirror's drift from main.
+            "remote_hosts": (rh := flow_mod.remote_hosts(ops)),
+            "landings_by_host_24h": flow_mod.landings_by_host(ops, hosts=rh),
             "experiment": experiment,
         }
     except Exception as e:
@@ -2948,6 +2957,22 @@ function drawCauses(el, d){
   el.innerHTML=h;
 }
 
+// 4c. remote worker hosts: running / landed, and the mirror's drift from main (it must never serve a stale base).
+function drawRemoteHosts(el, d){
+  if(!el) return; const H=d.remote_hosts||[];
+  if(!H.length){ el.innerHTML='<div class=kv><span>no remote host configured</span></div>'; return; }
+  const by=d.landings_by_host_24h||{};
+  el.innerHTML=(Object.keys(by).length?`<div class=kv><span>landings 24h by host:</span>${Object.entries(by).map(([k,v])=>`<span>${esc(k)} <b>${v}</b></span>`).join('')}</div>`:'')+H.map(h=>{
+    const drift=h.behind==null?'<span>mirror never pushed</span>':(h.behind>0?`<span style="color:${C.amber}">mirror behind by <b>${h.behind}</b></span>`:'<span>mirror current</span>');
+    const when=h.pushed_at?new Date(h.pushed_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'-';
+    const p=h.probe||{}, age=p.at?Math.round(Date.now()/1000-p.at):null;
+    const reach=p.at==null?'<span>not probed yet</span>':(p.reachable?`<span>reachable · ${age}s ago</span>`:`<span style="color:${C.red}">UNREACHABLE · ${age}s ago</span>`);
+    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length}/${h.cap} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed (${h.landed_24h} in 24h)</span><span>${h.dispatched} dispatched</span></div>`+
+           `<div class=kv>${reach}<span>load ${p.load1??'-'} / ${p.cores??'-'} cores</span><span>disk ${p.disk_free_gb??'-'} GB free</span></div>`+
+           `<div class=kv>${drift}<span>mirror ${esc(h.mirror||'-')} · pushed ${when}</span></div>`;
+  }).join('');
+}
+
 // 4b. merge-queue depth: branches not yet on main (queue file + batch + isolation remainder).
 function drawQueueDepth(el, d){
   const q=d.queue_depth; if(!el) return; if(!q){ el.innerHTML='<div class=kv><span>no data</span></div>'; return; }
@@ -3006,6 +3031,7 @@ async function load(){
       <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
       <div class=card><h2>Merge queue depth <em>not yet on main</em></h2><div id=cQueueDepth></div></div>
       <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
+      <div class=card><h2>Remote hosts <em>workers off this Mac</em></h2><div id=cRemote></div></div>
       <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
     </div>`;
     drawLandings($('#cLand'), d);
@@ -3013,6 +3039,7 @@ async function load(){
     drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
     drawCauses($('#cCauses'), d);
     drawQueueDepth($('#cQueueDepth'), d);
+    drawRemoteHosts($('#cRemote'), d);
     drawTouchpoints($('#cTouch'), d);
     drawExperiment($('#cExp'), d);
   }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }

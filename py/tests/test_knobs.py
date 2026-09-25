@@ -130,5 +130,6 @@ def test_the_merge_runner_passes_the_gate_tier_to_every_merge_gate():
     """Every gate call the runner makes on a merge carries $GATE_PHASE, and the retry commands too."""
     src = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
     calls = re.findall(r"limited just gate(?:-merge)?[^;\n]*", src)
-    assert calls and all("$GATE_PHASE" in c for c in calls), calls
+    merge_calls = [c for c in calls if "--phase acceptance" not in c]     # the release candidate's own run
+    assert merge_calls and all("$GATE_PHASE" in c for c in merge_calls), calls
     assert '"just gate-merge $GATE_PHASE"' in src and 'retry=${4:-"just gate --base $base $GATE_PHASE"}' in src

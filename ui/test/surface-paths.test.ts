@@ -66,7 +66,11 @@ test("MAP paths: one GET /api/paths over the union of the showing panes' boxes, 
   // The centre surface builds it from exactly the panes whose `paths` layer is on.
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.match(src, /pathsRequest\(pv\.view\.panes\.list\(\)\s*\.filter\(\(x\) => isLayerVisible\(layersFor\(x\.id\), "paths"\)\)/);
-  assert.match(src, /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{ rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn \}/);
+  // The paths renderer is an entry of the overlay table (asserted on the entry, not the table's
+  // literal, so another layer's renderer beside it does not break this check).
+  const fns = /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{([^}]*)\}/.exec(src);
+  assert.ok(fns, "the overlay renderer table");
+  assert.match(fns[1], /\bpaths: pathQuadsFn\b/);
 });
 
 test("MAP paths: the wire answer parses to ns vertices; malformed paths and vertices are dropped", () => {

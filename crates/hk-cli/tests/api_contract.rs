@@ -2346,6 +2346,214 @@ fn events_and_presence_serve_the_durable_catalogue() {
     stop_server(serving);
 }
 
+/// T-812 (MAP-12, docs/24 §7): `GET /api/priors` serves the band plan over a viewport as **ranked
+/// suggestions, never truth**. Asserted by value:
+///
+/// - over the blind FM station's window, the `fm-broadcast` allocation is served, backed by the
+///   measured emission (`in-band`/`cited`, never `context`), ranked above every context-only row,
+///   and — the station sitting on its 200 kHz raster — not flagged off-raster;
+/// - over a band nothing was detected in, the allocation is **context only**, and asking for priors
+///   there adds **no inventory row** (the database never pre-populates the inventory);
+/// - the box is required and validated like `/api/events`, the route is read-only, and it is
+///   token-gated.
+#[test]
+fn priors_serve_ranked_band_plan_suggestions_never_truth() {
+    let (_guard, serving, addr) = start_server();
+    let (f_lo, f_hi) = (87e6, 109e6);
+    // Detection is blind and comes first: wait until the station is in the catalogue.
+    wait_for(
+        "an event in the catalogue for the blind FM station",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(
+                addr,
+                &format!(
+                    "/api/events?f_lo={}&f_hi={}&t0={}&t1={t1}",
+                    STATION_HZ - 400e3,
+                    STATION_HZ + 400e3,
+                    t1 - 3600.0
+                ),
+            )
+            .1["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(
+        addr,
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "kind",
+        "source",
+        "region",
+        "priors",
+        "total",
+        "truncated",
+        "emitters_considered",
+        "emitters_truncated",
+        "statement",
+    ] {
+        assert!(v.get(field).is_some(), "priors answer missing {field}: {v}");
+    }
+    assert_eq!(v["kind"], json!("suggestion"), "{v}");
+    assert!(
+        v["statement"].as_str().unwrap().contains("never truth"),
+        "{v}"
+    );
+    let priors = v["priors"].as_array().expect("priors");
+    assert_eq!(v["total"].as_u64(), Some(priors.len() as u64), "{v}");
+    for (i, p) in priors.iter().enumerate() {
+        assert_eq!(
+            p["rank"].as_u64(),
+            Some(i as u64 + 1),
+            "ranks run 1..n: {v}"
+        );
+        for field in [
+            "f_lo_hz",
+            "f_hi_hz",
+            "service",
+            "allocation",
+            "source",
+            "reason",
+            "support",
+            "off_raster_hz",
+        ] {
+            assert!(p.get(field).is_some(), "prior missing {field}: {p}");
+        }
+        let hz = |k: &str| {
+            p[k].as_f64()
+                .unwrap_or_else(|| panic!("{k} is a number: {p}"))
+        };
+        assert!(
+            hz("f_hi_hz") >= f_lo && hz("f_lo_hz") <= f_hi,
+            "every prior intersects the box: {p}"
+        );
+        assert!(
+            p["reason"].as_str().unwrap().contains("never truth"),
+            "every reason is worded as a suggestion: {p}"
+        );
+    }
+    let fm = priors
+        .iter()
+        .position(|p| p["id"] == json!("fm-broadcast"))
+        .unwrap_or_else(|| panic!("the FM broadcast allocation intersects 87–109 MHz: {v}"));
+    let fm_row = &priors[fm];
+    assert!(
+        matches!(fm_row["support"].as_str(), Some("cited" | "in-band")),
+        "the blind station lies in the FM allocation, so it is measured support, not context: {fm_row}"
+    );
+    assert!(fm_row["emitters_in_band"].as_u64() >= Some(1), "{fm_row}");
+    assert!(
+        priors[..fm]
+            .iter()
+            .all(|p| p["support"] != json!("context")),
+        "a measured-backed allocation outranks every context-only one: {v}"
+    );
+    // The off-raster flag, read from the emitters' own stored raster fits: the station on its
+    // 200 kHz odd-tenth channel is never flagged; anything flagged lies in the allocation, off its
+    // nearest channel by what the entry says, and is FLAGGED rather than snapped (its centre is
+    // served as measured, not as the channel).
+    let off = fm_row["off_raster"].as_array().expect("off_raster");
+    let mut worst: Option<f64> = None;
+    for o in off {
+        let (fc, near, dx, step) = (
+            o["f_center_hz"].as_f64().unwrap(),
+            o["nearest_channel_hz"].as_f64().unwrap(),
+            o["offset_hz"].as_f64().unwrap(),
+            o["raster_hz"].as_f64().unwrap(),
+        );
+        assert!(
+            (fc - STATION_HZ).abs() > 50e3,
+            "{STATION_HZ} Hz sits on the 200 kHz odd-tenth raster and must not be flagged: {o}"
+        );
+        assert!((88e6..=108e6).contains(&fc), "{o}");
+        assert!(
+            ((fc - near) - dx).abs() < 1.0 && dx != 0.0 && dx.abs() <= step / 2.0 + 1.0,
+            "an off-raster entry states its own offset from its nearest channel: {o}"
+        );
+        if worst.is_none_or(|w| dx.abs() > w.abs()) {
+            worst = Some(dx);
+        }
+    }
+    assert_eq!(
+        fm_row["off_raster_hz"].as_f64(),
+        worst,
+        "off_raster_hz is the furthest flagged offset, or null when nothing is flagged: {fm_row}"
+    );
+    if !off.is_empty() {
+        assert!(
+            fm_row["reason"]
+                .as_str()
+                .unwrap()
+                .contains("flagged, not snapped"),
+            "{fm_row}"
+        );
+    }
+
+    // A band nothing was detected in: context only — and asking adds no inventory row.
+    let quiet = format!("f_lo=1e9&f_hi=1.0001e9&t0={t0}&t1={t1}");
+    let inventory_total = || {
+        let (st, inv) = get(addr, &format!("/api/inventory?{quiet}&relations=all"));
+        assert_eq!(st, 200, "{inv}");
+        inv["total"].as_u64().expect("total")
+    };
+    let before = inventory_total();
+    let (st, q) = get(addr, &format!("/api/priors?{quiet}"));
+    assert_eq!(st, 200, "{q}");
+    let qp = q["priors"].as_array().expect("priors");
+    assert!(
+        qp.iter()
+            .any(|p| p["id"] == json!("aero-radionav-960-1215")),
+        "1 GHz lies in the 960–1215 MHz aeronautical allocation: {q}"
+    );
+    for p in qp {
+        assert_eq!(p["support"], json!("context"), "nothing measured here: {p}");
+        assert!(
+            p["reason"].as_str().unwrap().contains("context only"),
+            "{p}"
+        );
+    }
+    assert_eq!(
+        inventory_total(),
+        before,
+        "the band plan never pre-populates the inventory"
+    );
+
+    // Validation, read-only, gated.
+    let (st, e) = get(
+        addr,
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+    );
+    assert_eq!(st, 400, "the box is required, like /api/events: {e}");
+    let (st, e) = get(
+        addr,
+        &format!("/api/priors?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 400, "{e}");
+    let (st, e) = post(
+        addr,
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+        "{}",
+    );
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, e) = call(
+        addr,
+        "GET",
+        &format!("/api/priors?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+        None,
+        None,
+    );
+    assert_eq!(st, 401, "{e}");
+
+    stop_server(serving);
+}
+
 /// T-897 (docs/23 §10.6 rule 2): `GET /api/paths` answers as `docs/api.md` documents it, on a live
 /// `hk serve` over the mock device's FM window. By value, not only shape: the fixture's one
 /// emitter is a **steady** broadcast station, so once the run has stored detections of it the
@@ -12362,6 +12570,116 @@ fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
     );
 
     stop_server(serving);
+}
+
+/// T-823 (MAP-23, RESEARCH-003): `/api/research/export` as `docs/api.md` documents it — one bundle
+/// holding the collections, markers, annotations and measurements as their own routes serve them,
+/// a SigMF-adjacent annotation block with the authored marker, a per-collection filter, and the
+/// usual errors.
+#[test]
+fn research_export_bundles_the_durable_objects_as_documented() {
+    let (_dir_guard, _serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let (st, c) = post(
+        addr,
+        "/api/collections",
+        &json!({"name": "t823-export"}).to_string(),
+    );
+    assert_eq!(st, 201, "{c}");
+    let cid = c["id"].as_str().unwrap().to_owned();
+    let (st, a) = post(
+        addr,
+        "/api/annotations",
+        &json!({
+            "kind": "box", "f_lo_hz": f - 1e5, "f_hi_hz": f + 1e5, "t0_s": 1000.0, "t1_s": 1002.0,
+            "label": "t823-note", "body": "off raster", "collection_id": cid, "view": view,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201, "{a}");
+    let (st, _) = post(
+        addr,
+        "/api/annotations",
+        &json!({
+            "kind": "text", "f_lo_hz": f, "f_hi_hz": f, "t0_s": 1005.0, "t1_s": 1005.0,
+            "label": "t823-unfiled", "view": view,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201);
+    let (st, m) = post(addr, "/api/measurements", &json!({
+        "kind": "bandwidth", "collection_id": cid,
+        "cursors": [{"f_hz": f - 1e5, "t_s": 1000.0}, {"f_hz": f + 1e5, "t_s": 1001.0}], "view": view,
+    }).to_string());
+    assert_eq!(st, 201, "{m}");
+    let (st, mk) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &json!({"name": "t823-marker", "f_center_hz": f, "view": view}).to_string(),
+    );
+    assert_eq!(st, 201, "{mk}");
+
+    let (st, all) = get(addr, "/api/research/export");
+    assert_eq!(st, 200, "{all}");
+    assert_eq!(all["format"], "hackriff-research-export@1");
+    assert_eq!(all["truncated"], false);
+    assert_eq!(all["counts"]["annotations"], 2);
+    assert_eq!(all["counts"]["measurements"], 1);
+    assert_eq!(all["counts"]["markers"], 1);
+    assert!(
+        all["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == cid.as_str())
+    );
+    // The objects are the routes' own JSON, carrying their server-stamped provenance.
+    assert_eq!(all["measurements"][0]["id"], m["id"]);
+    assert_eq!(all["measurements"][0]["value"], m["value"]);
+    assert_eq!(all["annotations"].as_array().unwrap().len(), 2);
+    // SigMF-adjacent: a standard annotation with the authored block, anchored at the earliest start.
+    let sg = &all["sigmf"];
+    assert_eq!(sg["global"]["core:sample_rate"].as_f64(), Some(1e6));
+    assert_eq!(sg["recording_start_s"].as_f64(), Some(1000.0));
+    let ann = sg["annotations"].as_array().unwrap();
+    assert_eq!(ann.len(), 2);
+    let boxed = ann
+        .iter()
+        .find(|x| x["core:label"] == "t823-note")
+        .expect("the box note");
+    assert_eq!(boxed["core:sample_start"], 0);
+    assert_eq!(boxed["core:sample_count"], 2_000_000);
+    assert_eq!(boxed["core:comment"], "off raster");
+    assert_eq!(boxed["hackriff:annotation"]["authored"], true);
+    assert!(boxed.get("hackriff:truth").is_none());
+
+    // One collection: only its own members.
+    let (st, one) = get(
+        addr,
+        &format!("/api/research/export?collection={cid}&rate=2e6"),
+    );
+    assert_eq!(st, 200, "{one}");
+    assert_eq!(one["counts"]["annotations"], 1);
+    assert_eq!(one["collections"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        one["sigmf"]["annotations"][0]["core:sample_count"],
+        4_000_000
+    );
+
+    for bad in ["collection=nope", "rate=0", "rate=x"] {
+        let (st, e) = get(addr, &format!("/api/research/export?{bad}"));
+        assert_eq!(
+            (st, e["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {e}"
+        );
+    }
+    let (st, e) = get(
+        addr,
+        "/api/research/export?collection=00000000-0000-7000-8000-00000000dead",
+    );
+    assert_eq!((st, e["code"].as_str()), (404, Some("not_found")), "{e}");
 }
 
 /// T-818 (MAP-18, RESEARCH-003): `/api/measurements` as `docs/api.md` documents it — the
