@@ -38,7 +38,7 @@
 // the tile a pane is looking at, converts its grid into overlay geometry through the same `toClip`
 // the tiles are drawn with, and never reaches a device route.
 
-import { addrSpelling, levelsFor, tilesFor, type Box, type Lattice, type TileAddr } from "./lattice";
+import { addrSpelling, extentOf, levelsFor, tilesFor, type Box, type Lattice, type TileAddr } from "./lattice";
 import type { OverlayQuad } from "./minimap";
 import { toClip, type PaneRect } from "./surface";
 
@@ -199,4 +199,83 @@ export function densityQuads(
     }
   }
   return out;
+}
+
+// ## When a density tile is asked for again (T-810, review fix 2)
+//
+// `/api/tiles/events` is "not a tile channel: counts change with every append to the observation
+// ledger" (docs/api.md), so fetching each address once and keying on the address alone froze a
+// live-edge tile's counts until the pane crossed a tile boundary — hours at a coarse level — and
+// left a failed fetch empty for as long. The rule below is the tile cache's own freshness rule
+// (`tilecache.ts`'s `behindTheEdge`, T-460/T-495), not a second policy:
+//
+//  - a copy records **the live edge at the instant it was asked for** (`edgeAtFetchNs`);
+//  - it is stale iff `edgeAtFetchNs < min(edge, tile end)` — the edge has moved on since it was
+//    asked AND it was asked before the tile's end. So a tile the edge is inside is revalidated, the
+//    first re-ask after the edge has passed its end completes it, and from then on it is **sealed**
+//    and never asked again (a copy asked after the edge passed the end cannot change);
+//  - only for a pane that is **following** the live edge (a frozen pane is a view over the past,
+//    exactly the tile cache's `following` list);
+//  - at most once per [[DENSITY_LIVE_REFRESH_MS]] per address, and the host keeps one batch in
+//    flight per pane, so the poll can never become a request storm;
+//  - a failed fetch keeps whatever copy was in hand and is retried with exponential backoff
+//    ([[DENSITY_RETRY_BASE_MS]] doubling to [[DENSITY_RETRY_MAX_MS]]) — never recorded as fetched.
+
+/** The least wall time between two asks for one live-edge density address. */
+export const DENSITY_LIVE_REFRESH_MS = 5000;
+/** First retry delay after a failed density fetch; doubles per consecutive failure. */
+export const DENSITY_RETRY_BASE_MS = 1000;
+/** The longest a failed density address waits before its next try. */
+export const DENSITY_RETRY_MAX_MS = 30_000;
+
+interface DensityEntry {
+  tile: DensityTile | null;
+  /** The live edge when the copy in hand was asked for; `-Infinity` before any copy. */
+  edgeAtFetchNs: number;
+  /** Wall ms of the last ask (success or failure). */
+  askedAtMs: number;
+  failures: number;
+}
+
+/** Per-address density copies and the one rule for when each is asked for again. Pure: no fetch,
+ * no clock — the host passes `nowMs` and the edge, and reports each answer back. */
+export class DensityFetches {
+  private readonly map = new Map<string, DensityEntry>();
+
+  /** The addresses of `addrs` that need a request now. */
+  due(lat: Lattice, addrs: readonly TileAddr[], edgeNs: number, following: boolean, nowMs: number): TileAddr[] {
+    return addrs.filter((a) => {
+      const e = this.map.get(addrSpelling(a));
+      if (!e) return true;
+      if (e.failures > 0) return nowMs - e.askedAtMs >= Math.min(DENSITY_RETRY_MAX_MS, DENSITY_RETRY_BASE_MS * 2 ** (e.failures - 1));
+      if (!following || !Number.isFinite(edgeNs)) return false;
+      const end = extentOf(lat, a).t1Ns;
+      if (!(e.edgeAtFetchNs < Math.min(edgeNs, end))) return false; // sealed, or edge not moved
+      return nowMs - e.askedAtMs >= DENSITY_LIVE_REFRESH_MS;
+    });
+  }
+
+  /** Record a successful answer for `a`, asked when the edge stood at `edgeAtFetchNs`. */
+  succeeded(a: TileAddr, tile: DensityTile, edgeAtFetchNs: number, nowMs: number): void {
+    this.map.set(addrSpelling(a), { tile, edgeAtFetchNs, askedAtMs: nowMs, failures: 0 });
+  }
+
+  /** Record a failed ask for `a`: the copy in hand (if any) is kept, and a retry is scheduled. */
+  failed(a: TileAddr, nowMs: number): void {
+    const k = addrSpelling(a);
+    const e = this.map.get(k);
+    this.map.set(k, { tile: e?.tile ?? null, edgeAtFetchNs: e?.edgeAtFetchNs ?? Number.NEGATIVE_INFINITY, askedAtMs: nowMs, failures: (e?.failures ?? 0) + 1 });
+  }
+
+  /** The copies in hand for `addrs`, in their order. */
+  tiles(addrs: readonly TileAddr[]): DensityTile[] {
+    const out: DensityTile[] = [];
+    for (const a of addrs) { const t = this.map.get(addrSpelling(a))?.tile; if (t) out.push(t); }
+    return out;
+  }
+
+  /** Drop every address not in `keep` (the union of what the panes currently show). */
+  retain(keep: ReadonlySet<string>): void {
+    for (const k of [...this.map.keys()]) if (!keep.has(k)) this.map.delete(k);
+  }
 }

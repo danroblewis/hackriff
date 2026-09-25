@@ -87,7 +87,7 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
-import { densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile, type DensityTile } from "../../surface/density";
+import { DensityFetches, densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile, type DensityTile } from "../../surface/density";
 import { addrSpelling } from "../../surface/lattice";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
@@ -97,6 +97,8 @@ import {
 } from "../map/research-slice";
 
 const S_TO_NS = 1e9;
+/** The centre poll's period, ms — the unit the density refresh paces its asks in. */
+const DENSITY_POLL_MS = 1000;
 /** The map strip along the bottom of the canvas, device px. */
 const MINIMAP_PX = 110;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
@@ -478,39 +480,54 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
   // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
   const densityByPane = new Map<string, DensityTile[]>();
-  const densityKeyByPane = new Map<string, string>();
+  // Per-address copies and WHEN each is asked again (`DensityFetches`, the tile cache's own
+  // live-edge/sealed rule): a following pane's live-edge tile is revalidated on a bounded cadence, a
+  // failed ask is retried with backoff, and a sealed past tile is asked for once.
+  const densityFetches = new DensityFetches();
   const densityInflight = new Set<string>();
+  // The refresh/backoff pacing is counted in POLL TICKS (the poll below runs every
+  // `DENSITY_POLL_MS`), never a browser clock — the centre modules are on the capture clock only
+  // (T-393/T-386's guard); this is request pacing, not a time anything is placed at.
+  let densityPolls = 0;
   const densityQuadsFn: OverlayLayerFn = (pane) => {
     const lat = preview?.view.surface.lat;
     if (!lat) return [];
     return densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
   };
-  /** Ask for each density-on pane's tile(s) when its address changed AND the pane is coarse-zoomed
+  /** Ask for each density-on, coarse-zoomed pane's tile(s) that `DensityFetches.due` says need it
    * (`isCoarseZoom`, the same gate `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane
    * would draw nothing with is a request this layer has no use for). A `GET` of an inventory
-   * aggregate — never a device route — and only for panes whose layer is on; a pane whose current
-   * address needs no tile (a degenerate box) is simply left empty. */
+   * aggregate — never a device route — one batch in flight per pane; a pane whose current address
+   * needs no tile (a degenerate box) is simply left empty. */
   const refreshDensity = () => {
     const p = preview;
     if (!p) return;
     const lat = p.view.surface.lat;
     const ids = new Set(p.view.panes.list().map((x) => x.id));
-    for (const id of [...densityByPane.keys()]) if (!ids.has(id)) { densityByPane.delete(id); densityKeyByPane.delete(id); }
-    for (const pane of p.view.panes.views(p.view.panes.lastEdgeNs)) {
+    for (const id of [...densityByPane.keys()]) if (!ids.has(id)) densityByPane.delete(id);
+    const edgeNs = p.view.panes.lastEdgeNs;
+    const nowMs = ++densityPolls * DENSITY_POLL_MS;
+    const keep = new Set<string>();
+    for (const pane of p.view.panes.views(edgeNs)) {
       const on = isLayerVisible(layersFor(pane.id), "density") && isCoarseZoom(lat, pane.box, pane.rect.w, pane.rect.h);
-      if (!on) { densityKeyByPane.delete(pane.id); densityByPane.set(pane.id, []); continue; }
+      if (!on) { densityByPane.set(pane.id, []); continue; }
       const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
-      if (addrs.length === 0) { densityByPane.set(pane.id, []); continue; }
-      const key = addrs.map(addrSpelling).join(",") + "|" + (pane.device ?? "any");
-      if (densityKeyByPane.get(pane.id) === key || densityInflight.has(pane.id)) continue;
+      for (const a of addrs) keep.add(addrSpelling(a));
+      densityByPane.set(pane.id, densityFetches.tiles(addrs));
+      if (densityInflight.has(pane.id)) continue;
+      const due = densityFetches.due(lat, addrs, edgeNs, p.view.panes.isFollowing(pane.id), nowMs);
+      if (due.length === 0) continue;
       densityInflight.add(pane.id);
-      Promise.all(addrs.map((a) => client.get<unknown>(densityUrl(a)).then((body) => parseDensityTile(a, body)).catch(() => null)))
-        .then((tiles) => {
-          densityKeyByPane.set(pane.id, key);
-          densityByPane.set(pane.id, tiles.filter((t): t is DensityTile => t !== null));
+      Promise.all(due.map((a) => client.get<unknown>(densityUrl(a))
+        .then((body) => {
+          const t = parseDensityTile(a, body);
+          if (t) densityFetches.succeeded(a, t, edgeNs, nowMs); else densityFetches.failed(a, nowMs);
         })
+        .catch(() => { densityFetches.failed(a, nowMs); })))
+        .then(() => { densityByPane.set(pane.id, densityFetches.tiles(addrs)); })
         .finally(() => { densityInflight.delete(pane.id); });
     }
+    densityFetches.retain(keep);
   };
   // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
   // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
