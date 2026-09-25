@@ -223,6 +223,48 @@ main_is_red(){
   return 1
 }
 
+# BISECT, NOT ISOLATE (supervisor for the user, 2026-09-24 19:37: four 1-by-1 isolations that day, 5-9 h of
+# serial full gates each). When a batch's triaged test/spec fails alone and main is green on it, find the
+# branch that breaks it with THAT TEST ALONE over halves of the batch (log2(n) targeted runs), confirm the
+# last candidate is red ALONE, and only then blame it. Everything else goes back as one batch and still
+# lands only through a full gate - nothing is excused. The candidates are persisted in isolate-remaining,
+# so a restart mid-bisect re-queues them (startup).
+bisect_red(){ # base branch... -> 0 = the triaged tests are RED on base + these branches, 1 = green, 2 = gave up
+  # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
+  # the two verdicts is the branches merged here.
+  local base=$1; shift; local b rc=1
+  git -C "$REPO" reset -q --hard "$base"
+  for b in "$@"; do
+    if ! HK_MERGE_RUNNER=1 git -C "$REPO" merge -q --no-ff -m "Merge $(ticket_of "$b") ($b): bisect probe (automated, never kept)" "$b" >>"$LOG" 2>&1; then
+      git -C "$REPO" merge --abort 2>/dev/null; git -C "$REPO" reset -q --hard "$base"
+      log "BISECT: $b does not merge onto $base with the others - giving up"; return 2
+    fi
+  done
+  if [ -n "${TRIAGE_FILTER:-}" ]; then
+    ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1 || rc=0
+  else
+    ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
+      || { git -C "$REPO" reset -q --hard "$base"; log "BISECT: rebuild failed on $* - giving up"; return 2; }
+    ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1 || rc=0
+  fi
+  git -C "$REPO" reset -q --hard "$base"
+  log "BISECT: base + $* -> $([ "$rc" = 0 ] && echo RED || echo green)"
+  return $rc
+}
+bisect_culprit(){ # base branch... -> echoes the one branch that is red ALONE, or nothing
+  local base=$1; shift; local cand=("$@") n r
+  printf '%s ' "$@" > "$S/isolate-remaining"
+  while [ "${#cand[@]}" -gt 1 ]; do
+    n=$(( ${#cand[@]} / 2 ))
+    bisect_red "$base" "${cand[@]:0:$n}"; r=$?
+    [ "$r" = 2 ] && return 0
+    if [ "$r" = 0 ]; then cand=("${cand[@]:0:$n}"); else cand=("${cand[@]:$n}"); fi
+  done
+  bisect_red "$base" "${cand[0]}"; r=$?
+  [ "$r" = 0 ] && echo "${cand[0]}"
+  return 0
+}
+
 process(){
   local branch=$1 ticket; ticket=$(ticket_of "$branch")
   cd "$REPO" || return 1
@@ -835,7 +877,27 @@ try_bulk(){
       rm -f "$BULKMARK"
       return 0
     fi
-    log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && { [ -n "${TRIAGE_FILTER:-}" ] || [ -n "${TRIAGE_SPECS:-}" ]; } && [ "${#branches[@]}" -ge 2 ]; then
+      # The bulk gate's own end line first, so hkpy.flow / cycletime close THIS gate here; the probes
+      # below are not gates and print no `gate: … took` lines.
+      log "BULK gate FAILED -> rewound to $base; BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS}) alone (instead of ${#branches[@]} serial gates)"
+      local culprit; culprit=$(bisect_culprit "$base" "${branches[@]}")
+      if [ -n "$culprit" ]; then
+        local others=() b; for b in "${branches[@]}"; do [ "$b" != "$culprit" ] && others+=("$b"); done
+        { printf '%s\n' "${others[@]}"; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+        rm -f "$S/isolate-remaining"
+        record_attempt "$culprit" "$(git -C "$REPO" rev-parse "$culprit")"
+        log "BISECT: GATE_FAIL $culprit (red ALONE on base + it, green on base: $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS})) -> abort + flag for AI; ${#others[@]} other(s) re-queued first as one batch"
+        echo "$(date '+%m-%d %H:%M')  $culprit  $(ticket_of "$culprit")  GATE_FAIL" >> "$NEEDS"
+        notify_coordinator "$(ticket_of "$culprit") ($culprit) FAILED the merge gate (bisected from the batch): $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} | cut -c1-200)" "gate failed - fix run"
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      rm -f "$S/isolate-remaining"
+      log "BISECT: no single branch confirmed red alone -> isolate by merging each individually"
+    else
+      log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+    fi
   else
     log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  BULK_FAIL_HEAD_MOVED" >> "$NEEDS"

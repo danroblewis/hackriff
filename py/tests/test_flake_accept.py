@@ -330,3 +330,73 @@ def test_a_single_branch_main_side_red_is_held_once_per_tip_not_charged():
     assert 'echo "$branch $tip" >> "$S/main-side-seen"' in block                     # the second time on this tip is charged
     assert '>> "$S/main-red-parked"' in block and "return 1" in block and "BLOCKED_ON_SPEC" in block
     assert '"main-side defect - deflaker/ticket needed"' in block
+
+
+def _bisect(tmp_path, branches, culprits, filt="t", specs="", merge_fail="", together=False):
+    """bisect_culprit over stubbed git/cargo/npm: the triaged test is red whenever a culprit is merged."""
+    state, calls = tmp_path / "merged", tmp_path / "calls"
+    state.write_text("")
+    culprit_re = "|".join(culprits) or "NONE"
+    need = len(culprits) if together else 1
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}; mkdir -p {tmp_path}/ui
+log(){{ echo "LOG $*" >&2; }}
+ticket_of(){{ echo "$1"; }}
+git(){{ shift 2
+  case "$1" in
+    reset) : > {state} ;;
+    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
+  esac; return 0; }}
+probe(){{ echo "$1 $(tr '\\n' ' ' < {state})" >> {calls}; [ "$(grep -cxE '{culprit_re}' {state})" -ge {need} ] && return 1; return 0; }}
+cargo(){{ [ "$1" = build ] && return 0; probe cargo; }}
+npm(){{ [ "$2" = build ] && return 0; probe npm; }}
+TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
+{_function("bisect_red")}
+{_function("bisect_culprit")}
+echo "CULPRIT=[$(bisect_culprit base {' '.join(branches)})]"
+cat {state} | wc -l | tr -d ' ' | sed 's/^/LEFT_MERGED=/'
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    probes = calls.read_text().splitlines() if calls.exists() else []
+    return out.stdout, probes, (tmp_path / "isolate-remaining").read_text()
+
+
+def test_bisection_names_the_one_branch_red_alone_in_log2_probes(tmp_path):
+    """Supervisor for the user, 2026-09-24: bisect a red batch by the failing test alone, not n gates."""
+    bs = [f"b{i}" for i in range(8)]
+    out, probes, remaining = _bisect(tmp_path, bs, ["b5"])
+    assert "CULPRIT=[b5]" in out
+    assert len(probes) == 4                      # 3 halvings + the confirmation of b5 ALONE
+    assert probes[-1].split() == ["cargo", "b5"]  # confirmed on base + the culprit only
+    assert "LEFT_MERGED=0" in out                # every probe is reset back to base
+    assert remaining.split() == bs               # a restart mid-bisect re-queues the whole batch
+
+
+def test_bisection_blames_nobody_when_the_red_needs_two_branches(tmp_path):
+    """b1 and b6 only break it together: no single branch is red alone -> nothing, and the caller isolates."""
+    out, probes, _ = _bisect(tmp_path, [f"b{i}" for i in range(8)], ["b1", "b6"], together=True)
+    assert "CULPRIT=[]" in out and len(probes) == 4 and "LEFT_MERGED=0" in out
+
+
+def test_bisection_gives_up_on_a_merge_it_cannot_make(tmp_path):
+    out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2", "b3"], ["b3"], merge_fail="b1")
+    assert "CULPRIT=[]" in out and probes == [] and "LEFT_MERGED=0" in out
+
+
+def test_bisection_runs_the_browser_specs_when_the_red_is_a_spec(tmp_path):
+    out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2"], ["b0"], filt="", specs="app-surface.e2e.mjs")
+    assert "CULPRIT=[b0]" in out and probes and all(p.startswith("npm ") for p in probes)
+
+
+def test_a_bisected_culprit_is_failed_and_the_rest_go_back_as_one_batch():
+    """The try_bulk wiring: bisect only for a triaged test red with main green, re-queue the others FIRST."""
+    text = RUNNER.read_text()
+    i = text.index("if main_is_red; then", text.index("\ntry_bulk(){"))
+    block = text[i:text.index("return 1\n}", i)]
+    assert "bisect_culprit" in block
+    assert '[ "${TRIAGE_KIND:-test}" = "test" ]' in block and '"${#branches[@]}" -ge 2' in block
+    assert '{ printf \'%s\\n\' "${others[@]}"; cat "$QUEUE"' in block   # others at the FRONT
+    assert "record_attempt \"$culprit\"" in block and "GATE_FAIL\" >> \"$NEEDS\"" in block
+    assert "isolate by merging each individually" in block             # the fallback is kept
