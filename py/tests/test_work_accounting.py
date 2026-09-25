@@ -1451,6 +1451,8 @@ def test_a_reachable_host_below_its_cap_takes_eligible_work_and_the_macs_cap_cou
     t = {"id": "T-9", "title": "hk-store retention follow-ups", "needs": "none"}
     assert R.host_for(t, claims) == "node2"
     assert R.host_for({"id": "T-10", "title": "wgpu provider for the FFT", "needs": "none"}, claims) is None
+    # mentioning the HackRF is not needing it (04:05: a docs ticket and a dashboard ticket were kept off an idle node2)
+    assert R.host_for({"id": "T-11", "title": "Dashboard: explorer row + radio owner (HackRF lock)", "needs": "none"}, claims) == "node2"
     assert R.host_for(t, dict(claims, **{"T-4": {"state": "running", "kind": "work", "host": "node2"}})) is None   # at cap
     (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time() - 600, "reachable": True}))
     assert R.host_for(t, claims) is None                                          # stale probe: not ready
@@ -1545,6 +1547,10 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     R.tick(dry=False)
     st = json.load(open(tmp_path / "work-runner-status.json"))
     assert st["frontier"]["held_by_branch"] == ["T-44"] and st["frontier"]["dispatchable_ids"] == ["T-45"]
+    tasks[:] = []                                                          # nothing ready: the keys stay, empty
+    R.tick(dry=False)
+    f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
+    assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
     assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "probe_age_s": 0}
     assert st["hosts"]["mac"] == {"running": 0, "cap": 2}
     assert [a[2] for a in seen] == ["ORPHAN_BRANCH"]

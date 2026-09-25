@@ -53,6 +53,9 @@
 .out-trace .tr-summary { flex: 1 1 auto; }
 .out-trace .tr-elided { font-size: 11px; opacity: 0.7; font-style: italic; padding: 2px 0; }
 .out-trace .tr-trunc { display: block; opacity: 0.6; margin-top: 4px; }
+/* Which filter the list answers (T-930): after a failed fetch for a new filter the previous
+   filter's results stay under the error line, so they must be labelled. */
+.out-trace .tr-shown { display: block; opacity: 0.6; margin-bottom: 4px; }
 .out-trace .tr-resolution { border: 1px solid var(--line, #333); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }
 .out-trace .tr-res-headline { font-weight: 600; }
 .out-trace .tr-res-not-searched { opacity: 0.7; }

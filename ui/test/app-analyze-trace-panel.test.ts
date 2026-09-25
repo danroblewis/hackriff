@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   elidedText, emptyTraceText, groupByStage, nodeRegister, offersRerun, rerunDeepBody,
-  tracePath, truncationNote, type ElidedBucket, type TraceFetch, type TraceNode,
+  filterLabel, tracePath, truncationNote, type ElidedBucket, type TraceFetch, type TraceNode,
 } from "../src/app/explore/analyze-trace-panel";
 
 const node = (over: Partial<TraceNode> = {}): TraceNode => ({
@@ -94,4 +94,30 @@ test("nodes_elided, the fetch-failure sentence and the poll stop rule read only 
   assert.equal(tracePollDone({ final: false }, { ...j, state: "failed", resolution: { kind: "not-searched" } }), false);
   assert.equal(tracePollDone({ final: true }, { ...j, state: "failed", resolution: { kind: "not-searched" } }), true);
   assert.equal(tracePollDone({ final: true }, { ...j, state: "done" }), true, "a solved job carries no resolution");
+});
+
+test("the list says which filter it answers (T-930): an error for one filter never labels another's results", () => {
+  assert.equal(filterLabel({}), "showing: the whole trace (no filter)");
+  assert.equal(filterLabel({ family: "psk" }), "showing: family psk");
+  assert.equal(filterLabel({ stage: "S3", outcome: "pruned_floor" }), "showing: stage S3, outcome pruned_floor");
+  assert.equal(filterLabel({ family: "psk", tried: false }), "showing: family psk, not-tried only");
+  assert.equal(filterLabel({ tried: true }), "showing: tried only");
+  // `limit` is a bound on the fetch, not a question about the trace: it never labels the list
+  // (the truncation note already states a shortened list).
+  assert.equal(filterLabel({ limit: 8 }), "showing: the whole trace (no filter)");
+});
+
+test("T-930: the poll stops for a job that ENDED without a trace — the served `final` decides", async () => {
+  const { tracePollDone } = await import("../src/app/explore/analyze-trace-panel");
+  const j = { id: "a1", state: "searching", end_reason: null, error: null, target: {}, results: [] } as const;
+  // The real shape of a running job's fetch on this build: final:false, no nodes. Keep polling.
+  assert.equal(tracePollDone({ final: false }, { ...j }), false);
+  // The shape the backend now serves once the job has ended without ever producing a trace: a
+  // failure, and a cancel of a job that was still queued. Both carry a not-searched resolution.
+  const notSearched = { kind: "not-searched", summary: "not searched" };
+  assert.equal(tracePollDone({ final: true }, { ...j, state: "failed", error: { code: "no_evaluator", message: "" }, resolution: notSearched }), true);
+  assert.equal(tracePollDone({ final: true }, { ...j, state: "cancelled", resolution: notSearched }), true);
+  // A cancelled job whose worker has not handed back yet still serves final:false (its partial
+  // trace may still arrive), so the poll continues — the case the fix must not break.
+  assert.equal(tracePollDone({ final: false }, { ...j, state: "cancelled", resolution: notSearched }), false);
 });

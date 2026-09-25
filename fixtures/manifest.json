@@ -650,6 +650,104 @@
         "SPACE-050"
       ],
       "source": []
+    },
+    {
+      "name": "fm-101p3-pi1694",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-101p3-pi1694.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "53a51802110669bb41c44002344bd88ac6046e1d61c09ab54ae80e92e264b715",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "101.3: oracle PI 1694 (56 groups, BLER 0.000); overload clip_fraction 0.984",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "datetime": "2026-09-25",
+      "clip_count": 11811945,
+      "lfs": true
+    },
+    {
+      "name": "fm-101p3-pi1694",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-101p3-pi1694.sigmf-meta",
+      "size_bytes": 7112,
+      "sha256": "d8890553558b6e6025e597f852b3080f288118d7684ba601c58ecbb646eb8e46",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "101.3: oracle PI 1694 (56 groups, BLER 0.000); overload clip_fraction 0.984",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "datetime": "2026-09-25",
+      "clip_count": 11811945
+    },
+    {
+      "name": "fm-98p9-piA4FF",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-98p9-piA4FF.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "45d0ad2f26691c721725b9ec1d058e20a83075ec9c19e70b3307f80e1c1775a1",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "98.9: oracle PI A4FF (3 groups, BLER 0.639); 98.1: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.120",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "datetime": "2026-09-25",
+      "clip_count": 1441836,
+      "lfs": true
+    },
+    {
+      "name": "fm-98p9-piA4FF",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/fm-98p9-piA4FF.sigmf-meta",
+      "size_bytes": 8933,
+      "sha256": "b51be97b3570e3a90f07f0d6e0f4c3d93a9faf250d2668b7fbb5bfd590d62097",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "98.9: oracle PI A4FF (3 groups, BLER 0.639); 98.1: oracle PI none decoded (0 groups, BLER n/a); overload clip_fraction 0.120",
+      "purpose": "explorer-agent captured live FM/RDS stations, blind truth cross-checked against the rds_ref.py oracle (T-935)",
+      "datetime": "2026-09-25",
+      "clip_count": 1441836
+    },
+    {
+      "name": "flex-pagers-930p8",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/flex-pagers-930p8.sigmf-data",
+      "size_bytes": 57600000,
+      "sha256": "05a8044f7a5f7652cb7b128e1808f5e4c401746360deb3ca8e5215ac338152ba",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-088"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "929.6084: oracle 3 sync(s), levels 1600bd:1L/3200bd:2L; 929.9331: oracle 1 sync(s), levels 1600bd:1L/3200bd:1L; 931.1580: oracle 2 sync(s), levels 1600bd:2L/3200bd:2L; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FLEX paging channels, blind truth cross-checked against the independent flex_ref.py sync-word oracle (T-949)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
+    },
+    {
+      "name": "flex-pagers-930p8",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/flex-pagers-930p8.sigmf-meta",
+      "size_bytes": 11558,
+      "sha256": "9d837012868e7ad8b554b678dac5f8de8fa61f21fba7eeed6bccd7a22cdba743",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-088"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "929.6084: oracle 3 sync(s), levels 1600bd:1L/3200bd:2L; 929.9331: oracle 1 sync(s), levels 1600bd:1L/3200bd:1L; 931.1580: oracle 2 sync(s), levels 1600bd:2L/3200bd:2L; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live FLEX paging channels, blind truth cross-checked against the independent flex_ref.py sync-word oracle (T-949)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
     }
   ]
 }

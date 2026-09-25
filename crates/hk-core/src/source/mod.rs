@@ -18,8 +18,10 @@
 //! Implementations: [`SigmfReplaySource`] (deterministic file replay, the basis of offline tests),
 //! [`HackRfSource`] (libhackrf receive, cargo feature `hackrf`; T-037a), [`RtlSdrSource`]
 //! (librtlsdr receive, cargo feature `rtlsdr`; T-514) and the [`mock`] SDR device (a SigMF
-//! recording behind the device contract, retuned realistically; T-049). Every device passes the
-//! [`conformance`] suite.
+//! recording behind the device contract, retuned realistically; T-049). Every tunable device
+//! passes the [`conformance`] suite. [`accessory`] (T-891) is the accessory-fed source — a VLF/LF
+//! receiver into a soundcard, below the HackRF's 1 MHz floor — and its SigMF mock; it is fixed at
+//! baseband, so `tune` is `Unsupported` and the tuning checks do not apply.
 //!
 //! TX is not part of these traits. It stays gated (C37).
 //!
@@ -92,6 +94,7 @@
 //! - **Backpressure:** [`Source::pausable`] is `false` for anything that streams in real time
 //!   (a radio, or a mock emulating one); lossless pipelines refuse such sources.
 
+pub mod accessory;
 pub mod conformance;
 pub mod format;
 pub mod hackrf;
@@ -112,6 +115,11 @@ use crate::block::{BlockHeader, SampleBlock};
 #[cfg(doc)]
 use crate::block::Discontinuity;
 
+pub use accessory::{
+    ACCESSORY_MOCK_DRIVER, AccessoryControl, AccessoryDescriptor, AccessoryKind,
+    AccessoryMockDriver, AccessoryMockOptions, AccessorySource, AudioInput, AudioRead,
+    accessory_capabilities, write_real_sigmf,
+};
 pub use hackrf::{
     HackRfConfig, HackRfControl, HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats,
 };

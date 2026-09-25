@@ -68,6 +68,7 @@ pub mod occupancy; // T-118
 pub mod presence; // T-388
 pub mod reports; // T-121
 pub mod retention; // T-904
+pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
 
 mod capture;
 mod dc_twin; // T-174

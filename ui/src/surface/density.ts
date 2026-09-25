@@ -256,9 +256,16 @@ export class DensityFetches {
     });
   }
 
-  /** Record a successful answer for pane `pane`'s `a`, asked when the edge stood at `edgeAtFetchNs`. */
+  /** Record a successful answer for pane `pane`'s `a`, asked when the edge stood at `edgeAtFetchNs`.
+   *
+   * A non-finite edge — the host has no edge to name yet, before the first row — is stored as
+   * `-Infinity`, never as `NaN` (T-927, follow-up 4): `NaN < edge` is FALSE, so a `NaN` fetch edge
+   * makes [[due]]'s "rows arrived since" test read "nothing to ask about" for ever, and this copy is
+   * never refreshed again — an accidental seal, the very thing review fix 3 removed. `-Infinity` is
+   * the truth of that case: asked before any edge was known, so stale as soon as one is. */
   succeeded(pane: string, a: TileAddr, tile: DensityTile, edgeAtFetchNs: number, nowMs: number): void {
-    this.map.set(entryKey(pane, a), { tile, edgeAtFetchNs, askedAtMs: nowMs, failures: 0 });
+    const edge = Number.isFinite(edgeAtFetchNs) ? edgeAtFetchNs : Number.NEGATIVE_INFINITY;
+    this.map.set(entryKey(pane, a), { tile, edgeAtFetchNs: edge, askedAtMs: nowMs, failures: 0 });
   }
 
   /** Record a failed ask: the copy in hand (if any) is kept, and a retry is scheduled. */
@@ -283,19 +290,33 @@ export class DensityFetches {
   }
 }
 
+/** One shared read's answer: the tile (`null` when it failed or did not parse) **and the live edge
+ * the request that fetched it was ISSUED at** — which is not the edge of the tick that joined it. */
+export interface DensityAnswer {
+  readonly tile: DensityTile | null;
+  readonly edgeAtFetchNs: number;
+}
+
 /**
  * The density reader the host polls with: one request per address in flight, SHARED by every pane
  * that asks for it meanwhile, so two following panes due for the same address in one tick send one
  * `GET`, not two. `get` is the host's read (a URL in, a body out); this file never reaches the
- * network itself. A failed or unparseable answer resolves `null` (the caller retries it).
+ * network itself. A failed or unparseable answer resolves a `null` tile (the caller retries it).
+ *
+ * The answer carries `edgeAtFetchNs` — the `edgeNs` of the ask that **issued** the request — because
+ * a pane joining a request in flight must record the copy at the edge it was actually taken at, not
+ * at its own later tick (T-927, follow-up 2). Recording the joining tick's edge claims a snapshot
+ * seconds fresher than it is, and `DensityFetches.due`'s "rows arrived since" test then skips the
+ * refresh that would have caught the counts that arrived in between.
  */
-export function sharedDensityReader(get: (url: string) => Promise<unknown>): (a: TileAddr) => Promise<DensityTile | null> {
-  const inflight = new Map<string, Promise<DensityTile | null>>();
-  return (a) => {
+export function sharedDensityReader(get: (url: string) => Promise<unknown>): (a: TileAddr, edgeNs: number) => Promise<DensityAnswer> {
+  const inflight = new Map<string, Promise<DensityAnswer>>();
+  return (a, edgeNs) => {
     const k = addrSpelling(a);
     let q = inflight.get(k);
     if (!q) {
-      q = get(densityUrl(a)).then((body) => parseDensityTile(a, body), () => null)
+      q = get(densityUrl(a))
+        .then((body) => ({ tile: parseDensityTile(a, body), edgeAtFetchNs: edgeNs }), () => ({ tile: null, edgeAtFetchNs: edgeNs }))
         .finally(() => { inflight.delete(k); });
       inflight.set(k, q);
     }

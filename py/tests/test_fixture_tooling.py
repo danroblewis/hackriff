@@ -16,6 +16,7 @@ sys.path.insert(0, str(FIXTURE_TOOLS))
 
 import annotate  # noqa: E402
 import fetch  # noqa: E402
+import flex_ref  # noqa: E402
 import fxlib  # noqa: E402
 import rds_ref  # noqa: E402
 import trim  # noqa: E402
@@ -215,6 +216,75 @@ def test_rds_reference_decoder_recovers_synthetic_pi_ps_and_stats(tmp_path):
     assert got["block_error_rate"] == 0.0
     assert abs(got["pilot_hz"] - 19000.0) < 0.5
     assert math.isclose(got["bitrate_bd_in_sample_clock"], got["pilot_hz"] / 16)
+
+
+def test_flex_reference_oracle_finds_synthetic_sync_and_levels():
+    """A synthetic FLEX preamble (alternating dotting bits) + the 32-bit frame sync
+    ``0xA6C6AAAA`` + >=2 s of random 2-level data (``LEVEL_WINDOW_S``), 2-level FSK at 1600 Bd,
+    +-4.8 kHz deviation -- the oracle should recover the sync at the natural bit order and report
+    a 2-level channel near +-4.8 kHz when the payload is re-sliced at 1600 Bd."""
+    rng = np.random.default_rng(5)
+    fs = 48_000.0
+    sps = fs / flex_ref.SYNC_RATE_BD  # 30, exact for a clean synthetic signal
+    dev = 4800.0
+    preamble = [i % 2 for i in range(64)]
+    sync_bits = [(flex_ref.FLEX_SYNC >> (31 - i)) & 1 for i in range(32)]
+    payload_bits = int(round(flex_ref.LEVEL_WINDOW_S * 1600.0)) + 200
+    payload = rng.integers(0, 2, size=payload_bits).tolist()
+    bits = np.array(preamble + sync_bits + payload, dtype=np.uint8)
+    inst_freq = np.repeat(np.where(bits == 1, dev, -dev), int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+
+    got = flex_ref.decode(x, fs)
+    assert got["n_syncs"] >= 1
+    assert got["sync_hex"] == "A6C6AAAA"
+    assert any(h["order"] == "natural" and h["hamming"] == 0 for h in got["syncs"])
+    # the sync should land at bit index len(preamble), give or take the timing search's rounding
+    natural_hits = [h["bit"] for h in got["syncs"] if h["order"] == "natural"]
+    assert min(abs(b - len(preamble)) for b in natural_hits) <= 1
+    lv = got["levels"]["1600bd"]
+    assert lv["n_levels"] == 2
+    for c in lv["level_centres_hz"]:
+        assert abs(abs(c) - dev) < 800.0
+
+
+def test_flex_reference_oracle_reports_four_level_channel():
+    """A synthetic 4-level FSK trace (payload-style) at +-4.9/+-1.6 kHz, sliced at its own 1600 Bd
+    symbol clock, should be reported as 4 levels, not 2, by the histogram-peak heuristic."""
+    rng = np.random.default_rng(3)
+    fs = 48_000.0
+    sps = fs / flex_ref.SYNC_RATE_BD
+    n_sym = int(round(flex_ref.LEVEL_WINDOW_S * 1600.0)) + 200
+    levels = np.array([-4900.0, -1600.0, 1600.0, 4900.0])
+    symbols = levels[rng.integers(0, 4, size=n_sym)]
+    inst_freq = np.repeat(symbols, int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    freq = flex_ref.fm_discriminate(x, fs)
+
+    got = flex_ref.level_count(freq, syncs=[{"bit": 0}], off=0.0, sps_1600=sps)
+    lv = got["1600bd"]
+    assert lv["n_levels"] == 4
+    mags = sorted(abs(c) for c in lv["level_centres_hz"])
+    assert abs(mags[0] - 1600.0) < 500.0
+    assert abs(mags[-1] - 4900.0) < 500.0
+
+
+def test_flex_reference_oracle_finds_no_sync_in_noise():
+    """A pure-noise instantaneous-frequency trace should not spuriously report a sync (guards
+    against the Hamming tolerance being so loose it always fires)."""
+    rng = np.random.default_rng(11)
+    fs = 48_000.0
+    n_bits = 2000
+    sps = fs / flex_ref.SYNC_RATE_BD
+    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
+    inst_freq = np.repeat(np.where(bits == 1, 4800.0, -4800.0), int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    got = flex_ref.decode(x, fs)
+    # random bits should essentially never match a specific 32-bit pattern within Hamming 3
+    assert got["n_syncs"] <= 1
 
 
 def committed_entries():

@@ -92,6 +92,20 @@ pub const NEG_PLANE: &str = "NEG";
 /// The test that populates the NEG rows.
 pub const GUARD_TEST: &str =
     "mauto_negatives::negative_controls_hold_the_false_label_budget_through_the_mock_sdr";
+/// T-576's false-confirm suite runs N1, N2 and N4 again, at `standard` and `deep`, and so
+/// populates their cells too: the manifest names both tests rather than implying one owner.
+pub const FALSE_CONFIRM_TEST: &str = "mauto_false_confirm::false_confirm_budget";
+
+/// The tests that populate one sub-population's cells.
+fn tests_for(sub: &SubPop) -> &'static [&'static str] {
+    const BOTH: &[&str] = &[GUARD_TEST, FALSE_CONFIRM_TEST];
+    const GUARD: &[&str] = &[GUARD_TEST];
+    if matches!(sub.pop, Population::N1 | Population::N2 | Population::N4) {
+        BOTH
+    } else {
+        GUARD
+    }
+}
 
 /// docs/22 §4.3's populations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -272,7 +286,7 @@ pub fn manifest_rows() -> Vec<Row> {
             };
             Row {
                 id: sub.row,
-                tests: std::slice::from_ref(&GUARD_TEST),
+                tests: tests_for(sub),
                 seeds,
                 fixed_seeds,
                 cells: vec![Cell::new(NEG_PLANE, &[("NP", sub.level)])],
