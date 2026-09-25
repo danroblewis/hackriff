@@ -1149,5 +1149,8 @@ def test_the_browser_tier_serves_the_hk_the_runner_built(tmp_path):
 
 def test_the_merge_runner_builds_in_its_own_target_dir():
     text = (Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
-    assert 'export CARGO_TARGET_DIR="${HK_GATE_TARGET:-$S/gate-target}"' in text
-    assert 'cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR"' in text
+    assert 'export CARGO_TARGET_DIR="$S/gate-target"' in text
+    assert 'cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR.tmp"' in text and 'mv "$CARGO_TARGET_DIR.tmp" "$CARGO_TARGET_DIR"' in text
+    just = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    recipe = just[just.index("\ntest-ui-e2e:"):]
+    assert 'if [ -z "${HK_BIN:-}" ]; then' in recipe[:3000]                 # hk always rebuilt, never "exists?"

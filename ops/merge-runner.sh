@@ -45,7 +45,7 @@ BULKMARK=$S/bulk-in-progress
 # target - each a `cp -c` clone of main's - exclusive, ~2 GB/min. Every cargo this runner starts (gates,
 # flake re-runs, main-red rebuilds) builds here instead, so main's target/ stays a stable clone source.
 # Seeded as a clone of main's target/ at startup, so the first gate is warm. CI and hand gates unaffected.
-export CARGO_TARGET_DIR="${HK_GATE_TARGET:-$S/gate-target}"
+export CARGO_TARGET_DIR="$S/gate-target"
 # T-543: one JSON line per LANDED ticket - {ticket, branch, first_commit_ts, merge_ts,
 # land_minutes, gate_attempts}. `merge-done.txt` records THAT a branch merged; this records
 # what it COST, which is the number T-543 exists to watch. Written next to the gate's own
@@ -880,7 +880,13 @@ self_version(){
 ( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
 
 if [ ! -d "$CARGO_TARGET_DIR" ] && [ -d "$REPO/target" ]; then
-  cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR" 2>>"$LOG" && log "STARTUP: seeded the gate's target dir $CARGO_TARGET_DIR as a clone of $REPO/target"
+  # Cloned to .tmp and moved into place: a half-copied dir would otherwise never be reseeded (review).
+  rm -rf "$CARGO_TARGET_DIR.tmp"
+  if cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR.tmp" 2>>"$LOG" && mv "$CARGO_TARGET_DIR.tmp" "$CARGO_TARGET_DIR"; then
+    log "STARTUP: seeded the gate's target dir $CARGO_TARGET_DIR as a clone of $REPO/target"
+  else
+    rm -rf "$CARGO_TARGET_DIR.tmp"; log "STARTUP: WARN could not seed $CARGO_TARGET_DIR - the first gate builds cold"
+  fi
 fi
 log "GATE TARGET: $CARGO_TARGET_DIR (main's target/ is the workers' clone source and is not rebuilt by gates)"
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
