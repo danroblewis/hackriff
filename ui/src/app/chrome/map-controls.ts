@@ -76,6 +76,8 @@ export interface MapControlHost extends LayerMenuHost {
   /** Tell the rest of the page the view moved (the surface's `mirror`). */
   viewChanged(): void;
   toast(text: string): void;
+  /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
+  research?: { isOpen(): boolean; toggle(): void };
 }
 
 /**
@@ -186,7 +188,7 @@ const svg = (...shapes: Shape[]): SVGSVGElement => {
  * host calls: `viewMoved()` when a gesture moved the view (a Go-to offer describes a window the pane
  * has now left, so it is withdrawn), and `syncFollow()` when the follow state may have changed.
  */
-export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void } {
+export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncResearch(): void } {
   const input = h("input", {
     class: "mono", placeholder: "Go to frequency, e.g. 433.92M or 101.3", "aria-label": "Go to frequency",
     inputmode: "decimal", autocomplete: "off", spellcheck: "false",
@@ -207,7 +209,12 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-layers",
   }, svg(["path", "M12 3l9 5-9 5-9-5 9-5z"], ["path", "M3 12l9 5 9-5"], ["path", "M3 16l9 5 9-5"])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn);
+  // T-821 (MAP-21): the Research slide-in — collections, and every mark as a row.
+  const researchBtn = h("button", {
+    type: "button", class: "map-ibtn map-research-btn", "aria-label": "Research", title: "Research: collections and their marks",
+    "aria-pressed": "false", hidden: !host.research,
+  }, svg(["path", "M4 5h16M4 12h16M4 19h16"], ["path", "M8 3v18"])) as HTMLButtonElement;
+  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn);
   const layersList = h("div", { class: "map-layers-rows" });
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
     layersList,
@@ -317,8 +324,12 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
   fab.addEventListener("click", () => { host.followLive(); host.viewChanged(); syncFollow(); });
 
+  const syncResearch = () => researchBtn.setAttribute("aria-pressed", String(!!host.research?.isOpen()));
+  researchBtn.addEventListener("click", () => { host.research?.toggle(); syncResearch(); });
+  syncResearch();
+
   syncFollow();
   /** Re-render an open menu — the active pane changed, or a toolbar button toggled a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); };
-  return { el, viewMoved: hideOffer, syncFollow, syncLayers };
+  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncResearch };
 }

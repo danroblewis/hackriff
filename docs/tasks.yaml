@@ -24340,7 +24340,6 @@ tasks:
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
     status: in-progress
-    branch: task-t821
     priority: normal
     parallel_group: MAP-RESEARCH
     model: opus
@@ -24369,6 +24368,16 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a Collections panel with a table view; selecting a row highlights its mark on the canvas and vice versa. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Research slide-in (460 px, full height) is a big panel: a row click selects/highlights the mark; any view jump or the gated retune offer is a small explicit per-row button only. P1: visible dismiss (T-900). P3: fixed position.
+    branch: task-t821
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 17:41).
+      Added the Research slide-in (MAP-21): a fixed right-edge panel (460 px, visible close, Esc) opened from a new Research button in the map's top-right cluster beside Layers. It lists every collection (checkbox = layer on/off, stored via PUT /api/collections/{id} {visible}; name button filters the table to it; create/delete non-reserved), and a table where every marker and every annotation is a row (Kind/Name/Collection/Frequency/Time, header-click sort, All/Markers/Annotations tabs, text filter, 'only in this window'). One slice (ui/src/app/map/research-slice.ts, state key `research`) feeds both views: the canvas draws each collection's marks through the pane's own box (pins full height, points floored to 8 px, collection colour; unfiled annotations follow the `research` layer; layers menu lists each collection as a per-pane overlay). Row click only SELECTS (P4): the mark turns amber on the canvas even if its layer is off; clicking a mark on the canvas selects it, opens the panel and scrolls to its row. Per-row small buttons: Go (requestGoto + reviewAt, view arithmetic only), rename (PUT name/label), delete (two-press confirm, DELETE); every write reloads the slice so both surfaces show the server's answer. STAGING: open Explore, press the Research icon (three lines) in the top-right cluster next to Layers; Bookmarks show as frequency pins - click a row to highlight its pin, click a pin to jump to its row.
+      Tests: just test-ui -> exit 0 (build + typecheck clean; 70/70 test files passed (incl. new app-research, app-panel-influence P4 guard, app-map-controls spy test))
+      precheck exit 0
+      Commits: 9f3066f1
+      Observed, not chased: precheck: `cargo fmt --all --check` passed; the clippy half was stopped deliberately because this diff touches no crate (with no crate arguments `just precheck` runs clippy over the whole workspace, which took more than 10 min here) | No UI creates markers or annotations in a user collection yet (MAP-16's drawing UI, and an 'add to collection' action from the detail sheet). Until one lands, staging shows only the Bookmarks collection's pins as rows | Collection layers are drawn after composeOverlays (z 40, above every overlay drawn today). Once artifacts (z50) or priors (z60) get renderers, collections must go through the registry's z ordering
+      Use cases: RESEARCH-003
+      Resources: 65 CPU-s, peak 1.1 GB
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
