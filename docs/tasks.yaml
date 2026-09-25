@@ -28959,7 +28959,8 @@ tasks:
   - id: T-995
     milestone: MMAP
     title: "Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired"
-    status: todo
+    status: in-progress
+    branch: task-t995
     priority: high
     deps: []
     parallel_group: MAP-MINIMAP
