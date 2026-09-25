@@ -28223,7 +28223,7 @@ tasks:
   - id: T-951
     milestone: MAUTO
     title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: RECIPE-POCSAG
@@ -28248,6 +28248,7 @@ tasks:
       Use cases: SIGNAL-062
       Resources: 388 CPU-s, peak 1.8 GB
     branch: task-t951
+    commit: e1756d19
   - id: T-952
     milestone: MAUTO
     title: "APRS: AFSK1200/AX.25 recipe (no APRS decode path exists)"
