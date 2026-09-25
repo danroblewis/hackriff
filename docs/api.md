@@ -65,7 +65,7 @@ Never returns content, only stream *metadata*: every offered stream's header fie
   "on_demand": [
     { "name": "listen", "ws_path": "/ws/open/listen", "tcp_target": "open/listen",
       "kind": "audio", "datatype": "ri16_le", "sample_rate_hz": 48000,
-      "params": ["emitter", "detection", "f_lo", "f_hi"], "records": "…" },
+      "params": ["emitter", "detection", "f_lo", "f_hi", "channels"], "records": "…" },
     { "name": "bits", "ws_path": "/ws/open/bits", "tcp_target": "open/bits", "kind": "bits", "...": "…" },
     { "name": "symbols", "ws_path": "/ws/open/symbols", "tcp_target": "open/symbols", "kind": "symbols", "...": "…" },
     { "name": "iq", "ws_path": "/ws/open/iq", "tcp_target": "open/iq", "kind": "iq", "datatype": "cf32_le",
@@ -1825,7 +1825,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 
 **`spectrum/live` is computed only while somebody is reading it (T-489).** The stream is always *offered* — it appears on `/api/streams` and accepts a subscriber whenever the run is live — but the producer's FFT runs only while at least one consumer is open, so a headless run (a scheduled survey with no browser attached) publishes **no rows at all** and the run's spectrum row counter honestly reads `0`. A **consumer** is what counts: this WebSocket, a TCP stream client, or an in-process subscriber. Nothing else changes — capture, the IQ ring, detection, the spectrum-history pyramid and the coverage map each read the ring themselves and are identical either way, which is the point: the data must not change because nobody was looking. On subscribing, rows start within one producer read timeout plus a row period (measured ~0.1 s), and the first one carries `DISCONTINUITY`, because it is not contiguous with whatever row was published before the quiet stretch.
 
-**`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`), `iq?emitter=<id>` or `iq?f_lo=<Hz>&f_hi=<Hz>` (T-165, ADR-0013 §4.9 gap 8: raw channelised IQ, `cf32_le`, stream-contract §12.3 — no mode or parameter either, there is nothing to demodulate). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …).
+**`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter; `&channels=2` opts in to **stereo**, T-874: on a broadcast-FM channel the header's `audio.channels` is then 2 and each record interleaves `L, R`, other modes stay mono and say `channels: 1`, and without the parameter the stream is exactly the mono one — stream contract §12.2), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`), `iq?emitter=<id>` or `iq?f_lo=<Hz>&f_hi=<Hz>` (T-165, ADR-0013 §4.9 gap 8: raw channelised IQ, `cf32_le`, stream-contract §12.3 — no mode or parameter either, there is nothing to demodulate). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …; on a two-channel stream also `stereo` — the pilot is locked and L−R decoded — and `stereo_lock_losses`).
 
 ### `hk` stream-tail
 
@@ -1848,6 +1848,16 @@ Consumers never send after the handshake line; any byte, or a hang-up, closes th
 
 ```sh
 printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
+```
+
+Listen from the command line (T-874). The stream is framed, so pipe it through the WAV example rather than straight into a player; `--stereo` sends `channels=2` and writes a two-channel WAV when the station is broadcast FM (the header says which it got):
+
+```sh
+HK_TOKEN=... python3 py/examples/hk_audio_wav.py --f-lo 101.2e6 --f-hi 101.4e6 --seconds 10 --out fm.wav
+HK_TOKEN=... python3 py/examples/hk_audio_wav.py --f-lo 101.2e6 --f-hi 101.4e6 --stereo --out fm-stereo.wav
+# the raw handshake, for any other client: mono unless it asks
+printf 'open/listen?f_lo=%s&f_hi=%s&channels=2&token=%s\n' 101200000 101400000 "$HK_TOKEN" | nc 127.0.0.1 8788 > fm.hkstream
+python3 py/examples/hk_audio_wav.py --file fm.hkstream --out fm-stereo.wav
 ```
 
 Python clients (standard library only): `py/examples/` (`hkstream.py`, `hk_bits.py`, `hk_audio_wav.py`), documented in `py/README.md`.
@@ -2431,7 +2441,7 @@ Both errors grow **linearly with age**, so a box drawn from a declared rate walk
 
 **What does not change, at any stage:**
 
-- `GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi=` and TCP `open/listen?…` keep their names, parameters and refusal codes. There is still **no `mode` parameter** — mode and every other parameter stay estimated.
+- `GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi=` and TCP `open/listen?…` keep their names, parameters and refusal codes. There is still **no `mode` parameter** — mode and every other parameter stay estimated. (T-874 added the one opt-in `channels=2` for stereo, ADR-0015 §12.13; without it nothing changed.)
 - The audio profile (`docs/stream-contract.md` §12.2) keeps `kind: "audio"`, `datatype: "ri16_le"`, `sample_rate_hz: 48000`, `frame_samples: 960`, its type-1 data records and its type-3 status keys (`level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …). A closed squelch stays a jump in `sample_index` plus `DISCONTINUITY`.
 - Audio stays **content**: the pre-attach gate (`listen_class`) still runs before any ring read, and the egress gate still withholds payloads under a class that forbids content.
 - `/api/status` keeps reporting `listen.budget`: an audio pipeline counts as a listener, not only as a chain.
