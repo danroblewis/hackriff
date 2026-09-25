@@ -1102,3 +1102,24 @@ def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monke
     assert R.dispatch_cap() == 4                                          # the gap before the next gate
     clock[0] += 100
     assert R.dispatch_cap() == 6                                          # the pipeline went quiet
+
+
+def test_the_queue_depth_is_sampled_once_a_minute(tmp_path, monkeypatch):
+    """User, 2026-09-24 17:02: track 'branches not yet on main' on /flow; the work runner samples it
+    (it ticks through a gate; the merge runner's loop does not)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "_DEPTH_AT", [0.0])
+    (tmp_path / "merge-queue.txt").write_text("task-a\ntask-b\n")
+    (tmp_path / "isolate-remaining").write_text("task-c\n")
+    R.record_queue_depth()
+    R.record_queue_depth()                                               # inside the minute: nothing
+    (line,) = (tmp_path / "queue-depth.jsonl").read_text().splitlines()
+    rec = json.loads(line)
+    assert rec["waiting"] == 3 and rec["queued"] == 2 and rec["isolating"] == 1
+
+
+def test_the_merge_runner_writes_what_it_holds_in_memory():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert 'echo "$1" > "$S/merging-now"; process "$1"' in text and 'rm -f "$S/merging-now"' in text
+    loop = text[text.index('        rest="$isolate"'):]
+    assert '> "$S/isolate-remaining"' in loop[:400] and 'rm -f "$S/isolate-remaining"' in loop[:1200]

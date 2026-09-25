@@ -1040,7 +1040,7 @@ while true; do
       set -- "${@:1:$BULK_MAX}"
     fi
     if [ "$#" -eq 1 ]; then
-      process "$1" || echo "$1" >> "$QUEUE"
+      echo "$1" > "$S/merging-now"; process "$1" || echo "$1" >> "$QUEUE"; rm -f "$S/merging-now"
     elif [ "$#" -ge 2 ]; then
       BULK_MERGED_LIST=""
       if ! try_bulk "$@"; then
@@ -1050,12 +1050,17 @@ while true; do
         isolate="${BULK_MERGED_LIST:-$*}"
         log "falling back to individual gates for: $isolate"
         MAIN_RED_STOP=""
+        # The isolation's remainder lives only in this loop; written out so "branches not yet on
+        # main" (hkpy.flow.queue_waiting, /flow's queue depth) counts it (user, 2026-09-24 17:02).
+        rest="$isolate"
         for b in $isolate; do
+          rest=$(printf '%s\n' $rest | grep -vx "$b" | tr '\n' ' '); printf '%s %s\n' "$b" "$rest" > "$S/isolate-remaining"
           # Main is red: the rest would each fail the same way - back to the queue, whose next batch
           # meets the batch path's MAIN IS RED hold.
           if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi
           process "$b" || echo "$b" >> "$QUEUE"
         done
+        rm -f "$S/isolate-remaining"
       fi
     fi
   fi

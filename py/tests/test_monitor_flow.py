@@ -222,3 +222,10 @@ def test_flow_shows_which_tests_were_blamed_on_a_branch(monitor, tmp_path, monke
         "quiet.e2e.mjs": {"branch_defects": 0}}}))
     monkeypatch.setattr(monitor, "SCRATCH", str(tmp_path))
     assert [(r["test"], r["blamed"]) for r in monitor.blamed_alone()] == [("canvas-journey.e2e.mjs", 3), ("app-trace.e2e.mjs", 1)]
+
+
+def test_flow_panel_carries_the_queue_depth(monitor, tmp_path):
+    (tmp_path / "merge-queue.txt").write_text("task-a\n")
+    (tmp_path / "isolate-remaining").write_text("task-b task-c\n")
+    d = monitor.build_flow_panel(str(tmp_path))
+    assert d.get("queue_depth", {}).get("now", {}).get("waiting") == 3, d.get("error")

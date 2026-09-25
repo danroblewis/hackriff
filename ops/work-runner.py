@@ -1935,6 +1935,24 @@ def reap_deflake(claims, key, c):
         claims[key] = dict(launch_review(c), state="running")
 
 
+_DEPTH_AT = [0.0]
+
+
+def record_queue_depth():
+    """One $HACKRIFF_OPS/queue-depth.jsonl line a minute: branches not yet on main (hkpy.flow's one
+    definition) - sampled here because this runner ticks through a gate, the merge runner does not
+    (user, 2026-09-24 17:02: 'merge queue is huge, is it growing? track its length on /flow')."""
+    if time.time() - _DEPTH_AT[0] < 60:
+        return
+    _DEPTH_AT[0] = time.time()
+    if f"{REPO}/py" not in sys.path:
+        sys.path.append(f"{REPO}/py")
+    from hkpy import flow
+    d = flow.queue_waiting(S)
+    with open(f"{S}/{flow.QUEUE_DEPTH_JSONL}", "a") as f:
+        f.write(json.dumps({"ts": round(time.time(), 1), **{k: d[k] for k in ("waiting", "queued", "gating", "isolating")}}) + "\n")
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
@@ -1973,6 +1991,10 @@ def tick(dry):
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:
         log(f"dispatch_deflakes error: {e}")
+    try:
+        record_queue_depth()
+    except Exception as e:
+        log(f"record_queue_depth error: {e}")
     changed |= dispatch(claims, dry)
     if not dry:
         save_claims(claims)
