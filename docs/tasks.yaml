@@ -26126,7 +26126,8 @@ tasks:
   - id: T-871
     milestone: MAUTO
     title: "LP-7: MUI: one output model across the dock and the per-signal panels"
-    status: todo
+    status: in-progress
+    branch: task-t871
     priority: normal
     deps:
     - T-869
@@ -29347,7 +29348,8 @@ tasks:
   - id: T-1002
     milestone: MMAP
     title: "Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it"
-    status: todo
+    status: in-progress
+    branch: task-t1002
     priority: medium
     deps:
     - T-1000
@@ -29408,7 +29410,8 @@ tasks:
   - id: T-1005
     milestone: MMAP
     title: "Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close"
-    status: todo
+    status: in-progress
+    branch: task-t1005
     priority: medium
     deps:
     - T-1000
@@ -29426,7 +29429,8 @@ tasks:
   - id: T-1006
     milestone: MMAP
     title: "Pane device selector in the UI: a device pill in each pane's status, a picker in the pane menu, 'one pane per device' when two SDRs are attached; Go-to/retune command that pane's device"
-    status: todo
+    status: in-progress
+    branch: task-t1006
     priority: normal
     deps:
     - T-1000
