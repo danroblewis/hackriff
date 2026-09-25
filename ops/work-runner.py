@@ -383,7 +383,8 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "observed_but_not_chased": ["<an observed failure outside scope, with the exact evidence>", ...],
    "use_cases": ["<the use-case ids your tests assert on>", ...]}}
 The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
-"done" if any test exit is non-zero. A CANCEL is yours to propose with evidence in the repo; an Opus review
+"done" if any test exit is non-zero - unless that red is not yours: mark it "known_flake": true or
+"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A CANCEL is yours to propose with evidence in the repo; an Opus review
 confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
@@ -733,6 +734,30 @@ def alert(level, title, body, key):
         pass
 
 
+_SPEC = re.compile(r"([a-z0-9-]+)(?:\.e2e\.mjs)?")
+
+
+def not_own_red(t):
+    """A failing listed test the worker marks as not its own ("known_flake" / "reproduces_on_main"), or whose
+    browser specs are ALL ones the flake ledger has seen pass alone (hkpy.flakes) - not a branch defect."""
+    if t.get("known_flake") or t.get("reproduces_on_main"):
+        return True
+    cmd = str(t.get("cmd", ""))
+    if "run.mjs" not in cmd:
+        return False
+    specs = [m + ".e2e.mjs" for m in _SPEC.findall(cmd.split("run.mjs", 1)[1]) if m and not m.startswith("-")]
+    if not specs:
+        return False
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import flakes
+        led = flakes.ledger(S)
+    except Exception:
+        return False
+    return all(led.get(s) is not None and led[s].passed_alone > 0 for s in specs)
+
+
 def reap(claims, dry):
     changed = False
     killed = []
@@ -802,9 +827,17 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
-        if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-            bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+        red = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict) and int(t.get("exit", 0) or 0) != 0]
+        # A red the worker shows is NOT its own - a known flake, or one that reproduces on main - goes to the
+        # queue: the gate and its flake triage are the arbiter (supervisor, 2026-09-24 18:55: T-809 read as
+        # BLOCKED 'needs a person' for app-surface failing the same way on main's build at load 44).
+        own = [t for t in red if not not_own_red(t)]
+        if hb and outcome == "done" and own:
+            bad = own[0]
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        elif hb and outcome == "done" and red:
+            attention(tid, c["branch"], "NOTE", "queued with a red the worker marks not its own (the gate arbitrates): "
+                      + "; ".join(f"{t.get('cmd')} exit {t.get('exit')}" for t in red)[:300])
         # How the hand-back arrived is the contract's own reliability measure: `json` is the
         # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
         # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is

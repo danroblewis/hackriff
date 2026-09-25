@@ -1102,3 +1102,20 @@ def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monke
     assert R.dispatch_cap() == 4                                          # the gap before the next gate
     clock[0] += 100
     assert R.dispatch_cap() == 6                                          # the pipeline went quiet
+
+
+def test_a_red_that_is_not_the_workers_own_queues_instead_of_blocking(monkeypatch):
+    """Supervisor, 2026-09-24 18:55: T-809 read BLOCKED 'needs a person' for app-surface failing the same
+    way on main's build at load 44 - the gate and its flake triage are the arbiter of such a red."""
+    class E:
+        def __init__(self, n): self.passed_alone = n
+    import types
+    fake = types.SimpleNamespace(ledger=lambda ops: {"app-surface.e2e.mjs": E(2), "app-sheet.e2e.mjs": E(1), "canvas.e2e.mjs": E(0)})
+    monkeypatch.setitem(__import__("sys").modules, "hkpy.flakes", fake)
+    monkeypatch.setattr(__import__("hkpy"), "flakes", fake, raising=False)
+    assert R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 1, "reproduces_on_main": True})
+    assert R.not_own_red({"cmd": "x", "exit": 1, "known_flake": True})
+    assert R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-sheet", "exit": 1})          # ledger-known flakers
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-detail", "exit": 1})     # app-detail unknown
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs canvas", "exit": 1})                     # never passed alone
+    assert not R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 101})                          # a plain red: blocked
