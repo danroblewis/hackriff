@@ -27389,6 +27389,8 @@ tasks:
       FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
 
       2026-09-25 coordinator, from explorer window 2 (journal-20260925.md, 05:52-06:23): amended by T-983 (supervisor 06:26 + the pipeline manager): one server per window, and the window script reaps IQ rings on exit - each per-target server allocated its own ~4.2 GB ring that nothing reaped.
+
+      2026-09-25 06:43 supervisor: amend the launcher so it ENFORCES one server per window (window 3's explorer started a server per target again; disk 96 -> 81 GB in 17 min) - the work is T-983 (now P1), which carries the enforcement spec.
     branch: task-t923
   - id: T-924
     milestone: M2-hardening
@@ -28406,7 +28408,7 @@ tasks:
     milestone: MAUTO
     title: "Explorer: one server per window, and the window script reaps IQ rings on exit (each per-target server left a 4.2 GB ring)"
     status: todo
-    priority: P2
+    priority: P1
     deps: []
     parallel_group: OPS-EXPLORER
     needs: none
@@ -28416,6 +28418,9 @@ tasks:
       FOUND 2026-09-25 (pipeline manager, confirmed by explorer window 2's own method): the explorer ran ONE hk serve PER TARGET, each allocating its own ~4.2 GB IQ ring under explorer/w2/data-*/iqbuffer, and nothing reaps them if the agent does not (window 2 deleted its own at the end; window 1 left explorer/data at 7.9 GB). Supervisor rule from window 3 on: ONE hk serve for the window, not one per target. T-923 (done) built the agent + launcher.
       DELIVER (ops territory - .claude/agents/explorer.md, ops/explorer-window.sh; Serves: user explorer directive): (1) explorer.md states one server per window (retune between targets; a restart only after the old server has exited and its ring files are deleted); (2) the window script's EXIT/timer path stops any hk serve the window started and deletes IQ ring files under the window's data dirs (never history/DB/logs, which the coordinator reads), and records the reclaimed bytes in window.log; (3) the dry-run prints what it would reap. Tests in py/tests (the reaper selects only the window's ring files; a fake tree). 
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 06:43 supervisor -> coordinator, AMENDMENT (the launcher must ENFORCE it, not only document it): window 3's explorer again started a fresh server per target (journal 06:36 'fresh server w3/data-70cm') despite being told at launch - each preallocating a 4.2 GB IQ ring; Mac disk 96 -> 81 GB in 17 min. The PM's disk guard reaps finished dirs under 80 GB, but the rule stands: ONE server for the whole window, RETUNE between targets (POST /api/control/window), no new --data-dir per target.
+      ADD TO DELIVER: (4) the window script ENFORCES one server: it starts (or records) the window's single server itself and exports its URL to the agent, and a watcher in the window script detects a second server process belonging to the window (a new --data-dir under the explorer tree, or a second listener) and stops it with a window.log line + an alert, deleting its ring; (5) explorer.md: the server is the launcher's - the agent retunes it, never starts one; (6) a py test over a fake process table: a second server is detected and refused, the first is untouched.
   - id: T-984
     milestone: MMAP
     title: Annotations drawn twice with the Research layer on; new annotation reaches Research only on its 15 s refresh; no e2e for authoring
