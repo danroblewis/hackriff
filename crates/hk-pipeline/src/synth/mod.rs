@@ -339,6 +339,7 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
             kind: ResolutionKind::StructuredUnidentified,
             deepest_verdict: Some(verdict),
             reason: Some(ResolutionReason::NothingScored),
+            suspected: None,
             summary: format!(
                 "framed and check-valid under {} — {} of {} blocks pass — but {missing}. That is \
                  a result, not a failure: a confirmed emitter with no complete identification is \

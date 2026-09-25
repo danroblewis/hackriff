@@ -350,7 +350,7 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 
 - **Channel hopping and trunking.** Synthesis works on one channel; `follow_hops` recipes stay hand-started. That is M4.
 - **Encrypted or proprietary payloads.** No key search or cryptanalysis. A high-entropy payload behind a valid frame is characterised ("framed, CRC-16 valid, payload entropy 7.9 bits/byte: probably encrypted or compressed") and left there.
-- **OFDM, DSSS, CSS and QAM structures** (no blocks). The classification's `unsupported-structure` is reported as the verdict reason.
+- **OFDM, DSSS, CSS and QAM structures** (no blocks). The classification's `unsupported-structure` is reported as the verdict reason — and, per [ADR-0021](0021-search-trace-and-negative-result.md) §7A.6 and §11.3 (applied by T-567), the sealed `Resolution` **names** the structure, the missing block's stable id and who suspected it as fields (`suspected: {structure, missing_block, suspected_by, posterior?}`), so ADR-0021 §9.4's backlog — *"3 emitters are waiting on `psk_demod`"* — is a group-by over `emitter_synthesis` rather than a search through prose. The row-level summary carries `{structure, missing_block}`, and a row is refused if an `unsupported-structure` names nothing (or any other kind names something).
 - **Automatic analysis of every detection.** Not every detection, and not at every profile: per U2 (§3.3) the attention scheduler auto-queues unexplained candidates at `quick` only, on mains, one at a time; `standard`/`deep` stay user- or API-triggered.
 - **ML on the critical path** (§3.3 slot only).
 - **Transmit or active probing.**
