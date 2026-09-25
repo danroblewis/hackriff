@@ -38,6 +38,12 @@ pub(super) const FAMILY_ORDER: &str = concat!(
     " ASC, c.classification_id DESC LIMIT 1"
 );
 
+/// How far back [`Repository::latest_classification_beside`] scans for a row unlike the current
+/// one. Rows identical to the current classification are restatements of one producer's label
+/// (T-878's rank-3 tie), of which a classification appends at most one, so the answer is normally
+/// the second row back; the margin covers repeated classifications of the same emitter.
+const LATEST_SCAN: usize = 8;
+
 /// Columns [`decode`] reads, alias `c`.
 const COLUMNS: &str = "c.t, c.family, c.confidence, c.open_set_score, c.model_version, \
      c.input_kind, c.input_id, c.feature_set_version, c.taxonomy, c.stage, c.arb_rank, c.detail";
@@ -333,5 +339,44 @@ impl Repository {
             emitter_id,
             "ORDER BY c.classification_id DESC LIMIT 1",
         )
+    }
+
+    /// The most recently appended classification that **differs from `current`** — what a reader
+    /// means by "and what else has been said about this emitter" (`latest_classification` in
+    /// `docs/api.md`, `latest` on `/api/inventory/<id>/classification`).
+    ///
+    /// T-886: [`Self::latest_classification`] alone cannot answer that on a rank-3 tie. When a
+    /// C15 posterior is appended beside a demodulator chain's unlocked label, the writer restates
+    /// the chain's own label after it so "latest among equals" leaves the family with the chain
+    /// (`hk_pipeline::classify::record`). The newest row is then a **copy of the current one**, so
+    /// a reader comparing newest against current sees no difference and the posterior — the row
+    /// the whole classifier chain exists to produce — is served nowhere. Skipping rows identical
+    /// to `current` walks back to it.
+    ///
+    /// `current` is passed in rather than re-read so this answers beside the very row the caller
+    /// is serving as the emitter's classification. With `None` it is exactly
+    /// [`Self::latest_classification`]. Bounded: at most [`LATEST_SCAN`] rows are examined, so an
+    /// emitter with a long history costs the same as one with two rows; `None` when every row in
+    /// that scan is the current one.
+    pub fn latest_classification_beside(
+        &self,
+        emitter_id: EmitterId,
+        current: Option<&RecordedClassification>,
+    ) -> Result<Option<RecordedClassification>, RepoError> {
+        let rows: Vec<Raw> = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT {COLUMNS} FROM emitter_classification c WHERE c.emitter_id = ?1 \
+                 ORDER BY c.classification_id DESC LIMIT {LATEST_SCAN}"
+            ))?
+            .query_map([blob(emitter_id)], raw)?
+            .collect::<Result<_, _>>()?;
+        for r in rows {
+            let r = decode(r)?;
+            if current != Some(&r) {
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
     }
 }

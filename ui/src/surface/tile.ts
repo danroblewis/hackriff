@@ -134,6 +134,45 @@ export interface TileData {
    * the only number there is.
    */
   readonly serverInFlightShare: number | null;
+  /**
+   * **Where this tile's last-known (shadow) values were read from** (T-916), or `null` when the
+   * answer carries no shadow run from before the tile.
+   *
+   * A shadow run is a measurement carried into rows the radio was not looking at, and the *cell it
+   * was measured over* decides whether it is the same number the band's last live row was drawn
+   * with. Since T-911 the route searches the tile's **own** level first, so a band that departed
+   * recently carries exactly that cell; a band that left longer ago than the own-level reach
+   * (~256 blocks) falls back to the spectrum-history **ladder**, whose cells are coarser in both
+   * axes, and a max-hold over a coarser box reads **hotter** — measured 10–15 dB on the departed
+   * FM band, up to 26 dB in single columns (T-911).
+   *
+   * That is not a defect to hide, it is a different resolution, and this surface's rule is that a
+   * pane states the level it was drawn at. So the counts travel to [[PaneStatus]] and the readout
+   * names the coarser source when one answered. `unstated` is a run whose source the answer did not
+   * label (a pre-T-911 server): counted with the ladder for the statement, because the claim that
+   * says least is "this may be coarser than the row above it".
+   *
+   * **Optional, and absent is no statement at all**: a tile this client built itself from pushed
+   * rows carries no shadow block to summarise, and a pane says nothing about a source no answer
+   * named. `null` is the same absence for a decoded answer that carried no run from before it.
+   */
+  readonly shadowSource?: ShadowSource | null;
+}
+
+/** Per-tile summary of the `shadow` block's `sources` table (T-916). See [[TileData.shadowSource]]. */
+export interface ShadowSource {
+  /** Runs carried from BEFORE the tile — the ones a search found. Runs from the tile's own grid
+   * (`src = 0`, the carry and the backward fill) are not counted: their cell is the tile's. */
+  readonly carried: number;
+  /** Of `carried`, those the route labelled `search: "own-level"` — the tile's own cell. */
+  readonly ownLevel: number;
+  /** Of `carried`, those labelled `search: "ladder"` — a coarser cell, which reads hotter. */
+  readonly ladder: number;
+  /** Of `carried`, those whose source entry labelled no search at all (pre-T-911 server). */
+  readonly unstated: number;
+  /** The coarsest ladder/unstated source cell behind those runs, `(Hz, s)`, or `null` when every
+   * carried run came from the tile's own level. `0` on an axis the answer did not state. */
+  readonly coarsest: { readonly fHz: number; readonly tS: number } | null;
 }
 
 /** The shape this client reads. Structural, and only the fields it actually uses. */
@@ -197,6 +236,9 @@ export interface TileResponse {
   shadow?: {
     encoding: string; runs: number;
     f: number[]; row: number[]; rows: number[]; last_db: number[]; last_t_s: number[]; src?: number[];
+    /** The source table `src` indexes (T-911/T-916): entry 0 is this tile's own grid, the rest are
+     * the store level a value before the tile came from, each naming the search that found it. */
+    sources?: { from?: string; search?: string; level?: number; f_cell_hz?: number; t_cell_s?: number }[];
   } | null;
 }
 
@@ -367,7 +409,47 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     bytes: n * BYTES_PER_CELL,
     serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,
     serverInFlightShare: typeof resp.cost?.in_flight_share === "number" ? resp.cost.in_flight_share : null,
+    shadowSource: shadowSourceOf(resp),
   };
+}
+
+/**
+ * **Which search answered this tile's shadow runs** (T-916), from the `sources` table the route
+ * serves beside them — or `null` when no run was carried in from before the tile.
+ *
+ * Read defensively and *downwards*: a run whose `src` index is missing, out of the table, or whose
+ * entry names no `search` counts as `unstated`, and `unstated` is stated to the user in the same
+ * breath as `ladder`. The claim that says least about a carried value is "this may have been
+ * measured over a coarser cell than the row above it", and that is the honest default for an answer
+ * that did not say. Nothing here throws: the source table is a *statement about* the shadow, not
+ * the shadow, so an unreadable one must not take a legitimate last-known plane off the screen —
+ * [[shadowCells]] still holds the plane itself to every rule it had.
+ */
+function shadowSourceOf(resp: TileResponse): ShadowSource | null {
+  const sh = resp.shadow;
+  if (!sh || typeof sh !== "object" || !Number.isInteger(sh.runs) || sh.runs <= 0) return null;
+  const table = Array.isArray(sh.sources) ? sh.sources : [];
+  const src = Array.isArray(sh.src) ? sh.src : null;
+  let carried = 0, ownLevel = 0, ladder = 0, unstated = 0;
+  let fHz = 0, tS = 0, coarse = false;
+  for (let r = 0; r < sh.runs; r++) {
+    // No `src` array at all: the run's provenance is unknown, not "this tile's own grid" — but a
+    // stated 0 IS the tile's own grid, and carries no claim about a coarser cell.
+    const i = src ? src[r] : NaN;
+    if (i === 0) continue;
+    carried++;
+    const e = Number.isInteger(i) ? table[i as number] : undefined;
+    const search = e && typeof e.search === "string" ? e.search : null;
+    if (search === "own-level") { ownLevel++; continue; }
+    if (search === "ladder") ladder++; else unstated++;
+    coarse = true;
+    if (e) {
+      if (typeof e.f_cell_hz === "number" && Number.isFinite(e.f_cell_hz)) fHz = Math.max(fHz, e.f_cell_hz);
+      if (typeof e.t_cell_s === "number" && Number.isFinite(e.t_cell_s)) tS = Math.max(tS, e.t_cell_s);
+    }
+  }
+  if (carried === 0) return null;
+  return { carried, ownLevel, ladder, unstated, coarsest: coarse ? { fHz, tS } : null };
 }
 
 /** Plane spellings this client can read. Anything else is refused, never guessed at (T-533). */

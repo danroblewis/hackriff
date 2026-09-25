@@ -103,7 +103,7 @@ impl Block for Parity {
                 let upstream_clean =
                     !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
                 self.ev
-                    .record(&self.bits, all && upstream_clean, units as f64);
+                    .record(&self.bits, all && upstream_clean, units as f64, 1);
             }
             if !all && self.drop_invalid {
                 continue;

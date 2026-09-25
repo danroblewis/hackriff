@@ -38,3 +38,24 @@
 .out-analyze .an-bar { position: absolute; inset: 0 auto 0 0; background: var(--accent, #4a8); opacity: 0.25; }
 .out-analyze .an-rung-t { position: relative; padding-left: 2px; }
 .out-analyze .an-actions { display: flex; gap: 4px; margin-top: 4px; }
+
+/* T-570 (ADR-0021 §6A): the trace panel — "why not PSK", with two visual registers decided by the
+   served `tried` boolean. `tr-tried` reads as a measurement; `tr-not-tried` reads as the
+   decode-side grey (dimmer, dashed rule), and the two must not read alike. */
+.out-trace { margin-bottom: 10px; }
+.out-trace .tr-filter { display: flex; gap: 4px; align-items: center; margin-bottom: 8px; }
+.out-trace .tr-filter input { flex: 1 1 auto; min-width: 0; }
+.out-trace .tr-stage { margin: 6px 0; }
+.out-trace .tr-stage-h { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em; }
+.out-trace .tr-node { font-size: 12px; padding: 3px 0; display: flex; gap: 6px; align-items: center; border-left: 2px solid transparent; padding-left: 6px; }
+.out-trace .tr-tried { border-left-color: var(--accent, #4a8); }
+.out-trace .tr-not-tried { opacity: 0.55; border-left-style: dashed; border-left-color: var(--line, #333); }
+.out-trace .tr-summary { flex: 1 1 auto; }
+.out-trace .tr-elided { font-size: 11px; opacity: 0.7; font-style: italic; padding: 2px 0; }
+.out-trace .tr-trunc { display: block; opacity: 0.6; margin-top: 4px; }
+.out-trace .tr-resolution { border: 1px solid var(--line, #333); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }
+.out-trace .tr-res-headline { font-weight: 600; }
+.out-trace .tr-res-not-searched { opacity: 0.7; }
+.out-trace .tr-res-unknown { opacity: 1; }
+.out-trace .tr-explanations { margin-top: 4px; font-size: 11px; opacity: 0.8; }
+.out-trace .tr-explain { padding: 1px 0; }

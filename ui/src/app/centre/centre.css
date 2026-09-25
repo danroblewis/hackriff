@@ -18,19 +18,88 @@
    level, orientation note) subtracted ~120 px from the canvas, against docs/23 §10.1 ("no chrome
    subtracts from it"). They float in the same bottom-left stack now, the readout nearest the map
    strip, capped below the vertically centred side chip and scrolling past that. Honesty statements:
-   never faded (docs/23 §10.2). */
+   never faded (docs/23 §10.2).
+   T-919: that stack reached ~560 x 184 px — a large PERMANENT overlay, against P1 (§10.6 rule 1:
+   an overlay exists to be closed, and its default state is its smallest). So it is a compact LINE
+   by default (`.sf-status-line`: the viewport's where/level-tier with its Retune, the colour scale,
+   the hover readout) with the paragraphs behind a toggle and a visible dismiss (`.sf-status-body`).
+   Never faded, and never closeable to nothing: the tier/level and the scale are on the picture in
+   every state. */
 .sf-status {
   position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 110px) + 30px); /* clear of the HUD's frequency labels */
-  max-width: min(560px, calc(100% - 80px)); max-height: max(60px, calc(50% - var(--map-strip, 110px) - 66px));
-  overflow-y: auto; display: flex; flex-direction: column; gap: 2px; pointer-events: none;
+  /* Clear of the right-edge cluster at every width: at 420 px the zoom stack docks above the FAB
+     (`chrome/phone.css`), and a line run to the window's edge put its own controls under it. */
+  max-width: min(560px, calc(100% - 80px));
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none;
 }
-.sf-status > * { pointer-events: auto; flex: none; border: 1px solid var(--line); border-radius: 6px;
+/* T-919: the SENTENCES, shown on demand. Same stack of statements as before, same never-faded
+   chrome band — what changed is that they are not on the picture until they are asked for. */
+.sf-status-body {
+  pointer-events: auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%;
+  max-height: max(60px, calc(50% - var(--map-strip, 110px) - 66px)); overflow-y: auto;
+}
+.sf-status-body > * { flex: none; border: 1px solid var(--line); border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 82%, transparent); }
-.sf-status > :empty { display: none; }
-.sf-status > .sf-readout {
+.sf-status-body > :empty { display: none; }
+
+/* The always-visible line: the viewport's level/tier (the honesty statement §10.2 names, and the
+   row carrying T-476's persistent Retune), the colour-scale sentence (T-470), the hover readout,
+   and the two small controls that open and close the detail. ONE row: the level keeps its width and
+   the scale sentence is what gives way, so the tier and the two numbers survive the narrowest case. */
+.sf-status-line {
+  pointer-events: auto; display: flex; flex-wrap: nowrap; align-items: center; gap: 2px 6px;
+  max-width: 100%; min-width: 0; padding: 2px 4px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.sf-status-line > .sf-chrome { border: 0; background: none; padding: 0 4px; flex: 0 1 auto; min-width: 0; max-width: 52%; }
+.sf-status-line > .sf-readout { flex: 1 1 0; min-width: 0; }
+.sf-status-btns { display: flex; align-items: center; gap: 2px; flex: none; margin-left: auto; }
+.sf-status-toggle, .sf-status-close {
+  min-height: 20px; padding: 0 6px; border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--muted); font: 11px var(--ui); line-height: 1; cursor: pointer;
+}
+.sf-status-close { min-width: 22px; font-size: 15px; }
+.sf-status-toggle:hover, .sf-status-toggle:focus-visible,
+.sf-status-close:hover, .sf-status-close:focus-visible { border-color: var(--line); color: var(--text); }
+
+/* Collapsed, the viewport row is ONE LINE: the level/tier it was drawn at, and its Retune. What is
+   put away is either detail (the row's id, the frame's tile counts, the offer's sentence, the
+   intermediate ruler, the width presets) or already stated elsewhere on the picture: the pane's
+   window is the HUD's own frequency and time labels (T-805), and the minimap's level — with the
+   sentence explaining why it legitimately differs from the pane's — belongs with the strip it
+   describes, which is an overview by construction. All of it is one press away. */
+.sf-status:not([data-open="true"]) .sf-chrome { max-height: 46px; } /* the level line, plus the offer's line when one is painted */
+.sf-status:not([data-open="true"]) .hk-surface-viewport { flex-wrap: nowrap; overflow: hidden; }
+.sf-status:not([data-open="true"]) .hk-surface-viewport[data-viewport="minimap"] { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-level-note { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-id { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-where { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-counts { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-ruler { display: none; }
+.sf-status:not([data-open="true"]) .hk-surface-widths { display: none; }
+/* The offer's SENTENCE stays with its button, always: the painted-offer discipline (T-476/T-407) is
+   that a press lands where the row SAID, so a pressable control whose destination is not on screen
+   is the one thing this collapse may not do. It takes its own line, clipped to one — the sentence
+   leads with the destination, the button's title carries it whole, and expanding shows it in full. */
+.sf-status:not([data-open="true"]) .hk-surface-why {
+  flex-basis: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+/* The one control on the row keeps its size whatever the width: T-476 made Retune persistent
+   because the user's report was that it appeared only sporadically, and a button squeezed out of a
+   nowrap row is the same absence by another route. The level beside it is what ellipsises. */
+.sf-status:not([data-open="true"]) .hk-surface-action { flex: none; }
+.sf-status:not([data-open="true"]) .hk-surface-level { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* At phone width there is no room for the level and the scale on one row, and ellipsising both
+   would cut the tier out of the one statement that may not be cut. They wrap instead (§10.5). */
+@media (max-width: 600px) {
+  .sf-status-line { flex-wrap: wrap; }
+  .sf-status-line > .sf-chrome { max-width: 100%; }
+}
+.sf-readout {
   display: flex; flex-direction: column; gap: 2px; border: 0;
-  padding: 3px 8px; pointer-events: none;
-  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  padding: 3px 8px; pointer-events: none; min-width: 0;
+  background: none;
   font: 11px var(--mono); color: var(--muted);
 }
 .sf-range, .sf-hover { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

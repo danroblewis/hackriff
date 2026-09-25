@@ -730,6 +730,7 @@ impl ListenManager {
             config: cfg.clone(),
             tune: (tune.center_hz, tune.sample_rate_hz),
             t0: time.host_time,
+            t0_anchored: false,
             refiner,
             refine_emitter: refine_emitter.or(emitter),
             refined: refined_tuning,
@@ -822,8 +823,13 @@ struct Session {
     config: ListenConfig,
     /// Tuned centre and rate the demodulator was built for.
     tune: (f64, f64),
-    /// Host time of the first probed sample (audio time origin).
+    /// Audio time origin: the capture time of the first sample the demodulator processes. Until
+    /// that chunk arrives it holds the probe head's time; `run` re-anchors it on the first chunk
+    /// (T-868: anchoring on the probe head stamped every record one probe window — ~1 s — early,
+    /// because audio starts after the probe and refinement window, not at its head).
     t0: Timestamp,
+    /// `t0` has been anchored on the first processed chunk.
+    t0_anchored: bool,
     /// Background re-refinement (T-070).
     refiner: Option<LiveRefiner>,
     /// Emitter refined tunings are stored on.
@@ -1001,6 +1007,10 @@ impl Session {
                         },
                         provenance: &chunk.provenance,
                     };
+                    if !self.t0_anchored {
+                        self.t0 = chunk.time.host_time;
+                        self.t0_anchored = true;
+                    }
                     let processed = self.demod.process(info, &self.reader.buf[..chunk.len]);
                     if let Some(r) = self.refiner.as_mut() {
                         r.feed(chunk.time, &chunk.provenance, &self.reader.buf[..chunk.len]);

@@ -467,9 +467,26 @@ pub(crate) struct ChainManager {
     /// T-878: each open track's classifying-chain [`DecodeSlot`], filled when a decode chain
     /// attaches to the track.
     slots: HashMap<TrackId, DecodeSlot>,
+    /// T-886: open tracks a measuring chain was **refused** for because its kind was at its
+    /// `max_chains` cap, with the candidate to retry from. Without it, first come was first
+    /// served for the whole life of a track: a track that matched a decode spec left `pending`
+    /// the moment that chain attached, and `attach_measuring` — which only ever ran from
+    /// `try_attach`, and `try_attach` only for a *pending* track — was never reached again, so a
+    /// region refused a classifier at the wrong second was never classified at all. Retried when
+    /// a chain of that kind finishes ([`Self::reap`]) and as further member boxes arrive.
+    /// Bounded by [`MAX_AWAITING_MEASURE`]; entries are dropped when the track ends or merges.
+    awaiting_measure: HashMap<TrackId, Candidate>,
+    /// T-886: inside [`Self::retry_measuring`] (see the guard there).
+    retrying: bool,
 }
 
 const BACKLOG_PER_TRACK: usize = 512;
+
+/// T-886: most tracks whose refused measuring chain is remembered for retry. Entries live only
+/// while a track is open and its kind is at its cap, and each is one small candidate; the bound
+/// is the same guard [`BACKLOG_PER_TRACK`] is — a detector flooding tracks must not grow this
+/// without limit. Past it a refusal is final, exactly as it was before the retry existed.
+const MAX_AWAITING_MEASURE: usize = 1024;
 
 /// Most runtime chains and recorders alive at once, across the whole run (T-558).
 ///
@@ -521,6 +538,8 @@ impl ChainManager {
             cooldown: ChannelMemory::default(),
             measuring: HashMap::new(),
             slots: HashMap::new(),
+            awaiting_measure: HashMap::new(),
+            retrying: false,
         }
     }
 
@@ -859,8 +878,20 @@ impl ChainManager {
     /// trigger is per confirmed track and a busy band has many. Above the cap the attach is refused
     /// and counted, never queued. A classifying chain is handed the track's member boxes so far
     /// (the backlog stays for the decode chain).
+    ///
+    /// T-886: a refusal is **remembered, not final**. The cap is on chains alive *now*, so a
+    /// track refused while four classifiers were running is retried when one of them finishes,
+    /// whether or not a decode chain has since claimed the track — the candidate is kept in
+    /// [`Self::awaiting_measure`] for exactly that. The refusal is counted **once per track**
+    /// (`classify_admission_refused` / `sweep_admission_refused`), not once per retry, so the
+    /// counter still reads "regions this cap cost a measurement", not "attempts".
     fn attach_measuring(&mut self, track: TrackId) {
-        let Some(cand) = self.pending.get(&track).cloned() else {
+        let Some(cand) = self
+            .pending
+            .get(&track)
+            .or_else(|| self.awaiting_measure.get(&track))
+            .cloned()
+        else {
             return;
         };
         // A confirmed track has at least one detection by definition — the confirming one — which
@@ -877,6 +908,7 @@ impl ChainManager {
             })
             .cloned()
             .collect();
+        let mut refused = false;
         for spec in specs {
             let (kind, cap) = match spec.shape() {
                 Ok(ChainShape::Sweep { max_chains, .. }) => (Measure::Sweep, max_chains),
@@ -893,11 +925,14 @@ impl ChainManager {
                 continue;
             }
             if self.live_measuring(kind) >= cap {
-                let c = &self.shared.counters.chains;
-                inc(match kind {
-                    Measure::Sweep => &c.sweep_admission_refused,
-                    Measure::Classify => &c.classify_admission_refused,
-                });
+                if !self.awaiting_measure.contains_key(&track) {
+                    let c = &self.shared.counters.chains;
+                    inc(match kind {
+                        Measure::Sweep => &c.sweep_admission_refused,
+                        Measure::Classify => &c.classify_admission_refused,
+                    });
+                }
+                refused = true;
                 continue;
             }
             let slot = (kind == Measure::Classify).then(|| {
@@ -917,6 +952,35 @@ impl ChainManager {
                 }
             }
         }
+        if refused {
+            // Keep the candidate (with whatever the member boxes have widened it to) for the
+            // retry; a track already waiting keeps its place rather than being re-counted.
+            if self.awaiting_measure.contains_key(&track)
+                || self.awaiting_measure.len() < MAX_AWAITING_MEASURE
+            {
+                self.awaiting_measure.insert(track, cand);
+            }
+        } else {
+            self.awaiting_measure.remove(&track);
+        }
+    }
+
+    /// T-886: retries every track a measuring chain was refused for, now that one has finished.
+    /// Ordered by track id so which of several waiting tracks takes a freed slot is deterministic
+    /// rather than a hash order that changes per run.
+    fn retry_measuring(&mut self) {
+        // `attach_with` reaps before it attaches, and `reap` calls this: without the guard a
+        // retry that attaches could re-enter through its own reap.
+        if self.awaiting_measure.is_empty() || self.retrying {
+            return;
+        }
+        self.retrying = true;
+        let mut waiting: Vec<TrackId> = self.awaiting_measure.keys().copied().collect();
+        waiting.sort();
+        for track in waiting {
+            self.attach_measuring(track);
+        }
+        self.retrying = false;
     }
 
     /// The finished flag of `track`'s decode chain, if one is attached.
@@ -996,7 +1060,15 @@ impl ChainManager {
             }
         }
         let fs = self.shared.fs;
-        if let Some(c) = self.pending.get_mut(&track) {
+        // T-886: the retry candidate is widened by the same boxes as the pending one, so a track
+        // that waits for a slot is re-offered the region as it is now, not as it was at the
+        // refusal.
+        for c in self
+            .pending
+            .get_mut(&track)
+            .into_iter()
+            .chain(self.awaiting_measure.get_mut(&track))
+        {
             c.f_lo_hz = c.f_lo_hz.min(member.f_lo_hz);
             c.f_hi_hz = c.f_hi_hz.max(member.f_hi_hz);
             c.first_sample = c.first_sample.min(member.samples.start);
@@ -1018,12 +1090,18 @@ impl ChainManager {
         }
         if self.pending.contains_key(&track) {
             self.try_attach(track);
+        } else if self.awaiting_measure.contains_key(&track) {
+            // T-886: a track whose decode chain already attached is no longer pending, so this is
+            // the only place a refused measuring chain gets another look before a slot frees.
+            self.attach_measuring(track);
         }
     }
 
     pub fn on_track_closed(&mut self, track: TrackId) {
         self.backlog.remove(&track);
         self.members.remove(&track);
+        // T-886: nothing left to measure, so the retry entry goes with the track.
+        self.awaiting_measure.remove(&track);
         // The measuring chain writes what it measured at detach, against a settled inventory.
         for (_, id) in self.measuring.remove(&track).unwrap_or_default() {
             self.send(id, ChainMsg::Detach);
@@ -1053,6 +1131,8 @@ impl ChainManager {
             self.send(id, ChainMsg::Detach);
         }
         self.slots.remove(&from);
+        // T-886: the absorbed track measures nothing further; the survivor carries the region.
+        self.awaiting_measure.remove(&from);
         let moved = self.members.remove(&from).unwrap_or(0);
         *self.members.entry(into).or_insert(0) += moved;
         if let Some(mut b) = self.backlog.remove(&from) {
@@ -1162,10 +1242,12 @@ impl ChainManager {
         self.manual.clear();
         self.measuring.clear();
         self.slots.clear();
+        self.awaiting_measure.clear();
     }
 
-    /// Joins finished chains.
+    /// Joins finished chains, and retries any measuring chain a full cap refused (T-886).
     pub fn reap(&mut self) {
+        let mut freed = false;
         let mut i = 0;
         while i < self.running.len() {
             if self.running[i].join.is_finished() {
@@ -1179,6 +1261,8 @@ impl ChainManager {
                         None => &c.detached,
                     });
                 }
+                // T-886: a measuring slot just freed, so a track refused one may have it.
+                freed |= r.measuring.is_some();
                 self.by_track.retain(|_, v| *v != r.id);
                 let now = self.shared.ring.next_sample().unwrap_or(0);
                 let cooldown = (CHANNEL_COOLDOWN_S * self.shared.fs) as u64;
@@ -1197,6 +1281,9 @@ impl ChainManager {
             } else {
                 i += 1;
             }
+        }
+        if freed {
+            self.retry_measuring();
         }
     }
 }

@@ -436,13 +436,35 @@ def hosts():
 # cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
 # Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
 REMOTE_DEFAULT_CAP = 2
-_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+# Only the Mac-first GPU paths: a ticket that needs the radio says so with `needs: hardware` (never dispatched at all);
+# matching 'hackrf' in the text kept a docs ticket and a dashboard ticket off an idle node2 (2026-09-25 04:05).
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon)\b", re.I)
 PROBE_FRESH_S = 180
 
 
 def remote_eligible(t):
     text = " ".join(str(t.get(k) or "") for k in ("title", "notes", "acceptance", "parallel_group"))
     return t.get("needs") in (None, "", "none") and not _MAC_ONLY.search(text)
+
+
+def _probe_age(h):
+    try:
+        return int(time.time() - json.load(open(f"{S}/hosts/{h}.json")).get("at", 0))
+    except (OSError, ValueError):
+        return None
+
+
+_ORPHANS_SAID = set()
+
+
+def orphan_branch_attention(tid):
+    """Once per runner process: a ready ticket with no claim whose branch carries commits - nobody takes it."""
+    if tid in _ORPHANS_SAID:
+        return
+    _ORPHANS_SAID.add(tid)
+    tip = sh(["git", "log", "-1", "--format=%h %s", branch_of(tid)]).strip()[:160]
+    attention(tid, branch_of(tid), "ORPHAN_BRANCH", f"ready, no claim, but its branch has commits ({tip}) - the runner "
+              "never re-dispatches someone's work: route it (queue it, re-dispatch on the branch, or reset the ticket)")
 
 
 def host_ready(h):
@@ -2600,15 +2622,31 @@ def tick(dry):
             elif per_group.get(t.get("parallel_group"), 0) >= GROUP_CAP:
                 frontier["held_by_group"] = frontier.get("held_by_group", 0) + 1
                 held[t.get("parallel_group")] = held.get(t.get("parallel_group"), 0) + 1
+            elif int(sh(["git", "rev-list", "--count", f"main..{branch_of(t['id'])}"]).strip() or 0) > 0:
+                # candidates() leaves a branch with commits alone (someone's work) - so it is NOT dispatchable, and
+                # with no claim nobody will ever take it (T-844, 09-22 -> 09-25 03:5x: 'dispatchable=1' while nothing
+                # could launch it). Say so here and once to the coordinator, who routes it.
+                frontier.setdefault("held_by_branch", []).append(t["id"])
+                orphan_branch_attention(t["id"])
             else:
                 frontier["dispatchable"] = frontier.get("dispatchable", 0) + 1
+                frontier.setdefault("dispatchable_ids", []).append(t["id"])
         frontier["held_groups"] = held
+        # Always present, empty when none (supervisor 04:27: a missing key read as a broken status, not as zero).
+        frontier.setdefault("dispatchable", 0)
+        frontier.setdefault("dispatchable_ids", [])
+        frontier.setdefault("held_by_branch", [])
     except Exception:
         pass
     status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "budget": {"cores": CORES, "gate_reserve": GATE_RESERVE, "worker_cores": WORKER_CORES, "worker_jobs": WORKER_JOBS, "worker_test_threads": WORKER_TEST_THREADS}, "cap": CAP,
               "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
               "load_max": LOAD_MAX, "per_tick": PER_TICK,
-              "queue_depth": queue_depth(), "queue_pause": QUEUE_PAUSE}
+              "queue_depth": queue_depth(), "queue_pause": QUEUE_PAUSE,
+              # Per host (supervisor 2026-09-25 03:56: the host dimension was missing from the status): this Mac and each
+              # remote host's running workers against its own cap, and whether its probe says it can take work.
+              "hosts": {"mac": {"running": busy_workers(claims), "cap": dispatch_cap()},
+                        **{h: {"running": busy_workers(claims, h), "cap": slot_cap(h), "ready": host_ready(h),
+                               "probe_age_s": _probe_age(h)} for h in hosts()}}}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 
