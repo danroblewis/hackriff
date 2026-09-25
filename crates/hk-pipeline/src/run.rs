@@ -1191,6 +1191,16 @@ impl Pipeline {
             t_end: None,
             summary: None,
         };
+        // T-913: a run that crashed left its survey open, and retention ages an open survey from
+        // its own newest row — so its last hour is never aged out until something closes it. One
+        // process writes a store, so any survey still open here belongs to a process that is gone.
+        match repo.abort_orphaned_surveys() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("hk-pipeline: aborted {n} survey(s) left open by an earlier run"),
+            Err(e) => {
+                eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}")
+            }
+        }
         repo.insert_survey(&survey)?;
         store_calibrations(&mut repo, &cfg.calibrations)?;
         let product = FloorProduct::open(
@@ -2935,12 +2945,13 @@ impl RunSummary {
             c("/detect/dense_frames")
         ));
         line(format!(
-            "tracks:      {} opened, {} closed, {} confirmed, {} rows, {} links",
+            "tracks:      {} opened, {} closed, {} confirmed, {} rows, {} links ({} dropped)",
             c("/detect/tracks_opened"),
             c("/detect/tracks_closed"),
             c("/detect/tracks_confirmed"),
             c("/detect/track_rows"),
-            c("/detect/track_links")
+            c("/detect/track_links"),
+            c("/detect/track_links_dropped")
         ));
         line(format!(
             "anomalies:   {} opened, {} closed, {} explanations",

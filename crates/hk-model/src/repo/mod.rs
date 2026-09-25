@@ -196,6 +196,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0017_multipath_relation.sql"), // T-222 C40 content-correlated multipath
     include_str!("migrations/0018_call_observed_until.sql"), // T-308 C23 truncated-call boundary
     include_str!("migrations/0019_detection_retention.sql"), // T-904 detection retention + rollup
+    include_str!("migrations/0020_explanation_detection.sql"), // T-913 pin cited detections
 ];
 
 /// Schema version this build creates and understands.
@@ -479,13 +480,14 @@ impl RepoBatch<'_> {
         inventory::upsert_track_on(self.conn, track)
     }
 
-    /// [`Repository::link_detections_to_track`] in this transaction.
+    /// [`Repository::link_detections_to_track`] in this transaction (returns the number of
+    /// detections that were not stored and so could not be linked, T-913).
     pub fn link_detections_to_track(
         &mut self,
         track_id: TrackId,
         detections: &[DetectionId],
         linked_at: Timestamp,
-    ) -> Result<(), RepoError> {
+    ) -> Result<usize, RepoError> {
         inventory::link_detections_on(self.conn, track_id, detections, linked_at)
     }
 
