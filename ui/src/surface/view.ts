@@ -37,7 +37,7 @@ import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type Pan
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
 import { rulerLabel } from "./ticks";
-import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type HudReserve, type PaneRuler, type RulerMode } from "./hud";
+import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type HudReserve, type PaneRuler } from "./hud";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -202,8 +202,6 @@ export class SurfaceView {
   tracePx: number;
   /** Draw the HUD rulers (T-805). */
   hudAxes: boolean;
-  /** T-1007: the time ruler's label form (the ⋯ settings menu's "Time ruler"). Labelling only. */
-  rulerMode: RulerMode = "age";
   private readonly hud: HudAxes | null;
   private readonly hudAlpha: (() => number) | null;
   private readonly hudReserve: (() => HudReserve | null) | null;
@@ -364,9 +362,9 @@ export class SurfaceView {
       for (const v of paneViews) {
         const s = statusById.get(v.id);
         if (!s) continue;
-        const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr, this.rulerMode);
+        const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
         rulers.push(r);
-        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        const q = hudTickQuads(r, { alpha, majorPx: 5 * dpr, minorPx: 3 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
         if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
         labels.push(...hudLabels(r, hPx, dpr, reserve));
       }

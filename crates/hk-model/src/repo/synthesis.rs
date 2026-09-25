@@ -362,6 +362,18 @@ pub enum ResolutionReason {
     UnsupportedStructure,
 }
 
+/// What an [`ResolutionKind::UnsupportedStructure`] row suspected (ADR-0021 §7A.6), summarised
+/// onto the row so ADR-0021 §9.4's backlog — *"3 emitters are waiting on `psk_demod`"* — is a
+/// group-by over `emitter_synthesis` and not a search through summary prose. The full sealed
+/// object (with the posterior and who suspected it) stays in `job.sealed_resolution`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspectedStructure {
+    /// The structure (`css`, `ofdm`).
+    pub structure: String,
+    /// The missing block's stable id (`css_dechirp`).
+    pub missing_block: String,
+}
+
 /// The sealed negative result (ADR-0021 §7A.2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Resolution {
@@ -374,6 +386,10 @@ pub struct Resolution {
     /// Why nothing won; `None` for [`ResolutionKind::NotSearched`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<ResolutionReason>,
+    /// The structure with no block, on an `unsupported-structure` row and nowhere else: without
+    /// it the absence of a LoRa decode reads exactly like a LoRa signal decoded as noise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspected: Option<SuspectedStructure>,
     /// Backend-rendered statement.
     pub summary: String,
 }
@@ -385,6 +401,7 @@ impl Resolution {
             kind: ResolutionKind::NotSearched,
             deepest_verdict: None,
             reason: None,
+            suspected: None,
             summary: "no analysis has run on this emitter: not searched, which is not the same \
                       as searched and unidentified"
                 .into(),
@@ -625,6 +642,17 @@ impl EmitterSynthesis {
                  (ADR-0021 §7A.4)"
                     .into(),
             );
+        }
+        if let Some(r) = &self.resolution {
+            let names = r.suspected.is_some();
+            if (r.kind == ResolutionKind::UnsupportedStructure) != names {
+                return bad(
+                    "`unsupported-structure` names the structure and the missing block, and no \
+                     other kind claims one: without the name, the absence of a decode reads \
+                     exactly like the signal decoded as noise (ADR-0021 §7A.6)"
+                        .into(),
+                );
+            }
         }
         let finite = self
             .evidence
@@ -952,12 +980,73 @@ mod tests {
                     kind: ResolutionKind::StructuredUnidentified,
                     deepest_verdict: Some(Verdict::Framed),
                     reason: Some(ResolutionReason::NothingScored),
+                    suspected: None,
                     summary: "framed, unidentified".into(),
                 }),
             )
             .validate()
             .is_ok()
         );
+    }
+
+    /// ADR-0021 §7A.6 (T-567): `unsupported-structure` is the one kind that must name what it
+    /// suspected and which block is missing, and no other kind may claim one. Without the name,
+    /// the absence of a LoRa decode is indistinguishable from a LoRa signal decoded as noise —
+    /// and ADR-0021 §9.4's "3 emitters are waiting on `psk_demod`" backlog cannot be counted.
+    #[test]
+    fn an_unsupported_structure_row_must_name_the_block_it_is_waiting_on() {
+        let res = |kind, suspected| {
+            Some(Resolution {
+                kind,
+                deepest_verdict: Some(Verdict::Demodulated),
+                reason: Some(ResolutionReason::UnsupportedStructure),
+                suspected,
+                summary: "no block for it".into(),
+            })
+        };
+        let css = || {
+            Some(SuspectedStructure {
+                structure: "css".into(),
+                missing_block: "css_dechirp".into(),
+            })
+        };
+        assert!(
+            row(
+                Vec::new(),
+                Verdict::Demodulated,
+                res(ResolutionKind::UnsupportedStructure, None)
+            )
+            .validate()
+            .is_err(),
+            "unsupported-structure with nothing named is the defect §7A.6 exists for"
+        );
+        assert!(
+            row(
+                Vec::new(),
+                Verdict::Demodulated,
+                res(ResolutionKind::UnsupportedStructure, css())
+            )
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            row(
+                Vec::new(),
+                Verdict::Demodulated,
+                res(ResolutionKind::Unknown, css())
+            )
+            .validate()
+            .is_err(),
+            "an `unknown` may not borrow a missing block it never suspected"
+        );
+        // It is a field, not prose: a client reads it without parsing the summary.
+        let v = serde_json::to_value(res(ResolutionKind::UnsupportedStructure, css())).unwrap();
+        assert_eq!(v["kind"], "unsupported-structure");
+        assert_eq!(v["suspected"]["missing_block"], "css_dechirp");
+        // …and it is absent, not null, on every other kind.
+        let v = serde_json::to_value(Resolution::not_searched()).unwrap();
+        assert!(v.get("suspected").is_none());
+        assert_eq!(v["kind"], "not-searched");
     }
 
     /// A stored row is a finished search by definition, so it can never mean "not searched".

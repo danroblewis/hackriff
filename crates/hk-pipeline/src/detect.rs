@@ -44,7 +44,7 @@ use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_context::occupancy::channels::{DetectionExtent, dc_only_suspect};
 use hk_context::{Correlator, FeedCache, FloorAnomalies, FloorAnomalyConfig, Site};
@@ -66,7 +66,7 @@ use crate::dc_twin::{LiveDcTwins, Observed};
 use crate::events::{Candidate, ControlEvent, MemberBox};
 use crate::presence::PresenceStream;
 use crate::run::Shared;
-use crate::stats::{add, inc, set};
+use crate::stats::{add, inc, set, thread_cpu_ns};
 
 /// Boxes and links older than this (stream time) are forgotten.
 const MEMORY_NS: i64 = 120_000_000_000;
@@ -114,6 +114,68 @@ pub(crate) const CAPTURE_NAME_SAMPLES: usize = 16_384;
 const DENSE_MEMORY_FRAMES: u64 = 1 << 20;
 /// Longest end-of-stream wait for the writer.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+/// Ring chunks between samples of this reader's CPU clock (T-939; ~0.2 s at 20 Msps).
+const CPU_SAMPLE_CHUNKS: u64 = 64;
+
+/// **How far behind the live edge this reader may fall before it sheds** (T-939), stream seconds.
+///
+/// Measured, on a 20 Msps HackRF: the reader read at about 7 Msps and was therefore lapped by the
+/// 4 s ring every ~6 s — 39 overruns and 3.1 G lost samples in 4 minutes, each overrun a hole
+/// almost a whole ring wide, and detection up to 4 s stale in between. The shedding was already
+/// happening; what was missing was a bound on *when* and *how big*. With this budget the same
+/// deficit becomes many small holes at a bounded distance from the live edge: the detector's view
+/// of the band is sampled evenly instead of blacked out for seconds at a time, and what it skipped
+/// is counted as [`crate::stats::ReaderCounters::shed_samples`] — chosen — rather than hidden in
+/// the ring's `lost_samples`.
+///
+/// 0.25 s is a quarter of the ring's default 4 s and two orders above the 2.05 ms detection frame,
+/// so a reader that keeps up never reaches it (its natural lag is one or two ring chunks) and a
+/// reader that cannot sheds long before the ring would lap it. **It is a ceiling on detection
+/// latency, not a target:** nothing sheds while the reader keeps up, and every offline replay runs
+/// with the lossless gate on, where shedding is refused outright.
+const DETECT_MAX_LAG_S: f64 = 0.25;
+
+/// Holds the detection reader inside [`DETECT_MAX_LAG_S`] of the live edge (T-939).
+///
+/// `limit` of 0 disables it, which is what a lossless replay gets: there the flow gate holds
+/// capture behind this very cursor, so every sample is analysed however slow the machine is, and
+/// skipping would make a replay's detections depend on the box that ran it. Live, the ring cannot
+/// wait ([`crate::gate`]), so the only question is whether the samples this reader will not reach
+/// are skipped deliberately and counted, or suffered as an overrun.
+fn shed_to_edge(shared: &Shared, reader: &mut hk_core::RingReader<Complex<i8>>, limit: u64) {
+    if limit == 0 {
+        return;
+    }
+    let Some(head) = shared.ring.next_sample() else {
+        return;
+    };
+    if head.saturating_sub(reader.position()) <= limit {
+        return;
+    }
+    if reader.shed_to_latest() == 0 {
+        return;
+    }
+    let rc = &shared.counters.detect_reader;
+    set(&rc.shed_samples, reader.shed_samples());
+    set(&rc.shed_events, reader.sheds());
+    set(&rc.gap_samples, reader.gap_samples());
+    if reader.sheds() == 1 {
+        eprintln!(
+            "hk-pipeline: detection is behind the live edge at {:.1} Msps; shedding to stay \
+             within {DETECT_MAX_LAG_S} s of it (readers.detect.shed_samples, and the per-stage \
+             profile clip_ns/burst_ns/stft_ns/frame_ns, say how much and where the time goes)",
+            shared.fs / 1e6
+        );
+    }
+}
+
+/// How many inventory events [`Writer::file_inventory`] files under one hold of the repository and
+/// inventory locks before releasing them (T-941).
+///
+/// Small enough that a chain's teardown — and so `hk-control`'s stop — never waits out a whole
+/// batch of closes, large enough that the lock round-trips are lost in the per-event SQLite work
+/// (each event is several statements; taking two uncontended mutexes is tens of nanoseconds).
+const INVENTORY_LOCK_CHUNK: usize = 32;
 
 // Short-lived per frame (moved straight into the tracker and the writer), like hk-detect's
 // own `TrackEvent`.
@@ -430,7 +492,9 @@ impl DetectNode {
         }
         let clipped = self.clips.partition_point(|&i| i < b) as u64;
         let mut floor_events = std::mem::take(&mut self.pending_floor);
+        let t_frame = Instant::now();
         let floor = self.floor.update(frame, |e| floor_events.push(e.clone()));
+        let t_floor = Instant::now();
         let mut evs: Vec<Owned> = Vec::new();
         self.det.process(
             frame,
@@ -442,6 +506,9 @@ impl DetectNode {
                 DetectorEvent::Integrated(_) => {}
             },
         );
+        let rc = &self.shared.counters.detect_reader;
+        add(&rc.floor_ns, (t_floor - t_frame).as_nanos() as u64);
+        add(&rc.detector_ns, t_floor.elapsed().as_nanos() as u64);
         self.pending_floor = floor_events;
         self.now_ns = frame.t.host_time.as_unix_nanos();
 
@@ -472,6 +539,7 @@ impl DetectNode {
         set(&dc.invalid_floor_frames, invalid);
         set(&dc.guarded_frames, guarded);
 
+        let t_track = Instant::now();
         let mut tev = Vec::new();
         self.handle_events(evs, &mut tev);
         self.tracker
@@ -485,6 +553,10 @@ impl DetectNode {
         if due {
             self.flush();
         }
+        add(
+            &self.shared.counters.detect_reader.track_ns,
+            t_track.elapsed().as_nanos() as u64,
+        );
     }
 
     /// A short-burst detection (T-075): stored untracked (never offered to the tracker).
@@ -594,6 +666,9 @@ impl DetectNode {
             }
             b.suspect = false;
             let member = b.clone();
+            // T-948: and the track stops counting it as the receiver's own line, so an emission
+            // the receiver was merely tuned on top of is admitted to the inventory.
+            self.tracker.refute_dc(id);
             if self.dc_goodable.remove(&id) {
                 self.good.insert(id);
             }
@@ -1021,6 +1096,8 @@ impl Writer {
         inc(&dc.db_batches);
         let now = Timestamp::from_unix_nanos(self.now_ns);
         let mut opened = Vec::new();
+        // Set inside the hold below, read by the inventory stage after it is released.
+        let tracks_stored;
         {
             let mut repo = shared.repo();
             let mut retry = Vec::new();
@@ -1043,7 +1120,7 @@ impl Writer {
             // Track links (and the closes that summarise them) name detections: write them only
             // once every detection is stored, otherwise keep them for the next pass.
             let detections_stored = self.pending.is_empty() && self.detections.pending() == 0;
-            let tracks_stored = detections_stored
+            tracks_stored = detections_stored
                 && match self.tracks.write(&mut repo) {
                     Ok((tracks, links)) => {
                         add(&dc.track_rows, tracks as u64);
@@ -1057,41 +1134,6 @@ impl Writer {
                         false
                     }
                 };
-            if tracks_stored
-                && !(self.closed.is_empty() && self.live.is_empty() && self.live_reviews.is_empty())
-            {
-                let mut inv = shared
-                    .inventory
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                // Live offers first: a carried batch can hold an older snapshot of a track whose
-                // close, merge or hop set arrived since, and the end must come after the offer so
-                // the inventory can retract it (T-109).
-                for s in self.live.drain(..) {
-                    if inv.live_track(&mut repo, &s).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-                // T-403: then the reviews. They create nothing, so their order against the
-                // offers does not matter; they run before the closes for the same reason the
-                // offers do — a close must be able to supersede a live decision, never the
-                // reverse.
-                for s in self.live_reviews.drain(..) {
-                    // T-403: whether a chain holds this emission as the review runs. The live
-                    // continuous route yields to one — see `ConfirmPolicy::decide`.
-                    let measuring = shared
-                        .claims
-                        .measuring(s.track.f_center_hz, s.track.bandwidth_hz.max(0.0) / 2.0);
-                    if inv.live_trust(&mut repo, &s, measuring).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-                for e in self.closed.drain(..) {
-                    if inv.track_event(&mut repo, &e).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-            }
             for e in self.floor.drain(..) {
                 inc(&dc.floor_events);
                 let Some(life) = self.anomalies.as_mut() else {
@@ -1121,6 +1163,12 @@ impl Writer {
                 }
             }
         }
+        // T-941: the inventory stage runs **outside** that hold, in chunks of its own — see
+        // [`Self::file_inventory`]. Gated on `tracks_stored` exactly as it was: an event that
+        // names a track row which is not stored yet waits for the next pass.
+        if tracks_stored {
+            self.file_inventory(&shared);
+        }
         if opened.is_empty() {
             return;
         }
@@ -1145,6 +1193,89 @@ impl Writer {
                 }
             }
             Err(_) => inc(&dc.db_errors),
+        }
+    }
+
+    /// Files this pass's inventory events — the live offers, the T-403 reviews and the closes —
+    /// taking the repository and inventory locks for **each chunk** of
+    /// [`INVENTORY_LOCK_CHUNK`] and releasing them in between (T-941).
+    ///
+    /// # Why the hold is chunked, not held for the batch
+    ///
+    /// This used to run inside [`Writer::write`]'s one repository hold, with the inventory lock
+    /// taken across every event of the batch. That is the hold T-941 was reported against, and it
+    /// couples three threads that should be independent:
+    ///
+    /// 1. **`hk-detect`** cannot end until its writer has drained what its `finish` handed over,
+    ///    and a segment's end closes *every open track it has* — in a dense band, hundreds of
+    ///    closes, each several SQLite statements of inventory work.
+    /// 2. **`hk-control`** cannot end until every chain has, and a chain's last act takes
+    ///    `shared.repo()` and then `shared.inventory` ([`crate::chains`]) — the two locks this
+    ///    held for the whole batch. So one long batch made *both* threads straggle, which is
+    ///    exactly the pair the live report names ("hk-detect did not stop within 8s … hk-control
+    ///    did not stop within 8s").
+    /// 3. **The next segment**'s first inventory write waits behind whatever of (1) is still
+    ///    running, since T-941 made the inventory the run's.
+    ///
+    /// Chunking changes none of the work and none of its order — all the offers, then all the
+    /// reviews, then all the closes, each event still filed under `&mut Repository` — only how
+    /// long anyone else waits to be let in between them. What does move is where this stage sits
+    /// against the *rest* of the pass: it now runs after the same pass's floor-anomaly and
+    /// trust-verdict writes rather than before them. Those are unrelated domains (a noise-floor
+    /// anomaly and a track's inventory entry name nothing in common), and the order that matters —
+    /// detections and track rows stored before anything that references them, offers before
+    /// closes — is the order above and inside this function.
+    fn file_inventory(&mut self, shared: &Shared) {
+        let dc = &shared.counters.detect;
+        // Live offers first: a carried batch can hold an older snapshot of a track whose close,
+        // merge or hop set arrived since, and the end must come after the offer so the inventory
+        // can retract it (T-109).
+        while !self.live.is_empty() {
+            let n = self.live.len().min(INVENTORY_LOCK_CHUNK);
+            let mut repo = shared.repo();
+            let mut inv = shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for s in self.live.drain(..n) {
+                if inv.live_track(&mut repo, &s).is_err() {
+                    inc(&dc.db_errors);
+                }
+            }
+        }
+        // T-403: then the reviews. They create nothing, so their order against the offers does
+        // not matter; they run before the closes for the same reason the offers do — a close must
+        // be able to supersede a live decision, never the reverse.
+        while !self.live_reviews.is_empty() {
+            let n = self.live_reviews.len().min(INVENTORY_LOCK_CHUNK);
+            let mut repo = shared.repo();
+            let mut inv = shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for s in self.live_reviews.drain(..n) {
+                // T-403: whether a chain holds this emission as the review runs. The live
+                // continuous route yields to one — see `ConfirmPolicy::decide`.
+                let measuring = shared
+                    .claims
+                    .measuring(s.track.f_center_hz, s.track.bandwidth_hz.max(0.0) / 2.0);
+                if inv.live_trust(&mut repo, &s, measuring).is_err() {
+                    inc(&dc.db_errors);
+                }
+            }
+        }
+        while !self.closed.is_empty() {
+            let n = self.closed.len().min(INVENTORY_LOCK_CHUNK);
+            let mut repo = shared.repo();
+            let mut inv = shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for e in self.closed.drain(..n) {
+                if inv.track_event(&mut repo, &e).is_err() {
+                    inc(&dc.db_errors);
+                }
+            }
         }
     }
 
@@ -1251,8 +1382,23 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
     let rc = &shared.counters.detect_reader;
+    // A reader that keeps up sits one or two chunks behind the writer, so the floor under the
+    // budget is a few chunks: a low sample rate must not make the ceiling smaller than the
+    // reader's own granularity.
+    let lag_limit = if shared.gate.enabled() {
+        0
+    } else {
+        ((DETECT_MAX_LAG_S * shared.fs) as u64).max(4 * buf.len() as u64)
+    };
+    let cpu0 = thread_cpu_ns();
+    let mut chunks: u64 = 0;
     loop {
-        match reader.read_timeout(&mut buf, Duration::from_millis(50)) {
+        shed_to_edge(&shared, &mut reader, lag_limit);
+        let t_wait = Instant::now();
+        let outcome = reader.read_timeout(&mut buf, Duration::from_millis(50));
+        let t_read = Instant::now();
+        add(&rc.wait_ns, (t_read - t_wait).as_nanos() as u64);
+        match outcome {
             ReadOutcome::Data(chunk) => {
                 let s = &buf[..chunk.len];
                 let first = chunk.first_sample();
@@ -1268,6 +1414,8 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
                         node.namer.finalize(shared.fs);
                     }
                 }
+                let t_clip = Instant::now();
+                add(&rc.clip_ns, (t_clip - t_read).as_nanos() as u64);
                 burst.push(
                     chunk.time,
                     chunk.discontinuity,
@@ -1275,9 +1423,16 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
                     s,
                     &mut |r| node.push_burst(r),
                 );
+                let t_burst = Instant::now();
+                add(&rc.burst_ns, (t_burst - t_clip).as_nanos() as u64);
+                let mut frame_ns = 0u64;
                 stft.push(InputInfo::from(&chunk), s, |frame| {
-                    node.process_frame(frame)
+                    let t = Instant::now();
+                    node.process_frame(frame);
+                    frame_ns += t.elapsed().as_nanos() as u64;
                 });
+                add(&rc.stft_ns, (Instant::now() - t_burst).as_nanos() as u64);
+                add(&rc.frame_ns, frame_ns);
                 cursor.set(chunk.end_sample());
                 add(&rc.samples, chunk.len as u64);
             }
@@ -1294,7 +1449,12 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
         let st = stft.stats();
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
+        chunks += 1;
+        if chunks % CPU_SAMPLE_CHUNKS == 0 {
+            set(&rc.cpu_ns, thread_cpu_ns().saturating_sub(cpu0));
+        }
     }
+    set(&rc.cpu_ns, thread_cpu_ns().saturating_sub(cpu0));
     // Stream end or detach (T-056): frames still in flight are detected and tracked before the
     // burst detector, the tracker and the writer finish.
     stft.flush(|frame| node.process_frame(frame));

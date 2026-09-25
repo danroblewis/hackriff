@@ -35,69 +35,36 @@
 //!   returns a prediction a consumer may act on is [`host::ModelHost::decide`], and it needs an
 //!   `active` mode, which needs enable evidence *and* a conformant provider.
 //!
-//! # This crate has no production caller, and that is the correct state (T-363)
+//! # Where the host is wired, and what that does not change (T-844)
 //!
-//! [`host::ModelHost`] is **reachable only from this crate's own tests**, the way `hk-gnss` is
-//! (T-274). `hk-classify` depends on this crate — T-204's per-family DL stage is written against
-//! [`LoadedModel`] and [`predict::Calibrator`] — but nothing anywhere constructs a [`host::ModelHost`],
-//! so [`host::HostStats`] has no production reader either. That was noticed in passing by T-283
-//! while it fixed the counters' happens-before ordering, and T-363 was funded to decide whether it
-//! is an oversight. **It is not.** Three independent things have to change before wiring this host
-//! into the pipeline would be anything but a caller with nothing to call.
+//! Until T-844 [`host::ModelHost`] was reachable only from this crate's tests, dormant by design
+//! (T-363) behind three conditions: a model installed in a registry, a family whose evidence
+//! supports running it, and a durable [`host::ShadowSink`]. T-844 built the third
+//! (`hk_store::ml`, `<data dir>/ml/shadow/`, hourly CRC-line NDJSON with per-SNR agreement
+//! aggregates) and wired the host in the same change: `hk_pipeline::ml::MlStage` constructs one
+//! host per provider a registry file can need, writes through `StoreShadowSink`, and is called
+//! once per classification at the classifier's single call site, after the published row is
+//! written. The operator surface is `GET /api/ml/models`, `PUT /api/ml/models/{id}/mode` and
+//! `GET /api/ml/shadow` (ADR-0016 §9).
 //!
-//! 1. **There is no model to host.** [`registry::ModelRegistry`] is rooted at the *user's* data
-//!    directory and has no built-ins: models are data, produced by an operator running
-//!    `py/hkpy/ml/train_amc`, never shipped in the tree. The only model file in this repository is
-//!    `tests/data/conformance/model.onnx`, a KB-sized fixture whose labels exist to compare
-//!    providers against each other and are not `hk-mod@1` classes. A host wired into
-//!    `hk-pipeline` today would resolve an empty registry on every run and every test — a
-//!    *vacuous* caller, which is worse than none, because it looks wired.
-//! 2. **No family earns a stage, and T-204 measured that rather than assuming it.** ADR-0016 §4.6
-//!    puts each family in `off` / `shadow` / `active`, and `active` needs the enable evidence on
-//!    the manifest. T-204 trained the grid and found large sim-to-sim class-accuracy gains
-//!    (analog +0.455…+0.540, psk-qam +0.653…+0.669, fsk +0.280…+0.291) sitting on top of an open
-//!    set that is *worse* than classical where it matters: on `fsk`, AUROC 0.326 against 0.824 and
-//!    a false-known rate of 1.000 against 0.325. That fails §4.6's "AUROC not lower by > 0.02" and
-//!    "false-known ≤ classical" outright, with no OTA labels behind the gains, so the stage landed
-//!    shadow-only and nothing was enabled.
-//!    That is belt-and-braces with the API's own shape: the only trained evaluator that exists is
-//!    [`MlProviderKind::CpuMlp`], which never reports itself [`MlProvider::conformant`], and
-//!    [`host::ModelHost::set_mode`] refuses `active` without a conformant provider (ADR-0007). So
-//!    [`host::ModelHost::decide`] is unreachable for it by construction, not only by policy.
-//! 3. **The shadow path's own consumer was never built.** ADR-0016 §6 puts shadow records in
-//!    hk-store (`ml/shadow/`, hourly CRC-line NDJSON with per-SNR agreement aggregates) and §9
-//!    serves them at `GET /api/ml/shadow`, alongside `GET /api/ml/models` and
-//!    `PUT /api/ml/models/{id}/mode` — the operator surface that would read [`host::HostStats`].
-//!    [`host::MemoryShadowSink`] is the only [`host::ShadowSink`] in the tree, and it is
-//!    in-memory. Wiring [`host::ModelHost::observe`] into the pipeline now would record into a
-//!    buffer nobody drains. §10 used to assign that store and those routes to T-203, which reads
-//!    `done` — T-365 established that T-203's acceptance never contained them (the board's own
-//!    `scope_audit_2026_09_15` narrows it to the host, batching, provenance, CFAR gating and the
-//!    conformance suite, all of which landed), so it is the ADR that was stale, not the ticket
-//!    that closed early. ADR-0016 §10's amendment of 2026-09-22 moves them to **T-844**, which
-//!    owns the durable sink together with the producer that makes it non-vacuous.
+//! What still keeps a run's ML stage idle by default is **data and an operator's act**, not
+//! missing code:
 //!
-//! **What would change this.** Wiring becomes correct when a model is installed in a registry
-//! (1), a family's dev evaluation clears ADR-0016 §4.6 for at least `shadow` (2), and a durable
-//! [`host::ShadowSink`] backed by hk-store exists to receive the records (3). (1) and (3) are
-//! ordinary work; (2) is an evidence question that T-204 answered "no" on the evidence available
-//! then, and only new evidence — not a new opinion — reopens it. `active` additionally requires
-//! the §4.6 enable evidence file and a conformant provider, and ADR-0016 §4.5/§7 bound what an ML
-//! stage may influence even then: within-family class only, never the family, and never the
-//! published row while it is in shadow.
-//!
-//! **What stops this rotting while it waits.** Two things, and they are deliberately different
-//! kinds. The *code* is guarded by `tests/conformance.rs`, which drives a real ONNX model through
-//! the real [`host::ModelHost`] on the real [`tract_provider`] — load, `set_mode`, `observe`,
-//! shadow record, a refused `decide`, deadline accounting, `unload` — in the **default** build, so
-//! CI runs it; the host is unwired, not untested. The *claim above* is guarded by
-//! `tests/no_production_caller.rs`, which fails the day a caller appears, so whoever wires it is
-//! told to come back here and delete this section rather than leaving it to mislead the next
-//! reader. That same tripwire is the premise of ADR-0016 §7's ML exit-gate row as
-//! `tests/e2e/tests/acceptance/m3_ml.rs` measures it (T-366): the gate reports an empty
-//! `(model, consumer)` mode table because nothing here is constructed, so wiring the host means
-//! giving that gate a real enumeration ([`exit_gate::MlGateSnapshot::from_host`]) in the same
-//! change.
+//! 1. **There is no model to host until one is installed.** [`registry::ModelRegistry`] is rooted
+//!    at the user's data directory and has no built-ins: models are produced by an operator
+//!    running `py/hkpy/ml/train_amc`, never shipped in the tree.
+//! 2. **Nothing runs until an operator puts a `(model, consumer)` in `shadow`** through the
+//!    audited `PUT` route; the mode is persisted with the data directory. T-204 measured that no
+//!    family's model earns `active` on the dev evidence (on `fsk`, AUROC 0.326 against classical's
+//!    0.824 and a false-known rate of 1.000 against 0.325), and `shadow` is how the OTA evidence
+//!    ADR-0016 §4.6 asks for is collected — it records, and decides nothing.
+//! 3. **Nothing a model says reaches a decision.** The pipeline calls [`host::ModelHost::observe`]
+//!    only, never [`host::ModelHost::decide`]; `active` still needs the §4.6 enable evidence *and*
+//!    a conformant provider (or an audited `force`), and the only trained evaluator,
+//!    [`MlProviderKind::CpuMlp`], is never [`MlProvider::conformant`]. ADR-0016 §7's ML exit-gate
+//!    row is measured over the wired stage's real mode table
+//!    ([`exit_gate::MlGateSnapshot::from_host`], through `MlStage::gate_snapshot`) by
+//!    `tests/e2e/tests/acceptance/m3_ml.rs`.
 
 #![deny(missing_docs)]
 

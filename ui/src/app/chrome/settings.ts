@@ -12,9 +12,9 @@
 //                    the layers menu. It is view-WIDE and it is the contrast control: "auto-contrast"
 //                    and "viewport scale" are two of its three modes, so offering them separately
 //                    would be two controls over one piece of state.
-//   Time ruler     — whether the HUD's time ruler reads seconds-ago or the absolute timestamp
-//                    (`surface/hud.ts`'s `RulerMode`). Labelling only: the marks are at the same
-//                    capture instants either way.
+//   Time ruler     — whether the HUD's time ruler reads seconds-ago or the local clock time
+//                    (T-998's `surface/hud.ts` `TimeLabelMode`, one radio group over it). Labelling
+//                    only: the marks are at the same capture instants either way.
 //   Front ends     — every live device from `GET /api/control/state`'s `devices` (T-511), and which
 //                    one's coverage each pane's grey is decided by (`PaneModel.setDevice` — panes are
 //                    where you look *from*, so a device choice here never adds a view window).
@@ -26,31 +26,18 @@
 // Thin client (CLAUDE.md): every press here is presentation state — a display range, a label form, a
 // pane's coverage source, a stored preference. Nothing on this path reaches a device route, and the
 // device list and the capture window are the backend's own words, re-read, never computed here.
-import type { RulerMode } from "../../surface/hud";
+import type { TimeLabelMode } from "../../surface/hud";
 import { h } from "../dom";
 
-export type { RulerMode };
+export type { TimeLabelMode };
 
-const RULER_KEY = "hk-ruler-mode";
-
-/** The remembered ruler mode; `age` when nothing is stored or storage is unavailable. */
-export function loadRulerMode(): RulerMode {
-  try {
-    return localStorage.getItem(RULER_KEY) === "clock" ? "clock" : "age";
-  } catch {
-    return "age";
-  }
-}
-
-export function saveRulerMode(mode: RulerMode): void {
-  try { localStorage.setItem(RULER_KEY, mode); } catch { /* storage unavailable */ }
-}
-
-/** The two ruler rows, derived from the mode in force — never tracked beside it. */
-export function rulerRows(mode: RulerMode): { id: RulerMode; label: string; hint: string; on: boolean }[] {
+/** The two ruler rows, derived from the mode in force — never tracked beside it. The mode itself is
+ * T-998's (`surface/hud.ts`'s `getTimeLabelMode`/`setTimeLabelMode`, stored as `hk-hud-time-labels`):
+ * this menu is where it is chosen, not a second copy of it. */
+export function rulerRows(mode: TimeLabelMode): { id: TimeLabelMode; label: string; hint: string; on: boolean }[] {
   return [
-    { id: "age", label: "Seconds ago", hint: "−1 m 20 s behind the live edge", on: mode === "age" },
-    { id: "clock", label: "Timestamp", hint: "the absolute capture instant, UTC", on: mode === "clock" },
+    { id: "relative", label: "Seconds ago", hint: "−1m20s behind the live edge", on: mode === "relative" },
+    { id: "absolute", label: "Clock time", hint: "the capture instant, local time", on: mode === "absolute" },
   ];
 }
 
@@ -102,7 +89,7 @@ export interface SettingsHost {
   settings(): SettingsModel;
   /** Choose the colour-scale/contrast mode (a display range, never a gain). */
   setScale(id: string): void;
-  setRulerMode(mode: RulerMode): void;
+  setRulerMode(mode: TimeLabelMode): void;
   /** Which device's coverage decides this pane's grey (`any` = the union). */
   setPaneDevice(paneId: string, device: string): void;
   /** Open one of the drawer's settings panels. Opening a panel is view state; what the panel itself
@@ -140,7 +127,7 @@ export function renderSettings(list: HTMLElement, host: SettingsHost, close: () 
       ...m.scale.rows.map((r) => radio("map-scale", "data-scale", r, () => host.setScale(r.id))),
       h("div", { class: "map-layers-note sf-range-note" }, m.scale.note)),
     group("ruler", "Time ruler · every pane", "Time ruler labels", "radiogroup",
-      ...m.ruler.rows.map((r) => radio("map-ruler", "data-ruler", r, () => host.setRulerMode(r.id as RulerMode)))),
+      ...m.ruler.rows.map((r) => radio("map-ruler", "data-ruler", r, () => host.setRulerMode(r.id as TimeLabelMode)))),
     group("devices", "Front ends", "Front ends and which viewport reads which", "group",
       ...(dev.empty !== null ? [h("div", { class: "map-layers-note" }, dev.empty)] : []),
       ...dev.list.map((d) => h("div", { class: "map-device", "data-device": d.id ?? "" },

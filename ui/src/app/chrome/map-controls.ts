@@ -390,22 +390,24 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-ibtn map-more-btn", "aria-label": "More: settings", title: "More: theme and settings",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-more-menu",
   }, svg(["circle", 5, 12, 1.2], ["circle", 12, 12, 1.2], ["circle", 19, 12, 1.2])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn, reviewHome, moreBtn);
+  const topright = h("div", { class: "map-chips map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn, reviewHome, moreBtn);
   const moreClose = h("button", {
     type: "button", class: "map-layers-close map-more-close", "aria-label": "Close the settings menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
   // T-1007: the ⋯ menu is THE settings menu — Theme (the node T-993 moved here) plus every
   // preference that used to sit in Review: the colour scale (and with it auto-contrast), the time
-  // ruler's labels, the front ends and which viewport's grey reads which, and the capture window the
-  // backend reports. `./settings.ts` renders the groups; each press is presentation state.
+  // ruler's labels (T-998's seconds-ago / local-clock preference, `surface/hud.ts`'s
+  // `TimeLabelMode`, offered here as one radio group rather than a second toggle), the front ends
+  // and which viewport's grey reads which, and the capture window the backend reports. `./settings.ts` renders the groups; each press is presentation state.
   const moreBody = h("div", { class: "map-more-body" });
   const settingsList = h("div", { class: "map-settings-rows" });
   const moreMenu = h("div", { class: "map-glass map-pane-menu map-more-menu", id: "map-more-menu", role: "group", "aria-label": "Settings", hidden: true },
     h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreBody, settingsList);
-  // T-993: the retired bar's other homes. The mode switch and device/stream state float as one small
-  // pill; the tuning nudges (T-409, device commands through the one gated DeviceAction path) sit
+  // T-993: the retired bar's other homes. T-1025: the mode switch and the device/stream state are
+  // SEPARATE chips in a `map-chips` row that paints nothing of its own and takes no pointer, so the
+  // canvas shows (and drags) between them; the tuning nudges (T-409, device commands through the one gated DeviceAction path) sit
   // under Go-to, where the retune offer — the other device command on the map — already lives.
-  const statusHome = h("div", { class: "map-glass map-status map-fade", role: "group", "aria-label": "View and device", hidden: true });
+  const statusHome = h("div", { class: "map-chips map-status map-fade", role: "group", "aria-label": "View and device", hidden: true });
   const nudgeHome = h("div", { class: "map-glass map-nudge map-fade", hidden: true });
   // T-997: the inventory pills' row, under Go-to and the nudges in the left stack — the place the
   // mid-height chip over the time ruler was retired from. Filled by `chrome/inv-pills.ts` (which may

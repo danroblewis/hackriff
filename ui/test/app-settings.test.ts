@@ -9,8 +9,9 @@
 //  2. **Every moved setting is really in the one small menu**, with its own group and its rows
 //     derived from the state in force — never tracked beside it, so a press cannot leave two rows on.
 //  3. **The ruler mode is a LABEL form**, not a second set of marks: the same ticks come back at the
-//     same values and instants, with the primary and secondary strings swapped (driven over the real
-//     `paneRuler`, so "the setting does nothing" cannot pass).
+//     same values and instants, relabelled from seconds-ago to the instant's own clock time (driven
+//     over the real `paneRuler` + `hudLabels`, so "the setting does nothing" cannot pass). The mode is
+//     T-998's `TimeLabelMode`; this menu is where it is chosen, never a second copy of it.
 //  4. **Thin client**: the whole settings path — the model, every press, the host that implements it
 //     — names no route, no client and no device action. The capture window is *stated* from the
 //     backend's own `window`, and there is no route to change a retention, so the menu says where it
@@ -19,7 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { rulerRows, type SettingsRow } from "../src/app/chrome/settings";
-import { paneRuler } from "../src/surface/hud";
+import { fmtRulerLocal, hudLabels, paneRuler } from "../src/surface/hud";
 import type { PaneRect } from "../src/surface/surface";
 
 const S = 1e9;
@@ -31,30 +32,32 @@ const on = (rows: SettingsRow[]) => rows.filter((r) => r.on).map((r) => r.id);
 
 // ---- (2) the rows are derived from the mode in force ----
 
-test("the ruler rows offer seconds-ago and timestamp, exactly one lit, derived from the mode", () => {
-  assert.deepEqual(rulerRows("age").map((r) => r.id), ["age", "clock"]);
-  assert.deepEqual(on(rulerRows("age")), ["age"]);
-  assert.deepEqual(on(rulerRows("clock")), ["clock"]);
-  for (const m of ["age", "clock"] as const) for (const r of rulerRows(m)) assert.ok(r.label && r.hint, "a row with no words");
+test("the ruler rows offer seconds-ago and clock time, exactly one lit, derived from the mode", () => {
+  assert.deepEqual(rulerRows("relative").map((r) => r.id), ["relative", "absolute"]);
+  assert.deepEqual(on(rulerRows("relative")), ["relative"]);
+  assert.deepEqual(on(rulerRows("absolute")), ["absolute"]);
+  for (const m of ["relative", "absolute"] as const) for (const r of rulerRows(m)) assert.ok(r.label && r.hint, "a row with no words");
 });
 
 // ---- (3) the ruler mode swaps the LABELS of the same marks ----
 
-test("the timestamp ruler keeps every mark and its instant, and swaps the two strings", () => {
-  const age = paneRuler("p", BOX, RECT, 1e3, 0.01, T0, 1, "age");
-  const clock = paneRuler("p", BOX, RECT, 1e3, 0.01, T0, 1, "clock");
-  assert.deepEqual(clock.time.map((t) => [t.value, t.pos, t.major]), age.time.map((t) => [t.value, t.pos, t.major]),
-    "the timestamp mode moved, added or dropped a mark: it may only relabel");
-  assert.deepEqual(clock.freq, age.freq, "the frequency ruler is not the time ruler's setting");
-  const major = age.time.filter((t) => t.major);
-  assert.ok(major.length >= 2, "a 20 s pane over 500 px has labelled marks to compare");
-  for (const [i, t] of age.time.entries()) {
-    assert.equal(clock.time[i].label, t.sub, "the timestamp mode does not read the UTC instant");
-    assert.equal(clock.time[i].sub, t.label, "the age is not kept beside it");
+test("the clock-time ruler keeps every mark and its instant, and only relabels it", () => {
+  // T-998 owns the label forms (the narrow ruler); T-1007's claim is that the setting relabels the
+  // SAME marks. One ruler, laid out once, labelled both ways.
+  const r = paneRuler("p", BOX, RECT, 1e3, 0.01, T0, 1);
+  const age = hudLabels(r, RECT.h, 1, null, "relative");
+  const clock = hudLabels(r, RECT.h, 1, null, "absolute");
+  assert.deepEqual(clock.map((l) => [l.axis, l.value, l.x, l.y]), age.map((l) => [l.axis, l.value, l.x, l.y]),
+    "the clock mode moved, added or dropped a mark: it may only relabel");
+  assert.deepEqual(clock.filter((l) => l.axis === "freq"), age.filter((l) => l.axis === "freq"),
+    "the frequency ruler is not the time ruler's setting");
+  const ageT = age.filter((l) => l.axis === "time"), clockT = clock.filter((l) => l.axis === "time");
+  assert.ok(ageT.length >= 2, "a 20 s pane over 500 px has labelled marks to compare");
+  for (const [i, l] of clockT.entries()) {
+    assert.equal(l.text, fmtRulerLocal(l.value, r.timeStepNs), "the clock mode does not read the mark's own instant");
+    // Non-vacuity: the two forms really are different strings on a labelled mark.
+    assert.notEqual(l.text, ageT[i].text);
   }
-  // Non-vacuity: the two forms really are different strings on a labelled mark.
-  assert.notEqual(major[0].label, major[0].sub);
-  assert.match(String(major[0].sub), /Z$/, "the secondary is not a UTC instant");
 });
 
 // ---- (1)/(2) the menu is the home, and it holds every setting the ticket moved ----
@@ -82,10 +85,10 @@ test("the settings host is view state only: no route, no client, no device actio
   for (const forbidden of [/["'`][^"'`]*\/api\//, /\bfetch\s*\(/, /client\./, /DeviceAction/]) {
     assert.doesNotMatch(code, forbidden, `the settings menu names ${forbidden}`);
   }
-  // The host's own implementation: the scale is the surface's range mode, the ruler is the view's
-  // label form, and a pane's device is `PaneModel.setDevice` — three writes, none of them a call.
+  // The host's own implementation: the scale is the surface's range mode, the ruler is T-998's
+  // label preference, and a pane's device is `PaneModel.setDevice` — three writes, none of them a call.
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(host, /setRulerMode: \(mode\) => \{[\s\S]*?pv\.view\.rulerMode = mode;[\s\S]*?saveRulerMode\(mode\);/);
+  assert.match(host, /setRulerMode: \(mode\) => \{[\s\S]*?setTimeLabelMode\(mode\);/);
   assert.match(host, /setPaneDevice: \(paneId, device\) => \{[\s\S]*?pv\.view\.panes\.setDevice\(paneId, device\);/);
   // The capture window is READ from the store's own capture clock (`GET /api/timeline`'s `window`),
   // and a null one is stated as unknown — never a default span (T-379).

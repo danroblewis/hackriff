@@ -77,15 +77,6 @@ export function fmtRulerHz(hz: number, stepHz: number): string {
   return `${(hz / 1e6).toFixed(mhzDecimals(stepHz))} MHz`;
 }
 
-/**
- * Which form the TIME ruler's primary label takes (T-1007, the ⋯ settings menu's "Time ruler").
- *
- * `age` is T-805's own: how far behind the live edge the mark is, with the UTC instant beside it.
- * `clock` swaps the two, for reading a recording against an external log. Labelling only — the marks
- * are at the identical capture instants either way, and the frequency ruler is unaffected.
- */
-export type RulerMode = "age" | "clock";
-
 /** A time ruler label: how far behind the live edge `tNs` is, or `live edge` for the mark on it. */
 export function fmtRulerAge(tNs: number, edgeNs: number, stepNs: number): string {
   const d = edgeNs - tNs;
@@ -97,6 +88,57 @@ export function fmtRulerAge(tNs: number, edgeNs: number, stepNs: number): string
 export function fmtRulerClock(tNs: number, stepNs: number): string {
   const iso = new Date(tNs / 1e6).toISOString();
   return `${stepNs < 1e9 ? iso.slice(11, 23) : iso.slice(11, 19)}Z`;
+}
+
+/**
+ * The absolute capture instant in the viewer's LOCAL time (T-998), derived from the capture-time ns
+ * the pane's mapping produced — never from `Date.now()`. Whole-second steps print `HH:MM:SS`; a step
+ * under a second gains just enough decimals that neighbouring ticks never read the same (`MM:SS.d`,
+ * `MM:SS.dd`, and below 10 ms `SS.ddd` — the hour and minute are dropped to stay within the narrow
+ * ruler, since a millisecond tick is read against its neighbours, not as a date).
+ */
+export function fmtRulerLocal(tNs: number, stepNs = 1e9): string {
+  // Round to the microsecond first so float error in `ns / 1e6` cannot tip a tick into the ms below.
+  const d = new Date(Math.round(tNs / 1e3) / 1e3);
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  if (!(stepNs < 1e9 * (1 - 1e-9))) return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const decimals = Math.max(1, Math.min(3, Math.ceil(-Math.log10(stepNs / 1e9) - 1e-9)));
+  // Truncate (never round up into the next second): a tick's label names an instant at or before it.
+  const frac = p(Math.floor(d.getMilliseconds() / 10 ** (3 - decimals)), decimals);
+  return decimals === 3 ? `${p(d.getSeconds())}.${frac}` : `${p(d.getMinutes())}:${p(d.getSeconds())}.${frac}`;
+}
+
+/** The relative label squeezed to the narrow ruler: no inner spaces, and `now` for the live edge. */
+export function compactRulerAge(label: string): string {
+  return label === "live edge" ? "now" : label.replace(/ /g, "");
+}
+
+/** How the time ruler words its marks (T-998): "seconds ago" or local clock. Per viewer. Chosen in
+ * the ⋯ settings menu's "Time ruler" group (T-1007, `app/chrome/settings.ts`). */
+export type TimeLabelMode = "relative" | "absolute";
+const TIME_MODE_KEY = "hk-hud-time-labels";
+let timeMode: TimeLabelMode | null = null;
+type Listener = (m: TimeLabelMode) => void;
+const timeModeListeners = new Set<Listener>();
+
+export function getTimeLabelMode(): TimeLabelMode {
+  if (timeMode === null) {
+    let v: string | null = null;
+    try { v = localStorage.getItem(TIME_MODE_KEY); } catch { /* storage unavailable */ }
+    timeMode = v === "absolute" ? "absolute" : "relative";
+  }
+  return timeMode;
+}
+
+export function setTimeLabelMode(m: TimeLabelMode): void {
+  timeMode = m;
+  try { localStorage.setItem(TIME_MODE_KEY, m); } catch { /* storage unavailable */ }
+  for (const l of timeModeListeners) l(m);
+}
+
+export function onTimeLabelMode(l: Listener): () => void {
+  timeModeListeners.add(l);
+  return () => { timeModeListeners.delete(l); };
 }
 
 /** Marks at multiples of `step` inside `[lo, hi]`, ends inclusive to within `eps`. */
@@ -121,7 +163,6 @@ function multiples(lo: number, hi: number, step: number): number[] {
  */
 export function paneRuler(
   id: string, box: Box, rect: PaneRect, cellHz: number, cellS: number, edgeNs: number, dpr = 1,
-  rulerMode: RulerMode = "age",
 ): PaneRuler {
   const spanHz = box.f1Hz - box.f0Hz, spanNs = box.t1Ns - box.t0Ns;
   const cellNs = cellS * 1e9;
@@ -148,14 +189,10 @@ export function paneRuler(
     const steps = minor >= cellNs ? multiples(box.t0Ns, box.t1Ns, minor) : multiples(box.t0Ns, box.t1Ns, timeStepNs);
     for (const v of steps) {
       const major = isMajor(v);
-      // T-1007: `clock` swaps the primary and the secondary — the same two strings, read the other
-      // way round, so a mark can never carry a time the other mode would not have put there.
-      const age = major ? fmtRulerAge(v, edgeNs, timeStepNs) : null;
-      const clock = major ? fmtRulerClock(v, timeStepNs) : null;
       time.push({
         value: v, pos: px(v), major,
-        label: rulerMode === "clock" ? clock : age,
-        sub: rulerMode === "clock" ? age : clock,
+        label: major ? fmtRulerAge(v, edgeNs, timeStepNs) : null,
+        sub: major ? fmtRulerClock(v, timeStepNs) : null,
       });
     }
   }
@@ -218,7 +255,7 @@ export interface HudLabel {
 }
 
 /** Keep a label this far (CSS px) from a pane corner, so the two rulers never print over each other. */
-const CORNER_CSS = { freqLeft: 64, freqRight: 36, timeTop: 10, timeBottom: 30 };
+const CORNER_CSS = { freqLeft: 40, freqRight: 30, timeTop: 8, timeBottom: 16 };
 
 /**
  * T-997: a box of the map's own floating chrome that the TIME ruler's labels must not print into,
@@ -232,10 +269,10 @@ const CORNER_CSS = { freqLeft: 64, freqRight: 36, timeTop: 10, timeBottom: 30 };
  */
 export interface HudReserve { readonly left: number; readonly right: number; readonly bottom: number }
 
-/** How far a time label prints from its anchor, CSS px: `centre.css`'s 14 px margin plus the widest
- * observed label ("−82 ms 11:10:38.700Z" measured 132 px), and half its line box above/below the
- * tick it is centred on. Deliberately generous: a label half-under a control is still lost. */
-export const TIME_LABEL_BOX_CSS = { left: 14, width: 150, half: 10 };
+/** Where a time label prints, CSS px from its anchor: `centre.css`'s 4 px margin plus the label's
+ * 36 px box (T-998: the ruler is <= 40 px wide), and half its 8 px line box above/below the tick it
+ * is centred on. A little generous: a label half-under a control is still lost. */
+export const TIME_LABEL_BOX_CSS = { left: 4, width: 36, half: 6 };
 
 /** Does a time label anchored at (`x`, `y`) print into `reserve`? */
 export function timeLabelReserved(x: number, y: number, reserve: HudReserve | null): boolean {
@@ -251,7 +288,9 @@ export function timeLabelReserved(x: number, y: number, reserve: HudReserve | nu
  * off its tick would name a place it is not at. `reserve` (T-997) drops the same way for the
  * floating chrome's top-left column.
  */
-export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1, reserve: HudReserve | null = null): HudLabel[] {
+export function hudLabels(
+  r: PaneRuler, canvasHpx: number, dpr = 1, reserve: HudReserve | null = null, mode: TimeLabelMode = getTimeLabelMode(),
+): HudLabel[] {
   const k = dpr > 0 ? dpr : 1;
   const left = r.rect.x / k, top = (canvasHpx - (r.rect.y + r.rect.h)) / k;
   const w = r.rect.w / k, h = r.rect.h / k;
@@ -267,7 +306,7 @@ export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1, reserve: Hud
     const y = t.pos / k;
     if (y < CORNER_CSS.timeTop || y > h - CORNER_CSS.timeBottom) continue;
     if (timeLabelReserved(left, top + y, reserve)) continue;
-    out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: t.label, sub: t.sub, value: t.value });
+    out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: mode === "absolute" ? fmtRulerLocal(t.value, r.timeStepNs) : compactRulerAge(t.label), sub: null, value: t.value });
   }
   return out;
 }

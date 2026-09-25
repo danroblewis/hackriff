@@ -1,6 +1,6 @@
 /* T-821 (MAP-21): the Research slide-in — ui/mockups/map-ui-v1.html's `.research`. Fixed to the right
    edge, full height between the top bar and the dock (P3), with a visible close (P1). */
-.research { position: fixed; z-index: 7; top: 56px; right: 8px; bottom: 70px; width: min(460px, calc(100vw - 16px)); box-sizing: border-box;
+.research { position: fixed; z-index: 7; top: 56px; right: 8px; bottom: 8px; width: min(460px, calc(100vw - 16px)); box-sizing: border-box;
   display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px;
   background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(8px); box-shadow: var(--shadow); font-size: 12px; }
 .research[hidden] { display: none; }
