@@ -26762,7 +26762,7 @@ tasks:
   - id: T-907
     milestone: M2-hardening
     title: e2e harness waitForSurfaceMounted returns immediately on the APP page (waits on [data-slot=note], only on /surface) - app specs can race an unmounted surface; app-surface boot flake
-    status: in-progress
+    status: done
     branch: task-t907
     priority: high
     deps: []
@@ -26784,6 +26784,7 @@ tasks:
       Commits: 1096d2a7
       Observed, not chased: The app-surface boot stall under load is backend-side: the harness's own startup probe (ui/e2e/backend.mjs tileCost, GET /api/tiles cells=8) failed with UND_ERR_HEADERS_TIMEOUT (>300 s) in 2 of 4 runs at load 37-46 on a debug hk, and when the backend did come up (33 s) the app's probeSurface had not got past /api/tiles + /api/navigation after 60 s. A worth-a-ticket candidate: tile-route latency under load, or the harness waiting on the route's readiness before timing the spec. | Non-boot wall-clock waits left alone (out of this ticket's boot-wait scope): app-surface.e2e.mjs sleeps a fixed 3 s before measuring the retention bound; app-pins.e2e.mjs hover loop uses a 20 s Date.now() deadline. | Worker hazard: symlinking a worktree's ui/node_modules to main's makes `npm test` compile into main's ui/node_modules/hk-ui-test and grep main's sources (gave a false surface-vscale red); clone-copy node_modules instead. | precheck is a Rust-crate check; no crate touched, so no crates to pass it — reported exit 0 because nothing Rust changed, not from a precheck run.
       Resources: 528 CPU-s, peak 2.3 GB — LEAKED 3 processes (killed at reap)
+    commit: 9b0b0dbd
   - id: T-908
     milestone: M3
     title: The 2fsk/gfsk verifier prefers gfsk on a true 2fsk record and sharpens it to p 0.9; fix it, then re-land T-887's packet_window dev-grid fix for cyclic_db
