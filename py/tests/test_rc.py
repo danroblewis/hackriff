@@ -98,6 +98,7 @@ def test_a_red_rc_still_runs_the_browser_tier_and_files_one_p1_item_per_final_re
     assert "node e2e/run.mjs fog-of-war" in fog and "a shadow tile is dimmer" in fog   # its OWN assertion
     assert not any(c.startswith("TAG") for c in calls) and "NOTIFY RC red - P1 tickets" in calls
     assert "rc=100" in (ops / "rc-result").read_text()
+    assert "(4 red)" in (ops / "log").read_text()          # 2 rust + 2 specs on ONE 'failed:' line (03:53 said '1 red')
 
 
 def test_a_suite_red_with_no_named_test_is_its_own_item(tmp_path):
