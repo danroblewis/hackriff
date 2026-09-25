@@ -1407,3 +1407,29 @@ def test_only_a_ticket_named_by_hand_goes_remote_in_stage_one(tmp_path, monkeypa
     (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o"}}))
     assert R.host_for({"id": "T-9"}) == "node2" and R.host_for({"id": "T-11"}) == "node2"
     assert R.host_for({"id": "T-10"}) is None
+
+
+def test_a_remote_worker_is_shown_like_a_local_one(tmp_path, monkeypatch):
+    """User via supervisor, 2026-09-25 00:40: T-567 ran on node2 and the dashboard showed nothing. Each tick: one
+    probe per host into hosts/<host>.json, and each running remote claim's transcript appended into this Mac's
+    transcript dir for its worktree (what the dashboard's worker row and transcript modal read)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setattr(R, "PROJECTS", str(tmp_path / "projects"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/far/repo", "ops": "/far/ops"}}))
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (0, "0.64 0.5 0.6 1/2 3\n24\n534G\n"))
+    runs = []
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: runs.append(args) or subprocess.CompletedProcess(args, 0, b"", b""))
+    claims = {"T-567": {"host": "node2", "state": "running", "session_id": "abc", "wt": f"{R.REPO}/.claude/worktrees/t567"},
+              "T-1": {"state": "running", "session_id": "x", "wt": f"{R.REPO}/.claude/worktrees/t1"}}
+    R.sync_remote_view(claims, dry=False)
+    rec = json.load(open(tmp_path / "hosts" / "node2.json"))
+    assert rec["reachable"] and rec["load1"] == 0.64 and rec["cores"] == 24 and rec["disk_free_gb"] == 534
+    [rsync] = runs                                                       # only the remote claim
+    assert rsync[:3] == ["rsync", "-a", "--append"]
+    assert rsync[-2] == "u@h:~/.claude/projects/-far-repo--claude-worktrees-t567/abc.jsonl"
+    assert rsync[-1] == f"{tmp_path}/projects/{R._proj_dir(R.REPO)}--claude-worktrees-t567/abc.jsonl"
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (255, "timed out"))
+    runs.clear()
+    R.sync_remote_view(claims, dry=False)
+    assert not json.load(open(tmp_path / "hosts" / "node2.json"))["reachable"] and runs == []

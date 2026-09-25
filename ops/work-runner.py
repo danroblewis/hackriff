@@ -555,6 +555,7 @@ def sync_back(c):
         if rc:
             raise RuntimeError(f"remote status: {dirty.strip()[:160]}")
         c["remote_dirty"] = [l for l in dirty.splitlines() if l.strip()]
+        sync_transcript(c)                      # the run's last stretch, which no tick copied
         log(f"REMOTE {tid}: synced back from {host} at {sh(['git', 'rev-parse', '--short', host + '/' + branch]).strip()}"
             + (f"; {len(c['remote_dirty'])} file(s) left uncommitted there" if c["remote_dirty"] else ""))
         return True
@@ -564,6 +565,55 @@ def sync_back(c):
             c["sync_warned"] = True
             attention(tid, branch, "REMOTE_SYNC", f"could not bring the run back from {host}: {str(e)[:200]}")
         return False
+
+
+PROJECTS = os.path.expanduser("~/.claude/projects")
+
+
+def _proj_dir(path):
+    """Claude Code's per-cwd transcript dir name: the path with '/' and '.' as '-'."""
+    return re.sub(r"[/.]", "-", path)
+
+
+def sync_remote_view(claims, dry):
+    """Every tick (user via supervisor, 2026-09-25 00:40: a remote worker must show on the dashboard like a local one):
+    per remote host, ONE ssh that reports reachability, load, disk and its running claude sessions to
+    $HACKRIFF_OPS/hosts/<host>.json; per running remote claim, its session transcript appended into this Mac's
+    transcript dir for that worktree - the dashboard's worker row and transcript modal read exactly that file."""
+    if dry or not hosts():
+        return
+    os.makedirs(f"{S}/hosts", exist_ok=True)
+    for h in hosts():
+        rc, out = remote_sh(h, "cat /proc/loadavg; nproc; df -BG --output=avail $HOME | tail -1", timeout=20)
+        rec = {"at": int(time.time()), "reachable": rc == 0}
+        if rc == 0:
+            try:
+                parts = out.split()
+                rec.update(load1=float(parts[0]), cores=int(parts[5]), disk_free_gb=int(parts[6].rstrip("G")))
+            except (IndexError, ValueError):
+                pass
+        with open(f"{S}/hosts/{h}.json.tmp", "w") as f:
+            json.dump(rec, f)
+        os.replace(f"{S}/hosts/{h}.json.tmp", f"{S}/hosts/{h}.json")
+        if not rec["reachable"]:
+            continue
+        for tid, c in claims.items():
+            if c.get("host") == h and c.get("state") == "running":
+                sync_transcript(c)
+
+
+def sync_transcript(c):
+    """Append a remote claim's session transcript into this Mac's transcript dir for its worktree."""
+    if not c.get("session_id"):
+        return
+    h = c["host"]
+    remote = f"~/.claude/projects/{_proj_dir(to_remote(h, c['wt']))}/{c['session_id']}.jsonl"
+    local_dir = f"{PROJECTS}/{_proj_dir(c['wt'])}"
+    os.makedirs(local_dir, exist_ok=True)
+    r = subprocess.run(["rsync", "-a", "--append", "-e", "ssh " + " ".join(SSH_OPTS),
+                        f"{hosts()[h]['ssh']}:{remote}", f"{local_dir}/{c['session_id']}.jsonl"], capture_output=True, timeout=120)
+    if r.returncode not in (0, 23):          # 23: the transcript is not there yet (a run's first seconds)
+        log(f"REMOTE {c['ticket']}: transcript copy from {h} failed (rsync {r.returncode}): {(r.stderr or b'')[-160:]!r}")
 
 
 def launch(t, dry):
@@ -2421,6 +2471,10 @@ def tick(dry):
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
         log(f"release_stale_claims error: {e}")
+    try:
+        sync_remote_view(claims, dry)
+    except Exception as e:
+        log(f"sync_remote_view error: {e}")
     try:
         sync_board(claims, dry)
     except Exception as e:
