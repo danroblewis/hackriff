@@ -26657,7 +26657,7 @@ tasks:
   - id: T-902
     milestone: MLIVE
     title: Tiles built from pushed rows guess their honesty tier - carry the tier on the row record, never infer it (T-893 finding)
-    status: in-progress
+    status: done
     branch: task-t902
     priority: normal
     deps:
@@ -26682,6 +26682,7 @@ tasks:
       Commits: f536fa3e
       Observed, not chased: The pane readout's tier label (panes.ts levelLabel, and measureViewOf in app/centre/surface.ts) comes from the pane's ViewTier (detail/overview) plus whether the pane is following, not from the drawn tiles' stated tier. A pushed-row tile's tier currently reaches the user only through the per-tile draw mark (surface.ts tierByte). If the readout text should reflect the drawn tiles' tier, that is separate work. | T-900 (closeable overlays, d86351cf) sat in rewound batch main d1ed9cd7 and is not on main 25ffc0f4. Its map-controls.ts change conflicts with T-882 (016d5f7c) and will need its own conflict fix.
       Resources: 65 CPU-s, peak 1.3 GB
+    commit: dbde8678
   - id: T-903
     milestone: MLIVE
     title: live-edge T-523 + T-890 cases red together 1 in 6 on task-t890 in file order (own-level probe never re-asked) - establish the rate, then root-cause
