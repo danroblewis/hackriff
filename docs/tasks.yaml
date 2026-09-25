@@ -25089,7 +25089,7 @@ tasks:
     milestone: M3
     title: C38 durable shadow sink in hk-store plus the three /api/ml routes, landed with a producer
       so the path is not vacuous
-    status: todo
+    status: in-progress
     branch: task-t844
     priority: normal
     deps:
