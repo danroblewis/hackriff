@@ -1,7 +1,8 @@
 //! Batched track persistence: upserts of the Track aggregates, then append-only
 //! track↔detection links, then merged tracks' links re-pointed to their survivors, then segment
 //! boundaries, through the repository. Write the member detections first (e.g. with
-//! [`DetectionWriter`](crate::DetectionWriter)); the link table references them.
+//! [`DetectionWriter`](crate::DetectionWriter)): a link whose detection is not stored — never
+//! written, or already aged out by detection retention (T-904) — is skipped, not written.
 //!
 //! One batch is **one** `BEGIN IMMEDIATE` transaction ([`Repository::batch`], T-035): it is
 //! written completely or not at all.

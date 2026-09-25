@@ -157,6 +157,10 @@ pub use repo::{
     Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
     TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
 };
+// T-904 per-frame detection retention and rollup (docs/07 §2.9).
+pub use repo::{
+    DetectionRetention, DetectionRollup, DetectionStorage, KEEP_PER_EMITTER, PruneReport,
+};
 // T-818 MAP-18 saved measurements (docs/25 §4).
 pub use repo::{
     MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX, MEASUREMENT_REF_MAX,
