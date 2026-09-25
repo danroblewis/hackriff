@@ -51,7 +51,22 @@ export interface CoverageSlice {
     f_lo_hz?: number; f_cell_hz?: number;
     t0_s?: number; t_cell_s?: number;
   } | null;
-  any?: { cells?: readonly { state?: string }[] | null } | null;
+  any?: {
+    cells?: readonly { state?: string }[] | null;
+    /**
+     * T-964: the route's own **time-collapsed** census — `{cells, observed_cells, excluded_cells,
+     * unobserved_cells, unknown_cells}` over the frequency axis, where a cell counts as sampled if
+     * any row in the window sampled it. This is the survey question, and it is the only share a
+     * sentence about the survey may quote: see [[orientationNote]].
+     */
+    bands?: {
+      cells?: number;
+      observed_cells?: number;
+      excluded_cells?: number;
+      unobserved_cells?: number;
+      unknown_cells?: number;
+    } | null;
+  } | null;
   /**
    * The route's own display scale for this region (T-470): `range_db`, with a `normalisation` that
    * reads *"0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped"* — which is the
@@ -155,6 +170,24 @@ export interface CoverageCensus {
   readonly total: number;
   /** The bounding box of the `observed` cells, or `null` when nothing here was ever sampled. */
   readonly box: Box | null;
+  /**
+   * **The same census with the time axis collapsed** (T-964): one count per *frequency* cell, where
+   * a cell counts as sampled if any row in the window sampled it.
+   *
+   * A grid census counts (time × frequency) cells, and that is the wrong denominator for *"where has
+   * this radio ever looked"*: a front end sees one window at a time, so a **finished** 1 MHz–6 GHz
+   * survey pass occupies only a thin diagonal of the grid. T-964 measured a completed full-range
+   * pass reported as *"4.3 % of this surface was ever sampled (176 of 4096 coverage cells)"* — true
+   * of the 128 × 32 grid, and read (correctly, given the sentence) as *the survey lit nothing*.
+   *
+   * Taken from the route's own `any.bands` when it serves one, else folded here from the same cells.
+   */
+  readonly bands: {
+    readonly observed: number;
+    readonly unobserved: number;
+    readonly unknown: number;
+    readonly total: number;
+  };
 }
 
 /**
@@ -172,7 +205,8 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
   const cells = cov?.any?.cells;
   const nf = finite(g?.cells) ? g!.cells! : 0;
   const nt = finite(g?.rows) ? g!.rows! : 0;
-  const empty: CoverageCensus = { observed: 0, unobserved: 0, unknown: 0, total: 0, box: null };
+  const noBands = { observed: 0, unobserved: 0, unknown: 0, total: 0 } as const;
+  const empty: CoverageCensus = { observed: 0, unobserved: 0, unknown: 0, total: 0, box: null, bands: noBands };
   if (!Array.isArray(cells) || nf <= 0 || nt <= 0 || cells.length !== nf * nt) return empty;
   const fLo = finite(g?.f_lo_hz) ? g!.f_lo_hz! : 0;
   const fCell = finite(g?.f_cell_hz) ? g!.f_cell_hz! : 0;
@@ -180,20 +214,41 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
   const tCell = finite(g?.t_cell_s) ? g!.t_cell_s! : 0;
   let observed = 0, unobserved = 0, unknown = 0;
   let f0 = Infinity, f1 = -Infinity, t0i = Infinity, t1i = -Infinity;
+  // T-964: the time-collapsed state per frequency cell, ranked so the strongest claim survives the
+  // fold — sampled beats forgotten beats grey, the route's own `bands` ordering.
+  const rank = new Uint8Array(nf);
   for (let i = 0; i < cells.length; i++) {
     const s = cells[i]?.state;
+    const f = i % nf, t = Math.floor(i / nf);
     if (s === "unobserved") { unobserved++; continue; }
-    if (s === "unknown") { unknown++; continue; }
+    if (s === "unknown") { unknown++; rank[f] = Math.max(rank[f], 1); continue; }
     // T-595: `"excluded"` is sampled spectrum (the DC notch), so it counts towards the observed
     // extent the view opens on — the radio was demonstrably there.
     if (s !== "observed" && s !== "excluded") continue;
     observed++;
-    const f = i % nf, t = Math.floor(i / nf);
+    rank[f] = 2;
     if (f < f0) f0 = f;
     if (f > f1) f1 = f;
     if (t < t0i) t0i = t;
     if (t > t1i) t1i = t;
   }
+  // The route's own count when it serves one (T-964), else the fold above of the same cells: one
+  // sentence, one rule, whichever end computed it.
+  const served = cov?.any?.bands;
+  const n = (v: unknown) => (finite(v) ? v : 0);
+  const bands = finite(served?.cells) && served!.cells! > 0
+    ? {
+      observed: n(served!.observed_cells) + n(served!.excluded_cells),
+      unobserved: n(served!.unobserved_cells),
+      unknown: n(served!.unknown_cells),
+      total: served!.cells!,
+    }
+    : {
+      observed: rank.reduce((a, r) => a + (r === 2 ? 1 : 0), 0),
+      unobserved: rank.reduce((a, r) => a + (r === 0 ? 1 : 0), 0),
+      unknown: rank.reduce((a, r) => a + (r === 1 ? 1 : 0), 0),
+      total: nf,
+    };
   const box: Box | null = observed > 0 && fCell > 0 && tCell > 0
     ? {
       f0Hz: fLo + f0 * fCell,
@@ -202,7 +257,7 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
       t1Ns: (t0 + (t1i + 1) * tCell) * S_TO_NS,
     }
     : null;
-  return { observed, unobserved, unknown, total: cells.length, box };
+  return { observed, unobserved, unknown, total: cells.length, box, bands };
 }
 
 /**
@@ -299,22 +354,43 @@ export function fmtShare(n: number, d: number): string {
  * It states the measured share, says which of the three coverage states the emptiness is, and says
  * where the view was opened — because T-437's 99.4 % is a true statement about a young pyramid and
  * the only defect available here is failing to say so.
+ *
+ * ## The share must answer the question the sentence asks (T-964)
+ *
+ * *"Ever sampled"* is a question about the **frequency axis**: did the radio ever look here in this
+ * window. The sentence used to quote the share of (time × frequency) **cells**, which answers a
+ * different question — *was it being looked at then* — and the two differ by the whole shape of a
+ * survey. A front end sees one window at a time, so a sweep is a thin diagonal across the grid: a
+ * **completed** 1 MHz–6 GHz pass came back as *"4.3 % of this surface was ever sampled (176 of 4096
+ * coverage cells)"*, which is true of the grid and false of the survey, and read as the fog-of-war
+ * map having nothing to show after the one feature that fills it.
+ *
+ * So both numbers are stated, each against its own question: the frequency share is what the survey
+ * achieved, the cell share is what the surface draws. Neither is dropped — a user who reads 100 %
+ * and then sees a mostly-grey canvas needs the second number to know why, which is the same honesty
+ * rule the sentence exists for.
  */
 export function orientationNote(c: CoverageCensus, opened: OpeningWindow): string {
   if (c.total === 0) {
     return "No coverage map was returned for this surface, so nothing here says whether the radio "
       + "ever looked. The view opens on the whole surface; anything drawn came from the pyramid.";
   }
-  const sampled = `${fmtShare(c.observed, c.total)} of this surface was ever sampled`;
-  const forgotten = c.unknown > 0
-    ? ` A further ${fmtShare(c.unknown, c.total)} is past the record horizon — hatched, not grey: we no longer know whether we looked.`
+  const b = c.bands;
+  const sampled = `${fmtShare(b.observed, b.total)} of this surface was ever sampled`;
+  // What the survey achieved, then what the canvas draws — a sweep occupies one window at a time,
+  // so the second share is always the smaller one and saying why is the point.
+  const counts = `${b.observed} of ${b.total} frequency cells ever sampled in this window; `
+    + `${fmtShare(c.observed, c.total)} of its ${c.total} time × frequency cells, which is what the `
+    + `surface draws — a radio sees one window at a time, so even a finished pass is a thin diagonal`;
+  const forgotten = b.unknown > 0
+    ? ` A further ${fmtShare(b.unknown, b.total)} of the frequency axis is past the record horizon — hatched, not grey: we no longer know whether we looked.`
     : "";
   if (!opened.onCoverage) {
-    return `${sampled} (${c.observed} of ${c.total} coverage cells), so the view opens on the whole `
+    return `${sampled} (${counts}), so the view opens on the whole `
       + `surface and is mostly grey. Grey is the claim that nothing ever looked there — it is not a `
       + `loading state and not a failure.${forgotten}`;
   }
-  return `${sampled} (${c.observed} of ${c.total} coverage cells). The view opens on the observed `
+  return `${sampled} (${counts}). The view opens on the observed `
     + `region with a margin, so the edge of coverage is on screen: inside it is measurement, outside `
     + `it is grey, and grey means nothing ever looked there.${forgotten}`;
 }
