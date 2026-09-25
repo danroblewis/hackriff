@@ -135,44 +135,57 @@ fn measure_chain_residency_over_a_sustained_survey() {
     );
 }
 
+/// The measuring kinds that are **not** counted against the run-wide cap, each bounded by its
+/// own node spec's `max_chains` instead: the classifier (T-878) and the narrowband-FSK frame hunt
+/// (T-950). Both are handed a track's member boxes and must never take the slot its decode chain
+/// needs. This list is the test's statement of that policy, on purpose not derived from the
+/// product's admission code: a new cap-exempt kind has to be named here, with its own bound
+/// asserted below, or its chains count against the sixteen and this test says so (T-1016 — T-950
+/// added the frame hunt without naming it, and every gate carrying it read 17 of 16).
+fn own_capped() -> Vec<(String, usize)> {
+    let own: Vec<(String, usize)> = builtin_chains()
+        .into_iter()
+        .filter_map(|s| match s.shape() {
+            Ok(
+                ChainShape::Classify { max_chains, .. } | ChainShape::FskFrames { max_chains, .. },
+            ) => Some((s.id, max_chains)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        own.iter().any(|(id, _)| id == "classify"),
+        "the classifier ships in the built-in registry"
+    );
+    assert!(
+        own.iter().any(|(id, _)| id == "fsk-frames"),
+        "the frame hunt ships in the built-in registry"
+    );
+    own
+}
+
+/// Per own-capped kind, how many are running; and how many chains of every other kind (the ones
+/// the run-wide cap bounds). A chain's `kind` is its spec id; anything not named by
+/// [`own_capped`] counts against the run-wide cap, so no other kind can escape it unnoticed.
+fn running(chain_stats: &serde_json::Value, own: &[(String, usize)]) -> (Vec<usize>, usize) {
+    let list = chain_stats.as_array().expect("chain_stats is a list");
+    let per_kind: Vec<usize> = own
+        .iter()
+        .map(|(id, _)| {
+            list.iter()
+                .filter(|c| c["kind"].as_str() == Some(id))
+                .count()
+        })
+        .collect();
+    let rest = list.len() - per_kind.iter().sum::<usize>();
+    (per_kind, rest)
+}
+
 /// The bound, stated as a bound: sixteen times the attaches is the same residency.
 ///
 /// Sampled at two survey lengths on purpose. One length can be passed by a cap, by a slow climb,
 /// or by luck; only the comparison shows the count is not a function of how long the survey ran.
 /// Before the cap this read `threads 43 -> 68` at 25 attaches and `43 -> 219` at 400, and the
 /// running-chain count was the attach count exactly.
-/// The built-in classifier's own concurrency cap (T-878), from its spec rather than a literal.
-fn classify_cap() -> usize {
-    builtin_chains()
-        .iter()
-        .find_map(|s| match s.shape() {
-            Ok(ChainShape::Classify { max_chains, .. }) => Some(max_chains),
-            _ => None,
-        })
-        .expect("the classifier ships in the built-in registry")
-}
-
-/// `(classifying, everything else)` among the running chains in `chain_stats`. A chain's `kind`
-/// is its spec id; anything that is not a built-in classify spec counts against the run-wide cap,
-/// so no other kind can escape it unnoticed.
-fn running(chain_stats: &serde_json::Value) -> (usize, usize) {
-    let classify: Vec<String> = builtin_chains()
-        .into_iter()
-        .filter(|s| matches!(s.shape(), Ok(ChainShape::Classify { .. })))
-        .map(|s| s.id)
-        .collect();
-    let list = chain_stats.as_array().expect("chain_stats is a list");
-    let classifying = list
-        .iter()
-        .filter(|c| {
-            c["kind"]
-                .as_str()
-                .is_some_and(|k| classify.iter().any(|id| id == k))
-        })
-        .count();
-    (classifying, list.len() - classifying)
-}
-
 #[test]
 fn a_sustained_survey_holds_a_bounded_number_of_chain_threads() {
     let dir = TempDir::new("t558-bound");
@@ -190,9 +203,11 @@ fn a_sustained_survey_holds_a_bounded_number_of_chain_threads() {
         .find(|s| s.id == "fsk-bursts")
         .unwrap();
     let base = threads();
+    let own = own_capped();
 
-    let mut at_25 = (0usize, 0usize, 0usize);
-    let mut at_400 = (0usize, 0usize, 0usize);
+    // (threads, chains under the run-wide cap, running per own-capped kind)
+    let mut at_25 = (0usize, 0usize, Vec::new());
+    let mut at_400 = (0usize, 0usize, Vec::new());
     for i in 1..=400usize {
         let at = handle.ring_position().saturating_sub(4096);
         let f = center - 500e3 + 1e3 * (i % 900) as f64;
@@ -211,32 +226,39 @@ fn a_sustained_survey_holds_a_bounded_number_of_chain_threads() {
         if i == 25 || i == 400 {
             // Let the control thread drain the attaches it was sent.
             std::thread::sleep(Duration::from_millis(600));
-            let (classifying, counted) = running(&handle.counters().chain_stats.to_json());
-            let row = (threads(), counted, classifying);
+            let (own_running, counted) = running(&handle.counters().chain_stats.to_json(), &own);
+            let own_line: Vec<String> = own
+                .iter()
+                .zip(&own_running)
+                .map(|((id, _), n)| format!("{n} {id}"))
+                .collect();
             println!(
-                "attaches {i}: threads {} running {} under the run-wide cap + {} classifying",
-                row.0, row.1, row.2
+                "attaches {i}: threads {} running {counted} under the run-wide cap + {} on their own caps",
+                threads(),
+                own_line.join(", ")
             );
+            let row = (threads(), counted, own_running);
             if i == 25 { at_25 = row } else { at_400 = row }
         }
     }
 
-    // Two bounds since T-878: every chain but the classifier's is under the run-wide cap, and the
-    // classifier's chains (which a track attaches *before* its decode chain, so they must never
-    // take a decode chain's slot) are under their own spec's `max_chains` instead.
+    // Every chain but an own-capped kind's is under the run-wide cap; each own-capped kind (a
+    // measuring chain a track attaches beside its decode chain, so it must never take a decode
+    // chain's slot — T-878, T-950) is under its own spec's `max_chains` instead.
     let cap = MAX_RUNTIME_CHAINS;
-    let classify_cap = classify_cap();
     assert!(
         at_400.1 <= cap,
-        "400 attaches left {} chains (classifying chains excluded) running, above the {cap} cap",
-        at_400.1
+        "400 attaches left {} chains (own-capped kinds {:?} excluded) running, above the {cap} cap",
+        at_400.1,
+        own.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>()
     );
-    assert!(
-        at_400.2 <= classify_cap,
-        "400 attaches left {} classifying chains running, above their {classify_cap} cap",
-        at_400.2
-    );
-    let cap = cap + classify_cap;
+    for ((id, own_cap), n) in own.iter().zip(&at_400.2) {
+        assert!(
+            n <= own_cap,
+            "400 attaches left {n} {id} chains running, above their own {own_cap} cap"
+        );
+    }
+    let cap = cap + own.iter().map(|(_, c)| c).sum::<usize>();
     assert!(
         at_400.0 <= base + 2 * cap + 8,
         "400 attaches took the process from {base} threads to {}: the thread count is a \
