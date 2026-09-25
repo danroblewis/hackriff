@@ -29076,7 +29076,7 @@ tasks:
   - id: T-999
     milestone: MMAP
     title: "Past-survey Go-to loses its time jump: the drawer writes reviewAt but no pane moves to it and mirror() overwrites it - move the pane's time + the missing test"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-GOTO
@@ -29101,6 +29101,7 @@ tasks:
       Observed, not chased: Debug instrumentation while chasing a (since-reverted) e2e centring check found that a FROZEN pane's rendered box span/centre can end up noticeably different from the exact PaneModel.goTo(centerNs) input on a SHORT (sub-second) survey window under the mock SDR's fine sweep - e.g. a 0.30s requested span rendered as ~3.0s, with the rendered midpoint landing ~1.2s away from the exact requested centre. Looks like legitimate zoom-floor/tile-resolution clamping (PaneModel's minSpanNs) plus a further effect I did not fully trace; the exact goTo() input itself was verified correct via debug log (centerNs matched the intended midpoint precisely). Outside this ticket's scope; not confirmed as a real defect. | ui/src/app/map/research.ts's goRow (research/marks explorer 'Go' row) still has the pre-T-999 pattern (reviewAt(...) + requestGoto(...) written separately, never centred at all) - noted in my prior handback too, still not chased (outside this ticket's named scope).
       Use cases: AWARE-042
       Resources: 3 CPU-s, peak 0.3 GB
+    commit: 26acbaa8
   - id: T-1000
     milestone: MMAP
     title: "Split view: make the active pane visible (outline; Go-to/zoom/layers name the pane; click and right-click set it; keys switch panes and toggle Live) + the global-vs-active chrome rule in docs/23 §10"
