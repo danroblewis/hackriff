@@ -579,7 +579,7 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
             probe = json.load(open(os.path.join(ops, "hosts", f"{h}.json")))      # the work runner's per-tick probe
         except (OSError, ValueError):
             probe = {}
-        out.append({"name": h, "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+        out.append({"name": h, "cap": (hosts[h] or {}).get("cap", 2), "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
                     "landed_24h": sum(1 for t in sent if f"(task-{t.lower().replace('-', '')})" in recent), "probe": probe,
                     "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
                     "landed": len(landed)})

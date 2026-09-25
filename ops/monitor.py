@@ -2967,7 +2967,7 @@ function drawRemoteHosts(el, d){
     const when=h.pushed_at?new Date(h.pushed_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'-';
     const p=h.probe||{}, age=p.at?Math.round(Date.now()/1000-p.at):null;
     const reach=p.at==null?'<span>not probed yet</span>':(p.reachable?`<span>reachable · ${age}s ago</span>`:`<span style="color:${C.red}">UNREACHABLE · ${age}s ago</span>`);
-    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed (${h.landed_24h} in 24h)</span><span>${h.dispatched} dispatched</span></div>`+
+    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length}/${h.cap} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed (${h.landed_24h} in 24h)</span><span>${h.dispatched} dispatched</span></div>`+
            `<div class=kv>${reach}<span>load ${p.load1??'-'} / ${p.cores??'-'} cores</span><span>disk ${p.disk_free_gb??'-'} GB free</span></div>`+
            `<div class=kv>${drift}<span>mirror ${esc(h.mirror||'-')} · pushed ${when}</span></div>`;
   }).join('');
