@@ -24093,7 +24093,8 @@ tasks:
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
-    status: todo
+    status: in-progress
+    branch: task-t813
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -26301,7 +26302,8 @@ tasks:
   - id: T-884
     milestone: MAUTO
     title: "T-860 follow-ups: wire ConfirmPolicy.synthesized config, republish synthesized decodes to the stream, provenance strings, TemplateFixed seeding, withheld-row leak"
-    status: todo
+    status: in-progress
+    branch: task-t884
     priority: normal
     deps:
     - T-860
