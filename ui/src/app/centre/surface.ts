@@ -87,7 +87,7 @@ import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest } from "../explore/annotate";
 import { focusSelection, focusSignal } from "../explore/slice";
-import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
@@ -1564,13 +1564,33 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a
     // different span still moves the pane; a request that names a span restores it (snapped by the
     // pane model), view arithmetic only.
+    //
+    // T-999: the SAME request can also name a time window (`gotoTimeWindow`) — a past survey's
+    // capture time, from the drawer's "go to". Applied to the active pane exactly as `setWindow`
+    // (`surface/preview.ts`) does it elsewhere: span first via `zoomTime`'s relative factor, THEN
+    // `goTo`'s absolute centre, because `goTo` freezes the pane at whatever span it finds — asking
+    // for the centre before the span would freeze it at the OLD span and only then resize around it,
+    // landing off from where the row named. `goTo` itself freezes the pane (`live: false`), which is
+    // the point: the past-survey jump must stick, not be read back to `live` on the next frame. Doing
+    // this here, in the one place that already writes the pane from `nav`, is what makes the write
+    // stick — `mirror()` below publishes the pane's OWN (now-moved) window afterwards, so there is no
+    // separate `reviewAt` write for a later `mirror()` pass to overwrite.
     store.select((s) => s.nav, (nav) => {
       const p = preview;
       if (!p) return;
       const pane = p.view.panes.get(p.activePane);
-      const w = pane ? gotoWindow(nav, pane.freq.spanHz) : null;
-      if (!w) return;
-      p.view.panes.setFreq(p.activePane, w.centerHz, w.spanHz);
+      if (!pane) return;
+      const w = gotoWindow(nav, pane.freq.spanHz);
+      if (w) p.view.panes.setFreq(p.activePane, w.centerHz, w.spanHz);
+      const t = gotoTimeWindow(nav);
+      if (t) {
+        if (t.spanS !== null) {
+          const spanNs = t.spanS * S_TO_NS;
+          p.view.panes.zoomTime(p.activePane, spanNs / Math.max(1, pane.time.spanNs), 0.5);
+        }
+        p.view.panes.goTo(p.activePane, t.tS * S_TO_NS);
+      }
+      if (!w && !t) return;
       mirror();
     });
 

@@ -9,7 +9,7 @@ import type { SchedulerResponse } from "../src/scheduler";
 import type { Selection } from "../src/selections";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
-import { gotoWindow, initialState, requestGoto, type AppState } from "../src/app/state";
+import { gotoTimeWindow, gotoWindow, initialState, requestGoto, type AppState } from "../src/app/state";
 
 test("unknown emitters lead, newest first, one per emitter; known ones are not listed", () => {
   const r: EventsResp = {
@@ -98,9 +98,9 @@ test("T-815 review: with a 7-day, 60k-record oldest-first log the NEWEST surveys
   const survey = el.all().filter((e) => e.tag === "li" && e.children[0]?.children[0]?.textContent === "survey · observed then");
   assert.equal(survey.length, 4);
   const got: number[] = [];
-  for (const li of survey) { li.children[1].fire("click"); got.push(store.get().time.tS!); }
+  for (const li of survey) { li.children[1].fire("click"); got.push(gotoTimeWindow(store.get().nav)!.tS); }
   assert.deepEqual(got, [edge, edge - 3600, edge - 7200, edge - 10800], "the four newest band-hours, newest first — never the oldest pages' windows");
-  assert.deepEqual(store.get().time, { live: false, tS: edge - 10800, spanS: 3600 });
+  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: edge - 10800, spanS: 3600 });
   assert.ok(srv.calls.every((c) => c.limit === 10_000), "the documented max page");
   assert.equal(srv.calls[0].t1, edge, "the newest slice is read first");
   assert.ok(!el.all().some((e) => e.textContent === "survey · not fully loaded"), "a complete read claims no truncation");
@@ -224,10 +224,13 @@ test("P4: the small per-row go-to button is the one that jumps the view (view ar
   gos[0].fire("click");
   assert.equal(store.get().nav.gotoHz, 433.92e6);
   assert.equal(store.get().nav.seq, seq0 + 1);
-  assert.equal(store.get().time.live, true, "a live emitter's go-to does not freeze the time window");
+  assert.equal(store.get().nav.gotoTS, null, "a live emitter's go-to names no time window");
   gos[1].fire("click");
   assert.equal(store.get().nav.gotoHz, 400.5e6);
-  assert.deepEqual(store.get().time, { live: false, tS: 100, spanS: 60 }, "a past survey window is reviewed");
+  // T-999: a past survey's time rides the SAME `nav` request as its frequency, not a separate
+  // `reviewAt` write — see `gotoTimeWindow` (`app/state.ts`) and the test below that this is what
+  // the surface actually moves a pane with.
+  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: 100, spanS: 60 }, "a past survey window is named");
   assert.ok(calls.every((c) => !/\/api\/(device|retune|control)/.test(c)), "never a device route");
 });
 
@@ -249,25 +252,38 @@ test("T-906: Go on a past survey restores its frequency SPAN as well as its cent
   li.children[1].fire("click");
   assert.deepEqual(store.get().nav.gotoHz, 435e6);
   assert.equal(store.get().nav.gotoSpanHz, 10e6, "the survey's band width, not the pane's old span");
-  assert.deepEqual(store.get().time, { live: false, tS: 90, spanS: 40 });
-  // The surface's own step: the request becomes a pane window, snapped by the real PaneModel.
-  const m = new PaneModel({ bounds: { f0Hz: 1e6, f1Hz: 6e9, t0Ns: 0, t1Ns: 100e9 }, width: 1000, height: 600,
+  // T-999: the time half rides the same request — `gotoTimeWindow`, not a separate `reviewAt` write
+  // that a later `mirror()` pass could overwrite before it ever reached a pane.
+  assert.deepEqual(gotoTimeWindow(store.get().nav), { tS: 90, spanS: 40 });
+  // The surface's own step: the request becomes a pane window, snapped by the real PaneModel — BOTH
+  // axes, exactly as `centre/surface.ts`'s `store.select((s) => s.nav, ...)` applies them.
+  // Bounds wide enough that a centre of 90 s with a 40 s span is not clamped against the capture
+  // window's own edge (which would be a second effect on top of the one under test).
+  const m = new PaneModel({ bounds: { f0Hz: 1e6, f1Hz: 6e9, t0Ns: 0, t1Ns: 1000e9 }, width: 1000, height: 600,
     freq: { centerHz: 100e6, spanHz: 2e6 }, minSpanHz: 1e3 });
   const id = m.list()[0].id;
   const w = gotoWindow(store.get().nav, m.get(id)!.freq.spanHz)!;
   m.setFreq(id, w.centerHz, w.spanHz);
   assert.deepEqual(m.get(id)!.freq, { centerHz: 435e6, spanHz: 10e6 });
+  const t = gotoTimeWindow(store.get().nav)!;
+  if (t.spanS !== null) m.zoomTime(id, (t.spanS * 1e9) / Math.max(1, m.get(id)!.time.spanNs), 0.5);
+  m.goTo(id, t.tS * 1e9);
+  assert.deepEqual(m.get(id)!.time, { live: false, centerNs: 90e9, spanNs: 40e9 },
+    "the pane freezes on the survey's own window, not the pane's previous (live) one");
   // A span beyond the device range is a view zoom snapped to the realizable extent, never a retune.
   m.setFreq(id, 3e9, 1e12);
   assert.deepEqual(m.get(id)!.freq, { centerHz: (1e6 + 6e9) / 2, spanHz: 6e9 - 1e6 });
-  // A plain go-to (no span) keeps the pane's span.
+  // A plain go-to (no span, no time) keeps the pane's span and leaves its time alone.
   store.set(requestGoto(101e6));
   assert.deepEqual(gotoWindow(store.get().nav, 2e6), { centerHz: 101e6, spanHz: 2e6 });
-  // The surface wires the request through gotoWindow on every request (keyed on the request, so a
-  // second Go to the same centre with a different span still moves the pane).
+  assert.equal(gotoTimeWindow(store.get().nav), null);
+  // The surface wires the request through gotoWindow/gotoTimeWindow on every request (keyed on the
+  // request, so a second Go to the same centre with a different span still moves the pane).
   const surface = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.match(surface, /store\.select\(\(s\) => s\.nav, \(nav\) =>/);
   assert.match(surface, /gotoWindow\(nav, pane\.freq\.spanHz\)/);
+  assert.match(surface, /gotoTimeWindow\(nav\)/);
+  assert.match(surface, /p\.view\.panes\.goTo\(p\.activePane, t\.tS \* S_TO_NS\)/);
 });
 
 test("T-906: survey sweep passes are listed as past surveys (one row per pass, visited hops only), stated as sweeps", () => {

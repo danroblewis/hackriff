@@ -128,7 +128,10 @@ test("mode, theme, time cursor and goto actions", () => {
   assert.deepEqual(s.get().time, { live: true });
   s.set(requestGoto(101.3e6));
   s.set(requestGoto(101.3e6));
-  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: null, seq: 2 });
+  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: null, gotoTS: null, gotoSpanS: null, seq: 2 });
+  // T-999: a request naming a time window (a past-survey Go-to) carries it on the same nav write.
+  s.set(requestGoto(101.3e6, 2e6, { t0S: 40, t1S: 100 }));
+  assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, gotoSpanHz: 2e6, gotoTS: 100, gotoSpanS: 60, seq: 3 });
 });
 
 test("review drawer toggles and opens on a tab and region", () => {
