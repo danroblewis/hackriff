@@ -3544,6 +3544,13 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
     assert_eq!(st, 200, "{t}");
     assert_eq!(t["nodes"], json!([]), "{t}");
     assert_eq!(t["job_id"], json!(id), "{t}");
+    // T-930: this job ENDED (failed) without ever producing a trace, so the fetch is `final` —
+    // otherwise a watching client polls it every 2 s for as long as it is on screen.
+    assert_eq!(
+        t["final"],
+        json!(true),
+        "a job that ended without a trace is final: {t}"
+    );
     // Every filter is parsed, and an unknown VALUE is `400 invalid` — never silently ignored,
     // which would answer a different question from the one asked (ADR-0021 §4.2).
     for good in [

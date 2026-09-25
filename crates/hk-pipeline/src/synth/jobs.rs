@@ -980,7 +980,13 @@ impl AnalyzeJobs {
             ));
         }
         let g = self.inner.lock();
-        let (_, job) = Self::resolve(&g, id)?;
+        let (n, job) = Self::resolve(&g, id)?;
+        // A job that ENDED without a trace is final all the same: nothing more is coming, so a
+        // client must be able to stop polling (a failed job and a cancel of a still-queued job
+        // never produce one — T-930). "Ended" is off the running slot and off the queue, the same
+        // test `subscribe` uses, never a terminal `state`: a cancel is terminal at once while its
+        // worker runs on and may still hand a partial trace over.
+        let ended = g.running != Some(n) && !g.queue.contains(&n);
         let bounds = job.snap.profile.trace_bounds();
         let keep = |n: &TraceNode| {
             q.stage.is_none_or(|s| n.stage == s)
@@ -1013,8 +1019,9 @@ impl AnalyzeJobs {
             "job_id": job.snap.id,
             "state": job.snap.state,
             "engine": hk_synth::ENGINE,
-            // `final: false` while the job runs: the engine hands its trace over when it stops.
-            "final": job.trace.is_some(),
+            // `final: false` only while the job can still produce a trace: the engine hands its
+            // trace over when it stops, and a job that stopped without one is final too.
+            "final": job.trace.is_some() || ended,
             "replay_key": job.snap.replay_key,
             "bounds": {
                 "max_nodes": bounds.max_trace_nodes,

@@ -747,6 +747,14 @@ fn without_an_evaluator_a_job_acquires_then_fails_not_searched_never_unknown() {
     assert!(j.results.is_empty() && j.trace_summary.is_none());
     let t = jobs.trace("a1", &TraceQuery::default()).unwrap();
     assert_eq!(t["nodes"], json!([]));
+    // T-930: it ended without ever producing a trace, so the fetch is `final` — a client that
+    // stops on `final` would otherwise poll this job forever (every job on a build with no
+    // evaluator).
+    assert_eq!(
+        t["final"],
+        json!(true),
+        "a failed job's trace is final: {t}"
+    );
 }
 
 #[test]
@@ -767,6 +775,10 @@ fn cancel_is_immediate_and_final_for_a_running_job_and_removes_a_queued_one() {
     assert_eq!(jobs.get("a1").unwrap().state, JobState::Searching);
     assert_eq!(jobs.get("a2").unwrap().state, JobState::Queued);
 
+    // While a1 runs its trace is NOT final: the engine may still hand a partial one over.
+    let t = jobs.trace("a1", &TraceQuery::default()).unwrap();
+    assert_eq!(t["final"], json!(false), "a running job's trace: {t}");
+
     // Queued: removed, cancelled, never run.
     let (q, forgotten) = jobs.cancel("a2").unwrap();
     assert!(!forgotten);
@@ -774,6 +786,13 @@ fn cancel_is_immediate_and_final_for_a_running_job_and_removes_a_queued_one() {
     assert_eq!(
         q.resolution.as_ref().unwrap().kind,
         ResolutionKind::NotSearched
+    );
+    // T-930: cancelled while queued, so nothing will ever hand a trace over — final at once.
+    let t = jobs.trace("a2", &TraceQuery::default()).unwrap();
+    assert_eq!(
+        (t["final"].clone(), t["nodes"].clone()),
+        (json!(true), json!([])),
+        "a queued-cancelled job's trace is final: {t}"
     );
     // Running: cancelled at once, and it stays cancelled when the engine hands back.
     let (r, forgotten) = jobs.cancel("a1").unwrap();
@@ -784,6 +803,9 @@ fn cancel_is_immediate_and_final_for_a_running_job_and_removes_a_queued_one() {
     });
     let a1 = jobs.get("a1").unwrap();
     assert_eq!(a1.state, JobState::Cancelled);
+    // Its worker has handed back, so the trace fetch is final now (with or without nodes).
+    let t = jobs.trace("a1", &TraceQuery::default()).unwrap();
+    assert_eq!(t["final"], json!(true), "handed back: {t}");
     assert_eq!(a1.end_reason, Some(StopReason::Cancelled));
     assert_eq!(
         a1.resolution.as_ref().unwrap().kind,
