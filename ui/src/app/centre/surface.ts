@@ -52,6 +52,7 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
+import type { HudReserve } from "../../surface/hud";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
@@ -167,6 +168,33 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/**
+ * T-997: the floating chrome's TOP-LEFT column, measured against the canvas, so the time ruler's
+ * labels are dropped rather than printed underneath it (`surface/hud.ts`'s `HudReserve`). The
+ * cluster's children are absolutely placed by `map-controls.css`, and the ones that matter are the
+ * ones that reach into the ruler's own band down the left edge — Go-to, the nudge row, the
+ * inventory pills, the retune offer, and at phone width the status pill. Whichever they are, this
+ * asks the layout rather than repeating the CSS's numbers: one rect read per child, once per frame,
+ * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
+ * most one layout and never a read-write thrash.
+ */
+const RULER_BAND_CSS = 14 + 150; // `hud.ts`'s TIME_LABEL_BOX_CSS: where a time label prints.
+function chromeReserve(canvas: HTMLCanvasElement, ctl: HTMLElement | null): HudReserve | null {
+  if (!ctl) return null;
+  const base = canvas.getBoundingClientRect();
+  let left = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const child of Array.from(ctl.children)) {
+    const r = child.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const x0 = r.left - base.left, x1 = r.right - base.left, y1 = r.bottom - base.top;
+    // Only what reaches into the band the time labels print in, and only above the fold: the zoom
+    // stack, the FAB and the top-right cluster are nowhere near the left ruler.
+    if (x0 > RULER_BAND_CSS) continue;
+    left = Math.min(left, x0); right = Math.max(right, x1); bottom = Math.max(bottom, y1);
+  }
+  return bottom > -Infinity ? { left, right, bottom } : null;
+}
+
 /** The surface's tool modes (docs/23 §10.4's table columns). */
 type ToolMode = "navigate" | "measure" | "annotate" | "pin";
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
@@ -1202,6 +1230,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
+        hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
         dom: pinsFrame,
       });
     } catch (e) {

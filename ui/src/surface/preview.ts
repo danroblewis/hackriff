@@ -51,6 +51,7 @@ import {
   type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
 } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
+import type { HudReserve } from "./hud";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
  * budget in `tilecache.ts` was measured against. */
@@ -624,6 +625,8 @@ export interface PreviewOptions {
   /** HUD axes (T-805, `./hud.ts`): the label layer, and the chrome's fade asked every frame. */
   hud?: HTMLElement | null;
   hudAlpha?: (() => number) | null;
+  /** T-997: the floating chrome's top-left column; a time label that would print into it is dropped. */
+  hudReserve?: (() => HudReserve | null) | null;
   /** Band-1 DOM marks laid out in the render frame (T-809, `./pins.ts`). See `SurfaceViewOptions.dom`. */
   dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
   /**
@@ -715,6 +718,7 @@ export class SurfacePreview {
       tracePx: opts.tracePx ?? 0,
       hud: opts.hud ?? null,
       hudAlpha: opts.hudAlpha ?? null,
+      hudReserve: opts.hudReserve ?? null,
       dom: opts.dom ?? null,
     });
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
