@@ -30,6 +30,9 @@ export interface AnalyzeJob {
   progress?: { stage_max?: string; beam?: number; pruned?: number; tried?: number; not_tried?: number; evaluations?: number; proposal_calls?: number };
   results: readonly PipelineResult[];
   warnings?: readonly unknown[];
+  /** ADR-0021 §7A.2, present whenever no result reached `solved`; rendered by the trace panel
+   * (T-570), never by this module. */
+  resolution?: Readonly<Record<string, unknown>> | null;
 }
 
 // ---- pure view-model ----
@@ -167,11 +170,12 @@ export function renderAnalyze(el: HTMLElement, j: AnalyzeJob | null, ctx: AppCon
 }
 
 /** Mounts the Analyze section into `el`, polling the watched job (GET is authoritative, ADR-0015
- * §5.2) at 1 s while it runs and once it has finished. */
-export function mountAnalyzeSection(el: HTMLElement, ctx: AppContext): void {
+ * §5.2) at 1 s while it runs and once it has finished. `onJob` (T-570) forwards every fetched job
+ * to the trace panel, so it needs no `GET /api/analyze/{id}` poll of its own. */
+export function mountAnalyzeSection(el: HTMLElement, ctx: AppContext, onJob?: (j: AnalyzeJob | null) => void): void {
   let job: AnalyzeJob | null = null;
   let watching: string | null = null;
-  const draw = () => renderAnalyze(el, job, ctx);
+  const draw = () => { renderAnalyze(el, job, ctx); onJob?.(job); };
   ctx.store.select((s) => s.analyze.jobId, (id) => {
     if (id === watching) return;
     watching = id; job = null; draw();
