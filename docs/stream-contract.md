@@ -729,8 +729,12 @@ Code: `hk_stream::bursts` (profile), `hk_pipeline::chains::taps` (producer).
   1. **Status** (type 3), a flat object: `burst` (per-stream counter), `symbols` (elements in the
      data record), `symbol_rate_bd`, `f_center_hz`, `bandwidth_hz`, `snr_db`, `framed`, `inverted`,
      `sync_bit`, `sync_bits`, `payload_bit`, `payload_bits`, `bit_order` (`msb-first`/`lsb-first`),
-     `crc` (`valid`/`invalid`), `emitter_id` (at detach), `content_withheld`. Absent values are
-     omitted.
+     `crc`, `emitter_id` (at detach), `content_withheld`. Absent values are omitted, **except
+     `crc` on a framed burst (T-954)**: once a sync word was located (`framed: true`) the field is
+     never omitted, and reads one of `valid`, `invalid`, `unknown` (a CRC model exists but this
+     frame wasn't evaluated, e.g. truncated before the CRC field) or `absent` (no CRC model at
+     all) — so a reader can always tell "no check ran" from "the check hasn't been reported". An
+     unframed burst still omits `crc` (there is no frame to check).
   2. **Data** (type 1), flags `BURST_START | BURST_END`, `t` of the first symbol, `sample_index`
      the source sample of the first symbol centre. Bits and symbols are in the **framing model's
      polarity** (inverted bursts complemented), so `payload_bit`/`payload_bits` index straight

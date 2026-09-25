@@ -22,6 +22,12 @@
 //!    connection, a tunnel whose browser vanished) closes the consumer and drops the session
 //!    guard, which stops the producer. A write blocked for the peer timeout fails the consumer
 //!    too. A producer that ends on its own finishes its publisher, which closes the socket.
+//! 6. **Every ending sends a real close frame (T-954), not a bare TCP hang-up.** [`close_frame_for`]
+//!    maps each [`PeerEnd`] to a code and reason before the socket goes down, once the `101`
+//!    response and the header actually reached the peer — a session that ended before that has
+//!    nothing valid to close on the wire, so it is left as a hang-up as before. Skipping this was
+//!    the T-954 bug: every `/ws/open/<name>` session, whatever ended it, read as WebSocket close
+//!    code `1006` ("abnormal closure") to the browser, indistinguishable from a real fault.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -36,6 +42,26 @@ use tungstenite::Message;
 use tungstenite::protocol::frame::CloseFrame;
 use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::protocol::{Role, WebSocket};
+
+/// How each [`PeerEnd`] closes the WebSocket (T-954): a code and reason, never a bare TCP
+/// hang-up. A browser reports an unframed close as `1006` ("abnormal closure"), indistinguishable
+/// from a real fault, which is exactly what every `/ws/open/<name>` session did before this: the
+/// shared close path (below) only ever shut the raw socket down.
+fn close_frame_for(end: PeerEnd) -> (CloseCode, &'static str) {
+    match end {
+        // A close frame from the peer, or a producer that finished and dropped the session: a
+        // normal, expected end.
+        PeerEnd::Closed => (CloseCode::Normal, "closed"),
+        // Consumers never write (§2): unsolicited data breaks the contract.
+        PeerEnd::Message => (CloseCode::Protocol, "unexpected message from a consumer"),
+        // No pong within the peer timeout: half-open or vanished, not a graceful close, but still
+        // told with a real frame rather than left to read as 1006.
+        PeerEnd::Unresponsive => (CloseCode::Normal, "no response within the peer timeout"),
+        // The transport itself faulted (reset, broken pipe): sending is best-effort and usually a
+        // no-op, but costs nothing to attempt.
+        PeerEnd::Reset => (CloseCode::Error, "transport reset"),
+    }
+}
 
 use crate::bridge;
 use crate::http::ServerConfig;
@@ -350,6 +376,20 @@ pub(crate) fn serve(
                 PeerEnd::Unresponsive => hk_stream::SessionEnd::Unresponsive,
                 PeerEnd::Reset => hk_stream::SessionEnd::Transport,
             });
+            // T-954: an honest close frame, not a bare TCP hang-up — see [`close_frame_for`].
+            // `watch` already returned, so this thread holds `conn` uncontended. Only once the
+            // `101` response and the first message actually went out (`started`, the same guard
+            // `watch`'s pinger uses): a session that ended before anything was ever written has
+            // no valid WebSocket to close on the wire, and writing framed bytes ahead of the
+            // handshake would corrupt it. This must happen **before** `handle.close(id)`: that
+            // call runs the subscribe callback, which shuts the raw socket down (T-633's
+            // `closer.shutdown`) and would otherwise race ahead of this write.
+            let mut c = conn.lock().unwrap_or_else(PoisonError::into_inner);
+            if c.started {
+                let (code, reason) = close_frame_for(end);
+                c.sink.close(code, reason);
+            }
+            drop(c);
             opened.handle.close(id);
             let _ = stream.shutdown(Shutdown::Both);
             if std::env::var_os("HK_PIPELINE_DEBUG").is_some() {

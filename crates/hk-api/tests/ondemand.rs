@@ -3,6 +3,7 @@
 //! nothing; an opened stream is served like any bridged stream (header text, binary records,
 //! status records); a disconnect drops the session guard; the token is checked first.
 
+use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -233,7 +234,14 @@ fn opened_streams_are_bridged_and_stop_on_disconnect() {
     assert_eq!(status.unwrap()["level_dbfs"], -20.5);
     assert!(!ok.stopped.load(Ordering::SeqCst));
     ws.close(None).unwrap();
-    let _ = drain(&mut ws);
+    // T-954: a client-initiated close gets a real close frame back, code 1000 — not a bare TCP
+    // hang-up, which every browser reports as 1006 ("abnormal closure") whatever the real cause.
+    let (_, _, code) = drain(&mut ws);
+    assert_eq!(
+        code,
+        Some(u16::from(CloseCode::Normal)),
+        "the server must echo a close frame, not just shut the socket down"
+    );
     let t0 = Instant::now();
     while !ok.stopped.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(10));
@@ -242,7 +250,6 @@ fn opened_streams_are_bridged_and_stop_on_disconnect() {
         ok.stopped.load(Ordering::SeqCst),
         "disconnect drops the session guard"
     );
-    let _ = CloseCode::Normal;
 }
 
 /// Publishes a small record every 20 ms until its session drops; counts live sessions (T-066).
@@ -326,6 +333,35 @@ fn raw_open(addr: SocketAddr) -> TcpStream {
     s
 }
 
+/// `raw_open` reads the raw socket with its own (non-WebSocket-aware) buffer, so any bytes it
+/// over-read past the header would leave a fresh [`WebSocket`] wrapper mis-aligned on the frame
+/// boundary. This checks the close reason's bytes turn up anywhere in what `s` sends next
+/// instead, which needs no frame alignment (T-954).
+fn close_reason_seen(mut s: TcpStream, reason: &str) -> bool {
+    use std::io::Read;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+    let needle = reason.as_bytes();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+        if buf.windows(needle.len()).any(|w| w == needle) {
+            return true;
+        }
+    }
+    buf.windows(needle.len()).any(|w| w == needle)
+}
+
 #[test]
 fn silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay() {
     let opener = Arc::new(Ticking::default());
@@ -377,12 +413,17 @@ fn silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay() {
         "silent peer released after {:.0} ms",
         t.elapsed().as_secs_f64() * 1e3
     );
+    // T-954: reaping a silent peer still sends a real close frame — the session-drop above races
+    // ahead of nothing, since the server writes the frame before dropping the session guard.
+    assert!(
+        close_reason_seen(silent, "no response within the peer timeout"),
+        "an unresponsive peer must get a close frame too, not just be left to read 1006"
+    );
 
     // Abrupt: a hang-up without a close frame.
     let gone = raw_open(addr);
     assert!(live_is(1));
     drop(gone);
     assert!(live_is(0), "a hang-up drops the session");
-    drop(silent);
     assert_eq!(opener.opened.load(Ordering::SeqCst), 3);
 }
