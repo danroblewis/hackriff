@@ -162,7 +162,8 @@ pub use repo::{
     SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS,
     Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
-    TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
+    TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UnresolvedRegion, UserBand,
+    ViewTier, authored_block,
 };
 // T-904 per-frame detection retention and rollup (docs/07 §2.9).
 pub use repo::{

@@ -157,7 +157,9 @@ pub use authored::{
     AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
     AuthoredKind, AuthoredPage, authored_block,
 };
-pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
+pub use relate::{
+    MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome, UnresolvedRegion,
+};
 pub use retention::{
     DetectionRetention, DetectionRollup, DetectionStorage, KEEP_PER_EMITTER, PruneReport,
 };

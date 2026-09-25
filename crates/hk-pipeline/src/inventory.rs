@@ -85,7 +85,7 @@ use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
 use hk_model::{
     DemodulationId, EmitterId, EmitterLink, IdentityScheme, LifecycleAuthor, LifecycleState,
     LinkTarget, MeasurementKey, RETUNE_MIN_CENTRES, RETUNE_RULE, RepoError, Repository,
-    RetuneTolerance, Sighting, Timestamp, Tolerances, TrackId,
+    RetuneTolerance, Sighting, Timestamp, Tolerances, TrackId, UnresolvedRegion,
 };
 use serde::{Deserialize, Serialize};
 
@@ -112,6 +112,13 @@ pub const OVERLAP_RULE: &str = "hk-pipeline/overlap@1";
 /// T-978: the rule name on a claim made from the region's re-measured spectrum, kept apart from
 /// [`OVERLAP_RULE`] so a reader can see which re-analysis spoke.
 pub const MEASURED_REGION_RULE: &str = "hk-pipeline/overlap-measured@1";
+
+/// T-978: how often one region is re-measured against a fresh spectrum, ns. A settled region stays
+/// reported so its claim stays revocable; this is what stops that costing the detect reader a
+/// snapshot per evaluation for as long as the overlap is live. 10 s is the far end of the
+/// "a region's few real signals should resolve quickly (~2-10 s)" invariant: slower than the first
+/// resolution, fast enough that a verdict the air has outgrown is withdrawn within one window.
+pub const REMEASURE_INTERVAL_NS: i64 = 10_000_000_000;
 
 /// T-978: most regions re-measured in one pass. A touch reports the regions stage 4 could not
 /// resolve around **one** emitter, so this is a bound on a pathological neighbourhood, not on the
@@ -1204,6 +1211,21 @@ pub struct TrackInventory {
     pub region_resolved: u64,
     /// T-978: regions re-measured against the spectrum.
     pub region_measured: u64,
+    /// T-978: when each region was last re-measured, for [`REMEASURE_INTERVAL_NS`]. Bounded like
+    /// [`Self::run`]: past the cap the map is cleared, which costs one extra measurement, never a
+    /// wrong verdict.
+    remeasured: HashMap<RegionKey, i64>,
+}
+
+/// T-978: a region band as a map key. Bit patterns of the two edges, so a region is the same key on
+/// every pass without comparing floats for order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct RegionKey(u64, u64);
+
+impl RegionKey {
+    fn of(r: hk_model::FreqRange) -> Self {
+        Self(r.lo_hz.to_bits(), r.hi_hz.to_bits())
+    }
 }
 
 impl Default for TrackInventory {
@@ -1251,6 +1273,7 @@ impl TrackInventory {
             overlap: OverlapConfig::default(),
             region_resolved: 0,
             region_measured: 0,
+            remeasured: HashMap::new(),
         }
     }
 
@@ -1409,12 +1432,32 @@ impl TrackInventory {
     fn resolve_measured(
         &mut self,
         repo: &mut Repository,
-        unresolved: &[hk_model::FreqRange],
+        unresolved: &[UnresolvedRegion],
         t: Timestamp,
     ) -> Result<(), RepoError> {
-        let (Some(spectrum), false) = (self.spectrum.clone(), unresolved.is_empty()) else {
+        let Some(spectrum) = self.spectrum.clone() else {
             return Ok(());
         };
+        // **A settled region is re-verified, not re-measured every touch.** Keeping a resolved
+        // region in `unresolved` is what keeps the claim revocable, but asking for a snapshot on
+        // every pass would have the detect reader copy a full integrated spectrum for as long as
+        // any settled overlap is live — an unbounded cost on the thread that gates the ring, which
+        // is exactly what T-453 says must be measured rather than assumed. So a region is
+        // re-measured at most once per [`REMEASURE_INTERVAL_NS`], on the capture clock.
+        let due: Vec<&UnresolvedRegion> = unresolved
+            .iter()
+            .filter(|u| {
+                self.remeasured
+                    .get(&RegionKey::of(u.region))
+                    .is_none_or(|&last| {
+                        t.as_unix_nanos().saturating_sub(last) >= REMEASURE_INTERVAL_NS
+                    })
+            })
+            .take(MAX_MEASURED_REGIONS)
+            .collect();
+        if due.is_empty() {
+            return Ok(());
+        }
         let Some(snapshot) = spectrum.take() else {
             // The reader has not answered the last request yet (or none was made).
             spectrum.want();
@@ -1422,19 +1465,29 @@ impl TrackInventory {
         };
         let started = Instant::now();
         let mut measured = 0;
-        for region in unresolved.iter().take(MAX_MEASURED_REGIONS) {
-            let Some(m) = measure_region(*region, &snapshot, &self.overlap) else {
+        for u in due {
+            let Some(m) = measure_region(u.region, &snapshot, &self.overlap) else {
                 continue;
             };
             measured += 1;
-            let out =
-                repo.resolve_measured_region(&m, MEASURED_REGION_RULE, t, &Tolerances::default())?;
+            if self.remeasured.len() >= RUN_MEMORY {
+                self.remeasured.clear();
+            }
+            self.remeasured
+                .insert(RegionKey::of(u.region), t.as_unix_nanos());
+            let out = repo.resolve_measured_region(
+                u,
+                &m,
+                MEASURED_REGION_RULE,
+                t,
+                &Tolerances::default(),
+            )?;
             self.region_resolved += out.duplicates.len() as u64;
             self.contested += out.contested.len() as u64;
         }
         self.region_measured += measured;
         spectrum.charge(measured, started.elapsed());
-        // Still unresolved after this pass? Ask for a fresher spectrum; the next touch decides.
+        // Still unresolved? Ask for a fresher spectrum, so the next due region has one waiting.
         spectrum.want();
         Ok(())
     }

@@ -29,7 +29,7 @@ use hk_model::{
     LinkTarget, PlanRegion, Provenance, ProvenanceId, RelationKind, RelationVisibility, Repository,
     ScanPlan, ScanPlanId, ScanPolicy, Schedule, Sighting, SpurMaskId, Survey, SurveyId,
     SurveyState, TimeRange, Timestamp, TimingFeatures, Tolerances, Track, TrackId, TrackState,
-    Tune,
+    Tune, UnresolvedRegion,
 };
 
 const RULE: &str = "test/t978@1";
@@ -98,8 +98,7 @@ fn scene() -> (Repository, SurveyId, ProvenanceId) {
     (r, survey.id, p)
 }
 
-/// One Candidate row from a track sighting, with a detection linked through its track so the rules
-/// can read its level, −3 dB width and tuning centre. Seen over the whole scene, so every row here
+/// One Candidate row from a track sighting, seen over the whole scene, so every row made this way
 /// overlaps every other in **time** as well as frequency.
 fn candidate(
     r: &mut Repository,
@@ -109,7 +108,29 @@ fn candidate(
     obw: f64,
     snr: f64,
 ) -> EmitterId {
-    let seen = TimeRange::new(t(0), t(20));
+    candidate_seen(
+        r,
+        survey,
+        provenance,
+        f,
+        obw,
+        snr,
+        TimeRange::new(t(0), t(20)),
+    )
+}
+
+/// One Candidate row from a track sighting over an explicit window, with a detection linked through
+/// its track so the rules can read its level, −3 dB width and tuning centre.
+#[allow(clippy::too_many_arguments)]
+fn candidate_seen(
+    r: &mut Repository,
+    survey: SurveyId,
+    provenance: ProvenanceId,
+    f: f64,
+    obw: f64,
+    snr: f64,
+    seen: TimeRange,
+) -> EmitterId {
     let track_id = TrackId::new();
     let id = r
         .record_sighting(
@@ -194,6 +215,22 @@ fn every(r: &Repository) -> Vec<EmitterId> {
     .collect()
 }
 
+/// The widest unresolved region stage 4 reported, with the members it named. The measured pass takes
+/// its members from here and never from a search over the band: see `UnresolvedRegion`.
+fn widest(out: &hk_model::repo::OverlapOutcome) -> UnresolvedRegion {
+    out.unresolved
+        .iter()
+        .cloned()
+        .reduce(|a, b| {
+            if b.region.width_hz() > a.region.width_hz() {
+                b
+            } else {
+                a
+            }
+        })
+        .expect("the region is unresolved from the rows alone")
+}
+
 /// The standing `DuplicateOf` claim on `id`, if it defers.
 fn defers_to(r: &Repository, id: EmitterId) -> Option<(EmitterId, String)> {
     r.emitter_relations(id)
@@ -271,10 +308,11 @@ fn two_candidates_for_one_p25_emission_resolve_to_one() {
         2048,
         &[(852_859_100.0, 26_200.0, 22.0)],
     );
-    let m = measure_region(out.unresolved[0], &snap, &OverlapConfig::default()).unwrap();
+    let u = out.unresolved[0].clone();
+    let m = measure_region(u.region, &snap, &OverlapConfig::default()).unwrap();
     assert_eq!(m.emissions.len(), 1, "one emission is measured there");
     let applied = r
-        .resolve_measured_region(&m, RULE, t(20), &Tolerances::default())
+        .resolve_measured_region(&u, &m, RULE, t(20), &Tolerances::default())
         .unwrap();
     assert_eq!(applied.duplicates.len(), 1, "exactly one row is retired");
 
@@ -325,15 +363,10 @@ fn a_merged_box_over_two_emitters_splits() {
             (861_450_000.0, 40_000.0, 26.0),
         ],
     );
-    let region = out
-        .unresolved
-        .iter()
-        .copied()
-        .reduce(|a, b| FreqRange::new(a.lo_hz.min(b.lo_hz), a.hi_hz.max(b.hi_hz)))
-        .unwrap();
-    let m = measure_region(region, &snap, &OverlapConfig::default()).unwrap();
+    let u = widest(&out);
+    let m = measure_region(u.region, &snap, &OverlapConfig::default()).unwrap();
     assert_eq!(m.emissions.len(), 2, "the spectrum separates two emissions");
-    r.resolve_measured_region(&m, RULE, t(20), &Tolerances::default())
+    r.resolve_measured_region(&u, &m, RULE, t(20), &Tolerances::default())
         .unwrap();
 
     let mut listed = shown(&r);
@@ -360,8 +393,11 @@ fn the_retirement_is_revoked_when_the_spectrum_changes() {
     let (mut r, sv, p) = scene();
     let narrow = candidate(&mut r, sv, p, 852_858_600.0, 9_300.0, 18.0);
     let wide = candidate(&mut r, sv, p, 852_859_100.0, 26_200.0, 22.0);
-    let region = FreqRange::new(852_846_000.0, 852_872_200.0);
     let cfg = OverlapConfig::default();
+    let u = widest(
+        &r.resolve_overlaps(wide, RULE, t(20), &Tolerances::default())
+            .unwrap(),
+    );
 
     let one = spectrum(
         852_860_000.0,
@@ -369,8 +405,8 @@ fn the_retirement_is_revoked_when_the_spectrum_changes() {
         2048,
         &[(852_859_100.0, 26_200.0, 22.0)],
     );
-    let m = measure_region(region, &one, &cfg).unwrap();
-    r.resolve_measured_region(&m, RULE, t(20), &Tolerances::default())
+    let m = measure_region(u.region, &one, &cfg).unwrap();
+    r.resolve_measured_region(&u, &m, RULE, t(20), &Tolerances::default())
         .unwrap();
     assert_eq!(shown(&r), vec![wide]);
 
@@ -384,10 +420,10 @@ fn the_retirement_is_revoked_when_the_spectrum_changes() {
             (852_868_000.0, 8_000.0, 22.0),
         ],
     );
-    let m2 = measure_region(region, &two, &cfg).unwrap();
+    let m2 = measure_region(u.region, &two, &cfg).unwrap();
     assert_eq!(m2.emissions.len(), 2);
     let out = r
-        .resolve_measured_region(&m2, RULE, t(40), &Tolerances::default())
+        .resolve_measured_region(&u, &m2, RULE, t(40), &Tolerances::default())
         .unwrap();
     assert!(!out.revoked.is_empty(), "the standing claim is revoked");
     let mut listed = shown(&r);
@@ -449,21 +485,22 @@ fn the_retirement_survives_every_later_touch() {
     let tol = Tolerances::default();
 
     let out = r.resolve_overlaps(wide, RULE, t(20), &tol).unwrap();
-    let region = out.unresolved[0];
+    let u = out.unresolved[0].clone();
     let snap = detector_spectrum(
         852_860_000.0,
         2.4e6,
         2048,
         &[(852_859_100.0, 26_200.0, 22.0)],
     );
-    let m = measure_region(region, &snap, &OverlapConfig::default()).unwrap();
+    let m = measure_region(u.region, &snap, &OverlapConfig::default()).unwrap();
     assert_eq!(
         m.emissions.len(),
         1,
         "the detector's own integrated spectrum shows one emission: {:?}",
         m.emissions
     );
-    r.resolve_measured_region(&m, RULE, t(20), &tol).unwrap();
+    r.resolve_measured_region(&u, &m, RULE, t(20), &tol)
+        .unwrap();
     assert_eq!(shown(&r), vec![wide]);
 
     let after_first = r.emitter_relations(narrow).unwrap().len();
@@ -504,12 +541,7 @@ fn the_split_survives_every_later_touch() {
     let tol = Tolerances::default();
 
     let out = r.resolve_overlaps(merged, RULE, t(20), &tol).unwrap();
-    let region = out
-        .unresolved
-        .iter()
-        .copied()
-        .reduce(|a, b| FreqRange::new(a.lo_hz.min(b.lo_hz), a.hi_hz.max(b.hi_hz)))
-        .expect("the region is unresolved from the rows alone");
+    let u = widest(&out);
     let snap = detector_spectrum(
         861_430_000.0,
         2.4e6,
@@ -519,14 +551,15 @@ fn the_split_survives_every_later_touch() {
             (861_450_000.0, 40_000.0, 26.0),
         ],
     );
-    let m = measure_region(region, &snap, &OverlapConfig::default()).unwrap();
+    let m = measure_region(u.region, &snap, &OverlapConfig::default()).unwrap();
     assert_eq!(
         m.emissions.len(),
         2,
         "the detector's own integrated spectrum separates two emissions: {:?}",
         m.emissions
     );
-    r.resolve_measured_region(&m, RULE, t(20), &tol).unwrap();
+    r.resolve_measured_region(&u, &m, RULE, t(20), &tol)
+        .unwrap();
 
     let mut real = vec![low, high];
     real.sort();
@@ -542,4 +575,83 @@ fn the_split_survives_every_later_touch() {
         }
     }
     assert_eq!(every(&r).len(), 3, "and nothing was deleted");
+}
+
+/// **The review's second finding, and the rule it breaks.** The measured pass used to collect its
+/// members with a frequency-only query over `ANY_TIME`, so a spectrum measured *now* could retire a
+/// live box as a duplicate of a row that was on air hours ago — and the default inventory filter
+/// hides a deferring row while the past row sits outside the viewed window, so the emission actually
+/// transmitting would have no box at all. That is "the inventory is time-scoped to the view" and
+/// "whenever data exists for that window it must be shown", both broken at once, and it is likeliest
+/// in the 902–928 MHz band, where repeated bursts leave many past rows on the same frequencies.
+///
+/// The members now travel with the region from stage 4 (`UnresolvedRegion`), which grew them from the
+/// touched row under `boxes_overlap` — time **and** frequency. The proof below is structural: the two
+/// past rows' bands do overlap the measured region, so a frequency-only search would have found
+/// them, and they are excluded anyway because they were not on air when it was measured.
+///
+/// The past rows are 60 and 100 kHz against the live 26.2 and 9.3 kHz: wide enough apart that entity
+/// resolution keeps them separate rows rather than folding each into the live emitter as a second
+/// presence interval, which is what it correctly does to two boxes of similar width at one centre.
+#[test]
+fn a_past_row_never_takes_a_live_emissions_box() {
+    let (mut r, sv, p) = scene();
+    let tol = Tolerances::default();
+    let this_morning = TimeRange::new(t(0), t(5));
+    let now = TimeRange::new(t(100), t(120));
+    let past_a = candidate_seen(&mut r, sv, p, 852_869_000.0, 60_000.0, 20.0, this_morning);
+    let past_b = candidate_seen(&mut r, sv, p, 852_869_000.0, 100_000.0, 21.0, this_morning);
+    let live_wide = candidate_seen(&mut r, sv, p, 852_859_100.0, 26_200.0, 22.0, now);
+    let live_narrow = candidate_seen(&mut r, sv, p, 852_858_600.0, 9_300.0, 18.0, now);
+    for (a, b) in [(past_a, past_b), (past_a, live_wide), (past_b, live_narrow)] {
+        assert_ne!(a, b, "the scene needs four distinct rows");
+    }
+
+    let out = r.resolve_overlaps(live_wide, RULE, t(120), &tol).unwrap();
+    let u = widest(&out);
+    assert!(
+        u.members.contains(&live_wide) && u.members.contains(&live_narrow),
+        "the live overlap is the region: {:?}",
+        u.members
+    );
+    for past in [past_a, past_b] {
+        let band = r.emitter(past).unwrap().freq();
+        assert!(
+            band.overlaps(&u.region),
+            "the proof needs the past row inside the measured band, so that only time excludes it"
+        );
+        assert!(
+            !u.members.contains(&past),
+            "a row that stopped at t+5 s is not part of an overlap measured at t+120 s"
+        );
+    }
+
+    let snap = detector_spectrum(
+        852_860_000.0,
+        2.4e6,
+        2048,
+        &[(852_869_000.0, 60_000.0, 20.0)],
+    );
+    let m = measure_region(u.region, &snap, &OverlapConfig::default()).unwrap();
+    r.resolve_measured_region(&u, &m, RULE, t(120), &tol)
+        .unwrap();
+
+    // Neither past row was claimed against — a spectrum measured now never rewrites the catalogue.
+    for past in [past_a, past_b] {
+        assert!(defers_to(&r, past).is_none());
+    }
+    // And no live box was retired in favour of one.
+    for live in [live_wide, live_narrow] {
+        if let Some((of, why)) = defers_to(&r, live) {
+            assert!(
+                of != past_a && of != past_b,
+                "a live box was retired as a duplicate of a row that had stopped: {why}"
+            );
+        }
+    }
+    let listed = shown(&r);
+    assert!(
+        listed.contains(&live_wide) || listed.contains(&live_narrow),
+        "the emission on air must keep a box; shown = {listed:?}"
+    );
 }

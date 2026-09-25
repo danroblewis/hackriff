@@ -597,12 +597,32 @@ pub struct OverlapOutcome {
     /// shown — a contested verdict never hides anything — and the record says what was tried and
     /// what blocked a merge. Bounded by [`crate::relate::REGION_MAX_ROUNDS`] per row.
     pub contested: Vec<EmitterRelation>,
-    /// T-978: the regions stage 4 examined and could **not** resolve from the rows alone — the
-    /// union band of each, for the caller to re-measure against the spectrum and hand back to
+    /// T-978: the regions stage 4 examined and could **not** resolve from the rows alone, for the
+    /// caller to re-measure against the spectrum and hand back to
     /// [`Repository::resolve_measured_region`]. Not a record: nothing is written for it, and it is
     /// reported whether or not a contested verdict was appended (those are capped per row by
     /// [`REGION_MAX_ROUNDS`], and a region does not stop being wrong when the cap is reached).
-    pub unresolved: Vec<FreqRange>,
+    pub unresolved: Vec<UnresolvedRegion>,
+}
+
+/// T-978: one overlapping region the rows could not resolve — its union band **and the rows that
+/// make it up**.
+///
+/// The members travel with the band on purpose. They are the connected component
+/// [`reanalyse_region`] grew outward from the row a sighting just arrived for, under
+/// [`boxes_overlap`], so they overlap one another in **time as well as frequency** and are anchored
+/// to the live overlap. Re-deriving them from the band alone would be a frequency-only search over
+/// [`ANY_TIME`], and then a spectrum measured *now* could retire a live box as a duplicate of a row
+/// that was on air this morning — hiding the emission actually transmitting, because the default
+/// inventory filter hides a deferring row while the past row sits outside the viewed window. That
+/// is the "inventory is time-scoped to the view" rule, and the time-overlap requirement every other
+/// stage here enforces through [`boxes_overlap`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnresolvedRegion {
+    /// The union band of the overlapping boxes.
+    pub region: FreqRange,
+    /// The rows that overlap one another in time and frequency across it.
+    pub members: Vec<EmitterId>,
 }
 
 impl OverlapOutcome {
@@ -1138,6 +1158,17 @@ fn is_measured_claim(r: &EmitterRelation) -> bool {
     verdict_of(r) == Some(MEASURED_REGION_VERDICT)
 }
 
+/// T-978: records `region` and its members as unresolved, once per region.
+fn note_unresolved(out: &mut OverlapOutcome, region: FreqRange, members: &[&RowEvidence]) {
+    if out.unresolved.iter().any(|u| u.region == region) {
+        return;
+    }
+    out.unresolved.push(UnresolvedRegion {
+        region,
+        members: members.iter().map(|m| m.emitter_id).collect(),
+    });
+}
+
 /// T-978: whether a standing claim on `id` was authored by the measured re-analysis.
 fn has_measured_claim(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
     Ok(read_relations(conn, CURRENT_RELATION_SQL, id)?
@@ -1402,9 +1433,7 @@ fn reanalyse_region(
     // coming, and so what keeps the claim revocable when the air changes.
     for m in &members {
         if has_measured_claim(conn, m.emitter_id)? {
-            if !out.unresolved.contains(&region) {
-                out.unresolved.push(region);
-            }
+            note_unresolved(out, region, &members);
             return Ok(());
         }
     }
@@ -1440,9 +1469,7 @@ fn reanalyse_region(
             .then_some("the measurements separate into more than one emission")
             .or_else(|| distinguishing_evidence(top, m, tol));
         if let Some(why) = blocked {
-            if !out.unresolved.contains(&region) {
-                out.unresolved.push(region);
-            }
+            note_unresolved(out, region, &members);
             out.revoked.extend(revoke_region_claim(
                 conn,
                 m.emitter_id,
@@ -1540,9 +1567,16 @@ fn reanalyse_region(
 /// ([`MAX_NEIGHBOURS`]), one `claim` or `revoke` per row, and contested verdicts capped per row by
 /// [`REGION_MAX_ROUNDS`] exactly as stage 4's are.
 impl Repository {
-    /// See the module docs: applies `m` to the live rows of the region it measured.
+    /// See the module docs: applies the measurement `m` to the rows of the region `u` that stage 4
+    /// reported unresolved.
+    ///
+    /// **The members come from `u`, never from the band.** See [`UnresolvedRegion`]: they are the
+    /// live, time-and-frequency-connected component stage 4 grew from the row a sighting arrived
+    /// for, so a spectrum measured now cannot retire a live box as a duplicate of a row that was on
+    /// air hours ago.
     pub fn resolve_measured_region(
         &mut self,
+        u: &UnresolvedRegion,
         m: &RegionMeasurement,
         actor: &str,
         t: Timestamp,
@@ -1550,7 +1584,7 @@ impl Repository {
     ) -> Result<OverlapOutcome, RepoError> {
         self.ensure_refined_table()?;
         let tx = self.write_tx()?;
-        let out = apply_measured_region(&tx, m, actor, t, tol)?;
+        let out = apply_measured_region(&tx, u, m, actor, t, tol)?;
         tx.commit()?;
         Ok(out)
     }
@@ -1558,26 +1592,34 @@ impl Repository {
 
 fn apply_measured_region(
     conn: &Connection,
+    u: &UnresolvedRegion,
     m: &RegionMeasurement,
     actor: &str,
     t: Timestamp,
     tol: &Tolerances,
 ) -> Result<OverlapOutcome, RepoError> {
     let mut out = OverlapOutcome::default();
-    // The members: live, listed rows in the measured region that overlap another member in time
-    // *and* frequency. A row that merely shares the span with nothing is not part of an overlap.
+    // The members are **the rows stage 4 named** ([`UnresolvedRegion`]), re-read here because the
+    // two passes are separate transactions and a row may have been merged, deleted or hidden by a
+    // stage above in between. Never a fresh search over the band: that search is `ANY_TIME`.
     let mut rows: Vec<RowEvidence> = Vec::new();
-    // `overlapping` excludes one row by id; the measurement is not about any one row, so the
-    // exclusion is the nil id and every live row in the region is a candidate member.
-    let none = EmitterId::from_uuid(uuid::Uuid::nil());
-    for id in overlapping(conn, m.region, none, MAX_NEIGHBOURS)? {
-        if defers_elsewhere(conn, id)? {
+    for &id in &u.members {
+        let Some(live) = listed(conn, id)? else {
+            continue;
+        };
+        if defers_elsewhere(conn, live)? {
             continue;
         }
-        if let Some(ev) = evidence(conn, id)? {
+        if let Some(ev) = evidence(conn, live)?
+            && !rows
+                .iter()
+                .any(|r: &RowEvidence| r.emitter_id == ev.emitter_id)
+        {
             rows.push(ev);
         }
     }
+    // And each surviving member must still overlap another **in time and frequency**: the evidence
+    // may have moved since stage 4 looked, and a region is an overlap or it is nothing.
     let members: Vec<&RowEvidence> = rows
         .iter()
         .filter(|a| rows.iter().any(|b| boxes_overlap(a, b)))
