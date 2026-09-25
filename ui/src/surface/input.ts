@@ -88,6 +88,22 @@ export interface SurfaceInputOptions {
   onAnnotateBox?: (r: SurfaceRegion) => void;
   /** A tap in a tool mode that drops a point annotation: `"text"` in Annotate, `"marker"` in Pin. */
   onAnnotatePoint?: (p: { pane: string; at: GlPoint }, kind: "text" | "marker") => void;
+  /**
+   * **A view-moving gesture touched a PANE** (T-1028), so a host that is in retune mode knows when
+   * to act and when a gesture ended.
+   *
+   * `ended: false` is "the view moved just now"; `ended: true` is the gesture's own end — the
+   * pointer released, or a pinch's second finger lifted — which is the same commit point T-486's
+   * follow/pause decision is made at, for the same reason: a gesture is over when the browser says
+   * it is over, not when a timer guesses. A wheel has no end and only ever reports `false`; the
+   * host is the one that decides what stillness means.
+   *
+   * **This file still reaches nothing.** It reports that a pane's view moved; what that means is the
+   * host's, exactly as `measureMode` and `annotateMode` are. The map strip is deliberately not
+   * reported: it is a navigator onto the surface, not a pane's window, and nothing about dragging it
+   * says where the radio should look.
+   */
+  onGesture?: (g: { pane: string; ended: boolean }) => void;
   /** **Ctrl+Shift+wheel adjusts the shadow's brightness instead of zooming** (T-526) — a client-only
    * display preference, never a view or device change. `notches` is the gesture's own signed count
    * (positive brightens); the host clamps and persists (`./shadow-gain.ts`) and calls
@@ -139,7 +155,14 @@ export function attachSurfaceInput(
       y: canvas.height - (e.clientY - r.top) * (canvas.height / Math.max(1, r.height)),
     };
   };
-  const moved = () => opts.onView?.();
+  /**
+   * A viewport moved. `pane` names the pane when the gesture was on one (T-1028's hook); the map
+   * strip passes none, because it is not a pane's window.
+   */
+  const moved = (pane: string | null = null, ended = false) => {
+    opts.onView?.();
+    if (pane) opts.onGesture?.({ pane, ended });
+  };
   /** Make the pane under `p` active (the map strip is not a pane and changes nothing). */
   const activate = (p: GlPoint) => {
     if (preview.onMap(p)) return;
@@ -261,7 +284,7 @@ export function attachSurfaceInput(
       else if (pinch.pane) { preview.wheel(pinch.pane, at, factor, axes); preview.drag(pinch.pane, dx, dy); }
       pinch.spread = spread;
       pinch.mid = mid;
-      moved();
+      moved(pinch.map ? null : pinch.pane);
       return;
     }
     if (!dragging || !e.buttons) { opts.onHover?.(point(e), e); return; }
@@ -283,7 +306,7 @@ export function attachSurfaceInput(
       const dx = (e.clientX - dragging.x0) * scale, dy = -(e.clientY - dragging.y0) * scale;
       if (dragging.map) preview.dragMap(dx, dy);
       else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-      moved();
+      moved(dragging.map ? null : dragging.pane);
       return;
     }
     const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
@@ -308,7 +331,7 @@ export function attachSurfaceInput(
     }
     if (dragging.map) preview.dragMap(dx, dy);
     else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-    moved();
+    moved(dragging.map ? null : dragging.pane);
   };
 
   // **The gesture ended, so the pane's follow/pause decision is committed now** (T-486).
@@ -325,7 +348,9 @@ export function attachSurfaceInput(
     if (d.map) preview.endDragMap();
     else if (d.pane) preview.endDrag(d.pane);
     else return;
-    moved();
+    // T-1028: the gesture ENDED. Reported here, with T-486's own commit point, so a host in retune
+    // mode acts on the view the user came to rest on rather than on one of the moves along the way.
+    moved(d.map ? null : d.pane, true);
   };
 
   // A pinch ends when either finger lifts: its target commits its follow/pause decision exactly as
@@ -431,7 +456,8 @@ export function attachSurfaceInput(
     const { factor, axes } = wheelZoom(e);
     if (preview.onMap(p)) { preview.wheelMap(p, factor, axes); moved(); return; }
     const pane = preview.paneAt(p);
-    if (pane) { preview.activePane = pane; preview.wheel(pane, p, factor, axes); moved(); }
+    // A wheel has no release, so it is never reported as ENDED: stillness is the host's call.
+    if (pane) { preview.activePane = pane; preview.wheel(pane, p, factor, axes); moved(pane); }
   };
 
   const onDbl = (e: MouseEvent) => {
