@@ -4505,6 +4505,9 @@ fn dataset_export_and_manifest_lookup_answer_as_documented() {
 #[test]
 fn ml_models_modes_and_the_shadow_log_answer_as_documented() {
     let dir = temp_data_dir();
+    // Guarded from creation (T-232), not only from `start_server_in` below: the probe model and the
+    // seeded shadow record are written into it first.
+    let _setup_guard = TempDataDirGuard::new(dir.clone());
     std::fs::create_dir_all(&dir).unwrap();
     let probe = hk_pipeline::ml::install_probe_model(&dir, "fsk", &["2fsk", "gfsk", "msk", "4fsk"])
         .unwrap();
