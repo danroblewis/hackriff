@@ -912,6 +912,13 @@ if [ -e "$REPO/.git/MERGE_HEAD" ]; then
   git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
     || log "STARTUP: could not abort the staged merge ($stale) - a person must look"
 fi
+# An isolation or a single merge this runner was killed in: those branches were in no queue - put them
+# back, so a restart never loses them (and the queue-depth count never shows them as phantoms).
+for f in "$S/isolate-remaining" "$S/merging-now"; do
+  [ -s "$f" ] || { rm -f "$f"; continue; }
+  sleft=$(tr -s ' \n' ' ' < "$f"); for b in $sleft; do echo "$b" >> "$QUEUE"; done
+  rm -f "$f"; log "STARTUP: re-queued what a killed run was still holding ($(basename "$f")): $sleft"
+done
 if [ -f "$BULKMARK" ]; then
   sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
   if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
@@ -1040,7 +1047,7 @@ while true; do
       set -- "${@:1:$BULK_MAX}"
     fi
     if [ "$#" -eq 1 ]; then
-      process "$1" || echo "$1" >> "$QUEUE"
+      echo "$1" > "$S/merging-now"; process "$1" || echo "$1" >> "$QUEUE"; rm -f "$S/merging-now"
     elif [ "$#" -ge 2 ]; then
       BULK_MERGED_LIST=""
       if ! try_bulk "$@"; then
@@ -1050,12 +1057,17 @@ while true; do
         isolate="${BULK_MERGED_LIST:-$*}"
         log "falling back to individual gates for: $isolate"
         MAIN_RED_STOP=""
+        # The isolation's remainder lives only in this loop; written out so "branches not yet on
+        # main" (hkpy.flow.queue_waiting, /flow's queue depth) counts it (user, 2026-09-24 17:02).
+        rest="$isolate"
         for b in $isolate; do
+          rest=$(printf '%s\n' $rest | grep -vx "$b" | tr '\n' ' '); printf '%s %s\n' "$b" "$rest" > "$S/isolate-remaining"
           # Main is red: the rest would each fail the same way - back to the queue, whose next batch
           # meets the batch path's MAIN IS RED hold.
           if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi
           process "$b" || echo "$b" >> "$QUEUE"
         done
+        rm -f "$S/isolate-remaining"
       fi
     fi
   fi
