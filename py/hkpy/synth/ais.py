@@ -10,8 +10,11 @@ signed, x1/600000 deg), course over ground (12, x0.1 deg), true heading (9), UTC
 manoeuvre indicator (2), spare (3), RAIM (1), communication state (19).
 
 The on-air bit chain (mirroring ``crates/hk-blocks/src/blocks/symbol/{bitstuff,line}.rs`` and the
-recipe's ``sync``/``crc`` nodes) is: payload || FCS -> HDLC zero-bit stuff -> flag || stuffed ||
-flag -> NRZI encode (0 = transition) -> GMSK (h = 0.5, BT = 0.4) at 9600 Bd.
+recipe's ``sync``/``destuff``/``crc`` nodes) is: message octets (the 168-bit string packed MSB
+first) each sent **LSB first**, then the FCS low-order octet first, LSB first (ITU-R M.1371-5
+Annex 2 / ISO/IEC 13239 section 4.3) -> HDLC zero-bit stuff -> flag || stuffed || flag -> NRZI
+encode (0 = transition) -> GMSK (h = 0.5, BT = 0.4) at 9600 Bd. Validated against a published
+!AIVDM sentence and RFC 1662's 0xF0B8 good-FCS residue in ``py/tests/test_fixture_tooling.py``.
 """
 
 from __future__ import annotations
@@ -52,7 +55,7 @@ def build_position_report(
     raim: int = 0,
     comm_state: int = 0,
 ) -> np.ndarray:
-    """The 168-bit (uint8, MSB first) common navigation block for message types 1/2/3."""
+    """The 168-bit message string (uint8, MSB first — field order, not air order) of the common navigation block for message types 1/2/3."""
     if msg_type not in (1, 2, 3):
         raise ValueError("msg_type must be 1, 2 or 3 (Class A position report)")
     bits: list[int] = []
@@ -93,24 +96,38 @@ def hdlc_stuff(bits: np.ndarray) -> np.ndarray:
     return np.array(out, dtype=np.uint8)
 
 
-def fcs(payload_bits: np.ndarray) -> np.ndarray:
-    """The 16-bit CRC-16/X-25 FCS over `payload_bits` (a whole number of bytes): standard HDLC
-    transmits a reflected CRC's low-order octet first (ISO/IEC 13239 section 4.3), so this
-    returns the low byte's bits (MSB first within it), then the high byte's."""
+def _lsb_first(data: bytes) -> list[int]:
+    """Each octet's bits in transmission order: least significant bit first (ITU-R M.1371-5
+    Annex 2 section 3.2.2.1 / ISO/IEC 13239 section 4.3: HDLC sends every octet LSB first)."""
+    return [(byte >> k) & 1 for byte in data for k in range(8)]
+
+
+def fcs_value(payload_bits: np.ndarray) -> int:
+    """CRC-16/X-25 (CRC-16/IBM-SDLC) over the message's octets, `payload_bits` being the
+    168-bit message string MSB first (the order its fields are defined in), packed into octets
+    MSB first — the same octets the 6-bit NMEA armouring carries."""
     if len(payload_bits) % 8 != 0:
         raise ValueError("payload_bits must be a whole number of bytes")
     data = np.packbits(payload_bits).tobytes()
-    crc = fsk.crc_generic(data, *fsk.CRC_CATALOGUE["CRC-16/IBM-SDLC"])
-    lo, hi = crc & 0xFF, (crc >> 8) & 0xFF
-    bits = [(lo >> k) & 1 for k in range(7, -1, -1)] + [(hi >> k) & 1 for k in range(7, -1, -1)]
-    return np.array(bits, dtype=np.uint8)
+    return fsk.crc_generic(data, *fsk.CRC_CATALOGUE["CRC-16/IBM-SDLC"])
+
+
+def air_bits(payload_bits: np.ndarray) -> np.ndarray:
+    """The frame content in on-air order, before stuffing: every message octet LSB first, then
+    the FCS low-order octet first, each LSB first (ISO/IEC 13239 section 4.3; ITU-R M.1371-5
+    Annex 2 section 3.2.2.6). A serial HDLC FCS run over these bits ends on the good residue
+    0xF0B8 (RFC 1662 appendix C.2)."""
+    data = np.packbits(payload_bits).tobytes()
+    crc = fcs_value(payload_bits)
+    return np.array(_lsb_first(data + bytes([crc & 0xFF, crc >> 8])), dtype=np.uint8)
 
 
 def frame_bits(payload_bits: np.ndarray) -> np.ndarray:
-    """One flag-delimited, zero-stuffed HDLC frame: flag || stuff(payload || FCS) || flag."""
-    flag = np.array([(FLAG >> k) & 1 for k in range(7, -1, -1)], dtype=np.uint8)
-    on_frame = np.concatenate([payload_bits, fcs(payload_bits)])
-    return np.concatenate([flag, hdlc_stuff(on_frame), flag])
+    """One flag-delimited, zero-stuffed HDLC frame in on-air order:
+    flag || stuff(air_bits(payload)) || flag. The flag 0x7E is a bit palindrome, so its order
+    does not matter."""
+    flag = np.array([(FLAG >> k) & 1 for k in range(8)], dtype=np.uint8)
+    return np.concatenate([flag, hdlc_stuff(air_bits(payload_bits)), flag])
 
 
 def nrzi_encode(bits: np.ndarray) -> np.ndarray:

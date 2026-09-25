@@ -1,11 +1,12 @@
 //! T-963 (SIGNAL-015): the AIS recipe (`recipes/ais.recipe.json`) validates against the pinned
 //! block catalogue and carries the ITU-R M.1371 conventions: GMSK 9600 Bd (deviation = rate/4),
-//! NRZI (0 = transition), standard HDLC framing on 0x7E flags with zero-bit destuffing, FCS =
+//! NRZI (0 = transition), standard HDLC framing on 0x7E flags found on the still-stuffed line,
+//! then per-frame zero-bit destuffing with octets reassembled LSB first, FCS =
 //! CRC-16/X-25 (a.k.a. CRC-16/IBM-SDLC: poly 0x1021, init 0xFFFF, refin/refout, xorout 0xFFFF)
 //! over everything but the closing flag octet, and the two fixed international marine channels
 //! followed together (not hop-discovered — the AIS channel plan is fixed by treaty, unlike a
 //! pager net's unknown channel count). The bit-level HDLC/CRC chain is checked with the real
-//! blocks in `crates/hk-blocks/src/blocks/framing/tests.rs::ais_hdlc_destuff_sync_and_crc16_x25`.
+//! blocks in `crates/hk-blocks/src/blocks/framing/tests.rs::ais_hdlc_sync_destuff_and_crc16_x25`.
 
 use hk_blocks::catalogue;
 use hk_recipe::{ChannelsSpec, PortType, Recipe, parse_hex};
@@ -30,8 +31,8 @@ fn ais_recipe_validates_against_the_pinned_catalogue() {
         ("clock", Real),
         ("slice", Soft),
         ("line", Bits),
-        ("destuff", Bits),
         ("sync", Bits),
+        ("destuff", Frames),
         ("crc", Frames),
         ("hops", Frames),
         ("msg", Frames),
@@ -74,6 +75,10 @@ fn ais_recipe_uses_gmsk_9600_nrzi_hdlc_and_crc16_x25() {
     assert_eq!(destuff["direction"], "destuff");
     assert_eq!(destuff["stuff_after"].as_u64(), Some(5));
     assert_eq!(destuff["abort_ones"].as_u64(), Some(7));
+    assert_eq!(destuff["bit_order"], "lsb", "HDLC sends every octet LSB first");
+    // The flag search runs on the stuffed line: destuffed data can contain 0x7E.
+    let pos = |id: &str| r.nodes.iter().position(|n| n.id == id).unwrap();
+    assert!(pos("sync") < pos("destuff") && pos("destuff") < pos("crc"));
 
     let sync = node("sync");
     assert_eq!(parse_hex(sync["sync_word"].as_str().unwrap()), Some(0x7E));

@@ -7,11 +7,15 @@ capture against — see ``~/.hackriff-ops/explorer/journal-20260925.md``, sectio
 
 Chain: burst detection (envelope threshold) -> GMSK FM discriminator -> best-phase symbol slicing
 at 9600 Bd -> NRZI decode (0 = transition; a *global* level inversion cancels in this step, so
-there is no discriminator-polarity ambiguity to resolve) -> HDLC zero-bit destuffing -> every span
-strictly between two ``0x7E`` flags -> keep the ones whose trailing 16 bits are a valid
-CRC-16/X-25 (a.k.a. CRC-16/IBM-SDLC) FCS over the rest, read as ISO/IEC 13239 section 4.3
-transmits a reflected CRC: low-order octet first -> the common navigation block (message type,
-repeat indicator, MMSI, and the Class A position-report fields for types 1/2/3).
+there is no discriminator-polarity ambiguity to resolve) -> every span strictly between two
+``0x7E`` flags **on the still-stuffed line** (stuffing guarantees six ones in a row only ever
+occur in a flag, so the flag is unique there — it is not after destuffing) -> HDLC zero-bit
+destuffing per span (the rule restarts at each frame) -> octets reassembled LSB first (ITU-R
+M.1371-5 Annex 2 / ISO/IEC 13239 section 4.3: every octet is sent LSB first) -> keep the ones
+whose trailing two octets are a valid CRC-16/X-25 (a.k.a. CRC-16/IBM-SDLC) FCS, low-order octet
+first -> the common navigation block (message type, repeat indicator, MMSI, and the Class A
+position-report fields for types 1/2/3) read MSB first from the message octets, the order the
+6-bit NMEA armouring carries them in.
 
 Only decoded fields leave this module (never raw IQ or bit dumps) — same discipline as
 ``fsk_ref.py``.
@@ -74,6 +78,10 @@ def find_bursts(x: np.ndarray, fs: float, min_len_s: float = 0.015,
 #: phase 3+ samples off the true one on a real destuffed payload, corrupting the frame (T-963).
 _TRAINING_SYMBOLS = 16
 _TRAINING_PATTERN = np.where(np.arange(_TRAINING_SYMBOLS) % 4 < 2, -1.0, 1.0)
+#: The training sequence opens the burst, a couple of symbols into the caller's window: the
+#: search for where it starts is bounded to this many symbols, not the whole burst (a payload
+#: stretch can mimic the pattern; searching all of it only adds false candidates and time).
+_MAX_LEAD_SYMBOLS = 32
 
 
 def slice_symbols(disc: np.ndarray, fs: float,
@@ -100,7 +108,7 @@ def slice_symbols(disc: np.ndarray, fs: float,
         if len(idx) < _TRAINING_SYMBOLS + 8:
             continue
         s = smooth[idx]
-        for start in range(len(s) - _TRAINING_SYMBOLS):
+        for start in range(min(len(s) - _TRAINING_SYMBOLS, _MAX_LEAD_SYMBOLS)):
             head = s[start : start + _TRAINING_SYMBOLS]
             corr = float(np.dot(head, _TRAINING_PATTERN)) / (np.linalg.norm(head) + 1e-30)
             if best is None or corr > best[0]:
@@ -154,11 +162,11 @@ def _bits_to_str(bits: np.ndarray) -> str:
     return "".join(str(int(b)) for b in bits)
 
 
-def find_flags(bits: np.ndarray) -> list[int]:
-    """Bit positions where the 8-bit flag `0x7E` starts (overlaps count: consecutive flags share
-    bits, per HDLC's shared-flag convention)."""
-    s = _bits_to_str(bits)
-    pat = "".join(str((FLAG >> k) & 1) for k in range(7, -1, -1))
+def find_flags(line_bits: np.ndarray) -> list[int]:
+    """Bit positions where the 8-bit flag `0x7E` starts in the NRZI-decoded, still-stuffed line
+    (overlaps count: consecutive flags may share bits)."""
+    s = _bits_to_str(line_bits)
+    pat = "01111110"  # 0x7E is a bit palindrome: the same in either transmission order
     out = []
     k = s.find(pat)
     while k != -1:
@@ -167,28 +175,46 @@ def find_flags(bits: np.ndarray) -> list[int]:
     return out
 
 
-def frames_between_flags(destuffed_bits: np.ndarray) -> list[np.ndarray]:
-    """Every non-empty span strictly between two (not necessarily adjacent) flag occurrences."""
-    flags = find_flags(destuffed_bits)
+def frames_between_flags(line_bits: np.ndarray) -> list[np.ndarray]:
+    """Every non-empty span of the *stuffed* line strictly between two (not necessarily
+    adjacent — a bit error can fake or break a flag) flag occurrences, each destuffed on its own:
+    on-air-order frame content (data then FCS)."""
+    flags = find_flags(line_bits)
     out = []
     for i, a in enumerate(flags):
         for b in flags[i + 1 :]:
             if b > a + 8:
-                out.append(destuffed_bits[a + 8 : b])
+                out.append(hdlc_destuff(line_bits[a + 8 : b]))
     return out
 
 
+def octets_lsb_first(air_bits: np.ndarray) -> bytes:
+    """Reassembles octets from on-air-order bits: each octet's first bit is its LSB."""
+    out = bytearray()
+    for i in range(0, len(air_bits) - len(air_bits) % 8, 8):
+        out.append(sum(int(air_bits[i + k]) << k for k in range(8)))
+    return bytes(out)
+
+
 def check_crc(frame_bits: np.ndarray) -> tuple[np.ndarray | None, bool]:
-    """(payload_bits, ok): the FCS is the trailing 16 bits, ISO/IEC 13239 section 4.3's
-    low-octet-first order (little-endian bytes of the CRC-16/X-25 register)."""
+    """(message bits MSB first, ok) for one destuffed frame in on-air order: octets LSB first,
+    the last two being the FCS low-order octet first (ISO/IEC 13239 section 4.3)."""
     if len(frame_bits) < 24 or len(frame_bits) % 8 != 0:
         return None, False
-    data_bits, check_bits = frame_bits[:-16], frame_bits[-16:]
-    data = np.packbits(data_bits).tobytes()
-    want = crc16_x25(data)
-    lo = int(_bits_to_str(check_bits[:8]), 2)
-    hi = int(_bits_to_str(check_bits[8:]), 2)
-    return data_bits, (lo | (hi << 8)) == want
+    octets = octets_lsb_first(frame_bits)
+    data, lo, hi = octets[:-2], octets[-2], octets[-1]
+    msg_bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+    return msg_bits, (lo | (hi << 8)) == crc16_x25(data)
+
+
+def decode_line_bits(line_bits: np.ndarray) -> list[dict]:
+    """Every CRC-valid frame in NRZI-decoded line bits, parsed."""
+    out = []
+    for frame in frames_between_flags(line_bits):
+        data_bits, ok = check_crc(frame)
+        if ok:
+            out.append(parse_common_block(data_bits))
+    return out
 
 
 def _uint(bits: np.ndarray) -> int:
@@ -220,8 +246,8 @@ def parse_common_block(data_bits: np.ndarray) -> dict:
             heading_deg=_uint(data_bits[128:137]),
             timestamp_s=_uint(data_bits[137:143]),
             maneuver=_uint(data_bits[143:145]),
-            raim=_uint(data_bits[147:148]),
-            comm_state=_uint(data_bits[148:167]),
+            raim=_uint(data_bits[148:149]),
+            comm_state=_uint(data_bits[149:168]),
         )
     return out
 
@@ -252,18 +278,14 @@ def decode_channel(x: np.ndarray, fs: float,
         line = slice_symbols(disc, fs, symbol_rate_bd)
         if line is None or len(line) < 40:
             continue
-        destuffed = hdlc_destuff(nrzi_decode(line))
-        for frame in frames_between_flags(destuffed):
-            data_bits, ok = check_crc(frame)
-            if ok:
-                out.append(parse_common_block(data_bits))
-    # A frame can validate from more than one flag-pair span inside the same burst (a longer
-    # inter-flag scan that happens to also satisfy CRC by chance is vanishingly unlikely, but a
-    # repeated *exact* hit is deduplicated).
+        out += decode_line_bits(nrzi_decode(line))
+    # A frame can validate from more than one flag-pair span inside the same burst only as the
+    # same frame; drop exact repeats (whole decoded content, so two distinct reports that share
+    # type, MMSI and timestamp — e.g. timestamp 60, "not available" — both survive).
     seen = set()
     uniq = []
     for m in out:
-        key = (m["message_type"], m["mmsi"], m.get("timestamp_s"))
+        key = tuple(sorted(m.items()))
         if key not in seen:
             seen.add(key)
             uniq.append(m)
