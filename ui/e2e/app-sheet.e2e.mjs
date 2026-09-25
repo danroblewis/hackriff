@@ -20,10 +20,11 @@ const hitTest = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.st
   return { label: (el.textContent ?? '').trim(), covered: top ? (top.className || top.tagName) : 'nothing',
            bySheet: !!top?.closest('.sheet'), ok: !!top && (top === el || el.contains(top)) };
 }).filter((b) => !b.ok))`;
-const TOP_CONTROLS = ".map-goto input, .map-topright button";
+// T-993: plus the retired top bar's controls, which now float as the nudge row and the status pill.
+const TOP_CONTROLS = ".map-goto input, .map-topright button, .map-nudge .nudge-btn, .map-status .mode";
 const UNCLICKABLE = hitTest(TOP_CONTROLS);
 /** The lowest bottom of the floating top chrome — what `focus-sheet.ts`'s `clearOf` measures. */
-const TOP_BOTTOM = `Math.max(...[...document.querySelectorAll('.map-ctl .map-goto, .map-ctl .map-topright')].map((e) => e.getBoundingClientRect().bottom))`;
+const TOP_BOTTOM = `Math.max(...[...document.querySelectorAll('.map-ctl .map-goto, .map-ctl .map-topright, .map-ctl .map-nudge, .map-ctl .map-status')].map((e) => e.getBoundingClientRect().bottom))`;
 // T-802's floating controls on the right edge: the sheet grows upward beside them (its gutter), so
 // they must be pressable at every snap height.
 const MAP_RIGHT = hitTest(".map-fab, .map-zoom-in, .map-zoom-out");
@@ -114,8 +115,10 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   await page.click("document.querySelector('.sheet-grab')");
   await waitSnap("full");
   const full = await page.$rect(".sheet");
-  const bar = await page.$rect(".app > .bar");
-  assert.ok(full.y >= bar.y + bar.h, `full stops below the top bar (${full.y} vs ${bar.y + bar.h})`);
+  // T-993: there is no top bar to stop below; the full sheet stops below the floating top chrome
+  // that replaced it (Go-to, nudges, the cluster, the mode/status pill).
+  const topBottom = await page.eval(TOP_BOTTOM);
+  assert.ok(full.y >= topBottom, `full stops below the top chrome (${full.y} vs ${topBottom})`);
   assert.deepEqual(JSON.parse(await page.eval(UNCLICKABLE)), [], "the full sheet covers a toolbar button");
   assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at full, the sheet covers the FAB or zoom");
   assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at full, the FAB or zoom overlaps the sheet");

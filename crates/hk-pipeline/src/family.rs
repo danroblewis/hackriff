@@ -1017,6 +1017,39 @@ pub fn decoder_evidence(decoder_id: &str, confidence: f64, t: Timestamp) -> Opti
     })
 }
 
+/// The **service family** a decoder's CRC-valid decode evidences, at `t`, or `None` when the id
+/// maps to no service at or above [`MIN_CONFIDENCE`].
+///
+/// The same call as [`FamilyCall::classification`] — the service, at the mapping's own confidence
+/// — but stamped `decoder:<id>`, so [`hk_model::classify::ArbRank`] ranks it as **decoder
+/// evidence** (ADR-0016 §2, rank 1: "a CRC-valid decode is ground truth") rather than at the
+/// classifier's rank 3.
+///
+/// T-961: the rank is the whole point. A decode's family used to be written at rank 3 with
+/// `model_version` [`FAMILY_MAP_VERSION`], which ties with the classifier — and "latest among
+/// equals" then hands the family to whichever wrote last. On 106.1 MHz that was the classifier's
+/// `unknown` at confidence 0.999, standing on an emitter whose RDS PI had been decoded CRC-valid:
+/// a decode that confirmed the entry and did not name it. Rank 1 is what makes the decode
+/// *supersede* the classifier instead of racing it, and it is why the row is no longer
+/// [shape-only evidence](is_shape_evidence) for the status either.
+///
+/// It differs from [`decoder_evidence`] only in the `family` string: that one records the decoder
+/// id itself as the family (what `synth`'s framing decoders have no service name for), this one
+/// the service the id maps to, which is what the decoder chains have always written and what the
+/// inventory's `family` filter matches on.
+pub fn decoder_service_evidence(decoder_id: &str, t: Timestamp) -> Option<Classification> {
+    let id = decoder_id.trim().to_ascii_lowercase();
+    let call = service_family(&Evidence::Decoder(&id));
+    let family = call.confident_service()?;
+    Some(Classification {
+        t,
+        family: family.to_owned(),
+        confidence: call.confidence,
+        open_set_score: 1.0 - call.confidence,
+        model_version: format!("{DECODER_EVIDENCE_PREFIX}{id}"),
+    })
+}
+
 /// Stores [`decoder_evidence`] on `emitter` (its live id) and returns it; `Ok(None)` stores
 /// nothing. **Call contract (decoder chains, T-037b `chains/plugin.rs`):** after a valid decode for
 /// `emitter`, call this, then `Inventory::chain_emitter(repo, track, emitter)`, which re-ranks the

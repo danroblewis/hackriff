@@ -248,6 +248,66 @@ fn stft_across_block_boundaries_matches_monolithic() {
     assert_eq!(first, a[0].spectrum);
 }
 
+/// T-974: a frame's time is a function of its first sample alone, however the stream is chopped —
+/// including at a rate whose sample period is not a whole number of nanoseconds, where every input
+/// time is itself rounded from the stream's anchor (as the mock SDR, the HackRF source and a ring
+/// chunk all stamp them). Re-anchoring on every input stacked those roundings, so the same row got
+/// a different `t` depending on where the reader's chunks fell, and `/ws/spectrum/live` served a
+/// `t` that was not `sample_index` on the capture clock (hk-cli `api_contract`,
+/// `ws_stream_header_matches_the_stream_contract`, 3 runs of 4).
+#[test]
+fn frame_times_are_the_capture_clock_however_the_stream_is_chopped() {
+    use hk_model::{SampleTime, Timestamp};
+    let fs = 2.4e6; // 416.66… ns per sample
+    let prov = provenance(100.8e6, fs);
+    // A wall-clock anchor that is not a whole number of sample periods, like the mock's.
+    let clock = SampleTime {
+        sample_index: 0,
+        host_time: Timestamp::from_unix_nanos(1_790_357_666_236_675_123),
+    };
+    let mut rng = Rng::new(17);
+    let x = synth::complex_noise(&mut rng, 400_000, 1e-3);
+    let run = |sizes: &mut dyn Iterator<Item = usize>| {
+        let mut p = StftProcessor::new(history_like(1024, 7)).unwrap();
+        let mut frames = Vec::new();
+        let mut pos = 0;
+        while pos < x.len() {
+            let len = sizes.next().unwrap().min(x.len() - pos);
+            let mut h = header(pos as u64, &prov, Discontinuity::NONE);
+            h.time.host_time = clock.time_of(pos as u64, fs);
+            p.push(InputInfo::from(&h), &x[pos..pos + len], |f| {
+                frames.push(f.clone())
+            });
+            pos += len;
+        }
+        frames
+    };
+    let whole = run(&mut std::iter::repeat(x.len()));
+    let mut size_rng = Rng::new(23);
+    let chopped = run(&mut std::iter::from_fn(move || {
+        Some(1 + (size_rng.next_u64() % 20_000) as usize)
+    }));
+    assert!(whole.len() > 40, "{} frames", whole.len());
+    assert_eq!(whole.len(), chopped.len());
+    let mut moved = 0;
+    for (a, b) in whole.iter().zip(&chopped) {
+        assert_eq!(a.t.sample_index, b.t.sample_index);
+        // The time IS the sample index on the capture clock: one rounding from the stream's anchor.
+        let exact = clock.time_of(a.t.sample_index, fs);
+        if b.t.host_time != exact {
+            moved += 1;
+        }
+        assert_eq!(a.t.host_time, exact, "frame at sample {}", a.t.sample_index);
+    }
+    assert_eq!(
+        moved,
+        0,
+        "{moved} of {} frames got a time that depends on the chopping",
+        chopped.len()
+    );
+    assert_eq!(whole, chopped, "chopped stream must be bit-identical");
+}
+
 #[test]
 fn discontinuities_reset_averaging() {
     let fs = 1e6;
