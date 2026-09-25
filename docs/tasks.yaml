@@ -28979,7 +28979,7 @@ tasks:
   - id: T-996
     milestone: MMAP
     title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: MAP-SCALE
@@ -28993,6 +28993,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
+
+      2026-09-25 layout pass (a295abab): left column under Go-to is now one flex stack (Retune/widths, Go-to offer, <=1180 px mode banner) instead of fixed top: constants; open lists clear it. New app-status e2e measures the column at 1280/1000/920/400 px with offer+mode shown (red before at 1000/920/400, green after). app-surface reds on this branch are all pre-existing: 4x 'closed: 12 vs 10' (T-1022's; green with T-1022's spec applied) and T-802 zoom-in no-op at the pane's time bound (intermittent, reproduces on base 3d4a20a1). canvas-journey #1 grey-vs-coverage, app-phone pinch and app-reload-retune T-955 also red on base.
   - id: T-997
     milestone: MMAP
     title: "Redesign the inventory chip ('1 cand, 1 conf' + hamburger): dock it top-left under Go-to as two pills that open the sheet on their list, never mid-height over the time ruler"
