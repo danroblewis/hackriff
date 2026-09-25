@@ -27830,6 +27830,8 @@ tasks:
       FOUND 2026-09-25 by the explorer: FLEX is the dominant 929-932 MHz paging protocol in SF tonight (oracle: FLEX sync at 1600 bps on 3 channels, 0 POCSAG) and the app has NO FLEX path - the only pager recipe is POCSAG, which got 0 frames on 11 channels in 75 s. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
       DELIVER: FLEX decode (2/4-FSK, 1600/3200/6400 bps, sync 0xA6C6AAAA + frame info word, BCH(31,21) + interleave) as a recipe over existing hk-blocks where possible (mlevel_slicer T-612, BCH) or a plugin behind the process boundary if reusing a GPL decoder (ADR-0010, e.g. multimon-ng's FLEX) - decide and say why; rate/levels estimated from the signal, never hard-coded. Test through the mock SDR on the FLEX fixture (the FLEX fixture ticket): frames sync and BCH-validate; the blind 'all captured signals decode' member for it goes green.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: the FLEX capture is an EXTERNAL fixture (57.6 MB > the 25 MB LFS cap; T-949 indexed it in fixtures/manifest.json as status: external, store path store/explorer-2026-09-25/). The original stays in ~/.hackriff-ops/explorer/captures/20260925/ on the Mac: in your worktree run `just fixtures-fetch --from ~/.hackriff-ops/explorer/captures/20260925` (never copy into the main checkout). Oracle: py/fixtures/flex_ref.py (T-949) agrees on sync counts 3/1/2; it DISAGREES with the explorer's truth on the FSK level count at 2 of 3 channels (recorded in the fixture README) - settle it from your decoder's evidence. Use case SIGNAL-088 (paging); T-952 APRS uses SIGNAL-089. Mac-only while the fixture is external.
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
   - id: T-951
     milestone: MAUTO
@@ -27859,6 +27861,8 @@ tasks:
       FOUND 2026-09-25 by the explorer: there is no AFSK1200/AX.25 (APRS) recipe or decoder in the app's list (ACARS, ADS-B, Analog WFM, POCSAG, RDS) - with a burst on the air the app has no APRS path except blind decoder synthesis, which has no evaluator yet. (No APRS energy reached this antenna tonight, so no capture.) Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
       DELIVER: an APRS recipe (NFM discriminator -> Bell 202 AFSK 1200/2200 Hz demod -> NRZI -> HDLC bitstuff/flags (T-613's block) -> AX.25 frame + FCS) with the tone/baud estimated or verified from the signal, decoded frames as a stream output; a synthetic AX.25 AFSK scene (py synth or hk-sim) through the mock SDR with hidden truth: FCS-valid frames decode, blind (no frequency passed). Use case: the terrestrial APRS id added by the FLEX fixture ticket (or SIGNAL-036 until it lands).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: use case SIGNAL-089 (terrestrial APRS) was added by T-949.
   - id: T-953
     milestone: M3
     title: "Burst emitters get no family/params: burst-tap symbol rates never reach estimated_params; unknown at 0.999 confidence; no paging band-plan prior"
