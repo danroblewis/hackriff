@@ -18564,7 +18564,7 @@ tasks:
   - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
-    status: in-progress
+    status: done
     priority: high
     parallel_group: W
     model: opus
@@ -18633,6 +18633,7 @@ tasks:
       ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     branch: task-t575
+    commit: 6a07d6d9
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
