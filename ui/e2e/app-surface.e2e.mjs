@@ -54,12 +54,11 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   // T-506: the Capture panel is gone — its roles are on the canvas (the test at the bottom).
   assert.equal(await page.$count('[data-slot="capture"]'), 0, "the retired Capture panel is still mounted");
 
-  // (4) It addressed the surface, or said why it could not. `.sf-note` carries T-450's orientation
-  // sentence on success and the failure text on every abort path, so waiting on "not still
-  // addressing" and then reading it is the difference between a diagnosis and a 30 s timeout.
-  await page.waitFor("the app's surface to finish addressing",
-    `!!document.querySelector('.sf-canvas') &&
-     ((document.querySelector('.sf-note')?.textContent ?? "").length > 0)`, { timeoutMs: 60000 });
+  // (4) It addressed the surface, or said why it could not. The wait is the surface's own
+  // mounted/failed event (T-907: `data-surface` on <html>, set by both surface pages), which fails
+  // at once with the page's reason on every abort path; `.sf-note` then carries T-450's orientation
+  // sentence, read below.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   const note = (await page.$text(".sf-note")) ?? "";
   assert.ok(!/could not be addressed|WebGL2 is unavailable/.test(note),
     `the app's surface refused to mount: ${note}`);
@@ -154,6 +153,8 @@ test("a drag on the app's surface moves the view and still reaches no device rou
   const page = await browser.page();
 
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the app's surface to draw",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
     { timeoutMs: 60000 });
@@ -182,6 +183,8 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-fab') &&
@@ -247,6 +250,8 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-layers-btn') && /^IQ ring/.test(document.querySelector('.sf-ring')?.textContent ?? '')`,
@@ -313,6 +318,8 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the canvas to draw and the ring readout to hold an IQ horizon",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.sf-ring')?.dataset.iqS`, { timeoutMs: 60000 });
@@ -442,6 +449,8 @@ for (const width of [1000, 920, 420]) test(`T-882: at ${width} px every rehomed 
   t.after(() => browser.close());
   const page = await browser.page(undefined, { width, height: 860 });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating cluster to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 100 &&
      !!document.querySelector('.map-ctl .map-pane-btn')`, { timeoutMs: 60000 });
