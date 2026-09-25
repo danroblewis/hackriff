@@ -26140,6 +26140,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 16:16).
+      UI one output model (ADR-0015 §12.7). OutputEntry gains outputId; the audio header's additive pipeline_id/output_id populate dock entries on header. collectPanelSources now normalises dock audio entries and pipeline outputs (incl. new 'audio' kind) into one per-emitter view: audio + RDS messages siblings of one emitter render as ONE audio panel (scope + RDS box, rdsSibling), replacing the old 'rds wins over audio' heuristic; digital/rds-only unchanged. AudioPanel skips RDS read when no sibling. Tests updated/added in app-output-panel; test-ui green (92 files). No backend/api change.
+      Tests: just test-ui -> exit 0 (92/92 test files passed)
+      precheck exit 0
+      Commits: e433185b
+      Observed, not chased: LP-5 (T-869) still in-progress: pipeline_id in headers only appears once the flagged opener switch lands; UI is ready for it. | Dock still lists one entry per audio stream, not per output of a pipeline (messages siblings are not separate dock rows).
+      Resources: 33 CPU-s, peak 0.8 GB
   - id: T-872
     milestone: MAUTO
     title: "LP-8: retire ChainKind::Listen for cut-over modes; listener-budget mapping"
