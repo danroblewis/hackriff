@@ -210,7 +210,11 @@ test("MAP-02: the cluster names no route; its one device path is the painted ret
   // The go-to offer is shown only where no tuned window covers the pane, and — since T-947 — pressed
   // through `acceptPaneWidth`, planning the device's OWN current span (or a caller default), never
   // the pane's viewport: the pane-row Retune (`pressOffer` → `acceptPaneRetune`) is untouched.
-  assert.match(host, /if \(!o \|\| o\.covered\) \{ lastPaintedGoto = null; return null; \}/);
+  // T-955: "covered" is whether a tuned window — the active windows OR `frequency.current`, so a
+  // retune by anyone counts the moment the poll reports it — holds the pane's CENTRE (a Go-to names
+  // a centre), not whether it holds the whole viewport.
+  assert.match(host, /const heldNow = !!pane && \(coveringWindow\(windows, c, c, pane\.device\) !== null\s*\|\| \(!!cur && Math\.abs\(c - cur\.center_hz\) <= cur\.span_hz \/ 2\)\);/);
+  assert.match(host, /if \(!o \|\| heldNow\) \{ lastPaintedGoto = null; return null; \}/);
   assert.match(host, /press: pressGotoOffer/);
   assert.match(host, /const pressGotoOffer = [^]*?acceptPaneWidth\(ctx, \{/);
   assert.match(host, /const gotoSpanHz = \(\): number => goToSpanHz\(/);

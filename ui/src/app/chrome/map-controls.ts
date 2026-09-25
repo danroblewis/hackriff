@@ -604,6 +604,9 @@ export function mountMapControls(host: MapControlHost): {
   // (T-955: "following" here means at the TUNED live edge — see `paneActions`.)
   fab.addEventListener("click", () => {
     fabPress(host);
+    // T-955: follow-live can move the pane's frequency too, so a painted Go-to offer now describes
+    // a window the pane has left — withdrawn, exactly as a zoom withdraws it.
+    hideOffer();
     host.viewChanged();
     syncFollow();
   });
