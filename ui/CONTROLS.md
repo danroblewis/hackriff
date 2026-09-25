@@ -14,7 +14,7 @@ Standard control sets of [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus),
 | Waterfall min/max, auto-level (SDR++, SigDigger) | client (`surface/surface.ts`) | The display range tracks what the served tiles actually hold (`range_db`), shared by every viewport so two panes cannot shade the same energy differently, and now by the spectrum trace as well. **The manual dB entry is not coming back (T-457):** `Waterfall.setScale(auto, lo, hi)` existed but had *no caller* at the cutover, so T-445 retired an unreachable control rather than a feature in use; and a hand-set range overrides a measurement, which this product declines by default. The honest control is to **state** the range, which the trace readout does |
 | Peak / max hold (SDRangel, SigDigger) | backend (the tile fold), drawn client-side (T-457) | Max-hold is what a coarser cell *is* (T-342): a level-n cell is the maximum over the level-0 cells under it, folded server-side. T-457 draws it as the second trace series by reducing the tiles a viewport **already has**, over that viewport's own window — **no accumulator and no new ladder tier**, because the ladder's only reduction already is max-hold and a max of max-holds is a max-hold |
 | Bookmarks / frequency manager, markers (SDR++, SDRangel, SigDigger) | `/api/bookmarks` | Add from a click or a selection; jump zooms, or retunes on request |
-| Freeze / pause (SDRangel spectrum, SigDigger) | client (the follow-live FAB, per viewport: a press freezes a following viewport and re-pins a frozen one — T-882 retired the toolbar's Live/Paused button) | T-347: holding the view is the client's own time cursor — the same state a scrub leaves — so it is per-viewer and reaches no route. The run-wide `/api/control/pause` is gone: it froze every connected browser's waterfall at once. T-442 made it per **viewport**: a pane's pause *is* its time window, so freezing is a coordinate change and not a mode, and "scrubbed but not paused" is not a state the type can spell |
+| Freeze / pause (SDRangel spectrum, SigDigger) | client (each pane's OWN Live/Freeze button, inside its rectangle: a press freezes that viewport and re-pins a frozen one — T-882 retired the toolbar's Live/Paused button, T-1001 the single follow-live FAB) | T-347: holding the view is the client's own time cursor — the same state a scrub leaves — so it is per-viewer and reaches no route. The run-wide `/api/control/pause` is gone: it froze every connected browser's waterfall at once. T-442 made it per **viewport**: a pane's pause *is* its time window, so freezing is a coordinate change and not a mode, and "scrubbed but not paused" is not a state the type can spell |
 | Record baseband (SDR++ recorder, SDRangel file sink) | `POST /api/control/record/start`, `stop` | Refused under content-forbidding classes (409 `refused`) |
 
 ## Navigating the surface (T-456)
@@ -36,7 +36,7 @@ to two axes.
 | Press, right-click, wheel or pinch on a pane | Makes it the **active pane** — outlined on the canvas, and named by the chrome that acts on it (T-1000, docs/23 §10.7) |
 | `]` / `[` | Next / previous pane becomes active |
 | `1`–`9` | Pane N becomes active |
-| `L` | Toggles Live on the active pane (the follow-live FAB's press) |
+| `L` | Toggles Live on the active pane (presses that pane's own Live button) |
 
 **Why Alt/Option and not Ctrl for the time axis.** Ctrl+scroll is macOS's own zoom gesture
 (Accessibility → Zoom, *"Use scroll gesture with modifier keys to zoom"*, whose default modifier is
@@ -85,7 +85,7 @@ they carried did not disappear with them:
 
 | Retired control | Where it is now |
 |---|---|
-| Time navigator: scrub, zoom the time span, LIVE/PAUSED | The surface's own time axis (drag, Alt+wheel) and the per-viewport follow-live **FAB** (T-882) |
+| Time navigator: scrub, zoom the time span, LIVE/PAUSED | The surface's own time axis (drag, Alt+wheel) and each pane's own **Live/Freeze button** (T-1001) |
 | Time navigator: compressed history of the selected band | The surface itself — history *is* the surface, at whatever level the viewport resolves to |
 | Frequency navigator: set centre and span across the device range | Pan and zoom the viewport, or the **map strip** along the canvas's bottom (double-click sends the active viewport there) |
 | Frequency navigator: lit segment per active capture window | The map's per-SDR live segments, read through the same `activeWindows` (T-443) |

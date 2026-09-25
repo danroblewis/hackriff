@@ -430,8 +430,8 @@ Everything else sits in exactly one band:
 | Band | z | Space | Members | Laid out |
 |---|---|---|---|---|
 | **0** | `0` | **content** | the one `<canvas>`: tiles, traces, coverage plane, every overlay stroke, HUD ticks | **every render frame** |
-| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz); the active pane's outline (§10.7), placed from the same frame's pane rectangles | **every render frame, in the same pass as band 0** |
-| **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, follow-live FAB, pane-status readout, HUD axis *labels* | on interaction |
+| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz); the active pane's outline (§10.7); **each pane's own Live/Freeze button** (T-1001), all placed from the same frame's pane rectangles | **every render frame, in the same pass as band 0** |
+| **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, pane-status readout, HUD axis *labels* | on interaction |
 | **3** | `30` | screen | the bottom sheet; the Research slide-in | on interaction |
 | **4** | `40` | screen | transients: MapTip, retune offer, mode banner, error toasts | on interaction |
 
@@ -447,7 +447,8 @@ Two rules make the table load-bearing rather than decorative:
 ### 10.2 Chrome docking, fade, and what fade may never hide
 
 Chrome docks to viewport edges as floating translucent panels: Go-to top-left; layers / tools /
-Research top-right; zoom right; follow-live FAB bottom-right above the sheet; pane status bottom-left.
+Research top-right; zoom right; pane status bottom-left. (T-1001: follow-live is no longer chrome at
+all — each pane carries its own Live/Freeze button inside its rectangle, in band 1.)
 Chrome **fades to ~35 % opacity after ~6 s idle** and returns on any pointer, key or focus event.
 **No overlay is draggable or repositionable; users choose visibility only** (§10.6 rule 3): each
 dock above is the one position this section gives it, no dock position is read from or written to
@@ -516,8 +517,8 @@ to un-tuned *frequency* **offers** a retune, and an explicit press commits one t
 
 ### 10.5 Responsive, touch and accessibility floors
 
-- Usable to **400 px** wide with **no horizontal page scroll**; one-handed reach for the sheet, the
-  FAB and the tool buttons.
+- Usable to **400 px** wide with **no horizontal page scroll**; one-handed reach for the sheet, each
+  pane's Live button and the tool buttons.
 - **Touch:** pinch = zoom (view), two-finger drag = pan (view), long-press = MapTip, region select =
   the retune *offer*. Touch never crosses the view/device line by accident.
 - **Hit targets >= 24 px**; pin glyphs >= 11 px with a >= 24 px hit area.
@@ -594,9 +595,10 @@ partly planned; the tickets that close the gaps are named per principle.*
    red on injected violations (a row-click jump, a row-click retune, a keyboard twin, a body listener,
    a jump behind a helper, and a jump swapped into each real Explore row) and green when the same call
    moves onto a per-row button.
-5. **The existing small controls are right; keep them.** The +/- zoom cluster, the follow-live
-   reticle FAB, the map-type/layers button and the Go-to frequency box (T-802) are the model for
-   rule 4, and are not to be replaced or enlarged.
+5. **The existing small controls are right; keep them.** The +/- zoom cluster, the map-type/layers
+   button and the Go-to frequency box (T-802) are the model for rule 4, and are not to be replaced
+   or enlarged. (T-1001 moved the follow-live reticle FAB into each pane as a small labelled
+   Live/Freeze button — same rule, one per pane instead of one for the hidden active pane.)
 6. **The map is GIS, not Google Maps: features are drawn at their true extent; markers are a
    generalization, never the representation** (user, 2026-09-24 19:35, after T-809's pins on
    staging: "a point doesn't represent something meaningful on a waterfall graph. A signal has a
@@ -648,7 +650,7 @@ or the one chosen by key — and it is **visible**:
 | **Go-to** (and its retune offer) | the active pane | a "pane N" tag in the box; the input's accessible name |
 | **Zoom** +/- | the active pane | a number badge on the stack; the buttons' titles |
 | **Layers** (base style, coverage, overlays) | the active pane | a number badge on the button; the menu head and every section heading |
-| **Follow-live FAB** (until each pane has its own Live, T-c) | the active pane | a number badge; its title and accessible name |
+| **Live / Freeze** (T-1001) | **its own pane** — never the active one | it is *inside* that pane's rectangle, and says "Live · pane N" while there are two or more |
 | **Viewport menu**: Close, Whole surface | the active pane | the menu head, "Viewport · pane N of M" |
 | **Tools** (Measure, Annotate, Pin) | the pane the stroke is made on — which the press makes active | the outline moves to it at the press |
 | **Colour scale** | **every pane** (docs/16 §8.5a: one scale, stated) | the layers menu's "every pane" section |
@@ -664,7 +666,7 @@ while the chrome goes on acting on another pane is the defect this section close
 |---|---|
 | `]` / `[` | the next / previous pane becomes active (layout order, wrapping) |
 | `1`-`9` | pane N becomes active |
-| `L` | toggles Live on the **active** pane — the FAB's own press: freeze a following pane, re-pin a frozen one |
+| `L` | toggles Live on the **active** pane — by pressing that pane's own Live button (T-1001), so the key and the button cannot differ |
 
 **Nothing here reaches a device route** (§10.4): which pane is active is view state, and `L` is a
 coordinate change on one pane. Guarded by `ui/test/app-active-pane.test.ts` (naming, the notifying
@@ -685,7 +687,7 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Full-bleed shell, z-bands | MAP-01 | `map.chrome` | - | - |
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
-| Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
+| Per-pane Live/Freeze (T-1001), zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
 | Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
 | Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/observations` (the past-surveys pages), `/api/history` (served; no client reads it since T-445 retired the spectrum-grid pane) | - |
 | Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
