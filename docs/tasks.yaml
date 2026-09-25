@@ -26936,7 +26936,7 @@ tasks:
   - id: T-910
     milestone: MMAP
     title: "GIS feature symbolization: signals as (t, f) polygons with class symbology, scale-dependent generalization below ~6 px, hit-test/select on the polygon, labels (re-scope of T-809's pins)"
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-809
@@ -26970,6 +26970,7 @@ tasks:
       Observed, not chased: The browser spec ui/e2e/app-pins.e2e.mjs was not run (it needs the hk backend build). By reading it, it should still pass: it picks the centre of a .sf-pin.detection element, which is now inside the box's hit area, and it checks .sf-pin.selected[aria-pressed], which is unchanged. The daily RC run will confirm. | Research/curated boxes get the double outline but are not generalized: they have no DOM hit layer (clicks go through markAt), so a symbol could not be selected there. They keep RESEARCH_MIN_PX as before. | Colours are still the existing inks. Colour-blind-safe palette tuning is T-813; class never relies on hue here, because outline pattern and fill differ per class. | The dash and hatch lengths (5/8 px dashes, a 1-in-7 px hatch at 0.45 alpha) are first guesses and have not been checked on staging. They are constants in marks.ts.
       Use cases: AWARE-053
       Resources: 37 CPU-s, peak 1.0 GB
+    commit: 27649ba8
   - id: T-911
     milestone: MLIVE
     title: "Departed band's shadow must keep the colour of its last live row (within one ramp step, undimmed): blind e2e + fix in the carry-forward/shadow path (user, staging)"
