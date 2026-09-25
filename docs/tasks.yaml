@@ -27676,6 +27676,8 @@ tasks:
       TESTING PROTOCOL: targeted tests only (just test-ui; the touched specs alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
 
       Review (fix attempt 1) FAILED: sheet clearance was measured from the peek-state sheet's LIVE height (gated on dataset.snap==='peek'), so the minimap (and every pane above it) followed the sheet up/down during a drag toward full and during the .28s open/close transition — violating docs/23 P3 fixed positions. Fixed by anchoring off the sheet's fixed BOTTOM edge (sheet.css pins it; only the top moves with height) minus the constant PEEK_PX, applied unconditionally (no longer needs dataset.snap). Extended app-sheet.e2e.mjs's existing drag test with a mid-drag insetBottom sample; proved red with the defect re-injected (134 -> 314 mid-drag), green with the fix. app-dismiss/app-phone/app-sheet all re-verified after merging main@7a9fa8ab. app-phone.e2e.mjs's idle-fade subtest is an intermittent flake reproduced identically on unmodified main (7a9fa8ab) run alone — not caused by this change.
+
+      Merge-gate fail (attempt 2): 1 uncommitted file (docs/tasks.yaml) left from an earlier 'just task note' call, no code change needed. Committed it (495d1528) and re-verified: typecheck clean, npm test 85/85, e2e app-dismiss + app-sheet green after a rebuild. origin/main still at the cited 7a9fa8ab, already merged into this branch.
   - id: T-934
     milestone: M2-hardening
     title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
