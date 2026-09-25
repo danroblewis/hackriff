@@ -412,10 +412,11 @@ async function tunedWindow(backend) {
 // ---------------------------------------------------------------------------
 
 /** The rectangle a pane draws its MEASUREMENT into: the canvas, minus the map strip and the trace. */
-function paneRectOf(rect, dpr) {
-  const paneH = rect.h * dpr - MINIMAP_PX;
+function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
+  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  return { x: rect.x, w: rect.w, y: rect.y + traceH / dpr, h: (paneH - traceH) / dpr };
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
 }
 
 /**
@@ -494,7 +495,7 @@ async function paneGeometry(page) {
   const rect = await page.$rect(".sf-canvas");
   assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  const whole = paneRectOf(rect, dpr);
+  const whole = paneRectOf(rect, dpr, await page.canvasInsets());
   const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
   const pane = clipToUnoccluded(whole, rect, unocc);
   assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);

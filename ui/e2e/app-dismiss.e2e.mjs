@@ -31,6 +31,11 @@ const OVERLAYS = [
     isOpen: "!document.querySelector('.map-pane-menu').hidden", alone: true },
 ];
 const STACKED = OVERLAYS.filter((o) => !o.alone);
+// T-918: an overlay that animates between its states (the sheet's height transition, sheet.css
+// .28 s) is measured once it has ARRIVED, never at a frame of the way there — a box read two frames
+// into its opening, or its closing, is most of the way back where it started.
+const settled = (page, o, what) => page.waitFor(`${o.name} to finish ${what}`,
+  `document.querySelector(${JSON.stringify(o.box)}).getAnimations().length === 0`, { timeoutMs: 5000 });
 
 for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes back to the map, and Escape closes the topmost`, async (t) => {
   const browser = await Browser.open();
@@ -47,12 +52,22 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     await page.waitFor("the sheet at peek", `!(${OVERLAYS[0].isOpen})`, { timeoutMs: 5000 });
   }
   await page.frames(3);
+  // T-918 (docs/23 §10.1): the canvas is 100vw x 100vh and no chrome subtracts from it — so every
+  // overlay below is OVER map pixels, and closing it has map pixels to give back. A canvas framed
+  // short of the sheet (T-801 round 3's padding plus the rows under the stage) is the defect.
+  const bleed = await page.$rect(".sf-canvas");
+  assert.deepEqual([bleed.x, bleed.y, bleed.w, bleed.h].map(Math.round), [0, 0, width, 860],
+    `the canvas is not full-bleed at ${width} px: ${JSON.stringify(bleed)}`);
 
   // (1) Each overlay alone: open from its small control, visible close, map back after.
   for (const o of OVERLAYS) {
     assert.equal(await page.eval(o.isOpen), false, `${o.name} is open before its control was pressed`);
+    // Where the overlay sits CLOSED (the sheet's peek strip; nothing for a hidden menu): closing
+    // cannot give those rows back, so they are not rows this check may measure (T-918).
+    const shut = await page.$rect(o.box);
     await page.click(`document.querySelector(${JSON.stringify(o.open)})`);
     await page.waitFor(`${o.name} to open`, o.isOpen, { timeoutMs: 5000 });
+    await settled(page, o, "opening");
     await page.frames(2);
     const box = await page.$rect(o.box);
     const canvas = await page.$rect(".sf-canvas");
@@ -66,7 +81,9 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
         .filter((c) => !c.contains(me) && !me.contains(c))
         .map((c) => c.getBoundingClientRect())
         .filter((r) => r.width > 0 && r.height > 0 && r.right > ${box.x} && r.left < ${box.x + box.w})
-        .map((r) => [r.top - 1, r.bottom + 1]).sort((a, b) => a[0] - b[0]);
+        .map((r) => [r.top - 1, r.bottom + 1])
+        .concat(${shut && shut.w > 0 && shut.h > 0 ? `[[${shut.y - 1}, ${shut.y + shut.h + 1}]]` : "[]"})
+        .sort((a, b) => a[0] - b[0]);
       let best = { y0: lo, y1: lo }, at = lo;
       for (const [t, b] of [...cuts, [hi, hi]]) {
         const top = Math.min(t, hi);
@@ -80,6 +97,7 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     assert.equal(await page.eval(pressable(o.close)), true, `${o.name}'s close (×) is not visible and pressable`);
     await page.click(`document.querySelector(${JSON.stringify(o.close)})`);
     await page.waitFor(`${o.name} to close`, `!(${o.isOpen})`, { timeoutMs: 5000 });
+    await settled(page, o, "closing");
     await page.frames(2);
     const after = await page.unoccludedColumns(".sf-canvas", { y0, y1 });
     t.diagnostic(`at ${width} px ${o.name}: box ${JSON.stringify(box)}; occluded columns open ${during.occluded} → closed ${after.occluded}`);
@@ -91,8 +109,10 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     // ...and closed is exactly the state before it opened: re-open, close again, same columns clear.
     await page.click(`document.querySelector(${JSON.stringify(o.open)})`);
     await page.waitFor(`${o.name} to re-open`, o.isOpen, { timeoutMs: 5000 });
+    await settled(page, o, "re-opening");
     await page.click(`document.querySelector(${JSON.stringify(o.close)})`);
     await page.waitFor(`${o.name} to close again`, `!(${o.isOpen})`, { timeoutMs: 5000 });
+    await settled(page, o, "closing again");
     await page.frames(2);
     const again = await page.unoccludedColumns(".sf-canvas", { y0, y1 });
     assert.equal(again.occluded, after.occluded, `${o.name}: a second close left ${again.occluded - after.occluded} more columns covered`);
