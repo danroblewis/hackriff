@@ -1665,3 +1665,64 @@ def test_a_local_fix_run_waits_for_room_on_this_mac_like_a_remote_one(tmp_path, 
     relaunched.clear()
     assert R.relaunch_held_fixes(claims) is True and relaunched == [] and claims["T-844"]["state"] == "gate-failed"
     assert notes[-1][2] == "GATE_FAIL_NO_SESSION"
+
+
+LIMIT_TEXT = ("You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message · "
+              "your session limit resets 9:20am (America/Los_Angeles)")
+
+
+def test_the_reset_a_usage_limit_message_names_is_the_next_one_after_it_was_written():
+    at = time.mktime((2026, 9, 25, 8, 11, 0, 0, 0, -1))
+    assert time.localtime(R.usage_limit_until(LIMIT_TEXT, at))[3:5] == (9, 20)
+    assert R.usage_limit_until(LIMIT_TEXT, at) - at == 69 * 60
+    late = time.mktime((2026, 9, 25, 10, 0, 0, 0, 0, -1))
+    assert R.usage_limit_until(LIMIT_TEXT, late) - late == (23 * 60 + 20) * 60        # tomorrow's 9:20
+    assert R.usage_limit_until("You've hit your limit", at) == at + 1800             # unparseable: half an hour
+
+
+def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launches_until_the_reset(killed_run, monkeypatch, tmp_path):
+    """2026-09-25 08:11-08:57: every run died in 1-3 min on the account usage limit; each was scored 'error' (released
+    after 4 h), dispatch launched 15 tickets into the wall in 7 min, and node2 then sat at 0/6 with nothing dispatchable."""
+    import os
+    claim, fixes, alerts, seen = killed_run
+    d = tmp_path / "work" / "T-802"
+    (d / "out.json").write_text(json.dumps({"is_error": True, "result": LIMIT_TEXT, "session_id": "s1"}))
+    (d / "handback.json").write_text(json.dumps({"outcome": "done", "summary": "a stale one from the earlier run"}))
+    at = time.time() - 60
+    os.utime(d / "out.json", (at, at))
+    wrote = []
+    monkeypatch.setattr(R, "write_result", lambda c, hb: wrote.append(c["ticket"]))
+    claims = claim(session_id="s0")
+    R.reap(claims, dry=False)
+    c = claims["T-802"]
+    assert c["state"] == "limited" and c["session_id"] == "s1" and fixes == [] and wrote == []   # never the stale handback
+    assert [k for _, k, _ in seen] == ["USAGE_LIMIT"]
+    until = R.usage_limited()
+    assert until == c["limited_until"] and until == R.usage_limit_until(LIMIT_TEXT, at) and until > time.time()
+    # while it holds: no dispatch, no deflaker, no fix run, and the limited run stays put
+    monkeypatch.setattr(R, "hosts", lambda: {"node2": {"cap": 6}})
+    assert R.dispatch_remote(claims, dry=False) is False
+    assert R.dispatch_deflakes(claims, dry=False) is False
+    assert R.relaunch_held_fixes(claims) is False and claims["T-802"]["state"] == "limited"
+    # its worktree is kept while it waits
+    live = {x.get("wt") for x in claims.values() if x.get("state") in ("running", "fix-held", "limited")}
+    assert c["wt"] in live and '("running", "fix-held", "limited")' in pathlib.Path(R.__file__).read_text()
+    # the reset passes: the held-fix pass resumes the session with the limit's own KILLED line, through the cap
+    (tmp_path / "usage-limited").write_text(f"{time.time() - 1:.0f}\n")
+    relaunched = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: relaunched.append((c["ticket"], line)) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "host_room", lambda claims, h, exclude=None: None)
+    assert R.relaunch_held_fixes(claims) is True
+    assert relaunched[0][0] == "T-802" and relaunched[0][1].startswith("KILLED") and "USAGE LIMIT" in relaunched[0][1]
+    assert claims["T-802"]["state"] == "running"
+
+
+def test_a_fix_run_asked_for_while_the_limit_holds_waits_quietly(monkeypatch, tmp_path):
+    (tmp_path / "usage-limited").write_text(f"{time.time() + 600:.0f}\n")
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    notes = []
+    monkeypatch.setattr(R, "attention", lambda *a: notes.append(a))
+    monkeypatch.setattr(R, "fix_reason", lambda line, b: ("GATE_FAIL", "x"))
+    c = {"ticket": "T-9", "branch": "task-t9", "wt": str(tmp_path), "session_id": "s", "state": "queued", "kind": "work"}
+    held = R.launch_fix(c, "GATE_FAIL x", claims={"T-9": c})
+    assert held["state"] == "fix-held" and notes == []

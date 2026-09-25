@@ -486,6 +486,34 @@ def slot_cap(host):
     return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
 
 
+# THE ACCOUNT USAGE LIMIT (2026-09-25 08:11-08:57): every claude run died in 1-3 min with "You've hit your ... limit ...
+# your session limit resets 9:20am"; each was scored an 'error' (released only after RELEASE_AFTER_H), and dispatch kept
+# launching into the wall - 15 tickets in 7 min, the whole frontier, then 0 running until a person resumed them. Now such
+# a run is 'limited': nothing launches until the named reset, then each limited run resumes its own session.
+_USAGE_LIMIT = re.compile(r"usage limit|spend limit|session limit resets|limit reached", re.I)
+
+
+def usage_limit_until(text, at):
+    """The reset instant a limit message names ('resets 9:20am'), taken as the next such time after `at` (when the
+    message was written); unparseable -> `at` + 30 min."""
+    m = re.search(r"resets\s+(\d{1,2})(?::(\d\d))?\s*([ap]m)", text, re.I)
+    if not m:
+        return at + 1800
+    lt = time.localtime(at)
+    t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(m[1]) % 12 + (12 if m[3].lower() == "pm" else 0),
+                     int(m[2] or 0), 0, 0, 0, -1))
+    return t if t >= at else t + 86400
+
+
+def usage_limited():
+    """The reset time while the account usage limit is in force, else 0."""
+    try:
+        until = float(open(f"{S}/usage-limited").read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+    return until if until > time.time() else 0
+
+
 def host_room(claims, h, exclude=None):
     """None when host `h` takes one more worker now, else why not. Fix runs count against its cap like dispatches
     (2026-09-25 05:40: a REVIEW_FAIL fix resumed on node2 at 6/6 made 7), and `max_load1` in hosts.json bounds its
@@ -1191,6 +1219,16 @@ def reap(claims, dry):
         text = str(res.get("result", ""))
         if res.get("session_id"):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
+        if res.get("is_error") and _USAGE_LIMIT.search(text):
+            out_f = c.get("out") or f"{d}/out.json"
+            until = usage_limit_until(text, os.path.getmtime(out_f) if os.path.exists(out_f) else time.time())
+            if until > usage_limited():
+                open(f"{S}/usage-limited", "w").write(f"{until:.0f}\n")
+                attention(tid, c["branch"], "USAGE_LIMIT", f"the account usage limit stopped this run; nothing launches "
+                          f"until {time.strftime('%H:%M', time.localtime(until))}, then limited runs resume ({text[:120]})")
+            c["state"], c["limited_until"] = "limited", until
+            record_done(c, "limited", res)
+            continue
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
         red, own = hand_back_reds(hb)
@@ -1325,6 +1363,8 @@ def launch_fix(c, fail_line, claims=None):
     # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
     # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
     # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
+    if usage_limited():
+        return dict(c, state="fix-held", fail_line=fail_line[:300], held_warned=True)
     if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
@@ -1898,7 +1938,7 @@ def dispatch_remote(claims, dry):
     """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
     (dispatch-paused) does. One launch per host per tick."""
     # The alone-mode gate hold binds here too: in that mode the merge runner waits for EVERY claim, remote included.
-    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch() or usage_limited():
         return False
     try:
         tasks = board()
@@ -1925,7 +1965,7 @@ def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work" and not c.get("host")]
     cap = dispatch_cap()
     free = cap - busy_workers(claims)          # this Mac's: fix runs are workers on the box too
-    if free <= 0:
+    if free <= 0 or usage_limited():
         return changed_remote
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
@@ -2015,7 +2055,7 @@ def reap_worktrees(claims, dry):
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}   # a held fix resumes there
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited")}   # a held fix resumes there
     if not dry:
         sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
@@ -2241,7 +2281,7 @@ def reclaim_idle_targets(claims, dry):
     (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited")}
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
@@ -2488,7 +2528,7 @@ def launch_deflake(slug, req, prior, dry):
 def dispatch_deflakes(claims, dry):
     """At most ONE deflaker per tick, as a worker under the dispatch cap, never through a hold."""
     reqs = read_deflake_requests()
-    if not reqs:
+    if not reqs or usage_limited():
         return False
     ready, changed = pending_deflakes(claims, reqs)
     if not ready:
@@ -2593,9 +2633,20 @@ def record_queue_depth():
 def relaunch_held_fixes(claims):
     """tick()'s held-fix pass: each `fix-held` claim relaunches once its holds clear - before any new dispatch."""
     changed = False
-    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch() or usage_limited():
         return False
     for tid, c in list(claims.items()):
+        if c.get("state") == "limited" and not c.get("session_id"):
+            claims[tid] = dict(c, state="killed")
+            attention(tid, c.get("branch", ""), "KILLED", "stopped by the account usage limit with no session to resume - redispatch it")
+            changed = True
+            continue
+        if c.get("state") == "limited" and c.get("session_id"):
+            # The limit has reset: resume the session where it stopped (commits kept), through the cap like any fix.
+            claims[tid] = c = dict(c, state="fix-held", held_warned=False, fail_line=(
+                "KILLED your run was stopped by the ACCOUNT USAGE LIMIT, not by a failure of yours; the limit has reset. "
+                "Carry on with exactly what this session was last asked to do"))
+            changed = True
         if c.get("state") == "fix-held":
             if host_room(claims, c.get("host"), exclude=tid):
                 continue                  # no room where its session lives yet: stays held, said once when held
