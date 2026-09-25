@@ -18634,7 +18634,7 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: in-progress
+    status: done
     branch: task-t565
     priority: normal
     parallel_group: SYN-E
@@ -18702,6 +18702,7 @@ tasks:
       Observed, not chased: The worktree branch task-t565 was cut from 0f6bbf17 (2026-09-22), before hk-synth/T-854 existed on it. I fast-forwarded it to main 31a36d22 before working. Untracked .githooks files identical to main's blocked the fast-forward and were moved to /tmp/t565-githooks-bak. | ADR-0021 §2.3 assumes 200-400 B per node. Measured ~480 B with the rendered summary, so at deep the 256 KiB byte cap binds at ~540 nodes and the 2048-node cap is effectively unreachable. The ADR text and bounds were not edited (ADR scope). | ADR-0015 is ACCEPTED, so its §1.3 'best pruned node kept as partial result' supersession and the §10 M-3 row widening were not written into the ADR text. The code behaves as superseded (results are drawn from retained trace nodes), as T-854 also noted. | hk-model::repo::synthesis has its own TraceNode type, separate from hk_synth::trace::TraceNode. It did not gain the `nondeterministic` field; M-9 persistence should reconcile the two.
       Use cases: RESEARCH-001, RESEARCH-003, RESEARCH-006
       Resources: 204 CPU-s, peak 2.6 GB
+    commit: d9ad41c4
   - id: T-566
     milestone: MAUTO
     title: "MAUTO: serve the trace and the resolution - GET /api/analyze/{id}/trace, trace_summary, the `trace` stream record"
