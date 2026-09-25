@@ -41,6 +41,7 @@
 import { activeWindows, timeExtent, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
 import { newClientId, setTileClientId } from "../../surface/clientid";
+import { markSurface } from "../../surface/mounted";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
   markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
@@ -844,9 +845,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     try {
       probe = await probeSurface((path) => client.get(path));
     } catch (e) {
-      say(isBackpressure(e)
+      const why = isBackpressure(e)
         ? "The tile route is busy producing for another viewport. Nothing is wrong with the surface — it will come back."
-        : `The surface could not be addressed: ${e instanceof Error ? e.message : String(e)}. GET /api/tiles is what states the view lattice, and a client that guessed one would be addressing a pyramid that does not exist.`);
+        : `The surface could not be addressed: ${e instanceof Error ? e.message : String(e)}. GET /api/tiles is what states the view lattice, and a client that guessed one would be addressing a pyramid that does not exist.`;
+      say(why);
+      markSurface("failed", why);
       return;
     }
     try {
@@ -884,10 +887,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
         dom: pinsFrame,
       });
     } catch (e) {
-      say(`WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`);
+      const why = `WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`;
+      say(why);
+      markSurface("failed", why);
       return;
     }
     say(probe.note);
+    markSurface("mounted");
 
     // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never
     // fetched, and changed only by the Ctrl+Shift+wheel gesture `input.ts` claims before any zoom.

@@ -468,19 +468,36 @@ export class Page {
   }
 
   /**
-   * Wait for the preview to finish addressing the surface, and fail immediately — with the card's
-   * own words — if it puts up its failure card instead.
+   * Wait for the surface to finish mounting — on EITHER page that hosts it — and fail immediately,
+   * with the page's own words, if it gave up instead.
    *
-   * `preview-main.ts`'s `fail()` replaces the stage and leaves the note reading "Addressing the
-   * surface…", so a wait on the note alone turns every abort into a 20-second timeout with no
-   * diagnosis. This is the difference between a suite people read and one they learn to ignore.
+   * **The event, not a page-specific proxy** (T-907). Both entry points (`/`'s
+   * `app/centre/surface.ts` and `/surface.html`'s `preview-main.ts`) write `data-surface` on
+   * `<html>` (`ui/src/surface/mounted.ts`): `mounted` once `SurfacePreview` exists over an
+   * addressed probe, `failed` on every abort path with `data-surface-reason` carrying the text the
+   * page put on screen. Absent means still addressing. This used to wait for the preview's
+   * `[data-slot="note"]` to stop reading "Addressing…" — and on the app page, which has no such
+   * element, `"".startsWith("Addressing")` is false, so it returned at once and the spec raced a
+   * surface that did not exist yet. `timeoutMs` is the failure bound; a green run returns the
+   * moment the page says it mounted.
    */
   async waitForSurfaceMounted({ timeoutMs = 30000 } = {}) {
-    await this.waitFor("the surface to finish addressing, or to say why it could not",
-      `!(document.querySelector('[data-slot="note"]')?.textContent ?? "").startsWith("Addressing")
-       || !!document.querySelector(".sp-fail")`, { timeoutMs });
-    const card = await this.$text(".sp-fail");
-    if (card !== null) throw new Error(`the surface put up its failure card instead of mounting: ${card}`);
+    try {
+      await this.waitFor("the surface to finish mounting, or to say why it could not",
+        `document.documentElement.dataset.surface === "mounted" || document.documentElement.dataset.surface === "failed"`,
+        { timeoutMs });
+    } catch (e) {
+      // A mount that never happened is the boot flake's signature; say what the probe was stuck on
+      // (the API requests on the wire, answered or still open, oldest first) instead of only "timed out".
+      const now = Date.now();
+      const api = this.requests.filter((r) => r.url.includes("/api/")).slice(-12).map((r) =>
+        `${r.url.replace(/^https?:\/\/[^/]+/, "")} → ${r.error ?? r.status ?? "open"} ` +
+        `(${r.endedMs ? r.endedMs - r.startedMs : now - r.startedMs} ms${r.endedMs ? "" : ", still open"})`);
+      throw new Error(`${e.message}\n  api requests (last ${api.length}):\n    ${api.join("\n    ") || "(none)"}`);
+    }
+    const state = await this.eval(`({ s: document.documentElement.dataset.surface,
+      why: document.documentElement.dataset.surfaceReason ?? null })`);
+    if (state.s !== "mounted") throw new Error(`the surface refused to mount: ${state.why ?? "(no reason given)"}`);
   }
 
   /** Poll an in-page boolean expression. Every wait in this suite is one of these, named. */

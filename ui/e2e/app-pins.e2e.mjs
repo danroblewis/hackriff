@@ -40,11 +40,9 @@ test("a detected signal is a pin: hover shows its MapTip, click selects it and o
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  // The app's surface addressed itself, or said why it could not (`app-surface.e2e.mjs`'s wait:
-  // `.sf-note` carries the orientation sentence on success and the reason on every abort path).
-  await page.waitFor("the app's surface to finish addressing",
-    `!!document.querySelector('.sf-canvas') && ((document.querySelector('.sf-note')?.textContent ?? "").length > 0)`,
-    { timeoutMs: 60000 });
+  // The app's surface addressed itself, or said why it could not: the surface's own mounted/failed
+  // event (T-907: `data-surface` on <html>), which throws with the page's reason on every abort path.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   const note = (await page.$text(".sf-note")) ?? "";
   assert.ok(!/could not be addressed|WebGL2 is unavailable|busy producing/.test(note), `the app's surface did not mount: ${note}`);
   await page.waitFor("blind detection to put a pin on the canvas", `!!${PIN_AT}`, { timeoutMs: 120000, everyMs: 1000 })

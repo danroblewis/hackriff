@@ -41,6 +41,8 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the app's surface to draw and the sheet to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      document.querySelector('.sheet')?.dataset.snap === 'peek'`, { timeoutMs: 60000 });
@@ -119,6 +121,8 @@ for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sh
   const page = await browser.page(undefined, { width, height: 860,
     initScript: "try { localStorage.setItem('hk-mui-sheet-selected', 'full'); } catch {}" });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the floating top controls and a full sheet",
     `!!document.querySelector('.map-topright button') && document.querySelector('.sheet')?.dataset.snap === 'full'`,
     { timeoutMs: 60000 });
