@@ -380,12 +380,20 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   // device route.
   //
   // The fog's key is not the only key in the menu: T-813 gave the detections overlay its symbology
-  // key (`markKeyEntries`) in the Overlays section. So the fog key is read off the coverage row it
-  // belongs to and the symbology key off the detections row, each exactly and in order, and the
-  // menu-wide list must be exactly the two in section order — a key row anywhere else, a fog row
-  // leaking out of the Coverage section or a symbology row leaking into it is red.
+  // key (`markKeyEntries`) in the Overlays section, and T-898 (d4d4ce7d) gave the retune-history
+  // overlay its own — one row per front end, or a single "No route in view" row (`none`) when no
+  // tune record covers the window. So each key is read off the ROW it belongs to, the two fixed
+  // ones exactly and in order; the set of rows that carry a key at all is stated here, so a key
+  // appearing on a row that should have none is still red; and the menu-wide list must be exactly
+  // those rows' keys concatenated in DOM order — a fog row leaking out of the Coverage section, a
+  // symbology row leaking into it, or a key `li` belonging to no row is red.
+  //
+  // The retune key's CONTENT is not a literal: it names the devices whose tune records cover the
+  // window, which is data, not symbology. Its row's presence and non-emptiness are asserted; what
+  // it says about a device is `surface/tunepath.ts`'s unit tier.
   const FOG_KEY = ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"];
   const MARK_KEY = ["confirmed", "candidate", "unexplained", "artifact", "curated"];
+  const KEYED_ROWS = ["coverage", "detections", "tune"];
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -398,20 +406,28 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   const state = `JSON.stringify({
     fog: document.querySelector('#map-layers [data-axis=data] input[data-layer="coverage"]')?.checked ?? null,
     key: [...document.querySelectorAll('#map-layers .map-layer-key li')].map((e) => e.dataset.mark),
-    rowKey: Object.fromEntries(["coverage", "detections"].map((id) => {
-      const next = document.querySelector('#map-layers input[data-layer="' + id + '"]')?.closest('label')?.nextElementSibling;
-      return [id, next?.matches('.map-layer-key') ? [...next.querySelectorAll('li')].map((e) => e.dataset.mark) : null];
-    })),
+    rows: [...document.querySelectorAll('#map-layers input[data-layer]')].map((i) => {
+      const next = i.closest('label')?.nextElementSibling;
+      return [i.dataset.layer, next?.matches('.map-layer-key') ? [...next.querySelectorAll('li')].map((e) => e.dataset.mark) : null];
+    }),
     drawsDetections: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '[]').some((l) => l.id === "detections"),
     said: document.querySelector('.sf-fog').hidden ? "" : document.querySelector('.sf-fog').textContent,
     head: document.querySelector('#map-layers h4')?.textContent,
   })`;
   const one = JSON.parse(await page.eval(state));
   assert.equal(one.fog, true, "the coverage fog must be shown by default: grey is the survey");
-  assert.deepEqual(one.rowKey.coverage, FOG_KEY, "the coverage row's key: the fog's rows, all present, in order, contiguous");
+  const rowKey = Object.fromEntries(one.rows);
+  assert.deepEqual(rowKey.coverage, FOG_KEY, "the coverage row's key: the fog's rows, all present, in order, contiguous");
   assert.equal(one.drawsDetections, true, "this build draws no detections overlay, so T-813's key has no row to sit under");
-  assert.deepEqual(one.rowKey.detections, MARK_KEY, "the detections row's key: T-813's symbology, in its own section");
-  assert.deepEqual(one.key, [...FOG_KEY, ...MARK_KEY], "the menu's keys: the fog's under Coverage, then the symbology's under Overlays, and no other");
+  assert.deepEqual(rowKey.detections, MARK_KEY, "the detections row's key: T-813's symbology, in its own section");
+  assert.deepEqual(one.rows.filter(([, k]) => k !== null).map(([id]) => id), KEYED_ROWS,
+    `exactly these rows carry a key, in section order: ${JSON.stringify(one.rows)}`);
+  assert.ok(Array.isArray(rowKey.tune) && rowKey.tune.length > 0 && rowKey.tune.every((m) => typeof m === "string" && m.length > 0),
+    `the retune row's key (T-898): a row per front end, or the "no route in view" row — never empty: ${JSON.stringify(rowKey.tune)}`);
+  assert.deepEqual(one.key, one.rows.flatMap(([, k]) => k ?? []),
+    "the menu's keys: each row's own, in section order, and no key li outside a row that has one");
+  assert.deepEqual(one.key.slice(0, FOG_KEY.length + MARK_KEY.length), [...FOG_KEY, ...MARK_KEY],
+    "the fog's key under Coverage, then the symbology's under Overlays");
   assert.equal(one.said, "");
 
   await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);

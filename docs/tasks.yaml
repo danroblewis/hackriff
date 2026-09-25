@@ -28196,7 +28196,7 @@ tasks:
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-BOOT
@@ -28211,6 +28211,17 @@ tasks:
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): also: the page opened on 100-1100 MHz x 1.6 h with the tuned 101.7 MHz window drawn as a sliver - it does not open on the tuned window even without a stale offer.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): repeat: the page opens on a 0-520 MHz overview with the tuned window a sliver. Also (possibly a harness artefact): the first /#token= load after a refused navigation stayed on 'token needed' - reproduce with a real browser before fixing.
+
+      Review attempt(s) on cdf2aa1f ended REVIEW_FAIL with no verdict line. Checked ops/work/T-955/{fix1,review}.json directly: both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one reviewer attempt made zero turns, the other got a Bash call denied (running the new e2e/app-reload-retune.e2e.mjs against a built hk binary) and then hit the spend limit after ~23 min. No actual defect was named. Triage: merged in fcb0dd43 (already an ancestor, no-op), re-ran just test-ui: 88/88 files pass, tsc --noEmit clean, same as before the review. No code change made; treating this as an infra/cost failure of the review step, not a finding against the diff.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 09:28).
+      Fixed the root cause behind both reported symptoms: the surface's opening window (surface/bootstrap.ts + preview.ts) was computed as the bounding box over EVERY cell ever observed, so a session holding two different tunings inside one record horizon (162.2 MHz then 144.6 MHz) got a box spanning the gap between them - a reload opened on the stale band with a stale retune offer, and one live run opened on '100-1100 MHz x 1.6 h' with the actually-tuned band drawn as a sliver. Added recentObservedExtent, which boxes only the most recently active rows of the coverage grid, and used it (falling back to the whole-history census only when the recent rows are empty) at both the coarse and fine stages of probeSurface's refinement pass, so the opening tracks the currently-tuned band and the per-pane retune offer naturally stops naming the departed one. Separately, followLive (app/chrome/map-controls.ts) now also resets the pane's frequency window to the front end's own current tuning (frequency.current) when pressed, not only its time. Both changes are view arithmetic only; no device route. RE-TRIAGE (this pass): the branch failed review twice with 'no verdict line'. Read both raw review artifacts directly (ops/work/T-955/fix1.json and review.json): both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one attempt made zero turns, the other had one Bash call denied (running the new e2e file against a built hk binary) and then hit the spend limit ~23 minutes in. No actual defect was ever named against this diff. Triaged per the brief: merged in fcb0dd43 (already an ancestor of this branch - no-op), re-ran the full targeted UI suite: unchanged, 88/88 files pass, tsc --noEmit clean. No code change was made this pass, since nothing in the diff was found broken; this is recorded as an infra/cost failure of the review step, not a finding, via `just task note T-955`.
+      Tests: cd ui && node test/run.mjs surface-preview -> exit 0 (35 passed, including the T-955 recentObservedExtent/probeSurface regression tests reproducing the two-disjoint-tunings shape); cd ui && node test/run.mjs app-map-controls -> exit 0 (12 passed, including the T-955 follow-live frequency-reset tests); just test-ui -> exit 0 (88/88 UI test files passed (build + tsc --noEmit + full node:test suite) - re-run after merging fcb0dd43 (already an ancestor; no-op) during this re-triage pass, unchanged from the first pass); cd ui && npm run typecheck -> exit 0 (tsc --noEmit clean)
+      precheck exit 0
+      Commits: cdf2aa1f, dfb16473
+      Observed, not chased: The review process failed twice with terminal_reason=api_error / api_error_status=429 (account monthly spend limit), never producing a verdict against this diff - not something this branch can fix. Recorded on the ticket via `just task note T-955` with the exact evidence (the two raw review JSON artifacts' terminal_reason/api_error_status/result fields) for whoever re-runs the review once the limit resets. | The new ui/e2e/app-reload-retune.e2e.mjs (retune via POST /api/control/window, reload, assert the drawn pane + its retune offer) was authored per the ticket's ask for an app e2e, but has still not been RUN in any session: no `hk` binary exists in this worktree or its target dir, and building the whole workspace for one e2e run is outside a targeted-tests pass. It appears to be exactly what one of the failed review attempts got stuck trying to do (a Bash call to build+run it was denied, then that session ran out of budget) - flagging this explicitly in case a future review pass hits the same wall: the unit-level tests are the primary, run evidence for this fix, and the e2e file is additional coverage for whoever next builds hk. | docs/tasks.yaml's root CLAUDE.md states the T-376 rule as 'never derived from frequency.current or a band plan' for the opening window; this fix does not read frequency.current for the OPENING (it derives recency purely from the coverage map's own row timestamps), but followLive's frequency reset does read frequency.current directly - deliberately, since that is on an explicit user press rather than at open. Worth a second look if a future ADR pass tightens that wording.
+      Resources: 689 CPU-s, peak 2.0 GB
+    commit: a5575655
   - id: T-956
     milestone: MAUTO
     title: Production Evaluator over acquired IQ for /api/analyze (every job ends no_evaluator) - next MAUTO tranche
@@ -28230,7 +28241,7 @@ tasks:
   - id: T-957
     milestone: MMAP
     title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-SURFACE-RC
@@ -28244,10 +28255,11 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: the T-820 conflict-fix worker saw app-surface fail on the bulk base d4c82050 WITHOUT its merge on: 'pane 2's priors toggle never flips' (T-806's assertion) and 'the fog key list has an extra none' (T-807's) - same two as the T-933 worker's (layers-menu toggle + fog key). Same defect set; bisect covers both.
+    commit: daf76a79
   - id: T-958
     milestone: MMAP
     title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-SHEET-FLAKE
@@ -28258,6 +28270,7 @@ tasks:
       FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
       DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
+    commit: 5c0891d1
   - id: T-959
     milestone: MLIVE
     title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
@@ -28314,7 +28327,8 @@ tasks:
   - id: T-962
     milestone: MAUTO
     title: RDS PI committed and Confirmed from ~3 CRC-valid groups (98.085 PI 1704; oracle saw no RDS) - identity needs vote counts and a provisional state
-    status: todo
+    status: in-progress
+    branch: task-t962
     priority: P1
     deps: []
     parallel_group: RDS-EVIDENCE
@@ -28398,7 +28412,8 @@ tasks:
   - id: T-967
     milestone: MMAP
     title: Decoded identity (PI/PS etc.) is not shown in the inventory list rows
-    status: todo
+    status: in-progress
+    branch: task-t967
     priority: P2
     deps: []
     parallel_group: UI-LIST-IDENT
@@ -28525,6 +28540,8 @@ tasks:
       FM/RDS P1 (T-926) sub-ticket 2 of 5 (supervisor 05:50): the unprompted hk-rds chain decodes ONE ~4-group snapshot (~0.35 s of RDS), commits PI and stops - so PS (four 0A segments), RT and PTY can never appear unprompted (window 1: PS unprompted 0 of 19; 101.3 'ps: null, ps_frames: []' after a 3+ min dwell). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, 'FM: Listen, the UI decode path, and the unprompted RDS dwell'.
       DELIVER: continuous RDS accumulation on the DETECTION row - once a WFM emitter has RDS, the chain keeps decoding it incrementally (CLAUDE.md: decode extends with the region, never re-decoding what is done) and accumulates PS (segment-assembled, stable-until-changed, dynamic PS tracked as a sequence), RT (A/B flag), PTY, AF, CT into the emitter's decode record as an accumulated field view (the user's 'RDS as accumulated field view, not packets'); bounded CPU per station (listener-budget, T-872) and it stops when the emitter ends. Tests through the mock SDR on the FM fixtures: PS/RT/PTY accumulate on the station's own row matching the hidden truth / the rds_ref oracle; red on current code. Depends on T-926 (auto-attach, touching the same chains) to avoid two workers in chains/.
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, from T-962's final review (PASS): when this ticket changes RDS accumulation, keep T-962's contract true for ANY GroupConfig - crates/hk-demod/src/record.rs:164-167 writes identity_votes_in_window = pi.window_votes, which is capped at GroupConfig::pi_commit_votes, while identity_votes_needed is always IdentityScheme::RdsPi.commit_votes() (10); a config above 10 would break 'provisional == in_window < needed' (docs/api.md:422, api_contract.rs:2908-2916). Derive the cap from the model constant, not the decoder config.
     core_interface: true
   - id: T-972
     milestone: M2-hardening
@@ -28647,6 +28664,8 @@ tasks:
       core_interface (detection/inventory). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): more overlap cases left standing: overlapping Confirmed boxes at 462.0076 / 462.0099 MHz (~100 kHz each), a stationary 12.5 kHz comb at 445.3-445.6 MHz Confirmed as ONE 105 kHz emitter with overlapping candidates, and triplicate candidates - none re-analysed.
+
+      2026-09-25 coordinator, evidence from T-974's triage (mock SDR, deterministic enough to reproduce): hk-cli api_contract inventory_and_analysis_strongest_find_the_blind_fm_station fails ALONE on main's code 3 of 6 runs - api_contract.rs:1719 'two boxes served stacked in time and frequency': two Candidates for one station, 99.8309-99.8517 MHz over 1790360024.517-027.598 s (count 7) and 99.8363-99.9161 MHz over 1790360024.389-026.650 s (count 4), both closed, both served by /api/inventory; the T-369 overlap re-analysis did not resolve the pair. Use it as this ticket's CI-visible failing-first test (it already exists and is red intermittently); when fixed it must pass alone 20/20.
     core_interface: true
   - id: T-979
     milestone: M3
@@ -28897,7 +28916,7 @@ tasks:
   - id: T-993
     milestone: MMAP
     title: "Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-TOPBAR
@@ -28917,10 +28936,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 10:02 via supervisor (staging): Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 11:55).
+      Retired the app-shell top bar over the map. In Explore, <header class="bar"> is display:none, so the canvas's top row is the page's first pixel row (measured: .sf-canvas top == 0 and the bar box is 0x0 at 1280x800 and at 400x820). Its controls are MOVED, not copied (ids and listeners unchanged), into the map's floating cluster by the new ui/src/app/chrome/top-chrome.ts, and put back into the framed bar in their original order for Decode/History. Explore/Decode/History, device state, readouts, rec and stream status go into a compact .map-status pill: top-centre on wide screens, under the top-right cluster when the top row is too narrow. The T-409 nudges go into .map-nudge under Go-to, and the retune offer moves down one row. Review becomes an icon button with a count badge in the top-right cluster. Theme goes into a new ⋯ settings menu there, with a visible close and Esc handled by the overlay stack. All of it fades with the cluster, and the pill stays solid while it says the stream is not live. At <=600 px the cluster buttons are 32 px wide so Go-to keeps some width beside 8 buttons. New e2e app-top-chrome clicks every former bar action at both widths, each in at most 2 clicks: modes take 1, Review 1, Theme 2 (⋯ then Theme), and a nudge press reaches /api/control/* against the mock SDR. It is red with the old floating bar rule put back. The e2e specs and unit tests that asserted the old bar are rewritten to assert there is no bar. Screenshots: /Users/daniellewis/.hackriff-ops/work/T-993/shots/top-chrome-1280.png, top-chrome-400.png, top-chrome-{1280,400}-more.png.
+      Tests: just test-ui -> exit 0 (91/91 test files passed (build + typecheck + node suites)); cd ui && HK_BIN=../target/debug/hk node e2e/run.mjs app-top-chrome -> exit 0 (2/2: 1280x800 and 400x820, no bar, every former bar action clicked); cd ui && node e2e/run.mjs app-top-chrome  (old floating .bar rule re-injected into map-layout.css) -> exit 1 (both widths fail: 'the old top bar still takes a box over the map'); cd ui && HK_BIN=../target/debug/hk node e2e/run.mjs app-phone app-sheet app-side-chip app-dismiss app-status scan-everything app-detail -> exit 1 (6/7 passed. app-phone failed under 3-lane load: every idle opacity read 1, including dock/zoom/FAB, which this change does not touch. It passed alone (next entry).); cd ui && HK_BIN=../target/debug/hk node e2e/run.mjs app-phone -> exit 0 (passes alone: bar 0 px, canvasTop 0, status/nudge/dock/zoom/fab/chip all fade to 0.35)
+      precheck exit 0
+      Commits: c1b05d55
+      Observed, not chased: app-phone.e2e.mjs's idle-fade step read opacity 1 for every element (dock, zoom and FAB too) when run in a 3-lane e2e batch, and passed alone. Under load it looks like the 800 ms transition wait or the idle timer gets starved. Deflaker candidate. | At 400 px the floating Go-to input is ~100 px wide beside the 8-button cluster, so its placeholder is cut off ('Go to f…'). Folding Annotate/Pin into a menu at phone width would win the space back. | Decode and History still use the framed shell's bar (as the ticket scoped it to the map). Retiring it there too would be a follow-up.
+      Resources: 753 CPU-s, peak 6.8 GB
+    commit: a7f58d37
   - id: T-994
     milestone: MMAP
     title: "Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires"
-    status: todo
+    status: in-progress
+    branch: task-t994
     priority: high
     deps: []
     parallel_group: MAP-OUTPUTS
@@ -28943,7 +28972,8 @@ tasks:
   - id: T-995
     milestone: MMAP
     title: "Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired"
-    status: todo
+    status: in-progress
+    branch: task-t995
     priority: high
     deps: []
     parallel_group: MAP-MINIMAP
@@ -29274,6 +29304,150 @@ tasks:
       FOUND BY merge runner bisect 2026-09-25: Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix
     dispatch: manual
     high_effort_reason: "bulk red with no single culprit: interaction-vs-nondeterminism triage across three branches on the replay/recovery path, a real-time-adjacent area"
+  - id: T-1016
+    milestone: M2-hardening
+    title: "sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-SWEEP-RESIDENCY
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY the merge runner / supervisor (2026-09-25 11:34): hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads has reddened THREE bulk gates (2026-09-24 16:21, overnight, 2026-09-25 11:26 - base 6b521960, 12 branches; today 29 branches waited on it). Each red costs a solo re-run or a bisect. Messages (ops merge-runner.log):
+        crates/hk-pipeline/tests/sweep_residency.rs:188 '400 attaches left 17 chains running, above the 16 cap' (report: 'attaches 25: threads 60 running 16 ... + 0 classifying; attaches 400: threads 62 running 17 ... + 1 classifying')
+        crates/hk-pipeline/tests/sweep_residency.rs:229 '400 attaches left 17 chains (classifying chains excluded) running, above the 16 cap'
+      The test (T-558) asserts the run-wide chain cap (16) holds under a sustained survey. Flakes registry: branch_defects 2, never triaged alone.
+      DELIVER (deflake-triage rules): run it ALONE >= 10x on main (nextest -p hk-pipeline -E 'binary(sweep_residency)') and under load; then decide:
+      - red alone => a REAL cap defect (an admission race letting a 17th chain start, or a finishing chain counted before it releases its slot): fix the product (the admission/release ordering), prove red on regression. The cap is a CPU-budget invariant - do not raise it or loosen the bound.
+      - passes alone, red only under load => the COUNT is racy, not the cap: count at a deterministic point (join/quiesce the chains that have ended, or read the scheduler's own admitted-count under its lock) instead of sampling live threads at an instant; never a sleep or retry. If the assertion is inherently a load-dependent bound it moves to the `timing` tier (docs/10 §3.6) with evidence - but prefer the deterministic count.
+      Do not #[ignore], quarantine or loosen. Red-on-regression proof required (re-inject an off-by-one admission and show the test catches it).
+      TESTING PROTOCOL (CLAUDE.md): targeted only (cargo nextest run -p hk-pipeline -E 'binary(sweep_residency)'; just precheck hk-pipeline), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY supervisor 2026-09-25 11:34 (merge gate reds x3): sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point
+    high_effort_reason: "three bulk reds on a CPU-budget invariant (the run-wide chain cap): real admission race vs racy count must be told apart and fixed deterministically on the real-time scheduling path"
+    dispatch: manual
+  - id: T-1017
+    milestone: MAUTO
+    title: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+    status: todo
+    priority: medium
+    deps:
+    - T-967
+    parallel_group: IDENTITY-LABEL
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus review of T-967 (2026-09-25). T-967 serves identity_label / identity_confidence on /api/inventory rows. Its first implementation guessed the label from field NAMES (IDENTITY_LABEL_KEYS ["ps","callsign","flight","station"], IDENTITY_CONFIDENCE_KEYS ["pi_share","share"] in crates/hk-model/src/decode.rs:243,248), which silently made any plugin's `station`/`share` field an identity label/confidence - an implicit plugin-output contract. The T-967 fix round narrows it to decoders with a known summary (RDS) and serves null otherwise. THIS TICKET designs the real contract:
+      1. A DECLARED label + confidence per decoder: the decoder/recipe manifest (and the built-in chains) state which output field is the human-readable identity label (e.g. RDS PS voted most-frequent, ADS-B callsign, AIS vessel name, FLEX/POCSAG capcode alias) and which is its confidence, with the confidence's meaning (vote share, CRC-valid rate). Plugin/stream contract (ADR-0010/0011, docs/stream-contract.md) + docs/api.md + api_contract.rs together (T-079). Pluggable decoders are consumers (CLAUDE.md), so a plugin opts in by declaring, never by naming a field a certain way.
+      2. Show the label on the other surfaces that carry identity: /api/events rows and the Selected/focus panel's identity box (T-967 worker's GAP 3).
+      3. Window scoping: today the label (like identity_value) is the all-time latest committed one; when a pane is scrubbed into the past the row can show a label decoded after the window. Either scope the label to the viewed window (the inventory is time-scoped to the view - CLAUDE.md signal model) or state the rule in docs/api.md; prefer scoping.
+      ACCEPTANCE: a plugin that declares no label shows none; RDS, AIS (T-963) and FLEX (T-950) show their declared labels via the manifest path; a scrubbed pane shows the label known within its window; contract tests for each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-model/hk-api/hk-plugins binaries you touch, api_contract, just test-ui, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-967 2026-09-25: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+
+      2026-09-25 coordinator, from T-967's re-review (PASS): add the missing guard test while here - a restricted/metadata-only decode naming the same PI alongside an hk-rds summary row must make latest_decode_identity_summary return None (withheld row serves identity_label and identity_label_share null); correct by inspection today (crates/hk-model/src/repo/gating.rs, IdentityAccess::Standard.reveals), untested. T-967 landed the RDS-only summary; this ticket generalises it by declaration.
+    core_interface: true
+  - id: T-1018
+    milestone: MLIVE
+    title: "Coarse /api/tiles reads fold from the FINEST affordable level and never read their own pre-built T-585 node: read the exact node first, else the cheapest candidate ((3,1) 150 ms -> ~25 ms)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: TILE-READ
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-ASKED (2026-09-25, via supervisor): '/api/tiles takes ~180 ms per request ... why, when tiles are pre-built?' Review with measurements: ~/.hackriff-ops/handoffs/tile-latency-review-2026-09-25.md (staging b5dd0c4d, live HackRF, loopback). Headline: wall ~= cost.build_ms everywhere; transport/gzip/JSON-vs-binary on the wire are NOT the cause.
+      THE DEFECT: read_affordable_levels (crates/hk-api/src/tiles.rs:1001) sorts candidates by cell area ascending and tile_read (:1430) returns the first with observed cells, so a (3,1) tile reads 16 x 65 536 = 1 048 576 LEVEL-0 cells and max-folds them in 4 history-lock holds (135-152 ms build) while the T-585 incremental node (3,1) sits on disk unread (resolution.answered.exact_node: false). Measured: (2,0) 47-68 ms/262 144 cells; (3,1) 140-170 ms/1 048 576; (4,1) 262-280 ms; (6,1) 377-399 ms/1 261 568 cells in 18 holds (folded from node (3,0); the lattice stores lf, lt <= 3, so node (3,1) would halve it). Max-hold folds compose, so the exact node gives the identical answer for 65 536 cells. This is the prior review's R1 in a new form (docs/tile-perf-review-2026-09-21.md): T-585 built the coarse levels incrementally and the reader does not use them.
+      DELIVER: tile_read reads the EXACT node when it exists and covers the request; otherwise the candidate with the FEWEST source cells that can answer it (not the finest); the TILE_MAX_TOTAL_SOURCE_CELLS budget still bounds it. Honesty tiers unchanged: the answered level/resolution fields must still state what was drawn (never implying detail the level cannot deliver). Live edge (finest, growing) behaviour unchanged - live is never gated on a tile build.
+      GUARD TESTS (no wall clock): after ingest through the mock SDR, request an on-node coarse tile and assert resolution.answered.exact_node == true and cost.source_cells == cells^2 (65 536); for an off-lattice tile assert the chosen level is the one with the fewest source cells; assert the pixels equal the level-0 fold (max-hold composes) on the same data. Red on current code.
+      EXPECTED: (3,1) 150 -> ~25 ms, (6,1) 390 -> ~50 ms, lock holds 4 -> 1. Measure and report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile latency review): Coarse /api/tiles reads fold from the FINEST affordable level and never read their own pre-built T-585 node: read the exact node first, else the cheapest candidate ((3,1) 150 ms -> ~25 ms)
+    core_interface: true
+    high_effort_reason: the tile read path is the live/history canvas hot path and an honesty-tier contract (answered level must state what was drawn); choosing the source level changes what every coarse tile serves
+  - id: T-1019
+    milestone: MLIVE
+    title: "Tile body still carries three 65 536-element JSON grid planes (coverage duplicated per cell, frames, occupancy_max): compact them like max_db f16 (850 kB -> ~200 kB, 12 ms per-tile floor -> ~3 ms)"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: TILE-WIRE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-ASKED (2026-09-25, via supervisor): '/api/tiles takes ~180 ms per request ... why, when tiles are pre-built?' Review with measurements: ~/.hackriff-ops/handoffs/tile-latency-review-2026-09-25.md (staging b5dd0c4d, live HackRF, loopback). Headline: wall ~= cost.build_ms everywhere; transport/gzip/JSON-vs-binary on the wire are NOT the cause.
+      THE COST: even a hot-cache hit (build_ms 0.6) takes ~12 ms wall - building and writing an 826-925 kB JSON body (planes=f16). grid.coverage, grid.frames and grid.occupancy_max are still 65 536-element JSON number arrays (~900 kB of the body; grid = 1.09 MB before gzip); only max_db moved to f16. grid.coverage duplicates per cell what coverage.planes[].runs already sends compactly.
+      DELIVER: drop the per-cell grid.coverage when the client asked for compact planes (it is in coverage.planes[].runs); frames and occupancy_max as u16/u8 base64 planes like max_db's f16 (or one binary body), negotiated the same way planes=f16 is so old clients keep working; docs/api.md + api_contract.rs together (T-079); ui/src/surface/tile.ts decodes them (presentation only) with a ui/test asserting the request the client builds. Batch route benefits the same.
+      EXPECTED: body 850 -> ~200 kB, per-tile floor 12 -> ~3 ms, batch of 9 x (0,0) 210 -> ~60 ms. Measure and report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile latency review): Tile body still carries three 65 536-element JSON grid planes (coverage duplicated per cell, frames, occupancy_max): compact them like max_db f16 (850 kB -> ~200 kB, 12 ms per-tile floor -> ~3 ms)
+  - id: T-1020
+    milestone: MLIVE
+    title: "Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache"
+    status: todo
+    priority: medium
+    deps:
+    - T-1019
+    parallel_group: TILE-CACHE
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER-ASKED (2026-09-25, via supervisor): '/api/tiles takes ~180 ms per request ... why, when tiles are pre-built?' Review with measurements: ~/.hackriff-ops/handoffs/tile-latency-review-2026-09-25.md (staging b5dd0c4d, live HackRF, loopback). Headline: wall ~= cost.build_ms everywhere; transport/gzip/JSON-vs-binary on the wire are NOT the cause.
+      THE COST: TILE_CACHE_MAX_BYTES = 32 MB ~= 35 of today's tiles against 135-290 tiles per screen; staging shows hits 0, misses 27, so a pan re-reads everything.
+      DELIVER (after B makes each entry ~5x smaller): size the cache in viewports (e.g. 256 MB after B, or count-based >= 300 entries; state the choice and the memory cost on the Jetson target, docs/02 hardware tiers); record hit/miss per pane (or per client) in /api/status.tile_cache (docs/api.md + api_contract.rs). Residency must not grow unbounded (T-453's constraint).
+      ACCEPTANCE: a pan back over a just-seen viewport is answered from the cache (hit count rises, no build), measured through the mock SDR.
+      Opus reviews (cheaper model on the tile path).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile latency review): Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache
+
+      2026-09-25 supervisor amendment (partial - the message arrived truncated, start being re-requested): (c) with A (T-1018) + B (T-1019) landed, the RAM hot cache is an ACCELERATOR ONLY - size it in viewports, not 32 MB. Raw IQ (ring.ci8, native 8-bit) is fine - no change there.
+  - id: T-1021
+    milestone: MLIVE
+    title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
+    status: todo
+    priority: normal
+    deps:
+    - T-1018
+    parallel_group: TILE-LOCK
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-ASKED (2026-09-25, via supervisor): '/api/tiles takes ~180 ms per request ... why, when tiles are pre-built?' Review with measurements: ~/.hackriff-ops/handoffs/tile-latency-review-2026-09-25.md (staging b5dd0c4d, live HackRF, loopback). Headline: wall ~= cost.build_ms everywhere; transport/gzip/JSON-vs-binary on the wire are NOT the cause.
+      Each /api/tiles chunk holds the history mutex for up to 500 k source cells (~70 ms at the measured 0.14 us/cell); ingest waits behind it - a live-edge stall source. Fix A cuts holds 16x for on-node tiles.
+      DELIVER: after A lands, MEASURE (not assume) per-request lock-hold time and the capture-thread ingest latency under a realistic tile load (a viewport of 135-290 tiles while live ingest runs through the mock SDR); only if a hold still stalls ingest beyond T-453's bound, change the chunking (smaller holds, or read nodes without the ingest lock). Report the numbers either way; if no change is warranted, say so and close.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile latency review): After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking
+  - id: T-1022
+    milestone: MMAP
+    title: "app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)"
+    status: todo
+    priority: high
+    deps:
+    - T-993
+    parallel_group: UI-SURFACE-RC
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-25 by T-955's fix-round worker; main 166117b4 reproduces): ui/e2e/app-surface.e2e.mjs fails 4 tests expecting 10 map controls and finding 12. Cause: T-957 (daf76a79, which fixed app-surface's two RC reds) and T-993 (a7f58d37, which retired the top bar and MOVED its controls into the map's floating cluster) landed in the SAME 12:13 batch; the per-merge gate is check-tier (no browser e2e since the user's 2026-09-24 test-tier rule), so the combination was never run together. The daily RC (just rc) would red on it.
+      DELIVER (rcfix rule): decide per assertion whether the spec's count/layout expectation is now stale (T-993 intentionally added the mode pill / status controls to the cluster -> update the spec to T-993's documented layout, asserting each control by role, not a bare count) or whether T-993 put a control somewhere the map-UI principles forbid (docs/23 §10: small floating chrome, fadeable, never over the time ruler) -> fix the product. Never loosen an assertion to pass; a bare count is brittle - assert the set of controls by name/role and their non-overlap.
+      ACCEPTANCE: `cd ui && node e2e/run.mjs app-surface app-top-chrome` green alone 3/3 on your own ports (HK_E2E_PORT / HK_E2E_JOURNEY_PORT >= 9216); red-proof that the rewritten spec still catches a missing or duplicated control.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the two specs alone), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-955 fix-round worker 2026-09-25 (red on main 166117b4): app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -172,7 +172,7 @@ def attention(ticket, branch, kind, detail=""):
     # stay in the file only.
     level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info",
              "DEFLAKE_BLOCKED": "amber", "DEFLAKE_ERROR": "amber", "DEFLAKE_REVIEW_FAIL": "amber",
-             "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
+             "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber", "SYNC_ERROR": "amber"}.get(kind)
     # "needs a person" only where no automation will pick it up (user, 2026-09-24 11:40): fix runs spent
     # or impossible, a cancellation to confirm, a review FAIL no fix round will take (REVIEW_FAIL is only
     # written then), and a BLOCKED hand-back that asks the user to decide.
@@ -486,6 +486,38 @@ def slot_cap(host):
     return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
 
 
+# THE ACCOUNT USAGE LIMIT (2026-09-25 08:11-08:57): every claude run died in 1-3 min with "You've hit your ... limit ...
+# your session limit resets 9:20am"; each was scored an 'error' (released only after RELEASE_AFTER_H), and dispatch kept
+# launching into the wall - 15 tickets in 7 min, the whole frontier, then 0 running until a person resumed them. Now such
+# a run is 'limited': nothing launches until the named reset, then each limited run resumes its own session.
+# The CLI's own account-limit message, as all 27 of 2026-09-25's read (review: 'limit reached' alone also matched
+# 'Context limit reached', one session's problem, which would freeze all dispatch).
+_USAGE_LIMIT = re.compile(r"^You've hit your\b", re.I | re.M)
+USAGE_LIMIT_FLOOR_S = 300   # a named reset already past still holds this long (review: the limit outlived its 9:20)
+
+
+def usage_limit_until(text, at):
+    """The reset instant a limit message names ('resets 9:20am') on `at`'s day - tomorrow only when that is more than
+    12 h behind `at` (a node2 result is copied back after the fact: 09:20 read at 09:20:15 has already reset, it is not
+    tomorrow's); unparseable -> `at` + 30 min."""
+    m = re.search(r"resets\s+(\d{1,2})(?::(\d\d))?\s*([ap]m)", text, re.I)
+    if not m:
+        return at + 1800
+    lt = time.localtime(at)
+    t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(m[1]) % 12 + (12 if m[3].lower() == "pm" else 0),
+                     int(m[2] or 0), 0, 0, 0, -1))
+    return t + 86400 if at - t > 12 * 3600 else t
+
+
+def usage_limited():
+    """The reset time while the account usage limit is in force, else 0."""
+    try:
+        until = float(open(f"{S}/usage-limited").read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+    return until if until > time.time() else 0
+
+
 def host_room(claims, h, exclude=None):
     """None when host `h` takes one more worker now, else why not. Fix runs count against its cap like dispatches
     (2026-09-25 05:40: a REVIEW_FAIL fix resumed on node2 at 6/6 made 7), and `max_load1` in hosts.json bounds its
@@ -555,7 +587,7 @@ def remote_sh(host, remote_cmd, timeout=120, input=None):
 
 def remote_wrapper(wt, branch, script, env, d, out_name):
     """The remote side of a run: the worker in its own session, its group id and both streams recorded on the box;
-    the branch pushed to the mirror when it ends, whatever its outcome (the Mac fetches it before the reap)."""
+    the branch pushed to the mirror on every commit (hkpy.reposync's hooks) and when it ends, whatever its outcome."""
     q = shlex.quote
     envs = " ".join(f"{k}={q(str(v))}" for k, v in env.items())
     inner = f"cd {q(wt)} && exec env {envs} nice -n 5 bash -c {q(script)}"
@@ -563,7 +595,9 @@ def remote_wrapper(wt, branch, script, env, d, out_name):
             # tee -p: a dropped connection (SIGPIPE on the channel) must not kill the copy on the host, nor the worker.
             f"setsid bash -c {q(inner)} </dev/null > >(tee -p {q(d + '/' + out_name)}) 2> >(tee -p -a {q(d + '/run.log')} >&2) & p=$!; "
             f"echo $p > {q(d + '/remote.pgid')}; wait $p; rc=$?; rm -f {q(d + '/remote.pgid')}; "
-            f"git -C {q(wt)} push -q --no-verify -f origin HEAD:refs/heads/{branch} >&2; exit $rc")
+            # hkpy.reposync's push (fast-forward, or a lease on the branch's own amend - never over the Mac's commits);
+            # the clone's hooks already pushed every commit, this catches a run that ended in a reset or a detached HEAD.
+            f"(cd {q(wt)} && {q(S + '/githooks/reposync-push')}) >&2; exit $rc")
 
 
 def remote_run_state(c):
@@ -596,11 +630,15 @@ def remote_prepare(host, wt, branch, d, resume=False):
     sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",
         f"{hosts()[host]['ssh']}:{to_remote(host, REPO)}/.git/lfs/objects/"], timeout=600, check=True)
     q = shlex.quote
+    rs = _reposync()
+    remote_put(host, f"{S}/githooks/reposync", rs.HOOK)    # every commit there reaches the mirror (invariant 29)
     rc, out = remote_sh(host, f"set -e; cd {q(REPO)}; git fetch -q origin; git branch -f main origin/main; git worktree prune; mkdir -p {q(d)}; "
+                              f"{rs.install_hook_cmd(q(S + '/githooks'), '.')}; "
                               f"if [ ! -d {q(wt)} ]; then "
                               f"if git rev-parse -q --verify origin/{branch} >/dev/null; then git worktree add -q -B {branch} {q(wt)} origin/{branch}; "
                               f"else git worktree add -q -b {branch} {q(wt)} origin/main; fi; "
-                              f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true; fi", timeout=600)
+                              f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true; "
+                              f"elif {rs.ff_worktree_cmd(q(wt), branch)}; then :; fi", timeout=600)
     if rc:
         raise RuntimeError(f"remote_prepare on {host}: {out.strip()[-200:]}")
 
@@ -626,6 +664,43 @@ def remote_attach(c):
     return p.pid
 
 
+_REAL_REPO = REPO
+
+
+def _reposync():
+    # A test that reaches here with the real checkout would push to the real host's mirror (2026-09-25: one did,
+    # through tick(), while this was written - 43 fast-forward pushes to node2). Tests patch REPO.
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.path.realpath(REPO) == os.path.realpath(_REAL_REPO):
+        raise RuntimeError("hkpy.reposync refused under pytest: REPO is the real checkout")
+    if f"{REPO}/py" not in sys.path:
+        sys.path.append(f"{REPO}/py")
+    from hkpy import reposync
+    return reposync
+
+
+_REPOSYNC = {}      # host -> the last tick's hkpy.reposync.sync_host result, for the status file
+GIT_SSH = "ssh " + " ".join(SSH_OPTS)      # a fetch/push to a host: BatchMode, ConnectTimeout, like every other ssh here
+
+
+def sync_repos(dry):
+    """Every tick, per host (invariant 29): its mirror's task branches fetched, and each fast-forwarded here, pushed
+    there, or reported drifting - so no ref this runner judges is more than one tick behind the host's."""
+    for h in hosts():
+        before = _REPOSYNC.get(h, {})
+        try:
+            if not host_ready(h):          # its last probe: unreachable (or stale) - no call that would wait on it
+                raise RuntimeError("host probe says unreachable or stale - not synced this tick")
+            _REPOSYNC[h] = r = _reposync().sync_host(REPO, h, dry=dry, ssh=GIT_SSH)
+        except Exception as e:
+            _REPOSYNC[h] = r = {"refs_in_sync": False, "drifting": None, "error": str(e)[:200], "branches": {}}
+        # what moved, every time; what drifts, when that set changes (a diverged branch is not re-logged every tick)
+        said = {b: e["state"] for b, e in r["branches"].items() if e["state"] != "in-sync"}
+        was = {b: e["state"] for b, e in before.get("branches", {}).items() if e["state"] != "in-sync"}
+        if r["error"] != before.get("error") or (said and said != was):
+            log(f"REPOSYNC {h}: " + (f"fetch failed ({r['error'][:160]})" if r["error"] else
+                                     ", ".join(f"{b} {st}" for b, st in sorted(said.items()))[:400]))
+
+
 def sync_back(c):
     """A remote run ended: its complete out file and run.log, its handback.json, its branch into this Mac's worktree,
     and the box's uncommitted files (for the reap's UNCOMMITTED rule). False = could not; the reap waits a tick."""
@@ -642,15 +717,37 @@ def sync_back(c):
                 raise RuntimeError(f"scp {f}: {r.stderr.decode(errors='replace').strip()[:160]}")
             elif os.path.exists(f"{d}/handback.json"):
                 os.remove(f"{d}/handback.json")          # never judge this run by an older hand-back
-        sh(["git", "fetch", "-q", host, f"+refs/heads/{branch}:refs/remotes/{host}/{branch}"], check=True, timeout=300)
-        if os.path.isdir(wt):
-            sh(["git", "reset", "-q", "--hard", f"{host}/{branch}"], cwd=wt, check=True)
-        rc, dirty = remote_sh(host, f"git -C {shlex.quote(wt)} status --porcelain --untracked-files=no", timeout=60)
+        # Invariant 29 (user ruling 2026-09-25 11:50): the hand-back is judged only from a branch verified identical on
+        # the host's worktree, its mirror and this Mac. 2026-09-25: nine resumed node2 runs (T-957..T-972) committed
+        # there and were judged NO_WORK from this Mac's unmoved ref.
+        rs = _reposync()
+        e = rs.sync_branch(REPO, host, branch, ssh=GIT_SSH)
+        if e["state"] == "fetch-failed":
+            raise RuntimeError(f"fetch {branch}: {e.get('why', '')[:160]}")
+        # The Mac's commits the host never had (a runner board result while the run went on): a clean host worktree
+        # takes them fast-forward, or the claim would sit in sync-error with nothing for a person to decide.
+        qwt = shlex.quote(wt)
+        rc, out = remote_sh(host, f"git -C {qwt} fetch -q origin +refs/heads/{branch}:refs/remotes/origin/{branch} && "
+                                  f"{{ {rs.ff_worktree_cmd(qwt, branch)} || true; }} && "
+                                  f"git -C {qwt} rev-parse HEAD && git -C {qwt} status --porcelain --untracked-files=no", timeout=60)
         if rc:
-            raise RuntimeError(f"remote status: {dirty.strip()[:160]}")
-        c["remote_dirty"] = [l for l in dirty.splitlines() if l.strip()]
+            raise RuntimeError(f"remote status: {out.strip()[:160]}")
+        head, *dirty = out.splitlines() or [""]
+        if e["local"] != e["mirror"] or head.strip() != e["mirror"]:
+            c["state"] = "sync-error"
+            detail = (f"{branch}: {host} worktree {head.strip()[:8] or '-'}, mirror {(e['mirror'] or '-')[:8]}, this Mac "
+                      f"{(e['local'] or '-')[:8]} ({e['state']}{': ' + e['why'] if e.get('why') else ''}) - not judged; the claim "
+                      "is held and re-judged the tick they agree")
+            if detail != c.get("sync_error_detail"):          # a held claim is re-tried every tick: said on change
+                c["sync_error_detail"] = detail
+                log(f"SYNC_ERROR {tid}: {detail}")
+            if not c.get("sync_error_said"):
+                c["sync_error_said"] = True
+                attention(tid, branch, "SYNC_ERROR", detail)
+            return False
+        c["remote_dirty"] = [l for l in dirty if l.strip()]
         sync_transcript(c)                      # the run's last stretch, which no tick copied
-        log(f"REMOTE {tid}: synced back from {host} at {sh(['git', 'rev-parse', '--short', host + '/' + branch]).strip()}"
+        log(f"REMOTE {tid}: synced back from {host} at {e['mirror'][:8]} ({e['state']}; host, mirror and this Mac agree)"
             + (f"; {len(c['remote_dirty'])} file(s) left uncommitted there" if c["remote_dirty"] else ""))
         return True
     except Exception as e:
@@ -1107,12 +1204,13 @@ def reap(claims, dry):
     changed = False
     killed = []
     for tid, c in list(claims.items()):
-        if c.get("state") != "running":
+        if c.get("state") not in ("running", "sync-error"):
             continue
+        held = c["state"] == "sync-error"           # its run is over and its pid may be recycled: never signal it
         pid = c["pid"]
         age_min = (time.time() - c["started"]) / 60
         limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
-        if alive(pid) and not c.get("detached"):
+        if not held and alive(pid) and not c.get("detached"):
             if track_usage(c):                      # the only chance to see this run's CPU time
                 changed = True
             if age_min > limit:
@@ -1135,7 +1233,7 @@ def reap(claims, dry):
             continue
         # finished - for a remote claim (a review runs on this Mac), the LOCAL ssh ended: ask the box first
         if c.get("host") and c["kind"] != "review":
-            state = remote_run_state(c)
+            state = "gone" if held else remote_run_state(c)
             if state == "running":
                 c["pid"], c["detached"] = remote_attach(c), False
                 log(f"REMOTE {tid}: connection to {c['host']} dropped, run still going there - re-attached (pid {c['pid']})")
@@ -1147,7 +1245,11 @@ def reap(claims, dry):
                     c["detached"] = True           # its local pid is dead: never signal it again (pids recycle)
                     changed = True
                 continue
-            c["detached"] = False
+            if held:
+                log(f"SYNC {tid}: host, mirror and this Mac agree again - judged now")
+                c.pop("sync_error_said", None)
+                c.pop("sync_error_detail", None)
+            c["detached"], c["state"] = False, "running"
         changed = True
         # The root is gone; anything of this run still running is a LEAK, holding cores and disk
         # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
@@ -1191,6 +1293,18 @@ def reap(claims, dry):
         text = str(res.get("result", ""))
         if res.get("session_id"):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
+        if res.get("is_error") and _USAGE_LIMIT.search(text):
+            out_f = c.get("out") or f"{d}/out.json"
+            until = max(usage_limit_until(text, os.path.getmtime(out_f) if os.path.exists(out_f) else time.time()),
+                        time.time() + USAGE_LIMIT_FLOOR_S)
+            if until > usage_limited():
+                open(f"{S}/usage-limited", "w").write(f"{until:.0f}\n")
+                attention(tid, c["branch"], "USAGE_LIMIT", f"the account usage limit stopped this run; nothing launches "
+                          f"until {time.strftime('%H:%M', time.localtime(until))}, then limited runs resume (lift early: rm {S}/usage-limited) "
+                          f"({text[:120]})")
+            c["state"], c["limited_until"] = "limited", until
+            record_done(c, "limited", res)
+            continue
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
         red, own = hand_back_reds(hb)
@@ -1325,6 +1439,8 @@ def launch_fix(c, fail_line, claims=None):
     # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
     # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
     # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
+    if usage_limited():
+        return dict(c, state="fix-held", fail_line=fail_line[:300], held_warned=True)
     if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
@@ -1440,9 +1556,10 @@ def _run_fix(c, n, prompt, out_name=None, fail_line=""):
 
 
 def branches_waiting():
-    """Branches in merge-queue.txt or in the running batch (the bulk marker's branches=)."""
+    """Branches in merge-queue.txt, in the running batch (the bulk marker's branches=), gating alone (merging-now) or
+    waiting in an isolation (isolate-remaining) - the runner empties the queue file before it acts on a line."""
     waiting = set()
-    for f in (MERGE_QUEUE, BULKMARK):
+    for f in (MERGE_QUEUE, BULKMARK, f"{S}/merging-now", f"{S}/isolate-remaining"):
         try:
             waiting |= set(open(f).read().replace("branches=", " ").split())
         except OSError:
@@ -1898,7 +2015,7 @@ def dispatch_remote(claims, dry):
     """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
     (dispatch-paused) does. One launch per host per tick."""
     # The alone-mode gate hold binds here too: in that mode the merge runner waits for EVERY claim, remote included.
-    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch() or usage_limited():
         return False
     try:
         tasks = board()
@@ -1925,7 +2042,7 @@ def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work" and not c.get("host")]
     cap = dispatch_cap()
     free = cap - busy_workers(claims)          # this Mac's: fix runs are workers on the box too
-    if free <= 0:
+    if free <= 0 or usage_limited():
         return changed_remote
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
@@ -2015,7 +2132,10 @@ def reap_worktrees(claims, dry):
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}   # a held fix resumes there
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited", "sync-error")   # a held fix resumes there
+            or (c.get("state") == "error" and time.time() - c.get("started", 0) < RELEASE_AFTER_H * 3600)}
+    # An 'error' claim's worktree is kept until the claim is released: its ERROR line tells a person to look, and a
+    # resume needs it (2026-09-25: three limit-killed claims, T-961/T-974/T-981, lost theirs within the hour).
     if not dry:
         sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
@@ -2241,7 +2361,7 @@ def reclaim_idle_targets(claims, dry):
     (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited", "sync-error")}
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
@@ -2316,6 +2436,15 @@ def read_deflake_requests(path=None):
 # specs under the user's authorization; the coordinator had to hold one by hand).
 _INFLIGHT = ("running", "queued", "review-failed", "gate-failed", "fix-held", "conflict")
 _DEFER_SAID = set()
+DEFLAKE_STALE_H = 12
+
+
+def branch_tip_ts(branch):
+    """Committer time of a branch's tip; now (i.e. fresh) when it cannot be read - never abandon on doubt."""
+    try:
+        return float(sh(["git", "log", "-1", "--format=%ct", branch]).strip())
+    except Exception:
+        return time.time()
 
 
 def deflake_deferred(slug, req, claims):
@@ -2327,7 +2456,15 @@ def deflake_deferred(slug, req, claims):
     target = merge_target()
     c = claims.get(DEFLAKE_PREFIX + slug)
     if c and c.get("branch") and commits_ahead(c["branch"], target) > 0:
-        return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+        # ...unless that branch is abandoned: not queued or gating, and untouched for DEFLAKE_STALE_H.
+        # 2026-09-24: fog-of-war's 00:35 WIP branch, retired by the coordinator at 03:55 but kept,
+        # deferred every new fog-of-war deflake for 17 h while the spec went red in 8 gates.
+        if c["branch"] in branches_waiting() or time.time() - branch_tip_ts(c["branch"]) < DEFLAKE_STALE_H * 3600:
+            return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+        if ("abandoned", slug, c["branch"]) not in _DEFER_SAID:
+            _DEFER_SAID.add(("abandoned", slug, c["branch"]))
+            log(f"DEFLAKE {slug}: its old branch {c['branch']} ({c.get('state')}) is abandoned (> {DEFLAKE_STALE_H} h "
+                f"untouched, not queued) - a fresh run starts from the gate base on a new branch; the old one is kept")
     test = str(req.get("test", ""))
     if not test.endswith(".e2e.mjs"):
         return ""
@@ -2459,8 +2596,11 @@ def launch_deflake(slug, req, prior, dry):
     key = DEFLAKE_PREFIX + slug
     run = (prior or {}).get("run", 0) + 1
     name = slug if run == 1 else f"{slug}-r{run}"      # a later run never reuses an earlier run's branch
-    branch, wt, d = f"task-{name}", f"{REPO}/.claude/worktrees/{name}", f"{WORKDIR}/{name}"
     base = merge_target()
+    while commits_ahead(f"task-{name}", base) > 0:     # ...nor its commits when the claim lost its `run` (claims rebuilt)
+        run += 1
+        name = f"{slug}-r{run}"
+    branch, wt, d = f"task-{name}", f"{REPO}/.claude/worktrees/{name}", f"{WORKDIR}/{name}"
     if dry:
         log(f"DRY-RUN would dispatch deflaker {key} run {run} for {req['test']} [opus/high] -> {branch} from {base}")
         return None
@@ -2488,7 +2628,7 @@ def launch_deflake(slug, req, prior, dry):
 def dispatch_deflakes(claims, dry):
     """At most ONE deflaker per tick, as a worker under the dispatch cap, never through a hold."""
     reqs = read_deflake_requests()
-    if not reqs:
+    if not reqs or usage_limited():
         return False
     ready, changed = pending_deflakes(claims, reqs)
     if not ready:
@@ -2593,9 +2733,20 @@ def record_queue_depth():
 def relaunch_held_fixes(claims):
     """tick()'s held-fix pass: each `fix-held` claim relaunches once its holds clear - before any new dispatch."""
     changed = False
-    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch() or usage_limited():
         return False
     for tid, c in list(claims.items()):
+        if c.get("state") == "limited" and not c.get("session_id"):
+            claims[tid] = dict(c, state="killed")
+            attention(tid, c.get("branch", ""), "KILLED", "stopped by the account usage limit with no session to resume - redispatch it")
+            changed = True
+            continue
+        if c.get("state") == "limited" and c.get("session_id"):
+            # The limit has reset: resume the session where it stopped (commits kept), through the cap like any fix.
+            claims[tid] = c = dict(c, state="fix-held", held_warned=False, fail_line=(
+                "KILLED your run was stopped by the ACCOUNT USAGE LIMIT, not by a failure of yours; the limit has reset. "
+                "Carry on with exactly what this session was last asked to do"))
+            changed = True
         if c.get("state") == "fix-held":
             if host_room(claims, c.get("host"), exclude=tid):
                 continue                  # no room where its session lives yet: stays held, said once when held
@@ -2612,6 +2763,10 @@ def relaunch_held_fixes(claims):
 
 def tick(dry):
     claims = load_claims()
+    try:
+        sync_repos(dry)                        # before anything reads a task branch (invariant 29)
+    except Exception as e:
+        log(f"sync_repos error: {e}")
     changed = reap(claims, dry)
     # A fix run that launch_fix HELD (dispatch-paused, gate-wanted, a gate in progress) is
     # relaunched once those clear - otherwise the claim sits as `fix-held`, the map shows the
@@ -2702,7 +2857,11 @@ def tick(dry):
               # remote host's running workers against its own cap, and whether its probe says it can take work.
               "hosts": {"mac": {"running": busy_workers(claims), "cap": dispatch_cap(), "held": host_room(claims, None)},
                         **{h: {"running": busy_workers(claims, h), "cap": slot_cap(h), "ready": host_ready(h),
-                               "held": host_room(claims, h), "probe_age_s": _probe_age(h)} for h in hosts()}}}
+                               "held": host_room(claims, h), "probe_age_s": _probe_age(h),
+                               **({"refs_in_sync": _REPOSYNC[h]["refs_in_sync"], "drifting": _REPOSYNC[h]["drifting"],
+                                   "branches": {b: {k: e.get(k) for k in ("mirror", "local", "behind", "ahead", "state")}
+                                                for b, e in _REPOSYNC[h]["branches"].items()}} if h in _REPOSYNC else {})}
+                           for h in hosts()}}}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 
