@@ -111,3 +111,7 @@ mod mauto_corpus;
 // false-label budget, and a stub that proves the suite can fail.
 #[path = "acceptance/mauto_negatives.rs"]
 mod mauto_negatives;
+// T-863 (MAUTO M-12): ADR-0015 §7's blind evaluation — the generic FSK/OOK sweep and the partial-
+// quality clause through the mock SDR and `/api/analyze`, armed on `server_backend()`.
+#[path = "acceptance/mauto_eval.rs"]
+mod mauto_eval;
