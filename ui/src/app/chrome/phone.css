@@ -19,13 +19,16 @@ body.chrome-idle .app:has(#view-explore:not([hidden])) > .bar:not(:focus-within)
 body.chrome-idle .app:has(#view-explore:not([hidden])) > .dock:not(:focus-within),
 body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visible) { opacity: .35; }
 
-/* ---- 2. Below the sheet breakpoint: the peek strip never covers the surface's statements --------
-   Under 900 px the sheet spans the width (sheet.css), so its 56 px peek strip sat over the last rows
-   under the canvas — the coverage sentence and the viewport rows (tier, level, IQ), which §10.2 says
-   may never be made less legible. The surface stops above the strip instead of under it. */
-@media (max-width: 900px) {
-  #view-explore > .centre { padding-bottom: calc(70px + 56px + 8px); }
-}
+/* ---- 2. Below the sheet breakpoint ---------------------------------------------------------------
+   T-824 shortened the surface here (`padding-bottom: calc(70px + 56px + 8px)`) because the sheet's
+   56 px peek strip sat over the last ROWS UNDER THE CANVAS — the coverage sentence and the viewport
+   rows, which §10.2 says may never be made less legible. T-918 moved those rows onto the canvas as
+   floating chrome and T-919 made them a line docked above the map strip (`--map-strip`, which
+   already lifts clear of the dock), so there is nothing under the canvas left to cover, and the
+   padding only bought the full-bleed canvas back out (§10.1: no chrome subtracts from it).
+   Measured, and why this is removed rather than reduced: at 420 x 860 the canvas was
+   {y: 56, h: 670} — 860 minus this padding and rule 3's `padding-top: 56px` — and
+   `app-dismiss.e2e.mjs`'s full-bleed assertion was RED at 420 px from T-918's own landing. */
 
 /* ---- 3. Phone width (≤ 600 px) ------------------------------------------------------------------ */
 @media (max-width: 600px) {
@@ -40,8 +43,10 @@ body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visi
   .app:has(#view-explore:not([hidden])) > .bar::-webkit-scrollbar { display: none; }
   .app:has(#view-explore:not([hidden])) > .bar > * { flex: none; }
   .app:has(#view-explore:not([hidden])) > .bar .brand { display: none; }
-  /* The canvas starts just under the one-row bar again (was 96 px for the wrapped one). */
-  #view-explore > .centre { padding-top: 56px; }
+  /* T-919: no `padding-top` here either — the bar FLOATS over the full-bleed canvas (§10.1) and
+     what keeps the panes' newest rows and the trace clear of it is the surface's own measured
+     `insetTopPx` (`centre/surface.ts` `fit()`, from the bar's real box at this width), not a
+     second, guessed copy of the bar's height in a media query. */
 
   /* The zoom stack docks just above the follow-live FAB (the mockup's phone `.rightstack`) instead of
      at mid-height, where the short phone stage put its "−" under the FAB. Same edge, same order —

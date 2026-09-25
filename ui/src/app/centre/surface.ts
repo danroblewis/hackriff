@@ -82,6 +82,7 @@ import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import { trackOverlay } from "../chrome/dismiss";
 import {
   BASE_STYLES, COLLECTION_Z, PLANE_ORDER, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
@@ -241,7 +242,45 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // The statements that used to be those rows (trace, IQ ring, fog, priors, per-viewport level,
   // orientation) float bottom-left with the readout, above the map strip: screen-space chrome over
   // the canvas, never faded (docs/23 §10.2: honesty statements).
-  const statusEl = h("div", { class: "sf-status", "data-band": "chrome" }, traceEl, ringEl, fogEl, priorsEl, chrome, note, readout);
+  //
+  // T-919 (user P1, docs/23 §10.6 rule 1): T-918's stack could grow to ~560 × 184 px — a large
+  // PERMANENT overlay over the waterfall, which is exactly what P1 forbids ("an overlay exists to
+  // be closed"; a panel's default state is its smallest). It is a compact STATUS LINE now:
+  //
+  //  - **Collapsed (the default)** — one line: the per-viewport row (`.sf-chrome`, trimmed by CSS
+  //    to where · level/tier and T-476's persistent Retune) beside the colour-scale sentence and
+  //    the hover readout. The tier/level and the scale are honesty statements, so they are on the
+  //    picture in every state: §10.2 says a statement about what the data *is* may not be made less
+  //    legible, and that applies to hiding it behind a press as much as to fading it.
+  //  - **Expanded** — adds the sentences that are a paragraph each: the spectrum trace, the IQ-ring
+  //    rules in words (retention bound, oldest IQ, whether this viewport has IQ), the fog note, the
+  //    ranked band-plan priors and T-450's orientation note.
+  //
+  // The dismiss (×, and Escape through the one overlay stack, T-900) returns it to the collapsed
+  // line, never to nothing — a viewer can put a paragraph away, not switch an honesty statement off.
+  const statusBody = h("div", { class: "sf-status-body", id: "sf-status-body", hidden: true },
+    traceEl, ringEl, fogEl, priorsEl, note);
+  const statusToggle = h("button", {
+    class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded": "false",
+    title: "The full status: spectrum trace, capture rules, coverage, priors and orientation",
+  }, "More") as HTMLButtonElement;
+  const statusClose = h("button", {
+    class: "sf-status-close", type: "button", "aria-label": "Close the status detail", title: "Close", hidden: true,
+  }, "×") as HTMLButtonElement;
+  const statusLine = h("div", { class: "sf-status-line" },
+    chrome, readout, h("div", { class: "sf-status-btns" }, statusToggle, statusClose));
+  const statusEl = h("div", { class: "sf-status", "data-band": "chrome", "data-open": "false" }, statusBody, statusLine);
+  const statusOverlay = trackOverlay("surface-status", () => setStatusOpen(false));
+  function setStatusOpen(on: boolean): void {
+    statusEl.dataset.open = on ? "true" : "false";
+    statusBody.hidden = !on;
+    statusClose.hidden = !on;
+    statusToggle.setAttribute("aria-expanded", on ? "true" : "false");
+    statusToggle.textContent = on ? "Less" : "More";
+    statusOverlay.open(on);
+  }
+  statusToggle.addEventListener("click", () => setStatusOpen(statusEl.dataset.open !== "true"));
+  statusClose.addEventListener("click", () => setStatusOpen(false));
   stage.append(statusEl);
   el.replaceChildren(stage);
 
