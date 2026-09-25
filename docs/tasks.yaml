@@ -24588,7 +24588,7 @@ tasks:
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -24630,6 +24630,7 @@ tasks:
       Commits: 54f40e73
       Observed, not chased: Under load ~25-33 on 2026-09-25, surface-nav (spec timeout 600 s), app-pins (surface mount >60 s) and app-trace (590 s timeout) could not be judged: a fresh hk serve took ~260-300 s to become ready, and run.mjs warned 'no observed coverage in 60000 ms'. live-edge failed identically on main's UI build. Not re-triaged on a quiet box. | precheck: this diff has no Rust. `cargo fmt --all --check` exit 0; I did not run clippy, since with no crate args it clippies the whole workspace. The UI's tsc typecheck is part of just test-ui (exit 0). | At desktop width the Research slide-in (top 56 px, right 8 px, z 7) still sits under the floating top-right cluster (z 20); I only fixed this at phone width. Worth a look under T-821/T-825. | The surface's statement rows under the canvas (slice/IQ ring/pane rows/coverage sentence) take ~250 px at 400 px wide, which leaves the canvas short on a phone. They are honesty statements, so I left them alone; compacting them is a design decision. | An app-page request goes to '/api/scheduler/api/scheduler?...' (doubled path), seen in the harness's API request list; did not investigate.
       Resources: 621 CPU-s, peak 2.5 GB
+    commit: 9917c15c
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
