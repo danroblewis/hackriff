@@ -208,6 +208,18 @@ pub trait Inventory: Send {
         Ok(())
     }
 
+    /// The `ConfirmPolicy.synthesized` clause this inventory confirms under (T-884 item 1).
+    ///
+    /// The run's inventory holds the configured [`ConfirmPolicy`], but MAUTO's attach step
+    /// ([`crate::synth::attach`]) runs outside it, over its own repository connection — so it has
+    /// to be told. Reading it from here rather than building a fresh [`SynthesizedConfirm`] is
+    /// what makes the configured field mean something on the one path that gates an irreversible
+    /// transition. The default is the default policy's, so an inventory that has no policy of its
+    /// own (the null inventory, a test double) is no weaker than the shipped rule.
+    fn synthesized_confirm(&self) -> SynthesizedConfirm {
+        ConfirmPolicy::default().synthesized
+    }
+
     /// The emitter whose inventory row `track`'s observations are recorded against, when this
     /// inventory has given it one (T-388).
     ///
@@ -480,13 +492,60 @@ impl DecisionRate {
 }
 
 impl SynthesizedConfirm {
+    /// The rule as it is **applied**: the configured clause, clamped so configuration can only
+    /// make the gate stricter than ADR-0022 §6's floors, never looser. A configured value on the
+    /// loose side of a floor (a width below 16, fewer than 24 analytic bits, no null control, a
+    /// higher assumed decision rate…) is replaced by the floor; a stricter one is kept; NaN reads
+    /// as the floor. `enabled: false` is kept — a disabled rule confirms nothing, the strictest
+    /// setting there is. The width floor may return to 8 only through ADR-0022 §4.3.1's
+    /// re-measurement (T-921) changing [`Self::ADR_MIN_CHECK_WIDTH`], never through config.
+    pub fn effective(&self) -> Self {
+        let floor = |v: f64, min: f64| if v.is_nan() { min } else { v.max(min) };
+        Self {
+            enabled: self.enabled,
+            min_analytic_holdout_bits: floor(
+                self.min_analytic_holdout_bits,
+                Self::ADR_MIN_ANALYTIC_HOLDOUT_BITS,
+            ),
+            hard_check_floor_bits: floor(
+                self.hard_check_floor_bits,
+                Self::ADR_HARD_CHECK_FLOOR_BITS,
+            ),
+            min_check_width: self.min_check_width.max(Self::ADR_MIN_CHECK_WIDTH),
+            assumed_decisions_per_week: self
+                .assumed_decisions_per_week
+                .min(Self::ADR_ASSUMED_DECISIONS_PER_WEEK),
+            require_null_control_when_searched: true,
+            max_suspect_detection_fraction: if self.max_suspect_detection_fraction.is_nan() {
+                Self::ADR_MAX_SUSPECT_FRACTION
+            } else {
+                self.max_suspect_detection_fraction
+                    .min(Self::ADR_MAX_SUSPECT_FRACTION)
+            },
+            forbid_overload_in_window: true,
+        }
+    }
+
+    /// ADR-0022 §4.1.
+    pub const ADR_MIN_ANALYTIC_HOLDOUT_BITS: f64 = 24.0;
+    /// ADR-0022 §4.3.
+    pub const ADR_HARD_CHECK_FLOOR_BITS: f64 = 16.0;
+    /// ADR-0022 §4.3.1 / §6, measured by T-577: 16 while §4.3.1's count is not re-measured.
+    pub const ADR_MIN_CHECK_WIDTH: u32 = 16;
+    /// ADR-0022 §1.2: the denominator the budget claim is derived at.
+    pub const ADR_ASSUMED_DECISIONS_PER_WEEK: u32 = 20_000;
+    /// ADR-0015 §5.5 condition 4.
+    pub const ADR_MAX_SUSPECT_FRACTION: f64 = 0.5;
+
     /// ADR-0022 §8: the budget claim at `decisions_7d` evaluations in the last seven days. Void
-    /// strictly above `assumed_decisions_per_week`; the gate's thresholds do not move either way.
+    /// strictly above `assumed_decisions_per_week` (as [`Self::effective`] applies it); the gate's
+    /// thresholds do not move either way.
     pub fn decision_rate(&self, decisions_7d: u64) -> DecisionRate {
+        let p = self.effective();
         DecisionRate {
             decisions_7d,
-            assumed_per_week: self.assumed_decisions_per_week,
-            budget_claim: if decisions_7d > u64::from(self.assumed_decisions_per_week) {
+            assumed_per_week: p.assumed_decisions_per_week,
+            budget_claim: if decisions_7d > u64::from(p.assumed_decisions_per_week) {
                 BudgetClaim::Void
             } else {
                 BudgetClaim::Holds
@@ -509,6 +568,11 @@ impl SynthesizedConfirm {
     /// `Ok(reason)` when the gate passes (the lifecycle reason), `Err(reason)` naming the first
     /// clause that refused. Never looks at the emitter's state: [`crate::synth::attach`] does.
     pub fn decide(&self, ev: &SynthesizedEvidence<'_>) -> Result<String, String> {
+        self.effective().decide_as_configured(ev)
+    }
+
+    /// [`Self::decide`] on a clause already clamped by [`Self::effective`].
+    fn decide_as_configured(&self, ev: &SynthesizedEvidence<'_>) -> Result<String, String> {
         use hk_synth::{Profile, Verdict};
         if !self.enabled {
             return Err("the synthesized confirm rule is disabled".into());
@@ -1444,6 +1508,10 @@ impl TrackInventory {
 }
 
 impl Inventory for TrackInventory {
+    fn synthesized_confirm(&self) -> SynthesizedConfirm {
+        self.policy.synthesized.clone()
+    }
+
     fn capture_name(&mut self, name: &str) {
         self.capture = Some(name.to_owned());
     }

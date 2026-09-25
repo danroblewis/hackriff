@@ -440,3 +440,17 @@ it starts spawning workers for `todo` tickets, its role file is stale: stop it a
 `.claude/roles/coordinator.md` on `main` carries the "Dispatch is … the work runner's job" paragraph.
 
 Then, if needed: `nohup cloudflared tunnel --url http://127.0.0.1:8901 &` for the dashboard.
+
+### The explorer window (T-923, on demand, Mac Studio only)
+```bash
+ops/launch.sh explorer --window 3h --dry-run   # validate: window, one instance, the commands it will run
+ops/launch.sh explorer --window 3h             # tmux session 'explore'
+```
+The pane runs `ops/explorer-window.sh`, which takes the radio lock (`just radio take explorer 3h …`),
+waits (≤ 150 s) for `just radio status` to show staging on replay, then runs
+`claude --agent explorer` (`.claude/agents/explorer.md`). It warns the agent 15 min before the end
+(`$HACKRIFF_OPS/explorer/wrap-up`), stops it at the deadline, stops any `hk serve` left on :8897,
+and releases the lock from an EXIT/INT/TERM/HUP trap. A crash or `tmux kill-session -t explore`
+releases it too; only a SIGKILL of the window script doesn't, and then the lock's `until` makes it stale.
+A second window is refused. The watchdog never relaunches it (`explorer` is not in `LIVE_ROLES`).
+Log: `$HACKRIFF_OPS/explorer/window.log`; journal: `$HACKRIFF_OPS/explorer/journal-YYYYMMDD.md`.

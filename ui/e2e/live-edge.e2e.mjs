@@ -45,10 +45,11 @@ const TRACE_PX = 96;
  * failure again — a decoration changing the geometry another ticket's assertions were measured in —
  * except here it would make the test *pass* on the trace's own colours, which is worse than red.
  */
-function paneRectOf(rect, dpr) {
-  const paneH = rect.h * dpr - MINIMAP_PX;
+function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
+  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  return { x: rect.x, w: rect.w, y: rect.y + traceH / dpr, h: (paneH - traceH) / dpr };
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
 }
 
 /**
@@ -124,7 +125,7 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   const { rect, ms } = await page.waitForCanvas(".sf-canvas", isRender, { timeoutMs: 90000 });
   t.diagnostic(`first fill after ${ms} ms; canvas ${rect.w}x${rect.h}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  const pane = paneRectOf(rect, dpr);
+  const pane = paneRectOf(rect, dpr, await page.canvasInsets());
   const strip = {
     x: Math.round(pane.x), w: Math.round(pane.w),
     y: Math.round(pane.y + pane.h * FRESH_FROM), h: Math.round(pane.h * (FRESH_TO - FRESH_FROM)),
@@ -348,7 +349,7 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
     "may scroll out before the silence gate reopens, so nothing below would be a claim about 502s");
   const { rect } = await page.waitForCanvas(".sf-canvas", isRender, { timeoutMs: 90000 });
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  const pane = paneRectOf(rect, dpr);
+  const pane = paneRectOf(rect, dpr, await page.canvasInsets());
   const at = { x: Math.round(pane.x + pane.w / 2), y: Math.round(pane.y + pane.h / 2) };
   const strip = {
     x: Math.round(pane.x), w: Math.round(pane.w),

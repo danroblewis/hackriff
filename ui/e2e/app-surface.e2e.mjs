@@ -299,10 +299,11 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     for (const d of snap.registry) assert.ok(planes.includes(d.plane), `${d.id} is offered as an overlay but registered on the ${d.plane} plane`);
     const rows = snap.registry.slice().sort((a, b) => planes.indexOf(a.plane) - planes.indexOf(b.plane) || a.z - b.z)
       .map((d) => [d.id, d.visibleByDefault]);
-    // Fixed, so the derivation cannot pass on an empty or gutted registry: the two core overlays
-    // are drawn, they paint first, and they are on by default (unknowns are never hidden by default).
-    assert.deepEqual(rows.slice(0, 2), [["rules", true], ["detections", true]],
-      "the registry must draw capture rules then detections first, both on by default");
+    // Fixed, so the derivation cannot pass on an empty or gutted registry: the core overlays are
+    // drawn, they paint first, and they are on by default (unknowns are never hidden by default).
+    // T-810's coarse-zoom density layer (z 15) paints between the capture rules and the detections.
+    assert.deepEqual(rows.slice(0, 3), [["rules", true], ["density", true], ["detections", true]],
+      "the registry must draw capture rules, density, then detections first, all on by default");
     return rows;
   };
 
@@ -377,6 +378,14 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   // like — painted by the one cell rule. Switching it off states in words that never-observed
   // spectrum is drawn as bare ground; a split pane inherits it and diverges; nothing reaches a
   // device route.
+  //
+  // The fog's key is not the only key in the menu: T-813 gave the detections overlay its symbology
+  // key (`markKeyEntries`) in the Overlays section. So the fog key is read off the coverage row it
+  // belongs to and the symbology key off the detections row, each exactly and in order, and the
+  // menu-wide list must be exactly the two in section order — a key row anywhere else, a fog row
+  // leaking out of the Coverage section or a symbology row leaking into it is red.
+  const FOG_KEY = ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"];
+  const MARK_KEY = ["confirmed", "candidate", "unexplained", "artifact", "curated"];
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -389,12 +398,20 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   const state = `JSON.stringify({
     fog: document.querySelector('#map-layers [data-axis=data] input[data-layer="coverage"]')?.checked ?? null,
     key: [...document.querySelectorAll('#map-layers .map-layer-key li')].map((e) => e.dataset.mark),
+    rowKey: Object.fromEntries(["coverage", "detections"].map((id) => {
+      const next = document.querySelector('#map-layers input[data-layer="' + id + '"]')?.closest('label')?.nextElementSibling;
+      return [id, next?.matches('.map-layer-key') ? [...next.querySelectorAll('li')].map((e) => e.dataset.mark) : null];
+    })),
+    drawsDetections: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '[]').some((l) => l.id === "detections"),
     said: document.querySelector('.sf-fog').hidden ? "" : document.querySelector('.sf-fog').textContent,
     head: document.querySelector('#map-layers h4')?.textContent,
   })`;
   const one = JSON.parse(await page.eval(state));
   assert.equal(one.fog, true, "the coverage fog must be shown by default: grey is the survey");
-  assert.deepEqual(one.key, ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"]);
+  assert.deepEqual(one.rowKey.coverage, FOG_KEY, "the coverage row's key: the fog's rows, all present, in order, contiguous");
+  assert.equal(one.drawsDetections, true, "this build draws no detections overlay, so T-813's key has no row to sit under");
+  assert.deepEqual(one.rowKey.detections, MARK_KEY, "the detections row's key: T-813's symbology, in its own section");
+  assert.deepEqual(one.key, [...FOG_KEY, ...MARK_KEY], "the menu's keys: the fog's under Coverage, then the symbology's under Overlays, and no other");
   assert.equal(one.said, "");
 
   await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);

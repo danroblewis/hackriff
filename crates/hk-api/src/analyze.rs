@@ -46,7 +46,8 @@ use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::repo::synthesis::Resolution;
 use hk_model::{
-    EmitterId, IdentityAccess, LifecycleState, RepoError, Repository, SelectionId, Timestamp,
+    EmitterId, IdentityAccess, InventoryIdentity, LifecycleState, RepoError, Repository,
+    SelectionId, Timestamp,
 };
 use serde_json::{Map, Value, json};
 
@@ -437,26 +438,42 @@ fn resolve_target(state: &ApiState, target: &Target) -> Result<Resolved, Fail> {
     }
 }
 
-/// Existence of `id`, resolving a merged emitter to the live entity like `/api/inventory/{id}`.
-fn emitter_exists(state: &ApiState, id: EmitterId) -> Result<(), Fail> {
+/// Existence of `id`, resolving a merged emitter to the live entity like `/api/inventory/{id}`,
+/// and whether its identity is **withheld** at [`IdentityAccess::Standard`] — the access every
+/// answer out of this process is gated at.
+fn emitter_exists(state: &ApiState, id: EmitterId) -> Result<bool, Fail> {
     let repo = inventory_store(state)?;
     let fail = repo_fail("inventory store", "no such inventory entry");
     let live = repo.live_emitter_id(id).map_err(&fail)?;
     repo.emitter_with_access(live, IdentityAccess::Standard)
-        .map(|_| ())
+        .map(|e| matches!(e.identity, InventoryIdentity::Withheld { .. }))
         .map_err(&fail)
 }
 
-/// The emitter's latest analysis, or the `not-searched` answer when none has run.
+/// The emitter's latest analysis, or the `not-searched` answer when none has run — or when the
+/// emitter's identity is `withheld`.
 ///
 /// **The distinction is the point.** A `None` here is never served as "unknown": an emitter
 /// nothing looked at and an emitter a finished search could not identify are different findings,
 /// and collapsing them is the defect ADR-0021 §7A.4 names.
-fn analysis(state: &ApiState, id: EmitterId) -> Result<Value, Fail> {
+///
+/// **Withheld rows read as not-searched** (T-884 item 6). `GET /api/inventory` already serves
+/// `synthesis: null` on such a row, for the reason T-159/T-163 gate `estimated_params` and
+/// `cluster_id`: a template id, a job id or a decode count appearing here would confirm a withheld
+/// identity indirectly. This route is the *full* row, so it leaked strictly more — `job` details
+/// and all. The answer is the same one a never-analysed emitter gets, with no marker that
+/// something is being held back, exactly as `/api/inventory/{id}/classification` does
+/// (`crate::classification`): an answer that says "withheld" is itself an oracle.
+fn analysis(state: &ApiState, id: EmitterId, withheld: bool) -> Result<Value, Fail> {
     let repo = inventory_store(state)?;
     let fail = repo_fail("inventory store", "no such inventory entry");
     let live = repo.live_emitter_id(id).map_err(&fail)?;
-    Ok(match repo.synthesis(live).map_err(&fail)? {
+    let row = if withheld {
+        None
+    } else {
+        repo.synthesis(live).map_err(&fail)?
+    };
+    Ok(match row {
         Some(row) => serde_json::to_value(&row)
             .map_err(|e| Fail::new(500, "failed", format!("serialising the analysis: {e}")))?,
         None => json!({
@@ -480,8 +497,8 @@ fn apply_post(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fa
     if !wants_job(body)
         && let Target::Emitter(id) = target
     {
-        emitter_exists(state, id)?;
-        let body = analysis(state, id)?;
+        let withheld = emitter_exists(state, id)?;
+        let body = analysis(state, id, withheld)?;
         // A read dressed as a control route: the target is audited, and nothing changes.
         return Ok(crate::control::ok(body, Value::Null, Value::Null));
     }
@@ -695,6 +712,115 @@ mod tests {
 
     fn body(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
+    }
+
+    /// T-884 item 6 — **the analyze read withholds what `/api/inventory` withholds.**
+    ///
+    /// Found by the T-860 Opus review. `GET /api/inventory` serves `synthesis: null` on a
+    /// withheld-identity row (T-159/T-163: a template id or a decode count must not confirm a
+    /// withheld identity indirectly), while `POST /api/analyze {"emitter_id"}` served the **whole**
+    /// row on the same emitter — pipeline, evidence, and the `job` block with its job id, profile,
+    /// template and decode counts.
+    ///
+    /// Red before the fix: the body carries `job` and a `solved` resolution for a withheld
+    /// emitter. After it, the answer is the one a never-analysed emitter gets — with no marker
+    /// that anything is held back, because a "withheld" flag is itself an oracle
+    /// (`crate::classification`).
+    #[test]
+    fn t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity() {
+        use hk_model::repo::synthesis::{
+            EmitterSynthesis, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage as RowStage, SynthesisJob,
+            Verdict as RowVerdict,
+        };
+        use hk_model::{Emitter, EmitterId, Identity, KnownStatus, Repository, Timestamp};
+
+        let t = |s: i64| Timestamp::from_unix_nanos(1_800_000_000_000_000_000 + s * 1_000_000_000);
+        // The emitter is written directly: nothing here exercises entity resolution, and the
+        // `hk-api` source may not name the ungated inventory getters (`inventory_api`'s guard).
+        let seed = || {
+            let mut repo = Repository::open_in_memory().unwrap();
+            let id = EmitterId::new();
+            repo.insert_emitter(&Emitter {
+                id,
+                f_center_hz: 929.6e6,
+                bandwidth_hz: 12e3,
+                first_seen: t(0),
+                last_seen: t(5),
+                count: 3,
+                fingerprint: Value::Null,
+                identity: Identity::Unknown,
+                known_status: KnownStatus::Unknown,
+                classifications: Vec::new(),
+                tags: Default::default(),
+            })
+            .unwrap();
+            repo.insert_synthesis(&EmitterSynthesis {
+                emitter_id: id,
+                provenance: SYNTHESIZED_BY_OUTPUT_ANALYSIS.into(),
+                engine: "hk-synth@test".into(),
+                t: t(1),
+                verdict: RowVerdict::Solved,
+                stage_reached: RowStage::S5Check,
+                pipeline: None,
+                evidence: Vec::new(),
+                trace: Vec::new(),
+                resolution: None,
+                receiver: None,
+                job: Some(SynthesisJob {
+                    job_id: "a7".into(),
+                    profile: "standard".into(),
+                    evidence_bits: 40.0,
+                    prior_bits: 0.0,
+                    analytic_holdout_bits: Some(30.0),
+                    template: Some(json!({ "id": "pocsag", "version": 1 })),
+                    recipe: json!({ "nodes": [] }),
+                    recipe_hash: "sha256:abc".into(),
+                    check: None,
+                    holdout: None,
+                    trace_summary: None,
+                    replay_key: None,
+                    null_control: None,
+                    sealed_resolution: None,
+                    decodes_stored: 12,
+                    decodes_valid: 12,
+                    confirm: None,
+                }),
+            })
+            .unwrap();
+            let state = ApiState {
+                inventory: Some(Arc::new(Mutex::new(repo))),
+                ..ApiState::default()
+            };
+            // `withheld` is what `emitter_exists` reads off the gated inventory entry; both values
+            // are exercised here rather than through the process-wide content-gating switch,
+            // which other tests in this binary share.
+            (
+                id,
+                analysis(&state, id, false).unwrap_or_else(|_| panic!("served")),
+                analysis(&state, id, true).unwrap_or_else(|_| panic!("served")),
+            )
+        };
+
+        // The control: a row that is not withheld is served in full, `job` and all.
+        let (id, clear, held) = seed();
+        assert_eq!(clear["emitter_id"], json!(id.to_string()));
+        assert_eq!(clear["job"]["job_id"], json!("a7"), "{clear}");
+        assert_eq!(clear["verdict"], json!("solved"), "{clear}");
+
+        // Withheld: the same answer a never-analysed emitter gets, and nothing else.
+        assert_eq!(held["emitter_id"], json!(id.to_string()));
+        assert_eq!(held["resolution"]["kind"], json!("not-searched"), "{held}");
+        assert_eq!(held["pipeline"], Value::Null, "{held}");
+        assert_eq!(held["evidence"], json!([]), "{held}");
+        assert_eq!(held["trace"], json!([]), "{held}");
+        let obj = held.as_object().unwrap();
+        for leaked in ["job", "verdict", "stage_reached", "engine", "receiver"] {
+            assert!(obj.get(leaked).is_none(), "{leaked} leaked: {held}");
+        }
+        // No marker either: the answer must not itself say that something is held back.
+        let text = held.to_string();
+        assert!(!text.contains("withheld"), "{held}");
+        assert!(!text.contains("a7") && !text.contains("pocsag"), "{held}");
     }
 
     #[test]

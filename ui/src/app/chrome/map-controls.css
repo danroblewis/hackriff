@@ -15,6 +15,10 @@
   left: var(--panel-gap, 8px);
   right: 8px;
   font: 12px var(--ui); color: var(--text);
+  /* T-824: the top-right cluster's real width (four 36 px buttons, their gaps, padding and border,
+     plus Go-to's gap to it), so Go-to and the retune offer stop short of it at phone width rather
+     than sliding under it (the old 132 px fallback was one button short). */
+  --topright-w: 170px;
 }
 /* T-803: no right-hand focus column any more (it became the bottom sheet, which leaves this
    cluster's right-edge column clear — `sheet.css`'s `--sheet-gutter`), so the right inset is fixed. */
@@ -57,7 +61,10 @@
 .map-topright { top: 0; right: 0; padding: 2px; display: flex; gap: 4px; }
 /* An open menu paints over the zoom stack beside it (z-index), and scrolls rather than running off
    a short stage (T-882 made the layers menu taller by the colour-scale group). */
-.map-layers, .map-pane-menu { z-index: 2; max-height: calc(100% - 54px); overflow-y: auto; }
+/* T-918: the stage is full-bleed now, so it runs under the app's floating dock; `--chrome-bottom`
+   (set by the surface's `fit`, the mirror of `--chrome-top`) is how far that dock reaches up over it,
+   and a menu stops short of it rather than scrolling its last item under the dock. */
+.map-layers, .map-pane-menu { z-index: 2; max-height: calc(100% - 54px - var(--chrome-bottom, 0px)); overflow-y: auto; }
 .map-layers { top: 46px; right: 0; width: min(280px, 100%); box-sizing: border-box; padding: 10px 12px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
 /* T-900: the layers menu's visible dismiss (P1: closeable, never only faded). */
 .map-layers-head { display: flex; align-items: center; justify-content: space-between; margin: -4px -4px 6px 0; font: 600 11px var(--ui); color: var(--muted); }

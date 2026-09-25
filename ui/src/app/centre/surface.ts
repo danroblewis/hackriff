@@ -44,16 +44,16 @@ import { newClientId, setTileClientId } from "../../surface/clientid";
 import { markSurface } from "../../surface/mounted";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
-  markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
+  GENERALIZE_BELOW_CSS_PX, markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
   selectionMarkBoxes, signalMarkBoxes,
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
-import { PinLayer, detectionPins, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
+import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
-import { fogKeyEntries, rangeLabel } from "../../surface/legend";
+import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
@@ -87,6 +87,8 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
+import { DensityFetches, densityAddrs, densityQuads, densityUrl, isCoarseZoom, parseDensityTile, type DensityTile } from "../../surface/density";
+import { addrSpelling } from "../../surface/lattice";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
@@ -95,6 +97,8 @@ import {
 } from "../map/research-slice";
 
 const S_TO_NS = 1e9;
+/** The centre poll's period, ms — the unit the density refresh paces its asks in. */
+const DENSITY_POLL_MS = 1000;
 /** The map strip along the bottom of the canvas, device px. */
 const MINIMAP_PX = 110;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
@@ -199,7 +203,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, tipEl, captureEl, readout);
+  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -233,7 +237,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   recordBtn.dataset.paneAct = "record";
   // T-882: there is no toolbar row. Live is the follow-live FAB, Trace/Signals/Contrast are the
   // layers menu, Measure and pane management are the floating cluster's top-right (`map-controls`).
-  el.replaceChildren(stage, traceEl, ringEl, fogEl, priorsEl, chrome, note);
+  // T-918: the canvas is full-bleed (docs/23 §10.1) — no row below the stage subtracts from it.
+  // The statements that used to be those rows (trace, IQ ring, fog, priors, per-viewport level,
+  // orientation) float bottom-left with the readout, above the map strip: screen-space chrome over
+  // the canvas, never faded (docs/23 §10.2: honesty statements).
+  const statusEl = h("div", { class: "sf-status", "data-band": "chrome" }, traceEl, ringEl, fogEl, priorsEl, chrome, note, readout);
+  stage.append(statusEl);
+  el.replaceChildren(stage);
 
   let preview: SurfacePreview | null = null;
   /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
@@ -397,7 +407,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
-    return markQuads(signalMarkBoxes(Object.values(s.inventory.rows), focusId), edge, pane.box, pane.rect);
+    // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
+    // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
+    const rows = Object.values(s.inventory.rows);
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
+      { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
   // through the pane's own box. The frame only records which window the pane showed; the fetch is on
@@ -460,13 +474,68 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
   const artifactQuads: OverlayLayerFn = (pane, edge) =>
     artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
+  // T-810 (MAP-10): the coarse-zoom density layer — `GET /api/tiles/events` counts, laid out here
+  // through the SAME `toClip` and drawn only where `isCoarseZoom` says this pane is genuinely
+  // coarse-zoomed (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for
+  // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
+  // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
+  const densityByPane = new Map<string, DensityTile[]>();
+  // Per-address copies and WHEN each is asked again (`DensityFetches`, the tile cache's own
+  // live-edge/sealed rule): a following pane's live-edge tile is revalidated on a bounded cadence, a
+  // failed ask is retried with backoff, and a sealed past tile is asked for once.
+  const densityFetches = new DensityFetches();
+  const densityInflight = new Set<string>();
+  // The refresh/backoff pacing is counted in POLL TICKS (the poll below runs every
+  // `DENSITY_POLL_MS`), never a browser clock — the centre modules are on the capture clock only
+  // (T-393/T-386's guard); this is request pacing, not a time anything is placed at.
+  let densityPolls = 0;
+  const densityQuadsFn: OverlayLayerFn = (pane) => {
+    const lat = preview?.view.surface.lat;
+    if (!lat) return [];
+    return densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
+  };
+  /** Ask for each density-on, coarse-zoomed pane's tile(s) that `DensityFetches.due` says need it
+   * (`isCoarseZoom`, the same gate `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane
+   * would draw nothing with is a request this layer has no use for). A `GET` of an inventory
+   * aggregate — never a device route — one batch in flight per pane; a pane whose current address
+   * needs no tile (a degenerate box) is simply left empty. */
+  const refreshDensity = () => {
+    const p = preview;
+    if (!p) return;
+    const lat = p.view.surface.lat;
+    const ids = new Set(p.view.panes.list().map((x) => x.id));
+    for (const id of [...densityByPane.keys()]) if (!ids.has(id)) densityByPane.delete(id);
+    const edgeNs = p.view.panes.lastEdgeNs;
+    const nowMs = ++densityPolls * DENSITY_POLL_MS;
+    const keep = new Set<string>();
+    for (const pane of p.view.panes.views(edgeNs)) {
+      const on = isLayerVisible(layersFor(pane.id), "density") && isCoarseZoom(lat, pane.box, pane.rect.w, pane.rect.h);
+      if (!on) { densityByPane.set(pane.id, []); continue; }
+      const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
+      for (const a of addrs) keep.add(addrSpelling(a));
+      densityByPane.set(pane.id, densityFetches.tiles(addrs));
+      if (densityInflight.has(pane.id)) continue;
+      const due = densityFetches.due(lat, addrs, edgeNs, p.view.panes.isFollowing(pane.id), nowMs);
+      if (due.length === 0) continue;
+      densityInflight.add(pane.id);
+      Promise.all(due.map((a) => client.get<unknown>(densityUrl(a))
+        .then((body) => {
+          const t = parseDensityTile(a, body);
+          if (t) densityFetches.succeeded(a, t, edgeNs, nowMs); else densityFetches.failed(a, nowMs);
+        })
+        .catch(() => { densityFetches.failed(a, nowMs); })))
+        .then(() => { densityByPane.set(pane.id, densityFetches.tiles(addrs)); })
+        .finally(() => { densityInflight.delete(pane.id); });
+    }
+    densityFetches.retain(keep);
+  };
   // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
   // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
   // other layer. The poll below only refreshes the records; it never positions anything (T-388).
   let paths: MarkPath[] = [];
   const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
-    rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
+    rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -515,8 +584,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
     const s = store.get();
     const all = detectionPins(Object.values(s.inventory.rows));
+    // T-910: the feature layer (hit areas, focus, labels) is over the DETECTIONS it identifies, so a
+    // pane that hides its detections has none of it either — no invisible target for an undrawn box.
     const layouts = panes
-      .filter((v) => isLayerVisible(layersFor(v.id), "pins"))
+      .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
     pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
     placeTip();
@@ -1181,10 +1252,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
           // T-809: the `dom`-plane pins are an overlay-content toggle too (docs/24 §4's second axis).
           overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
-            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible } };
+            // T-813: the detections layer's key — same symbology, quoted from `marks.ts`, `markKeyEntries` draws.
+            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key: l.id === "detections" ? markKeyEntries() : undefined } };
           }).concat(store.get().research.collections.map((c) => ({ plane: "overlay" as const, z: COLLECTION_Z, row: {
             id: collectionLayer(c.id), label: c.name, hint: c.reserved ? "collection · bookmarks" : "my collection",
             on: collectionVisibleOn(reg, c),
+            key: undefined,
           } }))).sort((a, b) => PLANE_ORDER.indexOf(a.plane) - PLANE_ORDER.indexOf(b.plane) || a.z - b.z).map((x) => x.row),
           viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceOn }],
           scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
@@ -1232,13 +1305,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
-      // The map strip is drawn in device px; the FAB docks above it in CSS px.
-      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr}px`);
+      // T-918: the canvas runs under the floating dock at the bottom (full-bleed, docs/23 §10.1), so
+      // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
+      const dock = document.querySelector<HTMLElement>(".app > .dock");
+      const dr = dock?.getBoundingClientRect();
+      const under = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      const lift = under > 0 ? under + 8 : 0;
+      stage.style.setProperty("--chrome-bottom", `${under}px`);
+      // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
+      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + lift}px`);
       // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
       // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
       // rather than under it. Layout arithmetic over two measured boxes; 0 where they do not meet.
       const over = topBar ? Math.max(0, Math.ceil(topBar.getBoundingClientRect().bottom - r.top)) : 0;
       stage.style.setProperty("--chrome-top", `${over}px`);
+      // T-918: the panes' content stops short of both full-width bars (never of a closeable overlay).
+      // Stated on the canvas (CSS px) so a test indexing pixels by pane reads the layout, not a copy.
+      const top = over > 0 ? over + 8 : 0;
+      canvas.dataset.insetTop = String(top);
+      canvas.dataset.insetBottom = String(lift);
+      if (preview) {
+        preview.view.insetTopPx = Math.round(top * dpr);
+        preview.view.insetBottomPx = Math.round(lift * dpr);
+      }
     };
     fit();
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
@@ -1251,7 +1340,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
-    startPoll(async () => { mirror(); refreshPriors(); }, 1000);
+    startPoll(async () => { mirror(); refreshPriors(); refreshDensity(); }, 1000);
 
     // T-897: the `paths` layer's records, for every pane that shows the layer — one read over the
     // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane

@@ -131,7 +131,8 @@ test("a pan moves the pin by exactly the pixels the rows move — no second layo
   const panned = { ...BOX, f0Hz: BOX.f0Hz + 0.5e6, f1Hz: BOX.f1Hz + 0.5e6 };
   near(layoutPanePins([p], "p1", panned, RECT, 500, 1, T0 * S).placed[0].x, 250);
   // Zoomed out 2x in frequency about the same centre: the pin halves its distance from the centre.
-  const [q] = detectionPins([row("q", { f_center_hz: 101.5e6 })]);
+  // (T-910: a feature is placed on its BOX, so the fixture's band moves with its centre.)
+  const [q] = detectionPins([row("q", { f_center_hz: 101.5e6, f_lo_hz: 101.4e6, f_hi_hz: 101.6e6 })]);
   const wide = { ...BOX, f0Hz: 100e6 - 1e6, f1Hz: 102e6 + 1e6 };
   near(layoutPanePins([q], "p1", BOX, RECT, 500, 1, T0 * S).placed[0].x, 750);
   near(layoutPanePins([q], "p1", wide, RECT, 500, 1, T0 * S).placed[0].x, 625);
@@ -147,8 +148,8 @@ test("an ongoing signal that began off-screen is pinned on-screen, at the live e
 test("outside the pane in time or frequency → no pin (never clamped onto the border)", () => {
   const pins = detectionPins([
     row("old", { presence: { last_interval: { t_start_s: T0 - 100, t_end_s: T0 - 50, open: false } } }),
-    row("hi", { f_center_hz: 103e6 }),
-    row("lo", { f_center_hz: 99e6 }),
+    row("hi", { f_center_hz: 103e6, f_lo_hz: 102.9e6, f_hi_hz: 103.1e6 }),
+    row("lo", { f_center_hz: 99e6, f_lo_hz: 98.9e6, f_hi_hz: 99.1e6 }),
   ]);
   assert.deepEqual(layoutPanePins(pins, "p1", BOX, RECT, 500, 1, T0 * S).placed, []);
 });
@@ -256,7 +257,7 @@ class FakeEl {
   listeners: Record<string, ((e: unknown) => void)[]> = {};
   static focused: FakeEl | null = null;
   ownerDocument = { createElement: () => new FakeEl() };
-  appendChild(c: FakeEl) { this.children.push(c); return c; }
+  appendChild(c: FakeEl) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); this.children.push(c); return c; }
   remove() { this.removed = true; }
   setAttribute(k: string, v: string) { this.attrs[k] = v; }
   getAttribute(k: string) { return this.attrs[k] ?? null; }
@@ -276,8 +277,9 @@ test("rest / hover / selected: classes, aria, per-frame transform; pooled elemen
   layer.update(laidOut([["a", "confirmed", 100, 50], ["b", "candidate", 300, 80]]), null, null);
   const a = layer.element("p1", "a") as unknown as FakeEl;
   const b = layer.element("p1", "b") as unknown as FakeEl;
-  assert.equal(a.className, "sf-pin confirmed detection");
-  assert.equal(b.className, "sf-pin candidate detection");
+  // T-910: a detection with no box area is a generalized feature — `symbol`, no DOM glyph.
+  assert.equal(a.className, "sf-pin confirmed detection symbol");
+  assert.equal(b.className, "sf-pin candidate detection symbol");
   assert.equal(a.type, "button", "a real button: focusable, Enter/Space activate");
   assert.match(a.getAttribute("aria-label")!, /^confirmed signal at /);
   assert.equal(a.getAttribute("aria-pressed"), "false");
@@ -285,9 +287,9 @@ test("rest / hover / selected: classes, aria, per-frame transform; pooled elemen
   // Hover b, select a; the next frame moves a — the same element, restyled.
   layer.update(laidOut([["a", "confirmed", 120, 60], ["b", "candidate", 300, 80]]), "b", "a");
   assert.equal(layer.element("p1", "a") as unknown as FakeEl, a, "pooled, so focus survives a frame");
-  assert.equal(a.className, "sf-pin confirmed detection selected");
+  assert.equal(a.className, "sf-pin confirmed detection symbol selected");
   assert.equal(a.getAttribute("aria-pressed"), "true");
-  assert.equal(b.className, "sf-pin candidate detection hovered");
+  assert.equal(b.className, "sf-pin candidate detection symbol hovered");
   assert.equal(a.style.transform, "translate(120.0px, 60.0px)");
   // Gone from the window → the element goes.
   layer.update(laidOut([["b", "candidate", 300, 80]]), null, null);
@@ -416,30 +418,39 @@ test("a box >= 6 px in both axes draws NO glyph: its button is an invisible area
   assert.equal(el.style.height, "125.0px");
   assert.match(el.getAttribute("aria-label")!, /^candidate signal at /, "still focusable with its name");
   const css = readFileSync("src/app/centre/centre.css", "utf8");
-  assert.match(css, /\.sf-pin\.area::before, \.sf-pin\.area::after \{ content: none; display: none; \}/);
+  assert.match(css, /\.sf-pin\.area::before, \.sf-pin\.area::after, \.sf-pin\.symbol::before, \.sf-pin\.symbol::after \{ content: none; display: none; \}/);
 });
 
-test("a box < 6 px in either axis generalizes to the glyph at its centre", () => {
-  // 5 kHz of a 2 MHz / 1000 px pane = 2.5 px wide (tall enough in time) → glyph.
+test("T-910: a box < 6 px in BOTH axes generalizes to its symbol; small in ONE axis is a bar at its true extent", () => {
+  // 5 kHz of a 2 MHz / 1000 px pane = 2.5 px wide, but 5 s tall (125 px): a thin bar of its
+  // duration, hit through a padded area — never collapsed to a dot (docs/23 §10.6 rule 6).
   const [narrow] = detectionPins([row("n", { f_lo_hz: 100.9975e6, f_hi_hz: 101.0025e6, bandwidth_hz: 5e3 })]);
-  // 0.1 s of a 20 s / 500 px pane = 2.5 px tall (wide enough in frequency) → glyph.
+  // 0.1 s of a 20 s / 500 px pane = 2.5 px tall, 100 px wide: a single-frame impulse is "a thin
+  // bar of its measured bandwidth".
   const [brief] = detectionPins([row("b", { presence: { last_interval: { t_start_s: T0 - 10, t_end_s: T0 - 9.9, open: false } } })]);
-  const { placed } = layoutPanePins([narrow, brief], "p1", BOX, RECT, 500, 1, T0 * S);
-  assert.equal(placed.length, 2);
-  for (const q of placed) assert.equal(q.area, null, `${q.pin.id} generalizes`);
+  // Both: 2.5 px × 2.5 px → the symbol.
+  const [dot] = detectionPins([row("d", { f_lo_hz: 100.9975e6, f_hi_hz: 101.0025e6, bandwidth_hz: 5e3,
+    presence: { last_interval: { t_start_s: T0 - 10, t_end_s: T0 - 9.9, open: false } } })]);
+  const { placed } = layoutPanePins([narrow, brief, dot], "p1", BOX, RECT, 500, 1, T0 * S);
+  const by = (id: string) => placed.find((q) => q.pin.id === id)!;
+  assert.ok(by("n").area && by("b").area, "one small axis is a bar, not a symbol");
+  near(by("n").area!.x1 - by("n").area!.x0, 12); // padded to MIN_HIT_CSS_PX about its centre line
+  near((by("n").area!.x0 + by("n").area!.x1) / 2, 500);
+  near(by("b").area!.x1 - by("b").area!.x0, 100); // the full measured bandwidth
+  assert.equal(by("d").area, null, "both small → generalized");
   // A curated marker is a point: always the glyph.
   const [c] = curatedPins([{ id: "m", name: "mine", f_hz: 101e6, t_s: T0 - 5 }]);
   assert.equal(layoutPanePins([c], "p1", BOX, RECT, 500, 1, T0 * S).placed[0].area, null);
   const root = new FakeEl();
   const layer = new PinLayer(root as unknown as HTMLElement);
   layer.update([{ placed, overCap: 0 }], null, null);
-  const el = layer.element("p1", "n") as unknown as FakeEl;
-  assert.equal(el.className, "sf-pin candidate detection");
-  near(placed[0].x, 500);
-  assert.equal(el.style.transform, `translate(500.0px, ${placed[0].y.toFixed(1)}px)`);
+  const el = layer.element("p1", "d") as unknown as FakeEl;
+  assert.equal(el.className, "sf-pin candidate detection symbol", "no DOM glyph: the overlay draws the symbol");
+  near(by("d").x, 500);
+  assert.equal(el.style.transform, `translate(500.0px, ${by("d").y.toFixed(1)}px)`);
   // Zooming in until the same feature is readable turns it back into its box.
-  const zoomed = { ...BOX, f0Hz: 100.99e6, f1Hz: 101.01e6 };
-  assert.ok(layoutPanePins([narrow], "p1", zoomed, RECT, 500, 1, T0 * S).placed[0].area);
+  const zoomed = { ...BOX, f0Hz: 100.99e6, f1Hz: 101.01e6, t0Ns: (T0 - 10.5) * S, t1Ns: (T0 - 9.5) * S };
+  assert.ok(layoutPanePins([dot], "p1", zoomed, RECT, 500, 1, T0 * S).placed[0].area);
 });
 
 test("hover/click anywhere inside a large box hits the feature, far from its centre", () => {

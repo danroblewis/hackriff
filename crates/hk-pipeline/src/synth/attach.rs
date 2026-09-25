@@ -26,18 +26,26 @@
 //!    runs [`SynthesizedConfirm::decide`]. A pass confirms the emitter (author `auto`, actor
 //!    [`CONFIRM_SYNTH_RULE`]) — never demotes, and a user delete wins.
 
+use std::collections::BTreeMap;
+
+use hk_model::classify::{ArbRank, DECODER_RULES_PREFIX, Stage as ClassifyStage, TaxonomyRef};
+use hk_model::emitter::Classification as LegacyClassification;
 use hk_model::repo::LIFECYCLE_TEXT_MAX;
 use hk_model::repo::synthesis::{
     EmitterSynthesis, Resolution as RowResolution, ResolutionKind as RowKind,
     ResolutionReason as RowReason, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage as RowStage,
     StageEvidence as RowEvidence, SynthPipeline, SynthesisJob, Verdict as RowVerdict,
 };
+use hk_model::signature::{
+    DEFAULT_MIN_DISCRIMINATING, FieldExpect, FieldSpec, RecipeRef as SigRecipeRef,
+    SIGNATURE_SCHEMA, Signature, SignatureKind, SignatureProvenance, field as sig_field,
+    is_signature_id,
+};
 use hk_model::{
     ContentClass, ContentHash, CrcStatus, Decode, DecodeId, DecodeProvenance, DecodedIdentity,
     EmitterId, FreqRange, IdentityScheme, LifecycleAuthor, LifecycleState, Region, RepoError,
     Repository, TimeRange, Timestamp,
 };
-use hk_model::{EmitterLink, LinkTarget};
 use hk_plugins::Ingest;
 use hk_stream::policy;
 use hk_synth::result::HoldoutFrame;
@@ -226,6 +234,171 @@ fn pipeline_name(r: &PipelineResult) -> String {
         .map_or_else(|| r.recipe.id.clone(), |t| t.id.clone())
 }
 
+/// The `hk-mod@1` family the result's own S1 demod block commits to, mirroring the `family` each
+/// built-in generic skeleton records on its own S1 alternative
+/// (`templates/generic-*.template.json`, `SlotAlternative::family`) — never a claim read from the
+/// template's metadata, which [`attach_in`] does not have loaded.
+///
+/// `am_demod` is ambiguous in general (analog AM as well as the OOK skeletons' envelope
+/// detection), but every caller here is a *solved synthesized decode* — a S0..S5 framing-and-check
+/// search never an analog audio chain — so within this module the mapping is safe.
+fn recipe_family(r: &PipelineResult) -> Option<&'static str> {
+    const BLOCK_FAMILY: &[(&str, &str)] = &[
+        ("fsk_demod", "fsk"),
+        ("msk_demod", "fsk"),
+        ("am_demod", "ook-ask"),
+        ("psk_demod", "psk-qam"),
+        ("ppm_demod", "pulsed"),
+    ];
+    let demod = block_at(r, Stage::S1)?;
+    BLOCK_FAMILY
+        .iter()
+        .find(|(b, _)| *b == demod)
+        .map(|(_, f)| *f)
+}
+
+/// ADR-0015 §4.2's feedback, first leg: "a solved result emits a decode label {source: decode,
+/// family, template, job_id} to C15 (a CRC-valid decode overrides *automatic* classification —
+/// never a user label, U3 = A)". Written at [`ArbRank::Decoder`]/[`ClassifyStage::Decoder`],
+/// exactly like every other decoder's evidence (`crate::family::record_decoder_evidence`), through
+/// the same legacy `hk_model::emitter::Classification` the rest of that pathway writes.
+///
+/// `None` when the result did not solve, or its S1 block names no known `hk-mod@1` family (an
+/// open search may reach a decode through a block this mapping does not cover yet).
+fn label_classification(
+    r: &PipelineResult,
+    job_id: &str,
+    t: Timestamp,
+) -> Option<LegacyClassification> {
+    if r.verdict != Verdict::Solved {
+        return None;
+    }
+    let family = recipe_family(r)?;
+    let confidence = r
+        .check
+        .as_ref()
+        .map_or(0.95, |c| f64::from(c.pass_rate))
+        .clamp(0.5, 0.999);
+    let template = r.template.as_ref().map_or("open", |t| t.id.as_str());
+    Some(LegacyClassification {
+        t,
+        family: family.to_owned(),
+        confidence,
+        open_set_score: 1.0 - confidence,
+        model_version: format!("{DECODER_RULES_PREFIX}synth:{template}#{job_id}"),
+    })
+}
+
+/// A numeric recipe param, by name, from the result's own recipe (searched, not template-declared:
+/// the value the search actually bound).
+fn recipe_param(r: &PipelineResult, key: &str) -> Option<f64> {
+    r.recipe
+        .nodes
+        .iter()
+        .find_map(|n| n.params.get(key).and_then(Value::as_f64))
+        .filter(|v: &f64| v.is_finite())
+}
+
+/// ADR-0015 §4.2's feedback, second leg: "proposes a C18 `Signature` from the solved parameters
+/// (provenance `decoder-confirmed`, T-201 route)". The catalogue's `RecipeConfirmed` provenance is
+/// that route (`hk_model::signature`'s own doc comment: "the only provenance a decode can mint"),
+/// minted here since T-201 never wired a caller for it. The signature id is namespaced under the
+/// job so re-analysing the same window never collides with a hand-authored id; ADR-0016 §5's rank
+/// rules take it from there — a discovered signature ranks like any other and confirms nothing
+/// (§4.3's rule for a saved template applies just as much to a proposed signature: it only orders
+/// later matches).
+fn propose_signature(
+    r: &PipelineResult,
+    job_id: &str,
+    band: FreqRange,
+    t: Timestamp,
+) -> Option<Signature> {
+    if r.verdict != Verdict::Solved {
+        return None;
+    }
+    let family = recipe_family(r);
+    let mut fields: BTreeMap<String, FieldSpec> = BTreeMap::new();
+    if let Some(v) = recipe_param(r, "symbol_rate_bd") {
+        fields.insert(
+            sig_field::SYMBOL_RATE_HZ.to_owned(),
+            FieldSpec::required(FieldExpect::Value { value: v }),
+        );
+    }
+    if let Some(v) = recipe_param(r, "deviation_hz") {
+        fields.insert(
+            sig_field::DEVIATION_HZ.to_owned(),
+            FieldSpec::required(FieldExpect::Value { value: v }),
+        );
+    }
+    // A CRC-valid decode's check model is required evidence whenever there is one; it is the
+    // strongest single field this route has (§5's `min_discriminating` requires at least one
+    // required field, and a solved-but-checkless result — S4 framing with no S5 check — has no
+    // rate/deviation params to fall back on either).
+    if let Some(c) = &r.check
+        && !c.model.trim().is_empty()
+    {
+        fields.insert(
+            sig_field::CRC_POLY.to_owned(),
+            FieldSpec::required(FieldExpect::Text {
+                text: c.model.clone(),
+            }),
+        );
+    }
+    let obw_hz = band.hi_hz - band.lo_hz;
+    // The occupied bandwidth is always known (the searched band), so it is the fallback required
+    // field of last resort: a `Signature` can never validate with zero required fields.
+    let obw_required = fields.values().filter(|s| s.required).count() == 0;
+    fields
+        .entry(sig_field::OBW_HZ.to_owned())
+        .or_insert(FieldSpec {
+            expect: FieldExpect::Value { value: obw_hz },
+            tolerance: None,
+            required: obw_required,
+            weight: 0.5,
+        });
+    let required = u32::try_from(fields.values().filter(|s| s.required).count()).unwrap_or(0);
+    let min_discriminating = required.clamp(1, DEFAULT_MIN_DISCRIMINATING);
+    let pipeline = pipeline_name(r);
+    let sanitized: String = pipeline
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let id = format!("synth-{sanitized}-{job_id}");
+    if !is_signature_id(&id) {
+        return None;
+    }
+    Some(Signature {
+        schema: SIGNATURE_SCHEMA,
+        id,
+        version: 1,
+        name: format!("Discovered: {pipeline}"),
+        kind: SignatureKind::Protocol,
+        taxonomy: family.map(|_| TaxonomyRef::current()),
+        family: family.map(str::to_owned),
+        class: None,
+        fields,
+        min_discriminating,
+        recipe: Some(SigRecipeRef {
+            id: r.recipe.id.clone(),
+            version: r.recipe.version,
+        }),
+        provenance: SignatureProvenance::RecipeConfirmed,
+        author: format!("synth:{job_id}"),
+        created_at: t,
+        supersedes: None,
+        bands_hz: vec![[band.lo_hz, band.hi_hz]],
+        notes: Some(format!(
+            "Proposed from MAUTO job {job_id} on a solved synthesized decode (ADR-0015 §4.2)."
+        )),
+    })
+}
+
 fn decode_row(
     f: &HoldoutFrame,
     r: &PipelineResult,
@@ -274,10 +447,27 @@ fn decode_row(
         ),
         decoder_version: format!("{}+{hash}", hk_synth::ENGINE),
         frame_model: f.frame_model.clone(),
-        metadata: if f.metadata.is_null() {
-            json!({})
-        } else {
-            f.metadata.clone()
+        // `family` (ADR-0015 §4.2's feedback, third leg): T-205's dataset export reads a decoded
+        // emission's `hk-mod@1` family off a linked `Demodulation` row, which a synthesized decode
+        // never has (`demodulation_ref: None`, above) — this is the metadata key
+        // `hk_store::dataset`'s synth-path reader looks for instead (T-861).
+        metadata: {
+            let mut m = if f.metadata.is_null() {
+                serde_json::Map::new()
+            } else {
+                match f.metadata.clone() {
+                    Value::Object(m) => m,
+                    other => {
+                        let mut m = serde_json::Map::new();
+                        m.insert("value".into(), other);
+                        m
+                    }
+                }
+            };
+            if let Some(family) = recipe_family(r) {
+                m.insert("family".into(), json!(family));
+            }
+            Value::Object(m)
         },
         content: f.content.clone().filter(|_| class.permits_content()),
         crc_status,
@@ -293,11 +483,15 @@ fn decode_row(
             check_bits: h.and_then(|h| h.check_bits).map(f64::from),
             l_check: h.and_then(|h| h.l_check).map(f64::from),
             check_searched: h.is_none_or(|h| h.check_origin.searched()),
+            // T-884 item 3: the three values `hk_model::DecodeProvenance` documents, and the
+            // three a `CheckOrigin` can actually distinguish. `builtin` and `user` are one case
+            // here on purpose: ADR-0022 §5.1 prices them identically (`L_check = 0`) and
+            // `CheckOrigin::TemplateFixed` does not carry which of the two authored the template.
             template_provenance: r.template.as_ref().map(|_| {
                 match h.map(|h| h.check_origin) {
-                    Some(hk_synth::result::CheckOrigin::TemplateFixed) => "builtin-or-user",
+                    Some(hk_synth::result::CheckOrigin::TemplateFixed) => "template-fixed",
                     Some(hk_synth::result::CheckOrigin::Discovered { .. }) => "discovered",
-                    _ => "template",
+                    _ => "searched",
                 }
                 .to_owned()
             }),
@@ -402,21 +596,18 @@ fn attach_in(
             );
             let is_valid = d.crc_status == CrcStatus::Valid;
             match emitter {
-                // The emitter is known: store the row and link it. A sighting here would let a
-                // structural or shared-channel identity mint a second entry for this emission.
+                // The emitter is known: store the row, link it, and republish it on the
+                // `messages` stream — but take **no** identity sighting, which would let a
+                // structural or shared-channel identity mint a second entry for this emission
+                // ([`Ingest::store_decode_linked`]). T-884 item 2: this path used to insert and
+                // link by hand, so a synthesized decode for a known emitter reached the database
+                // and never the stream.
                 Some(e) => {
                     let mut d = d;
                     if !policy::decode_is_allowlist_shaped(&d) {
                         policy::sanitize_decode(None, STRUCTURAL_SCHEME, &mut d);
                     }
-                    let id = d.id;
-                    let t = d.t;
-                    ingest.repo_mut().insert_decode(&d)?;
-                    ingest.repo_mut().link_emitter(&EmitterLink {
-                        emitter_id: e,
-                        target: LinkTarget::Decode(id),
-                        linked_at: t,
-                    })?;
+                    ingest.store_decode_linked(d, e, None)?;
                 }
                 // No emitter yet: ordinary ingestion, whose identity sighting creates the
                 // candidate — for this frame only. Every later frame is stored and linked to the
@@ -440,6 +631,24 @@ fn attach_in(
             "no inventory emitter in the analysed window, and no decode created one",
         )));
     };
+
+    // 2b. ADR-0015 §4.2's feedback: a solved result labels C15, proposes a C18 signature, and
+    //     (via `decode_row`'s own `metadata.family`, above) feeds T-205's labelled-capture path —
+    //     all before the confirm decision, since the ADR ties this to the result being *solved*,
+    //     not to the emitter being *confirmed*.
+    if let Some(c) = label_classification(r, input.job_id, input.window.start) {
+        ingest.repo_mut().append_classification_ranked(
+            emitter,
+            &c,
+            ClassifyStage::Decoder,
+            ArbRank::Decoder,
+        )?;
+    }
+    if let Some(s) = propose_signature(r, input.job_id, input.band, input.window.start) {
+        // A signature id collision (a retried job, or a hand-authored id clash) never fails the
+        // attach: the signature is a proposal, and the decode and confirmation stand without it.
+        let _ = ingest.repo_mut().insert_signature(&s);
+    }
 
     // 3. The decision, then the row, then the lifecycle — all in this transaction, and the state
     //    read here is the state the confirmation changes (the batch holds the write lock).
@@ -815,6 +1024,80 @@ mod tests {
         assert!(!reason.contains("null control"), "{reason}");
     }
 
+    /// T-884 item 3: `template_provenance` says only what a `CheckOrigin` can distinguish, in the
+    /// vocabulary `hk_model::DecodeProvenance` documents. Red before the fix: a template-fixed
+    /// check wrote `builtin-or-user` and a searched one wrote `template`, neither of which the
+    /// data model named.
+    #[test]
+    fn t884_template_provenance_says_what_the_data_model_documents() {
+        let frame = HoldoutFrame {
+            t_ns: 1_757_774_400_000_000_000,
+            check_valid: true,
+            corrected: false,
+            frame_model: "adsb-df17".into(),
+            identity: None,
+            metadata: json!({}),
+            content: None,
+        };
+        let provenance = |origin: Option<CheckOrigin>| {
+            let mut r = solved();
+            r.template = Some(hk_synth::result::TemplateRef {
+                id: "adsb".into(),
+                version: 1,
+            });
+            match origin {
+                Some(o) => r.holdout.as_mut().unwrap().check_origin = o,
+                None => r.holdout = None,
+            }
+            let d = decode_row(
+                &frame,
+                &r,
+                "a1",
+                "sha256:abc",
+                1,
+                ContentClass::Unrestricted,
+            );
+            match d.provenance.expect("synthesized provenance") {
+                DecodeProvenance::Synthesized {
+                    template_provenance,
+                    ..
+                } => template_provenance,
+            }
+        };
+        assert_eq!(
+            provenance(Some(CheckOrigin::TemplateFixed)).as_deref(),
+            Some("template-fixed")
+        );
+        assert_eq!(
+            provenance(Some(CheckOrigin::Discovered {
+                look_elsewhere_bits: Some(4.0)
+            }))
+            .as_deref(),
+            Some("discovered")
+        );
+        assert_eq!(
+            provenance(Some(CheckOrigin::Searched)).as_deref(),
+            Some("searched")
+        );
+        // No hold-out evidence at all is the most-charged reading, not a free one.
+        assert_eq!(provenance(None).as_deref(), Some("searched"));
+        // An open search names no template, so there is nothing to say.
+        let d = decode_row(
+            &frame,
+            &solved(),
+            "a1",
+            "sha256:abc",
+            1,
+            ContentClass::Unrestricted,
+        );
+        match d.provenance.expect("synthesized provenance") {
+            DecodeProvenance::Synthesized {
+                template_provenance,
+                ..
+            } => assert_eq!(template_provenance, None),
+        }
+    }
+
     /// ADR-0022 §4.2 (review M1): the check is worth at most `width × differences − L_check`,
     /// whatever the evaluator reports. A searched CRC-16 on a beacon repeating one payload five
     /// times has one difference: 16 − 21 = −5 bits, so it refuses even when told 40.
@@ -1062,6 +1345,71 @@ mod tests {
         assert!(kept.contains('…'), "{kept}");
     }
 
+    /// T-575 × T-884: the configured rule now reaches the gate, and configuration may only make
+    /// it stricter. A clause configured looser than ADR-0022 §6 — a CRC-8 floor, 8 analytic
+    /// bits, no null control, overload allowed, a higher assumed decision rate — is **clamped**
+    /// to the floors; a stricter one is kept.
+    #[test]
+    fn t575_configuration_can_tighten_the_gate_but_never_loosen_it() {
+        let loose = SynthesizedConfirm {
+            enabled: true,
+            min_analytic_holdout_bits: 8.0,
+            hard_check_floor_bits: f64::NAN,
+            min_check_width: 8,
+            assumed_decisions_per_week: 1_000_000,
+            require_null_control_when_searched: false,
+            max_suspect_detection_fraction: 1.0,
+            forbid_overload_in_window: false,
+        };
+        assert_eq!(loose.effective(), SynthesizedConfirm::default());
+        let ev = |r: &PipelineResult, overload| {
+            loose.decide(&SynthesizedEvidence {
+                profile: Profile::Standard,
+                result: r,
+                pipeline: "p".into(),
+                suspect_fraction: Some(0.0),
+                overload,
+            })
+        };
+        // A CRC-8 with plenty of bits: the configured 8-bit floor does not apply.
+        let e = ev(&with(|h| h.check_width = Some(8)), Some(false)).unwrap_err();
+        assert!(e.contains("under the 16-bit floor"), "{e}");
+        // No null control for a searched check: still refused.
+        let e = ev(&with(|h| h.null_control = None), Some(false)).unwrap_err();
+        assert!(e.contains("needs the null control"), "{e}");
+        // Overload: still refused.
+        assert!(
+            ev(&solved(), Some(true))
+                .unwrap_err()
+                .contains("overloaded")
+        );
+        // 20 analytic bits: under the ADR's 24, whatever the configuration says.
+        let e = ev(&with(|h| h.analytic_bits = 20.0), Some(false)).unwrap_err();
+        assert!(e.contains("against a 24-bit threshold"), "{e}");
+        // The decision rate is judged against the ADR's denominator, not a larger configured one.
+        assert_eq!(
+            loose.decision_rate(20_001).budget_claim,
+            crate::inventory::BudgetClaim::Void
+        );
+        // Stricter configuration is kept.
+        let tight = SynthesizedConfirm {
+            min_check_width: 24,
+            min_analytic_holdout_bits: 40.0,
+            ..SynthesizedConfirm::default()
+        };
+        assert_eq!(tight.effective(), tight);
+        let e = tight
+            .decide(&SynthesizedEvidence {
+                profile: Profile::Standard,
+                result: &solved(),
+                pipeline: "p".into(),
+                suspect_fraction: Some(0.0),
+                overload: Some(false),
+            })
+            .unwrap_err();
+        assert!(e.contains("under the 24-bit floor"), "{e}");
+    }
+
     #[test]
     fn t575_a_long_reason_is_cut_to_the_lifecycle_limit_on_a_char_boundary() {
         let long = "−".repeat(LIFECYCLE_TEXT_MAX);
@@ -1069,5 +1417,95 @@ mod tests {
         assert!(cut.len() <= LIFECYCLE_TEXT_MAX && !cut.is_empty());
         assert!(long.starts_with(cut));
         assert_eq!(lifecycle_text("short"), "short");
+    }
+
+    /// ADR-0015 §4.2's feedback (M-10, T-861): a solved result's S1 block names its `hk-mod@1`
+    /// family, a decode label, and a proposed signature.
+    mod feedback {
+        use hk_synth::result::StageEvidence;
+        use hk_synth::{MetricId, quality_from_bits};
+
+        use super::*;
+
+        /// [`solved`] with a real S1 evidence rung naming `ppm` (the ADS-B fixture's `ppm_demod`
+        /// node): [`recipe_family`] reads the node the ladder names, not the whole recipe, so a
+        /// test fixture with `stages: Vec::new()` (every other test in this module) would find
+        /// none.
+        fn solved_with_s1() -> PipelineResult {
+            let mut r = solved();
+            r.stages.push(StageEvidence {
+                stage: Stage::S1,
+                node: "ppm".into(),
+                metric: MetricId::Snr,
+                raw: 20.0,
+                n: 100,
+                bits: 10.0,
+                quality: quality_from_bits(10.0),
+            });
+            r
+        }
+
+        #[test]
+        fn recipe_family_reads_the_s1_ladder_node_not_the_whole_recipe() {
+            assert_eq!(recipe_family(&solved()), None, "no S1 rung, no family");
+            assert_eq!(recipe_family(&solved_with_s1()), Some("pulsed"));
+        }
+
+        #[test]
+        fn label_classification_is_none_unless_solved_and_familied() {
+            let mut unsolved = solved_with_s1();
+            unsolved.verdict = Verdict::Checked;
+            assert!(label_classification(&unsolved, "a1", Timestamp::UNIX_EPOCH).is_none());
+            assert!(label_classification(&solved(), "a1", Timestamp::UNIX_EPOCH).is_none());
+
+            let c = label_classification(&solved_with_s1(), "a1", Timestamp::UNIX_EPOCH).unwrap();
+            assert_eq!(c.family, "pulsed");
+            assert!(c.confidence >= 0.5 && c.confidence <= 0.999);
+            assert_eq!(c.open_set_score, 1.0 - c.confidence);
+            assert_eq!(c.model_version, "decoder:synth:open#a1");
+        }
+
+        #[test]
+        fn label_classification_ranks_as_a_decoder_row() {
+            let c = label_classification(&solved_with_s1(), "a1", Timestamp::UNIX_EPOCH).unwrap();
+            let (stage, rank) = ArbRank::legacy(&c.model_version, None);
+            assert_eq!(stage, ClassifyStage::Decoder);
+            assert_eq!(rank, ArbRank::Decoder);
+        }
+
+        #[test]
+        fn propose_signature_carries_the_bound_recipe_params_and_never_upgrades_nothing() {
+            let band = FreqRange::new(1_090_000_000.0 - 500_000.0, 1_090_000_000.0 + 500_000.0);
+            // Unlike `label_classification`, a signature is still proposable without an S1
+            // family rung — the catalogue's `family` is optional (a device-type or RFI
+            // signature may name none) — so the only gate is the verdict.
+            let no_family =
+                propose_signature(&solved(), "a7", band, Timestamp::UNIX_EPOCH).unwrap();
+            no_family.validate().unwrap();
+            assert_eq!(no_family.family, None);
+            assert_eq!(no_family.taxonomy, None);
+
+            let mut unsolved = solved_with_s1();
+            unsolved.verdict = Verdict::Checked;
+            assert!(propose_signature(&unsolved, "a7", band, Timestamp::UNIX_EPOCH).is_none());
+
+            let s =
+                propose_signature(&solved_with_s1(), "a7", band, Timestamp::UNIX_EPOCH).unwrap();
+            s.validate()
+                .expect("a proposed signature must itself be a valid catalogue entry");
+            assert_eq!(s.provenance, SignatureProvenance::RecipeConfirmed);
+            assert_eq!(s.family.as_deref(), Some("pulsed"));
+            assert_eq!(s.kind, SignatureKind::Protocol);
+            assert_eq!(s.bands_hz, vec![[band.lo_hz, band.hi_hz]]);
+            assert!(is_signature_id(&s.id));
+            assert_eq!(s.author, "synth:a7");
+            // CRC-16 from `solved()`'s check summary.
+            assert!(matches!(
+                &s.fields[sig_field::CRC_POLY].expect,
+                FieldExpect::Text { text } if text == "CRC-16"
+            ));
+            // Always at least the band's own occupied bandwidth.
+            assert!(s.fields.contains_key(sig_field::OBW_HZ));
+        }
     }
 }

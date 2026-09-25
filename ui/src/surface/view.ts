@@ -164,6 +164,17 @@ export class SurfaceView {
   /** Draw the overlay pass this frame. */
   overlays: boolean;
   minimapPx: number;
+  /**
+   * T-918: device px along the canvas's top and bottom edges that full-width screen-space chrome
+   * docks over (the app's floating top bar and status dock). The canvas is full-bleed (docs/23
+   * §10.1) and that chrome is drawn OVER it, but it is not an overlay the user can close, so the
+   * content keeps clear of it: the map strip is lifted above the bottom band and the panes (their
+   * newest rows and trace strip on top) stop below the top one. Closeable overlays — the sheet, the
+   * side column, the menus — get no inset: they cover map pixels and give them back on close.
+   * 0 (the default) draws edge to edge, as before.
+   */
+  insetTopPx = 0;
+  insetBottomPx = 0;
   private readonly overlay: OverlayPass;
   /** The trace's own program: vertex colour from the one ramp, no sampler. See `./tracepass.ts`. */
   private readonly tracePass: TracePass;
@@ -233,8 +244,10 @@ export class SurfaceView {
     // surface, so it is laid out in this surface's pixels, not in a widget of its own.
     // Capped at half the surface: the map is where you see *where the panes are*, so it may not
     // become the thing you are looking at.
-    const mapH = Math.max(0, Math.min(Math.floor(this.minimapPx), Math.floor(hPx / 2)));
-    const paneH = Math.max(1, hPx - mapH);
+    const inset = Math.max(0, Math.min(Math.floor(this.insetBottomPx), Math.floor(hPx / 3)));
+    const insetTop = Math.max(0, Math.min(Math.floor(this.insetTopPx), Math.floor(hPx / 3)));
+    const mapH = Math.max(0, Math.min(Math.floor(this.minimapPx), Math.floor((hPx - inset - insetTop) / 2)));
+    const paneH = Math.max(1, hPx - inset - insetTop - mapH);
     this.panes.setViewport(w, paneH);
     // The map is laid out in the same pixels, and it needs them for the same reason the panes do:
     // T-486's dead zone is a number of *device pixels*, so a viewport that does not know its own
@@ -247,12 +260,12 @@ export class SurfaceView {
     const traceH = this.trace ? Math.max(0, Math.min(Math.floor(this.tracePx), Math.floor(paneH / 3))) : 0;
     const paneViews = this.panes.views(edgeNs, w, paneH)
       .map((v) => ({
-        ...v, rect: { ...v.rect, y: v.rect.y + mapH, h: Math.max(1, v.rect.h - traceH) },
+        ...v, rect: { ...v.rect, y: v.rect.y + inset + mapH, h: Math.max(1, v.rect.h - traceH) },
         // T-807: the pane's coverage-fog layer, asked every frame like `marks`. The minimap is not
         // asked: it is where coverage is surveyed at a glance, so its fog is always shown.
         ...(this.fog ? { fog: this.fog(v.id) } : {}),
       }));
-    const mapRect: PaneRect | null = mapH > 0 ? { x: 0, y: 0, w, h: mapH } : null;
+    const mapRect: PaneRect | null = mapH > 0 ? { x: 0, y: inset, w, h: mapH } : null;
     // `scales: false` (T-528): the map is another viewport onto the same surface and is drawn with
     // the same ramp and the same range — but it is a viewport over the WHOLE surface, so it may not
     // be what a viewport-measured range is measured over. See `Surface`'s `PaneView.scales`.

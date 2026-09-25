@@ -456,3 +456,23 @@ push_mirrors; wait
     sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=8", "HEAD"], capture_output=True, text=True).stdout.strip()
     assert f"LOG PUSHED node2 {sha}" in (tmp_path / "log").read_text()
     assert subprocess.run(["git", "-C", str(mirror), "rev-parse", "main"], capture_output=True, text=True).stdout.strip().startswith(sha)
+
+
+def test_the_gate_never_waits_for_a_remote_hosts_workers(tmp_path):
+    """2026-09-25: a claim with a host runs on that host - the merge runner's worker count leaves it out."""
+    import json
+    (tmp_path / "work-claims.json").write_text(json.dumps({
+        "T-1": {"state": "running"}, "T-2": {"state": "running", "host": "node2"}, "T-3": {"state": "queued"}}))
+    script = f"""
+S={tmp_path}
+{_function("workers_running")}
+workers_running >/dev/null 2>&1
+python3 - "$S/work-claims.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(sum(1 for c in d.values() if c.get("state") == "running" and not c.get("host")))
+PY
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.stdout.strip().splitlines()[-1] == "1"
+    assert 'and not c.get("host")' in _function("workers_running")

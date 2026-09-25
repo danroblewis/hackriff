@@ -55,8 +55,11 @@
 //!   ALRT, and it is self-normalising: a larger constellation buys its extra flexibility with the
 //!   `1/M` prior, so no complexity penalty is needed or applied.
 //! - **fsk — GLRT over the frequency-pulse shape.** The instantaneous-frequency trajectory is fitted
-//!   as `A·Σ_k a_k·g(t − τ − kT)`, with `g` rectangular (CPFSK: `2fsk`, `4fsk`) or Gaussian
-//!   (`gfsk`), symbols hard-decided and `A` by least squares. This is the one thing that actually
+//!   as `A·Σ_k a_k·g(t − τ − kT)`, with `g` a rectangle as the receive channel leaves it (CPFSK:
+//!   `2fsk`, `4fsk`; the channel's smoothing a fitted nuisance, [`CHANNEL_BT_GRID`]) or a Gaussian
+//!   pulse (`gfsk`), symbols hard-decided and `A` by least squares. Where the channel has smoothed
+//!   a rectangle into the deployed Gaussian range the two hypotheses share that shape
+//!   ([`SHARED_BT`]) and tie, so the stage moves nothing (T-908). This is the one thing that actually
 //!   separates 2-FSK from GFSK at the same modulation index: the *shape of the transition*, which
 //!   the tree can only see indirectly through the smearing of an IF histogram. A GLRT maximises over
 //!   its free parameters, so hypotheses are compared by description length ([`mdl_penalty`]) rather
@@ -157,27 +160,71 @@ const TAU_STEPS: usize = 8;
 /// hypothesis, by the strength of the symbol-rate timing line — never per hypothesis.
 const ALPHA_GRID: [f64; 3] = [0.2, 0.35, 0.5];
 
-/// Gaussian `BT` products searched for the `gfsk` hypothesis: the **deployed** range and nothing
-/// wider (GSM 0.3, Bluetooth 0.5).
+/// Gaussian `BT` products searched for the `gfsk` hypothesis: the deployed range's sharpest shaping
+/// (0.3 in this module's units, where GSM and Bluetooth sit) and the band [`SHARED_BT`] it has in
+/// common with a receiver-smoothed rectangle — and nothing sharper.
 ///
-/// The upper end matters more than it looks. A Gaussian at `BT` 0.7 and above is very nearly a
-/// rectangle, so admitting it lets the `gfsk` hypothesis impersonate the CPFSK one and win on every
-/// input by sheer flexibility — measured: with 0.7 in this grid, `gfsk` beat `2fsk` on 100 % of
-/// snippets, by a *larger* margin on genuine 2-FSK (+3.3 to +8.9 nats/symbol) than on genuine GFSK
-/// (+2.3 to +3.8). A hypothesis set has to contain distinguishable hypotheses.
-const BT_GRID: [f64; 2] = [0.3, 0.5];
+/// The upper end matters more than it looks. A Gaussian at `BT` 0.85 and above is very nearly a
+/// rectangle, and no genuine GFSK on the dev grid was ever fitted best there (T-908, below), so
+/// admitting it would let the `gfsk` hypothesis impersonate the CPFSK one by sheer flexibility.
+/// That is exactly what T-200 measured when this grid reached 0.7 while the CPFSK hypotheses were
+/// pinned at `BT` 1.0: `gfsk` beat `2fsk` on 100 % of snippets, by a *larger* margin on genuine
+/// 2-FSK (+3.3 to +8.9 nats/symbol) than on genuine GFSK (+2.3 to +3.8). A hypothesis set has to
+/// contain distinguishable hypotheses — and since T-908 the CPFSK hypotheses reach into the same
+/// band, so there the two now tie instead of one out-fitting the other.
+const BT_GRID: [f64; 5] = [0.3, SHARED_BT[0], SHARED_BT[1], SHARED_BT[2], SHARED_BT[3]];
 
-/// The `BT` standing for "rectangular, as this receiver sees it".
+/// The smoothings at which a GFSK pulse and a rectangle **as this receiver sees it** are the same
+/// shape, so the pulse-shape test can say nothing (T-908). Both [`BT_GRID`] and
+/// [`CHANNEL_BT_GRID`] contain this whole band, so a trajectory whose best fit lies in it fits both
+/// hypotheses identically, the GLRT reports a tie, and [`bounded_update`] moves nothing.
+///
+/// Measured, not chosen: on the dev grid (seeds 0–59 × 20/25/30 dB, every snippet C14 locked, a
+/// rectangle-plus-Gaussian fitted over a `BT` scan of 0.2 … 3.0 and the bare rectangle), the
+/// smoothing that fits **genuine 2-FSK** best fell at 0.4 (6), 0.5 (9), 0.6 (21), 0.7 (41),
+/// 0.85 (22), 1.0 (42) and 1.5 (36); that of **genuine GFSK** at 0.3 (16), 0.4 (43), 0.5 (87),
+/// 0.6 (17) and 0.7 (6). The two ranges overlap on exactly 0.4 … 0.7. Only outside it does a
+/// trajectory name its class: smoother than any receiver-smoothed rectangle (0.3) is `gfsk`,
+/// sharper than any genuine GFSK (0.85 and up) is CPFSK.
+const SHARED_BT: [f64; 4] = [0.4, 0.5, 0.6, 0.7];
+
+/// The `BT`s standing for "rectangular, as this receiver sees it": a **nuisance** fitted per
+/// snippet, like the timing phase, and never a constant.
 ///
 /// A CPFSK transmitter keys its frequency abruptly, but nothing downstream of the antenna ever sees
-/// that edge: C13 hands the classifier a snippet filtered to ±0.75 × OBW99 and decimated, which is
-/// a channel roughly one symbol rate wide, and that filter smooths the instantaneous-frequency
-/// trajectory of *every* emission it passes. Comparing an ideal rectangle against a Gaussian
-/// therefore does not compare two transmitters; it measures the receive filter, and the smoother
-/// hypothesis wins whatever was transmitted. Giving the CPFSK hypotheses this fixed, mild smoothing
-/// makes the test what it is supposed to be: is the transition *sharper* than the channel alone
-/// would leave it?
-const CHANNEL_BT: f64 = 1.0;
+/// that edge: C13 hands the classifier a snippet filtered to ±0.75 × OBW99 and decimated, and that
+/// filter smooths the instantaneous-frequency trajectory of *every* emission it passes. Comparing an
+/// ideal rectangle against a Gaussian therefore does not compare two transmitters; it measures the
+/// receive filter, and the smoother hypothesis wins whatever was transmitted. So the CPFSK
+/// hypotheses carry the channel's smoothing, and the test is what it is supposed to be: is the
+/// transition *sharper* than a deployed Gaussian pulse would leave it?
+///
+/// **How much the channel smooths is not one number (T-908).** Until T-908 it was a fixed `BT` 1.0,
+/// and that is what made this stage prefer `gfsk` on genuine 2-FSK. The channel's width is set by
+/// OBW99, and OBW99 grows with the modulation index, so the room the channel leaves beyond the tones
+/// — `0.75·OBW99 − Δf`, which is what passes the transitions — runs from about 0.6 Rs at `h` 0.4
+/// to about 2 Rs at `h` 3, and the smoothing that fits genuine 2-FSK best runs with it from `BT`
+/// 0.4 to 1.5 ([`SHARED_BT`] has the histogram). Pinned at 1.0, every narrow-deviation draw sat
+/// nearer the `gfsk` grid than its own hypothesis and the GLRT called it `gfsk`: on the dev grid
+/// 32 of 168 genuine 2-FSK snippets, by up to 4.2 nats/symbol, and **never once the other way**
+/// (0 of 104 genuine GFSK called `2fsk`). A one-sided error is the signature of a mis-specified
+/// hypothesis, not of noise. The acceptance draw that exposed it (`2fsk` seed 1 307 003, `h` 0.63,
+/// OBW99 1.18 Rs) was one of them: `gfsk` by 1.4 nats/symbol, confirmed at p 0.906 as soon as the
+/// tree's prior let the stage run (T-887).
+///
+/// The grid's smooth end is [`SHARED_BT`] and not below it: going lower would put the `gfsk`
+/// grid's own 0.3 inside the CPFSK hypothesis, and the stage could never name `gfsk`. The sharp
+/// end, 1.5, is the sharpest trajectory a wide-deviation draw was fitted best at; a sharper one only
+/// strengthens a CPFSK call that `gfsk` could not have matched anyway.
+const CHANNEL_BT_GRID: [f64; 7] = [
+    SHARED_BT[0],
+    SHARED_BT[1],
+    SHARED_BT[2],
+    SHARED_BT[3],
+    0.85,
+    1.0,
+    1.5,
+];
 
 /// SNR range the ALRT's `N₀` is taken from, dB. Outside it the measured in-band SNR says more about
 /// the analysis band than about `E_s/N₀`, and an unclamped `N₀` would make the likelihood either
@@ -795,11 +842,10 @@ fn psk_qam_loglikelihoods_with(
 struct FskModel {
     /// Alphabet size.
     levels: usize,
-    /// `Some(bt)` for a Gaussian frequency pulse, `None` for an ideal rectangular one.
-    bt: Option<f64>,
-    /// Whether `bt` is a free parameter fitted over [`BT_GRID`] (the `gfsk` hypothesis) or fixed by
-    /// the class (the CPFSK ones, at [`CHANNEL_BT`]).
-    free_bt: bool,
+    /// Gaussian `BT`s the frequency pulse is fitted over: the deployed range for `gfsk`
+    /// ([`BT_GRID`]), the receive channel's for the CPFSK classes ([`CHANNEL_BT_GRID`]). Either
+    /// way one free parameter, so neither hypothesis buys flexibility the other lacks.
+    bts: &'static [f64],
     /// Peak frequency deviation in rad/sample when the modulation index is fixed by the class
     /// (`msk`: `h = 0.5`), or `None` when it is a free parameter fitted by least squares.
     fixed_peak: Option<f64>,
@@ -809,8 +855,7 @@ fn fsk_model(label: &str) -> Option<FskModel> {
     Some(match label {
         "2fsk" => FskModel {
             levels: 2,
-            bt: Some(CHANNEL_BT),
-            free_bt: false,
+            bts: &CHANNEL_BT_GRID,
             fixed_peak: None,
         },
         // **`msk` is not testable here, so this stage does not test it** (T-422).
@@ -822,7 +867,7 @@ fn fsk_model(label: &str) -> Option<FskModel> {
         // and those are not the same number.
         //
         // The proof does not need the true value, only its own twin: `2fsk` is the identical
-        // hypothesis — two levels, rectangular pulse at [`CHANNEL_BT`] — differing *only* in fitting
+        // hypothesis — two levels, a rectangle through [`CHANNEL_BT_GRID`] — differing *only* in fitting
         // the deviation instead of fixing it. On the blind acceptance grid at gate+5/+10, `2fsk`
         // beat `msk` on genuine MSK on 22 of 22 snippets, by 0.13–0.92 nats/symbol, **after** the
         // [`mdl_penalty`] that charges it half a `ln n` for that extra freedom. A constraint that
@@ -844,14 +889,12 @@ fn fsk_model(label: &str) -> Option<FskModel> {
         "msk" => return None,
         "gfsk" => FskModel {
             levels: 2,
-            bt: Some(BT_GRID[0]),
-            free_bt: true,
+            bts: &BT_GRID,
             fixed_peak: None,
         },
         "4fsk" => FskModel {
             levels: 4,
-            bt: Some(CHANNEL_BT),
-            free_bt: false,
+            bts: &CHANNEL_BT_GRID,
             fixed_peak: None,
         },
         _ => return None,
@@ -868,15 +911,11 @@ fn instantaneous_frequency(x: &[Complex64]) -> Vec<f64> {
     f
 }
 
-/// The sampled frequency pulse, centred on zero: a rectangle of one symbol, optionally smoothed by
-/// a Gaussian of the given `BT` (the standard GFSK definition).
-fn frequency_pulse(sps: f64, bt: Option<f64>) -> (Vec<f64>, usize) {
+/// The sampled frequency pulse, centred on zero: a rectangle of one symbol smoothed by a Gaussian
+/// of the given `BT` (the standard GFSK definition). Every hypothesis is smoothed — the CPFSK ones
+/// by the receive channel ([`CHANNEL_BT_GRID`]) — so there is no bare-rectangle case.
+fn frequency_pulse(sps: f64, bt: f64) -> (Vec<f64>, usize) {
     let half_rect = (sps / 2.0).round().max(1.0) as isize;
-    let Some(bt) = bt else {
-        let taps: Vec<f64> = (-half_rect..half_rect).map(|_| 1.0).collect();
-        let half = taps.len() / 2;
-        return (taps, half);
-    };
     let sigma = (sps * 0.5 / (std::f64::consts::TAU * bt)).max(0.3);
     let half_g = (3.0 * sigma).ceil() as isize;
     let half = half_rect + half_g;
@@ -926,14 +965,9 @@ fn fsk_loglikelihoods(
         let Some(model) = fsk_model(&lp.label) else {
             continue;
         };
-        let bts: Vec<Option<f64>> = if model.free_bt {
-            BT_GRID.iter().map(|b| Some(*b)).collect()
-        } else {
-            vec![model.bt]
-        };
         let mut best = f64::NEG_INFINITY;
-        for bt in bts {
-            let (pulse, centre) = frequency_pulse(sps, bt);
+        for bt in model.bts {
+            let (pulse, centre) = frequency_pulse(sps, *bt);
             let energy: f64 = pulse.iter().map(|w| w * w).sum();
             if energy <= 0.0 {
                 continue;
@@ -946,7 +980,7 @@ fn fsk_loglikelihoods(
                 // parameters and of the symbol alphabet (MDL): without the alphabet term a
                 // four-level model, whose alphabet contains the binary one, could never lose.
                 let ll = -0.5 * sigma2.max(1e-18).ln() * n as f64;
-                let penalty = mdl_penalty(&model, n, n_sym, model.free_bt);
+                let penalty = mdl_penalty(&model, n, n_sym);
                 best = best.max((ll - penalty) / n_sym);
             }
         }
@@ -960,13 +994,13 @@ fn fsk_loglikelihoods(
 /// Description length, in nats, of what a hypothesis fitted rather than predicted: half a
 /// `ln n` per free continuous nuisance parameter (BIC), plus `ln levels` per symbol for the
 /// alphabet a GLRT hard-decides for free.
-fn mdl_penalty(model: &FskModel, n: usize, n_sym: f64, free_bt: bool) -> f64 {
+fn mdl_penalty(model: &FskModel, n: usize, n_sym: f64) -> f64 {
     let mut free = 1.0; // the timing phase, always fitted
     if model.fixed_peak.is_none() {
         free += 1.0; // the deviation
     }
-    if free_bt {
-        free += 1.0; // the Gaussian BT
+    if model.bts.len() > 1 {
+        free += 1.0; // the Gaussian BT (the pulse's for `gfsk`, the channel's for CPFSK)
     }
     0.5 * free * (n as f64).ln() + n_sym * (model.levels as f64).ln()
 }
@@ -2025,6 +2059,115 @@ mod tests {
         assert!(
             ran >= 50,
             "the verifier only ran {ran} of {forced} times — the pairs were not exercised"
+        );
+    }
+
+    /// **T-908: the `fsk` pulse-shape test never argues for the wrong binary class.**
+    ///
+    /// Forced to choose between `2fsk` and `gfsk` at 50/50, starting from the wrong name, the stage
+    /// may keep the tie (a receiver-smoothed rectangle and a deployed Gaussian share
+    /// [`SHARED_BT`]) or move towards the truth; it may never score the rival higher. Blind:
+    /// acceptance draws from `verifier_gain`'s own seed range, never the dev grid the channel
+    /// grid was measured on.
+    ///
+    /// The two `2fsk` draws are the ones the fixed `BT` 1.0 channel lost, at every SNR of that
+    /// test: `1 307 003` is T-887's (`h` 0.63, OBW99 1.18 Rs; `gfsk` by 1.38 nats/symbol at 25 dB,
+    /// confirmed at p 0.906 once the tree's prior let the stage run) and `1 307 005` its twin
+    /// (`h` 0.43; by 1.30). Both go red here on the pre-T-908 grid. The twelve `gfsk` draws are
+    /// the whole cell, so the fix cannot have bought them by leaning the other way.
+    #[test]
+    fn t908_the_fsk_pulse_test_never_prefers_the_wrong_binary_class() {
+        let snr = 25.0;
+        let base = ACCEPTANCE_SEED_BASE + 300_000;
+        let cases: Vec<(Class, &str, &str, u64)> = [3u64, 5]
+            .iter()
+            .map(|t| {
+                (
+                    Class::Fsk2,
+                    "2fsk",
+                    "gfsk",
+                    base + 1_000 * Class::Fsk2 as u64 + t,
+                )
+            })
+            .chain((0..12u64).map(|t| {
+                (
+                    Class::Gfsk,
+                    "gfsk",
+                    "2fsk",
+                    base + 1_000 * Class::Gfsk as u64 + t,
+                )
+            }))
+            .collect();
+        let mut ran = 0usize;
+        for (class, truth, rival, seed) in cases {
+            let s = generate(class, &SynthConfig::new(snr, seed));
+            let mut c14 = SymbolEstimator::new();
+            let symbols = c14.from_samples(
+                &s.symbol_samples,
+                s.symbol_sample_rate_hz,
+                Some(s.obw_hz),
+                Some(snr),
+            );
+            let mut req = ClassifyRequest::new(&s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+            req.obw_hz = Some(s.obw_hz);
+            req.snr_db = Some(snr);
+            req.symbols = symbols.as_ref();
+            let mut c = Classifier::new().classify(&req);
+            if c.family != "fsk" || c.class.is_none() {
+                continue;
+            }
+            if let Some(call) = c.class.as_mut() {
+                call.dist = vec![
+                    LabelP {
+                        label: truth.to_owned(),
+                        p: 0.5,
+                    },
+                    LabelP {
+                        label: rival.to_owned(),
+                        p: 0.5,
+                    },
+                ];
+                call.label = rival.to_owned();
+                call.p = 0.5;
+            }
+            let outcome = verify(
+                &mut c,
+                &VerifyInput {
+                    samples: &s.symbol_samples,
+                    sample_rate_hz: s.symbol_sample_rate_hz,
+                    symbols: symbols.as_ref(),
+                    snr_db: Some(snr),
+                },
+            );
+            let VerifyOutcome::Ran { scores, .. } = &outcome else {
+                continue;
+            };
+            ran += 1;
+            let score = |l: &str| {
+                scores
+                    .iter()
+                    .find(|(k, _)| k == l)
+                    .map(|(_, v)| *v)
+                    .expect("both scored")
+            };
+            assert!(
+                score(rival) <= score(truth) + 1e-9,
+                "{truth} seed {seed} at {snr} dB: the pulse test preferred {rival} ({scores:?})"
+            );
+            let p_truth = c
+                .class
+                .as_ref()
+                .and_then(|k| k.dist.iter().find(|lp| lp.label == truth))
+                .map_or(0.0, |lp| lp.p);
+            assert!(
+                p_truth >= 0.5 - 1e-9,
+                "{truth} seed {seed}: demoted to {p_truth}"
+            );
+        }
+        println!("T-908: the pulse test ran on {ran} of 14 forced 2fsk/gfsk pairs");
+        assert!(
+            ran >= 10,
+            "only {ran} forced pairs ran: the property was not exercised"
         );
     }
 }
