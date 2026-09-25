@@ -217,7 +217,7 @@ Source: [docs/results/T-577.md](../results/T-577.md), harness `hk-estimate/tests
 
 **The count change.** A valid frame adds a trial only if two things hold:
 
-1. It is not degenerate: it is not short-periodic even with up to *w* bits trimmed from either end. This closes (A).
+1. It is not degenerate: it is not short-periodic even with up to *w* bits trimmed from either end. This closes (A). The test is applied to **the bits the check covers** — `frame[span.start_bit .. len − end_trim_bits]`, one BCH word, the parity units — never to the frame they were cut from: with `start_bit > 0` the cancelling `init` starts at `start_bit`, so a frame whose *covered* span is idle is not short-periodic under any trim of the whole frame, and (A) returns (measured on the real block: one such frame counted, at w = 32 — T-928, re-modelled in the harness with `start_bit = 8`).
 2. Its zero-trimmed polynomial is not a multiple (or divisor) of one already counted, because m·P is valid by construction once P is. This closes (B), including frames that hold two copies of one burst.
 
 The count is then capped at the GF(2) **affine rank + 1** of the valid frames. That is where independence actually saturates: at the payload's varying-bit dimension (a slow sensor ≈ 7, a counter log₂k + 2, a squitter 41), not at a frame count. With this count, every N2/N3 and artefact cell reads 0 of 4000 at w = 8, except (C) at w = 4. It costs the five real-emitter models nothing: it equals `differences` at every k.
@@ -338,7 +338,7 @@ T-547 measures whether the calibrated nulls (bimodality, eye openness, EVM, SNR 
 
 **What does not change, under any of the three outcomes:**
 
-- `min_analytic_holdout_bits = 24`, `hard_check_floor_bits = 16`, `min_check_width = 8`, and §4.2's formula. None of them reads a calibrated metric.
+- `min_analytic_holdout_bits = 24`, `hard_check_floor_bits = 16`, `min_check_width = 16` (§4.3: T-577 measured it; 8 only once §4.3.1's count is re-measured by that harness, never below 8), and §4.2's formula. None of them reads a calibrated metric.
 - The margin `M = 9.7 bits`. It prices the *analytic* nulls' assumptions (§3.2), which T-547 does not measure. §10.2 moves `M`; T-547 does not.
 - The soundness of the budget argument. This is the point of §2: the derivation was built so that a NO-GO is survivable without a redesign.
 
@@ -429,7 +429,7 @@ A reader of that knows which assumption broke, by how much, and which fixture to
 
 ### 11.1 ADR-0015
 
-- **§5.5** — conditions 1–3 replaced by §6's gate; `min_evidence_bits` and `min_distinct_valid` deleted; `min_check_width` 16 → 8 with `hard_check_floor_bits`; condition 4 (front-end trust) unchanged; the actor becomes `hk-pipeline/confirm-synth@2`. The "single frames don't auto-confirm" sentence and §10 open question 1 are **settled** by §4.2 + docs/20 §U1.
+- **§5.5** — conditions 1–3 replaced by §6's gate; `min_evidence_bits` and `min_distinct_valid` deleted; the flat `min_check_width = 16` replaced by `hard_check_floor_bits` plus a **measured** width floor (§4.3: 16 with the shipped count, 8 only with §4.3.1's count re-measured — T-577); condition 4 (front-end trust) unchanged; the actor becomes `hk-pipeline/confirm-synth@2`. The "single frames don't auto-confirm" sentence and §10 open question 1 are **settled** by §4.2 + docs/20 §U1.
 - **§11.5** — the restated thresholds updated to match; "no rule demotes", the T-210 corrected-frame invariant and the one-promoted-row rule unchanged.
 - **§1.3** — a note that `evidence_bits` remains the search-order and result-rank key and is **not** the confirm key; `analytic_holdout_bits` is added beside it.
 - One pointer line added in this branch; the full rewrite belongs to **T-575**.
