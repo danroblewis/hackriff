@@ -28409,7 +28409,7 @@ tasks:
   - id: T-960
     milestone: MAUTO
     title: "Two more explorer FM captures into fixtures/ with hidden truth: 88.5 PI 3AAB, 106.1 PI 1323 (oracle-confirmed)"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
@@ -28427,6 +28427,7 @@ tasks:
       MAC ONLY (the captures are in ~/.hackriff-ops on the Mac Studio). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     dispatch: manual
     branch: task-t960
+    commit: abbd8c5d
   - id: T-961
     milestone: MAUTO
     title: "RDS identity lands on a separate overlapping row (106.1: rds-pi:1323 beside an unknown-0.999 detection); a CRC-valid decode never confirms the emitter"
