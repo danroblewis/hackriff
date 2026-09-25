@@ -24463,7 +24463,7 @@ tasks:
   - id: T-820
     milestone: MMAP
     title: 'Annotation authoring on the canvas (draw box/marker/label -> create annotation)'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-RESEARCH
     model: opus
@@ -24500,6 +24500,7 @@ tasks:
       Observed, not chased: No Rust crate touched, so precheck was cargo fmt --all --check only (exit 0); clippy scope empty. | Label entry uses window.prompt: functional but plain; an inline label editor (and edit/delete via PUT/DELETE) belongs with T-821's Research slide-in. | docs/23 §10.4 also names 'annotate this' from a Shift+drag region (the selection context menu); not added here — the tool mode covers authoring. | The 'research' layer in surface/layers.ts (default hidden) is still not wired; annotations (like T-822's measurements) are drawn as always-on user marks so they are visible after reload without a toggle.
       Use cases: RESEARCH-003, RESEARCH-001
       Resources: 51 CPU-s, peak 1.0 GB
+    commit: 53fcbbcc
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
