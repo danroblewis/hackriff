@@ -1388,7 +1388,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // fetch spy); the only press that can reach the radio is the Go-to's retune OFFER, which goes
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
-    const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on));
+    const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
+      // T-955: follow-live brings the pane's FREQUENCY back to the front end's own current window
+      // too, when one is known — the same `frequency.current` the retune-offer span already reads
+      // (`goToSpanHz`), never a device call.
+      () => {
+        const cur = store.get().navGrid.grid?.frequency?.current;
+        return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
+      });
     // A read-only statement of the overlay layers this build draws, each as its REGISTRY def
     // (plane, z, default) — never the menu's rendering of them — so a check can derive what the
     // layers menu must offer from the registry itself rather than a literal every new renderer

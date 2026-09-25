@@ -687,10 +687,23 @@ export class Page {
   /**
    * Click an element named by an in-page expression that evaluates to it. A real click at the
    * element's own centre, not `el.click()`: the difference is whether anything is on top of it.
+   *
+   * **Scrolled into view first** (T-957), exactly as T-528's pressability hit test
+   * (`app-chrome.mjs`'s `unclickable`) already does, and for the same reason: a control inside a
+   * scrolling menu that the user would scroll to is reachable, and its centre is only a clickable
+   * point once it is on screen. Without this, an element clipped by its own scroll container still
+   * reports a rect — one *outside* that container — and the click lands on whatever is really
+   * there. That is what broke here: the layers menu (`.map-layers`, `overflow-y: auto`) grew past
+   * its `max-height` as MAP-10/MAP-13/MAP-21 added rows, and a click aimed at the `artifacts` row
+   * (rect 749…777, menu bottom 758) landed on `.sf-canvas`, so the toggle never flipped. The click
+   * is still a REAL click at a point, so anything genuinely painted on top of the control still
+   * takes it — `block: "nearest"` is a no-op for an element already fully visible.
    */
   async click(elementExpr) {
     const at = await this.eval(`(() => { const e = ${elementExpr};
-      if (!e) return null; const r = e.getBoundingClientRect();
+      if (!e) return null;
+      e.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const r = e.getBoundingClientRect();
       return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     if (!at) throw new Error(`nothing to click for: ${elementExpr}`);
     await this.mouse("mousePressed", at.x, at.y, { buttons: 1, clickCount: 1 });

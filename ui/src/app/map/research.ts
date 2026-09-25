@@ -98,6 +98,9 @@ export const goRow = (r: ResearchRow) => (s: AppState): Partial<AppState> => ({
 });
 
 /** The route a row's rename / delete goes to. */
+/** A collection's own path: the layer-visibility `PUT` and the `DELETE` the panel builds (T-825). */
+export const collectionPath = (id: string): string => `/api/collections/${encodeURIComponent(id)}`;
+
 export const rowPath = (r: Pick<ResearchRow, "kind" | "id">): string =>
   `${r.kind === "marker" ? "/api/markers" : "/api/annotations"}/${encodeURIComponent(r.id)}`;
 export const renameBody = (r: Pick<ResearchRow, "kind">, name: string): Record<string, string> =>
@@ -187,7 +190,7 @@ export const mountResearch: MountFn = (el, ctx: AppContext) => {
       vis.addEventListener("change", () => {
         // The layer switch: the stored default every pane reads (view state, then the PUT).
         store.set(setCollectionVisible(c.id, vis.checked));
-        void write("Layer toggle", () => client.put(`/api/collections/${encodeURIComponent(c.id)}`, { visible: vis.checked }));
+        void write("Layer toggle", () => client.put(collectionPath(c.id), { visible: vis.checked }));
       });
       const only = h("button", {
         type: "button", class: "research-only", "aria-pressed": String(filter.collectionId === c.id),
@@ -203,7 +206,7 @@ export const mountResearch: MountFn = (el, ctx: AppContext) => {
           if (armedDelete !== `c:${c.id}`) { armedDelete = `c:${c.id}`; render(); return; }
           armedDelete = null;
           if (filter.collectionId === c.id) filter.collectionId = null;
-          void write("Delete collection", () => client.del(`/api/collections/${encodeURIComponent(c.id)}`));
+          void write("Delete collection", () => client.del(collectionPath(c.id)));
         });
         li.append(del);
       } else li.append(h("small", { class: "research-reserved" }, c.id === BOOKMARKS_ID ? "bookmarks" : "built in"));
