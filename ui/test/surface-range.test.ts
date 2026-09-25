@@ -349,7 +349,10 @@ test("T-946(b): the orientation note follows the backend's coverage as it grows,
   latest += 300; // the sweep lit cells AFTER first paint, past the probe's frozen box
   const later = await refreshOrientationNote(get, p);
   assert.notEqual(later, first, "the sentence stayed at its first-paint census after coverage grew");
-  assert.match(later, /400 of 4096/);
+  // T-964: the census is stated on both axes — 400 row-major cells is every one of the 128 frequency
+  // cells (the survey's own share) and 9.8 % of the 4096 (time x frequency) cells the canvas draws.
+  assert.match(later, /128 of 128 frequency cells ever sampled/);
+  assert.match(later, /9\.8 % of its 4096 time × frequency cells/);
   const asked = coverageT1[coverageT1.length - 1];
   assert.ok(asked >= latest, `the refresh queried a box ending at ${asked}, before the newest capture ${latest}`);
 });

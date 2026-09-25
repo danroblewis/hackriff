@@ -28532,6 +28532,8 @@ tasks:
       core_interface (coverage). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 13:50 coordinator: skipped from the bulks for a real conflict in ui/src/surface/bootstrap.ts with T-955 (landed 448a9a65; its correction af8bf491 is queued and edits the same file). Resolved ONCE after the T-955 correction lands, then re-queued. Branch holds the reviewed work (4540c41d).
+
+      2026-09-25 coordinator: node2 handback (ffab0588) was reaped as a false NO_WORK (sync-back bug); coordinator ran the core-interface Opus review: PASS (bands census on /api/coverage consistent with the served cells, grey stays unobserved, T-376 opening rule intact, thin client). SCOPE: this lands the census + banner only; the canvas symptom (no last-known shadow over the swept range after a full scan), the contradictory preview-page coverage line, the un-timed query's IQ-ring default window and record-limit truncation moved to T-1014.
     core_interface: true
   - id: T-965
     milestone: MSCAN

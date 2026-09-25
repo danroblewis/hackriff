@@ -812,6 +812,10 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
     "named": true,                             // false for the "unknown" and "any" labels
     "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "excluded_cells": 1,
     "observed_fraction": 0.5,
+    // T-964: the same census with the TIME AXIS COLLAPSED — one entry per frequency cell, sampled
+    // if ANY row sampled it. The survey question; see below.
+    "bands": { "cells": 4, "observed_cells": 2, "excluded_cells": 1, "unobserved_cells": 1,
+               "unknown_cells": 0, "observed_fraction": 0.75, "rule": "collapsed over time: …" },
     "cells": [
       // 1. observed, and there was energy
       { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
@@ -836,7 +840,7 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
     ]
   }],
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
-           "unknown_cells": 0, "cells": [ … ] },
+           "unknown_cells": 0, "bands": { "…": "…" }, "cells": [ … ] },
   "horizon": { "oldest_record_s": 1789214520.0,  // null when nothing here holds a tune record
                "recording_began_s": 1789214400.0, // T-507: null when nothing here ever recorded
                "forgotten": null,                 // or why the past before it is unbounded
@@ -895,6 +899,40 @@ The fix gives the notch its own mark rather than making the observation log lie 
 - **`analysed_s` is the number behind the word.** Every observed cell now carries it: of `observed_s`, how many seconds the analysis actually ran on. `analysed_s == 0.0` *is* `"excluded"`, so a client can check the claim instead of taking it. A cell whose extent is partly analysed (a coverage cell wider than the notch, or a coarse tile that swallows it) reports what it is — `0 < analysed_s <= observed_s` — and reads `"observed"`: a 30 kHz exclusion is not a claim about a 200 kHz cell.
 - **Draw the measurement, mark it distinctly, never grey.** `resolution.grey_rule` says so in the response. The canvas draws the level on the same ramp with a vertical-rule ink over it (`ui/src/surface/cellrule.ts`, the seventh cell state) — a mark ruled along the *frequency* axis, which is the axis the exclusion is a stripe on.
 - **It can change at the ring horizon, honestly.** Inside the ring the same cell reads `"observed"`, because the raw samples are there to analyse; past it, `"excluded"`, because the only surviving evidence is a record that says the analysis skipped it. Each is the truth about what we can still say.
+
+#### The survey census: `bands` — the same coverage with the time axis collapsed (T-964)
+
+Every grid (`devices[]` and `any`) carries a **`bands`** census beside its cells: `{cells,
+observed_cells, excluded_cells, unobserved_cells, unknown_cells, observed_fraction, rule}`, with one
+entry per **frequency** cell, counted as sampled if **any** row in the window sampled it. Same four
+states, same vocabulary, one axis fewer.
+
+It exists because a grid census is the wrong denominator for the one question the fog-of-war view
+asks — *where has this radio ever looked?* A front end sees one window at a time, so a **completed**
+survey pass can only ever occupy a thin diagonal of a (time × frequency) grid. Measured on the live
+HackRF: a finished 1 MHz–6 GHz pass of `Scan everything (fast)` was reported to the user as *"4.3 %
+of this surface was ever sampled (176 of 4096 coverage cells)"* — arithmetically true of the
+128 × 32 grid the client folded, and read (correctly, given that sentence) as *the survey lit
+nothing*. The records were all there, and the fold over a window containing the pass had every
+stepped cell `observed`; what was wrong was the axis the share was taken over.
+
+So the collapse is served, with its rule attached, rather than left to each client:
+
+- **It widens the question, never the claim.** A band nothing sampled stays `unobserved` here too,
+  and `unknown` still outranks grey (forgetting is not a measurement). `excluded` (T-595) counts as
+  sampled — the radio was demonstrably there — so `observed_cells + excluded_cells` is the sampled
+  total, exactly as in the grid census.
+- **It never replaces the per-cell grid.** A cell is a claim about an *instant*, and that is what the
+  canvas draws; `bands` is what a *sentence about the survey* may cite. Both are in every answer, so
+  no client has to fold a grid into a claim of its own — which is how the axes got swapped.
+- `rule` says all of this on the wire, so a reader cannot mistake a band for an instant.
+
+Contract: `crates/hk-cli/tests/scan_coverage.rs` starts a sweep through the mock SDR the way the app
+does (`POST /api/control/scan`), waits for a whole pass, and asserts every stepped frequency cell is
+sampled, that `bands` equals the fold of the cells served beside it, that the (time × frequency) grid
+is **not** sampled everywhere (a sweep visits one window at a time), and that a band the pass never
+reached stays `unobserved`. The client half — the orientation sentence quoting this share — is
+`ui/test/surface-preview.test.ts`.
 
 #### The time axis: `rows` (T-423)
 
