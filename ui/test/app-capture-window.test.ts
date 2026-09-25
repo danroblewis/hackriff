@@ -352,7 +352,7 @@ test("Record IQ survived the panel: it records the viewport's band through the o
   const src = readFileSync("src/app/centre/capture-clock.ts", "utf8");
   assert.match(src, /"\/api\/outputs\/record\/start", \{ band: \{ f_lo: span\.loHz, f_hi: span\.hiHz \}, kinds: \["iq"\] \}/);
   assert.match(src, /"\/api\/outputs\/record\/stop"/);
-  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /recordIqButton\(ctx\)/, "it is mounted in the canvas bar");
+  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /recordIqButton\(ctx\)/, "it is mounted (in the viewport menu since T-882)");
 });
 
 test("no default span: nothing on the capture window's path can fall back to a constant window", () => {

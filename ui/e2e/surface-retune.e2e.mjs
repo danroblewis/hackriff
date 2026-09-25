@@ -47,6 +47,7 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
+import { paneAct } from "./app-chrome.mjs";
 import { startBackend } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -209,7 +210,7 @@ test("2. THE TICKET: zooming DEEP INSIDE the tuned window keeps the control — 
 test("3. a split gives each viewport its OWN control, and moving one does not disturb the other", async () => {
   const page = await app();
   const nPanes = panes(await rows(page)).length;
-  await page.click(`[...document.querySelectorAll('.sf-actions button')].find((b) => /Split/.test(b.textContent))`);
+  await paneAct(page, "split"); // T-882: the viewport menu, not the retired toolbar row
   await page.frames(4);
   const rs = await rows(page);
   assert.equal(panes(rs).length, nPanes + 1, `the split did not add a viewport: ${JSON.stringify(rs.map((r) => r.id))}`);
@@ -477,7 +478,7 @@ test("5. THE TICKET, enabled: a viewport INSIDE the tuned window retunes to wher
 test("6. PER PANE: two viewports, two controls, each naming ITS OWN window", async () => {
   const { page } = await mockApp();
   const at = await centre(page);
-  await page.click(`[...document.querySelectorAll('.sf-actions button')].find((b) => /Split/.test(b.textContent))`);
+  await paneAct(page, "split"); // T-882: the viewport menu, not the retired toolbar row
   await page.frames(4);
   // Move ONE of them along frequency. A split opens both on the identical box (T-442), so until one
   // moves they legitimately name the same destination.
