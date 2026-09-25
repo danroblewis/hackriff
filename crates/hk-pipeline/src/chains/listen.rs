@@ -733,6 +733,7 @@ impl ListenManager {
             t0_anchored: false,
             refiner,
             refine_emitter: refine_emitter.or(emitter),
+            subaudible_written: None,
             refined: refined_tuning,
             end_slot: end_slot.clone(),
             _slot: slot.clone(),
@@ -808,6 +809,9 @@ fn build_demod(
     Ok(if channels == 2 { d.with_stereo() } else { d })
 }
 
+/// What makes two sub-audible conclusions the same answer (T-988).
+type SubaudibleKey = (hk_model::SubaudibleKind, Option<u64>, Option<String>);
+
 struct Session {
     shared: Arc<Shared>,
     reader: ChainReader,
@@ -832,8 +836,10 @@ struct Session {
     t0_anchored: bool,
     /// Background re-refinement (T-070).
     refiner: Option<LiveRefiner>,
-    /// Emitter refined tunings are stored on.
+    /// Emitter refined tunings are stored on (and, T-988, sub-audible conclusions).
     refine_emitter: Option<EmitterId>,
+    /// The sub-audible answer last filed on the emitter (T-988): kind, CTCSS tone bits, DCS code.
+    subaudible_written: Option<SubaudibleKey>,
     /// Refined centre and bandwidth in force.
     refined: Option<(f64, f64)>,
     /// How the transport said the session ended (T-633), read when `stop` is seen.
@@ -879,10 +885,76 @@ impl Session {
 
     /// Swaps in a rebuilt demodulator, carrying its stereo lock losses over (T-874): the new one
     /// starts unlocked, so dropping a locked pilot is itself a loss.
-    fn replace_demod(&mut self, demod: AudioDemod) {
+    fn replace_demod(&mut self, mut demod: AudioDemod) {
         self.stereo_losses +=
             self.demod.stereo_lock_losses() + u64::from(self.demod.stereo_locked());
+        // T-988: a refined rebuild of the same channel keeps its sub-audible measurement.
+        demod.inherit_subaudible(&mut self.demod);
         self.demod = demod;
+    }
+
+    /// T-988: files a settled sub-audible conclusion (a tone, a code, or "none") on the emitter
+    /// row as a Demodulation whose `params.subaudible` carries it — once per change of answer,
+    /// never while still `measuring`. The emitter is the Listen target, else the inventory entry
+    /// at the channel; with neither there is no row to put it on and nothing is written.
+    fn record_subaudible(&mut self, s: &hk_model::Subaudible, t: Timestamp) {
+        use hk_model::SubaudibleKind;
+        if s.kind == SubaudibleKind::Measuring {
+            return;
+        }
+        let key = (
+            s.kind,
+            s.tones.first().and_then(|t| t.table_hz).map(f64::to_bits),
+            s.dcs.as_ref().map(|d| d.code.clone()),
+        );
+        if self.subaudible_written.as_ref() == Some(&key) {
+            return;
+        }
+        let plan = self.demod.plan().clone();
+        let mut repo = self.shared.repo();
+        let emitter = self.refine_emitter.or_else(|| {
+            crate::refine::emitter_for_channel(
+                &repo,
+                plan.channel_center_hz,
+                plan.channel_bandwidth_hz,
+            )
+            .ok()
+            .flatten()
+        });
+        let Some(emitter) = emitter else {
+            return;
+        };
+        let demod = hk_model::Demodulation {
+            id: hk_model::DemodulationId::new(),
+            emitter_ref: Some(emitter),
+            detection_ref: None,
+            recording_ref: None,
+            mode: plan.mode_name().into(),
+            params: hk_model::EstimatedParams {
+                bandwidth_hz: Some(plan.channel_bandwidth_hz),
+                subaudible: Some(s.clone()),
+                ..hk_model::EstimatedParams::default()
+            },
+            lock_quality: None,
+            evm_db: None,
+            time: hk_model::TimeRange::new(self.t0, t.max(self.t0)),
+            demod_version: LISTEN_DEMOD_VERSION.into(),
+        };
+        let written = repo.insert_demodulation(&demod).and_then(|()| {
+            repo.link_emitter(&hk_model::EmitterLink {
+                emitter_id: emitter,
+                target: hk_model::LinkTarget::Demodulation(demod.id),
+                linked_at: t,
+            })
+        });
+        match written {
+            Ok(()) => self.subaudible_written = Some(key),
+            Err(e) => crate::stats::storage_error(
+                &self.shared.counters.chains,
+                "listen sub-audible write",
+                &e,
+            ),
+        }
     }
 
     /// Why this chain stopped when its session guard was dropped (T-633).
@@ -1114,10 +1186,18 @@ impl Session {
                     stereo: (channels == 2).then(|| self.demod.stereo_locked()),
                     stereo_lock_losses: (channels == 2)
                         .then(|| self.stereo_losses + self.demod.stereo_lock_losses()),
+                    ..AudioStatus::default()
                 };
                 let t = self.t0.saturating_add_nanos(
                     (audio_index as f64 * 1e9 / AUDIO_SAMPLE_RATE_HZ).round() as i64,
                 );
+                // T-988: NBFM streams say which CTCSS tone / DCS code they carry, or that they
+                // carry none, and the settled answer goes on the emitter row.
+                let mut status = status;
+                if let Some(sub) = self.demod.subaudible() {
+                    status.set_subaudible(&sub);
+                    self.record_subaudible(&sub, t);
+                }
                 if self
                     .publisher
                     .publish_status(t, audio_index, &status.to_value())

@@ -264,6 +264,7 @@ impl AudioSink {
             // A recipe's `audio` output is mono (hk-recipe; T-874 changed only Listen's opener).
             stereo: None,
             stereo_lock_losses: None,
+            ..AudioStatus::default()
         };
         let mut m = match status.to_value() {
             Value::Object(m) => m,

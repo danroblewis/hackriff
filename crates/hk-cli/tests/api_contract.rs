@@ -2856,6 +2856,7 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
             "bandwidth_hz",
             "roll_off",
             "pilot_hz",
+            "subaudible",
             "source_recording",
         ] {
             assert!(
@@ -2863,6 +2864,9 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
                 "estimated_params missing {field}: {row}"
             );
         }
+        // T-988: `subaudible` is `null` (nobody looked) or the CTCSS/DCS/none object.
+        let sub = &p["subaudible"];
+        assert!(sub.is_null() || sub["kind"].is_string(), "{row}");
     }
     let (st, v) = get(addr, "/api/inventory/not-a-uuid");
     assert_eq!(st, 404, "{v}");

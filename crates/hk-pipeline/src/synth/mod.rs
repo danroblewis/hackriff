@@ -129,6 +129,7 @@ pub fn estimated_params(obs: &CcObservation<'_>) -> Option<(&'static str, Estima
             roll_off: None,
             bandwidth_hz: Some(obs.bandwidth_hz),
             pilot_hz: None,
+            subaudible: None,
         },
     ))
 }

@@ -5,7 +5,7 @@ import type { AppContext } from "../context";
 import { removeOutput, upsertOutput, type OutputEntry } from "../state";
 import type { AudioHeader } from "../../audio-frames";
 import { AudioSession, type AudioSessionEvents } from "./audio-session";
-import { audioSubText, listenTcpTarget, nextId, recordsTcpTarget, refusalText } from "./outputs";
+import { audioSubText, listenTcpTarget, nextId, recordsTcpTarget, refusalText, subaudibleText } from "./outputs";
 
 /** What to listen to: a known emitter, or a band (a selection or the view). */
 export type ListenTarget =
@@ -29,8 +29,8 @@ function events(ctx: AppContext): AudioSessionEvents {
   };
   // Each live stream's header, for re-deriving the sub-line when a status changes `stereo` (T-874).
   const headers = new Map<string, AudioHeader>();
-  const sub = (h: AudioHeader, stereo: boolean | null) =>
-    audioSubText(h.audio?.mode, h.sample_rate_hz, h.audio?.channels ?? 1, stereo);
+  const sub = (h: AudioHeader, stereo: boolean | null, tone: string | null = null) =>
+    audioSubText(h.audio?.mode, h.sample_rate_hz, h.audio?.channels ?? 1, stereo, tone);
   return {
     onHeader(id, header) {
       headers.set(id, header);
@@ -41,7 +41,10 @@ function events(ctx: AppContext): AudioSessionEvents {
     },
     onStatus(id, status) {
       const h = headers.get(id);
-      const next = h && typeof status.stereo === "boolean" ? sub(h, status.stereo) : null;
+      // T-988: an NBFM stream's CTCSS/DCS answer (or "no tone") joins the header line.
+      const tone = subaudibleText(status);
+      const stereo = typeof status.stereo === "boolean" ? status.stereo : null;
+      const next = h && (stereo !== null || tone !== null) ? sub(h, stereo, tone) : null;
       patch(id, (e) => ({ ...e, levelDbfs: status.level_dbfs, sub: next ?? e.sub }));
     },
     onClosed(id, _hadHeader, reason) {
