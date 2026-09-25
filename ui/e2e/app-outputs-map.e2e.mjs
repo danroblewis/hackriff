@@ -71,6 +71,12 @@ const menuItem = (label) => `[...document.querySelectorAll('.ctx-menu:not([hidde
 const menuItemMatching = (re) => `[...document.querySelectorAll('.ctx-menu:not([hidden]) .ctx-item')].find((b) => ${re}.test(b.querySelector('.lbl')?.textContent ?? ''))`;
 const BADGE = (id) => `document.querySelector('.sf-obadges .sf-obadge[data-pin=${JSON.stringify(id)}]')`;
 const KINDS = (id) => `(${BADGE(id)}?.dataset.kinds ?? '')`;
+/** Whether box `id` is placed on the canvas this frame. On the mock SDR the feature layer can go
+ * without a box for tens of seconds while its row stays listed (observed on main at 2033e9dd, with
+ * or without this change): a box can only carry a badge while it is drawn, so each check below
+ * first waits for the box to BE drawn, then asserts on that same frame. */
+const PLACED = (id) => `!!document.querySelector('.sf-pins .sf-pin.detection.area[data-pin=${JSON.stringify(id)}]')`;
+const waitPlaced = (page, id, fail) => page.waitFor(`box ${id.slice(0, 8)} to be drawn`, PLACED(id), { timeoutMs: 120000, everyMs: 250 }).catch(fail);
 const ACTIVE_BTN = (id) => `!!document.querySelector('.sf-pins .sf-pin.active[data-pin=${JSON.stringify(id)}]')`;
 
 /** Pixels near ACTIVE_MARK in the band just OUTSIDE a box's left edge (where no badge sits — the
@@ -121,6 +127,8 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   const shot = async (name) => { if (SHOTS) await page.shot(path.join(SHOTS, `outputs-map-${name}.png`)); };
   const state = async () => page.eval(`JSON.stringify({
     menu: ${MENU_LABELS}, strip: document.querySelector('.out-strip')?.hidden, chips: [...document.querySelectorAll('.out-strip .out')].map((o) => [o.dataset.state, o.textContent]),
+    pins: [...document.querySelectorAll('.sf-pins .sf-pin.detection')].slice(0, 12).map((p) => { const r = p.getBoundingClientRect(); return [p.className, p.getAttribute('aria-label'), Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; }),
+    chrome: document.querySelector('.sf-chrome')?.textContent?.slice(0, 200),
     badges: [...document.querySelectorAll('.sf-obadge')].map((b) => [b.dataset.pin?.slice(0, 8), b.dataset.kinds]),
     toast: document.querySelector('#toast')?.textContent, mode: document.querySelector('.mode[aria-pressed=true]')?.dataset.mode })`);
   const fail = async (e) => { throw new Error(`${e.message}\nstate: ${await state()}`); };
@@ -154,12 +162,12 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   await page.click(menuItem("Listen"));
   await page.waitFor("the server's stream header (the chip goes live)", `document.querySelector('.out-strip .out[data-state=live]') !== null`, { timeoutMs: 30000 }).catch(fail);
   await page.frames(2);
-  t.diagnostic(`after the header: ${await state()} pins: ${await page.eval(`JSON.stringify([...document.querySelectorAll('.sf-pins .sf-pin')].filter((p) => p.dataset.pin === ${JSON.stringify(id)}).map((p) => p.className))`)}`);
-  assert.match(await page.eval(KINDS(id)), /\baudio\b/, "the box carries the audio badge within a frame of the header");
+  await waitPlaced(page, id, fail);
+  assert.match(await page.eval(KINDS(id)), /\baudio\b/, "the box carries the audio badge on every frame it is drawn once the header is in");
   assert.equal(await page.eval(ACTIVE_BTN(id)), true, "the box's feature is in the active state");
   assert.match(await page.eval(`document.querySelector('.sf-pin[data-pin=${JSON.stringify(id)}]').getAttribute('aria-label')`), /active: listening/);
-  const live = await box(page, 8, 8);
-  const area = live && live.id === id ? live.area : target.area;
+  const area = JSON.parse(await page.eval(`JSON.stringify((() => { const r = document.querySelector('.sf-pins .sf-pin.area[data-pin=${JSON.stringify(id)}]')?.getBoundingClientRect();
+    return r ? { x0: r.x, y0: r.y, x1: r.right, y1: r.bottom } : null; })())`)) ?? target.area;
   const haloOn = await haloPixels(page, area);
   t.diagnostic(`halo pixels left of the box: before ${haloBefore}, while listening ${haloOn}`);
   assert.ok(haloOn > haloBefore + 10, `the GL overlay drew no active halo outside the box (${haloBefore} → ${haloOn})`);
@@ -174,16 +182,20 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   await shot("3-listening");
 
   // (4) Stop from the same menu → both drop.
+  await waitPlaced(page, id, fail);
   const again = await openMenuOn(page, id);
   assert.ok(again.includes("Stop listening"), `the menu offers Stop listening while it plays: ${again}`);
   await page.click(menuItem("Stop listening"));
   await page.frames(2);
+  assert.equal(await page.eval(`document.querySelector('.out-strip').hidden`), true, "nothing open: the strip is gone");
+  await waitPlaced(page, id, fail);
   assert.equal(await page.eval(`${BADGE(id)} === null`), true, "the badge dropped");
   assert.equal(await page.eval(ACTIVE_BTN(id)), false, "the active state dropped");
   assert.equal(await page.eval(`document.querySelector('.out-strip').hidden`), true, "nothing open: the strip is gone");
   await shot("4-stopped");
 
   // (5) Decode from the menu → the decode badge while the backend reports it running; drops when done.
+  await waitPlaced(page, id, fail);
   const decodeLabels = await openMenuOn(page, id);
   await page.click(menuItemMatching("/^Decode/"));
   const pipe = await page.waitForValue("the backend to report a running decode pipeline on the box",
@@ -194,10 +206,10 @@ test("outputs live on the map: right-click a box → Listen shows active + badge
   t.diagnostic(`decode: menu ${decodeLabels.find((l) => /^Decode/.test(l))} → pipeline ${running.id} on ${running.emitter_id}`);
   await page.click(`document.querySelector('.mode[data-mode=explore]')`);
   const decId = running.emitter_id ?? id;
-  await page.waitFor("the box to carry the decode badge", `/\\bdecode\\b/.test(${KINDS(decId)})`, { timeoutMs: 15000 }).catch(fail);
+  await page.waitFor("the box to carry the decode badge", `/\\bdecode\\b/.test(${KINDS(decId)})`, { timeoutMs: 120000, everyMs: 250 }).catch(fail);
   await shot("5-decoding");
   await page.eval(authed(backend.token, "DELETE", `/api/pipelines/${running.id}`));
-  await page.waitFor("the decode badge to drop once the pipeline is done", `!/\\bdecode\\b/.test(${KINDS(decId)})`, { timeoutMs: 15000 }).catch(fail);
+  await page.waitFor("the decode badge to drop once the pipeline is done", `${PLACED(decId)} && !/\\bdecode\\b/.test(${KINDS(decId)})`, { timeoutMs: 120000, everyMs: 250 }).catch(fail);
 
   // (6) 400 px: no dock bar either, and a long-press on a box opens the same menu, on screen.
   await page.conn.send("Emulation.setDeviceMetricsOverride", { width: 400, height: 820, deviceScaleFactor: 1, mobile: false }, page.sessionId);

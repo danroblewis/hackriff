@@ -1,11 +1,12 @@
 // T-824 (MAP-24): the phone-width + fade/immersive pass, in the real app — what only a browser's own
 // layout, hit test and touch pipeline can show. docs/23 §10.2 (fade) and §10.5 (400 px, touch).
 //
-//  1. At 400 px nothing scrolls the page sideways, the top bar is one row, and every floating control
-//     (Go-to, the top-right cluster, zoom, the FAB, the sheet's handle, the lists' chip) is on screen,
+//  1. At 400 px nothing scrolls the page sideways, there is no top bar (T-993 retired it; its controls
+//     float as the nudge row and the mode/status pill), and every floating control (Go-to, the
+//     top-right cluster, the nudges, the mode switch, zoom, the FAB, the sheet's handle, the lists' chip) is on screen,
 //     at least 24 px, and what a press at its centre lands on — Go-to never under the top-right cluster.
 //     The sheet's peek strip covers none of the surface's statements (coverage sentence, pane rows).
-//  2. Idle: after ~6 s untouched the floating chrome — the cluster, the top bar, the chip —
+//  2. Idle: after ~6 s untouched the floating chrome — the cluster (with the bar's former controls), the chip —
 //     fades to ~35 %, while the sheet and the honesty statements do not; a touch brings it all back.
 //  3. Sheets and menus stay reachable and closeable: the sheet's handle opens it and its close shuts
 //     it; Research opens as a full-height panel above the cluster, the sheet drops to peek, and its
@@ -19,13 +20,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
+import { settled } from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
 const W = 400, H = 820;
 
-const GUARDED = ".map-goto input, .map-topright button:not([hidden]), .map-zoom-in, .map-zoom-out, .map-fab, .sheet-grab, .side-chip";
+const GUARDED = ".map-goto input, .map-topright button:not([hidden]), .map-nudge .nudge-btn, .map-status .mode, .map-zoom-in, .map-zoom-out, .map-fab, .sheet-grab, .side-chip";
 // T-528's hit test at phone width: on screen, >= 24 px, and what a press at its centre lands on.
 const unpressable = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})].map((el) => {
   const r = el.getBoundingClientRect();
@@ -65,12 +67,16 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   // (1) Fits.
   const fit = JSON.parse(await page.eval(`JSON.stringify({
     sw: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), iw: innerWidth,
-    bar: document.querySelector('.app > .bar').getBoundingClientRect().height })`));
+    bar: document.querySelector('.app > .bar').getBoundingClientRect().height,
+    canvasTop: document.querySelector('.sf-canvas').getBoundingClientRect().top })`));
   t.diagnostic(`fit: ${JSON.stringify(fit)}`);
   assert.ok(fit.sw <= fit.iw, `the page scrolls sideways at ${W} px (${fit.sw} > ${fit.iw})`);
-  assert.ok(fit.bar <= 48, `the top bar is ${fit.bar} px tall at ${W} px — it wrapped instead of being one row`);
+  // T-993: T-824's "the bar is one row" became "there is no bar": its pixels are the map's.
+  assert.equal(fit.bar, 0, `the retired top bar is still ${fit.bar} px tall at ${W} px`);
+  assert.equal(fit.canvasTop, 0, "the canvas's top row is not the page's first pixel row");
   assert.deepEqual(JSON.parse(await page.eval(unpressable(GUARDED))), [], "a floating control is off screen, too small or covered");
-  assert.equal(await page.eval(overlap(".map-goto", ".map-topright")), 0, "Go-to slides under the top-right cluster");
+  assert.equal(await page.eval(overlap(".map-goto", ".map-topright, .map-status")), 0, "Go-to slides under the top-right cluster or the status pill");
+  assert.equal(await page.eval(overlap(".map-nudge", ".map-topright, .map-status")), 0, "the nudges slide under the cluster or the status pill");
   assert.equal(await page.eval(overlap(".map-zoom", ".map-fab, .map-topright")), 0, "the zoom stack collides with the FAB or the top-right cluster");
   assert.equal(await page.eval(overlap(".sheet", ".sf-note, .sf-chrome, .sf-ring")), 0,
     "the sheet's peek strip covers one of the surface's honesty statements");
@@ -84,22 +90,30 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   assert.equal(await page.eval(`document.querySelector('.app > .dock')`), null, "the Outputs dock bar is retired");
   assert.equal(await page.eval(`document.querySelector('.app > .out-strip').hidden`), true, "nothing open: no outputs strip");
   const idle = JSON.parse(await page.eval(`JSON.stringify({
-    bar: ${opacity(".app > .bar")}, zoom: ${opacity(".map-zoom")},
+    status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, zoom: ${opacity(".map-zoom")},
     fab: ${opacity(".map-fab")}, chip: ${opacity(".side-chip")}, sheet: ${opacity(".sheet")},
     chrome: ${opacity(".sf-chrome")}, note: ${opacity(".sf-note")} })`));
   t.diagnostic(`idle opacities: ${JSON.stringify(idle)}`);
-  for (const k of ["bar", "zoom", "fab", "chip"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
+  for (const k of ["status", "nudge", "zoom", "fab", "chip"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
   for (const k of ["sheet", "chrome", "note"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
   await touch("touchStart", [[200, 110]]);
   await touch("touchEnd", []);
   await page.waitFor("a touch to bring the chrome back", "!document.body.classList.contains('chrome-idle')", { timeoutMs: 5000 });
 
   // (3) Sheet and Research: reachable one-handed and closeable.
+  // T-958: the close (×) and the grab handle ride the sheet's head, which travels ~313 px over the
+  // .28 s height transition the press before it started — and `dataset.snap` flips at the START of
+  // that move, not at its end. So a state wait that is followed by another press on the sheet is
+  // followed by `settled` too, the page's own report that it has arrived; without it the press is
+  // aimed where the button WAS and lands in the body below (1 run in 6 alone on a loaded box, and
+  // on main).
   await page.click("document.querySelector('.sheet-grab')");
   await page.waitFor("the sheet to open", "document.querySelector('.sheet').dataset.snap !== 'peek'", { timeoutMs: 5000 });
+  await settled(page, ".sheet", "the sheet's opening");
   await shot("3-sheet");
   await page.click("document.querySelector('.sheet-close')");
   await page.waitFor("the sheet's close to collapse it", "document.querySelector('.sheet').dataset.snap === 'peek'", { timeoutMs: 5000 });
+  await settled(page, ".sheet", "the sheet's collapse");
   await page.click("document.querySelector('.sheet-grab')");
   await page.waitFor("the sheet to open again", "document.querySelector('.sheet').dataset.snap !== 'peek'", { timeoutMs: 5000 });
   await page.click("document.querySelector('.map-research-btn')");

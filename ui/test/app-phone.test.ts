@@ -33,21 +33,26 @@ test("one idle signal: the cluster's IdleFade writes the <body> class the HUD an
   }
 });
 
-test("fade reaches the bar, the Active-outputs strip and the lists' chip — never what §10.2 exempts", () => {
+test("fade reaches the Active-outputs strip and the lists' chip — never what §10.2 exempts", () => {
   const rules = [...phoneCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
   const fading = rules.filter((r) => /opacity:\s*\.35/.test(r.body));
   assert.ok(fading.length > 0, "no fade rule at all, so this proves nothing");
   const sels = fading.flatMap((r) => r.sel.split(",").map((s) => s.trim()));
   for (const s of sels) assert.match(s, /^body\.chrome-idle /, `a fade not gated on idle: ${s}`);
-  // T-994 retired the dock bar; the Active-outputs strip that replaced it is floating chrome too.
-  for (const want of ["> .bar", "> .out-strip", ".side-chip"]) {
+  // T-993: no top bar over the map to fade — its controls are in the cluster and fade with it.
+  // T-994: the dock bar is retired; the Active-outputs strip that replaced it fades like it did.
+  for (const want of ["> .out-strip", ".side-chip"]) {
     assert.ok(sels.some((s) => s.includes(want)), `${want} does not fade`);
   }
   const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side.is-open"];
   for (const s of sels) for (const n of NEVER) assert.ok(!s.includes(n), `${s} fades ${n}, which §10.2 says never fades`);
   assert.ok(sels.every((s) => /:not\(:focus-(within|visible)\)/.test(s)), "a focused control must never fade");
-  assert.ok(sels.some((s) => s.includes("> .bar") && s.includes(":not(:has(.conn:not([hidden])))")),
-    "the bar must stay solid while it states the stream is not live");
+  assert.ok(!sels.some((s) => s.includes("> .bar")), "T-993: the retired top bar has no rule over the map");
+  // The stream-status line moved into the cluster's status pill (T-993): it holds the pill solid.
+  const ctlCss = noComments(src("src/app/chrome/map-controls.css"));
+  assert.match(ctlCss, /\.map-ctl\.is-idle \.map-status:has\(\.conn:not\(\[hidden\]\)\) \{ opacity: 1; \}/,
+    "the status pill must stay solid while it states the stream is not live");
+  assert.match(ctlCss, /\.map-ctl\.is-idle \.map-fade:not\(:focus-within\) \{ opacity: \.35; \}/, "…and fades otherwise");
 });
 
 test("the phone breakpoint is one number, and isPhoneWidth reads it", () => {

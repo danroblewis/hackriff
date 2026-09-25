@@ -12,6 +12,11 @@
      Layout regions follow ui/mockups/explorer-v3.html; every panel mounts into one data-slot and
      owns only that subtree. -->
 <div class="app" id="app">
+  <!-- T-993: in Explore this bar takes NO pixels (display: none, `chrome/map-layout.css`); its
+       controls are MOVED, not copied, into the map's floating chrome (`chrome/top-chrome.ts`): the
+       Explore/Decode/History switch and the device state into a small pill, the nudges beside Go-to,
+       Review into the top-right cluster and Theme into its ⋯ menu. Decode and History keep the framed
+       shell, so the same elements come back here when either is shown. -->
   <header class="bar">
     <div class="brand">hack<span>riff</span></div>
     <div class="modes" role="group" aria-label="View">
@@ -33,7 +38,7 @@
          1/8, 1/4 or 1/2 of the span to move it off DC while keeping it in the window. A press is
          an explicit device action (T-343), never a gesture. -->
     <div class="nudge" data-slot="nudge" role="group" aria-label="Tuning nudges"></div>
-    <button class="mini" type="button" id="review-btn" aria-pressed="false">Review</button>
+    <button class="mini" type="button" id="review-btn" aria-pressed="false" aria-label="Review" title="Review: anomalies, device and survey"><span class="rv-ico" aria-hidden="true">⚑</span><span class="rv-label">Review</span><span class="rv-n" hidden></span></button>
     <button class="mini" type="button" id="theme-btn">Theme</button>
   </header>
 

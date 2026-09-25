@@ -42,7 +42,7 @@ export function sideChipLabel(c: SideCounts): string {
 
 /**
  * Where the open overlay's top goes on a narrow screen: below the lowest of the top chrome's
- * bottoms (the bar, the floating Go-to and top-right cluster), plus a gap. Non-finite readings
+ * bottoms (the floating Go-to, nudges, top-right cluster and status pill), plus a gap. Non-finite readings
  * (an element not built yet) are ignored; null when nothing was measurable, so the CSS fallback
  * stands.
  */
@@ -51,7 +51,8 @@ export function sideTopPx(bottoms: readonly (number | null | undefined)[]): numb
   return ok.length ? Math.ceil(Math.max(...ok)) + SIDE_TOP_GAP_PX : null;
 }
 
-const TOP_CHROME = [".app > .bar", ".map-goto", ".map-topright"];
+// T-993: the top bar is gone from Explore; its controls are the nudge row and the status pill.
+const TOP_CHROME = [".map-goto", ".map-nudge", ".map-topright", ".map-status"];
 
 export const mountSideChip: MountFn = (el, ctx) => {
   el.classList.add("is-collapsed");

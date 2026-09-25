@@ -27,7 +27,8 @@ import { dirname, join, normalize } from "node:path";
 import test from "node:test";
 
 import {
-  coverageUrl, fmtShare, latticeSpanHz, observedExtent, openingWindow, orientationNote, surfaceBounds,
+  coverageUrl, fmtShare, latticeSpanHz, observedExtent, openingWindow, orientationNote, recentObservedExtent,
+  surfaceBounds,
 } from "../src/surface/bootstrap";
 import { GREY } from "../src/surface/cellrule";
 import { legendEntries, swatchPixels } from "../src/surface/legend";
@@ -114,6 +115,40 @@ test("observed extent counts the three coverage states separately and boxes only
   assert.equal(observedExtent(null).total, 0, "a missing map is not an empty map");
 });
 
+/** A coverage answer with TWO disjoint observed rectangles, so the whole-history census's bounding
+ * box spans the empty gap between them the way a session holding two different tunings would. */
+function twoBandCoverage(nf: number, nt: number, old_: { f0: number; f1: number; t1: number },
+  recent: { f0: number; f1: number; t0: number; t1: number }) {
+  const cells: { state: string }[] = [];
+  for (let t = 0; t < nt; t++) {
+    for (let f = 0; f < nf; f++) {
+      const inOld = f >= old_.f0 && f <= old_.f1 && t <= old_.t1;
+      const inRecent = f >= recent.f0 && f <= recent.f1 && t >= recent.t0 && t <= recent.t1;
+      cells.push({ state: inOld || inRecent ? "observed" : "unobserved" });
+    }
+  }
+  return {
+    grid: { cells: nf, rows: nt, f_lo_hz: 1e6, f_cell_hz: 1e6, t0_s: T0, t_cell_s: 1 },
+    any: { cells },
+  };
+}
+
+test("T-955: a session holding two disjoint tunings — recentObservedExtent boxes only the one it holds NOW", () => {
+  // The measured shape: 100.7 MHz (index ~100) tuned for a long stretch, then retuned to 10.5 MHz
+  // (index ~10) five rows ago. `observedExtent`'s bounding box spans both, plus the untuned gap
+  // between them — the "100–1100 MHz" bug. `recentObservedExtent` must box only the recent one.
+  const cov = twoBandCoverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 100, f1: 102, t1: 20 }, { f0: 10, f1: 12, t0: 29, t1: 31 });
+  const whole = observedExtent(cov);
+  assert.ok(whole.box && whole.box.f0Hz <= 11e6 && whole.box.f1Hz >= 103e6,
+    "the whole-history census spans the gap between the two tunings — this IS the bug, reproduced");
+
+  const recent = recentObservedExtent(cov);
+  assert.ok(recent.box, "the recent rows are not empty");
+  assert.ok(recent.box!.f0Hz >= 9e6 && recent.box!.f1Hz <= 14e6,
+    `recentObservedExtent boxed the OLD band too: ${JSON.stringify(recent.box)}`);
+  assert.ok(recent.box!.f1Hz <= whole.box!.f1Hz, "recent is never wider than the whole-history census");
+});
+
 test("the view opens ON observed coverage with a margin, so the edge of coverage is on screen", () => {
   const c = observedExtent(coverage(10, 10, { f0: 2, f1: 3, t0: 4, t1: 5 }));
   const o = openingWindow(BOUNDS, c.box);
@@ -180,6 +215,24 @@ test("probeSurface asks exactly five read-only routes, in dependency order", asy
   assert.match(p.note, new RegExp(`${surfaceWide.observed} of ${surfaceWide.total} coverage cells`));
   assert.ok(p.opening.freq.spanHz < surfaceWide.box!.f1Hz - surfaceWide.box!.f0Hz,
     "the refinement did not narrow the opening window: a coarse cell is 51.2 MHz on a 6.5 GHz surface");
+});
+
+test("T-955: probeSurface opens on the RECENTLY tuned band, not the union of everything ever observed", async () => {
+  // The exact shape found live 2026-09-25: a long tuning near 101 MHz, then a retune to ~11 MHz a
+  // few rows ago. Before this fix `p.opening` centred somewhere between the two — on current code
+  // (revert the `recentObservedExtent` narrowing in `probeSurface` to see it) this assertion is red:
+  // `openingWindow(origin.bounds, observedExtent(cov).box)` puts the centre near 56 MHz, off the
+  // tuned band entirely, and a span wide enough to draw it as a sliver.
+  const cov = twoBandCoverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 100, f1: 102, t1: 20 }, { f0: 10, f1: 12, t0: 29, t1: 31 });
+  const p = await probeSurface(async (path) => {
+    if (path.startsWith("/api/tiles")) return tileProbeResponse(path.includes("scheme=overview") ? "overview" : "view");
+    if (path === "/api/navigation") return { frequency: { ranges_hz: [[1e6, 6e9]], center_step_hz: 28.6 }, time: { latest_s: T1 } };
+    return cov;
+  });
+  assert.equal(p.opening.onCoverage, true);
+  assert.ok(p.opening.freq.centerHz >= 9e6 && p.opening.freq.centerHz <= 14e6,
+    `opened away from the currently-tuned band: centre ${p.opening.freq.centerHz / 1e6} MHz`);
+  assert.ok(p.opening.freq.spanHz < 20e6, `sliver span left over from the old union box: ${p.opening.freq.spanHz}`);
 });
 
 test("a refinement that finds nothing keeps the coarse box: an observed cell has something in it", async () => {
