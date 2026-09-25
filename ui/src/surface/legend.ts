@@ -12,6 +12,9 @@
 // legend changes with it, because there is nothing here to keep in step.
 
 import { CELL, PENDING, TIER, cellPixel, type Rgb, type Vec2 } from "./cellrule";
+import {
+  ARTIFACT_MARK, CANDIDATE_MARK, CONFIRMED_MARK, SYMBOLOGY, type FeatureClass, type MarkSymbology,
+} from "./marks";
 import type { DisplayRange } from "./surface";
 
 /** One row of the key: a name, what it claims, and how to paint a pixel of its swatch. */
@@ -136,6 +139,51 @@ export function fogKeyEntries(): readonly LegendEntry[] {
       pixel: (px: Vec2, x: number): Rgb => cellPixel({ state: CELL.UNOBSERVED, x, px, tier: TIER.LIVE_IQ, srcPx: SWATCH_SRC_PX, fallback: false, fog: false }),
     },
   ];
+}
+
+/** Curated/human marks' ink (`app/map/research-slice.ts`'s `MINE_MARK` — a display constant, not
+ * signal logic, so it is quoted rather than imported: `surface/` sits under `app/`, never over it). */
+const CURATED_MARK: Rgb = [0.953, 0.89, 0.749];
+
+const CLASS_RGB: Readonly<Record<FeatureClass, Rgb>> = {
+  confirmed: [CONFIRMED_MARK[0], CONFIRMED_MARK[1], CONFIRMED_MARK[2]],
+  candidate: [CANDIDATE_MARK[0], CANDIDATE_MARK[1], CANDIDATE_MARK[2]],
+  unexplained: [CANDIDATE_MARK[0], CANDIDATE_MARK[1], CANDIDATE_MARK[2]],
+  artifact: [ARTIFACT_MARK[0], ARTIFACT_MARK[1], ARTIFACT_MARK[2]],
+  curated: CURATED_MARK,
+};
+
+/** The symbology's outline/fill, in words — one sentence per class, so a viewer who cannot tell two
+ * inks apart still has the non-hue cue stated, not just drawn. */
+function symbologyNote(sym: MarkSymbology): string {
+  const outline = sym.outline === "solid" ? "solid outline" : sym.outline === "dashed" ? "dashed outline" : "double outline";
+  return sym.fill ? `${outline}, light hatch fill` : `${outline}, no fill`;
+}
+
+/**
+ * **The detections layer's key** (T-813 / MAP-13, docs/23 §7 / §10.6 rule 6): one row per
+ * [[FeatureClass]], each swatch painted in the class's own ink and each note stating the outline/fill
+ * cue that carries the class when hue does not — the CVD-safety half of `docs/23 §9`'s checklist made
+ * visible, not just asserted in a test (`ui/test/surface-cvd.test.ts`). Unexplained is drawn a `?` by
+ * the label layer (`pins.ts`), noted here rather than duplicated as a swatch feature.
+ *
+ * Same colours the boxes are drawn in (`marks.ts`'s own constants, quoted, not re-picked), so this
+ * key cannot show a class the canvas paints a different ink for.
+ */
+export function markKeyEntries(): readonly LegendEntry[] {
+  const order: readonly FeatureClass[] = ["confirmed", "candidate", "unexplained", "artifact", "curated"];
+  const labels: Record<FeatureClass, string> = {
+    confirmed: "Confirmed", candidate: "Candidate", unexplained: "Unexplained (?)",
+    artifact: "Explained artifact", curated: "Curated / your mark",
+  };
+  return order.map((cls) => {
+    const sym = SYMBOLOGY[cls];
+    const rgb = CLASS_RGB[cls];
+    const note = cls === "unexplained"
+      ? `${symbologyNote(sym)}, labelled "?" — a Candidate the backend offered no explanation for.`
+      : symbologyNote(sym) + (cls === "confirmed" ? " — the stronger claim, drawn heavier." : "");
+    return { key: cls, label: labels[cls], note, pixel: () => rgb };
+  });
 }
 
 /**
