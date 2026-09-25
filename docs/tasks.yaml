@@ -28529,7 +28529,7 @@ tasks:
   - id: T-966
     milestone: M2-hardening
     title: Listen status level_dbfs reads above 0 dBFS while the delivered audio is -9.4 dBFS RMS
-    status: in-progress
+    status: done
     priority: P3
     deps: []
     parallel_group: LISTEN-LEVEL
@@ -28542,6 +28542,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: node2 handback (87af6c67) reaped as a false NO_WORK (sync-back bug); coordinator ran the required Opus review (sonnet on the real-time audio path): PASS - O(1) per sample, dBFS <= 0 after the clamp, squelch/SNR untouched, both output paths identical, test red at +6.03 dBFS before. Follow-up filed for the squelch-closed meaning, stereo time constant, docs and WFM/AGC tests.
+    commit: 19173d29
   - id: T-967
     milestone: MMAP
     title: Decoded identity (PI/PS etc.) is not shown in the inventory list rows
