@@ -1338,9 +1338,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
-      // T-955: follow-live brings the pane's FREQUENCY back to the front end's own current window
-      // too, when one is known — the same `frequency.current` the retune-offer span already reads
-      // (`goToSpanHz`), never a device call.
+      // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
+      // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
+      // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
+      // NOTE for T-1006 (per-pane device): this reads the GLOBAL `frequency.current`, not the
+      // pane's own device's window.
       () => {
         const cur = store.get().navGrid.grid?.frequency?.current;
         return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
@@ -1455,6 +1457,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
+    // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
+    store.select((s) => {
+      const c = s.navGrid.grid?.frequency?.current;
+      return c ? `${c.center_hz}/${c.span_hz}` : "";
+    }, () => controls.tuningChanged());
 
     const topBar = document.querySelector<HTMLElement>(".app > .bar");
     const fit = () => {
