@@ -466,6 +466,9 @@ pub struct AnalyzeJob {
     pub results: Vec<PipelineResult>,
     /// ADR-0021 §4.1.
     pub trace_summary: Option<TraceSummary>,
+    /// ADR-0021 §5: what the trace can be reproduced from (the engine's key plus the analysed
+    /// window); `null` until the engine hands back.
+    pub replay_key: Option<Value>,
     /// ADR-0021 §7A.2: present whenever the job finished without a solved result.
     pub resolution: Option<Resolution>,
     /// The emitter the job analyses (an emitter target) or attached to (M-9).
@@ -805,6 +808,7 @@ impl AnalyzeJobs {
             },
             results: Vec::new(),
             trace_summary: None,
+            replay_key: None,
             resolution: None,
             emitter_id: req.emitter_id.map(|e| e.to_string()),
             decodes: None,
@@ -938,7 +942,7 @@ impl AnalyzeJobs {
             "engine": hk_synth::ENGINE,
             // `final: false` while the job runs: the engine hands its trace over when it stops.
             "final": job.trace.is_some(),
-            "replay_key": Value::Null,
+            "replay_key": job.snap.replay_key,
             "bounds": {
                 "max_nodes": bounds.max_trace_nodes,
                 "max_bytes": bounds.max_trace_bytes,
@@ -1284,29 +1288,28 @@ fn run(inner: &Arc<Inner>, n: u64, plan: Option<Plan>) {
             .and_then(|j| j.snap.window.as_ref())
             .and_then(|w| w.clip_id.clone())
     };
-    // ADR-0021 §5: what makes this search reproducible. Blocks and the calibration hash are the
-    // backend's to add once one exists (MAUTO M-2's evaluator); what the job knows is here.
-    let replay_key = json!({
-        "engine": hk_synth::ENGINE,
-        "templates": &request.templates,
-        "profile": request.profile,
-        "budget": { "max_evaluations": budget.max_evaluations,
-                    "max_proposal_calls": budget.max_proposal_calls },
-        "window": { "clip_id": clip_id, "t_lo": secs(read.start), "t_hi": secs(read.end) },
-        "seed_ref": Value::Null,
-    });
+    // ADR-0021 §5: what makes this search reproducible. The engine keys everything its
+    // decisions are a function of (T-565: engine, templates, blocks@version, profile, count caps,
+    // seed_ref); the job adds the analysed window. The calibration hash is the backend's to add
+    // once an evaluator uses one (MAUTO M-2).
+    let window = json!({ "clip_id": clip_id, "t_lo": secs(read.start), "t_hi": secs(read.end) });
     match outcome {
-        Ok(o) => finish_search(
-            inner,
-            n,
-            o,
-            Finished {
-                class,
-                overload,
-                read,
-                replay_key,
-            },
-        ),
+        Ok(o) => {
+            let mut key = o.replay_key.clone();
+            key.window = Some(window);
+            let replay_key = serde_json::to_value(&key).unwrap_or(Value::Null);
+            finish_search(
+                inner,
+                n,
+                o,
+                Finished {
+                    class,
+                    overload,
+                    read,
+                    replay_key,
+                },
+            )
+        }
         Err(e) => fail(inner, n, "failed", e, None),
     }
 }
@@ -1403,6 +1406,7 @@ pub fn resolution_of(o: &SearchOutcome, summary: &TraceSummary, ended: &str) -> 
 }
 
 fn finish_search(inner: &Inner, n: u64, mut o: SearchOutcome, f: Finished) {
+    let job_replay_key = f.replay_key.clone();
     let class = f.class;
     // Content leaves only when the IQ's class permits it (module docs).
     if !class.is_some_and(ContentClass::permits_content) {
@@ -1483,6 +1487,7 @@ fn finish_search(inner: &Inner, n: u64, mut o: SearchOutcome, f: Finished) {
     s.used = o.used;
     s.results = std::mem::take(&mut o.results);
     s.trace_summary = Some(summary);
+    s.replay_key = Some(job_replay_key);
     if let Some(w) = attach_warning {
         s.warnings.push(w);
     }

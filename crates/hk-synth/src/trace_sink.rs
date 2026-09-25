@@ -27,6 +27,8 @@
 //! ([`Trace::over_bound`]); ADR-0021 §2.3 argues that set is small (one per deferred family,
 //! one per unsupported structure), and a test holds it to that.
 
+use std::cell::Cell;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
@@ -34,6 +36,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::stage::Stage;
 use crate::trace::{Elided, Outcome, OutcomeKind, TraceBounds, TraceNode};
+
+thread_local! {
+    static IN_TRACE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the current thread is building or retaining a trace node right now.
+///
+/// This is the hook for **measuring** the trace's allocation cost (ADR-0021 §3, T-453's
+/// constraint: measured, not assumed): a counting global allocator in a test binary reads it on
+/// every allocation and splits the search's bytes into trace and not-trace. It is a
+/// const-initialised `Cell<bool>` with no destructor, so reading it from inside an allocator
+/// neither allocates nor registers anything.
+pub fn in_trace_scope() -> bool {
+    IN_TRACE.with(Cell::get)
+}
+
+/// Marks the current thread as inside trace work until dropped (nests).
+pub(crate) struct TraceScope(bool);
+
+impl TraceScope {
+    pub(crate) fn enter() -> Self {
+        Self(IN_TRACE.with(|c| c.replace(true)))
+    }
+}
+
+impl Drop for TraceScope {
+    fn drop(&mut self) {
+        IN_TRACE.with(|c| c.set(self.0));
+    }
+}
 
 /// How many nodes, by result rank, retention protects: enough that `results[]` (≤ 10, ADR-0015
 /// §5.2) never has to be drawn from outside the retained trace.
@@ -56,6 +88,13 @@ pub struct Trace {
     /// The bound was exceeded because every remaining node is protected (never-dropped rows).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub over_bound: bool,
+    /// Most nodes retained at once, sampled after **every** insert's retention pass: residency
+    /// during the search, not only at its end.
+    #[serde(default)]
+    pub peak_nodes: u64,
+    /// Most bytes retained at once, sampled the same way.
+    #[serde(default)]
+    pub peak_bytes: u64,
 }
 
 impl Trace {
@@ -67,22 +106,88 @@ impl Trace {
 }
 
 /// (stage, family): the unit retention protects the best of.
+#[cfg(test)]
 type FamilyKey<'a> = (Stage, Option<&'a str>);
+
+/// `f32` under IEEE total order, so evidence can key an ordered index.
+#[derive(Clone, Copy, Debug)]
+struct Bits(f32);
+
+impl PartialEq for Bits {
+    fn eq(&self, o: &Self) -> bool {
+        self.0.total_cmp(&o.0).is_eq()
+    }
+}
+impl Eq for Bits {}
+impl PartialOrd for Bits {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for Bits {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&o.0)
+    }
+}
+
+/// Drop order: tier (ADR-0021 §2.3's list), then weakest evidence, then newest.
+type CandKey = (u8, Bits, Reverse<u32>);
+/// Best first: highest evidence, then oldest.
+type BestKey = (Reverse<Bits>, u32);
 
 struct Entry {
     node: TraceNode,
     bytes: u64,
     parent: Option<u32>,
     family: Option<String>,
+    /// Interned (stage, family).
+    group: u32,
 }
 
 impl Entry {
     fn bits(&self) -> f32 {
         self.node.evidence_bits.unwrap_or(f32::NEG_INFINITY)
     }
+
+    /// Whether the node competes for the "best of" protections: tried and not a memoised hit
+    /// (a memoised hit repeats another node's measurement; the original speaks for it).
+    fn ranked(&self) -> bool {
+        self.node.tried && !matches!(self.node.outcome, Outcome::Memoised { .. })
+    }
+
+    fn tier(&self) -> u8 {
+        match self.node.outcome.kind() {
+            OutcomeKind::Memoised => 0,
+            OutcomeKind::PrunedBeam => 1,
+            OutcomeKind::PrunedBound => 2,
+            OutcomeKind::PrunedFloor => 3,
+            OutcomeKind::EvaluatedWorse => 4,
+            _ => 5,
+        }
+    }
+
+    fn cand_key(&self, id: u32) -> CandKey {
+        (self.tier(), Bits(self.bits()), Reverse(id))
+    }
+}
+
+/// One (stage, family)'s ordered indexes.
+#[derive(Default)]
+struct Group {
+    /// Every ranked node: the first is the best of the group.
+    best: BTreeSet<BestKey>,
+    /// Ranked `pruned_floor` nodes: the first two are kept.
+    floors: BTreeSet<BestKey>,
 }
 
 /// Retention on insert (module docs).
+///
+/// Retention is **incremental**: the protected set and the droppable leaves are ordered
+/// indexes kept up to date on every insert, pin and drop, so choosing a victim is O(log n)
+/// rather than a rescan and re-sort of the whole retained set per insert. T-565 measured the
+/// rescan at ~310 µs per decision under quick's bound in a debug build (retention was 96 % of
+/// the trace's wall); the unit tests hold the incremental choice to the rescan's, victim by
+/// victim.
 pub struct TraceSink {
     bounds: TraceBounds,
     entries: BTreeMap<u32, Entry>,
@@ -93,6 +198,30 @@ pub struct TraceSink {
     nodes_elided: u64,
     over_bound: bool,
     cost: Duration,
+    peak_nodes: u64,
+    peak_bytes: u64,
+    group_ids: HashMap<(Stage, Option<String>), u32>,
+    groups: Vec<Group>,
+    /// Every ranked node, deepest stage then best evidence first (the top-rank protection).
+    ranked: BTreeSet<(Reverse<Stage>, Reverse<Bits>, u32)>,
+    /// Droppable leaves: tried, with a parent, unpinned and childless. Protected ones are
+    /// skipped at choice time.
+    cands: BTreeSet<CandKey>,
+    #[cfg(test)]
+    oracle: bool,
+}
+
+/// Counts serialised bytes without buffering them.
+struct ByteCount(u64);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0 += b.len() as u64;
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl TraceSink {
@@ -108,6 +237,14 @@ impl TraceSink {
             nodes_elided: 0,
             over_bound: false,
             cost: Duration::ZERO,
+            peak_nodes: 0,
+            peak_bytes: 0,
+            group_ids: HashMap::new(),
+            groups: Vec::new(),
+            ranked: BTreeSet::new(),
+            cands: BTreeSet::new(),
+            #[cfg(test)]
+            oracle: false,
         }
     }
 
@@ -115,6 +252,7 @@ impl TraceSink {
     /// that child is inserted (and then only if the child itself is dropped).
     pub fn pin(&mut self, parent: u32) {
         *self.pins.entry(parent).or_default() += 1;
+        self.refresh(parent);
     }
 
     /// Finalises node `id` (whose parent is `parent`, and whose committed family is `family`)
@@ -127,7 +265,9 @@ impl TraceSink {
         node: TraceNode,
     ) {
         let t = Instant::now();
-        let bytes = serde_json::to_vec(&node).map_or(0, |v| v.len() as u64);
+        let _scope = TraceScope::enter();
+        let mut count = ByteCount(0);
+        let bytes = serde_json::to_writer(&mut count, &node).map_or(0, |()| count.0);
         if let Some(p) = parent {
             if let Some(c) = self.pins.get_mut(&p) {
                 *c = c.saturating_sub(1);
@@ -138,15 +278,36 @@ impl TraceSink {
             *self.retained_children.entry(p).or_default() += 1;
         }
         self.bytes += bytes;
-        self.entries.insert(
-            id,
-            Entry {
-                node,
-                bytes,
-                parent,
-                family,
-            },
-        );
+        let next = self.groups.len() as u32;
+        let group = *self
+            .group_ids
+            .entry((node.stage, family.clone()))
+            .or_insert(next);
+        if group == next {
+            self.groups.push(Group::default());
+        }
+        let e = Entry {
+            node,
+            bytes,
+            parent,
+            family,
+            group,
+        };
+        if e.ranked() {
+            let bk = (Reverse(Bits(e.bits())), id);
+            let g = &mut self.groups[group as usize];
+            g.best.insert(bk);
+            if matches!(e.node.outcome, Outcome::PrunedFloor { .. }) {
+                g.floors.insert(bk);
+            }
+            self.ranked
+                .insert((Reverse(e.node.stage), Reverse(Bits(e.bits())), id));
+        }
+        self.entries.insert(id, e);
+        self.refresh(id);
+        if let Some(p) = parent {
+            self.refresh(p);
+        }
         while self.over() {
             match self.victim() {
                 Some(v) => self.drop_node(v),
@@ -156,6 +317,8 @@ impl TraceSink {
                 }
             }
         }
+        self.peak_nodes = self.peak_nodes.max(self.entries.len() as u64);
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
         self.cost += t.elapsed();
     }
 
@@ -197,6 +360,8 @@ impl TraceSink {
             nodes_elided: self.nodes_elided,
             bytes: self.bytes,
             over_bound: self.over_bound,
+            peak_nodes: self.peak_nodes,
+            peak_bytes: self.peak_bytes,
             nodes: self.entries.into_values().map(|e| e.node).collect(),
             elided: self.elided.into_values().collect(),
         }
@@ -207,16 +372,74 @@ impl TraceSink {
             || self.bytes > u64::from(self.bounds.max_trace_bytes)
     }
 
-    fn protected(&self) -> BTreeSet<u32> {
+    /// Re-derives whether `id` is a droppable leaf.
+    fn refresh(&mut self, id: u32) {
+        let Some(e) = self.entries.get(&id) else {
+            return;
+        };
+        let key = e.cand_key(id);
+        let leaf = e.node.tried
+            && e.parent.is_some()
+            && !self.pins.contains_key(&id)
+            && self.retained_children.get(&id).copied().unwrap_or(0) == 0;
+        if leaf {
+            self.cands.insert(key);
+        } else {
+            self.cands.remove(&key);
+        }
+    }
+
+    /// ADR-0021 §2.3's "never dropped" rows among the tried: the best per (stage, family), the
+    /// best two `pruned_floor` per (stage, family), `evaluated_worse` up to rank 10, and the
+    /// top [`PROTECTED_TOP_RANK`] by result rank. (Not-tried nodes, the root and lineage are
+    /// never droppable leaves in the first place.)
+    fn is_protected(&self, id: u32) -> bool {
+        let Some(e) = self.entries.get(&id) else {
+            return false;
+        };
+        if !e.ranked() {
+            return false;
+        }
+        if matches!(e.node.outcome, Outcome::EvaluatedWorse { rank, .. } if rank <= 10) {
+            return true;
+        }
+        let g = &self.groups[e.group as usize];
+        if g.best.first().is_some_and(|b| b.1 == id) {
+            return true;
+        }
+        if matches!(e.node.outcome, Outcome::PrunedFloor { .. })
+            && g.floors.iter().take(2).any(|b| b.1 == id)
+        {
+            return true;
+        }
+        self.ranked
+            .iter()
+            .take(PROTECTED_TOP_RANK)
+            .any(|r| r.2 == id)
+    }
+
+    fn victim(&self) -> Option<u32> {
+        let v = self
+            .cands
+            .iter()
+            .map(|c| c.2.0)
+            .find(|&id| !self.is_protected(id));
+        #[cfg(test)]
+        if self.oracle {
+            assert_eq!(v, self.victim_naive(), "incremental retention diverged");
+        }
+        v
+    }
+
+    /// The original rescan, kept as the oracle the incremental choice is held to.
+    #[cfg(test)]
+    fn protected_naive(&self) -> BTreeSet<u32> {
         let mut keep = BTreeSet::new();
-        // Best per (stage, family), whatever the outcome.
         let mut best: BTreeMap<FamilyKey<'_>, (f32, u32)> = BTreeMap::new();
-        // Best two pruned_floor per (stage, family).
         let mut floors: BTreeMap<FamilyKey<'_>, Vec<(f32, u32)>> = BTreeMap::new();
         let mut ranked: Vec<(Stage, f32, u32)> = Vec::new();
         for (&id, e) in &self.entries {
-            // A memoised hit repeats another node's measurement; the original speaks for it.
-            if !e.node.tried || matches!(e.node.outcome, Outcome::Memoised { .. }) {
+            if !e.ranked() {
                 continue;
             }
             let key = (e.node.stage, e.family.as_deref());
@@ -244,8 +467,9 @@ impl TraceSink {
         keep
     }
 
-    fn victim(&self) -> Option<u32> {
-        let keep = self.protected();
+    #[cfg(test)]
+    fn victim_naive(&self) -> Option<u32> {
+        let keep = self.protected_naive();
         self.entries
             .iter()
             .filter(|(id, e)| {
@@ -255,17 +479,7 @@ impl TraceSink {
                     && !self.pins.contains_key(id)
                     && self.retained_children.get(id).copied().unwrap_or(0) == 0
             })
-            .map(|(&id, e)| {
-                let tier = match e.node.outcome.kind() {
-                    OutcomeKind::Memoised => 0,
-                    OutcomeKind::PrunedBeam => 1,
-                    OutcomeKind::PrunedBound => 2,
-                    OutcomeKind::PrunedFloor => 3,
-                    OutcomeKind::EvaluatedWorse => 4,
-                    _ => 5,
-                };
-                (tier, e.bits(), id)
-            })
+            .map(|(&id, e)| (e.tier(), e.bits(), id))
             .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(b.2.cmp(&a.2)))
             .map(|(_, _, id)| id)
     }
@@ -275,6 +489,15 @@ impl TraceSink {
             return;
         };
         self.bytes -= e.bytes;
+        self.cands.remove(&e.cand_key(id));
+        if e.ranked() {
+            let bk = (Reverse(Bits(e.bits())), id);
+            let g = &mut self.groups[e.group as usize];
+            g.best.remove(&bk);
+            g.floors.remove(&bk);
+            self.ranked
+                .remove(&(Reverse(e.node.stage), Reverse(Bits(e.bits())), id));
+        }
         if let Some(p) = e.parent
             && let Some(c) = self.retained_children.get_mut(&p)
         {
@@ -282,6 +505,7 @@ impl TraceSink {
             if *c == 0 {
                 self.retained_children.remove(&p);
             }
+            self.refresh(p);
         }
         self.nodes_elided += 1;
         let kind = e.node.outcome.kind();
@@ -343,6 +567,7 @@ mod tests {
             outcome,
             evaluations: 3,
             cpu_ms: 0,
+            nondeterministic: false,
             summary: String::new(),
         }
     }
@@ -462,5 +687,77 @@ mod tests {
         // n1 is the best of family "a" and protected; the memoised leaf is dropped instead.
         assert!(t.nodes.iter().all(|n| n.id != "n2"));
         assert_eq!(t.elided[0].outcome, OutcomeKind::Memoised);
+    }
+
+    #[test]
+    fn incremental_retention_drops_exactly_what_the_rescan_would() {
+        // Randomised trees — ties in evidence, several (stage, family) groups, pins, children
+        // arriving before and after their parents — under both bounds, with the rescan run
+        // beside every victim choice.
+        let outcomes = |r: u64, rank: u32| match r % 9 {
+            0 => Outcome::Memoised {
+                reused: "n0".into(),
+            },
+            1 | 2 => beam(rank),
+            3 => Outcome::PrunedBound {
+                bound_bits: 1.0,
+                best_bits: 2.0,
+            },
+            4 | 5 => Outcome::PrunedFloor {
+                floor_bits: 6.0,
+                measured_bits: 1.0,
+            },
+            6 => Outcome::EvaluatedWorse {
+                rank: rank % 14,
+                gap_bits: 1.0,
+            },
+            7 => Outcome::Survived { children: 1 },
+            _ => Outcome::DeferredBudget {
+                stop: StopReason::Budget,
+                queue_position: rank,
+            },
+        };
+        for seed in 1..=6u64 {
+            let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut rnd = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            };
+            let bounds = if seed % 2 == 0 {
+                TraceBounds {
+                    max_trace_nodes: 12 + (seed as u32) * 3,
+                    max_trace_bytes: u32::MAX,
+                }
+            } else {
+                TraceBounds {
+                    max_trace_nodes: u32::MAX,
+                    max_trace_bytes: 4_000 + seed as u32 * 500,
+                }
+            };
+            let mut sink = TraceSink::new(bounds);
+            sink.oracle = true;
+            let stages = [Stage::S1, Stage::S2, Stage::S3, Stage::S5];
+            let families = ["fsk", "ook", "psk"];
+            for id in 1..=600u32 {
+                let parent = match rnd() % 5 {
+                    0 => None,
+                    _ => Some((rnd() % u64::from(id)) as u32),
+                };
+                if rnd() % 3 == 0 {
+                    sink.pin((rnd() % u64::from(id + 1)) as u32);
+                }
+                let outcome = outcomes(rnd(), (rnd() % 20) as u32);
+                let bits = (rnd() % 12) as f32 / 2.0;
+                let mut n = node(id, parent, outcome, bits);
+                n.stage = stages[(rnd() % 4) as usize];
+                let family = families[(rnd() % 3) as usize];
+                n.hypothesis.family = Some(family.into());
+                sink.insert(id, parent, Some(family.into()), n);
+            }
+            let t = sink.finish();
+            assert!(t.nodes_elided > 50, "seed {seed}: the bound bit");
+        }
     }
 }

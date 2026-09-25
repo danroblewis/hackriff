@@ -161,8 +161,8 @@ pub use frame::{
 pub use query::{
     CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, FilterSummary,
     LAST_KNOWN_MAX_TOP_ROWS, LastKnown, LastKnownCell, LastKnownSearch, LastKnownStage,
-    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, Overview, OverviewCell, RegionHistory, RegionQuery,
-    Resolution, ShadowFill, ShadowRun, StraddleGuard, burst_histogram,
+    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, Overview, OverviewCell, PINNED_REACH_BLOCKS, RegionHistory,
+    RegionQuery, Resolution, ShadowFill, ShadowRun, StraddleGuard, burst_histogram,
 };
 pub use shape::NoiseShapeEstimator;
 pub use store::{IngestOutcome, MAX_MATERIALIZE_TILES, Pyramid, PyramidStats, ResidentBytes};

@@ -574,6 +574,21 @@ fn a_job_acquires_what_it_reads_searches_and_streams_to_done() {
     let all = jobs.trace("a1", &TraceQuery::default()).unwrap();
     assert_eq!(all["final"], json!(true));
     assert_eq!(all["engine"], json!(hk_synth::ENGINE));
+    // ADR-0021 §5: the job records what its trace can be reproduced from, the analysed window
+    // (from the read ledger) included, and the trace fetch serves the same key.
+    let key = done.replay_key.as_ref().expect("replay_key on the job");
+    let key: hk_synth::trace::ReplayKey =
+        serde_json::from_value(key.clone()).expect("the engine's ReplayKey shape");
+    assert_eq!(key.engine, hk_synth::ENGINE);
+    // The key records the caps the engine RAN under — this test's backend sets 4 000 (`spec`).
+    assert_eq!(key.budget.max_evaluations, Some(4_000));
+    assert_eq!(key.seed_ref.len(), 64);
+    assert!(!key.blocks.is_empty(), "blocks at their versions");
+    assert_eq!(
+        key.window.as_ref().map(|w| &w["clip_id"]),
+        Some(&json!(done.window.as_ref().and_then(|w| w.clip_id.clone()))),
+    );
+    assert_eq!(all["replay_key"], serde_json::to_value(&key).unwrap());
     let n_all = all["nodes"].as_array().unwrap().len();
     assert_eq!(n_all as u64, ts.nodes_recorded.min(512));
     let s5 = jobs
