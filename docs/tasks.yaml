@@ -27908,7 +27908,7 @@ tasks:
   - id: T-943
     milestone: MMAP
     title: Selected-region panel lists signals outside the region and offers no Listen/Decode; list-row context menu opens nothing
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-SELECTED
@@ -27934,6 +27934,7 @@ tasks:
       Observed, not chased: The diff is ui/ only, so `just precheck` with no crates would clippy the whole workspace in a cold worktree for no coverage; `cargo fmt --all --check` (the whole-tree half of precheck) was run and is clean, and the gate class for this diff is `ui` (test-ui + test-ui-e2e), both of which were run in full. | The e2e runs used HK_BIN=/home/ubuntu/hk/hackriff/target/debug/hk (main's already-built binary, read-only) rather than building hk in this worktree: the diff touches no crate, and backend.mjs serves this worktree's ui/dist via --ui-dist. | The drawer's past-survey reads (SurveyLog, /api/observations) stay at the device's whole range even under a region scope; their rows are filtered to the region at render instead, because the log cache is keyed by time only. Honest today (nothing outside the region is listed) but a region-scoped read would be cheaper - left alone as out of scope. | `ui/test/app-sheet-principles.test.ts`'s fake DOM gained `matches`/`closest` and a default `touches: []` on `fire`, because its audit fires EVERY handler an element carries and the long-press trigger reads `e.touches`. Harness-only; no assertion was weakened.
       Use cases: AWARE-042
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 2abd9955
   - id: T-944
     milestone: MAUTO
     title: "Decode: manual recipe choice as the entry point; /api/pipelines omits a just-created pipeline; no started confirmation"
