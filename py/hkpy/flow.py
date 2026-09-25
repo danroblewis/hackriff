@@ -568,7 +568,9 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
         tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/remotes/{h}/main")
         behind = _git(repo, "rev-list", "--count", f"{tip}..main") if tip else ""
         pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
-        running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running")
+        # Work on the host: a review keeps its claim's host but runs on this Mac (the work runner's busy_workers).
+        running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running"
+                         and c.get("kind", "work") in ("work", "fix", "deflake"))
         sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
         # Landed = main carries the runner's merge commit for the ticket's branch ('... (task-t567): gate passed' or
         # '... (task-t567): batch, gated together'); a just-dispatched branch with no commits is 'merged' but not landed.

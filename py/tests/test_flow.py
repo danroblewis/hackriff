@@ -273,6 +273,7 @@ def test_remote_hosts_report_running_landed_and_the_mirrors_drift(tmp_path):
         g(*step)
     (ops / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h"}}))
     (ops / "work-claims.json").write_text(json.dumps({"T-11": {"host": "node2", "state": "running"},
+                                                      "T-13": {"host": "node2", "state": "running", "kind": "review"},   # on this Mac
                                                       "T-12": {"state": "running"}}))
     (ops / "work-runner.log").write_text("[09-25 00:20:00] DISPATCH T-9 [opus/high] pid=1 -> node2:/r/wt (remote)\n"
                                          "[09-25 00:21:00] DISPATCH T-10 [opus/high] pid=2 -> node2:/r/wt (remote)\n"

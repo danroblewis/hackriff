@@ -53,7 +53,7 @@ import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, ty
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
-import { fogKeyEntries, rangeLabel } from "../../surface/legend";
+import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
@@ -1235,10 +1235,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
           // T-809: the `dom`-plane pins are an overlay-content toggle too (docs/24 §4's second axis).
           overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
-            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible } };
+            // T-813: the detections layer's key — same symbology, quoted from `marks.ts`, `markKeyEntries` draws.
+            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key: l.id === "detections" ? markKeyEntries() : undefined } };
           }).concat(store.get().research.collections.map((c) => ({ plane: "overlay" as const, z: COLLECTION_Z, row: {
             id: collectionLayer(c.id), label: c.name, hint: c.reserved ? "collection · bookmarks" : "my collection",
             on: collectionVisibleOn(reg, c),
+            key: undefined,
           } }))).sort((a, b) => PLANE_ORDER.indexOf(a.plane) - PLANE_ORDER.indexOf(b.plane) || a.z - b.z).map((x) => x.row),
           viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceOn }],
           scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
