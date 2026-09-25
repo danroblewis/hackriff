@@ -165,7 +165,17 @@ Termination and non-oscillation are structural, not tuned:
 - after committing, the controller **holds** — it issues no further device action until something
   `trigger()`s a new run, and a trigger inside `min_rerun_s` (30 s) of the last commit is refused.
   A re-run that lands on the same state doubles that interval, bounded, so a scene that has nothing
-  better to offer stops asking.
+  better to offer stops asking;
+- and a run that **cannot** finish is *abandoned*, not left open. A refused device action mid-probe
+  (the gate is precisely where a user's retune collides with a gain run), a dwell the ring cannot
+  give, or a commit the device will not take all end the run through `GainController::abandon`,
+  which drops its probes and its pending commit and leaves the previous run's decision, re-run clock
+  and backoff untouched: **a run that did not finish decided nothing.** Without it the controller
+  stays `Running` with a probe outstanding and refuses every later trigger — which from outside is
+  indistinguishable from a settled controller holding, so a policy that had stopped for good on its
+  first refused probe would never say so. That is a review finding, not a hypothetical: it is the
+  difference between a feature that can be proven on hardware and one that dies on the first
+  collision.
 
 `GainTrigger` names why a run started (`Manual`, `Retune`, `QualityLoss`, `Overload`,
 `PeriodicReview`) and the reason is in the report.
@@ -183,6 +193,11 @@ until HIL proves it on real air (the M2-hardening exit for T-945 is the mock; T5
 - **The applied state, not the commanded one.** `set_gains` returns what the device took after
   quantisation; the probe is scored and recorded against *that*, and the report shows both when they
   differ (the rule the RTL driver already follows for its 29-step table).
+- **A commit is the device taking the state, not the controller choosing it.** `GainStep::Commit`
+  names a choice; `GainController::committed` — which only the actuator, which can see the device,
+  may call — is what sets the settled state, the re-run clock and its backoff. So a final
+  `set_gains` the front end refuses cannot leave the controller reporting a gain the radio is not at,
+  nor start a re-run interval for a state it never reached.
 - **A dwell spanning a discontinuity is not evidence.** The settle gap exists because the source
   contract drops samples across a gain change and flags the boundary; the caller must not score
   across it.

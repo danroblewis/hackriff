@@ -158,12 +158,19 @@ impl GainManager {
                 }
                 GainStep::Commit { state, report } => {
                     match self.apply(&state) {
-                        Ok(_) => return Ok(Some(*report)),
+                        Ok(_) => {
+                            // Only now is it a commit: the device took it. Doing this bookkeeping
+                            // on the choice alone would start a re-run interval for a state the
+                            // radio never reached.
+                            self.controller.committed();
+                            return Ok(Some(*report));
+                        }
                         Err(e) => return Err(self.abort(&from, GainRunError::Control(e))),
                     };
                 }
-                // A run in progress cannot answer either of these; both mean there is nothing to
-                // do, and neither has issued a device action.
+                // `Disabled` cannot be reached inside a run (the trigger above refused it), and
+                // `Hold` means the controller measured nothing and already abandoned the run
+                // itself. Neither has issued a device action, and neither leaves a run in progress.
                 GainStep::Disabled | GainStep::Hold => return Ok(None),
             }
         }
@@ -180,9 +187,17 @@ impl GainManager {
             .realizable(&GainState::new(tuning.gains)))
     }
 
-    /// Puts the front end back where the run found it, then reports the original failure. A failed
-    /// restore is not allowed to hide it.
+    /// Ends a run that could not finish: the controller **abandons** it and the front end goes back
+    /// where the run found it. Then the original failure is reported — a failed restore is not
+    /// allowed to hide it.
+    ///
+    /// The abandon is the load-bearing half. Without it the controller would keep the outstanding
+    /// probe and stay `Running`, so every later [`Self::run`] would answer `Ok(None)` — the same
+    /// answer as "off" or "holding" — and a policy that had stopped for good on one refused probe
+    /// would never say so (found in review, T-945). A refused probe is not rare: the gate exists
+    /// because a user retune can collide with exactly this.
     fn abort(&mut self, from: &GainState, err: GainRunError) -> GainRunError {
+        self.controller.abandon();
         let _ = self.apply(from);
         err
     }
@@ -486,6 +501,59 @@ mod tests {
             GainState::new(spy.tuning().gains).same_as(&started),
             "the radio must be put back"
         );
+    }
+
+    /// Found in review (T-945): after one refused probe the manager used to be dead for good —
+    /// the controller kept the outstanding probe, stayed `Running`, and every later `run` answered
+    /// `Ok(None)`, which is also what "off" and "holding" answer. A gain run colliding with a user
+    /// retune on the gate is exactly the case the gate exists for, so this is not a rare path.
+    #[test]
+    fn after_a_refused_probe_a_later_run_still_happens() {
+        let spy = Spy::new();
+        spy.refuse_at.store(3, Ordering::SeqCst);
+        let mut m = GainManager::new(spy.clone(), GainPolicy::default().enabled()).unwrap();
+        let started = m.state_in_force();
+        let err = m.run(GainTrigger::Overload, measure).unwrap_err();
+        assert!(matches!(err, GainRunError::Control(_)), "{err}");
+        assert!(!m.controller().running(), "the run must not still be open");
+        assert_eq!(m.controller().settled(), None, "it decided nothing");
+        // The one that matters: the front end is still managed.
+        let report = m
+            .run(GainTrigger::Overload, measure)
+            .expect("the second run must not fail")
+            .expect("and must not be silently refused");
+        assert!(
+            report.committed.total_db() < started.total_db(),
+            "{}",
+            report.explain()
+        );
+        assert_eq!(m.controller().settled(), Some(&report.committed));
+        assert!(GainState::new(spy.tuning().gains).same_as(&report.committed));
+    }
+
+    /// The review's second half: the commit is the device taking it, not the controller choosing it.
+    #[test]
+    fn a_refused_commit_settles_nothing_and_does_not_block_the_next_run() {
+        let spy = Spy::new();
+        let policy = GainPolicy {
+            max_probes: 2,
+            ..GainPolicy::default().enabled()
+        };
+        // Two probes then the commit: calls 0 and 1 are the probes, call 2 is the commit.
+        spy.refuse_at.store(2, Ordering::SeqCst);
+        let mut m = GainManager::new(spy.clone(), policy).unwrap();
+        let started = m.state_in_force();
+        let err = m.run(GainTrigger::Overload, measure).unwrap_err();
+        assert!(matches!(err, GainRunError::Control(_)), "{err}");
+        assert_eq!(
+            m.controller().settled(),
+            None,
+            "a commit the device refused settles nothing"
+        );
+        assert!(GainState::new(spy.tuning().gains).same_as(&started));
+        // And no re-run interval was started for a state the radio never reached.
+        spy.refuse_at.store(u64::MAX, Ordering::SeqCst);
+        assert!(m.run(GainTrigger::Overload, measure).unwrap().is_some());
     }
 
     #[test]

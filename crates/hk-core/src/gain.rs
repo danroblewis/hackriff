@@ -776,6 +776,9 @@ pub struct GainController {
     trigger: GainTrigger,
     pruned: usize,
     settled: Option<GainState>,
+    /// The state [`GainController::commit`] chose, until the caller says the device took it
+    /// ([`GainController::committed`]) or that it could not ([`GainController::abandon`]).
+    pending_commit: Option<GainState>,
     last_commit_s: Option<f64>,
     rerun_backoff_s: f64,
     now_s: f64,
@@ -797,6 +800,7 @@ impl GainController {
             trigger: GainTrigger::Manual,
             pruned: 0,
             settled: None,
+            pending_commit: None,
             last_commit_s: None,
             rerun_backoff_s: backoff,
             now_s: 0.0,
@@ -813,14 +817,62 @@ impl GainController {
         &self.ladder
     }
 
-    /// The last committed state, when a run has settled.
+    /// The last committed state — one the **device took**, never merely one that was chosen
+    /// ([`Self::committed`]).
     pub fn settled(&self) -> Option<&GainState> {
         self.settled.as_ref()
     }
 
-    /// A run is in progress.
+    /// A run is in progress: probes outstanding, or a commit the caller has not resolved.
     pub fn running(&self) -> bool {
-        matches!(self.phase, Phase::Running { .. })
+        matches!(self.phase, Phase::Running { .. }) || self.pending_commit.is_some()
+    }
+
+    /// Confirms that the front end took the state [`GainStep::Commit`] named, which is what makes
+    /// the run a commit: the settled state, the re-run clock and its backoff are all set here.
+    ///
+    /// The controller cannot see the device, so it cannot know a `set_gains` was accepted. Doing
+    /// this bookkeeping when the state was merely *chosen* would let a refused commit start a
+    /// re-run interval for a state the radio never reached, and report a settled gain it is not at
+    /// (found in review, T-945). Returns the settled state, or `None` when no commit was pending.
+    pub fn committed(&mut self) -> Option<&GainState> {
+        let pick = self.pending_commit.take()?;
+        // A run that re-commits the state it started from has nothing to offer: back off, bounded,
+        // so it stops asking. A run that moved the radio resets the interval.
+        let unchanged = self.started_from.as_ref().is_some_and(|f| pick.same_as(f));
+        self.rerun_backoff_s = if unchanged {
+            (self.rerun_backoff_s * 2.0).min(self.policy.min_rerun_s * 32.0)
+        } else {
+            self.policy.min_rerun_s
+        };
+        self.last_commit_s = Some(self.now_s);
+        self.settled = Some(pick);
+        self.settled.as_ref()
+    }
+
+    /// Abandons a run that could not finish, so the controller is ready to be [`Self::trigger`]ed
+    /// again. `false` when there was nothing to abandon.
+    ///
+    /// This is what a caller **must** call when a run stops early: a device action refused
+    /// mid-probe (the gate is exactly where a user's retune collides with a gain run), a dwell that
+    /// could not be measured, or a commit the front end would not take. Without it the controller
+    /// stays `Running` with a probe outstanding and refuses every later trigger — which from
+    /// outside is indistinguishable from a settled controller holding, so a policy that stopped for
+    /// good on its first refused probe would say nothing at all (found in review, T-945).
+    ///
+    /// **An abandoned run leaves no trace.** Its probes are dropped and its pending commit with
+    /// them; the previous run's settled state, re-run clock and backoff are left exactly as they
+    /// were, because a run that did not finish decided nothing.
+    pub fn abandon(&mut self) -> bool {
+        let was = self.running() || self.outstanding.is_some();
+        self.phase = Phase::Idle;
+        self.outstanding = None;
+        self.pending_commit = None;
+        self.started_from = None;
+        self.records.clear();
+        self.visited.clear();
+        self.pruned = 0;
+        was
     }
 
     /// The caller's monotonic clock, seconds — how `min_rerun_s` is enforced. A caller that never
@@ -1066,9 +1118,9 @@ impl GainController {
             usable.iter().max_by_key(|r| r.score).map(|r| (*r).clone())
         };
         let Some(pick) = pick else {
-            // Nothing was measured at all (a run triggered and immediately capped).
-            self.phase = Phase::Idle;
-            self.settled = Some(started_from.clone());
+            // Nothing was measured at all (a run triggered and immediately capped): it decided
+            // nothing, so it settles nothing and there is no commit to resolve.
+            self.abandon();
             return GainStep::Hold;
         };
         let runner_up = self
@@ -1092,16 +1144,10 @@ impl GainController {
                 || pick.quality.clip_fraction > self.policy.clip_significant,
             why,
         };
-        // A run that re-commits the state it started from has nothing to offer: back off, bounded,
-        // so it stops asking. A run that moved the radio resets the interval.
-        if pick.applied.same_as(&started_from) {
-            self.rerun_backoff_s = (self.rerun_backoff_s * 2.0).min(self.policy.min_rerun_s * 32.0);
-        } else {
-            self.rerun_backoff_s = self.policy.min_rerun_s;
-        }
-        self.last_commit_s = Some(self.now_s);
+        // Chosen, not yet committed: the caller has to put the device there first
+        // ([`Self::committed`]) or say it could not ([`Self::abandon`]).
         self.phase = Phase::Idle;
-        self.settled = Some(pick.applied.clone());
+        self.pending_commit = Some(pick.applied.clone());
         GainStep::Commit {
             state: pick.applied,
             report: Box::new(report),
@@ -1378,7 +1424,11 @@ mod tests {
                         )));
                     c.observe(q).unwrap();
                 }
-                GainStep::Commit { state, report } => return (state, *report, commanded),
+                GainStep::Commit { state, report } => {
+                    // The manager's job: the device took it, so the run is a commit.
+                    c.committed();
+                    return (state, *report, commanded);
+                }
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -1449,6 +1499,14 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             }
         };
+        assert_eq!(
+            c.settled(),
+            None,
+            "chosen is not committed until the device takes it"
+        );
+        assert!(c.running(), "the commit is still unresolved");
+        assert_eq!(c.committed(), Some(&settled));
+        assert!(!c.running());
         assert_eq!(c.settled(), Some(&settled));
         assert_eq!(
             c.next_step(),
@@ -1485,7 +1543,10 @@ mod tests {
                         )
                         .unwrap();
                     }
-                    GainStep::Commit { state, .. } => return state,
+                    GainStep::Commit { state, .. } => {
+                        c.committed();
+                        return state;
+                    }
                     other => panic!("unexpected {other:?}"),
                 }
             }
@@ -1507,6 +1568,116 @@ mod tests {
         );
         c.set_now_s(policy.min_rerun_s * 3.2);
         assert!(c.trigger(&s2, GainTrigger::PeriodicReview));
+    }
+
+    /// Found in review (T-945): a run that stops early used to leave the controller `Running` with
+    /// a probe outstanding for ever, and `trigger` then refused every later run — silently, with the
+    /// same `Ok(None)` a disabled or a holding controller answers.
+    #[test]
+    fn an_abandoned_run_can_be_started_again_and_leaves_the_last_decision_alone() {
+        let mut c = GainController::new(&hackrf(), GainPolicy::default().enabled()).unwrap();
+        let feed = |c: &mut GainController, p: &GainProbe| {
+            let (clip, snr, groups) = scene(p.state.total_db());
+            c.observe(
+                GainQuality::new(p.state.clone(), p.dwell_s)
+                    .with_clip(clip, Some(clip > 1e-4))
+                    .with_snr(snr)
+                    .with_decode(Some(DecodeQuality::from_count(
+                        "rds-groups",
+                        groups,
+                        p.dwell_s,
+                    ))),
+            )
+            .unwrap();
+        };
+        // A first run that finishes, so there is a decision to protect.
+        c.set_now_s(0.0);
+        assert!(c.trigger(&state(32.0, 30.0, 11.0), GainTrigger::Overload));
+        let first = loop {
+            match c.next_step() {
+                GainStep::Probe(p) => feed(&mut c, &p),
+                GainStep::Commit { state, .. } => {
+                    c.committed();
+                    break state;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        // A second run that stops after two probes — a refused device action, or a dwell the ring
+        // could not give.
+        c.set_now_s(1000.0);
+        assert!(c.trigger(&first, GainTrigger::QualityLoss));
+        for _ in 0..2 {
+            let GainStep::Probe(p) = c.next_step() else {
+                panic!()
+            };
+            feed(&mut c, &p);
+        }
+        let GainStep::Probe(_) = c.next_step() else {
+            panic!("a probe is outstanding")
+        };
+        assert!(c.running());
+        assert!(c.abandon(), "there was a run to abandon");
+        assert!(!c.running(), "the controller must be idle again");
+        assert_eq!(c.next_step(), GainStep::Hold);
+        // The abandoned run decided nothing: the previous commit stands.
+        assert_eq!(c.settled(), Some(&first));
+        // And a third run happens rather than being refused for ever.
+        c.set_now_s(2000.0);
+        assert!(c.trigger(&first, GainTrigger::QualityLoss), "stuck");
+        let third = loop {
+            match c.next_step() {
+                GainStep::Probe(p) => feed(&mut c, &p),
+                GainStep::Commit { state, .. } => {
+                    c.committed();
+                    break state;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert!(third.same_as(&first), "{third} vs {first}");
+        assert!(!c.abandon(), "nothing left to abandon");
+    }
+
+    /// The other half (review follow-up): a commit is a commit only once the device takes it.
+    #[test]
+    fn a_commit_the_device_refuses_settles_nothing_and_starts_no_rerun_interval() {
+        let mut c = GainController::new(&hackrf(), GainPolicy::default().enabled()).unwrap();
+        c.set_now_s(100.0);
+        assert!(c.trigger(&state(32.0, 30.0, 11.0), GainTrigger::Overload));
+        let chosen = loop {
+            match c.next_step() {
+                GainStep::Probe(p) => {
+                    let (clip, snr, groups) = scene(p.state.total_db());
+                    c.observe(
+                        GainQuality::new(p.state.clone(), p.dwell_s)
+                            .with_clip(clip, Some(clip > 1e-4))
+                            .with_snr(snr)
+                            .with_decode(Some(DecodeQuality::from_count(
+                                "rds-groups",
+                                groups,
+                                p.dwell_s,
+                            ))),
+                    )
+                    .unwrap();
+                }
+                GainStep::Commit { state, .. } => break state,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        // The device refused the final `set_gains`, so the caller abandons instead of confirming.
+        assert!(c.abandon());
+        assert_eq!(
+            c.settled(),
+            None,
+            "the radio never went to {chosen}: nothing is settled"
+        );
+        // No re-run interval was started for a state the front end never reached.
+        c.set_now_s(100.1);
+        assert!(
+            c.trigger(&state(32.0, 30.0, 11.0), GainTrigger::Overload),
+            "a commit that never landed must not block the next attempt"
+        );
     }
 
     #[test]
