@@ -23952,6 +23952,8 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): image/harmonic/IMD relationships drawn as lines linking the related signals on the canvas, switchable as a layer. Say in your handback exactly what to open on staging to see it.
+
+      Gate failed app-surface.e2e T-806 layers menu: it asserted the overlay list without the new artifacts layer; updated expectations (artifacts, off). app-dismiss.e2e failure (bottom sheet) is not in this tree, not from this change.
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 17:06).
       Added the `artifacts` overlay layer (ui/src/surface/artifacts.ts): every inventory row with relation.kind=artifact-of and a source row in view gets a dashed line from its box centre to the source's box centre (ink per mechanism: image/harmonic/intermod) with a larger square at the source end, laid out per frame through the pane's own toClip in the one overlay pass. Registered in centre/surface.ts overlayFns so the Layers menu offers it (off by default, z 50). Claims with no source in view or no presence interval draw nothing. FE only, no route touched. To see it on staging: open Explore, Layers menu > Artifacts, on a pane where an image/harmonic/IMD candidate has a relation claim (rows are fetched with relations=all).
