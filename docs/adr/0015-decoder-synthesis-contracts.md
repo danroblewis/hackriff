@@ -1099,7 +1099,8 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
 ### 13.4 What is *not* changed here
 
 - **ADR-0022's gate.** `min_analytic_holdout_bits = 24`, `hard_check_floor_bits = 16`,
-  `min_check_width = 8` and §4.2's frame formula all stand untouched. None reads a calibrated
+  `min_check_width = 16` (T-577, measured; 8 only once ADR-0022 §4.3.1's count is re-measured by
+  T-577's harness, never below 8) and §4.2's frame formula all stand untouched. None reads a calibrated
   metric, by construction (ADR-0022 §2.1), so none of the three defects above ever reached them.
   ADR-0022 §9's admission of conditioned calibrated bits toward the 24 stays **unexercised** —
   and §13.1 raises its price, because the honest per-stage calibrated contribution under the
