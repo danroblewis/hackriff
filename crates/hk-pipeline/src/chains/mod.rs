@@ -32,6 +32,7 @@
 pub(crate) mod analog;
 pub mod budget;
 pub(crate) mod classify;
+pub(crate) mod frames;
 pub(crate) mod fsk;
 pub mod iq;
 pub mod listen;
@@ -228,6 +229,9 @@ enum Measure {
     /// The C15 classifier ([`classify`], T-878). Unlike the characteriser it needs the track's
     /// member boxes, so it is sent them.
     Classify,
+    /// The narrowband-FSK frame hunt ([`frames`], T-950). Sent the member boxes, like the
+    /// classifier, and like it never takes a decode chain's slot.
+    Frames,
 }
 
 /// Longest wait for a chain row's parent detection ([`stored_detection`]).
@@ -440,7 +444,9 @@ impl EmissionClaims {
 fn chain_start(shape: &ChainShape, cand: &Candidate, fs: f64) -> u64 {
     let pre_s = match shape {
         ChainShape::Analog { pre_s, .. } => *pre_s,
-        ChainShape::Fsk { pad_s, .. } | ChainShape::Classify { pad_s, .. } => *pad_s,
+        ChainShape::Fsk { pad_s, .. }
+        | ChainShape::Classify { pad_s, .. }
+        | ChainShape::FskFrames { pad_s, .. } => *pad_s,
         // The hunt and the characteriser read forward from where they attached: there is no
         // trigger box to precede.
         ChainShape::Plugin { .. } | ChainShape::TrunkCc { .. } | ChainShape::Sweep { .. } => 0.0,
@@ -478,6 +484,9 @@ pub(crate) struct ChainManager {
     awaiting_measure: HashMap<TrackId, Candidate>,
     /// T-886: inside [`Self::retry_measuring`] (see the guard there).
     retrying: bool,
+    /// T-950: tracks the frame hunt was already offered to on a member box, before (or without)
+    /// the track's confirmation — attached or refused, once. See [`Self::hunt_frames_early`].
+    frames_offered: std::collections::HashSet<TrackId>,
 }
 
 const BACKLOG_PER_TRACK: usize = 512;
@@ -516,10 +525,13 @@ pub const MAX_RUNTIME_CHAINS: usize = 16;
 /// Whether the run-wide cap ([`MAX_RUNTIME_CHAINS`]) admits a chain of kind `new` beside the
 /// `running` chains' kinds. A classifying chain neither counts nor is refused here.
 fn admits(running: impl Iterator<Item = Option<Measure>>, new: Option<Measure>) -> bool {
-    if new == Some(Measure::Classify) {
+    // The classifier and the frame hunt are bounded by their own `max_chains` and never take the
+    // slot a decode chain needs (T-878, T-950).
+    let own_cap = |m: Option<Measure>| matches!(m, Some(Measure::Classify | Measure::Frames));
+    if own_cap(new) {
         return true;
     }
-    running.filter(|m| *m != Some(Measure::Classify)).count() < MAX_RUNTIME_CHAINS
+    running.filter(|m| !own_cap(*m)).count() < MAX_RUNTIME_CHAINS
 }
 
 impl ChainManager {
@@ -540,6 +552,7 @@ impl ChainManager {
             slots: HashMap::new(),
             awaiting_measure: HashMap::new(),
             retrying: false,
+            frames_offered: std::collections::HashSet::new(),
         }
     }
 
@@ -590,6 +603,7 @@ impl ChainManager {
         // counted apart from it (see `Running::measuring`).
         let measuring = match (&shape, spec.trigger) {
             (ChainShape::Classify { .. }, Trigger::EveryTrack) => Some(Measure::Classify),
+            (ChainShape::FskFrames { .. }, Trigger::EveryTrack) => Some(Measure::Frames),
             (_, Trigger::EveryTrack) => Some(Measure::Sweep),
             _ => None,
         };
@@ -777,6 +791,22 @@ impl ChainManager {
                         cursor,
                         slot,
                     ),
+                    ChainShape::FskFrames {
+                        pad_s,
+                        retain_s,
+                        segment_s,
+                        ..
+                    } => frames::run(
+                        shared,
+                        rx,
+                        cand,
+                        frames::FramesNode {
+                            pad_s,
+                            retain_s,
+                            segment_s,
+                        },
+                        cursor,
+                    ),
                     ChainShape::Sweep {
                         window_s,
                         frame_s,
@@ -802,6 +832,7 @@ impl ChainManager {
                 inc(match measuring {
                     Some(Measure::Sweep) => &c.sweep_attached,
                     Some(Measure::Classify) => &c.classify_attached,
+                    Some(Measure::Frames) => &c.frames_attached,
                     None => &c.attached,
                 });
                 self.running.push(Running {
@@ -913,6 +944,7 @@ impl ChainManager {
             let (kind, cap) = match spec.shape() {
                 Ok(ChainShape::Sweep { max_chains, .. }) => (Measure::Sweep, max_chains),
                 Ok(ChainShape::Classify { max_chains, .. }) => (Measure::Classify, max_chains),
+                Ok(ChainShape::FskFrames { max_chains, .. }) => (Measure::Frames, max_chains),
                 _ => continue,
             };
             // One measuring chain of a kind per track: a second would measure the same region
@@ -930,6 +962,7 @@ impl ChainManager {
                     inc(match kind {
                         Measure::Sweep => &c.sweep_admission_refused,
                         Measure::Classify => &c.classify_admission_refused,
+                        Measure::Frames => &c.frames_admission_refused,
                     });
                 }
                 refused = true;
@@ -946,6 +979,9 @@ impl ChainManager {
                 self.measuring.entry(track).or_default().push((kind, id));
                 if let Some(slot) = slot {
                     self.slots.insert(track, slot);
+                }
+                // Both member-reading kinds are handed the track's boxes so far.
+                if matches!(kind, Measure::Classify | Measure::Frames) {
                     for m in self.backlog.get(&track).cloned().unwrap_or_default() {
                         self.send(id, ChainMsg::Member(m));
                     }
@@ -1050,12 +1086,77 @@ impl ChainManager {
         }
     }
 
+    /// T-950: offers the frame hunt a track **on its first trustworthy member box**, whether or
+    /// not the detector has confirmed the track as an emitter candidate.
+    ///
+    /// The detector confirms a box only when a later box repeats it or the ≥ 1 s integrated
+    /// spectrum carries it (S4 §5). A one-off transmission gets neither — on the explorer's
+    /// FLEX capture, 929.933 MHz keyed once for 0.45 s at ~20 dB SNR, its detection `good` and
+    /// `Unconfirmed` for the whole run, so no chain of any kind ever saw it. For a framed
+    /// transmission the decode **is** the confirmation (sync plus BCH-checked words is stronger
+    /// evidence than any repeat), so the hunt must not wait for the detector to agree first. It
+    /// is bounded by the same `max_chains` cap (refusals counted once per track, never queued)
+    /// and a carrier without sync gives its slot back within a probe window
+    /// ([`frames`](self::frames) module docs). Classification and sweep characterisation keep
+    /// their confirmed-track trigger.
+    fn hunt_frames_early(&mut self, track: TrackId, member: &MemberBox) {
+        if member.suspect || self.frames_offered.contains(&track) {
+            return;
+        }
+        if self
+            .measuring
+            .get(&track)
+            .is_some_and(|v| v.iter().any(|(k, _)| *k == Measure::Frames))
+        {
+            return;
+        }
+        let spec = self
+            .shared
+            .specs
+            .iter()
+            .find(|s| {
+                s.trigger == Trigger::EveryTrack
+                    && matches!(s.shape(), Ok(ChainShape::FskFrames { .. }))
+                    && s.matches(member.f_lo_hz, member.f_hi_hz, None)
+            })
+            .cloned();
+        let Some(spec) = spec else { return };
+        let Ok(ChainShape::FskFrames { max_chains, .. }) = spec.shape() else {
+            return;
+        };
+        self.frames_offered.insert(track);
+        if self.live_measuring(Measure::Frames) >= max_chains {
+            inc(&self.shared.counters.chains.frames_admission_refused);
+            return;
+        }
+        let cand = Candidate {
+            track: Some(track),
+            detection: Some(member.detection),
+            f_lo_hz: member.f_lo_hz,
+            f_hi_hz: member.f_hi_hz,
+            first_sample: member.samples.start,
+            trigger_sample: member.samples.end,
+            bursty: None,
+        };
+        if let Some(id) = self.attach_with(&spec, cand, None) {
+            self.measuring
+                .entry(track)
+                .or_default()
+                .push((Measure::Frames, id));
+            // The boxes so far; `on_member` forwards this one and every later one.
+            for m in self.backlog.get(&track).cloned().unwrap_or_default() {
+                self.send(id, ChainMsg::Member(m));
+            }
+        }
+    }
+
     pub fn on_member(&mut self, track: TrackId, member: MemberBox) {
         *self.members.entry(track).or_insert(0) += 1;
+        self.hunt_frames_early(track, &member);
         // T-878: the classifier chooses its box from the track's members, whatever decode chain
         // (if any) receives them below.
         for &(kind, id) in self.measuring.get(&track).into_iter().flatten() {
-            if kind == Measure::Classify {
+            if matches!(kind, Measure::Classify | Measure::Frames) {
                 self.send(id, ChainMsg::Member(member.clone()));
             }
         }
@@ -1099,6 +1200,7 @@ impl ChainManager {
 
     pub fn on_track_closed(&mut self, track: TrackId) {
         self.backlog.remove(&track);
+        self.frames_offered.remove(&track);
         self.members.remove(&track);
         // T-886: nothing left to measure, so the retry entry goes with the track.
         self.awaiting_measure.remove(&track);
@@ -1125,6 +1227,7 @@ impl ChainManager {
     }
 
     pub fn on_merged(&mut self, from: TrackId, into: TrackId) {
+        self.frames_offered.remove(&from);
         // The survivor keeps its own measuring chain; the absorbed track's finishes and writes
         // whatever it had already measured (the repository re-points a merged emitter).
         for (_, id) in self.measuring.remove(&from).unwrap_or_default() {
@@ -1243,6 +1346,7 @@ impl ChainManager {
         self.measuring.clear();
         self.slots.clear();
         self.awaiting_measure.clear();
+        self.frames_offered.clear();
     }
 
     /// Joins finished chains, and retries any measuring chain a full cap refused (T-886).
@@ -1258,6 +1362,7 @@ impl ChainManager {
                     inc(match r.measuring {
                         Some(Measure::Sweep) => &c.sweep_detached,
                         Some(Measure::Classify) => &c.classify_detached,
+                        Some(Measure::Frames) => &c.frames_detached,
                         None => &c.detached,
                     });
                 }

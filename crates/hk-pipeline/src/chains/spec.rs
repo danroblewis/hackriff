@@ -237,6 +237,28 @@ pub enum NodeSpec {
         /// Most classifying chains alive at once.
         max_chains: usize,
     },
+    /// The narrowband-FSK **frame hunt** over a candidate region's own IQ (T-950,
+    /// [`crate::chains::frames`]): channelise the track, then try each framing in the catalogue —
+    /// FLEX today — and keep what frame-syncs and BCH-checks. Which decoder a signal gets is
+    /// decided by sync plus check on its own symbols, never by where it was found.
+    ///
+    /// Every field is an admission bound:
+    ///
+    /// - `pad_s` — pad either side of a transmission, as `fsk-bursts` takes it;
+    /// - `retain_s` — the rolling sample buffer (capped again at the fsk chain's sample ceiling);
+    /// - `segment_s` — longest stretch decoded at once. A continuous transmitter is decoded in
+    ///   segments of this length, overlapping by one frame, so memory and latency stay bounded;
+    /// - `max_chains` — most hunting chains alive at once across the run.
+    FskFrames {
+        /// Pad either side of a transmission, s.
+        pad_s: f64,
+        /// Rolling sample buffer, s.
+        retain_s: f64,
+        /// Longest stretch decoded at once, s.
+        segment_s: f64,
+        /// Most hunting chains alive at once.
+        max_chains: usize,
+    },
 }
 
 fn one() -> u32 {
@@ -361,6 +383,17 @@ pub enum ChainShape {
         /// Longest extent analysed, s.
         window_s: f64,
         /// Most classifying chains alive at once.
+        max_chains: usize,
+    },
+    /// The narrowband-FSK frame hunt (T-950).
+    FskFrames {
+        /// Pad, s.
+        pad_s: f64,
+        /// Buffer, s.
+        retain_s: f64,
+        /// Longest stretch decoded at once, s.
+        segment_s: f64,
+        /// Most hunting chains alive at once.
         max_chains: usize,
     },
 }
@@ -547,6 +580,38 @@ impl ChainSpec {
                 })
             }
             [
+                NodeSpec::FskFrames {
+                    pad_s,
+                    retain_s,
+                    segment_s,
+                    max_chains,
+                },
+            ] => {
+                // Content is decided per decode by the emitter's class, as `fsk-bursts` decides
+                // it; the chain itself records nothing, so a record node is refused.
+                if self.record().is_some() {
+                    return Err("fsk-frames must not carry a record node".into());
+                }
+                // A FLEX frame is 1.875 s; a segment must hold one plus its overlap.
+                if !(*pad_s >= 0.0 && *segment_s >= 4.0 && *retain_s >= *segment_s + 2.0 * *pad_s)
+                {
+                    return Err(
+                        "fsk-frames needs pad_s >= 0, segment_s >= 4 and retain_s >= segment_s + \
+                         2 pad_s"
+                            .into(),
+                    );
+                }
+                if *max_chains == 0 {
+                    return Err("fsk-frames needs max_chains >= 1".into());
+                }
+                Ok(ChainShape::FskFrames {
+                    pad_s: *pad_s,
+                    retain_s: *retain_s,
+                    segment_s: *segment_s,
+                    max_chains: *max_chains,
+                })
+            }
+            [
                 rest @ ..,
                 NodeSpec::Plugin {
                     manifest,
@@ -575,7 +640,7 @@ impl ChainSpec {
             }
             _ => Err(
                 "node list must be [record] analog-auto | [record] fsk-bursts | \
-                 [record] [ddc] plugin | trunk-cc | sweep-char | classify"
+                 [record] [ddc] plugin | trunk-cc | sweep-char | classify | fsk-frames"
                     .into(),
             ),
         }
@@ -705,6 +770,14 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "bandwidth_hz": [500, 2e6],
     "nodes": [
       { "node": "classify", "pad_s": 0.02, "retain_s": 3.0, "window_s": 0.25, "max_chains": 4 }
+    ]
+  },
+  {
+    "id": "fsk-frames",
+    "trigger": "every-track",
+    "bandwidth_hz": [4e3, 60e3],
+    "nodes": [
+      { "node": "fsk-frames", "pad_s": 0.05, "retain_s": 4.5, "segment_s": 4.0, "max_chains": 8 }
     ]
   },
   {

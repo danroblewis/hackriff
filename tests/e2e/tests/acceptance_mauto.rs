@@ -119,3 +119,7 @@ mod mauto_eval;
 // negatives, A2 the analytic null's measured tail, A3 the recall control.
 #[path = "acceptance/mauto_false_confirm.rs"]
 mod mauto_false_confirm;
+// T-950: "all captured signals decode" — the FLEX member (SIGNAL-088), on the explorer's live
+// 930.8 MHz capture (external fixture; skips where it is not fetched).
+#[path = "acceptance/captured_flex.rs"]
+mod captured_flex;

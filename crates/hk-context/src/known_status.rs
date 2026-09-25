@@ -49,6 +49,7 @@ fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
         "gnss" => Some(&["gnss"]),
         "cellular" | "lte" => Some(&["cellular"]),
         "public-safety" | "p25" | "dmr" => Some(&["public-safety"]),
+        "paging" | "pager" => Some(&["paging"]),
         _ => None,
     }
 }

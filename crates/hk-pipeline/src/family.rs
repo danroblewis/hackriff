@@ -30,6 +30,7 @@
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
 //! | `p25-tsbk`, `dmr-csbk`, `nxdn-cac` | decoder | `public-safety` | 0.97 | a CRC-valid trunked control channel; nothing else transmits one (T-546) |
+//! | `flex` | decoder | `paging` | 0.97 | FLEX frames whose sync and BCH(31,21)-checked frame information word both hold; FLEX is a paging protocol and nothing else (T-950) |
 //! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
 //! | `nbfm`, `nfm` | demod mode | — | — | land mobile, amateur, marine, public safety and FRS/GMRS share it |
 //! | `am` | demod mode | — | — | aviation, AM broadcast, CB and amateur share it |
@@ -274,6 +275,13 @@ const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
      raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
 
+/// Why a FLEX decode is paging evidence (T-950): the frame sync and the BCH-checked frame
+/// information word are the protocol's own, and FLEX carries pages and nothing else. The
+/// allocation (929–932 MHz paging, 47 CFR 22 / 24 / 90) then *agrees* or *disagrees* — it never
+/// decided the decoder.
+const FLEX_NOTE: &str = "FLEX frames decoded: sync-1 and a BCH(31,21)-checked frame information word. \
+     FLEX is a paging protocol";
+
 /// The vocabulary (see the module table).
 pub const VOCABULARY: &[VocabEntry] = &[
     entry(
@@ -333,6 +341,7 @@ pub const VOCABULARY: &[VocabEntry] = &[
         0.97,
         TRUNK_CC_NOTE,
     ),
+    entry("flex", Decoder, Some("paging"), 0.97, FLEX_NOTE),
 ];
 
 /// Service family names that pass through unchanged (each one accepted by
@@ -360,6 +369,8 @@ const SERVICE_PASSTHROUGH: &[(&str, &str)] = &[
     ("fsk-ism", "ism"),
     ("ook-ism", "ism"),
     ("lora", "lora"),
+    ("paging", "paging"),
+    ("pager", "paging"),
 ];
 
 /// Canonical services the band plan can suggest as allocation-only candidates.
@@ -375,6 +386,7 @@ const ALLOCATION_SERVICES: &[&str] = &[
     "cellular",
     "public-safety",
     "ism",
+    "paging",
 ];
 
 /// Human label of a canonical service family.
@@ -392,6 +404,7 @@ pub fn service_label(service: &str) -> &'static str {
         "public-safety" => "Public safety / land mobile",
         "ism" => "ISM / Part 15 device",
         "lora" => "LoRa (Part 15)",
+        "paging" => "Paging",
         _ => "Other service",
     }
 }

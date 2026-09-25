@@ -75,6 +75,13 @@ amateur-1-25m,222000000,225000000,us,non-federal,amateur,,amateur;vhf,false
 amateur-70cm,420000000,450000000,us,shared,radiolocation,amateur,amateur;uhf,false
 ism-433-part15,433050000,434790000,us,shared,radiolocation,amateur,part15;short-range-device;ism-eu-band,false
 ism-902,902000000,928000000,us,shared,radiolocation;amateur,,ism;part15;33cm,false
+# T-950: the 929-932 MHz paging bands. Edges as hk-pipeline's content-class table has them, checked
+# 2026-09-13 against eCFR Title 47 via the Cornell LII mirror: 47 CFR 90.494 (929-930 MHz paging),
+# 24.129 (narrowband PCS, 930-931 MHz), 22.531 (UHF paging, 931-932 MHz). The primary-service
+# column is NOT re-checked against 2.106 this session, hence unverified=true.
+paging-929,929000000,930000000,us,non-federal,fixed;mobile,,paging;part90,true
+npcs-930,930000000,931000000,us,non-federal,fixed;mobile,,paging;narrowband-pcs;part24,true
+paging-931,931000000,932000000,us,non-federal,fixed;mobile,,paging;part22,true
 amateur-23cm,1240000000,1300000000,us,shared,radiolocation;radionavigation-satellite,amateur,amateur;uhf,false
 aero-radionav-960-1215,960000000,1215000000,us,shared,aeronautical-radionavigation,radionavigation-satellite,adsb;dme;tacan,false
 gnss-l5,1164000000,1215000000,us,shared,aeronautical-radionavigation;radionavigation-satellite,,gnss;l5;galileo-e5,false

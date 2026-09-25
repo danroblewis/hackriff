@@ -479,6 +479,26 @@ counter_group!(
         /// Classifications made but not written: the inventory recorded no entry for the track
         /// within the bounded wait, so the row had nothing to be evidence about.
         classify_no_emitter,
+        /// T-950: narrowband-FSK frame-hunting chains attached ([`crate::chains::frames`]).
+        /// Counted apart from `attached`, for the reason `sweep_attached` is.
+        frames_attached,
+        /// Frame-hunting chains that finished.
+        frames_detached,
+        /// Frame-hunting chains the concurrency cap refused to attach.
+        frames_admission_refused,
+        /// Transmissions a frame-hunting chain could not decode: their samples had left its
+        /// buffer, or never reached it.
+        frames_missed,
+        /// Frames decoded but not written: no inventory entry for the track within the bounded
+        /// wait.
+        frames_no_emitter,
+        /// Frame-hunting chains that gave up: a transmission on the air for a whole segment
+        /// without one sync-1 (a carrier, not a framed FSK transmitter).
+        frames_abandoned,
+        /// FLEX frames decoded (sync-1 found and the frame information word checked).
+        flex_frames,
+        /// FLEX pages (address + vector) found in those frames.
+        flex_pages,
         /// Chain errors (demod, repository).
         errors,
         /// T-605: chain errors that came back from the **storage engine** — a write the database
