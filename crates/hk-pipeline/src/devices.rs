@@ -449,6 +449,9 @@ pub(super) fn finish(common: &Common, errors: &mut Vec<String>) {
             let _ = p.seal_through(t);
         }
         let _ = p.checkpoint();
+        // T-901: the view pyramid defers its writes; every writer has joined, so this lands the
+        // run's last files inline.
+        let _ = p.flush_writes();
         crate::history::update_view_tile_counters(&common.counters, &p);
     }
 }
