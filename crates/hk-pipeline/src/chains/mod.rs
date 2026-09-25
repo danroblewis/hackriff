@@ -494,7 +494,7 @@ const BACKLOG_PER_TRACK: usize = 512;
 /// `max_chains` alone. Counted, they held run-wide slots that decode chains needed — a track's
 /// classifying chain attaches before its decode chain, so one taking the last slot refused the
 /// decode chain for good (a refused decode attach is never retried).
-pub(crate) const MAX_RUNTIME_CHAINS: usize = 16;
+pub const MAX_RUNTIME_CHAINS: usize = 16;
 
 /// Whether the run-wide cap ([`MAX_RUNTIME_CHAINS`]) admits a chain of kind `new` beside the
 /// `running` chains' kinds. A classifying chain neither counts nor is refused here.
