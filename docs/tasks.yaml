@@ -27879,7 +27879,7 @@ tasks:
   - id: T-938
     milestone: MAUTO
     title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: RECIPE-RDS
@@ -27893,6 +27893,7 @@ tasks:
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): Listen's own refinement WORKS (101.3: converged, refined centre 101.29948 MHz, -519 Hz, bandwidth 139.1 kHz) - reuse that refiner for the RDS recipe rather than building a second one.
     branch: task-t938
+    commit: 224686fa
   - id: T-939
     milestone: MLIVE
     title: At 20 Msps the detect reader loses 3.1 G samples (39 overruns/4 min) and the live waterfall rows go empty
