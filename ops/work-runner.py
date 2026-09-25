@@ -1486,9 +1486,10 @@ def _run_fix(c, n, prompt, out_name=None, fail_line=""):
 
 
 def branches_waiting():
-    """Branches in merge-queue.txt or in the running batch (the bulk marker's branches=)."""
+    """Branches in merge-queue.txt, in the running batch (the bulk marker's branches=), gating alone (merging-now) or
+    waiting in an isolation (isolate-remaining) - the runner empties the queue file before it acts on a line."""
     waiting = set()
-    for f in (MERGE_QUEUE, BULKMARK):
+    for f in (MERGE_QUEUE, BULKMARK, f"{S}/merging-now", f"{S}/isolate-remaining"):
         try:
             waiting |= set(open(f).read().replace("branches=", " ").split())
         except OSError:
@@ -2372,7 +2373,7 @@ def branch_tip_ts(branch):
     """Committer time of a branch's tip; now (i.e. fresh) when it cannot be read - never abandon on doubt."""
     try:
         return float(sh(["git", "log", "-1", "--format=%ct", branch]).strip())
-    except (ValueError, Exception):
+    except Exception:
         return time.time()
 
 
@@ -2390,8 +2391,10 @@ def deflake_deferred(slug, req, claims):
         # deferred every new fog-of-war deflake for 17 h while the spec went red in 8 gates.
         if c["branch"] in branches_waiting() or time.time() - branch_tip_ts(c["branch"]) < DEFLAKE_STALE_H * 3600:
             return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
-        log(f"DEFLAKE {slug}: its old branch {c['branch']} ({c.get('state')}) is abandoned "
-            f"(> {DEFLAKE_STALE_H} h untouched, not queued) - a fresh run starts from main; the branch is kept")
+        if ("abandoned", slug, c["branch"]) not in _DEFER_SAID:
+            _DEFER_SAID.add(("abandoned", slug, c["branch"]))
+            log(f"DEFLAKE {slug}: its old branch {c['branch']} ({c.get('state')}) is abandoned (> {DEFLAKE_STALE_H} h "
+                f"untouched, not queued) - a fresh run starts from the gate base on a new branch; the old one is kept")
     test = str(req.get("test", ""))
     if not test.endswith(".e2e.mjs"):
         return ""
@@ -2523,8 +2526,11 @@ def launch_deflake(slug, req, prior, dry):
     key = DEFLAKE_PREFIX + slug
     run = (prior or {}).get("run", 0) + 1
     name = slug if run == 1 else f"{slug}-r{run}"      # a later run never reuses an earlier run's branch
-    branch, wt, d = f"task-{name}", f"{REPO}/.claude/worktrees/{name}", f"{WORKDIR}/{name}"
     base = merge_target()
+    while commits_ahead(f"task-{name}", base) > 0:     # ...nor its commits when the claim lost its `run` (claims rebuilt)
+        run += 1
+        name = f"{slug}-r{run}"
+    branch, wt, d = f"task-{name}", f"{REPO}/.claude/worktrees/{name}", f"{WORKDIR}/{name}"
     if dry:
         log(f"DRY-RUN would dispatch deflaker {key} run {run} for {req['test']} [opus/high] -> {branch} from {base}")
         return None

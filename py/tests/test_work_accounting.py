@@ -1778,6 +1778,37 @@ def test_an_abandoned_deflake_branch_no_longer_blocks_a_fresh_run(df, monkeypatc
     R.dispatch_deflakes(claims, dry=False)
     assert launched == []                                                 # old but QUEUED: still waits
     (tmp / "merge-queue.txt").write_text("")
+    for marker in ("merging-now", "isolate-remaining"):                  # review: gating alone / isolated
+        (tmp / marker).write_text("task-deflake-a\n")
+        R.dispatch_deflakes(claims, dry=False)
+        assert launched == []
+        (tmp / marker).unlink()
     R.dispatch_deflakes(claims, dry=False)
     assert launched == [("deflake-a", 600.0, 2)]                          # abandoned: a fresh run
     assert "is abandoned" in (tmp / "work-runner.log").read_text()
+
+
+def test_a_fresh_deflake_never_checks_out_an_earlier_runs_commits(tmp_path, monkeypatch):
+    """Review 2026-09-25: the fog-of-war claim had lost its `run` (claims rebuilt), so run 1's name was the abandoned
+    WIP branch itself - the fresh deflaker would have been handed 5c98fb3d and told it was cut from the base."""
+    g = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                  check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "base")
+    g("branch", "task-deflake-a")
+    g("checkout", "-q", "task-deflake-a")
+    g("commit", "-q", "--allow-empty", "-m", "abandoned WIP")
+    g("checkout", "-q", "main")
+    for name, val in [("REPO", str(tmp_path)), ("WORKDIR", str(tmp_path / "work")), ("LOG", str(tmp_path / "log")),
+                      ("BULKMARK", str(tmp_path / "no-bulk"))]:
+        monkeypatch.setattr(R, name, val)
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: real_sh(args, cwd=cwd or str(tmp_path), **k))
+    monkeypatch.setattr(R, "clone_cmd", lambda wt: "")
+    monkeypatch.setattr(R, "e2e_env", lambda wt: {})
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(R.subprocess, "Popen", lambda *a, **k: type("P", (), {"pid": 1})() if k.get("start_new_session")
+                        else real_popen(*a, **k))                           # the deflaker itself is never spawned
+    c = R.launch_deflake("deflake-a", _req("deflake-a", 600.0), {"branch": "task-deflake-a"}, dry=False)
+    assert c["branch"] == "task-deflake-a-r2" and c["run"] == 2
+    assert g("rev-parse", "task-deflake-a-r2") == g("rev-parse", "main")    # cut from the base, not from the WIP
