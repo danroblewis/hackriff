@@ -27276,6 +27276,30 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the timing/measurement tier for the rate run), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-575 fix round 2026-09-25.
+
+      2026-09-25 coordinator, from T-575's delta review: before any floor drop, T-577's harness must also cover (a) spans with start_bit != 0 (T-928 fixes the guard), (b) a frame holding two DIFFERENT already-counted bursts at arbitrary offsets (x^a*A + x^b*B) - valid by construction, counts as a new trial (the divisor rule only covers one burst), (c) frames with <= 16 idle bits (e.g. 1^24||0^16; is_short_periodic needs > 16 bits), (d) sum-type checksums whose init-cancelling frames exceed w bits.
+    core_interface: true
+    depends_on: [T-575, T-928]
+  - id: T-928
+    milestone: MAUTO
+    title: Confirm-gate init-cancel guard misses spans with start_bit > 0 (must precede template seeding / floor 8); stale floor-8 doc text; CheckTally preallocates ~790 KB per check block (T-575 review)
+    status: todo
+    priority: high
+    deps:
+    - T-575
+    parallel_group: W
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FROM T-575's delta Opus review (PASS; task-t575 5075887f), REQUIRED BEFORE template-fixed roots are seeded (M-5) or the check-width floor returns to 8:
+      1. INIT-CANCEL GUARD MISSES FRAMES WHOSE CHECK DOES NOT START AT BIT 0. crates/hk-blocks/src/blocks/fec/crc.rs:519,530 records the WHOLE frame (extend_bits(.., 0, bit_len)) while a `span` CRC covers only [start_bit, len - end_trim_bits); degenerate_frame (crates/hk-blocks/src/evidence.rs:387) trims w bits from the whole frame's ends, not the covered span's. checksum.rs:146-148 has the same shape. Trigger: CRC-32 init FFFFFFFF, span.start_bit = 8, CW/voice slicer frame 1^40 || 0^56: the covered data starts with 1^32 (cancels the register) so the frame is valid, and none of the four trims is short-periodic -> it counts; at w=32 one frame clears the gate (T-577's hole A, ~2e-2 per decision on N2). Not reachable today (a searched check pays L_check = w+5) - the dangerous path is a template-fixed CRC with start_bit > 0. FIX: run the guard over the covered slice bits[start .. n - trim] (or trim start+w from the front and trim+w from the back); pass the span to record. Test red on the current code with the trigger above; also make T-577's harness model start != 0.
+      2. DOC DRIFT: stale `min_check_width = 8` at docs/adr/0015-decoder-synthesis-contracts.md:1088 (§13.4), docs/21-evidence-bits-under-quantisation.md:249, docs/adr/0022-false-confirm-budget.md:341,432 - align with 16 + the §4.3.1 rule.
+      3. MEMORY: each CheckTally preallocates ~790 KB (three Vecs of 64 x ~4 KB entries, evidence.rs:423) for EVERY crc/bch/checksum/parity block instance, live recipes included - size it from the block's frame length or allocate lazily off the record path while keeping record allocation-free; and a cloned CheckTally keeps only its current length as capacity so pushes after a clone allocate - fix. Measure residency before/after (the Jetson budget; T-453: measure, don't assume).
+      core_interface (the confirm gate is a one-way door: only stricter).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-575 delta Opus review 2026-09-25.
     core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
