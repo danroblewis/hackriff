@@ -25694,7 +25694,6 @@ tasks:
     milestone: MAUTO
     title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
     status: in-progress
-    branch: task-t861
     priority: normal
     deps:
     - T-856
@@ -25716,6 +25715,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    branch: task-t861
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:23).
+      Implemented three of MAUTO M-10's four deliverables in full (ADR-0015 section 4.2/4.3): hk-synth::template::save_as_template builds a provenance.discovered Template from a solved PipelineResult (recipe fully bound, output_policy clamped to the job's source class, never upgraded); hk-pipeline::synth::attach now derives the result's S1-block hk-mod@1 family and, on every solved result inside the existing attach transaction, appends a legacy Classification at ArbRank::Decoder (C15 label) and mints a C18 Signature with SignatureProvenance::RecipeConfirmed from the bound recipe params/check/band (a schema T-201 defined but never wired a producer for); decode_row now stamps metadata.family on stored synthesized decodes, and hk-store::dataset gained synthesized_emissions, reading Decode rows via EmitterLink (never Demodulation, which synthesized decodes never have) so T-205's labelled-capture export now covers MAUTO decodes. The fourth deliverable, the POST /api/analyze/{id}/results/{rank}/template HTTP route, is NOT done: hk-api has no existing ApiState capability/trait for templates (no /api/templates route exists anywhere yet, and TemplateLibrary is unused outside hk-synth's own tests), so wiring it needs a new TemplateControl trait + ApiState field + hk-cli backend + docs/api.md + contract tests -- a second pass of comparable size to what landed. save_as_template itself is real and tested; only the transport is missing.
+      Tests: cargo nextest run -p hk-synth -E 'test(/save_as_template/)' -> exit 0 (2 passed); just test-crate hk-synth -> exit 0 (107 passed); cargo nextest run -p hk-pipeline -E 'test(/synth::attach/) or binary(analyze_jobs)' -> exit 0 (27 passed); cargo nextest run -p hk-store -E 'test(/dataset::/)' -> exit 0 (9 passed)
+      precheck exit 0
+      Commits: 0655d1c8
+      Observed, not chased: The POST /api/analyze/{id}/results/{rank}/template route (ADR-0015 section 4.3) is not wired: no ApiState capability exists for templates at all today (grep for TemplateLibrary/TemplateControl outside hk-synth's own crate finds nothing), so serving save_as_template needs a new hk-api trait, ApiState field, hk-cli backend implementation, docs/api.md delta and hk-cli/tests/api_contract.rs coverage -- proposed as a follow-up ticket the coordinator can size and allocate. | save_as_template's free list is always empty (every solved-recipe param fixed), not narrowed ranges for unsolved stages at twice the measured uncertainty as ADR-0015 section 4.3 also describes: PipelineResult does not currently carry the original per-stage search-space domains past stage_reached, so there is nothing to narrow from. Widening this needs that data added to PipelineResult/candidate tracking first -- noted in the function's own doc comment, not silently dropped. | recipe_family (and therefore the C15 label and the C18 signature's family field) only recognises five block ids (fsk_demod, msk_demod, am_demod, psk_demod, ppm_demod) at S1 -- every block the built-in generic skeletons commit to a family at today. A future demod block reaching S1 in a solved search (e.g. an OFDM/CSS/DSSS block, currently absent from the catalogue per ADR-0011 section 9.2) will label_classification/propose_signature return None for family rather than mis-map; this is intentional (documented in recipe_family's own comment) but worth flagging as the catalogue grows.
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
