@@ -361,6 +361,7 @@ fn signal_001_adsb_decodes_reach_an_external_consumer() {
             }),
             content_class: ContentClass::Unrestricted,
             t: Timestamp::from_unix_nanos(1_757_000_000_000_000_000 + n as i64),
+            provenance: None,
         };
         publisher
             .publish_message(&MessageRecord::from_decode(&decode, Some(*emitter), None))

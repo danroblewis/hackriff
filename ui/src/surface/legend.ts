@@ -111,6 +111,34 @@ export function legendEntries(): readonly LegendEntry[] {
 }
 
 /**
+ * **The coverage-fog layer's key** (T-807 / MAP-07): the rows the layers menu shows beside its
+ * `coverage` switch — the four coverage states the fog is read against, the last-known shadow it
+ * must never be mistaken for, and what a fog cell becomes while the layer is hidden.
+ *
+ * Taken from [[legendEntries]] by key, so the menu's swatches are the same `cellPixel` rows the
+ * preview's key paints — no second drawing of any mark. The one new row, `fog-hidden`, is painted
+ * by `cellPixel` too, with the fog flag off.
+ */
+export function fogKeyEntries(): readonly LegendEntry[] {
+  const all = new Map(legendEntries().map((e) => [e.key, e]));
+  const pick = (k: string) => all.get(k)!;
+  return [
+    pick("unobserved"),
+    pick("unknown"),
+    pick("observed"),
+    pick("excluded"),
+    { ...pick("shadow"), note: pick("shadow").note + " Not fog: a measurement, drawn whether the fog is shown or not." },
+    {
+      key: "fog-hidden",
+      label: "Fog hidden",
+      note: "This pane's coverage fog is switched off: never-observed and unknown cells are drawn as a flat bare ground "
+        + "— not grey, not a level. A choice about the picture, stated beside the canvas; the coverage itself is unchanged.",
+      pixel: (px: Vec2, x: number): Rgb => cellPixel({ state: CELL.UNOBSERVED, x, px, tier: TIER.LIVE_IQ, srcPx: SWATCH_SRC_PX, fallback: false, fog: false }),
+    },
+  ];
+}
+
+/**
  * **The scale row** (T-470): the ramp, the two dB it runs between, and which of the two ways it was
  * decided.
  *

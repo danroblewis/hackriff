@@ -77,6 +77,7 @@ export function rasterize(ops: readonly GlOp[], w: number, h: number): Framebuff
     const srcPx = { x: (u.uSrcPx ?? [1, 1])[0], y: (u.uSrcPx ?? [1, 1])[1] };
     const tier = u.uTier?.[0] ?? 0;
     const fallback = (u.uFallback?.[0] ?? 0) > 0.5;
+    const fog = (u.uFog?.[0] ?? 1) !== 0; // T-807: the pane's coverage-fog layer, as the shader reads it
     const lodb = u.uLo?.[0] ?? -120, hidb = u.uHi?.[0] ?? -60;
     const [u0, v0] = u.uUv0 ?? [0, 0];
     const [u1, v1] = u.uUv1 ?? [1, 1];
@@ -95,7 +96,7 @@ export function rasterize(ops: readonly GlOp[], w: number, h: number): Framebuff
           state: s,
           x: (v - lodb) / Math.max(hidb - lodb, 1e-6),
           px: { x: qx * pw, y: qy * ph },
-          tier, srcPx, fallback,
+          tier, srcPx, fallback, fog,
         }));
       }
     }

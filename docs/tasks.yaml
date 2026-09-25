@@ -5116,7 +5116,7 @@ tasks:
   - id: T-277
     milestone: M5
     title: 'M5 HF/VLF science front ends (accessory-gated)'
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: M5C
@@ -5133,6 +5133,13 @@ tasks:
       model-selection.md names for Sonnet/medium, not new capability design."
     notes: |
       2026-09-22 (coordinator): a worker proposed CANCEL because SPACE-001/SPACE-041/PROP-019 already carry hardware_fit: needs-accessory - REJECTED. The deliverable is the HF/VLF science front ends themselves (accessory-fed source in hk-core + the three analyses); the needs-accessory tags are a CONSTRAINT on that work, not the work. M5 roadmap - not before the 09-23 burndown.
+
+      2026-09-24 coordinator: a stale cancel-proposed claim held this ticket out of dispatch; the cancel stays REJECTED (see 09-22 note: the deliverable is the accessory-fed HF/VLF front ends + analyses, tested on synthetic/recorded IQ; the needs-accessory tags constrain it). Released and redispatched 11:04.
+
+      2026-09-24 coordinator: RE-SCOPED after its Opus review FAILED the 'done' (review.json): T-277 = the VLF/LF science analyses (task-t277, hk-dsp::vlf, reviewed correct: PROP-019 sign, SPACE-001 step, accessory gating). The accessory-fed hk-core source and the pipeline/API wiring that make them reachable are split to T-891, which now carries SPACE-001/SPACE-041/PROP-019 end to end. T-277 lands done on that narrower scope; the retiered_2026_09_21 note's 'tagging only' reading was already wrong (the tags predated the ticket).
+    result: |
+      DONE 2026-09-24 (work-runner hand-back, re-scoped by the coordinator after the Opus review): T-277 = the VLF/LF science ANALYSES in hk-dsp::vlf (SPACE-001 SID step, PROP-019 phase -> reflection height, sferic detection), accessory-gated, reviewed correct (PROP-019 sign fix 2d2d5b08). Tests: cargo nextest run -p hk-dsp --lib vlf -> exit 0 (4 passed); precheck exit 0. Commits: f1785ca1, 2d2d5b08, 78159094. NOT in this ticket (split out): the accessory-fed hk-core source, its mock and the pipeline/API wiring that make SPACE-001/SPACE-041/PROP-019 reachable, plus the detect_sferics zero-median threshold floor - all T-891.
+    commit: 3273643b
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -7521,7 +7528,7 @@ tasks:
     milestone: M2-hardening
     title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
       been tried'
-    status: blocked
+    status: done
     priority: normal
     deps:
     - T-343
@@ -7537,10 +7544,16 @@ tasks:
       that is a real defect: a half-opened stream would produce frames nobody can attribute, and the provenance
       work (T-302, T-303, T-304, T-305, T-325) all assumes a device is opened once or not at all'
     needs: hardware
-    blocked_on: "a HIL session with the HackRF free: stop the user demo on :8899 (it holds the radio), run two hk serve --device hackrf processes back to back, then restore the demo. Deferred per the 09-22 directive - schedule after the 09-23 burndown with the user."
     notes: |
       2026-09-22 (coordinator): worker handed back BLOCKED - the test needs the real HackRF, which the :8899 demo holds. Not run: T-356 is on the 09-22 defer list (speculative, no observed failure), and taking the demo down is the user's call. needs: hardware so the runner stops dispatching it.
+
+      2026-09-24 11:55 USER (via supervisor): approves taking the HackRF anytime. Status todo; stays needs: hardware so the work runner does not dispatch it - the coordinator runs it as a capture-agent HIL slot: stop the :8899 demo (exact pid, never a broad pkill), start two hk serve --device hackrf back to back, assert the second gets a clean device-in-use (not a libusb error or a half-open stream), then release the radio; the supervisor restores the demo.
     branch: task-t356
+    result: |
+      DONE 2026-09-24 by HIL (capture-agent; full record ~/.hackriff-ops/work/T-356/hil-result.md). HackRF One serial 0000000000000000d2b861dc263bc293, fw 2026.01.3, libhackrf 0.9.2; binary hk 0.1.0 built 06:25 from main 31a36d22. Receive only.
+      The first process (the :8899 demo, restarted live by ops/stage.sh - same binary, --hackrf, 100.8 MHz / 2.4 Msps / LNA 32 / VGA 30 / amp on) streamed throughout; a second `hk serve --hackrf` was started twice while it streamed.
+      RESULT: exclusion HOLDS. Both attempts: the second process exits 1 after ~0.5 s, before binding its port, never half-opens the device, emits no frames; the first process kept streaming (20.7 M / 20.8 M samples in ~9 s, read errors / drops / capture failures all 0). The T-302..T-305/T-325 assumption (a device is opened once or not at all) is verified.
+      DEFECT (filed separately): the second process's error is a raw libusb error, class (b): "hackrf-one: hackrf_open_by_serial failed: Access denied (insufficient permissions) (-1000)" - it blames permissions when the device is simply in use.
   - id: T-357
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
@@ -17070,9 +17083,8 @@ tasks:
     commit: a3f9c0e9
   - id: T-544
     milestone: MAUTO
-    title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
-    status: blocked
-    blocked_on: "user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART."
+    title: "SIGNAL-087 first real instance: blind wideband hunt for a continuously-keyed (100%-duty) channel, captured as a SigMF fixture with HIDDEN ground truth (BART skipped)"
+    status: todo
     priority: high
     parallel_group: FIXTURE
     model: opus
@@ -17105,6 +17117,8 @@ tasks:
     notes: |
       Filed 2026-09-20. Phases: T-544 research+capture, T-545 failing blind tests, T-546 make them pass.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-24 11:55 USER (via supervisor): 'skip BART' - BART was only an idea from a friend's capture. RE-SCOPED to the alternative the blocked_on already named: the blind wideband 100%-duty hunt as SIGNAL-087's first instance. NEW DEFINITION OF DONE: (a) BLIND hunt, no database lookup: sweep the trunked-LMR family the HackRF can reach (VHF 136-174, UHF 380-512, 700 MHz 769-775, 800 MHz 851-869 MHz; docs/19 section 7 already found max duty 88% in 850.9-862.1, so do not stop there) for an emission keyed continuously (duty ~100% over >=30 s) with digital structure; record every sweep setting and each band's max-duty result, including negatives. (b) CAPTURE the best candidate as SigMF with every setting (LNA 32 / VGA 40 / AMP ON is docs/19's validated 800 MHz setting; re-derive for other bands), receiver clock ppm estimated and recorded (T-560). (c) Only AFTER the blind find, research what it is (cite sources, mark unverified) and ANNOTATE the hidden ground truth (time-frequency extents, modulation, decoded content where established). If no 100%-duty digital emitter exists anywhere reachable, the hunt's negative map IS the deliverable, stated plainly - never manufacture a fixture. Receive only; one agent on the radio; the coordinator hands it over. T-545/T-546's blind suite then gains this real instance (T-318, still blocked, keeps the BART-specific hardware half).
     result: |
       CAPTURE TAKEN 2026-09-20 AND NEGATIVE. Research half DONE (docs/19 sections 1-6, SIGNAL-087
       minted). Capture half CANNOT BE COMPLETED HERE - no fixture produced, and none should be
@@ -17161,6 +17175,7 @@ tasks:
       but because the one continuous thing is not four-level digital. BART is also not hiding on an
       unlisted channel in this band.
 
+    needs: hardware
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
@@ -17190,6 +17205,8 @@ tasks:
     notes: |
       Filed 2026-09-20. Depends on T-544's fixture and truth list.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-24 coordinator: user skipped BART (11:55). This ticket's blind SIGNAL-087 suite stands on the synthetic trunk_encrypted_control_channel scene; its first REAL instance now comes from T-544's re-scoped blind wideband 100%-duty hunt - when that fixture exists, point the suite at it as a second scene (same blind assertions, no lookup-and-tune).
     result: |
       DONE 2026-09-21 on branch task-t545. `tests/e2e/tests/acceptance_mauto.rs` +
       `tests/e2e/tests/acceptance/signal_087.rs`: SEVEN tests, FIVE RED (`#[ignore]`d, each
@@ -17374,6 +17391,8 @@ tasks:
     notes: |
       Filed 2026-09-20.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-24 coordinator: user skipped BART (11:55). This ticket's blind SIGNAL-087 suite stands on the synthetic trunk_encrypted_control_channel scene; its first REAL instance now comes from T-544's re-scoped blind wideband 100%-duty hunt - when that fixture exists, point the suite at it as a second scene (same blind assertions, no lookup-and-tune).
   - id: T-558
     milestone: M2-hardening
     title: A sustained sweep accumulates threads, RSS and a growing occupancy accumulator
@@ -18615,7 +18634,7 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: todo
+    status: in-progress
     branch: task-t565
     priority: normal
     parallel_group: SYN-E
@@ -18846,50 +18865,13 @@ tasks:
   - id: T-568
     milestone: MAUTO
     title: "MAUTO: the negative-control guard suite - four populations, a stated false-label budget, and zero labels on input with nothing to find"
-    status: todo
+    status: done
     priority: high
     parallel_group: M-E
     model: opus
-    depends_on: [T-568, T-575]
+    depends_on: [T-854, T-623, T-624, T-626, T-627]
     use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
     core_interface: false
-    acceptance: |
-      `acceptance_mauto::false_confirm_budget`, per ADR-0022 section 10. Extends T-568's negative
-      populations rather than duplicating them.
-      PROTOCOL, NON-NEGOTIABLE (CLAUDE.md + ADR-0021 section 8.4): fixtures replay THROUGH THE MOCK
-      SDR behind the ordinary device interface; jobs start via `POST /api/analyze`; targets come
-      from BLIND DETECTION or an ad-hoc band, NEVER a truth frequency; truth is loaded only by the
-      assert harness; jobs are bounded by `max_evaluations`, never by wall.
-      THREE ASSERTIONS, because one has no power and one is passed by doing nothing.
-      A1, THE DIRECT ONE (necessary, weak): over T-568's N1 + N2 + N4 at each of `standard` and
-      `deep`, `confirms == 0` and `emitters_created == 0`.
-      A2, THE ONE WITH POWER: report the MAXIMUM `analytic_holdout_bits` reached by any rank-1
-      hold-out result on input with nothing to find, plus p50/p99 per population per profile, and
-      assert `max <= 18.0` against the 24-bit threshold. This measures ADR-0022 section 3.2's
-      9.7-bit model margin DIRECTLY instead of waiting for a threshold crossing a 24-bit gate makes
-      vanishingly rare. If the observed max is 21 bits the true margin is 3 bits, not 9.7, and the
-      budget is missed by ~100x WHILE A1 STILL READS ZERO.
-      A3, THE RECALL CONTROL, because a false-confirm suite with no recall control is passed by
-      never confirming: ADR-0015 section 7's positive rows still confirm under the new gate, and
-      specifically (a) at least one ADS-B single squitter confirms ON ONE FRAME (the ADR-0022
-      section 4.2 case the old rule blocked), (b) a template-fixed CRC-8 emitter confirms at 3
-      differing frames (the case the old width-16 floor refused outright), (c) a repeated-payload
-      beacon does NOT confirm on repeat count alone - `differences`, not `distinct_valid`.
-      WHAT THE SUITE HONESTLY BOUNDS, stated in the report and not implied: zero confirms at
-      n = 800 per profile bounds the true per-decision rate to <= 3.7e-3 at 95 % (rule of three),
-      against a budget of 5.0e-5. A1 IS 75x TOO WEAK TO DEMONSTRATE THE BUDGET and must never be
-      quoted as doing so - it can only fail to contradict it. Demonstrating 5.0e-5 from a
-      zero-failure run at 95 % needs n ~ 60 000 negative decisions. DECIDE AND STATE whether a
-      nightly or milestone run at that scale is worth building outside CI; inventing the number in
-      CI would be the same defect as quoting it (docs/17 section 1's four-decimal error).
-      THE FAILURE MESSAGE IS PART OF THE DELIVERABLE. ADR-0022 section 10.2 gives the format: the
-      budget and its units, the threshold with its two terms, the observation, the IMPLIED MARGIN
-      ("the analytic nulls are optimistic by >= 2^7.1 = 137x more than assumed"), what that means in
-      wrong rows per week, the winning result's check/width/differences/L_check/null-control margin,
-      and the replay command for the offending fixture. A bare `assert!(max <= 18.0)` tells a reader
-      none of it.
-      DoD: the three assertions, the honest-bound paragraph in the report, the legible failure
-      format, and a stated position on the n ~ 60 000 question.
     notes: |
       Filed 2026-09-21 with ADR-0022 (T-548). HIGH: it is the only evidence the derived threshold
       actually delivers the budget, and A2 is the only part of it with any statistical power.
@@ -18897,6 +18879,29 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-23 (coordinator, from the MAUTO manifest refresh): this ticket's acceptance text is word-for-word T-576's (acceptance_mauto::false_confirm_budget) and its notes say 'Runs after T-568 builds the populations' - i.e. the body was copied from its dependant. By its title T-568 is the negative-control guard suite that BUILDS the four populations (N1-N4: ofdm_nonstandard_cp, dsss_m_sequence, qam16_unframed, nbfm_voice/am_voice scenes now exist via T-623/T-624). Rewrite the acceptance from docs/22 before dispatching; the manifest now cites T-568 for the ofdm/dsss/16qam and voice negatives.
+
+      2026-09-24 coordinator - ACCEPTANCE (REWRITTEN; the previous acceptance was a word-for-word copy of dependant T-576's body, including `depends_on: [T-568, T-575]`, a self-dependency that held T-568/T-576/T-577 out of dispatch permanently). Source: docs/22 §4.3 (read that section only) and ADR-0021 §8.4.
+      DELIVER the NEGATIVE-CONTROL GUARD SUITE in acceptance_mauto: run the MAUTO search engine (T-854, done) blind, through the mock SDR, over each negative population and assert what docs/22 §4.3's "must return" column says:
+      - N1 thermal noise (noise_floor_rise, n_weak_signals=0): unknown / no-signal, deepest_verdict energy; 0 labels >= framed; 0 emitters.
+      - N2 energy without symbols: CW (tone) + NBFM voice + AM voice (T-624, done): unknown / nothing-scored, deepest_verdict <= demodulated; 0 >= framed.
+      - N3 out-of-catalogue structure: OFDM non-standard CP, DSSS, 16-QAM (T-623, done) [CSS = P9]: unsupported-structure naming the structure + missing_block; 0 solved; framed only where the trace shows a measured framing. SCORED SEPARATELY.
+      - N4 real empty capture: the 433 MHz quiet window; a spur is never a label (artifact_of, never >= demodulated). The 50-ohm terminator half is T-375 (user action, blocked): mark that cell SKIPPED-with-reason in the T-627 coverage manifest, never silently absent.
+      - N5 mismatched hypothesis (T-626, done; off_grid + adjacent_leakage): unknown / tied or a correct partial; never solved with wrong parameters; classify with hkpy.synth.mismatch.classify_outcome (a miss is NOT a false label).
+      - State the false-label budget: false_labels counted over N1+N2+N4+N5 per profile, N3 separately; report counts per population. At CI tier use docs/22's n per population (or a documented smaller CI n with the full n run by T-576). The n~60 000 run and the A2 tail-slope reporting are T-576's, not this ticket's; the check-width/degenerate-frame measurements are T-577's.
+      - Degeneracy detector (docs/22 §6.2): the suite must be able to fail - a deliberately over-claiming stub engine turns it red.
+      Hidden truth stays sealed (tests/e2e/src/blind.rs). Build on the existing generators; do not rebuild populations.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the acceptance_mauto binary / the new test), then HAND BACK. Never `just gate`.
+    effort: medium
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 12:37).
+      Built the negative-control guard suite, acceptance_mauto::mauto_negatives (docs/22 §4.3, §6.2, §10). It runs every population blind through the mock SDR with truth stripped: N1 thermal (noise_floor_rise, step_db=0, n_weak_signals=0); N2 CW (tone at 0.4 s; the 0.05 s default produced no emitter), NBFM voice and AM voice; N3 OFDM, DSSS and 16-QAM, scored separately; N4 the real 2026-09-13 433 MHz quiet window; N5 off_grid and adjacent_leakage. For every emitter a run produces it calls POST /api/analyze {emitter_id}. The stated budget: 0 false labels (verdict >= framed) over N1+N2+N4+N5, and 0 solved on N3. N1 must produce 0 emitters. A spur (artifact-of) may never reach demodulated. N5 is judged by hkpy.synth.mismatch.classify_outcome (a miss is not a false label). Each run prints counts per sub-population and per population, the pooled rule-of-three bound, and the docs/22 §10 sentence that the terminator null is unmeasured. CI n is 3 seeds per synthetic sub-population minus the sealed hold-out; the full n belongs to T-576. First run: 18 pooled jobs, 0 false labels. The per-population must-return rules are in place, but on this build every answer is not-searched: there is no production stage evaluator over IQ, so region jobs end no_evaluator. Two stub engines check that the suite can fail (docs/22 §6.2). One over-claims and turns every population red, including N5 through the Python rule. The other over-claims only on N3 and shows N3 is scored apart from the pooled budget. The coverage manifest has a new NEG plane (NP axis, 12 cells): 10 populated, n3-css declared against T-565, and n4-terminator-50ohm declared SKIPPED against T-375. Declarations that cited T-568 now cite T-567 (the sealed Resolution) and T-576 (the full-n N1 run), so the open-ticket check stays valid once this ticket closes. Manifest re-blessed: 504 cells, 0 unmarked.
+      Tests: cargo nextest run -p hk-e2e -E '(binary(acceptance_mauto) & (test(/mauto_corpus/) | test(/mauto_negatives/))) | (package(hk-e2e) & kind(lib))' -> exit 0 (32 passed (guard through mock SDR 52 s warm, 80-183 s cold synth cache))
+      precheck exit 0
+      Commits: a11b0a26
+      Observed, not chased: No ticket owns the production SearchBackend. Nothing wires hk_synth::engine::search to hk_blocks::run_window over acquired IQ (hk_pipeline::synth::jobs ends every job failed/no_evaluator; the only Evaluator impls are in tests: crates/hk-pipeline/tests/analyze_jobs.rs:221, crates/hk-synth/tests/search_engine.rs:114). Until something does, the must-return column of this suite (and T-576/T-863) cannot be reached: every negative answers not-searched. | N3 dsss_m_sequence (defaults) produced 0 emitters in all 3 seeds, so no DSSS answer was scored. The run also found only 2 of 3 OFDM scenes. N5 adjacent_leakage: nothing was detected inside the analysed box in any of the 3 seeds (only ~1 kHz fragments at 433.868/433.955/433.962 MHz), so it scores abstain and is not evidence about mismatch. | N4 433 MHz quiet window: 8 emitters and none marked artifact-of, although the fixture README calls the 434.000 MHz line a likely sample-clock harmonic (one row sits at 433.9943-434.0060 MHz). So the spur rule has no artifact row to bind on today. | The Resolution served by /api/analyze has no missing_block field, so N3's 'naming the structure + missing_block' is checked against resolution.summary text. T-566/T-567 should decide whether it becomes a field.
+      Use cases: SIGNAL-001, SIGNAL-062, RESEARCH-009
+      Resources: 68 CPU-s, peak 3.5 GB
+    commit: 6b1c55fe
   - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
@@ -19476,7 +19481,7 @@ tasks:
   - id: T-590
     milestone: M3
     title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
-    status: todo
+    status: done
     priority: normal
     parallel_group: M3A
     model: opus
@@ -19496,6 +19501,19 @@ tasks:
       avoid. Re-measure first, then decide, and state the false-label cost either way.
       Relates to ADR-0016's exit gates and to T-306's confidently-wrong analysis.
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
+    branch: task-t590
+    notes: |
+      2026-09-24 coordinator: the 09-22 worker's untested WIP (hk-classify/src/verify.rs, +138/-32) is kept on branch task-t590-wip-0922 (f59e52cf), renamed off task-t590 so the runner could redispatch. The 11:04 run starts fresh from main; compare against that WIP only if useful. T-877 (blocked) also edits verify.rs - expect an overlap there.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 12:48).
+      RE-MEASURED, THEN RESTORED qam16/qam64 to the verifier. One correction to the premise: T-422's recorded reason was not the smear itself. It was that sweeping only the ALRT's assumed SNR flipped both QAM truths together (no N0 right on both), which it blamed on filter/timing error. That flip was T-246's residual-carrier ring: removing remove_residual_cfo reproduces it exactly (five-way 16/60, qam16-vs-qam64 12/24 at every assumption, all called qam64). With T-246's correction in place: five-way arg-max 60/60 on bpsk/qpsk/8psk/qam16/qam64 at 20/30 dB, and qam16-vs-qam64 24/24 at the measured SNR, at 30 dB and at 15 dB (148/150 over 10-30 dB; both misses are at 10 dB, below the class gate). Through the production path, qam16/qam64 at 20/25/30 dB x 12 blind seeds: wrong 4 -> 1, every rerank on the truth, confidently wrong (p>=0.9) 0 -> 0, and the verifier runs on 55/69 where it ran on 0. The remaining wrong call is a qam64 snippet C14 never locked. FALSE-LABEL COST: with forced 0.5/0.5 priors, the verifier names the truth every time it is in the pair (qam16 vs qam64/8psk/qpsk, qam64 vs qam16, 8psk/qpsk vs qam16; ran 59 of 61). It can be wrong only when the tree offers two wrong labels: genuine QPSK offered only qam16/qam64 goes to qam64 18/18, and held-out pi/4-DQPSK splits 8/10. The held-outs (apsk16, pi/4-DQPSK) abstain at the family level 72/72, so that route is closed upstream today, and a restored qam call stays bounded by the 19:1 cap and MAX_CONFIDENCE. Change: the constellation() lookup scores qam16/qam64 via square_qam. verify_with and psk_qam_loglikelihoods_with keep T-422's declined arm measurable in three new count-based t590_* tests. T-597's run-rate pin moves psk-qam gate+5 from ran 0 (geometry=3) to ran 3 (confirmed=1, reranked=2), and both reranks are correct (qam16 cell top-1 1.000).
+      Tests: just test-crate hk-classify -> exit 0 (113 passed (1 skipped), after re-pinning the T-597 psk-qam run-rate row; the first run before the re-pin was 112/113 with only that pin red); cargo nextest run -p hk-classify --lib -E 'test(/t590|t246|a_two_candidate/)' -> exit 0 (5 passed; t590_the_qam_orders_separate... also shown RED with remove_residual_cfo disabled (16/60, pair 12/24))
+      precheck exit 0
+      Commits: 4ee0f966
+      Observed, not chased: Before this change, a psk-qam verifier run whose candidates included a declined label (fewer than 2 scored) reported SkipReason::Geometry, which is a misleading code for 'no model for the candidates'. It no longer fires for QAM; it would recur for any future declined label. | C14 locks genuine qam64 on only 4 of 6 seeds at 15-30 dB (t590 exploration), so the verifier cannot run on the rest; this is the one remaining qam64 wrong call on the e2e grid. | Only hk-classify was tested. A downstream crate or an e2e test that pins exact psk-qam class calls could see the verifier now re-ranking QAM priors; the coordinator's gate covers that.
+      Use cases: SIGNAL-062
+      Resources: 626 CPU-s, peak 1.3 GB
+    commit: 03c941bc
   - id: T-583
     milestone: MLIVE
     title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
@@ -23534,6 +23552,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): the canvas fills the whole window edge to edge (no app-shell frame or margins); the inventory and focus panels float over it; every toolbar button is clickable. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator: after staging review the user stated principle P1 (docs/23 §10.6): the left column kept its pre-redesign height, which is not minimal. The collapse-to-chip + dismiss is T-895 (high).
     result: |
       Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
       siblings of `.centre` which is z-index:auto) painted above `.centre`
@@ -23592,7 +23612,7 @@ tasks:
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23623,12 +23643,15 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a floating control cluster over the canvas - Go-to, a layers button, and a live/my-location FAB in the corner - like Google Maps' map controls; the old toolbar row is gone. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator: the relaunched worker (7c2ee1c3) found the dead worker's 6 staged files were a REVERT of the branch's own two commits, and discarded them. DoD line 'the old toolbar row is gone' is NOT met (T-528's hit test + Split/Whole-surface e2e specs drive that row): rehoming it is T-882.
     branch: task-t802
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
+    commit: 2a2085a5
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
-    status: in-progress
+    status: done
     branch: task-t803
     priority: high
     parallel_group: MAP-CHROME
@@ -23661,10 +23684,11 @@ tasks:
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): panels open as bottom sheets you can drag between peek, half and full height, and the canvas stays usable behind them (non-modal). Say in your handback exactly what to open on staging to see it.
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
+    commit: 42c26a91
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23695,6 +23719,19 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): clicking a pin or box slides up a detail sheet for that signal (its centre, bandwidth, time extent and explanations) without leaving the canvas. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Selected tab holds the most device actions in the largest surface - invert that: device actions (Listen, Record clip, Stream out, Analyze, Promote/Delete, any retune) are a COMPACT action cluster of small buttons, not a large surface, and no device route is bound to the sheet body. P1: the sheet has a visible dismiss (T-900).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:23).
+      MAP-04: the focus panel inside the T-803 bottom sheet is now the detail sheet from ui/mockups/map-ui-v1.html. Selecting a signal (clicking its box on the canvas or its inventory row) raises the sheet from peek to half. The sheet shows: the big frequency, the state and liveness in one line (from presence: on air since HH:MM:SS, or ended and marked provisional, reopens if it resumes); a Measured block with centre, bandwidth, and SNR/peak from /api/inventory's `measured` object, followed by a 'measured at HH:MM:SS UTC over N s' line (a level never appears without its time; 'No level measured yet' when there is none); the time extent (an open interval reads 'start -> live'); the ranked explanations, labelled 'ranked suggestions, never truth'; and an action row (Listen, Decode/RDS, Record clip, Stream out, Analyze, Promote, Delete) built from the context menu's own items. The peek strip names the selected frequency. Front end only, existing routes only. The new view-model explore/detail.ts is pure and imports types only. TO SEE IT ON STAGING: open Explore, wait for a signal box or inventory row to appear, then click the box (or the row). The sheet at the bottom right slides up to half height showing that signal's frequency, liveness, Measured-with-time, explanations and actions, while the canvas beside it still pans.
+      Tests: just test-ui -> exit 0 (61/61 test files passed (build + typecheck + unit), incl. new app-detail.test.ts (7 tests, spy-client empty call list on select/build)); cd ui && node e2e/run.mjs app-detail -> exit 0 (1/1 passed: selecting a detected FM-fixture signal raises the sheet to half with its frequency, liveness, measured-at, explanations, actions; no device route); cd ui && node e2e/run.mjs app-sheet -> exit 0 (1/1 files passed (T-803 sheet regression))
+      precheck exit 0
+      Commits: 9a04c5f3
+      Observed, not chased: Clicking the box of the signal that is ALREADY focused, while the sheet is collapsed, does not re-open the sheet. focus-sheet.ts only reveals on a focus CHANGE (T-803 design, asserted in app-sheet.test.ts: 're-asserting the same focus does not reopen it'). The ticket did not ask for this; it would need the surface's onClick to call a reveal directly. | The mockup's 'Seen by' line (device, centre/span, gains) is not shown: /api/inventory rows carry no per-row device/gain provenance. | The canvas has no pins yet, only signal boxes; the pin click path belongs to the ticket that adds pins. The e2e selects through the inventory row, which calls the same focusSignal the canvas box click calls (centre/surface.ts onClick). It does not click a WebGL box, because the spec cannot locate one.
+      Use cases: AWARE-053
+      Resources: 99 CPU-s, peak 2.3 GB
+    branch: task-t804
+    commit: e6f34ff2
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
@@ -23742,7 +23779,7 @@ tasks:
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
@@ -23772,10 +23809,21 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a layers menu that lists base styles and overlays per pane; toggling one changes that pane only. Say in your handback exactly what to open on staging to see it.
+    branch: task-t806
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:29).
+      Built the per-pane layer registry from docs/24 §13 (ui/src/surface/layers.ts). Each layer has a fixed plane (data/overlay/dom) and a z value that only orders it within its plane. Defaults follow §13.4: detections, including Candidate and unknown ones, start visible. The registries live in the store as state.layers (ui/src/app/map/layers-slice.ts). A split pane starts with a copy of its creator's registry and then changes independently. Each pane's registry is saved in localStorage under its pane id, and the page still works when storage is unavailable. The ring rules and the found-signal boxes are now the `rules` and `detections` overlay layers. The visible overlay layers are combined in z order into the one existing marks hook, so there is still a single overlay path (no sampler, no ramp) and the byte-identical-with-overlays-off guard is unchanged. The layers menu from T-802 now has two axes for the active pane: base style (Amplitude ramp or Phosphor, radios) and overlays in paint order (checkboxes), headed 'this pane' or 'pane N of M'. It also has one 'Every pane' switch for the spectrum-trace strip. Phosphor draws that pane's spectrum trace and afterglow in one green ink that is not on the waterfall's colour ramp. The toolbar Signals button now toggles the active pane's detections layer. TO SEE IT ON STAGING: open the app, click the Layers button (top-right of the canvas), then click 'Split ⇔' in the surface toolbar. The menu header changes to 'pane 2 of 2'. Choose Phosphor and untick Detections and Capture rules: only the new pane changes (green trace, no boxes, no ring lines, and the readouts say so). Click 'Close' and pane 1 is exactly as it was.
+      Tests: just test-ui -> exit 0 (build + typecheck + 60/60 test files passed (incl. 7 new MAP-06 tests)); cd ui && node e2e/run.mjs app-surface -> exit 0 (5/5 incl. new T-806 browser test; last 4 consecutive runs green)
+      precheck exit 0
+      Commits: e4dd8926
+      Observed, not chased: ui/e2e/app-surface.e2e.mjs 'a drag on the app's surface moves the view…' timed out ('waiting for the per-viewport readout to change after a drag') in 3 of the first 4 runs, at load averages of 21 to 27. main's code passed it 2/2 at a similar load, and my branch then passed 4/4 in a row once load dropped to about 15-20. The drag starts 0.6 s after the canvas is >200 px wide, which looks like a readiness race under load. This is a flake for the deflaker, not a product failure. | precheck: only `cargo fmt --all --check` was run (exit 0). The diff touches no crate, and `just precheck` with no crate list runs clippy over the whole workspace, which was skipped. | docs/24 §13.4 says the `research` layer (saved measurements) is hidden by default. T-822's saved measurements, selections and in-progress gestures are still drawn as always-on interaction marks after the registry overlays, to avoid hiding a measurement right after it is saved. When MAP-20/22 take `research`, they should decide whether to move measurements into it. | The `coverage` and `tier` data layers and the other overlays (artifacts, priors, collection:*, pins) are defined in the registry but not yet offered in the menu. The menu lists only layers that have a renderer, and MAP-07/08/11/12/21 each add one to `overlayFns` in surface.ts. Phosphor currently changes the spectrum trace only; a phosphor tile ramp would be a data-plane change to the one ramp module.
+      Use cases: AWARE-042
+      Resources: 264 CPU-s, peak 2.4 GB
+    commit: 03c3b8c5
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-LAYERS
     model: opus
@@ -23805,10 +23853,20 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): never-observed spectrum shows as an explicit fog you can switch on and off in the layers menu, distinct from shadow and from unknown. Say in your handback exactly what to open on staging to see it.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 20:43).
+      CONFLICT FIX: re-cut task-t807 as ONE commit (ee03dd9f) on the gated main 25ffc0f4. The first cut sat on the provisional batch 51f73939 (T-888/T-892/T-277/T-874/T-590/T-568/... merges that never landed on gated main), so merging it would have carried ~100 ungated files. Those merges touched none of T-807's files; the old tip is kept as branch task-t807-provisional-base. Conflicts with main's T-882 (toolbar-less floating chrome), T-809 pins and T-811 artifacts were resolved on main's side, with the fog readout, the Coverage menu section + key and the per-pane fog flag re-added on top. The T-807 e2e now splits/closes through the viewport menu (paneAct); the T-882 source-text check allows the .sf-fog row. docs/tasks.yaml is main's copy with only T-807's result re-applied via `just task result`. Coverage fog is now an explicit per-pane data-plane layer (docs/24 §3b/§13.3). The coverage switch is a flag on the one generated cell rule (cellMark(..., bool fog) / cellPixel({fog}) -> uniform uFog set per pane by the data pass), never a quad. Shown (the default) is pixel-identical to before, so the states unobserved (the only grey), unknown (hatch), observed and excluded (ruled notch) stay drawn distinctly per resolution.grey_rule. Hidden changes ONLY unobserved+unknown, which draw as FOG_HIDDEN: a flat neutral bare ground, darker than grey, off the ramp and untextured. Every measurement-bearing state (observed, no-level, awaiting, last-known shadow, excluded with its ink) is always drawn. The layers menu gains a 'Coverage · this pane' section with the switch and a key painted by cellPixel (unobserved, unknown, observed, excluded, last-known marked 'not fog', fog hidden). While the active pane's fog is hidden, a .sf-fog line says so in words. The setting is per pane, a split inherits it, it persists through the T-806 registry, and it reaches no route. WHAT TO OPEN ON STAGING: the app root (/), open the Layers button (top right, stacked-squares icon) and look at the 'Coverage · <pane>' section: 'Coverage fog' is checked and has a six-swatch key. Zoom out ('Whole surface') so most of the canvas is grey (never observed). Untick 'Coverage fog': the grey and the purple unknown hatch become dark bare ground, the last-known scanlined shadow and the measured spectrum stay, and the line under the canvas reads 'Coverage fog hidden on this pane…'. Split to check that each pane keeps its own setting.
+      Tests: just test-ui -> exit 0 (72/72 test files passed on 25ffc0f4 + T-807 (incl. surface-fog 7 tests, app-map-controls)); cd ui && npx tsc --noEmit -> exit 0 (typecheck clean); just task validate -> exit 0 (749 tickets OK)
+      precheck exit 0
+      Commits: ee03dd9f
+      Observed, not chased: task-t807 was originally cut from provisional batch 51f73939 which was later rewound; any other branch cut from that tip (the work runner's cut point around 16:2x on 09-24) carries the same ungated merges and will look like it 'conflicts' or bloat its diff. | ui/e2e/app-surface.e2e.mjs, including the new T-807 spec, was NOT verified in a browser. `node e2e/run.mjs app-surface` failed all 6 tests (the 'surface to finish addressing' waits timed out at 60 s, exceptions []) at load average 43-55, both WITH this change and with ui/src checked out at HEAD~1 (the baseline). So the failure is environmental (load, or a stale local target/debug/hk), not this diff. The coordinator's gate should run it; the T-806 spec's overlays selector is now scoped to [data-axis=overlays] because the menu gained a Coverage section. | No Rust crate touched, so `just precheck` reduced to `cargo fmt --all --check` (exit 0). Its clippy half with no crates would have linted the whole workspace, so it was not run. | docs/24 §3a's 'base recedes' (desaturating the ramp) was deliberately NOT done here: it would move the ramp that the shadow's brightness-ceiling guarantee and the 'tier never moves the ramp' rule depend on. That belongs to MAP-13 (T-813), the figure-ground pass across all layers.
+      Use cases: AWARE-042
+      Resources: 405 CPU-s, peak 2.5 GB
+    commit: e219d285
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -23836,10 +23894,24 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): detections drawn as their own layer: confirmed signals prominent, candidates visibly weaker, and neither ever drawn over the grey fog. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): T-808's boxes are now the PRIMARY geometry for every feature (docs/23 §10.6 rule 6). Hover/select hit-testing on the box (MapTip anywhere inside, click selects, keyboard reading order) is carried by T-909 (quick) and T-910 (full).
+    branch: task-t808
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 15:13).
+      T-806 already wired the detections overlay layer (stroke plane, so never over the coverage fog; candidates/unknowns visible by default; no overlap hiding or z-ordering). Remaining gap was that Confirmed and Candidate strokes were the same thickness. Added per-box strokePx to MarkBox: Confirmed 3px, Candidate/artifact 1px. Test asserts thickness ordering. Data source remains the inventory presence intervals (same backend rows), not a new /api/events call. On staging: open the canvas with the Detections layer on (default) and look at a region with both confirmed (teal, heavy) and candidate (lavender, thin) boxes.
+      Tests: node test/run.mjs surface-marks surface-layers -> exit 0 (19 passed)
+      precheck exit 0
+      Commits: 6113261b
+      Observed, not chased: Detections layer reads /api/inventory presence, not /api/events as the ticket text says
+      Use cases: AWARE-053
+      Resources: 56 CPU-s, peak 0.4 GB
+    commit: 8e7c82e9
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
-    status: todo
+    status: done
+    branch: task-t809
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
@@ -23868,15 +23940,18 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): signals and events appear as pins; hovering one shows a tooltip (MapTip), and clicking selects it with a visible selected state. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): the user judged the pins 'awful, much worse than the boxes' on staging (a provisional batch at 19:27 put task-t809 there). T-809 lands as pins.ts + the quick fix T-909 (box >= 6 px draws no glyph; pin only as scale-dependent generalization; hit area = the box), done on task-t809 before its gate. The full re-scope into feature symbolization (polygons with class symbology, generalization, hit-test/select, labels) is T-910.
+    commit: 26cc2fa9
   - id: T-810
     milestone: MMAP
-    title: 'Pin clustering at coarse zoom from /api/tiles/events, resolving to individuals on zoom-in'
+    title: Density layer at coarse zoom (features per cell from /api/tiles/events) instead of numbered cluster bubbles; drilling in resolves to boxes (re-scoped from pin clustering, user 19:35)
     status: todo
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-809]
+    depends_on: [T-809, T-910]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -23899,10 +23974,12 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): zoomed out, nearby pins merge into numbered clusters; zooming in splits them back into individual pins. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): RE-SCOPED: not pin clustering. Where many features would generalize at coarse zoom, draw a DENSITY/heat layer (features per cell, from /api/tiles/events) - the GIS 'aggregate at small scale' - toggleable per pane in the layers menu, stroke/fill that never tints a measurement (keep the overlays on/off byte-identical guard); zooming in resolves to T-910's boxes. No numbered cluster bubbles. WHAT THE USER WILL SEE ON STAGING: zoomed far out, busy regions glow by how many signals are there; zoom in and they resolve into rectangles.
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -23930,10 +24007,24 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): image/harmonic/IMD relationships drawn as lines linking the related signals on the canvas, switchable as a layer. Say in your handback exactly what to open on staging to see it.
+
+      Gate failed app-surface.e2e T-806 layers menu: it asserted the overlay list without the new artifacts layer; updated expectations (artifacts, off). app-dismiss.e2e failure (bottom sheet) is not in this tree, not from this change.
+    branch: task-t811
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 19:44).
+      Gate failure was ui/e2e/app-surface.e2e.mjs (T-806 layers menu) asserting the overlay list [rules, detections]; the new Artifacts layer adds [artifacts, false] third, so the expectations were updated (three spots). Not run in a browser here (no hk binary built); the order and default match the gate's reported actual. The app-dismiss.e2e bottom-sheet failure in the same gate log is a spec absent from this tree and unrelated. Artifacts layer itself unchanged: dashed links from artifact-of rows to their source, Layers menu > Artifacts. Attempt 2: the only leftover was the ticket note written by just task note; committed, and merged the last gated main cleanly.
+      Tests: node test/run.mjs surface-layers surface-artifacts -> exit 0 (9 passed (earlier run; unit code unchanged))
+      precheck exit 0
+      Commits: cd244181, b4d0feb9
+      Observed, not chased: app-dismiss.e2e.mjs 'bottom sheet covers no canvas rows' failed in the same gate batch; file not in this branch
+      Use cases: AWARE-042
+      Resources: 52 CPU-s, peak 0.6 GB
+    commit: 0726f714
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
-    status: todo
+    status: in-progress
+    branch: task-t812
     priority: normal
     parallel_group: MAP-LAYERS
     model: opus
@@ -23973,7 +24064,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-807, T-808, T-809]
+    depends_on: [T-807, T-808, T-809, T-910]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -23996,10 +24087,12 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): every layer stays legible over the waterfall (figure-ground) and distinguishable under a colour-blind simulation; no two layers share a colour meaning. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): ADDED: (a) the SYMBOLOGY TABLE on the polygon - Confirmed = solid outline + light fill; Candidate = dashed outline, no/very light fill; unexplained = outline + '?' label; curated/human = distinct outline style; class carried by fill/outline/label, never glyph shape; colour-blind safe; (b) LABEL PLACEMENT - freq · bw · class inside or just above a box wide enough to hold it, overlapping labels thinned by priority (Confirmed > Candidate), GIS-style. Coordinate with T-910 (which draws the polygons).
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
@@ -24028,10 +24121,25 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a collapsed Explore drawer at the bottom listing interesting signals and patterns; expanding it and clicking an entry flies the canvas there. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): this is a BIG panel (to ~90 vh). A bare click on a drawer row must NOT pan/zoom the map or offer a retune; the jump / retune offer lives on a small explicit per-row button. The drawer's body only adds/removes marks or shifts coordinates slightly. Also P1: it has a visible dismiss (T-900); P3: fixed position, not draggable.
+
+      2026-09-24 coordinator: landed on main inside task-t804 (merge e6f34ff2), which merged task-t814 to share one sheet dismiss. task-t814's own gate (14:26) was red only on fog-of-war T-521's server shadow-plane check (intermittent, unrelated to this UI-only branch; deflaker on task-deflake-fog-shadow-race). Includes the P4 fix (61529629): a bare row click highlights, a small per-row Go button pans; the sheet has a x dismiss.
+    branch: task-t814
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:12).
+      Added the Explore drawer (ui/src/app/chrome/explore-drawer.ts) as a data-slot=drawer inside the T-803 bottom sheet, above the focus panel; collapsed by default (peek), expands to half/full. Groups: unknown & unexplained (/api/events), strongest (/api/analysis/strongest), quiet-but-active (/api/scheduler POI), past surveys (observed runs from /api/coverage). Clicking an item writes requestGoto (and reviewAt for a survey window) to the store: view arithmetic only, GETs only, no device route. Pure model + thin-client source guard tested. To see it on staging: open the app in Explore mode, click the bottom sheet's peek strip/grab handle to expand it, and click any entry to pan the canvas there.
+      Tests: node ui/test/run.mjs app-explore-drawer app-sheet app-shell -> exit 0 (3+11+11 passed)
+      precheck exit 0
+      Commits: d4f5ebfa
+      Observed, not chased: No e2e/spy-client DOM test of clicking a drawer item; covered by source guard only. Drawer polls every 30 s and only once live.edgeTS/view exist.
+      Use cases: AWARE-042
+      Resources: 49 CPU-s, peak 0.6 GB — LEAKED 5 processes (killed at reap)
+    commit: e6f34ff2
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
@@ -24059,6 +24167,21 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a browse list of past surveys; choosing one jumps the canvas to that saved coverage window. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): 'jump the pane' to a saved coverage window is a MAJOR map change: it is a small explicit per-row button, never a bare row click in the survey list.
+
+      Review: single limit=1000 page of the oldest-first log dropped newest surveys; now follows next_cursor (max 20 pages), tested.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 15:21).
+      Explore drawer 'Past surveys' group now lists observed-then windows built from GET /api/observations (dwell records over the last 7 days, same-band touching dwells merged, newest first), tagged 'survey · observed then', plus the coverage-derived current window and the widest 'survey · never looked' gap (no time window, no review). Per-row small Go button (P4; bare row click only selects) jumps the pane: reviewAt restores the window time extent and requestGoto centres frequency; GET-only, no device route. Frequency span is not restored (nav gotoHz carries centre only). On staging: open the Explore drawer (bottom sheet), scroll to 'Past surveys — jump to a coverage window', press Go on an 'observed then' row. Review fix: observations are now paged via next_cursor (bounded 20 pages) so the newest surveys appear.
+      Tests: just test-ui -> exit 0 (69/69 test files passed)
+      precheck exit 0
+      Commits: c06c9982, 8b94b025, 6241e85f
+      Observed, not chased: Go restores time extent and centre frequency only; restoring span needs a nav slice extension
+      Use cases: AWARE-042
+      Resources: 56 CPU-s, peak 0.9 GB
+    branch: task-t815
+    commit: d2b324ef
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
@@ -24275,7 +24398,8 @@ tasks:
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
-    status: todo
+    status: in-progress
+    branch: task-t821
     priority: normal
     parallel_group: MAP-RESEARCH
     model: opus
@@ -24302,6 +24426,8 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a Collections panel with a table view; selecting a row highlights its mark on the canvas and vice versa. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Research slide-in (460 px, full height) is a big panel: a row click selects/highlights the mark; any view jump or the gated retune offer is a small explicit per-row button only. P1: visible dismiss (T-900). P3: fixed position.
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
@@ -24383,7 +24509,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: opus
     effort: medium
-    depends_on: [T-805, T-814, T-821]
+    depends_on: [T-805, T-814, T-821, T-900]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -24408,6 +24534,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): at phone width the floating chrome rearranges to fit, and in immersive mode the controls fade away until you touch or move the pointer. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P1 (docs/23 §10.6 rule 1): overlays are meant to be CLOSED, not faded - fade-to-35 % is an idle courtesy only, never a substitute for a dismiss. The dismiss itself is T-900 (now a dependency); this pass keeps it working at phone width.
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-825
     milestone: MMAP
@@ -24442,6 +24570,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): nothing new to look at: this adds the UI tests and honesty guards; SEE = the staging build still shows every MMAP feature above working. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLES (docs/23 §10.6): fold in the guards filed today - T-896 (P3: no chrome dock POSITION read from/written to local or user state; no drag-to-move handler on band-2/3 chrome) and T-899 (P4: no device route or view-jump handler bound to a big-panel body element: sheet, Explore drawer, Research slide-in, left column). Each guard goes red on an injected violation.
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
@@ -25384,7 +25514,6 @@ tasks:
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
     status: in-progress
-    branch: task-t858
     priority: normal
     deps:
     - T-853
@@ -25406,7 +25535,21 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      Review fix (attempt 1): the review failed the branch for changing ACCEPTED ADR-0015 §2.3 without the user. Changed: bandwidth axis restored (it is the S0 channel filter's width behind a flat channeliser), schema v3 no longer refuses bandwidth_hz, and the ADR block is reworded as a PROPOSED AMENDMENT PENDING THE USER (S0 not counted in quality or the lock; bandwidth read as the S0 filter width; measured S1-S3 saturation). The coordinator should raise the amendment with the user. No gate failure: this was a review finding. Tests: hk-recipe + hk-synth 142/142, precheck clean.
+
+      Review fix 2: the review failed the branch because the code still left S0 out of quality and refused S0-only prefixes while ADR-0015 called that amendment pending. Now the code implements §2.3 exactly as accepted (S0 counted; any prefix accepted). The S0 exception exists only as ADR text marked 'not accepted, not implemented', for the user to decide. Tests: hk-synth 93/93; hk-recipe 49 of its 50 pass in the combined run. The 50th, field_eval reparsing_a_recorded_stream_of_10k_frames_is_instant, failed at load average ~40 and passes alone in 0.9 s: a pre-existing wall-clock-bound test outside this diff, for the deflaker.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 03:42).
+      Review fix 2. The review failed the branch because the code still left S0 out of quality and refused S0-only prefixes while ADR-0015 (ACCEPTED) called that amendment pending. main is merged in. The code now implements §2.3 exactly as accepted: quality = capped evidence bits over S0 … the deepest stage (§1.3); any prefix is accepted (ObjectiveError::NothingToMeasure removed); an S0-only prefix locks on S0's floor. The ADR-0015 §2.3 block now says 'PENDING THE USER; not accepted, not implemented'. The S0 exception exists only as a proposal, and the block states the consequence of the accepted text: S0's ~6 noise bits are added to every tuning, roughly constant; an S0-only prefix can lock on pure noise; deeper prefixes lock on their deepest stage and are unaffected. The bandwidth axis stays as last round, which the reviewer did not object to: it is the S0 channel filter's width behind a flat channeliser. New tests pin the accepted contract: quality == b_S0+b_S1+b_S2, and an S0-only prefix builds and locks on S0. The rest stands: EvidenceObjective over RefinementLoop, hold-out-enforced validation, per-block support alignment, recipe schema v3 refine.objective.evidence.
+      Tests: cargo nextest run -p hk-synth -E 'binary(evidence_objective)' --no-fail-fast -> exit 0 (9 passed); cargo nextest run -p hk-synth --no-fail-fast -> exit 0 (92 passed, before adding the S0-only test (evidence_objective now 9/9)); cargo nextest run -p hk-recipe -E 'test(/reparsing_a_recorded_stream/)' -> exit 0 (1 passed alone (0.9 s). In the combined hk-recipe+hk-synth run at load average ~40 it failed its wall-clock bound: 142/143 passed)
+      precheck exit 0
+      Commits: c5e2b468, 62125374, 8fef1e7f, 093608d2
+      Observed, not chased: USER DECISION (coordinator to raise): ADR-0015 §2.3 proposed amendment, not implemented. Should S0 be left out of evidence-objective quality and lock, and S0-only prefixes refused? Evidence: noise scores 6 bits at S0 through a channeliser whose band edges roll off (lowpass@1 credits 6 bits at +0.1 dB, n=16384). | Load-flake for the deflaker: hk-recipe::field_eval reparsing_a_recorded_stream_of_10k_frames_is_instant failed in a combined run at load average ~40 and passes alone in 0.9 s. It asserts on elapsed wall time, so it belongs in the timing tier (docs/10 §3.6). The test is pre-existing and not in this diff. | Engine wiring not done: hk_synth::engine never emits refined_into. It needs a refine call on the Evaluator seam, which needs an IQ-backed Evaluator (M-6/M-8). | Calibrated S1–S3 evidence saturates at 6 bits per metric, so a refinement at S2 is flat for a strong unshaped 2-FSK. This weighs on §3.1 step 6. | The calibration tables were drawn at a 6 kHz cutoff and 4800 Bd, so tuning the S0 cutoff or the symbol rate scores against a mismatched null. The effect was not measured.
+      Use cases: RESEARCH-002, SIGNAL-062
+      Resources: 192 CPU-s, peak 3.2 GB
+    branch: task-t858
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
@@ -25448,7 +25591,7 @@ tasks:
   - id: T-860
     milestone: MAUTO
     title: "MAUTO M-9: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out"
-    status: in-progress
+    status: done
     branch: task-t860
     priority: normal
     deps:
@@ -25471,6 +25614,7 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
     core_interface: true
+    commit: 4fb3da00
   - id: T-861
     milestone: MAUTO
     title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
@@ -25654,8 +25798,7 @@ tasks:
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
-    status: in-progress
-    branch: task-t867
+    status: done
     priority: normal
     deps:
     - T-866
@@ -25672,6 +25815,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Gate failed on test_work_accounting.py (2 tests, release_stale_claims) - unrelated to this recipe-only diff; both pass alone on the merged tree (60 passed). Load/order-sensitive, flag for deflaker. No code change.
+
+      Gate attempt 2 failed again on the same 2 py tests (test_work_accounting: waits_while_last_branch_unmerged, claim_landed_as_rebuilt_branch). They pass alone (60 passed). Cause is on main, not this recipe-only diff: ops/work-runner.py release_stale_claims/branches_waiting read the real REPO/.git/MERGE_HEAD (lines ~954, 1040), which exists during gate-merge, and the tests do not isolate it. Needs a pipeline fix (monkeypatch REPO in those tests); branch is otherwise ready.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:22).
+      Gate failure was 2 py tests in test_work_accounting.py (release_stale_claims), unrelated to this recipe-only diff; both pass alone on the tree merged with 1fef1a41 (60 passed). Load/order-sensitive, flagged for deflaker. No code change; merged main in. Recipe test still passes, precheck clean.
+      Tests: cargo nextest run -p hk-blocks -E 'binary(analog_wfm_recipe)' -> exit 0 (1 passed); pytest py/tests/test_work_accounting.py -> exit 0 (60 passed)
+      precheck exit 0
+      Commits: 9de1103a, 54e9b3de
+      Observed, not chased: test_work_accounting: test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed failed in gate, pass alone
+      Resources: 63 CPU-s, peak 0.4 GB
+    branch: task-t867
+    commit: 6d350b8a
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
@@ -25714,8 +25871,7 @@ tasks:
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
-    status: in-progress
-    branch: task-t870
+    status: done
     priority: normal
     deps:
     - T-866
@@ -25731,7 +25887,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Gate 09-24 04:49 failed in just test-py, not in T-870 code: py/tests/test_work_accounting.py test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped (line 476) and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed (line 839). ops/work-runner.py release_stale_claims (lines 938/954) checks the REAL {REPO}/.git/MERGE_HEAD, which the tests do not monkeypatch; the merge runner gates inside a staged merge, so both tests fail in EVERY merge gate (task-t873 04:45 too) and pass anywhere else (60/60 in this worktree after merging main). Fix belongs to the pipeline side: monkeypatch REPO, or route the MERGE_HEAD check through a patchable path. T-870 re-queues unchanged once that lands.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:44).
+      ADR-0015 LP-6 (§12.6) / ADR-0011 §8.7 delivered. hk-recipe: refine.objective is either {builtin} (schema 3) or {node, metric, goal}, never a mix; a mixed or partial object is refused at parse with a named rule. builtin must be registered (REFINE_BUILTINS = wfm-pilot) and needs an iq input on one channel. EditPlan::with_channel_moved treats a moved centre as an `input` change, so every node rebuilds. hk-pipeline: new recipes::refine. A per-pipeline hk-refine worker runs T-070's RefinementLoop + WfmObjective with Listen's settings and hysteresis: once from the target, then every 15 s. The pipeline thread only copies a ring window into a buffer made at start and handed back; it never allocates or spawns. Each locked, accepted result is applied as an ordinary hot edit through RecipeRuntime::apply_refinement, the same staged edit PUT /api/pipelines/{id}/recipe makes: the refined centre becomes the channel, the refined bandwidth goes into input.bandwidth_hz, the channel is re-plumbed at a chunk boundary, edit_rev goes up by one, outputs keep their consumers, and a save keeps the refined revision. It is stored as an emitter_refined_tuning row (source "recipe"). Pipeline JSON gains `refinement`, and `channel` now reports the channel in force. Audio status records carry refined_center_hz / refined_bandwidth_hz / refine_updates. The {node, metric} form is still validated but not run. docs/api.md and ADR-0011 §8's status line are updated.
+      Tests: cargo nextest run -p hk-recipe -> exit 0 (52 passed (incl. builtin-objective schema tests and a_moved_channel_rebuilds_every_surviving_node)); cargo nextest run -p hk-pipeline -E 'binary(recipe_refine) or binary(recipe_runtime) or binary(recipe_audio) or binary(follow_hops) or binary(recipe_alloc_free) or binary(decoded_capture) or (kind(lib) and test(/recipes::/))' -> exit 0 (51 passed; recipe_refine: refines a band drawn 25 kHz off the hidden-truth station onto it (within 2 kHz) and applies it as one hot edit per result, the pre-edit audio consumer keeps the 1 kHz programme; an unlocked result never retunes)
+      precheck exit 0
+      Commits: d95e1d2d
+      Observed, not chased: hk-cli api_contract recipe_and_pipeline_routes_match_the_documented_shapes fails on the BASE commit too (checked by restoring HEAD~1's crates/ in this worktree): api_contract.rs:4756 (4761 on this branch) expects POST /api/pipelines on band 90.0-90.1 MHz to be 409 outside_window but gets 201; the started pipeline shows chunks 0. That looks like planning_tune's provisional window (T-175: before the capture publishes a tune, the window is centred on the target), not T-870. It failed 3/3 alone at load ~19. My added assertion (refinement: null) runs before that line and passes. | hk-pipeline runtime_attach chains_attached_and_detached_mid_run_drop_no_always_on_samples fails alone at load 13-20 ('attached 9' / 'attached 8' < 18). It is the known load-flake already recorded in docs/tasks.yaml (~line 21282): fsk-bursts chain, 50 ms wall-clock sleeps, no recipe code involved. | The {node, metric, goal} refine objective (e.g. recipes/rds.recipe.json crc.error_rate -> min) is still parsed and validated but never run by the recipe runtime. T-870 serves only {builtin}; running node-metric objectives through the same apply_refinement path is follow-up work. | A pipeline's content_class (streams_ctx.class) is fixed at start. An applied refinement (or any input edit) re-runs the audio pre-attach gate on the new channel but does not re-derive the class for non-audio outputs. Moves are bounded by the WFM objective's 100 kHz search margin; noted, not changed.
+      Use cases: SIGNAL-062
+      Resources: 180 CPU-s, peak 3.0 GB
+    branch: task-t870
+    commit: 738bd3af
   - id: T-871
     milestone: MAUTO
     title: "LP-7: MUI: one output model across the dock and the per-signal panels"
@@ -25775,8 +25944,7 @@ tasks:
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
-    status: in-progress
-    branch: task-t873
+    status: done
     priority: normal
     deps:
     - T-866
@@ -25794,10 +25962,21 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:41).
+      Added the `stereo_decode` block (audio group, crates/hk-blocks/src/blocks/audio/stereo.rs), ADR-0015 §12.13 LP-9. It takes the real FM multiplex from fm_demod without de-emphasis (at least 110 kS/s) and outputs `left` and `right` at 48 kS/s. A PilotPll locks to the 19 kHz pilot using phase coherence, so it works whatever scale the input is in. While the pilot is locked, the 38 kHz L−R carrier (−sin 2θ, BS.450 phase) is demodulated. M and S go through one shared DDC as a complex stream, so both channels get the same delay, and the matrix is L = M+S, R = M−S. Honest mono fallback: while the pilot is absent or the PLL is unlocked, L−R is not decoded at all and L = R = M exactly, even if an L−R subcarrier is present. Status: lock, pilot_locked, stereo (1 only while L−R is being decoded), lock_losses (counts every locked→unlocked transition, including a DISCONTINUITY, so a loss between two polls is still reported), pilot_hz and pilot_amplitude. quality = pilot coherence. Evidence: S1 pilot_lock, group pilot, raw = |Σb|/Σ|b| over PLL update blocks, calibrated (no table yet, so bits = 0). Tests: separation above 35 dB at the correct level, labelled stereo; a mono station and a pilotless subcarrier both give identical L/R labelled mono; the pilot dropping mid-stream is reported (lock_losses=1) and output falls back to identical L/R; a DISCONTINUITY gives mono until relock; noise never locks and has low coherence; param/rate refusal; chunk invariance; allocation-free and restart-equals-fresh. Two deliberate breaks (swapped L−R sign; decoding L−R while unlocked) each turned the tests red. A recipe with st.left/st.right wiring validates against the catalogue.
+      Tests: just test-crate hk-blocks -> exit 0 (181 passed, 6 skipped); cargo nextest run -p hk-blocks -E 'test(/stereo/) | binary(stereo_recipe)' -> exit 0 (7 passed (re-run after cargo fmt))
+      precheck exit 0
+      Commits: fa7da3f8
+      Observed, not chased: Schema 3 refuses a second audio output ('at most one audio output per recipe') and AudioChannels has only Mono. Carrying L/R in one stream is LP-10's wire change, so stereo_recipe.rs sends the right channel out as a stage output for now. | stereo_decode has no calibration table under synth/calibration (same as subcarrier), so hk-synth scores its pilot_lock at NoTable = 0 bits until one is generated. | hk-model change is doc-comment only (Stage::S1 lists stereo_decode); hk-model tests were not run.
+      Use cases: SIGNAL-062
+      Resources: 43 CPU-s, peak 1.7 GB
+    branch: task-t873
+    commit: ecb8b25d
   - id: T-874
     milestone: MAUTO
     title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-873
@@ -25816,6 +25995,21 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     core_interface: true
+    branch: task-t874
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 12:59).
+      LP-10 (ADR-0015 §12.13) delivered as stream contract 1.5. Stereo is opt-in: listen?…&channels=2 (absent or 1 = mono, anything else 400). The header's audio.channels says what the stream actually carries: 2 only on a WFM channel, and each record is then 960 interleaved L,R frames (sample_index still counts frames; max_frame_len is 32+8·960). Two-channel status records add `stereo` (pilot locked, L−R decoded) and `stereo_lock_losses`. While the pilot is unlocked L = R = M exactly, and a lost lock is counted, never hidden.
+      hk-demod WfmDemod::enable_stereo decodes L−R on the pilot PLL's 2θ through a copy of the mono path's own FIR and de-emphasis, so the mono path is untouched. The legacy Listen chain honours channels across retune/refine rebuilds, and discovery params gain `channels`. STREAM_VERSION_MINOR goes 2 → 5, which re-syncs the header with the document.
+      Mono streams are byte-identical except the header `version` string.
+      Clients updated in the same change: the UI dock asks for stereo and plays two channels (jitter buffer, worklet and ScriptProcessor fallback), and shows 'stereo' only from the status. Also py hk_audio_wav --stereo, the docs/api.md TCP one-liner, stream-contract §1/§12.2, the ADR-0015 §12.13 status note, and the api_contract and listen_conformance (§9) tests.
+      Through the mock SDR the synthetic stereo station separates 35 dB / 28 dB (left/right).
+      Tests: cargo nextest run -p hk-demod -p hk-stream -> exit 0 (99 passed); cargo nextest run -p hk-pipeline -E 'binary(listen_conformance)' -> exit 0 (5 passed (4 freeze tests + new stereo §9)); cargo nextest run -p hk-pipeline -E 'binary(recipe_audio) | (kind(lib) & test(/listen|playback|audio/))' -> exit 0 (9 passed); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/ws_open_listen_streams|discovery_history_floor/)' -> exit 0 (2 passed); just test-ui -> exit 0 (61/61 test files passed (incl. new audio-channels.test.ts)); cd ui && npx tsc --noEmit -> exit 0 (clean); cd py && uv run --locked pytest -q tests/test_stream_examples.py -> exit 0 (7 passed); cd py && uv run --locked ruff check . -> exit 0 (All checks passed)
+      precheck exit 0
+      Commits: 802445d6
+      Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails with 'assertion records > 20: 9 records' (ondemand.rs:365). It fails identically with this ticket's hk-stream change reverted to HEAD (checked twice). It is a wall-clock throughput assertion (records counted over 1.5 s with a 20 ms ticker), and the load average was 17–22. It looks like a timing-tier candidate for the deflaker; unrelated to T-874. | Recipe `audio` outputs (audio/<pipeline>/<output>) and the `playback` opener stay mono (channels: 1): audio_out takes one real input, and hk-recipe validates audio outputs as mono. Recipe-side stereo needs stereo_decode → a two-input audio_out (L in re, R in im through its Rate, as stereo_decode does) plus the recipe validation change. It is the natural companion to LP-3/T-867. | Listen's CPU-budget costing (ListenConfig::chain_mcores) does not add the stereo path's extra FIR (one more 15 kHz low-pass at 240 kS/s per WFM listener); it is small against the source-rate DDC but unmeasured. | On the synthetic stereo station, T-070 refinement narrowed the WFM channel to about 106 kHz (occupied BW), below Carson's bandwidth for a stereo multiplex. Separation was still 28–35 dB, but on real stations a narrow refined channel may cost stereo separation. Untested on a real stereo recording.
+      Use cases: SIGNAL-062
+      Resources: 165 CPU-s, peak 2.4 GB
+    commit: 33ddeda1
   - id: T-875
     milestone: MAUTO
     title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
@@ -25851,7 +26045,7 @@ tasks:
   - id: T-876
     milestone: M3
     title: "Burst-extent estimate overruns the burst (hk_estimate::params step 6b): 24.8-28.8 ms for a 23.5 ms burst, so noise-only samples push FSK envelope features out of every class"
-    status: in-progress
+    status: done
     branch: task-t876
     priority: high
     deps: []
@@ -25865,10 +26059,11 @@ tasks:
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
     tier_reason: estimation on the real-time classification path; blind extent recovery
+    commit: e199579d
   - id: T-877
     milestone: M3
     title: The fsk class density is one Gaussian over modulation index 0.4-5, so real device FSK at h~4 sits in its tail and reads unknown
-    status: in-progress
+    status: blocked
     branch: task-t877
     priority: high
     deps: []
@@ -25881,11 +26076,16 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+
+      2026-09-24 coordinator: the relaunched worker DISPROVED the premise - splitting 2fsk by h made it worse (0/16; narrow half collides with gfsk at p~0.9). The device rows are integer-h FSK with spectral lines (blind_qpsk 0.200), unseen by the log-uniform dev grid; task-t877 1d62fe12 fits 2fsk as a line/continuous mixture (sweeps unchanged or better, unknown recall 1.00/88) but device rows still miss on cyclic_db and sigma_aa, which are device-path inputs (T-887). Decision: hold (option 1), keep the device floor, re-measure after T-887. Also: verifier sharpens narrow-2fsk vs gfsk near-ties to p>=0.9 - check before landing. Unmeasured-default features: T-888.
+
+      2026-09-24 coordinator: T-887 (task-t887 053a50b8, queued) with T-888 now claims fsk on 16/16 above-gate device rows WITHOUT T-877's line/continuous mixture (sigma_aa fixed at the estimator; densities = T-888's refit). Once T-887 lands, re-measure task-t877's mixture on top: if it adds nothing (claims already 16/16, sweeps unchanged), CANCEL T-877 with that evidence; if it improves the open-set sweeps, rebase and land it. The verifier near-tie sharpening noted above is now T-908.
     core_interface: true
+    blocked_on: "T-887 landing, then re-measure task-t877 (1d62fe12) on top: device claims are already 16/16 without it - cancel with evidence if it adds nothing"
   - id: T-878
     milestone: M3
     title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
-    status: in-progress
+    status: done
     branch: task-t878
     priority: high
     deps: []
@@ -25899,6 +26099,7 @@ tasks:
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
     core_interface: true
+    commit: 9075575a
   - id: T-879
     milestone: M3
     title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
@@ -25930,6 +26131,866 @@ tasks:
       Resources: 1551 CPU-s, peak 2.8 GB
     branch: task-t879
     commit: 3421c16d
+  - id: T-880
+    milestone: MCANVAS
+    title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the app-trace re-merge worker (task-deflake-app-trace-e2e-mjs, 9c6f32ec; handback ~/.hackriff-ops/work/deflake-app-trace-e2e-mjs/handback-merge-main.json). ui/e2e/app-trace.e2e.mjs's T-475 colour check (the spectrum trace at a scrubbed pane's time position must be the FFT of that pane's top cell) went red 2 of 12 clean runs, both on panes showing ~2 s of history (every pane >= 3.1 s passed): 77.2% (766/992) and 71.7% (665/928) of columns matched against the 80% bar. Offline re-analysis of both saved screenshots: canvas position correct, the 6 rows read are exactly the pane's top cell; the trace matches that cell in only 72-80% of columns but matches max(that cell, the next-older cell) in 88.6-91.8%, with misses spread across all columns (not one tile). So the drawn slice appears to be a max over TWO cells, which sliceWindow's own comment says must never happen; on longer panes cells are ~3 px so 6 rows already span two cells and the defect is masked.
+      UNCONFIRMED HYPOTHESIS: ui/src/surface/trace.ts maxHoldColumns derives the rows to read with floor/ceil on f64 epoch nanoseconds (~1.8e18 > 2^53, ~256 ns precision), so a boundary value just off a cell edge pulls in the neighbouring cell.
+      DELIVER: root-cause (it reproduces on main - the colour check is main's T-475 check), fix so the trace at a pane's time position is exactly one cell's FFT (e.g. integer/BigInt or cell-relative arithmetic, not raw epoch-ns doubles), and a ui/test unit test at a cell boundary with realistic epoch-ns values that goes red on the old code. Presentation-only arithmetic (thin client); no change to the e2e threshold or control.
+      WHAT THE USER WILL SEE ON STAGING: scrubbing a pane into the past, the spectrum trace strip above it matches the top waterfall row of that pane exactly, including on very short (~2 s) pane windows.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui or the single ui/test file; app-trace.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY app-trace re-merge worker 2026-09-24 (2/12 reds, offline screenshot analysis).
+    commit: 71918b4c
+  - id: T-881
+    milestone: MCANVAS
+    title: "Departed band shows never-observed grey at its newest rows (10-60% of a shadow pane) instead of shadow: gap between shadow.edge_s and as_of_s?"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the fog-of-war deflaker (pipeline-manager's manual deflaker; task-deflake-fog-of-war c9018996/ff08e2c5, landed; relayed in merge-needs-attention 00:36). In ui/e2e/fog-of-war.e2e.mjs a DEPARTED band (swept, then the radio left) shows real never-observed grey at its NEWEST rows: the top of the band-A shadow pane was plain grey with 0 pending / 0 coarse stand-ins / 0 behind the live edge, 10.7-25.1% of the pane across the deflaker's runs (rows 181-275 of a 181-548 pane in one snapshot); T-801's gate measured 59.8%. That contradicts the invariant "swept then left = shadow (last-known), not grey" (user: scan + fog-of-war shadow tiles; T-441 distinct marks).
+      UNVERIFIED GUESS: the rows between the server's newest folded frame (shadow.edge_s) and the coverage horizon (as_of_s) are marked unobserved, but no shadow run reaches them.
+      DELIVER: root-cause through the real serving path (coverage/shadow routes + the client's shadow placement), fix so a departed band's rows up to the moment it was left read as shadow (or as observed-not-yet-measured where that is the truth), never as never-observed grey; a backend or ui/test regression test that goes red on the old code. The fog-of-war assertion "departed band A reads mostly THE grey" is currently left unchanged and goes red whenever the gap exceeds half the pane: keep it, do not weaken it.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band you swept; its column on the canvas stays dim "last-known" shadow right up to the moment you left, with no plain-grey strip at the top.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the crate's binary / just test-ui; fog-of-war.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY fog-of-war deflaker 2026-09-24 (relayed by pipeline-manager).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 10:26).
+      Root cause, two parts, both server-side on the real serving path. (1) The shadow stopped at the store's newest FOLDED frame (shadow.edge_s), which trails capture; a departed band's rows between it and the tune record's reach carried no run, so coverage 'unobserved' + no shadow = THE grey. New LastKnown::carry_forward_to (hk-store) carries past the edge up to the answer's own coverage.horizon.as_of_s, only over cells the selected coverage plane calls unobserved (a column stops for good at a not-unobserved cell past the edge); wire field shadow.reach_s. (2) coverage.horizon.as_of_s was read over THIS band only: a tile wholly after the departure named no horizon (null) and a held copy was drawn as served, grey over rows recorded since; a tile straddling it named the departure, leaving later rows pending for good. as_of_s is now the tune record's reach over any band (IQ ring segments + dwells in flight from the same snapshot as the band's spans; observation log still per band), the rule /ws/tiles/rows already used. docs/api.md updated (as_of_s row, shadow data-edge rule, reach_s). The fog-of-war 'departed band A reads mostly THE grey' assertion is unchanged; run alone it now measures grey 0.0% (was 10.7-59.8%), the newest strip reading as 'behind the edge' (pending) instead. On staging: a departed band's column stays shadow up to the live edge, with at most a short pending strip at the very top between tile refreshes, never plain grey.
+      Tests: cargo nextest run -p hk-api -E 'test(/shadow|departed|coverage|horizon|as_of|tile/)' -> exit 0 (67 passed (includes new a_departed_band_reads_as_shadow_up_to_the_record_reach_not_grey_past_the_fold_edge, verified RED with the fix disabled: as_of_s null / reach_s null)); cargo nextest run -p hk-store -E 'test(/last_known/)' -> exit 0 (11 passed (includes new the_carry_continues_past_the_fold_edge_only_over_unobserved_cells_up_to_the_record_reach)); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/coverage_answers_per_cell/)' -> exit 0 (1 passed (updated untouched-band as_of_s assertion)); HK_BIN=target/debug/hk HK_E2E_PORT=9376 HK_E2E_JOURNEY_PORT=9400 HK_E2E_CONCURRENCY=1 node ui/e2e/run.mjs fog-of-war -> exit 0 (1/1 files passed; SHADOW A (departed) grey 0.0%, '3 tiles, 0 pending, 3 behind the edge')
+      precheck exit 0
+      Commits: b8a06b6c
+      Observed, not chased: Full-crate runs: `just test-crate hk-store` exit 100 (211/212) and `just test-crate hk-api` exit 100 (286/287); every test touched by this diff passed. The two failures are unrelated to it and both FAIL ALONE 3/3 at load avg ~15-17: (a) hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at crates/hk-store/src/decoded.rs:1529 `assert!(c.dropped_records > 0)` with dropped_records: 0, frames: 29; (b) hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay panics at crates/hk-api/tests/ondemand.rs:365 `records > 20` with '10 records' in 1.5 s. Both are wall-clock-bound; not re-checked on a quiet box or on main. | as_of_s still reads the observation log for this band only (a whole-band page would compete with the band's records for MAX_RECORD_LIMIT). A server with no IQ ring and no dwell in flight (capture stopped, ring refused) still gets a departed band's horizon at the departure; not observed in practice. | A per-band untouched region (never-swept band C) now carries a non-null as_of_s, so a held copy draws grey only up to it and pending above - more honest, but a visible change to the top strip of never-swept panes between refreshes.
+      Resources: 917 CPU-s, peak 3.5 GB
+    effort_reason: "hard cross-layer debugging: root cause spans the backend coverage/shadow serving path and the client's shadow placement, with only an unverified guess (prompts/model-selection.md: hard debugging -> opus high)"
+    commit: 0f4a2113
+  - id: T-882
+    milestone: MMAP
+    title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
+    status: done
+    priority: high
+    deps:
+    - T-802
+    - T-806
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-802 worker (task-t802, handback ~/.hackriff-ops/work/T-802/handback.json): T-802's user DoD line says "the old toolbar row is gone", but the surface toolbar (Live, Trace, Contrast, Signals, Measure, Record, Split, Close, Whole surface) remains - T-802 kept it because T-528's hit test and two e2e specs (Split, Whole surface) drive those buttons.
+      DELIVER: remove the surface toolbar row and rehome every control, per docs/26 + ui/mockups/map-ui-v1.html: Live -> the follow-live FAB (T-802, already there); Trace / Signals / Contrast -> the layers menu (T-806, base style vs overlays); Measure -> the on-canvas measurement tool (T-822); Record -> the detail sheet's "Record clip" action (T-804). Pane management (Split, Close, Whole surface) has NO decided home in docs/26: propose one (e.g. a per-pane corner overflow menu) in the handback with a screenshot, keep it presentation-only, and do not block on it - ship the rest if that one needs the user's call. Retarget T-528's hit test and the Split/Whole-surface e2e specs at the new controls (same assertions, new selectors; never weaken them). Thin client: presentation only; a control that commands the radio still goes through the one gated DeviceAction path.
+      WHAT THE USER WILL SEE ON STAGING: open Explore - no toolbar row above the canvas; the canvas is full-bleed with only the floating controls, the layers menu holds Trace/Signals/Contrast, and pane split/close/whole-surface live where the handback says.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-802 worker 2026-09-24 (user DoD: the old toolbar row is gone).
+
+      2026-09-24 T-803 worker: at 1000/920 px the toolbar overflows (Split, Close, Whole surface off-screen) and at 420 px Live/Trace/Auto-contrast sit under the top bar with the rest off-screen - the row runs off-screen rather than wrapping, and T-528's hit test runs only at 1440 px. Removing the row fixes this; ALSO extend the rehomed controls' hit test to 1000/920/420 px so an unreachable control goes red. Evidence: diagnostic lines in ui/e2e/app-sheet.e2e.mjs (task-t803).
+
+      2026-09-24 coordinator: now depends on T-895 (left column collapses to a chip) - same chrome files, and the user sees that first. P3/P5: the rehomed controls take fixed positions (not draggable); the existing zoom/FAB/layers/Go-to controls are kept as they are.
+    depends_on: [T-802, T-806, T-895]
+    branch: task-t882
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 19:13).
+      Removed the surface toolbar row (.sf-bar/.sf-actions). The stage is now the surface's first grid row, so the canvas is full-bleed with only floating controls. Where each control went: Live -> the follow-live FAB, which now toggles (a press freezes a following pane and re-pins a frozen one; paneActions.pauseLive). Trace -> the layers menu's 'Every pane' row. Signals -> the layers menu's detections overlay. Contrast -> a new 'Colour scale' radio axis in the layers menu (Anchored / Auto-contrast / Viewport scale; contrast.ts scaleRows/scaleMode, derived from the one RangeMode). Measure -> a top-right icon plus the mockup's mode banner, with Esc still exiting. PROPOSED HOME for pane management, which docs/26 does not decide: a top-right 'Viewport' menu (.map-pane-btn -> #map-pane-menu) holding Split, Close viewport (disabled on the last pane), Whole surface and Record IQ over the viewport span. Record IQ records the viewport span, which is a different act from the detail sheet's per-signal 'Record clip' (T-804), so it is kept in this menu rather than dropped. Screenshots are in ui/e2e/artifacts/t882-viewport-menu-{1440,1000,920,420}.png and t882-layers-*.png (gitignored; the width e2e test regenerates app-surface-viewport-menu-<w>.png). The range and hover readouts float bottom-left above the axis labels. The cluster starts below the app bar where that bar wraps on narrow windows (--chrome-top, measured in fit()); without this, Go-to sat under the bar at 420 px, which the new hit test caught. T-528's hit test and the Split/Close/Whole-surface/Live e2e steps are retargeted at the new controls with the same assertions (shared helpers in ui/e2e/app-chrome.mjs), and the hit test now also runs at 1000/920/420 px with menus opened. Presentation only: no new route, and no device path besides the existing retune offer.
+      Tests: cd ui && npx tsc --noEmit -> exit 0 (clean); cd ui && node test/run.mjs (just test-ui's unit tier) -> exit 0 (69/69 test files passed (incl. new T-882 tests in app-map-controls / surface-vscale / app-centre-signals)); HK_E2E_ORIGIN=<fresh hk serve --replay fm fixture> node --test e2e/app-surface.e2e.mjs (final src) -> exit 0 (per-test on final code: GET / mounts, T-802, T-806, 420 px passed in the full-file run; drag, T-506, 1000 px, 920 px each passed alone (--test-name-pattern, 4 runs, all exit 0). Every rehomed control pressable at 1440/1000/920/420: counts closed 7, pane menu 4, layers 6); HK_E2E_ORIGIN=<fresh hk serve --replay fm fixture> node --test e2e/app-sheet.e2e.mjs e2e/app-side-chip.e2e.mjs -> exit 0 (9/9 passed); HK_E2E_ORIGIN=<fresh hk serve --replay fm fixture> HK_E2E_PORT=9401 node --test e2e/surface-retune.e2e.mjs -> exit 0 (6/6 passed (Split through the viewport menu)); HK_E2E_ORIGIN=<fresh hk serve --replay fm fixture> node --test --test-name-pattern='T-475|scrubbed' e2e/app-trace.e2e.mjs -> exit 0 (3/3 FAB-driven tests passed (scrubbed in one run, the two T-475 after adding the FAB wait))
+      precheck exit 0
+      Commits: 016d5f7c
+      Observed, not chased: Backend: GET /api/coverage stalls as an hk serve --replay --loop process ages. On a server ~20 min old, curl of /api/coverage?f_lo=0&f_hi=9830400000&cells=128&rows=32&t0=..&t1=.. got no answer in 280 s (curl exit 28, 000); on a fresh server the same kind of request took 7.8 s. probeSurface awaits it, so the app surface never boots. That is why every run through `node e2e/run.mjs` (lanes took 125-373 s to start, and warned 'no observed coverage in 60000 ms') failed all app-* tests, including tests this diff does not touch (the sheet drag, GET / mounts). Load average was 33-46 at the time. Binary: target/debug/hk built 16:48, after main's last crates/ change (e199579d). The e2e results above were therefore run with node --test directly against a freshly started server. | Load-flake, not an assertion failure: in a full-file run of app-surface on the final code, 4 of 8 tests timed out at their 60 s boot wait ('the surface to draw ...') because /api/coverage was stalling, at load average 18-24. Each then passed alone (exit 0). Earlier runs through `node e2e/run.mjs` failed every app-* test the same way, including tests this diff does not touch. Flag for the deflaker together with the coverage stall above. | UI client bug, pre-existing, not in this diff: the app requests '/api/scheduler/api/scheduler?f_lo=..&f_hi=..&t0=..&t1=..' (the path is doubled) and gets 404 every poll; seen in the page's request log. ui/src/scheduler.ts:70 builds '/api/scheduler?..', so some caller is prefixing the path a second time. | precheck: the diff touches no Rust crate, so this ran `cargo fmt --all --check` (exit 0) and `tsc --noEmit` rather than a crate-scoped clippy.
+      Resources: 2341 CPU-s, peak 4.5 GB
+    commit: 03716e65
+  - id: T-883
+    milestone: M2-hardening
+    title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: E2E-HARNESS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-802 worker in .claude/worktrees/t802: single-file runs of `node e2e/run.mjs app-surface.e2e.mjs` printed an `app-sheet.e2e.mjs` spec that does not exist in that worktree (it exists only in the concurrently-running T-803 worktree), one run started two lanes for one file with one lane running a copy of app-surface.e2e.mjs WITHOUT the T-802 test, and lanes came up on ports 9431/9591/9471, not the HK_E2E_PORT=9342 it set. Unverified guess: ui/e2e/run.mjs's shared LOCK_DIR / sweepStaleRuns() or lane-port state is machine-global rather than per-worktree, so concurrent runs in different worktrees see (and may sweep/kill) each other's children - a candidate cause of the load-only e2e reds in flaky.jsonl.
+      DELIVER: reproduce with two concurrent run.mjs invocations in two worktrees; if cross-talk is real, make each run's lock/lane/port state and its sweep scoped to its own run (or its own worktree) so one run can never report, reuse or kill another's; a harness test that goes red on the old code. Harness code only (ui/e2e/run.mjs, harness.mjs, backend.mjs) - no product spec assertion changes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-802 worker 2026-09-24.
+
+      2026-09-24 CORROBORATED by the T-803 worker (separate worktree, same hour): in a parallel run its lane log showed another worktree's specs, including T-802's 'floating controls' test that is not in its tree; one surface-drag test timed out that run and passed on re-run. Two independent worktrees saw each other's runs.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 10:34).
+      Reproduced with the real hk serve: two concurrent startBackend calls on one port both returned the same origin (3/3). freePort's check and hk serve's bind are not atomic, and the loser's readiness loop adopted the winner's server before its own child died of the bind error. Because every e2e backend shared one constant token, the loser's authenticated reads all worked against the other worktree's server, bundle and history, and its lane lost that server when the other run ended. That is a load-only red source. Fix (harness only): backend.mjs gives each backend a fresh random token, and readiness requires identity (the token is accepted and our own child is alive); a foreign server means a lost race, so it steps to the next free port. run.mjs lock files record their checkout root, and the startup sweep only judges its own checkout's locks. New ui/e2e/selftest-crosstalk.mjs (npm run e2e:selftest-crosstalk; no browser or builds needed; ~5 s) forces the race with a fake HK_BIN and a foreign-checkout lock: it is red on HEAD's code for all three properties and green now. Verified with two real concurrent run.mjs invocations on one HK_E2E_PORT: one run logged 'lost the race', moved to the next port, and both went green. The T-802 report's specific symptoms (app-sheet in its output, 2 lanes, ports 9431/9591/9471) match T-803's own run (T-803 ran `run.mjs app-sheet app-surface` on 2 lanes at HK_E2E_PORT 9471, and had merged task-t802, hence the floating-controls test); no shared log or stdout exists in the harness.
+      Tests: cd ui && node e2e/selftest-crosstalk.mjs -> exit 0 (5/5 checks ok (red on HEAD's backend.mjs/run.mjs: 3 FAIL)); cd ui && npm run e2e:selftest-orphans -> exit 0 (PASS: SIGINT/SIGTERM/SIGKILL legs + pid-reuse guard); two concurrent: HK_E2E_CONCURRENCY=1 HK_E2E_PORT=37888 node e2e/run.mjs app-surface | surface-region -> exit 0 (both 1/1 passed; app-surface lost the race for 37888 and moved to 37889 instead of adopting); just test-ui -> exit 0 (60/60 test files passed)
+      precheck exit 0
+      Commits: d0656c3d
+      Observed, not chased: selftest-crosstalk (like the timeout/orphan selftests) is in no gate. It is ~5 s and needs no browser, so it could run under test-ui; adding a justfile recipe was skipped because touching the justfile forces this ui-only diff onto the full gate. | Lock files written before this change have no `root`, so the scoped sweep skips them; they age out after 24 h (STALE_LOCK_MAX_AGE_MS). An orphan from a SIGKILLed run in a worktree that is later removed is now never swept by another checkout's run.
+      Resources: 270 CPU-s, peak 3.8 GB
+    commit: 15ec8607
+  - id: T-884
+    milestone: MAUTO
+    title: "T-860 follow-ups: wire ConfirmPolicy.synthesized config, republish synthesized decodes to the stream, provenance strings, TemplateFixed seeding, withheld-row leak"
+    status: todo
+    priority: normal
+    deps:
+    - T-860
+    parallel_group: W
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-860 Opus review (and the T-860 worker), non-blocking findings on task-t860 left for after it lands:
+      1. crates/hk-cli/src/pipeline.rs:1132 builds SynthesizedConfirm::default(), so the ConfirmPolicy.synthesized config field is never read - wire it.
+      2. Known-emitter attach path (hk-pipeline/src/synth/attach.rs ~343-356) inserts and links decodes directly, skipping Ingest's republish, so synthesized decodes never reach the messages stream (ADR-0015 §5.5) - give the attacher a publisher.
+      3. template_provenance writes "builtin-or-user"/"template" (attach.rs:292-294) while hk-model/src/decode.rs documents builtin/user/discovered - make them agree.
+      4. No production seeding sets CheckOrigin::TemplateFixed (every root is Searched: fail-safe, but the ADR-0015 U1=B single-squitter template confirm cannot happen); and a template-fixed check is charged L_check = l5 where ADR-0022 says 0.
+      5. L_j is the job-wide per-stage count, not the winning path's (ADR-0022 §2.3 pt 2) - conservative, pre-existing.
+      6. The bare {"emitter_id"} analyze read (hk-api/src/analyze.rs:447-463) returns `job` details on withheld rows while /api/inventory hides `synthesis` there - withhold consistently.
+      7. is_analytic counts SyncRegularity/Plausibility as analytic; ADR-0022 §2.1's table does not list them.
+      DELIVER each with a test that goes red on the old behaviour; items 4-5 may be split out if they need ADR-0022 text. Update docs/api.md + api_contract.rs together for item 6 (T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-860 Opus review 2026-09-24.
+  - id: T-885
+    milestone: MAUTO
+    title: "Rule on synthesized confirm with zero in-window detections: T-860 fails closed, narrowing ADR-0015 §6's one-burst confirm (ADR clarification)"
+    status: todo
+    priority: normal
+    deps:
+    - T-860
+    needs: user
+    model: fable
+    effort: high
+    acceptance: |
+      DECISION NEEDED (user + Fable; ADR-0015 is ACCEPTED, so its reading is not a coding call). T-860 implemented ConfirmPolicy.synthesized per ADR-0022 §6 and chose to FAIL CLOSED on the front-end trust step when no detection of the emitter falls in the job's window (0 suspect of 0 detections) or overload is Unknown. Consequence: a candidate created by a job's own decodes (no inventory emitter in the window) can never auto-confirm in that job - and, since it has no linked detections, possibly never. That narrows ADR-0015 §6 ("One burst ... attaches, and confirms on its own"). The T-860 Opus review judged it consistent with ADR-0022's one-way-door stance but a stricter reading of an accepted ADR, stated today only in docs/07, docs/api.md and code; it also noted window_trust counts only detections LINKED to that emitter, not all detections in band x window.
+      DELIVER: the user's ruling, written as a clarification in ADR-0022 §6 step 5 / ADR-0015 §5.5 condition 4 (and §6's example), and - if the ruling differs from fail-closed - the code change in hk-pipeline/src/inventory.rs's confirm gate with a test.
+    notes: |
+      FOUND BY T-860 worker + Opus review 2026-09-24.
+    effort_reason: "an ACCEPTED-ADR clarification of a one-way confirm rule (CLAUDE.md: changing an ACCEPTED ADR goes to Fable + the user)"
+  - id: T-886
+    milestone: M3
+    title: "T-878 follow-ups: merged-away tracks lose their classification row, posterior hidden on tied emitters, classify chain memory at 20 Msps, first-come classify coverage"
+    status: todo
+    priority: normal
+    deps:
+    - T-878
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-878 Opus review (task-t878), non-blocking findings on the new chain-independent classify chain (crates/hk-pipeline/src/chains/classify.rs):
+      1. Merged-away tracks never get their row: inventory.rs:1140 removes recorded[from] on Merged (and the hop-set path at :1125), so the absorbed track's classify chain waits 2 s and ends classify_no_emitter - contradicting on_merged's "finishes and writes whatever it had already measured". Resolve the merged track to its surviving emitter.
+      2. latest_classification now serves the restated legacy chain row (no detail) on rank-3-tied emitters, so API readers lose the classifier's posterior there - serve the posterior alongside the kept family.
+      3. Memory: retain_s 3.0 capped at 16M samples, buf peaks ~2x -> ~64 MB per chain at 20 Msps, ~256 MB for 4 classify chains on the Jetson. Size retain_s to what the classifier reads (T-453: measure, don't assume).
+      4. First-come coverage: a track matching a decode spec while the 4 classify slots are full never gets a classify chain (only unmatched tracks retry); counted in classify_admission_refused. Retry it when a slot frees.
+      DELIVER each with a test that goes red on the old behaviour (item 3: a measured before/after residency number).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-878 Opus review 2026-09-24.
+  - id: T-887
+    milestone: M3
+    title: "Device-path FSK features disagree with the dev grid: cyclic_db ~7 dB low on short bursts, sigma_aa ~2x - the rows T-877 cannot claim"
+    status: done
+    branch: task-t887
+    priority: high
+    deps:
+    - T-876
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-877 worker (task-t877 1d62fe12; handback ~/.hackriff-ops/work/T-877/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, h=4, 8 seeds x 20/25/30 dB): with a 2fsk class model that DOES fit these rows' spectral-line features (blind_qpsk z~0), every above-gate row still falls outside the class on two features that come from the DEVICE PATH, not from hk-classify:
+      - cyclic_db: z -3.3 to -3.8 (~20 dB on device vs ~27 dB on the synthetic dev grid), from C14 on a ~113-symbol burst; trimming the classifier snippet to 1400 samples does not move it.
+      - sigma_aa: z +2.2 to +4.0, ~2x the synthetic value even on the 12 rows with a correct burst extent (T-876 fixes the extent overrun, not this).
+      DELIVER: root-cause each mismatch - is the device-path measurement biased on short bursts (fix the estimator), or is the dev grid's burst length / edge model unrepresentative (fix the generator in hk-classify's synth so the densities are fitted on what the device path actually measures)? Blind throughout. Report both features' z-scores on the device rows before/after, and re-run T-877's branch's device_fsk_classify on top. Also correct device_fsk_classify.rs's module docs, which blame the single-Gaussian tail (disproved by T-877's measurements).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-877 worker 2026-09-24.
+
+      2026-09-24 coordinator: landed scope = sigma_aa fix (half-level edges) + T-888 merged; device FSK 16/16. cyclic_db fix (packet_window) held behind T-908 (verifier). Observed, not chased: device burst 25 dB seed 854 #5 looks split/collided (OBW 15 kHz vs ~25, envelope variation 0.85, no deviation estimate, sigma_aa z +14.6) - a detection/overlap question, not estimator bias; file if it recurs.
+    effort_reason: root-causing a feature bias across the estimator and the synthetic generator, blind, on the classification contract
+    commit: dd29c157
+  - id: T-888
+    milestone: M3
+    title: blind_qpsk/blind_bpsk carry a default when unmeasured (0.200 veto floor), breaking T-311's absent-not-default rule
+    status: done
+    branch: task-t888
+    priority: normal
+    deps: []
+    parallel_group: M3C
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-877 worker: blind_qpsk and blind_bpsk are populated even when unmeasured (every device FSK row reads blind_qpsk = 0.200 exactly, a veto-floor value, with blind_bpsk ~0.055), unlike blind_ook/blind_fsk which follow T-311's rule that an unmeasured feature is absent, not a default. A default value reads as evidence to the density model. DELIVER: blind_qpsk/blind_bpsk are absent (None) when not measured, the densities are refitted with fit-densities, and a test asserts an unmeasured feature is absent end to end; report hk-classify's accuracy/open-set sweeps before/after.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-877 worker 2026-09-24.
+    commit: f6cf5be6
+  - id: T-889
+    milestone: M2-hardening
+    title: "fog-of-war.e2e.mjs band-A wait gives up on a 10 s wall-clock stall: make it event-counted (load flake that sank the 10:15 batch)"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the coordinator's fog-of-war triage deflaker: the 10:15 bulk gate went red on ui/e2e/fog-of-war.e2e.mjs T-521 "band A at boot is not a real render (only 0 distinct colours)". The spec passed ALONE 8/8 on base 31a36d22, task-t802, task-t803 and a local re-creation of the whole 11-branch batch, so it is a load flake, not a branch defect. Mechanism: draw() gives up once the frame "stopped getting closer for stallMs", and stallMs defaults to a WALL-CLOCK 10000 ms (fog-of-war.e2e.mjs:1064, break :1109, band A call :1234, assertion :1246); under gate load (load 20.7, a tile answer seen at 5062 ms in the same gate) the pane's own tiles take longer than that. Alone on task-t802 run 2 the same wait needed 7847 of 10000 ms. Same assertion red 14x on 09-22/23 (merge-runner.log 417888-465257) before the 09-23 deflake.
+      DELIVER: the band-A wait (and every other draw() call in the spec still on the default stall) gives up on EVENTS, not wall-clock - e.g. after N tile answers for the pane's own addresses have landed since the wait began without the frame being accepted, as phase 5 already does (`giveUp: async () => surveyAnswers() >= 10`, :1383). No assertion or threshold change. Prove it: force the pane's own tiles to be refused (per-address 503, as surface-nav's backpressure test does) and show the band-A assertion still goes red with the counts in its message; and green alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
+    branch: task-t889
+    commit: 23ad9781
+  - id: T-890
+    milestone: MLIVE
+    title: A pane following live draws NOTHING at its live edge for 8-10+ s when its tile set changes (0 tiles, coarse stand-ins drew nothing) - live gated on tile generation
+    status: done
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 in the 10:15 bulk gate (merge-runner.log ~637569-637601) and reproduced ALONE on task-t802 by the fog-of-war triage deflaker: a pane FOLLOWING LIVE had its tiles resident ("2 tiles ... drawn to 2.3 s short of the top"), then its tile set changed - most likely the live edge crossing into a new time row - and for over 10 s it drew NOTHING at the live edge: "0 tiles · 2 coarse stand-ins · 0 pending · 2 behind the edge · 2 drew nothing", meanLuma 0.0, 0 distinct colours. Alone, the same transition took 7847 ms to produce a usable frame.
+      That violates the live-rendering invariant (CLAUDE.md, user 2026-09-17): "rows append in real time as they are recorded, and live is NEVER gated on batch tile generation"; the live/tuned tier renders at live-IQ FFT resolution (T-484/T-501). Rows that exist must be on screen while the new row's tile is requested.
+      DELIVER: root-cause the empty live edge on a tile-set change (client residency/stand-in selection in ui/src/surface/surface.ts ~590-668 vs the server's live-row serving), fix so a following pane keeps drawing the rows it already has and appends new rows as they arrive with no blank interval, and a regression test (ui/test unit and/or an e2e through the mock SDR with a deliberately slowed tile route) that goes red on the old code. Thin client: presentation/residency only in ui/src; any serving change in the backend.
+      WHAT THE USER WILL SEE ON STAGING: leave a pane following live for a minute; the waterfall never blinks to black/empty at its top edge as time advances, even when the box is busy.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
+
+      2026-09-24 coordinator: RESIDUE FOUND AND FIXED - T-890's look-ahead made canvas-journey red on main (1/3 alone on 89d3d9f9, green before T-890): a tile requested before it has rows comes back as_of_s null / all-unobserved and was drawn whole as grey. Fix on task-t890-cj (8fdbd943): such a tile's horizon is set to its own start, so it draws nothing until rows exist (T-893's row feed then extends it). Unit tests red without it.
+    effort_reason: hard debugging across client tile residency/stand-in selection and live-row serving on the real-time display path
+    branch: task-t890
+    commit: 78b92378
+    result: |
+      DONE 2026-09-24: landed on main via task-t893 (merge 78b92378), which is built on task-t890 (c2160635). Root cause: a following pane only requested tiles inside its own box (which ends at the live edge), so the next time row was asked for only after the edge entered it, behind coarser parents; coarse stand-ins (never refreshed) drew nothing -> 8-10+ s blank live edge. Fix: low-priority look-ahead for the next row in ui/src/surface/tilecache.ts; T-893 then added the /ws/tiles/rows push. task-t890's OWN gate (14:09) went red on canvas-journey #1 (14-18 % of the live-edge zone grey during aggressive pan/zoom, failed alone); with T-893's row feed on top the same spec passed in T-893's gate (265 s). A 3x alone run of canvas-journey on main is being done to confirm; a residual would be filed separately.
+  - id: T-891
+    milestone: M5
+    title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
+    status: todo
+    priority: normal
+    deps:
+    - T-277
+    parallel_group: M5C
+    use_cases:
+    - SPACE-001
+    - SPACE-041
+    - PROP-019
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      SPLIT FROM T-277 on 2026-09-24 (coordinator, per T-277's Opus review, ~/.hackriff-ops/work/T-277/review.json): T-277 landed the VLF/LF science ANALYSES only (crates/hk-dsp/src/vlf.rs: SPACE-001 SID step, PROP-019 phase -> reflection height, sferic detection; accessory-gated, unit-tested) - nothing calls them, so SPACE-001 / SPACE-041 / PROP-019 are not reachable even with the accessory attached.
+      DELIVER:
+      - An ACCESSORY-FED SOURCE in hk-core behind the generic device interface (a soundcard / audio-rate VLF/LF receiver as a source, per the "keep the device interface generic / several SDRs" rule): tune/rate/start/stop/timestamps/overruns as for any source, with provenance recording the accessory (device_id + accessory kind) so every detection says it came through the accessory. No HackRF specifics.
+      - A MOCK of it that replays recorded or synthetic VLF (SigMF) behind the same interface, for e2e.
+      - Wiring: the hk-dsp::vlf analyses run on that source through the pipeline and surface through the API (docs/api.md + api_contract.rs together, T-079), so the three use cases are exercised end to end through the device interface.
+      - Each use case stays hardware_fit needs-accessory; the base device alone still claims none of them.
+      - detect_sferics floor (review minor): if more than half the samples are exactly zero (muted/gated soundcard) the median is 0, the threshold becomes 0 and every non-zero sample is a sferic - floor the threshold; test it.
+      Acceptance tests: blind, through the mock accessory source (hidden truth: an injected SID step, a known phase advance, known sferic times).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-277 Opus review 2026-09-24 (split).
+    core_interface: true
+  - id: T-892
+    milestone: M2-hardening
+    title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
+    status: done
+    priority: normal
+    deps:
+    - T-356
+    parallel_group: SDR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by T-356's HIL (~/.hackriff-ops/work/T-356/hil-result.md): when another process holds the HackRF, a second `hk serve --hackrf` fails with "Error: opening the hackrf source / Caused by: hackrf-one: hackrf_open_by_serial failed: Access denied (insufficient permissions) (-1000)". Exclusion itself is correct (no half-open, first stream undisturbed) but the message sends the user to fix permissions when the device is in use. crates/hk-core/src/source/hackrf/ffi.rs LibHackRf::open and check() pass libhackrf's -1000 (LIBUSB_ERROR_ACCESS) through verbatim.
+      DELIVER: a distinct, typed device-in-use error from the source layer (generic across devices, not HackRF-specific in the core), naming the device serial and saying another process holds it, surfaced the same way through `hk serve` startup and the gated DeviceAction path (its API error shape documented in docs/api.md + api_contract.rs if it reaches the API, T-079). Distinguish in-use from a genuine permissions failure honestly: if libhackrf cannot tell them apart, say "in use by another process, or not permitted" rather than guessing - Unknown is not Off. Test through the mock SDR (the mock can simulate an open that fails with the access code) that goes red on the verbatim message.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-356 HIL capture-agent 2026-09-24.
+    branch: task-t892
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:05).
+      A device another process holds is now reported as a typed, generic SourceError::DeviceInUse {source_name, device, certainty, driver_message} instead of libhackrf's verbatim 'Access denied (insufficient permissions) (-1000)'. InUseCertainty has two states and the weaker is never rounded up: HACKRF_ERROR_BUSY or libusb 'Resource busy' -> InUse; libusb 'Access denied' (-1000, which on macOS covers both a held device and missing USB rights) -> InUseOrNotPermitted, whose message reads 'in use by another process, or not permitted: the driver cannot tell which' with what to do for each case, keeping the driver's own text for the record. Any other open failure stays SourceError::Device. The message names the device: the requested serial, or for 'first HackRF' the serial(s) from hackrf_device_list (new FFI binding, checked against the installed hackrf.h; builds with --features hackrf). The mock gets MockFault::OpenAccessDenied (HK_MOCK_FAULT=open-access-denied), which refuses the open through the same HackRF classifier. Tests: classifier/naming unit tests, a driver-contract test through the mock, and an `hk serve --device mock:` startup test that goes red on the verbatim message. The DeviceAction path never opens a device today (it only controls an open source), so no new API error code was added; if a SourceError::DeviceInUse ever reached LiveControlError::Source it would answer 502 device_error with the honest message.
+      Tests: just test-crate hk-core -> exit 0 (184 passed (second run; first run 183/184, see observed_but_not_chased)); cargo nextest run -p hk-cli -E 'binary(device_in_use)' -> exit 0 (1 passed); cargo build -p hk-core --features hackrf -> exit 0 (real libhackrf FFI (hackrf_device_list binding) compiles and links)
+      precheck exit 0
+      Commits: eac91fe4
+      Observed, not chased: Load flake, pre-existing and untouched by this diff: hk-core source::hackrf::tests::a_slow_reader_gets_counted_drops_and_an_exact_gap panicked 'the pool overflowed' (hackrf.rs ~1412) in 1 of 3 and 2 of 5 isolated runs at load average ~18-21; it sleeps 200 ms of wall clock and assumes the fake producer thread overflowed a 2-buffer pool in that time. Passed in the second full `just test-crate hk-core`. A deflaker should make it wait on the drop counter rather than a fixed sleep. | If a future DeviceAction ever (re)opens a device (e.g. device hot-swap), LiveControlError should map SourceError::DeviceInUse to its own 409 code in docs/api.md + api_contract.rs rather than 502 device_error; not done here because no route reaches it today. | Classification of -1000 matches libusb's English strerror text (libusb's default locale); a non-English libusb_setlocale would fall back to the plain Device error, never to a false 'in use'.
+      Resources: 51 CPU-s, peak 1.4 GB
+    commit: e2e57dd3
+  - id: T-893
+    milestone: MLIVE
+    title: "Following panes still poll for new rows: wire /ws/tiles/rows (rowfeed.ts is parsed but unused), refresh coarse stand-ins, look ahead on still-pending columns (T-890 residue)"
+    status: done
+    priority: high
+    deps:
+    - T-890
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-890 worker (task-t890 c2160635; handback ~/.hackriff-ops/work/T-890/handback.json). T-890 stopped a following pane going blank when its live edge crosses into a new time row (a low-priority look-ahead request in ui/src/surface/tilecache.ts). Three residual gaps against the live-rendering invariant ("rows append in real time as they are recorded; live is NEVER gated on tile generation"):
+      1. NEW ROWS STILL ARRIVE BY POLLING. On a busy tile route the refresh lags by more than a short pane's span, so the TOP of a following pane can still be empty with no row crossing at all (the gate run's pane was drawn only to 2.3 s short of its 2.8 s top before the crossing). The server already has a row-feed route, /ws/tiles/rows, and ui/src/surface/rowfeed.ts parses it, but nothing uses it. Wire it into following panes so rows append as recorded.
+      2. COARSE STAND-INS ARE NEVER REFRESHED, and the stand-in search ignores finer tiles already in hand: a time zoom-out on a following pane goes blank until the coarser level arrives.
+      3. WIDE PANES: at full width a pane is 6 tile columns; the look-ahead only extends columns already loaded, so columns still pending when the row starts get none.
+      DELIVER each with a regression test that goes red on the old code (ui/test and/or an e2e through the mock SDR with a slowed tile route, as T-890's live-edge.e2e.mjs case does). Thin client: presentation/residency in ui/src; any serving change in the backend (docs/api.md + api_contract.rs together if a route changes, T-079).
+      WHAT THE USER WILL SEE ON STAGING: a pane following live has its newest row at the very top within a frame or two of it being recorded, at any zoom and width, on a busy box.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-890 worker 2026-09-24.
+    effort_reason: "real-time display path: wiring a live row stream into tile residency without regressing T-890's look-ahead or the thin-client rule"
+    branch: task-t893
+    result: |
+      Coordinator-run 2026-09-24 on task-t893 ee9e2605 (built on task-t890): following panes subscribe to /ws/tiles/rows (<=12 of 16 feeds, centre-first; frozen panes and the minimap open none), finer tiles stand in on zoom-out and standing-in coarse tiles refresh, the look-ahead extends in-flight/queued columns. Evidence: 3 s simulated route - pane top 2.80 s behind by polling vs 0.020 s with the feed; e2e with every tile read held 2.5 s - median shortfall 1.4 s -> 0-0.2 s. just test-ui 60/60; new unit + e2e cases red on T-890's code. Residue: T-901 (server push stalls), T-902 (pushed-row tiles guess their tier). The T-523 proxy-502 case in live-edge.e2e.mjs was red on T-890's commit too - triaged separately.
+    commit: 78b92378
+  - id: T-894
+    milestone: M2-hardening
+    title: fog-of-war.e2e.mjs waitForResident still gives up on a 10 s wall-clock stall (T-889 residue)
+    status: done
+    branch: task-t894
+    priority: normal
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-889 deflaker (task-t889 136d84df): after T-889 made fog-of-war's band-A draw() waits event-counted, `waitForResident` in ui/e2e/fog-of-war.e2e.mjs (~lines 248-254) still has a WALL-CLOCK stall - stallMs = 10000 via waitWhileWorking, giving up only when the wire and the pane's report are both quiet for 10 s. Less load-exposed than the draw() wait, but in T-889's red run (band-A tiles refused) retries kept the wire busy and it sat at its full 120 s timeout, most of that run's 206 s.
+      DELIVER: bound waitForResident by events (tile answers for the pane's own addresses, as T-889's paneAnswers does), never a clock; no assertion or threshold change; prove red (refused tiles -> fails fast with counts) and green alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-889 deflaker 2026-09-24.
+    commit: d52ebcd6
+  - id: T-895
+    milestone: MMAP
+    title: Left inventory column collapses to a chip (<=56 px) with a visible dismiss when expanded - the map is the default (user P1)
+    status: done
+    priority: high
+    deps:
+    - T-801
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P1 (docs/23 §10.6 rule 1): minimize overlay; expose as much map as possible; overlays exist to be CLOSED. After reviewing T-801 on staging the user noted the left bar is still the same height as before the redesign - not minimal.
+      AUDIT EVIDENCE: ui/src/app/chrome/map-layout.css - `#view-explore > .side { position:absolute; top:64px; bottom:74px; width:min(var(--panel-w),...) }`, --panel-w 300px, 92 % opaque, no collapsed state. The left column has NO row in docs/23 §11 ("a panel not in this table has no home"). T-803 retired the RIGHT focus column into the sheet; nothing did the same for the left. Only fade-to-35 % exists, no dismiss.
+      DELIVER: `.side` (the left inventory column: Candidate/Confirmed lists) has a COLLAPSED DEFAULT on every width - an icon/chip or a peek strip no taller than 56 px - that shows the lists' counts; expanding it opens an overlay with a visible DISMISS that returns every pixel to the map (not a fade). It never covers the Go-to box, the zoom cluster or the FAB (T-802), or the sheet's handle (T-803). Fixed position, not draggable (P3). Add the left column's row to docs/23 §11 (panel -> client slice -> reads/writes; it reads the inventory routes it reads today, writes nothing new). Presentation only (thin client). Keep T-528's hit test passing and extend it to 1440/1000/920/420 px.
+      WHAT THE USER WILL SEE ON STAGING: open Explore - the map fills the window; the Candidate/Confirmed lists are a small chip with counts at the left edge; click it to open the lists over the map, click the close (x) to put the map back.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+    branch: task-t895
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:03).
+      The Explore left inventory column (.side: Candidate/Confirmed lists + selections) is now COLLAPSED BY DEFAULT on every width: a left-edge, vertically-centred chip (max-height 56 px; drawn 44 px) stating both lists' counts, taken from the same renderedInventory collection the lists render (new ui/src/app/chrome/side-chip.ts, mounted on a new data-slot="side"). Pressing it opens the lists as a floating column with a visible close (x; Escape too); closed, the lists take no pixels (display:none, not a fade). The open column starts below the measured top chrome (bar, surface toolbar, Go-to -> --side-top), ends above the sheet peek, and below 900 px stops short of the zoom/FAB gutter, so it never covers Go-to, zoom, FAB, the sheet handle or T-528's toolbar; the toolbar and floating cluster no longer reserve the old 316 px left inset. Fixed, not draggable; presentation only (spy-client test: no route). docs/23 section 11 gains the left column's row (reads the inventory routes it reads today, writes nothing new). New e2e extends T-528's hit test to 1440/1000/920/420 px, collapsed and open; app-detail.e2e opens the chip before clicking a row.
+      Tests: just test-ui -> exit 0 (build + typecheck + 66/66 unit test files passed); HK_E2E_CONCURRENCY=1 npm run e2e -- app-side-chip app-detail app-sheet (HK_E2E_PORT=14336) -> exit 0 (3/3 files, 10 tests passed); HK_E2E_CONCURRENCY=1 npm run e2e -- app-surface (HK_E2E_PORT=14336) -> exit 0 (1/1 file, 5 tests passed (T-528 + T-802 hit tests))
+      precheck exit 0
+      Commits: 8057e3f8
+      Observed, not chased: No Rust touched, so precheck was run as its fmt half only (`cargo fmt --all --check`, exit 0); clippy with no crate list would lint the whole workspace. | Load flake (not a failure of the change): one earlier run of app-side-chip.e2e at 920 px timed out after 60 s in its initial 'surface/controls/sheet/chip mounted' wait at load avg ~30; the identical run passed right after (9.6 s). A separate first attempt died in run.mjs startLane -> backend.mjs tileCost with UND_ERR_HEADERS_TIMEOUT before any spec ran. | Pre-existing, not caused by this ticket (same with the side collapsed, and app-sheet.e2e already filters these to bySheet): at 420 px, 10 of the surface toolbar's .sf-actions buttons can't be clicked. Live is covered by another .mini, Trace/Auto-contrast/Viewport scale are under the wrapped top .bar, and Signals/Measure/Record IQ/Split/Close/Whole surface are off-screen (elementFromPoint returns nothing). The toolbar overflows at phone width instead of wrapping below the bar.
+      Resources: 892 CPU-s, peak 5.5 GB
+    commit: 9225a972
+  - id: T-896
+    milestone: MMAP
+    title: "Overlay position is ours: chrome is non-repositionable, users choose visibility only - docs/23 §10.2 + ADR-0023 §1 line and a T-825 guard (user P3)"
+    status: done
+    priority: normal
+    deps: []
+    parallel_group: MAP-TEST
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P3 (docs/23 §10.6 rule 3): WE decide the overlay arrangement; overlays are not draggable and cannot be repositioned; the user only chooses whether each is shown (a deliberate Google-Maps-style choice to try).
+      AUDIT EVIDENCE: ADR-0023 §1 "four fixed bands" and docs/23 §10.2's edge docks imply it and §10.3 stores only visibility/snap state, but until §10.6 no normative sentence forbade repositioning, and T-825 has no guard. T-803's peek/half/full is a vertical snap of a fixed-position sheet - no conflict.
+      DELIVER: (a) docs/23 §10.2 gains the line "no overlay is draggable or repositionable; users choose visibility only" pointing at §10.6 rule 3, and ADR-0023 §1 gets the same one-line amendment (ADR-0023 is PROVISIONAL; if it is ACCEPTED by then, route the amendment to Fable + the user per CLAUDE.md). (b) A guard test in ui/test (and folded into T-825's suite) asserting that no chrome dock POSITION is read from or written to localStorage/sessionStorage/user state - only visibility and the sheet's snap state may be - and that no band-2/3 chrome element has a drag handler that moves it. Red on a deliberately injected position write.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+
+      WHAT THE USER WILL SEE ON STAGING: every floating control and panel sits in the one place the design gives it; nothing can be dragged somewhere else, and a reload never restores a moved panel - only which panels are shown.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:46).
+      docs/23 §10.2 gains the normative line 'No overlay is draggable or repositionable; users choose visibility only' pointing at §10.6 rule 3, and ADR-0023 §1 (still PROVISIONAL) gets the same one-line amendment. New guard ui/test/map-overlay-position.test.ts (named as part of T-825's MAP-25 suite, which is still todo and should fold it in): (1) every storage key the client uses is classified in a table (visibility / snap / display-pref / session-token); any positional key name or positional stored value (left/top/x/y/pos/dock/offset/clientX/getBoundingClientRect...) in any get/set/removeItem, *_KEY constant or storageKey option across ui/src fails, as does an unclassified key; (2) no ui/src/app (band-2/3 chrome) pointermove/mousemove/touchmove/drag handler, inline or named, writes left/top/right/bottom/inset/transform/cssText, and nothing there is made draggable. The sheet's height-only drag (T-803 snap) is asserted allowed. Non-vacuity: injected position writes into the real sheet.ts and shell.ts sources, plus synthetic snippets, each go red.
+      Tests: node test/run.mjs map-overlay-position (in ui/) -> exit 0 (12 passed); just test-ui -> exit 0 (63/63 test files passed); npx tsc --noEmit -p ui -> exit 0 (clean)
+      precheck exit 0
+      Commits: 4642f712
+      Observed, not chased: T-825 (MAP-25) is still todo; when it lands it should list ui/test/map-overlay-position.test.ts as part of its suite rather than re-implement the P3 guard. | The guard is a static source scan scoped to ui/src/app for drag handlers; chrome mounted from ui/src/surface (if the layers panel ever moves there) would need that directory added to chromeSrc.
+      Resources: 55 CPU-s, peak 1.2 GB
+    commit: da858df8
+  - id: T-897
+    milestone: MMAP
+    title: "Path layer: (t, f) polylines on the surface in the tile pass - chirp, hop sequence, sweep path as first producers (user P2)"
+    status: todo
+    priority: normal
+    deps:
+    - T-806
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER PRINCIPLE P2 (docs/23 §10.6 rule 2): anything with (time x frequency) coordinates is rendered ON the map - as a point/pin, or as a TRACED PATH like Google Maps' blue directions line.
+      AUDIT EVIDENCE: pins, boxes, artefact lines, fog, priors, measurements, annotations and rules are all planned, but there is NO path/polyline primitive in the ADR-0023 §2 `LayerId` union and no producer for a chirp, a hop sequence or a sweep path; presence is only an interval box (ADR-0019).
+      DELIVER: a `paths` overlay LayerId in the per-pane layer registry (T-806) rendering an ordered (t, f) vertex list in CONTENT space through the pane's own capture-time mapping, in the SAME render pass as the tiles (docs/23 §10.1: band 0, re-laid-out every frame - never on the data-poll cadence, the T-388 defect), toggleable per pane from the layers menu, stroke-only (a layer can never tint a measurement - keep the byte-identical-with-overlays-on/off guard). Backend: a path record carrying absolute capture time per vertex, with provenance, served by a viewport route (docs/api.md + api_contract.rs together, T-079). First producers, from blind measurement only: a chirp's swept frequency over its time extent, a frequency-hop sequence, and a sweep path. Tests: a path's vertices stay on the same (t, f) as the tile rows under scroll/zoom (drift = invariant violation), through the mock SDR with a synthetic chirp and hop sequence and hidden truth.
+      WHAT THE USER WILL SEE ON STAGING: a chirp or a hopping emitter on the canvas has a thin line traced along the path it took through time and frequency, which can be turned off in the layers menu.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+    effort_reason: a new content-space render primitive on the shared-time-axis render pass plus a backend path record and route - the per-frame invariant makes it real-time display work
+  - id: T-898
+    milestone: MMAP
+    title: Retune history drawn as a traced directions-style path per device, from the recorded tune intervals (user P2)
+    status: todo
+    priority: normal
+    deps:
+    - T-897
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P2 (docs/23 §10.6 rule 2): the device's own movement through frequency is a thing with (t, f) coordinates and belongs ON the map as a traced path, like Google Maps' directions line.
+      DELIVER: the device's centre-frequency timeline - from the coverage map / tune history the backend already records per interval (centre, span, rate, device_id; CLAUDE.md "coverage map derived from the SDR configuration/tune history") - drawn through the paths layer as a directions-style line, one per device (the several-SDRs rule: each device's path, labelled by device_id), toggleable per pane. Each retune is a vertex at its capture time; a dwell is a vertical run. No new client-side derivation of tune history: read it from the backend (a route over the recorded tune intervals; docs/api.md + api_contract.rs together, T-079). Test through the mock SDR with scripted retunes: the drawn vertices land on the recorded retune instants and centres, and move with the tile rows under scroll/zoom.
+      WHAT THE USER WILL SEE ON STAGING: after tuning around, a line on the canvas traces where the radio has been tuned over time, like a route on a map.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+  - id: T-899
+    milestone: MMAP
+    title: "Size inversely proportional to influence: big panels never jump the map or offer a retune on a bare row click - re-spec T-814/T-815/T-821/T-804 + T-825 guard (user P4)"
+    status: done
+    priority: normal
+    deps: []
+    parallel_group: MAP-DESIGN
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P4 (docs/23 §10.6 rule 4): size is inversely proportional to influence. Big panels only add/remove things or shift coordinates slightly; anything that changes the map in a MAJOR way (retune, zoom, jump, base/layer switch, follow-live) is a small button or small cluster.
+      AUDIT EVIDENCE: docs/23 §11 rule 1 keeps device routes to Go-to + Selected actions and small controls are 36-48 px, but: T-814's Explore drawer (to ~90 vh) says "selecting an item pans/zooms (or offers a retune)"; T-815 says "jump the pane"; T-821/T-819's Research slide-in (460 px, full height) inherits the gated retune offer; T-804's Selected tab holds the most device actions in the largest surface.
+      DELIVER: (a) DOC (sonnet-level work, done here): docs/23 §10.6 rule 4 is in place; re-spec T-814/T-815/T-821/T-804's acceptance so a bare click on a row in a big panel never jumps the map or offers a retune - that lives on a small, explicit per-row button (and T-804's device actions become a compact action cluster, not a large surface); the coordinator has added notes to those tickets pointing here - reconcile their acceptance text with them. (b) GUARD (opus): a ui/test guard, folded into T-825, that no device route (the gated DeviceAction path) and no view-jump handler is bound to a big-panel BODY element (sheet, Explore drawer, Research slide-in, left column) - only to small explicit controls; red on an injected row-click jump.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+
+      WHAT THE USER WILL SEE ON STAGING: clicking a row in a big panel (sheet, Explore drawer, Research) highlights its mark but never moves or retunes the map; moving the map from a row is a small explicit button on that row.
+
+      2026-09-24 coordinator - LANDED UNGATED at 15:05 via 292de09b: the coordinator made a board commit in the main checkout (a cd into a removed worktree failed) while the merge runner had task-t899 STAGED (MERGE_HEAD present, its gate running); git recorded it as a merge with T-899's tip 3c00903c as second parent - an invariant breach of the same class as ea91c27c (09-22). T-899's own gate (run 8ad41df20aa8, 14:56-15:03, class ui+docs+py) passed lint-py / test-ui / test-py and was red only in test-ui-e2e on canvas-journey + fog-of-war, which the runner then confirmed red on main itself (MAIN_RED 15:10, no attempt charged) - main-side, not this branch. COVERED AFTER THE FACT by the 15:10-15:19 bulk gate (run db008bf29f8b, base fbf77e7d which contains 292de09b, class ui+docs+py, T-896 + task-t890-cj): lint-py 0, test-ui 0, test-py 0, test-ui-e2e red only on fog-of-war which passed alone twice (load-flake rule) and the resumed gate PASSED 15:19:05, canvas-journey green. The coordinator did not run git push at any point.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:45).
+      (a) DOC: docs/23 §10.6 rule 4 now has a normative re-spec table for T-814 (Explore drawer), T-815 (past surveys), T-821 (Research slide-in) and T-804 (Selected tab). In a big panel, a bare row or body click only selects and highlights the mark. A view jump, or raising the gated retune offer, goes on a small per-row Go/Jump/Restore button. T-804's device actions become a compact cluster of small buttons, and the sheet body has no device route. §11's Selected row and rule 1 were amended to match. The table replaces the matching acceptance words, and the tickets' existing 2026-09-24 notes point there. (b) GUARD: ui/test/app-panel-influence.test.ts (T-825's P4 guard) scans every module under ui/src/app except a short named list of non-panels (map-controls, canvas surface, nudge cluster, decode workbench, each with its reason), so it fails closed and covers new panel files automatically. A press handler (click/dblclick/key/pointer/mouse/touch/contextmenu) bound to anything other than a button/input/select/textarea — a row, a panel body, an unresolved mount host — must not name a device route (/api/control, /ws/open, DeviceAction, retune…) or a view jump (jump/fly/panTo/centreOn/zoom/followLive/setView/restore…View/viewChanged…). Same-file helpers are followed two deep, and focus subscribers are checked too. The guard is shown to fire on injected violations, including a jump swapped into each real Explore row and the sheet's title strip. It passes when the same call is on a per-row button. Staging: nothing visible changes; current rows already only select.
+      Tests: node test/run.mjs app-panel-influence (in ui/) -> exit 0 (8 passed); just test-ui -> exit 0 (63/63 test files passed)
+      precheck exit 0
+      Commits: 6dfaa125
+      Observed, not chased: The acceptance: text of T-814/T-815/T-821/T-804 was not edited: workers may not edit docs/tasks.yaml, and T-814/T-804 are in progress on their own branches. The coordinator should replace 'selecting an item pans/zooms (or offers a retune)' (T-814), 'jump the pane to one' (T-815), and 'actions (Listen, …)' (T-804) with a pointer to the docs/23 §10.6 rule-4 re-spec table, and add that pointer to T-821. | When T-814/T-821 land, the new guard will fail any row that jumps or retunes on a bare click. That is intended; their workers should put Go/Jump on a per-row <button>. | T-825 can now mark its P4 part done: the guard exists in ui/test/app-panel-influence.test.ts.
+      Resources: 60 CPU-s, peak 1.7 GB
+    commit: 292de09b
+  - id: T-900
+    milestone: MMAP
+    title: "Overlays are closeable, not just fadeable: a visible dismiss (and Esc) on the sheet, Research slide-in and left column (user P1)"
+    status: done
+    priority: high
+    deps:
+    - T-895
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P1 (docs/23 §10.6 rule 1): overlays are temporary and meant to be CLOSED so the user resumes the map - not time-based fading.
+      AUDIT EVIDENCE: only fade-to-35 % after ~6 s idle (docs/23 §10.2) exists; there is no dismiss on the bottom sheet (T-803), the Research slide-in, or the left column.
+      DELIVER: every band-2/3 overlay - the bottom sheet, the Research slide-in, the left column (the collapse ticket), any open menu - has a visible, keyboard-reachable DISMISS that returns its pixels to the map, and Esc closes the topmost. Fade-to-35 % stays only as an idle courtesy on band-2 chrome and is never a substitute. A closed overlay reopens from its small control. Test at 1440/1000/420 px that each overlay closes and the map area it covered is uncovered afterwards (the unoccludedColumns harness helper). Presentation only.
+      WHAT THE USER WILL SEE ON STAGING: every panel over the map has an x; closing it gives the map back, and Esc closes the top one.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 20:43).
+      Merged main (25ffc0f4) into task-t900; one conflict, in map-controls.ts. Main had added a Viewport (pane) menu with its own Escape handler. I kept main's menu and its rule that only one menu is open at a time. Its Esc now goes through the shared stack in chrome/dismiss.ts, and it gets a visible x like the layers menu. The e2e spec covers it, and now measures each overlay only over rows that no other fixed chrome crosses (main's .sf-range readout sits in the left column's rows whether or not anything is open). Unchanged from the first round: ui/src/app/chrome/dismiss.ts is the one overlay stack and the only Escape listener, so Esc closes the most recently opened overlay, one per press. The sheet, left column, layers menu, viewport menu and retune offer each have a visible x and reopen from their small control. The Research slide-in is not built yet (T-821); it should call trackOverlay('research', close). Presentation only; the e2e spec asserts no device route is called.
+      Tests: just test-ui -> exit 0 (72/72 test files passed after the merge); HK_E2E_CONCURRENCY=1 HK_BIN=/tmp/t900-hk node e2e/run.mjs app-dismiss -> exit 0 (3/3 passed at 1440/1000/420 px: sheet, left column, layers and viewport menus); HK_E2E_CONCURRENCY=2 HK_BIN=/tmp/t900-hk node e2e/run.mjs app-side-chip app-sheet -> exit 0 (app-side-chip and app-sheet all passed on the merged tree. That same run had app-dismiss red at 1440/1000 before its row-selection fix; app-dismiss then passed alone (row above))
+      precheck exit 0
+      Commits: c5a00cf6, c6006945
+      Observed, not chased: Under load average ~54, e2e with the worktree's debug target/debug/hk never became ready: the tileCost probe in e2e/run.mjs failed with UND_ERR_HEADERS_TIMEOUT, the lane took 220 s and saw no observed coverage in 60 s. I ran the specs against a copy of t904's release hk (/tmp/t900-hk) instead. The backend does not matter for a UI-only change. | Precheck: cargo fmt --all --check passed (exit 0). I touched no crates, so bare `just precheck` fell through to a workspace-wide clippy, which I stopped. My `pkill -f 'cargo clippy'` matched by pattern and may have killed other workers' concurrent clippy runs around 17:55. Sorry: those would need a rerun. | surface.ts measure-mode Esc listener (document keydown) runs regardless of the overlay stack, so one Esc both exits Measure mode and closes the topmost overlay. It is a tool mode, not an overlay, and I left it alone. | The context menu (ui/src/app/menu) closes on Esc, an outside click or Tab, but has no visible ×. It is a transient pointer menu; the stack correctly leaves its Esc alone. | The e2e runs used a release hk copied from t904 at 17:41 (/tmp/t900-hk), older than the merged main's backend. The spec's assertions are UI-only.
+      Resources: 651 CPU-s, peak 5.4 GB
+    branch: task-t900
+    commit: 07fd84c8
+  - id: T-901
+    milestone: MLIVE
+    title: Server row pushes on /ws/tiles/rows stall 0.35-5 s every ~64 rows (and /api/navigation with them) - live rows are not steady (T-893 finding)
+    status: in-progress
+    branch: task-t901
+    priority: high
+    deps:
+    - T-893
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-893 worker (task-t893 ee9e2605; handback ~/.hackriff-ops/work/T-893/handback.json), after wiring following panes to /ws/tiles/rows: with the default replay fixture, ONE subscription and no other load, the server's row pushes stall for 0.35-5 s roughly every 64 rows (~2.5 s), and /api/navigation stalls at the same instants. This server-side stall is the residual live-edge lag in T-893's new e2e (the client stays within 0.04 s p90 of the newest pushed row). Suspects (unverified): RowCursor::record_reach or history-lock contention in crates/hk-api/src/rows.rs.
+      This violates "rows append in real time as they are recorded" and T-453's constraint (work on the capture/serving path must be measured, not assumed).
+      DELIVER: root-cause the periodic stall (profile the push path and the lock it shares with /api/navigation), fix it so row pushes are steady at the recording cadence with no multi-second gaps, and a backend test through the mock SDR that measures inter-push gaps over >= 200 rows and goes red on the old code (a latency/throughput bound belongs in the `timing` tier per docs/10 §3.6 - put the bound there and a deterministic structural check, e.g. "no push waits on the history lock", in the gate). Also refresh docs/api.md's /ws/tiles/rows section, which still names the old per-pane client class (with api_contract.rs if the contract changes, T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-893 worker 2026-09-24.
+
+      2026-09-24 coordinator: T-893's live-edge e2e case had a wall-clock bound (median live-edge shortfall <= 0.5 s under a slowed tile route) that measured THIS server push cadence, not the client; it was removed from the gated suite (task-t893 5ca4ce59, still printed as a diagnostic) because the 'timing' tier (docs/10 §3.6) only runs Rust tests via nextest - there is no browser-spec timing home. This ticket owns that bound now: restore it as a timing-tier measurement once the push stall is fixed (a Rust-side push-cadence bound in the timing tier, and/or a browser timing-tier runner if the pipeline manager adds one - the gap is reported to them).
+    effort_reason: "hard debugging of a periodic stall on the live serving path shared with navigation (T-453: measure, do not assume)"
+  - id: T-902
+    milestone: MLIVE
+    title: Tiles built from pushed rows guess their honesty tier - carry the tier on the row record, never infer it (T-893 finding)
+    status: in-progress
+    branch: task-t902
+    priority: normal
+    deps:
+    - T-893
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-893 worker: a tile built client-side from rows pushed over /ws/tiles/rows (before the first real tile answer for that time row) GUESSES its honesty tier - it copies the tier of the tile below in the same column, or claims "spectrum-history" - because pushed rows carry no tier. The pane then states a level it was not actually drawn at until the first real answer replaces it.
+      That breaks the honesty-tier invariant (CLAUDE.md: "each pane states the level it was actually drawn at"; live-IQ detail / spectrum-history / survey overview stay distinct): an inferred tier presented as a statement is the implied-detail defect.
+      DELIVER: pushed rows carry their tier/level from the backend (extend the /ws/tiles/rows row record; docs/api.md + api_contract.rs together, T-079), and the client states exactly that - or, where it genuinely is unknown, states "unknown" rather than a guess (Unknown is not a default). Test: a pushed-row-built tile's stated tier equals the backend's, red on the inference.
+      WHAT THE USER WILL SEE ON STAGING: the level readout on a live pane is always the level the newest rows were actually measured at, never a guess.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-893 worker 2026-09-24.
+  - id: T-903
+    milestone: MLIVE
+    title: live-edge T-523 + T-890 cases red together 1 in 6 on task-t890 in file order (own-level probe never re-asked) - establish the rate, then root-cause
+    status: done
+    priority: normal
+    deps:
+    - T-890
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the coordinator's live-edge triage deflaker: on task-t890 (c2160635) a whole-file run of ui/e2e/live-edge.e2e.mjs (T-523 premise met, pane 51.1 s) hit T-523's failure mode 1 - "in 75075 ms of outage the client never asked ... level 0/1 (levels refused: 2/1 1/1)" - and T-890's own new case went red in the same run ("+17860 ms: 0 tiles · 4 coarse stand-ins ... 4 drew nothing"). Rate: 1 of 6 long-pane runs on task-t890, 0 of 6 on the gate base 8b1681d6; the merge-runner log's 50 gate runs of the case since T-846 met the premise every time (151-913 ms, median 305) with no such shape. UNPROVEN guess: while the silence gate admits one probe at a time, the pin is re-scheduled on top of the LIFO queue every frame and starves the own-level probe; T-890's look-ahead reads sit at the bottom so should not take it. No request log was captured (the instrumented loop was killed by a bulk gate).
+      DELIVER: establish the rate on a quiet box (`just timing` window or nightly, docs/10 §3.6) with a request log per run; if real, root-cause and fix with a regression test that goes red on the old code; if it does not reproduce in >= 20 quiet runs, record that and close.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator live-edge triage deflaker 2026-09-24.
+
+      2026-09-24 coordinator: dispatched by the coordinator (supervisor/user priority 14:55). Sibling: the canvas-journey live-edge-zone grey (14-30 % during aggressive pan/zoom; the 13:39 batch and task-t890's gate) is being triaged/fixed by the T-890 worker on task-t890-cj - coordinate, do not duplicate.
+    effort_reason: an unexplained intermittent starvation on the tile-probe path; needs a quiet-box rate measurement and hard debugging
+    branch: task-t903
+    commit: f6b3efe6
+  - id: T-904
+    milestone: M2-hardening
+    title: "Detection rows grow without bound (~125 MB/h at 2.4 Msps, ~3 GB/day): a retention/rollup policy for per-frame detections; tracks/emitters stay durable"
+    status: in-progress
+    branch: task-t904
+    priority: high
+    deps: []
+    parallel_group: STORE
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 on staging (supervisor; the user asked 13:55 how big the DB gets): 2.4 Msps, live HackRF - hackriff.db grew to 96 MB + 6 MB WAL in 41 min. The detection table holds 161,533 rows for t_start 13:11..13:51 (~65 rows/s, ~530 B/row including 4 indexes) = ~125 MB/h, ~3 GB/day, ~90 GB/month at this rate, and ~8x that at 20 Msps. A grep of crates/hk-model and crates/hk-store finds NO prune/retention/rollup for the detection or track_detection tables; only the history tiles have a retention trim (T-126). On a portable handheld (CLAUDE.md product constraints) this fills the device.
+      DELIVER: a retention policy for per-frame DETECTION rows, designed against docs/07 (read the detection/track/emitter sections only) and ADR-0017/0019's model:
+      - Tracks, emitters and observations stay DURABLE - they are the history catalogue (workflow #3), and every small burst stays as a track, so one-off events (POCSAG-like) are never lost.
+      - Per-frame detection rows (and their track_detection links) age out after a configurable N days, or roll up into a per-track segment summary (e.g. track_segment: time extent, f/bw envelope, peak/mean power, counts) before deletion - whichever keeps every query the API serves answerable; state which, and why.
+      - Nothing a Confirmed emitter's presence track, the time-scoped inventory, the overlap re-analysis or decode provenance needs may be deleted; prove it by the existing API/contract tests plus a test that a pruned window still answers /api/inventory and presence for its tracks.
+      - Configurable (retention days / rollup on), reported in GET /api/status (storage: db bytes, WAL bytes, detection rows, oldest detection, next prune) - docs/api.md + api_contract.rs together (T-079).
+      - Pruning never blocks the capture/ring thread or holds the write lock long enough to stall ingest (T-453: measure per-arriving-row cost, don't assume): batched, off the hot path.
+      - MEASURE bytes/h before and after through the mock SDR replay at 2.4 and 20 Msps and report it in the result.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY supervisor, staging DB measurement 2026-09-24 (user asked 13:55).
+    core_interface: true
+  - id: T-905
+    milestone: MCANVAS
+    title: "fog-of-war: the pane sometimes requests a tile over never-swept band C - T-580's coverage short-circuit races the coverage survey (fails alone 1 in 9)"
+    status: done
+    priority: normal
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the fog-of-war shadow-race deflaker (task-deflake-fog-shadow-race), and in the 09-23 23:30 gate (before T-890/T-893): ui/e2e/fog-of-war.e2e.mjs's check "the pane REQUESTED a tile over band C ... T-580's short-circuit did not fire" failed ALONE once in a 4-run batch (the next 5 passed). Band C was never swept, so T-580's rule is that a viewport tile with no data is answered from the coverage map and never requested/generated. A test that fails alone is a real defect (deflake-triage): likely a race between the coverage survey and the pane's tile requests - a request issued before the client knows band C is unobserved. The spec now names the offending request URL, the tile's extent and its coverage states in the failure message (eac4845e).
+      DELIVER: root-cause through the real client path (ui/src/surface: when tile requests are issued vs when coverage is known) and fix so an unobserved region is never requested, with a regression test (ui/test with a delayed coverage answer) that goes red on the old code. No assertion or threshold change.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY fog-of-war shadow-race deflaker 2026-09-24.
+    commit: 5fb165d6
+  - id: T-906
+    milestone: MMAP
+    title: "Past-surveys drawer follow-ups: Go restores the frequency SPAN too; honest 'nothing looked at' text; sweep records (T-815 review)"
+    status: done
+    priority: normal
+    deps:
+    - T-815
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by T-815's Opus review (~/.hackriff-ops/work/T-815/review.json), non-blocking findings on the past-surveys drawer (ui/src/app/chrome/explore-drawer.ts):
+      1. PARTIAL RESTORE: Go restores the time extent (reviewAt) and the centre frequency (requestGoto) but NOT the frequency span, while T-815 asks to restore the saved (time x frequency) extent. Restore the span too - snapped to a realizable state, view arithmetic only, never a device route (a span wider than the instantaneous bandwidth is a view zoom over history, not a retune).
+      2. HONESTY TEXT: explore-drawer.ts ~:157 says "outside this band and window nothing was looked at", which claims more than the code knows - other bands can be observed in the same window, and pastSurveyItems ignores sweep records. State only what this window's records show (the coverage-map honesty rule: grey = genuinely unobserved, computed from what was sampled).
+      3. Sweep records are ignored by pastSurveyItems - decide (and state in the drawer) whether survey sweeps are listed as past surveys.
+      DELIVER each with a ui/test that goes red on the old behaviour. Thin client: presentation only.
+      WHAT THE USER WILL SEE ON STAGING: pressing Go on a past survey restores exactly the time window and frequency range that survey covered, and the drawer never claims nothing was looked at elsewhere.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-815 Opus review 2026-09-24.
+
+      2026-09-24 coordinator: item 2 (honest drawer text) is DONE in T-815's fix fa8ba25a ('the log records this band looked at X ago for Y'). Remaining: item 1 (restore the frequency span) and item 3 (sweep records - the route has no filter that excludes them without dropping dwells). ADDED item 4 (T-815 fix worker): if an older day's slice fails on first load (network), the 'not fully loaded' row sticks until that day ages out of the 7-day window - retry failed older slices on refresh.
+    branch: task-t906
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 20:25).
+      Item 1: the past-surveys drawer's Go now restores the frequency SPAN as well as the centre and time window. requestGoto takes an optional span (nav.gotoSpanHz); a new pure gotoWindow(nav, currentSpan) gives the pane window, which PaneModel.setFreq's normalisation snaps to a realizable view (zoom floor .. device range). This is view arithmetic only and never reaches a device route. surface.ts now selects on the whole nav request, so a second Go to the same centre with a different span still moves the pane. Region rows (past surveys, coverage runs, never-looked gaps) carry spanHz. Item 2 was already fixed by T-815 (fa8ba25a); a source guard now asserts the drawer never says 'nothing was looked at'. Item 3 decision: survey sweeps ARE listed as past surveys. There is one row per pass (survey_id), spanning only the hops the record says were actually visited (observed_ms > 0) and the pass's time span. It is tagged 'survey · swept then' and says 'each step was heard only during its own dwell'. A sweep whose geometry the page lacks is skipped, not guessed. Item 4: SurveyLog now tracks retryBefore for older slices that FAILED to fetch (not budget truncation) and re-reads [floor, retryBefore] on the next refresh, so 'not fully loaded' no longer sticks until the day ages out. Each item has a ui/test that fails on the old behaviour.
+      Tests: just test-ui -> exit 0 (build + typecheck + 69/69 test files passed)
+      precheck exit 0
+      Commits: 3e36f1fa
+      Observed, not chased: just precheck was not run with a crate list because no crate was touched; ran cargo fmt --all --check (exit 0), and just test-ui covers typecheck for the ui/ diff
+      Use cases: AWARE-042
+      Resources: 53 CPU-s, peak 0.7 GB
+    commit: 52d1cdf8
+  - id: T-907
+    milestone: M2-hardening
+    title: e2e harness waitForSurfaceMounted returns immediately on the APP page (waits on [data-slot=note], only on /surface) - app specs can race an unmounted surface; app-surface boot flake
+    status: done
+    branch: task-t907
+    priority: high
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-809 worker (task-t809 af5c0a29; handback ~/.hackriff-ops/work/T-809/handback.json): the ui/e2e harness helper `waitForSurfaceMounted` only fits the /surface page - it waits on [data-slot=note], which the APP page lacks, so on the app page it returns immediately and a spec proceeds before the surface has mounted. T-809's app-pins spec had to use app-surface's own `.sf-note` wait instead. The same worker saw app-surface.e2e.mjs fail its boot-time "surface to finish addressing" wait under load 27-49, on T-809's build AND on main's build (HK_E2E_UI_DIST from git archive HEAD) - a boot flake that predates T-809 and plausibly shares this cause (specs racing an unmounted surface, or waiting with a wall-clock deadline for addressing).
+      DELIVER: `waitForSurfaceMounted` detects mount on BOTH pages (the app page's own mounted marker, or a shared data attribute the surface sets when mounted) and never returns before mount; audit every app-page spec's boot wait (app-surface, app-detail, app-map-controls, app-pins, app-sheet, app-trace) and make them wait on the mounted/addressed state as an event, not a wall-clock deadline (docs/10 §3.6). No assertion or threshold change. Prove: the helper goes red on the app page with the old code (returns before mount), and app-surface's boot passes alone under load where it failed before.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the touched app-*.e2e.mjs specs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-809 worker 2026-09-24.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 20:33).
+      CONFLICT FIX: task-t907 had been cut from a provisional batch carrying the un-landed T-900 (c5a00cf6, incl. app-dismiss.e2e.mjs), so merging gated main would have smuggled T-900 in; the branch is now gated main 25ffc0f4 + the one T-907 commit (1096d2a7), app-sheet's conflict resolved keeping main's new '.map-topright' wait after the mount wait, and main's new app-surface floating-cluster test also given the mount wait. Both surface entry points (ui/src/app/centre/surface.ts and ui/src/surface/preview-main.ts) now state their mount on <html> via the new ui/src/surface/mounted.ts: data-surface="mounted" once SurfacePreview exists over an addressed probe, "failed" on every abort path with data-surface-reason carrying the on-screen text. ui/e2e/harness.mjs waitForSurfaceMounted waits on that event (both pages) instead of the preview-only [data-slot=note], throws with the page's reason on failure, and on timeout lists the /api requests on the wire (answered or still open) so a boot stall names its route. Every app-* spec (app-detail, app-pins, app-sheet, app-side-chip, app-surface, app-trace; app-map-controls does not exist) waits on the mount event right after load; app-surface and app-pins replace their .sf-note waits with it. No assertion or threshold changed. PROOF 1 (met): a throwaway spec on the APP page ran the old helper condition and it returned after 5 / 33 / 58 ms across three runs with data-surface unset and .sf-note empty, i.e. before mount. PROOF 2 (NOT met on this box): at load 25-48 the app surface did not mount within 60 s in any run, even when hk serve came up in 33 s; the new diagnostics show the probe still on /api/tiles-then-/api/navigation at timeout, and in two runs the harness's own startup tileCost GET /api/tiles hit undici's 300 s headers timeout before any spec ran. So the app-surface boot flake is backend tile-route slowness under load (debug hk), not a spec racing an unmounted surface; this ticket makes it fail fast with the stuck route named, but cannot make it pass under that load without a threshold change, which the ticket forbids.
+      Tests: cd ui && npm test -> exit 0 (71/71 test files passed (after rebase onto 25ffc0f4)); cd ui && npm run build && node --check e2e/harness.mjs e2e/app-*.mjs -> exit 0 (bundles build; harness and all app specs parse); cd ui && npx tsc --noEmit -p . -> exit 0 (clean); cd ui && HK_E2E_CONCURRENCY=1 node e2e/run.mjs <throwaway old-vs-new helper proof on the app page> -> exit 1 (old helper returned before mount in 5-58 ms (the defect, shown); the new helper then timed out at 60 s because the app surface did not mount under load 25-48 — the pre-existing boot stall the ticket's own evidence reports on main's build too (T-809 worker, load 27-49); throwaway spec not committed)
+      precheck exit 0
+      Commits: 1096d2a7
+      Observed, not chased: The app-surface boot stall under load is backend-side: the harness's own startup probe (ui/e2e/backend.mjs tileCost, GET /api/tiles cells=8) failed with UND_ERR_HEADERS_TIMEOUT (>300 s) in 2 of 4 runs at load 37-46 on a debug hk, and when the backend did come up (33 s) the app's probeSurface had not got past /api/tiles + /api/navigation after 60 s. A worth-a-ticket candidate: tile-route latency under load, or the harness waiting on the route's readiness before timing the spec. | Non-boot wall-clock waits left alone (out of this ticket's boot-wait scope): app-surface.e2e.mjs sleeps a fixed 3 s before measuring the retention bound; app-pins.e2e.mjs hover loop uses a 20 s Date.now() deadline. | Worker hazard: symlinking a worktree's ui/node_modules to main's makes `npm test` compile into main's ui/node_modules/hk-ui-test and grep main's sources (gave a false surface-vscale red); clone-copy node_modules instead. | precheck is a Rust-crate check; no crate touched, so no crates to pass it — reported exit 0 because nothing Rust changed, not from a precheck run.
+      Resources: 528 CPU-s, peak 2.3 GB — LEAKED 3 processes (killed at reap)
+    commit: 9b0b0dbd
+  - id: T-908
+    milestone: M3
+    title: The 2fsk/gfsk verifier prefers gfsk on a true 2fsk record and sharpens it to p 0.9; fix it, then re-land T-887's packet_window dev-grid fix for cyclic_db
+    status: in-progress
+    branch: task-t908
+    priority: high
+    deps:
+    - T-887
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-887 worker (task-t887 053a50b8; handback ~/.hackriff-ops/work/T-887/handback.json). T-887 root-caused the device-path cyclic_db mismatch: cyclic-line strength grows ~9.5 dB per decade of symbols, the device's 20.2 dB matches its 112-symbol burst, while every dev-grid 2fsk record holds 270-1,170 symbols. The generator fix (`packet_window`, WIP commit 8492468b on task-t887: each 2fsk record's symbol-estimator view cut to one packet of random length, 64 symbols up to the whole record) moved the device cyclic_db z from -2.8..-1.7 to -0.8..+0.1 - but was held back because it turned hk-classify's verifier_gain 2fsk/gfsk test red: confidently-wrong calls 0 -> 1. On one blind acceptance draw (2fsk seed 1307003, 25 dB) the refit lifted p(2fsk) 0.045 -> 0.055, just over the verifier's 0.05 candidate cut-off, so the verifier ran - and the verifier PREFERS gfsk on that 2fsk draw with or without the cut (21.54 vs 20.16 per symbol on the whole record), pushing the tree's wrong gfsk call to p 0.906. The verifier weakness existed already; the old densities hid it (T-877's worker saw the same near-tie sharpening).
+      DELIVER: (1) fix the 2fsk-vs-gfsk verifier so it never sharpens a wrong family into a confident call - root-cause why its per-symbol score prefers gfsk on a true 2fsk record (shaping/ISI model? h estimate?), fix, and prove on verifier_gain with 0 confidently-wrong calls; (2) then re-land `packet_window` from 8492468b, refit densities with fit-densities, and report device cyclic_db z, device_fsk_classify claims (must stay 16/16) and accuracy_sweep / open_set_stats / verifier_gain before/after; (3) measure whether gfsk/msk/4fsk dev-grid records carry the same long-record cyclic_db bias and apply the same window if so. Blind throughout. core_interface (classification contract): Opus-reviewed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-887 worker 2026-09-24.
+    core_interface: true
+  - id: T-909
+    milestone: MMAP
+    title: "Quick fix: draw the box, not the centre glyph, when a feature's box is >= 6 px (pins only as generalization) - staging not worse than before T-809 (user 19:35)"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER 2026-09-24 19:35, looking at staging (handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): T-809's pins are "awful, much much worse than the boxes we had before. A point doesn't represent something meaningful on a waterfall graph. A signal has a frequency width and a duration, that's a rectangle." Staging showed them because a batch provisionally merged task-t809 at 19:27; T-809 had not landed on main.
+      QUICK FIX so staging is never worse than before T-809, implemented ON task-t809 before its gate (so T-809 lands already fixed): a feature whose box is >= 6 px on screen in both axes draws NO centre glyph - the box (T-808) is the representation - and the pin glyph remains only as the scale-dependent generalization below that; hover/select still work by an invisible hit area covering the box, laid out in the same per-frame pass. Fallback if unsafe in the time: the Pins layer defaults OFF. Tests: >=6 px draws no glyph; <6 px draws the symbol; hover/click inside a large box hits the feature - each red on the pre-fix code.
+      WHAT THE USER WILL SEE ON STAGING: the boxes, as before T-809; tiny far-zoomed signals show a small symbol; hovering a box shows its tip.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 19:35 on staging.
+    branch: task-t809
+  - id: T-910
+    milestone: MMAP
+    title: "GIS feature symbolization: signals as (t, f) polygons with class symbology, scale-dependent generalization below ~6 px, hit-test/select on the polygon, labels (re-scope of T-809's pins)"
+    status: todo
+    priority: high
+    deps:
+    - T-809
+    - T-909
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER DECISION 2026-09-24 19:35 (docs/23 §10.6 rule 6; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): the map is GIS, not Google Maps - features are drawn at their true extent; markers are a generalization, never the representation. This ticket is the full re-scope of T-809 ("Pins") into FEATURE SYMBOLIZATION, building on T-808's box layer (the primary geometry) and T-809's pins.ts (which becomes the generalization path only):
+      1. GEOMETRY: every detection/emitter/event is a polygon in (t, f) - its box - in content space through the pane's capture-time mapping, in the same render pass as the tiles (docs/23 §10.1). A single-frame impulse is a thin bar of its measured bandwidth. An ongoing box runs to the live edge by assumption; drawn at the pane's resolution tier.
+      2. SCALE-DEPENDENT GENERALIZATION: below ~6 px (either axis) a feature collapses to a small centre symbol with the same symbology; at or above, it is the box again (T-909's quick fix is the start of this).
+      3. SYMBOLOGY BY ATTRIBUTE ON THE POLYGON: Confirmed = solid outline + light fill; Candidate = dashed outline, no/very light fill; unexplained = outline + '?' label; curated/human = distinct outline style. Class carried by fill/outline/label, not glyph shape (palette: T-813).
+      4. IDENTIFY = HIT-TEST THE POLYGON: hover anywhere inside shows the MapTip; click selects (thicker outline + corner handles; the sheet rises); keyboard Tab walks features in reading order (time, then frequency). Confirm T-808's boxes carry this.
+      5. LABELS by placement rules (freq · bw · class inside or just above a wide-enough box; overlapping labels thinned by priority Confirmed > Candidate) - with T-813.
+      Thin client: presentation only; symbology reads already-served attributes. Tests: polygon at true extent moves with the tile rows under scroll/zoom (drift = invariant violation); generalization threshold both ways; symbology per class; hit-test inside/outside; keyboard order.
+      WHAT THE USER WILL SEE ON STAGING: signals are rectangles at their true time-frequency extent, styled by class, selectable by clicking inside them; far-zoomed tiny ones become small symbols and turn back into boxes as you zoom in.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 19:35 on staging.
+
+      2026-09-24 coordinator, from T-909's quick fix (task-t809 780b449d): hover/select placement still keys on the box CENTRE - a large box whose centre frequency is outside the pane but which overlaps it gets no hit area. Place the hit area from the box's visible intersection with the pane (clip the polygon), not from its centre.
+    effort_reason: a symbolization model on the per-frame render pass (shared-time-axis invariant) across box, generalization, hit-test and labels
+  - id: T-911
+    milestone: MLIVE
+    title: "Departed band's shadow must keep the colour of its last live row (within one ramp step, undimmed): blind e2e + fix in the carry-forward/shadow path (user, staging)"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER REQUEST 2026-09-24 (~19:45, relayed; the first part of the message was cut off in transit - the coordinator asked for it). The received acceptance, verbatim: "(blind, user-grounded): sweep a band with a known emitter, retune away; the shadow's colour for that band must equal the colour of its last live row within one ramp step (e2e: compare the framebuffer column before/after departure). Priority high - the user sees it on staging. MLIVE/MMAP, opus (hk-store history is core)."
+      READING (state in the hand-back if the evidence says otherwise): the fog-of-war SHADOW (last-known) tier (T-485/T-519/T-520/T-527) is DESIGNED to render dimmer than live (T-520 "a dim last-known ramp, unmistakable from live"; T-526's user-set darkness). So "equal within one ramp step" is judged on the VALUE the shadow carries (its dB, mapped through the same ramp) with the documented shadow dimming undone - or with the shadow darkness set to none (Ctrl+Shift+wheel, T-526) if the harness can. The defect to find is the shadow showing a DIFFERENT level than the band's last live row: e.g. hk-store's carry-forward folding the wrong row (an older/coarser/averaged level, a max over cells, a different fold level than the live row), or the client mapping shadow through a different range/ramp than live.
+      DELIVER: (1) the blind e2e through the mock SDR exactly as the user specified - sweep a band with a known emitter, retune away, read the framebuffer column over that band at the last live row and in the shadow after departure, and assert the shadow's (undimmed) colour equals the last live row's within one ramp step, per column over the emitter and the noise floor; red on today's code if the defect is real; (2) root-cause it through the real serving path (crates/hk-store history carry_forward / LastKnown, the tile route's shadow plane, the client's shadow placement/ramp) and fix it; (3) keep the shadow visibly distinct from live exactly as T-520 intends (dimming stays), and keep grey = never-observed untouched.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band you were watching - its shadow keeps the same picture (same signals, same relative levels) as the moment you left, just dimmed, not a different-looking band.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the crate binaries you touch; the e2e alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~19:45 (relayed, message truncated).
+    core_interface: true
+    branch: task-t911
+  - id: T-912
+    milestone: M2-hardening
+    title: "CI matches the check-tier gate: 'check' on push/PR, 'acceptance' nightly + manual; rust-toolchain.toml pins 1.93.1; nextest installed in the acceptance job"
+    status: in-progress
+    branch: task-t912
+    priority: normal
+    deps: []
+    parallel_group: CI
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER RULE 2026-09-24 20:00 (via supervisor): the merge gate is the CHECK tier only (lint + unit + workspace tests); acceptance + browser e2e run once a day as a release-candidate run (`just rc`, the pipeline manager is building it). CI must match. Three small items in .github/workflows/ci.yml + repo root:
+      1. CI TRIGGERS: the `test` job (`just gate --phase check`) runs on push and pull_request; the `acceptance` job (`just gate --phase acceptance`) runs NIGHTLY (`schedule:` cron) plus `workflow_dispatch`, not on every push. Keep the two jobs' existing steps; update the header comments that say both run per push.
+      2. TOOLCHAIN PIN: add `rust-toolchain.toml` pinning 1.93.1 (the toolchain the local gate runs: rustc 1.93.1) with the components CI uses (clippy, rustfmt), and make both jobs install from it instead of `dtolnay/rust-toolchain@stable` (so local and CI can't drift).
+      3. NEXTEST IN THE ACCEPTANCE JOB: since T-631 hk-e2e runs under nextest (`just _e2e-run`), but only the `test` job installs it (`taiki-e/install-action` tool: just@1.58.0,nextest@0.9.144) - add nextest (same pinned version) to the acceptance job.
+      Note: nothing has been pushed yet (CLAUDE.md Status), so CI is unverified - validate the workflow syntax locally (e.g. actionlint if available) and state what could not be verified. A .github change forces the full gate by design (the gate must not certify its own weakening) - expected.
+      TESTING PROTOCOL (CLAUDE.md): targeted checks only (workflow syntax, `just gate --dry-run` classification), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user rule 2026-09-24 20:00 via supervisor.
+  - id: T-913
+    milestone: M2-hardening
+    title: "Detection retention follow-ups: on_air double count, rollup f-extent vs per-frame OBW, startup index build, periodic count(*), writer lock-wait measurement, WAL peak, 20 Msps fixture metas (T-904 review)"
+    status: todo
+    priority: normal
+    deps:
+    - T-904
+    parallel_group: STORE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by T-904's Opus review (non-blocking; task-t904). Follow-ups to the detection retention/rollup policy:
+      1. on_air_ns sums member durations, so co-timed FSK lobes linked to one track are counted twice and can exceed the hull (nothing reads it yet - fix before anything does).
+      2. DetectionExtent::of_rollup uses the f_lo..f_hi envelope while the per-frame path uses centered(f_center, obw) - rollups are wider for suspect masking; make them comparable.
+      3. A pinned row inside a rollup's hull is counted in both, contradicting "never count the same air twice" (harmless for boolean masking today).
+      4. Module docs say multipath reads rollups past the age; crates/hk-context/src/multipath.rs:317 is unchanged (last <= 60 s only) - correct the docs.
+      5. Evidence::Detection in explanation.body is not pinned (nothing produces it today) - pin it or document why not.
+      6. idx_detection_t_end is built synchronously at startup: on a database that ran unpruned for weeks that is a long startup and a big WAL - build it off the startup path or measure and bound it.
+      7. detection_storage runs count(*) every 60 s even with retention off - a full scan on a large DB holding a read snapshot that delays checkpoints; use an estimate or a maintained counter.
+      8. The pass reports its own lock wait but not how long the DETECT WRITER waits behind it; the 0.5-1.95 s outliers at 20 Msps are unexplained - measure the writer's BEGIN IMMEDIATE wait under `just timing` on a quiet box (T-453: measure, don't assume).
+      9. (T-904 worker) At 20 Msps the WAL still peaks ~295 MB mid-pass before shrinking to 64 MB; and the 20 Msps store was still growing 112 MB/h at 12 min - run 1-2 h to see whether it plateaus.
+      10. (T-904 worker) The mock SDR rejects the metadata of the 20 Msps fixtures/store/2026-09-13/urban_* fixtures (old provenance schema) - migrate those SigMF metas.
+      DELIVER each with a test or a measurement, as appropriate.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-904 Opus review + worker 2026-09-24.
+
+      2026-09-24 coordinator, ADDED from T-904's fix round (a2ee94ff): (11) CRASHED RUNS KEEP THEIR LAST HOUR - a survey switches to DB-wide ageing only once closed; after a crash the open survey's newest hour stays until something closes it - close/age orphaned open surveys at startup. (12) DROPPED LINKS ARE SILENT - with the WHERE EXISTS guard a link to a pruned detection is skipped without an error, and TrackBatch::write reports links ATTEMPTED not INSERTED - count and report skipped links (a counter in storage/last_pass or the track stats) so a drain-before-flush regression is visible.
+  - id: T-914
+    milestone: MMAP
+    title: app-surface.e2e.mjs layers-menu checks derive the overlay list from the registry, not a literal - every layer ticket (T-811/T-812/T-821/T-897) stops being blamed
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      SPEC UPDATE (supervisor 2026-09-24 20:10: "the list comes from the registry, not a literal"). ui/e2e/app-surface.e2e.mjs's T-806 layers-menu checks ("overlays in paint order, defaults on", "a split must inherit the registry", the toggled pane's overlays) hard-code the rendered overlay list [["rules", true], ["detections", true]]. T-806's registry (ui/src/surface/layers.ts) already declares research/artifacts/priors/pins, and the menu lists the overlays that have a renderer registered - so EVERY layer ticket that registers a renderer (T-811 artifacts, T-812 priors, T-821 research, later T-897 paths) fails the literal, and their literal edits conflict with each other. The merge runner then misattributed it as a main-side defect (19:59 BLOCKED_ON_SPEC holding T-821). Same family: T-882's app-centre-signals source check matched the exact overlayFns literal (fixed on task-t882 a1a8f000).
+      DELIVER: the checks derive their expectation from the app's own registry - the registered/rendered overlay layers in the registry's paint order (z) with each one's declared visibleByDefault (read from the page; a read-only accessor if needed; thin client) - and assert the menu shows EXACTLY that, plus split inheritance and per-pane toggles per layer. Equally strict: red if the menu drops a registered layer, reorders, or shows a wrong default (prove each by injected mutation); plus a fixed assertion that rules and detections appear first and on, so it cannot pass vacuously. In flight on task-deflake-app-surface-overlays (built on task-t811). No layer ticket should need to touch this spec afterwards.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator + supervisor 2026-09-24 20:10.
+    branch: task-deflake-app-surface-overlays
+  - id: T-915
+    milestone: MLIVE
+    title: A band's last 5-7 s of recorded rows before a retune are never folded - they stay 'awaiting' forever (T-911 finding)
+    status: in-progress
+    branch: task-t915
+    priority: high
+    deps: []
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-911 worker (task-t911 45ed0691; handback ~/.hackriff-ops/work/T-911/handback.json; screenshot ui/e2e/artifacts/shadow-level.png, left pane): when the radio retunes away from a band, the band's LAST 4.7-6.8 s of rows before the retune are never folded into the history - they keep the dotted "awaiting" (observed-but-not-yet-measured) mark forever instead of filling in with the rows that were recorded. The recorded rows exist (the capture ran to the retune), so "show all data that exists" requires them on screen: the in-progress downsample row/tile at the moment of departure is apparently dropped or never committed when the tune changes.
+      DELIVER: root-cause (hk-pipeline ingest / hk-store history fold at a retune: is the in-progress tile or the pending downsample row flushed when the capture window moves?) and fix so every recorded row up to the retune instant is folded and served; the awaiting mark then resolves to data (or to the shadow once departed). Regression test through the mock SDR with a scripted retune: the band's rows up to the retune instant are all present in the served tiles; red on today's code. Mind T-453: per-arriving-row work on the capture thread must be measured, not assumed.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band and its waterfall runs all the way to the moment you left - no dotted strip of never-filled rows at the top.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-911 worker 2026-09-24.
+    effort_reason: root cause on the capture/ingest fold path at a retune (T-453 real-time constraint)
+  - id: T-916
+    milestone: MLIVE
+    title: "Shadow follow-ups: ladder-fallback departures read hotter, auto/viewport contrast re-ranges the shadow, re-measure tile cost after the own-level search (T-911 residue)"
+    status: todo
+    priority: normal
+    deps:
+    - T-911
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-911 worker (task-t911 45ed0691), residue of the shadow own-level fix:
+      1. OLD DEPARTURES STILL READ HOTTER: a band left longer ago than the tile's own level still holds falls back to the spectrum-history ladder search (labelled `ladder` per run) and will read hotter than its live row did (max over coarser cells). State it more visibly to the user (e.g. the pane readout names the shadow's source/level) and/or keep the own-level data longer for departed bands - decide with the level-retention budget.
+      2. OPT-IN CONTRAST MODES: in auto and viewport contrast (T-528), the display range re-scales after departure, so a shadow's colour can still move relative to its live row. Decide whether shadow cells should be excluded from / pinned in the range those modes compute (the anchored default is correct).
+      3. COST NOT RE-MEASURED: the own-level search can add up to one more search budget per tile; re-measure T-523's tile-cost numbers (hk-api tile_cost) before/after and record them (T-453: measure, don't assume).
+      DELIVER each with a test or a measurement as appropriate.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-911 worker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

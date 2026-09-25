@@ -16,6 +16,28 @@ CODE=$(printf '%s' "$CMD" | python3 "$(dirname "$0")/cmd_code.py" 2>/dev/null) |
 deny(){ printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' "$(printf '%s' "$1" | jq -Rs .)"; exit 0; }
 
 # ---------------------------------------------------------------------------------------------
+# MAIN COMMIT GUARD - every session. A commit in the MAIN checkout while the merge runner has a merge
+# staged (.git/MERGE_HEAD) or a batch provisionally on main (bulk-in-progress) completes or corrupts
+# the runner's merge: 2026-09-22 ea91c27c (a 4-of-44-file "merge"), and 2026-09-24 15:05:04 a board
+# note that became a merge commit of task-t899, which LANDED UNGATED. The runner itself is a script,
+# not a session, and is never stopped by this. No override: wait for the runner (`just wait-for-gate`).
+# ---------------------------------------------------------------------------------------------
+if [ -n "$CMD" ] && printf '%s' "$CODE" | grep -Eq '(^|[;&|(]|[[:space:]])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+(commit|merge|cherry-pick|revert|am|rebase)([[:space:]]|$)'; then
+  TGT=$(printf '%s' "$CODE" | sed -nE 's/.*git[[:space:]]+-C[[:space:]]+([^[:space:];&|]+).*/\1/p' | head -1)
+  TGT=${TGT:-$CWD}
+  TGT=${TGT/#\~/$HOME}
+  TOP=$(git -C "$TGT" rev-parse --show-toplevel 2>/dev/null)
+  # The main checkout is the one whose .git is a DIRECTORY; a linked worktree's .git is a file.
+  if [ -n "$TOP" ] && [ -d "$TOP/.git" ]; then
+    OPS="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+    WHY=""
+    [ -e "$TOP/.git/MERGE_HEAD" ] && WHY="the merge runner has a merge STAGED in $TOP (.git/MERGE_HEAD)"
+    [ -z "$WHY" ] && [ -e "$OPS/bulk-in-progress" ] && WHY="a batch is provisionally merged on main and gating ($OPS/bulk-in-progress)"
+    [ -n "$WHY" ] && deny "Not now: $WHY. A commit in main's checkout now becomes part of the runner's merge - on 2026-09-24 15:05 a board note turned into a merge of task-t899 and landed it UNGATED. Wait until the gate ends (\`just wait-for-gate\`, or until .git/MERGE_HEAD and bulk-in-progress are gone), then edit -> check -> commit in one step. Or put the change on a branch and queue it."
+  fi
+fi
+
+# ---------------------------------------------------------------------------------------------
 # LOAD GUARD - applies to EVERY session, coordinator included, because contention is contention.
 # On 2026-09-22 a deflaker agent left sixteen `while :; do :; done` shells at 100 % CPU running
 # from 14:29 to 16:47, through every merge gate; the work runner's cpulimit bound does not apply

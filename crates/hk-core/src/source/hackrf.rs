@@ -65,8 +65,8 @@ use serde_json::{Value, json};
 
 use self::pool::{TransferCounters, TransferPool};
 use super::{
-    ControlMailbox, DeviceInfo, Gains, OpenRequest, Source, SourceCapabilities, SourceControl,
-    SourceDriver, SourceError, SourceStats,
+    ControlMailbox, DeviceInfo, Gains, InUseCertainty, OpenRequest, Source, SourceCapabilities,
+    SourceControl, SourceDriver, SourceError, SourceStats,
 };
 use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle};
 
@@ -476,6 +476,76 @@ fn not_available() -> SourceError {
         reason: "this build has no HackRF driver; rebuild with the `hackrf` cargo feature (e.g. \
                  `cargo run -p hk-cli --features hackrf`), which links the system libhackrf"
             .into(),
+    }
+}
+
+/// `HACKRF_ERROR_BUSY` (hackrf.h): "Resource is busy, possibly the device is already opened".
+pub(crate) const HACKRF_ERROR_BUSY: i32 = -6;
+/// `HACKRF_ERROR_LIBUSB` (hackrf.h): a libusb error, named by `hackrf_error_name` through
+/// `libusb_strerror` of the library's last libusb error.
+pub(crate) const HACKRF_ERROR_LIBUSB: i32 = -1000;
+/// `libusb_strerror(LIBUSB_ERROR_ACCESS)` (libusb's English strings, the library default).
+pub(crate) const LIBUSB_ACCESS_TEXT: &str = "Access denied (insufficient permissions)";
+/// `libusb_strerror(LIBUSB_ERROR_BUSY)`.
+const LIBUSB_BUSY_TEXT: &str = "Resource busy";
+
+/// How a refused `hackrf_open_by_serial` is reported (T-892).
+///
+/// libhackrf returns `HACKRF_ERROR_LIBUSB` (-1000) for every libusb failure, and names it by
+/// libusb's last error. When another process holds the HackRF, macOS libusb reports
+/// `LIBUSB_ERROR_ACCESS` — **the same code** as a user without USB permissions (observed by
+/// T-356's HIL: `Access denied (insufficient permissions) (-1000)`). Passed through verbatim, that
+/// sent the user to fix permissions on a device that was merely in use. So:
+///
+/// - `HACKRF_ERROR_BUSY`, or a libusb "Resource busy": [`InUseCertainty::InUse`];
+/// - a libusb "Access denied": [`InUseCertainty::InUseOrNotPermitted`] — the driver cannot tell,
+///   so neither can we;
+/// - anything else (not found, no memory, …): the plain [`SourceError::Device`].
+///
+/// `name` is `hackrf_error_name(rc)`; `device` names what was being opened.
+pub(crate) fn open_failure(rc: i32, name: &str, device: String) -> SourceError {
+    let driver_message = format!("{name} ({rc})");
+    let certainty = if rc == HACKRF_ERROR_BUSY
+        || (rc == HACKRF_ERROR_LIBUSB && name.contains(LIBUSB_BUSY_TEXT))
+    {
+        Some(InUseCertainty::InUse)
+    } else if rc == HACKRF_ERROR_LIBUSB && name.contains(LIBUSB_ACCESS_TEXT) {
+        Some(InUseCertainty::InUseOrNotPermitted)
+    } else {
+        None
+    };
+    match certainty {
+        Some(certainty) => SourceError::DeviceInUse {
+            source_name: HackRfSource::NAME,
+            device,
+            certainty,
+            driver_message,
+        },
+        None => SourceError::Device {
+            source_name: HackRfSource::NAME,
+            operation: "hackrf_open_by_serial",
+            message: driver_message,
+        },
+    }
+}
+
+/// Names the device an open was aimed at: the requested serial, or — for "the first HackRF" —
+/// the serials enumeration found (`listed`; entries libhackrf could not read are `None`).
+#[cfg_attr(not(any(test, feature = "hackrf")), allow(dead_code))]
+pub(crate) fn describe_open_target(requested: Option<&str>, listed: &[Option<String>]) -> String {
+    if let Some(serial) = requested {
+        return format!("serial {serial}");
+    }
+    let known: Vec<&str> = listed.iter().flatten().map(String::as_str).collect();
+    match (listed.len(), known.as_slice()) {
+        (1, [serial]) => format!("serial {serial}"),
+        (0, _) => "(the first HackRF found)".into(),
+        (1, []) => "(the only HackRF found; its serial unreadable)".into(),
+        (n, []) => format!("(the first of {n} HackRFs found; serials unreadable)"),
+        (n, serials) => format!(
+            "(the first of {n} HackRFs found: serial {})",
+            serials.join(", serial ")
+        ),
     }
 }
 
@@ -1374,6 +1444,88 @@ mod tests {
         drop(src);
         let log = &state.lock().unwrap().log;
         assert_eq!(log.last().map(String::as_str), Some("close"));
+    }
+
+    /// T-892: libhackrf's open codes are classified honestly — busy is in use, libusb's access
+    /// error is "in use, or not permitted" (the two are one code), everything else stays a plain
+    /// device error.
+    #[test]
+    fn open_failures_are_classified_by_what_the_driver_can_actually_tell() {
+        let serial = "0000000000000000a06063c8234a8e5f";
+        let target = describe_open_target(Some(serial), &[]);
+        let access = open_failure(
+            HACKRF_ERROR_LIBUSB,
+            "Access denied (insufficient permissions)",
+            target.clone(),
+        );
+        assert!(matches!(
+            &access,
+            SourceError::DeviceInUse { certainty: InUseCertainty::InUseOrNotPermitted, device, .. }
+                if device == &format!("serial {serial}")
+        ));
+        let text = access.to_string();
+        assert!(text.contains(serial), "{text}");
+        assert!(
+            text.contains("in use by another process, or not permitted"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Access denied (insufficient permissions) (-1000)"),
+            "{text}"
+        );
+
+        for (rc, name) in [
+            (HACKRF_ERROR_BUSY, "HACKRF_ERROR_BUSY"),
+            (HACKRF_ERROR_LIBUSB, "Resource busy"),
+        ] {
+            let e = open_failure(rc, name, target.clone());
+            assert!(
+                matches!(
+                    e,
+                    SourceError::DeviceInUse {
+                        certainty: InUseCertainty::InUse,
+                        ..
+                    }
+                ),
+                "{rc} {name}: {e:?}"
+            );
+            assert!(!e.to_string().contains("not permitted"), "{e}");
+        }
+        for (rc, name) in [
+            (-5, "HACKRF_ERROR_NOT_FOUND"),
+            (
+                HACKRF_ERROR_LIBUSB,
+                "No such device (it may have been disconnected)",
+            ),
+        ] {
+            assert!(matches!(
+                open_failure(rc, name, target.clone()),
+                SourceError::Device {
+                    operation: "hackrf_open_by_serial",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn an_open_target_is_named_as_specifically_as_enumeration_allows() {
+        let s = |v: &str| Some(v.to_owned());
+        assert_eq!(describe_open_target(Some("abc"), &[s("xyz")]), "serial abc");
+        assert_eq!(describe_open_target(None, &[s("abc")]), "serial abc");
+        assert_eq!(describe_open_target(None, &[]), "(the first HackRF found)");
+        assert_eq!(
+            describe_open_target(None, &[None]),
+            "(the only HackRF found; its serial unreadable)"
+        );
+        assert_eq!(
+            describe_open_target(None, &[s("abc"), s("def")]),
+            "(the first of 2 HackRFs found: serial abc, serial def)"
+        );
+        assert_eq!(
+            describe_open_target(None, &[None, None]),
+            "(the first of 2 HackRFs found; serials unreadable)"
+        );
     }
 
     #[test]

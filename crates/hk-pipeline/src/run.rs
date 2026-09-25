@@ -2935,6 +2935,15 @@ impl RunSummary {
             c("/chains/sweep_uncharacterised")
         ));
         line(format!(
+            "classify:    {} chain(s), {} row(s) written, {} abstained, {} without an entry, {} \
+             refused at the cap",
+            c("/chains/classify_attached"),
+            c("/chains/classifications"),
+            c("/chains/classify_abstained"),
+            c("/chains/classify_no_emitter"),
+            c("/chains/classify_admission_refused")
+        ));
+        line(format!(
             "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s) + {} CAC(s), {} grant(s) \
              mapped / {} unmapped / {} outside window; {} followed ({} refused, {} silent), {} \
              call(s) ({} closed on silence, {} truncated when the window ended, {} continued \
@@ -3224,7 +3233,7 @@ impl PipelineHandle {
                     Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
                         .filter(|p| p.is_dir())
                 });
-            let rt = Arc::new(crate::recipes::runtime::RecipeRuntime::new(
+            let rt = crate::recipes::runtime::RecipeRuntime::new(
                 Arc::clone(&self.sup.common.counters),
                 Arc::new(move || sup.lock().shared.clone()),
                 Arc::clone(&self.sup.common.listen),
@@ -3232,7 +3241,7 @@ impl PipelineHandle {
                     builtin,
                     self.sup.common.data_dir.join("recipes"),
                 ),
-            ));
+            );
             // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
             rt.attach_default_capture_store(&self.sup.common.data_dir);
             rt

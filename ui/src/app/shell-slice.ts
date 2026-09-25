@@ -45,8 +45,12 @@ export interface DeviceSlice {
   fftBounds: FftBounds | null;
 }
 
-/** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. */
-export interface NavSlice { gotoHz: number | null; seq: number }
+/** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. `gotoSpanHz`
+ * (T-906) is the frequency span to show, when the request names one (a past survey's band); null
+ * keeps the pane's own span. Either way this is view arithmetic: the surface snaps it to a realizable
+ * pane (`PaneModel`'s clamp to the zoom floor and the device range) and never reaches a device route,
+ * so a span wider than the instantaneous bandwidth is a zoom over history, not a retune. */
+export interface NavSlice { gotoHz: number | null; gotoSpanHz: number | null; seq: number }
 
 export interface ShellState {
   mode: Mode; theme: Theme; conn: ConnSlice; device: DeviceSlice; nav: NavSlice;
@@ -77,7 +81,7 @@ export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
   device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
-  nav: { gotoHz: null, seq: 0 },
+  nav: { gotoHz: null, gotoSpanHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,
 });
@@ -87,7 +91,17 @@ export const setMode = (mode: Mode) => (): Partial<AppState> => ({ mode });
 const THEMES: readonly Theme[] = ["system", "dark", "light"];
 export const cycleTheme = (s: AppState): Partial<AppState> => ({ theme: THEMES[(THEMES.indexOf(s.theme) + 1) % THEMES.length] });
 
-export const requestGoto = (hz: number) => (s: AppState): Partial<AppState> => ({ nav: { gotoHz: hz, seq: s.nav.seq + 1 } });
+export const requestGoto = (hz: number, spanHz?: number) => (s: AppState): Partial<AppState> => ({
+  nav: { gotoHz: hz, gotoSpanHz: spanHz !== undefined && Number.isFinite(spanHz) && spanHz > 0 ? spanHz : null, seq: s.nav.seq + 1 },
+});
+
+/** The pane frequency window a go-to request asks for (T-906): its centre and, when it names one,
+ * its span — otherwise the pane keeps `currentSpanHz`. Null when there is nowhere to go. The caller
+ * hands this to `PaneModel.setFreq`, whose normalisation snaps it to a realizable window. */
+export function gotoWindow(nav: NavSlice, currentSpanHz: number): { centerHz: number; spanHz: number } | null {
+  if (nav.gotoHz === null || !Number.isFinite(nav.gotoHz)) return null;
+  return { centerHz: nav.gotoHz, spanHz: nav.gotoSpanHz ?? currentSpanHz };
+}
 
 export const toast = (text: string) => (s: AppState): Partial<AppState> => ({ toast: { text, seq: s.toast.seq + 1 } });
 

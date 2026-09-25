@@ -573,20 +573,35 @@ pub struct RuledOut {
     pub best_bits: f32,
 }
 
-/// The shuffled-null control's record (ADR-0021 §8.2).
+/// Least margin, bits, the real hold-out result must hold over the best null window
+/// (ADR-0021 §8.2: `min_null_margin = 8`, 256:1). ADR-0021's number; T-568 measures it.
+pub const MIN_NULL_MARGIN_BITS: f32 = 8.0;
+
+/// The shuffled-null control's record (ADR-0021 §8.2), kept **whether or not it fired**: "the
+/// null control ran and passed with a 12.9-bit margin" is a checkable fact; an absence is not.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NullControl {
-    /// Nulls run.
+    /// Null windows asked for (the profile's `K`).
     pub k: u32,
-    /// Whether it ran.
+    /// Whether all `k` ran. A control that could not run (budget, evaluator error) is **not** a
+    /// pass: an open-search result without one neither solves nor confirms.
     pub ran: bool,
-    /// Best bits any null reached.
+    /// Best hold-out-style `evidence_bits` the unchanged winning prefix reached on any null window.
     pub best_null_bits: f32,
-    /// Margin of the real result over the best null.
+    /// The real hold-out `evidence_bits` minus [`Self::best_null_bits`].
     pub margin_bits: f32,
-    /// Whether the null budget was capped.
+    /// The verdict was **capped at `framed`** because the margin fell below
+    /// [`MIN_NULL_MARGIN_BITS`]. The control can only cap; it never raises a verdict.
     pub capped: bool,
+}
+
+impl NullControl {
+    /// Whether the control ran and did not cap — the only state in which a searched check may
+    /// confirm (ADR-0022 §6 step 4).
+    pub const fn passed(&self) -> bool {
+        self.ran && !self.capped
+    }
 }
 
 /// The negative result (ADR-0021 §7A.2), present whenever no result reached `solved`.

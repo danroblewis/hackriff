@@ -99,3 +99,329 @@ def test_the_record_carries_the_reds_own_time(tmp_path):
     _, recs = run(tmp_path, "     Summary [1.0s] 9 tests run: 8 passed, 1 failed\ngate: just test took 900s (exit 100)\n",
                   t0="2026-09-23T17:00:05")
     assert recs[-1]["ts"] == "2026-09-23T17:00:05"
+
+
+def test_a_red_in_the_resumed_gate_is_triaged_too_and_main_red_uses_its_own_reds(tmp_path):
+    """2026-09-24 10:36-10:47: a Rust red passed alone twice and was accepted; the resumed gate then
+    went red on fog-of-war.e2e.mjs, which got no re-run - straight to isolating 11 branches - and the
+    MAIN-IS-RED check re-ran the accepted Rust test's filter instead of the spec."""
+    log = tmp_path / "merge-runner.log"
+    log.write_text("[09-24 10:15:34] BULK gate (just gate --base abc ...)\n"
+                   "gate: just lint took 40s (exit 0)\n"
+                   "        FAIL [   4.159s] (2681/3003) hk-cli::api_contract t_band\n"
+                   "gate: just test took 1231s (exit 100)\n")
+    (tmp_path / "ui").mkdir()
+    calls = tmp_path / "calls"
+    script = f"""
+set -u
+LOG={log}; FLAKY={tmp_path}/flaky.jsonl; REPO={tmp_path}
+log(){{ echo "[09-24 10:40:00] $*" >> $LOG; echo "LOG $*"; }}
+alert(){{ :; }}
+cargo(){{ echo "cargo $*" >> {calls}; return 0; }}          # the Rust flake passes alone
+npm(){{ echo "npm $*" >> {calls}; return 0; }}              # ... and so does the browser spec
+N=0
+limited(){{
+  N=$((N+1)); echo "limited $*" >> {calls}
+  if [ $N -eq 1 ]; then                                     # the resumed gate: red in the browser tier
+    printf 'gate: just acceptance-ci took 213s (exit 0)\\ne2e: 14/15 files passed in 237.3 s (backend 4.2 s); failed: fog-of-war.e2e.mjs\\ngate: just test-ui-e2e took 300s (exit 1)\\n' >> $LOG
+    return 1
+  fi
+  return 0
+}}
+{_function("_flake_retry")}
+{_function("flake_accept")}
+_flake_retry abc 1 "T-1 T-2" "just gate --base abc"
+echo "RC $? FILTER=[$TRIAGE_FILTER] SPECS=[$TRIAGE_SPECS]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    ran = calls.read_text().splitlines()
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- fog-of-war.e2e.mjs"] * 2   # re-run alone, twice
+    assert ran[-1] == "limited just gate --base abc --resume-after test-ui-e2e"
+    assert "RC 0 FILTER=[] SPECS=[fog-of-war.e2e.mjs]" in out.stdout
+
+
+def test_the_main_is_red_rerun_treats_a_test_main_lacks_as_green():
+    """09-24 10:15: T-870's own new test was re-run on the rewound main, where it does not exist;
+    nextest's "no tests to run" exit (4) read as red -> MAIN IS RED, and T-870 was never isolated."""
+    text = RUNNER.read_text()
+    i = text.index("TRIAGE: is main itself red? re-running the failing tests alone on main")
+    rerun = next(ln for ln in text[i:].splitlines() if "cargo nextest run" in ln)
+    assert "--no-tests=pass" in rerun
+
+
+def _main_is_red(tmp_path, filt="", specs="", kind="test", cargo_rc=0, npm_rc=0):
+    calls = tmp_path / "calls"
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; mkdir -p {tmp_path}/ui
+log(){{ echo "LOG $*"; }}
+cargo(){{ echo "cargo $*" >> {calls}; [ "$2" = build ] && return 0; return {cargo_rc}; }}
+npm(){{ echo "npm $*" >> {calls}; [ "$2" = build ] && return 0; return {npm_rc}; }}
+TRIAGE_KIND={kind}; TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
+{_function("main_is_red")}
+main_is_red; echo "RC $? WHAT=[$MAIN_RED_WHAT]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout, (calls.read_text().splitlines() if calls.exists() else [])
+
+
+def test_main_is_red_answers_for_this_triages_own_reds(tmp_path):
+    """2026-09-24 11:19-11:30: T-858, T-802, T-803 each gated alone and were blamed for app-trace's
+    T-475 check, which main itself failed - the single-branch path never asked main."""
+    out, calls = _main_is_red(tmp_path, specs="app-trace.e2e.mjs", npm_rc=1)
+    assert "RC 0 WHAT=[browser spec(s) app-trace.e2e.mjs]" in out
+    assert calls[-1] == "npm run e2e -- app-trace.e2e.mjs" and any("build" in c for c in calls)   # rebuilt first
+    out, _ = _main_is_red(tmp_path, specs="app-trace.e2e.mjs", npm_rc=0)
+    assert "RC 1 WHAT=[]" in out
+    out, calls = _main_is_red(tmp_path, filt="test(t_band)", cargo_rc=100)
+    assert "RC 0 WHAT=[test(t_band)]" in out and "--no-tests=pass" in calls[-1]
+    out, calls = _main_is_red(tmp_path / "s", filt="test(x)", kind="suite")
+    assert "RC 1 WHAT=[]" in out and calls == []                          # lint/build: nothing to ask
+
+
+def test_a_single_branch_red_that_main_shares_is_not_charged_and_stops_an_isolation():
+    text = RUNNER.read_text()
+    single = text[text.index("    git merge --abort 2>/dev/null || true\n    if main_is_red; then"):]
+    single = single[:single.index("record_attempt")]
+    assert "return 1" in single and "MAIN_RED_STOP=1" in single           # re-queued by the caller, no attempt
+    assert '>> "$S/main-red-parked"' in single                               # ... and parked until main moves
+    loop = text[text.index('        MAIN_RED_STOP=""'):]
+    assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:loop.index("\n        done")]
+
+
+def _park_block() -> str:
+    text = RUNNER.read_text()
+    i = text.index("    # A branch whose red main shares")
+    j = text.index("\n    fi\n", text.index('log "PARK: $(echo $parked)', i)) + len("\n    fi\n")
+    return text[i:j]
+
+
+def _park(tmp_path, parked_lines, head, ready):
+    (tmp_path / "main-red-parked").write_text(parked_lines)
+    q = tmp_path / "queue"
+    q.write_text("")
+    script = f"""
+set -u
+S={tmp_path}; QUEUE={q}; REPO={tmp_path}
+log(){{ echo "LOG $*"; }}
+sleep(){{ :; }}
+git(){{ case "$*" in *"rev-parse HEAD"*) echo {head};; *) echo tipA;; esac; }}
+ready="{ready}"; GATED=none
+for _ in 1; do
+{_park_block()}
+GATED="$ready"
+done
+echo "GATED=[$GATED]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout, q.read_text().split(), (tmp_path / "main-red-parked").exists()
+
+
+def test_a_branch_main_is_red_on_waits_until_main_moves(tmp_path):
+    """Review 2026-09-24: re-queued on MAIN IS RED, a lone branch re-gated every tick until main was
+    fixed. Parked, it waits; the rest of the queue (a fix for main among it) still gates."""
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipA\n", "aaa", "task-t802 task-fix")
+    assert "GATED=[task-fix]" in out and queued == ["task-t802"] and still
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipA\n", "aaa", "task-t802")
+    assert "GATED=[none]" in out and queued == ["task-t802"]                 # nothing else: no gate at all
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipA\n", "bbb", "task-t802")
+    assert "GATED=[task-t802]" in out and queued == [] and not still          # main moved: it gates again
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipOLD\n", "aaa", "task-t802")
+    assert "GATED=[task-t802]" in out and queued == []                         # its own tip moved: a fix, it gates
+
+
+def _solo_run(tmp_path, solo_answer, knob="1", alone_rcs=(0, 0), code_changed=False):
+    """A browser red in test-ui-e2e, re-run alone by the real _flake_retry/flake_accept/solo_ok."""
+    log = tmp_path / "merge-runner.log"
+    log.write_text("[09-24 14:30:00] BULK gate (just gate --base abc ...)\n"
+                   "gate: just test-ui took 8s (exit 0)\n"
+                   "e2e: 15/16 files passed in 258.5 s (backend 2.5 s); failed: app-trace.e2e.mjs\n"
+                   "gate: just test-ui-e2e took 259s (exit 1)\n")
+    (tmp_path / "ui").mkdir(exist_ok=True)
+    calls = tmp_path / "calls"
+    rcs = " ".join(str(r) for r in alone_rcs)
+    script = f"""
+set -u
+LOG={log}; FLAKY={tmp_path}/flaky.jsonl; REPO={tmp_path}; FLAKE_SOLO_ONE={knob}; BULKMARK={tmp_path}/no-bulk
+git(){{ echo "git $*" >> {calls}; return {1 if code_changed else 0}; }}      # `git diff --quiet` of the acceptance code
+log(){{ echo "[09-24 14:40:00] $*" >> $LOG; echo "LOG $*"; }}
+alert(){{ :; }}
+RCS=({rcs}); N=0
+npm(){{ echo "npm $*" >> {calls}; local r=${{RCS[$N]:-0}}; N=$((N+1)); return $r; }}
+uv(){{ echo "uv $*" >> {calls}; echo "{solo_answer}"; case "{solo_answer}" in solo-ok*) return 0;; *) return 1;; esac; }}
+limited(){{ echo "limited $*" >> {calls}; return 0; }}
+{_function("judge_changed")}
+{_function("solo_ok")}
+{_function("_flake_retry")}
+{_function("flake_accept")}
+_flake_retry abc 1 "T-1" "just gate --base abc"
+echo "RC $?"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    ran = calls.read_text().splitlines() if calls.exists() else []
+    recs = [json.loads(ln) for ln in (tmp_path / "flaky.jsonl").read_text().splitlines()] if (tmp_path / "flaky.jsonl").exists() else []
+    return out.stdout, ran, recs
+
+
+def test_a_ledger_known_flaker_is_accepted_after_one_solo_pass(tmp_path):
+    """User decision 2026-09-24 14:20 (knob FLAKE_SOLO_ONE)."""
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11")
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"]          # ONE solo run
+    assert "accepted after one solo pass (ledger: 11 alone-passes)" in out and "PASS alone once" in out
+    assert ran[-1] == "limited just gate --base abc --resume-after test-ui-e2e" and "RC 0" in out
+    assert recs[-1]["passes_alone"] == 1 and recs[-1]["accepted"] is True
+
+
+def test_a_first_time_flaker_or_the_knob_off_keeps_the_twice_rule(tmp_path):
+    for answer, knob in (("solo-no 1", "1"), ("solo-ok 11", "0")):
+        d = tmp_path / f"{answer[:7]}{knob}"
+        d.mkdir()
+        out, ran, recs = _solo_run(d, answer, knob=knob)
+        assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
+        assert "PASS alone twice" in out and recs[-1]["passes_alone"] == 2
+        assert knob == "1" or not any(c.startswith("uv") for c in ran)                    # off: the ledger is not even asked
+
+
+def test_a_fail_alone_is_a_real_red_whatever_the_ledger_says(tmp_path):
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11", alone_rcs=(1,))
+    assert "FAILS alone -> a real defect" in out and "RC 1" in out and recs == []
+    assert not any(c.startswith("uv") for c in ran)                                          # asked only after a pass
+
+
+def test_a_merge_that_changes_the_acceptance_code_keeps_the_twice_rule(tmp_path):
+    """Review 2026-09-24: a batch editing hkpy/flakes.py or the runner would decide its own flake accept."""
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11", code_changed=True)
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
+    assert any("diff --quiet HEAD -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh" in c for c in ran)
+    assert not any(c.startswith("uv") for c in ran) and recs[-1]["passes_alone"] == 2
+
+
+def test_main_side_of_asks_the_ledger_with_the_triaged_names(tmp_path):
+    calls = tmp_path / "calls"
+
+    def run(specs, tests):
+        script = f"""
+set -u
+REPO={tmp_path}
+uv(){{ echo "uv $*" >> {calls}; echo "main-side x: task-t1"; }}
+TRIAGE_SPECS={specs!r}; TRIAGE_TESTS={tests!r}
+{_function("main_side_of")}
+main_side_of task-t9
+"""
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
+
+    assert run("canvas-journey.e2e.mjs", "") == "main-side x: task-t1\n"
+    assert calls.read_text().splitlines()[-1].endswith("--main-side canvas-journey.e2e.mjs --branch task-t9")
+    run("", "hk-pipeline::sweep_residency a_sustained hk-api::x b_c")       # the ledger's full nextest names
+    assert calls.read_text().splitlines()[-1].endswith("--main-side hk-pipeline::sweep_residency a_sustained hk-api::x b_c --branch task-t9")
+    n = len(calls.read_text().splitlines())
+    assert run("", "") == "" and len(calls.read_text().splitlines()) == n   # nothing triaged: not asked
+
+
+def test_a_single_branch_main_side_red_is_held_once_per_tip_not_charged():
+    text = RUNNER.read_text()
+    block = text[text.index('    local side=""; grep -qx "$branch $tip" "$S/main-side-seen"'):]
+    block = block[:block.index("record_attempt")]
+    assert block.splitlines()[1].strip() == 'if [ -n "$side" ]; then'                   # the hold is what the verdict gates
+    assert 'echo "$branch $tip" >> "$S/main-side-seen"' in block                     # the second time on this tip is charged
+    assert '>> "$S/main-red-parked"' in block and "return 1" in block and "BLOCKED_ON_SPEC" in block
+    assert '"main-side defect - deflaker/ticket needed"' in block
+
+
+def _bisect(tmp_path, branches, culprits, filt="t", specs="", merge_fail="", together=False):
+    """bisect_culprit over stubbed git/cargo/npm: the triaged test is red whenever a culprit is merged."""
+    state, calls = tmp_path / "merged", tmp_path / "calls"
+    state.write_text("")
+    culprit_re = "|".join(culprits) or "NONE"
+    need = len(culprits) if together else 1
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}; mkdir -p {tmp_path}/ui
+log(){{ echo "LOG $*" >&2; }}
+ticket_of(){{ echo "$1"; }}
+git(){{ shift 2
+  case "$1" in
+    rev-parse) [ -s {state} ] && echo moved || echo base ;;
+    reset) : > {state} ;;
+    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; b=${{b#sha-}}; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
+  esac; return 0; }}
+probe(){{ echo "$1 $(tr '\\n' ' ' < {state})" >> {calls}; [ "$(grep -cxE '{culprit_re}' {state})" -ge {need} ] && return 1; return 0; }}
+cargo(){{ [ "$1" = build ] && return 0; probe cargo; }}
+npm(){{ [ "$2" = build ] && return 0; probe npm; }}
+TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
+{_function("bisect_red")}
+{_function("bisect_culprit")}
+echo "CULPRIT=[$(bisect_culprit base {' '.join(f"{b}=sha-{b}" for b in branches)})]"
+cat {state} | wc -l | tr -d ' ' | sed 's/^/LEFT_MERGED=/'
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    probes = calls.read_text().splitlines() if calls.exists() else []
+    return out.stdout, probes, (tmp_path / "isolate-remaining").read_text()
+
+
+def test_bisection_names_the_one_branch_red_alone_in_log2_probes(tmp_path):
+    """Supervisor for the user, 2026-09-24: bisect a red batch by the failing test alone, not n gates."""
+    bs = [f"b{i}" for i in range(8)]
+    out, probes, remaining = _bisect(tmp_path, bs, ["b5"])
+    assert "CULPRIT=[b5=sha-b5]" in out          # by the tip recorded before the bisect
+    assert len(probes) == 5                      # 3 halvings + b5 ALONE, twice
+    assert probes[-2].split() == probes[-1].split() == ["cargo", "b5"]  # base + the culprit only
+    assert "LEFT_MERGED=0" in out                # every probe is reset back to base
+    assert remaining.split() == bs               # a restart mid-bisect re-queues the whole batch
+
+
+def test_bisection_blames_nobody_when_the_red_needs_two_branches(tmp_path):
+    """b1 and b6 only break it together: no single branch is red alone -> nothing, and the caller isolates."""
+    out, probes, _ = _bisect(tmp_path, [f"b{i}" for i in range(8)], ["b1", "b6"], together=True)
+    assert "CULPRIT=[]" in out and len(probes) == 4 and "LEFT_MERGED=0" in out   # green alone: no 2nd confirm
+
+
+def test_bisection_gives_up_on_a_merge_it_cannot_make(tmp_path):
+    out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2", "b3"], ["b3"], merge_fail="b1")
+    assert "CULPRIT=[]" in out and probes == [] and "LEFT_MERGED=0" in out
+
+
+def test_bisection_runs_the_browser_specs_when_the_red_is_a_spec(tmp_path):
+    out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2"], ["b0"], filt="", specs="app-surface.e2e.mjs")
+    assert "CULPRIT=[b0=sha-b0]" in out and probes and all(p.startswith("npm ") for p in probes)
+
+
+def test_a_red_alone_only_once_is_not_blamed(tmp_path):
+    """Flaky even alone: the first confirmation red, the second green -> no culprit (review, 2026-09-24)."""
+    state, calls, flip = tmp_path / "merged", tmp_path / "calls", tmp_path / "flip"
+    state.write_text("")
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}
+log(){{ :; }}; ticket_of(){{ echo "$1"; }}
+git(){{ shift 2; case "$1" in rev-parse) [ -s {state} ] && echo moved || echo base ;; reset) : > {state} ;;
+  merge) b="${{@: -1}}"; echo "${{b#sha-}}" >> {state} ;; esac; return 0; }}
+cargo(){{ echo x >> {calls}; grep -qx b1 {state} || return 0; [ -e {flip} ] && return 0; touch {flip}; return 1; }}
+TRIAGE_FILTER=t; TRIAGE_SPECS=""
+{_function("bisect_red")}
+{_function("bisect_culprit")}
+echo "CULPRIT=[$(bisect_culprit base b0=sha-b0 b1=sha-b1)]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert "CULPRIT=[]" in out.stdout, out.stdout + out.stderr
+
+
+def test_a_bisected_culprit_is_failed_and_the_rest_go_back_as_one_batch():
+    """The try_bulk wiring: bisect only for a triaged test red with main green, re-queue the others FIRST."""
+    text = RUNNER.read_text()
+    i = text.index("if main_is_red; then", text.index("\ntry_bulk(){"))
+    block = text[i:text.index("return 1\n}", i)]
+    assert "bisect_culprit" in block
+    assert '[ "${TRIAGE_KIND:-test}" = "test" ]' in block and '"${#branches[@]}" -ge 2' in block
+    assert '"${TRIAGE_ALONE_FIRST:-0}" = 1' in block        # never for a red that once passed alone
+    assert "main_side_of \"$culprit\"" in block            # main-side reds are not blamed here
+    assert 'record_attempt "$culprit" "$tip"' in block      # the tip that was probed
+    assert "\"GATE FAILED $culprit (bisected" in block      # hkpy.fixes / flakes read this wording
+    assert '{ printf \'%s\\n\' "${others[@]}"; cat "$QUEUE"' in block   # others at the FRONT
+    assert "GATE_FAIL\" >> \"$NEEDS\"" in block
+    assert "isolate by merging each individually" in block             # the fallback is kept

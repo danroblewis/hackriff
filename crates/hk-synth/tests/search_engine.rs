@@ -23,6 +23,7 @@ use hk_synth::engine::{
     ProposalReply, ProposeRequest, RecipeHead, Root, SearchOutcome, SearchSpec, Suggestion,
     UnsupportedStructure, search,
 };
+use hk_synth::result::{CheckOrigin, CheckSummary, HoldoutFrame};
 use hk_synth::search::{JobState, Profile, StopReason};
 use hk_synth::trace::{Outcome, OutcomeKind, Reason};
 use hk_synth::{
@@ -68,6 +69,14 @@ struct World {
     truth: Truth,
     calls: AtomicU64,
     holdout_calls: AtomicU64,
+    /// Evaluations over ADR-0021 §8.2's null windows.
+    null_calls: AtomicU64,
+    /// The null windows carry the "signal" too: structure the search finds in structureless data.
+    null_fits: bool,
+    /// Distinct valid frames on hold-out at the true CRC.
+    holdout_frames: u32,
+    /// The CRC's width, as the check summary reports it.
+    width: u32,
     proposals: AtomicU64,
     grants: Mutex<Vec<u64>>,
     hook: Option<Hook>,
@@ -79,6 +88,10 @@ impl World {
             truth,
             calls: AtomicU64::new(0),
             holdout_calls: AtomicU64::new(0),
+            null_calls: AtomicU64::new(0),
+            null_fits: false,
+            holdout_frames: 12,
+            width: 16,
             proposals: AtomicU64::new(0),
             grants: Mutex::new(Vec::new()),
             hook: None,
@@ -106,11 +119,18 @@ impl Evaluator for World {
         if req.window == EvalWindow::Holdout {
             self.holdout_calls.fetch_add(1, Ordering::SeqCst);
         }
+        let null = matches!(req.window, EvalWindow::Null(_));
+        if null {
+            self.null_calls.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(h) = &self.hook {
             h(k);
         }
         let t = &self.truth;
-        let upstream = req.parent.is_none_or(|p| p.on_truth);
+        // A phase-randomised or time-reversed null keeps the PSD (S0) and destroys everything
+        // after it — unless this world plants structure in the nulls too.
+        let upstream = req.parent.is_none_or(|p| p.on_truth)
+            && !(null && req.stage > Stage::S0 && !self.null_fits);
         let nodes = &req.candidate.recipe.nodes[req.new_nodes.clone()];
         let last = nodes.last().expect("every alternative here has nodes");
         let p = |name: &str| last.params.get(name).cloned().unwrap_or(Value::Null);
@@ -204,9 +224,9 @@ impl Evaluator for World {
             }
             Stage::S5 => {
                 let hit = upstream && p("poly").as_str() == Some(t.poly);
-                let frames = match (hit, holdout) {
+                let frames = match (hit, holdout || null) {
                     (true, false) => 20,
-                    (true, true) => 12,
+                    (true, true) => self.holdout_frames,
                     _ => 0,
                 };
                 (
@@ -216,12 +236,37 @@ impl Evaluator for World {
                         GroupId::Undeclared,
                         frames as f32,
                         frames,
-                        16.0 * frames as f32,
+                        self.width as f32 * frames as f32,
                     ),
                     hit,
                 )
             }
             Stage::S6 => (EvidenceSet::new(), upstream),
+        };
+        let check = (req.stage == Stage::S5).then(|| CheckSummary {
+            kind: "crc".into(),
+            model: format!("CRC-{}", self.width),
+            width: self.width,
+            pass_rate: if on_truth { 1.0 } else { 0.0 },
+            distinct_valid: if on_truth { self.holdout_frames } else { 0 },
+            corrected_excluded: 0,
+            tested: self.holdout_frames.max(1),
+            holdout,
+        });
+        let frames = if holdout && on_truth && req.stage == Stage::S5 {
+            (0..self.holdout_frames)
+                .map(|i| HoldoutFrame {
+                    t_ns: 1_000_000 * i64::from(i),
+                    check_valid: true,
+                    corrected: false,
+                    frame_model: "hk-framing".into(),
+                    identity: None,
+                    metadata: json!({ "len": 64 }),
+                    content: None,
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
         Ok(Evaluated {
             evidence: vec![NodeEvidence {
@@ -230,7 +275,8 @@ impl Evaluator for World {
             }],
             output: Sig { on_truth },
             output_bytes: 1024,
-            check: None,
+            check,
+            frames,
         })
     }
 
@@ -326,6 +372,7 @@ fn root(sk: Skeleton, prior_bits: f32, polys: &[&str]) -> Root {
         seed_source: hk_synth::candidate::SeedSource::Open,
         family: None,
         deferred: None,
+        check_origin: CheckOrigin::Searched,
     }
 }
 
@@ -595,7 +642,7 @@ fn shared_prefixes_are_memoised_not_paid_twice() {
         ),
     ];
     let mut s = spec(roots, Profile::Deep);
-    s.solve.min_holdout_bits = 1e9; // never solves: both searches run to the end
+    s.solve.min_analytic_holdout_bits = 1e9; // never solves: both searches run to the end
     let o = run(&s, &world, &Control::new());
     check_outcome(&o, &world);
     let memo: Vec<_> = o
@@ -901,7 +948,7 @@ fn the_trace_stays_within_its_bound_and_is_complete_in_counts() {
     let world = World::new(FSK);
     let mut s = spec(roots, Profile::Quick);
     s.budget.max_proposal_calls = Some(100);
-    s.solve.min_holdout_bits = 1e9;
+    s.solve.min_analytic_holdout_bits = 1e9;
     let bound = Profile::Quick.trace_bounds().max_trace_nodes as usize;
     let o = run(&s, &world, &Control::new());
     check_outcome(&o, &world);
@@ -967,7 +1014,7 @@ fn crowded_spec(n_polys: usize, profile: Profile) -> SearchSpec {
     let mut s = spec(roots, profile);
     s.budget.max_proposal_calls = Some(100);
     s.budget.max_evaluations = Some(20_000);
-    s.solve.min_holdout_bits = 1e9;
+    s.solve.min_analytic_holdout_bits = 1e9;
     s
 }
 
@@ -1378,4 +1425,230 @@ fn the_trace_cost_is_measured_not_assumed() {
     for r in &rows {
         eprintln!("T-565 trace cost: {r}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// MAUTO M-9 (T-860): ADR-0022's solve rule on hold-out, and ADR-0021 §8.2's null control
+// ---------------------------------------------------------------------------------------------
+
+/// The winning open-search result solves only through ADR-0022's inequality on hold-out — the
+/// analytic-null currency, per-stage look-elsewhere — and only after the shuffled-null control
+/// ran and passed. Everything the confirm gate reads is on the result.
+#[test]
+fn m9_an_open_search_solves_on_analytic_hold_out_bits_after_the_null_control_passes() {
+    let world = World::new(FSK);
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    let h = top
+        .holdout
+        .as_ref()
+        .expect("a solved result carries its hold-out evidence");
+    // The confirm key is the analytic part only: S4's sync excess and S5's check, each net of its
+    // own stage's L — never the calibrated S0–S3 bits.
+    let analytic_on_ladder: f32 = h
+        .stages
+        .iter()
+        .filter(|e| e.metric.is_analytic())
+        .map(|e| e.bits)
+        .sum();
+    assert!(
+        h.analytic_bits < analytic_on_ladder,
+        "look-elsewhere is charged per stage: {} vs {analytic_on_ladder}",
+        h.analytic_bits
+    );
+    assert!(h.analytic_bits < h.evidence_bits + 1e3);
+    assert_eq!(top.analytic_holdout_bits, Some(h.analytic_bits));
+    assert!(h.analytic_bits >= 24.0);
+    assert_eq!(h.check_width, Some(16));
+    assert_eq!(h.differences, 12);
+    assert!(h.check_bits.unwrap() >= 16.0);
+    let l_check = h
+        .l_check
+        .expect("an open search's L_check is the S5 stage's own");
+    assert!(l_check > 0.0, "three polynomials were tried at S5");
+    assert!((h.check_bits.unwrap() - (16.0 * 12.0 - l_check)).abs() < 1e-3);
+    assert_eq!(h.check_origin, CheckOrigin::Searched);
+    // ADR-0021 §8.2: K = 2 at standard, the unchanged prefix over each null, recorded.
+    let nc = h
+        .null_control
+        .expect("a searched check runs the null control");
+    assert!(nc.ran && !nc.capped && nc.passed());
+    assert_eq!(nc.k, 2);
+    assert!(nc.margin_bits >= 8.0);
+    assert_eq!(
+        world.null_calls.load(Ordering::SeqCst),
+        2 * top
+            .stages
+            .iter()
+            .map(|e| e.stage)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64,
+        "K nulls × the chain's stages, no more"
+    );
+    // The decodes the attach step stores are the solved rank-1's hold-out frames.
+    assert_eq!(o.holdout_frames.len(), 12);
+    assert!(
+        o.holdout_frames
+            .iter()
+            .all(|f| f.check_valid && !f.corrected)
+    );
+    assert!(o.null_control().is_some_and(|n| n.passed()));
+    assert_eq!(
+        o.seal(None, None, "t"),
+        None,
+        "a solved search seals no negative result"
+    );
+}
+
+/// A search that finds its structure in the null windows too cannot tell the fit from chance:
+/// ADR-0021 §8.2 caps the verdict at `framed`, the resolution says `tied`, and the record says why.
+#[test]
+fn m9_the_null_control_caps_a_fit_that_the_nulls_reproduce() {
+    let mut world = World::new(FSK);
+    world.null_fits = true;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    assert!(
+        o.results.iter().all(|r| r.verdict != Verdict::Solved),
+        "the control can only cap, and here it must"
+    );
+    assert_ne!(o.stop, Some(StopReason::Solved));
+    assert_eq!(o.reason, Some(Reason::Tied));
+    let capped = o
+        .results
+        .iter()
+        .find(|r| r.holdout.as_ref().and_then(|h| h.null_control).is_some())
+        .expect("the capped candidate keeps its null-control record");
+    assert!(capped.verdict <= Verdict::Framed);
+    let nc = capped.holdout.as_ref().unwrap().null_control.unwrap();
+    assert!(nc.ran && nc.capped && !nc.passed());
+    assert!(nc.margin_bits < 8.0);
+    assert!(
+        o.holdout_frames.is_empty(),
+        "nothing solved, nothing to store"
+    );
+    let res = o
+        .seal(None, None, "t")
+        .expect("an unsolved search seals a resolution");
+    assert_eq!(res.kind, hk_synth::ResolutionKind::Unknown);
+    assert_eq!(res.null_control, Some(nc));
+    assert!(res.summary.contains("null windows"), "{}", res.summary);
+}
+
+/// A template that fixes the whole check has `L_check = 0` beyond its own S5 count and needs no
+/// null control; at `quick` (K = 0) no control runs either. Neither is charged for one.
+#[test]
+fn m9_a_template_fixed_check_and_a_quick_job_run_no_null_control() {
+    let world = World::new(FSK);
+    let mut fixed = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &["0x8005"]),
+        0.0,
+        &["0x8005"],
+    );
+    fixed.check_origin = CheckOrigin::TemplateFixed;
+    let o = run(
+        &spec(vec![fixed], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    let h = top.holdout.as_ref().unwrap();
+    assert_eq!(
+        h.l_check,
+        Some(0.0),
+        "one polynomial: zero look-elsewhere at S5"
+    );
+    assert_eq!(h.null_control, None);
+    assert_eq!(world.null_calls.load(Ordering::SeqCst), 0);
+
+    let world = World::new(FSK);
+    let o = run(
+        &spec(standard_roots(), Profile::Quick),
+        &world,
+        &Control::new(),
+    );
+    assert_eq!(world.null_calls.load(Ordering::SeqCst), 0, "quick: K = 0");
+    assert!(
+        o.results
+            .iter()
+            .all(|r| { r.holdout.as_ref().is_none_or(|h| h.null_control.is_none()) })
+    );
+}
+
+/// ADR-0022 §4: the three constants that replaced 64 bits / 3 frames / width 16. A check under the
+/// 8-bit width floor never solves however many frames it passes; a single hold-out frame of a
+/// searched CRC-16 cannot carry 16 bits after its L; and a discovered template whose discovery
+/// cost was never recorded never solves — an unknown charge is not a zero one.
+#[test]
+fn m9_width_floor_hard_check_floor_and_the_laundering_rule() {
+    let mut narrow = World::new(FSK);
+    narrow.width = 4;
+    narrow.holdout_frames = 40;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &narrow,
+        &Control::new(),
+    );
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    let h = o.results[0].holdout.as_ref().expect("validated");
+    assert_eq!(h.check_width, Some(4));
+
+    let mut one = World::new(FSK);
+    one.holdout_frames = 1;
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &one,
+        &Control::new(),
+    );
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    let h = o.results[0].holdout.as_ref().expect("validated");
+    assert_eq!(h.differences, 1);
+    assert!(h.check_bits.unwrap() < 16.0, "{:?}", h.check_bits);
+
+    let world = World::new(FSK);
+    let mut laundered = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &["0x8005"]),
+        0.0,
+        &["0x8005"],
+    );
+    laundered.check_origin = CheckOrigin::Discovered {
+        look_elsewhere_bits: None,
+    };
+    let o = run(
+        &spec(vec![laundered.clone()], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    assert_eq!(o.results[0].holdout.as_ref().unwrap().l_check, None);
+    // With the discovering search's cost recorded, it is inherited as L_check and paid for.
+    laundered.check_origin = CheckOrigin::Discovered {
+        look_elsewhere_bits: Some(20.0),
+    };
+    let world = World::new(FSK);
+    let o = run(
+        &spec(vec![laundered], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    let h = o.results[0].holdout.as_ref().unwrap();
+    assert_eq!(h.l_check, Some(20.0));
+    assert!((h.check_bits.unwrap() - (16.0 * 12.0 - 20.0)).abs() < 1e-3);
+    assert!(
+        h.null_control.is_some(),
+        "a discovered check counts as searched"
+    );
+    assert_eq!(o.results[0].verdict, Verdict::Solved);
 }

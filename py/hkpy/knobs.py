@@ -40,19 +40,25 @@ KNOBS: dict[str, tuple[str, str, str]] = {
     "WORK_WORKER_CORES": ("3", "work-runner", "cores one worker may occupy at peak"),
     "WORK_GROUP_CAP": ("2", "work-runner", "workers per parallel_group"),
     "WORK_MAX_MINUTES": ("180", "work-runner", "a worker older than this is reaped"),
+    "WORK_CLONE_TARGET": ("1", "work-runner", "1 = a new worker's worktree clones main's target/; 0 = it builds from sccache (no new clone pin)"),
     "WORKER_DRAIN_MAX": ("0", "merge-runner", "0 = overlap mode; seconds to wait for claimed workers before gating"),
     "FOREIGN_DRAIN_MAX": ("300", "merge-runner", "seconds to wait for a foreign spec run / contention"),
     "BULK_MAX": ("15", "merge-runner", "most branches in one batch"),
     "GATE_TIMEOUT": ("3600", "merge-runner", "seconds before a gate is killed"),
     "MAX_ATTEMPTS": ("2", "merge-runner", "gate attempts per branch tip"),
+    "FLAKE_SOLO_ONE": ("0", "merge-runner", "1 = a red the flake ledger already shows passing alone (>=2, never failing, 7 d) is accepted after ONE solo pass"),
+    "GATE_TIERS": ("full", "merge-runner", "full = merges gate both phases; check = check phase only (acceptance runs daily as the RC, `just rc`)"),
     "HK_E2E_CONCURRENCY": ("3", "gate (ui/e2e/run.mjs)", "browser-spec lanes"),
     "NEXTEST_TEST_THREADS": ("profile default 8", "gate (nextest)", "test threads for the workspace suite"),
     "CARGO_BUILD_JOBS": ("6 (gate.py sets it)", "gate only", "parallel rustc jobs for the gate; workers keep their own bound (CARGO_ENV in work-runner.py)"),
 }
 
-#: Every knob is a non-negative integer; these must be at least 1 (WORK_CAP=1 is invariant 3's floor).
+#: Every knob but _CHOICES' is a non-negative integer; these must be at least 1 (WORK_CAP=1 is invariant 3's floor).
 _AT_LEAST_ONE = {"WORK_CAP", "WORK_PER_TICK", "WORK_WORKER_CORES", "WORK_GROUP_CAP", "WORK_MAX_MINUTES",
                  "BULK_MAX", "GATE_TIMEOUT", "MAX_ATTEMPTS", "HK_E2E_CONCURRENCY", "NEXTEST_TEST_THREADS", "CARGO_BUILD_JOBS"}
+
+#: Knobs that take a word, not a number.
+_CHOICES = {"GATE_TIERS": ("full", "check")}
 
 _KV = re.compile(r"^([A-Z][A-Z0-9_]+)=(.*)$")
 
@@ -160,7 +166,11 @@ def cmd_set(ops: str, pairs: list[str], why: str, who: str) -> int:
         # A stored value the reader cannot parse kills the work runner at its next start (an
         # uncaught ValueError at import) and makes the merge runner print "integer expression
         # expected" every loop - so the store only ever holds what both readers accept.
-        if not v.isdigit():
+        if k in _CHOICES:
+            if v not in _CHOICES[k]:
+                print(f"knobs: {k}={v!r} is not one of {'|'.join(_CHOICES[k])}; nothing stored", file=sys.stderr)
+                return 2
+        elif not v.isdigit():
             print(f"knobs: {k}={v!r} is not a non-negative integer; nothing stored", file=sys.stderr)
             return 2
         if k == "WORK_CAP" and int(v) < 1:

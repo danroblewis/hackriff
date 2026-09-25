@@ -1,7 +1,7 @@
 //! Decoder synthesis (ADR-0015, MAUTO): search for the pipeline structure and parameters that best
 //! explain a signal, guided by per-stage evidence in bits and ending in confirm-by-decode.
 //!
-//! # What exists (T-848 = M-1 the scaffold; T-853 = M-2 evidence; T-854 = M-3 the engine)
+//! # What exists (T-848 = M-1 the scaffold; T-853 = M-2 evidence; T-854 = M-3 the engine; T-858 = M-7 the objective)
 //!
 //! **The search engine runs (M-3) over real evidence (M-2).** [`engine::search`] runs the staged
 //! beam over an [`engine::Evaluator`]; M-2 added per-block evidence (`hk_blocks::Block::evidence`),
@@ -29,7 +29,7 @@
 //! | [`trace_sink`] | the `TraceSink`: incremental retention on insert, elided counts, peak residency, the allocation-measurement scope (ADR-0021 §2.3, §3) | **M-3 (T-854, T-565)** |
 //! | [`result`] | `PipelineResult` and the verdict ladder (§3.4) | M-3, M-9 |
 //! | [`trace`] | the search trace and the negative result (ADR-0021) | M-3 (producer), M-9 (sealing) |
-//! | [`objective`] | `EvidenceObjective` over T-070's `RefinementLoop` (§2.3) | M-7 |
+//! | [`objective`] | `EvidenceObjective` over T-070's `RefinementLoop`; hold-out validation, support alignment (§2.3) | **M-7 (T-858)** |
 //!
 //! # The rules every later ticket inherits
 //!
@@ -84,6 +84,10 @@ pub use hk_model::synth::null as nulls;
 pub use hk_model::synth::{
     EVIDENCE_SET_CAPACITY, Evidence, EvidenceSet, EvidenceSetFull, GroupId, MetricId, Stage,
     quality_from_bits,
+};
+pub use objective::{
+    ChannelSearch, EVIDENCE_OBJECTIVE, EvidenceContext, EvidenceObjective, ObjectiveError,
+    ParamAxis, WindowSplit,
 };
 pub use proposal::ProposalOp;
 pub use result::{PipelineResult, Verdict};

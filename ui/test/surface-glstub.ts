@@ -65,6 +65,16 @@ export function stubGl(w = 800, h = 600) {
     },
     texSubImage2D: (..._a: unknown[]) => {
       const data = _a[_a.length - 1] as ArrayLike<number>;
+      const y = Number(_a[3] ?? 0), rows = Number(_a[5] ?? 0);
+      const up = lastTex ? texData.get(lastTex) : undefined;
+      // A row patch (T-893) rewrites rows [y, y + rows) of the texture bound NOW, not the newest one.
+      if (up && !(y === 0 && rows === up.h)) {
+        const full = Array.from(up.data.length ? up.data : new Array<number>(up.w * up.h).fill(0));
+        for (let i = 0; i < data.length; i++) full[y * up.w + i] = data[i];
+        up.data = full;
+        return;
+      }
+      if (up) { up.data = data; return; }
       if (uploads.length) uploads[uploads.length - 1].data = data;
     },
     texParameteri: () => undefined,

@@ -69,14 +69,16 @@ use hk_stream::{
 use hk_synth::admission::{AutoProfile, Origin, Refusal, Slots, admit};
 use hk_synth::engine::{Observer, Progress, SearchOutcome, Used};
 use hk_synth::search::{StopReason, SynthBudget};
-use hk_synth::trace::{OutcomeKind, Reason, ReplayKey, Resolution, ResolutionKind, TraceNode};
-use hk_synth::{Control, PipelineResult, Stage, Trace, Verdict};
+use hk_synth::trace::{OutcomeKind, Resolution, TraceNode};
+use hk_synth::{Control, PipelineResult, Stage, Trace};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::acquire::{
     AcquireError, Acquisition, Burst, BurstSet, MAX_BURST_IQ_NS, Membership, RingRead, acquire,
 };
+use super::attach::{AttachInput, Attached, attach};
+use crate::inventory::SynthesizedConfirm;
 use crate::iqbuffer::{ClipError, IqBufferService};
 
 pub use hk_synth::admission::PowerPolicy;
@@ -252,6 +254,39 @@ pub trait SearchBackend: Send + Sync {
         control: &Control,
         observer: &mut dyn Observer,
     ) -> Result<SearchOutcome, String>;
+}
+
+/// Attaches a finished job's results to the inventory (MAUTO M-9, [`super::attach`]). A server
+/// without one keeps results in memory only and says `not-attached`.
+pub trait Attacher: Send + Sync {
+    /// Attaches `input`; `Ok(None)` when there was nothing to attach.
+    fn attach(&self, input: &AttachInput<'_>) -> Result<Option<Attached>, String>;
+}
+
+/// The run's attacher: a connection to the run's repository per attach (jobs are rare; a held
+/// connection would be a second writer for the life of the run), ordinary decode ingestion, and
+/// `ConfirmPolicy.synthesized`.
+pub struct RepoAttacher {
+    db: std::path::PathBuf,
+    policy: SynthesizedConfirm,
+}
+
+impl RepoAttacher {
+    /// Over the repository at `db`, under `policy`.
+    pub fn new(db: impl Into<std::path::PathBuf>, policy: SynthesizedConfirm) -> Self {
+        Self {
+            db: db.into(),
+            policy,
+        }
+    }
+}
+
+impl Attacher for RepoAttacher {
+    fn attach(&self, input: &AttachInput<'_>) -> Result<Option<Attached>, String> {
+        let repo = hk_model::Repository::open(&self.db).map_err(|e| e.to_string())?;
+        let mut ingest = hk_plugins::Ingest::new(repo);
+        attach(&mut ingest, &self.policy, input).map_err(|e| e.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -431,14 +466,18 @@ pub struct AnalyzeJob {
     pub results: Vec<PipelineResult>,
     /// ADR-0021 §4.1.
     pub trace_summary: Option<TraceSummary>,
-    /// ADR-0021 §5: what the trace can be reproduced from, `window` filled from the read
-    /// ledger; `null` until the engine hands back.
-    pub replay_key: Option<ReplayKey>,
+    /// ADR-0021 §5: what the trace can be reproduced from (the engine's key plus the analysed
+    /// window); `null` until the engine hands back.
+    pub replay_key: Option<Value>,
     /// ADR-0021 §7A.2: present whenever the job finished without a solved result.
     pub resolution: Option<Resolution>,
     /// The emitter the job analyses (an emitter target) or attached to (M-9).
     pub emitter_id: Option<String>,
-    /// Confirm-by-decode outcome (M-9); `null` until attach exists.
+    /// Decodes stored from the rank-1 hold-out run, `{stored, valid}` (M-9); `null` until the job
+    /// has attached.
+    pub decodes: Option<Value>,
+    /// Confirm-by-decode outcome `{rule, outcome, evidence_bits, reason}` (M-9); `null` until the
+    /// job has finished. `outcome` is `confirmed | already | insufficient | not-attached`.
     pub confirm: Option<Value>,
     /// The acquired IQ's content class; gates `frames_preview`.
     pub content_class: Option<ContentClass>,
@@ -484,6 +523,7 @@ struct Inner {
     wake: Condvar,
     env: Arc<dyn JobEnv>,
     backend: Option<Arc<dyn SearchBackend>>,
+    attacher: Option<Arc<dyn Attacher>>,
     power: PowerPolicy,
 }
 
@@ -648,6 +688,16 @@ impl AnalyzeJobs {
         backend: Option<Arc<dyn SearchBackend>>,
         power: PowerPolicy,
     ) -> Self {
+        Self::with_attacher(env, backend, power, None)
+    }
+
+    /// [`Self::new`], attaching finished jobs through `attacher` (MAUTO M-9).
+    pub fn with_attacher(
+        env: Arc<dyn JobEnv>,
+        backend: Option<Arc<dyn SearchBackend>>,
+        power: PowerPolicy,
+        attacher: Option<Arc<dyn Attacher>>,
+    ) -> Self {
         let inner = Arc::new(Inner {
             jobs: Mutex::new(Jobs {
                 next: 1,
@@ -656,6 +706,7 @@ impl AnalyzeJobs {
             wake: Condvar::new(),
             env,
             backend,
+            attacher,
             power,
         });
         let worker = {
@@ -760,6 +811,7 @@ impl AnalyzeJobs {
             replay_key: None,
             resolution: None,
             emitter_id: req.emitter_id.map(|e| e.to_string()),
+            decodes: None,
             confirm: None,
             content_class: None,
             created: now_s(),
@@ -1140,6 +1192,10 @@ fn run(inner: &Arc<Inner>, n: u64, plan: Option<Plan>) {
         .chunks
         .first()
         .map(|c| c.chunk.piece.provenance.tune.sample_rate_hz);
+    // ADR-0015 §5.5 condition 4: any piece recorded under an overloaded front end. No pieces is
+    // "not known", which the confirm gate refuses.
+    let overload = (!acq.chunks.is_empty())
+        .then(|| acq.chunks.iter().any(|c| c.chunk.piece.provenance.overload));
     let job_window = |acq: &Acquisition, clip: Option<RecordingId>| {
         let w = acq.window();
         JobWindow {
@@ -1218,10 +1274,52 @@ fn run(inner: &Arc<Inner>, n: u64, plan: Option<Plan>) {
         n,
     };
     let outcome = backend.search(&input, &control, &mut observer);
+    let read = {
+        let w = acq.window();
+        match (w.t_lo, w.t_hi) {
+            (Some(a), Some(b)) if a < b => TimeRange::new(a, b),
+            _ => window,
+        }
+    };
+    let clip_id = {
+        let g = inner.lock();
+        g.jobs
+            .get(&n)
+            .and_then(|j| j.snap.window.as_ref())
+            .and_then(|w| w.clip_id.clone())
+    };
+    // ADR-0021 §5: what makes this search reproducible. The engine keys everything its
+    // decisions are a function of (T-565: engine, templates, blocks@version, profile, count caps,
+    // seed_ref); the job adds the analysed window. The calibration hash is the backend's to add
+    // once an evaluator uses one (MAUTO M-2).
+    let window = json!({ "clip_id": clip_id, "t_lo": secs(read.start), "t_hi": secs(read.end) });
     match outcome {
-        Ok(o) => finish_search(inner, n, o, class, &started_at),
+        Ok(o) => {
+            let mut key = o.replay_key.clone();
+            key.window = Some(window);
+            let replay_key = serde_json::to_value(&key).unwrap_or(Value::Null);
+            finish_search(
+                inner,
+                n,
+                o,
+                Finished {
+                    class,
+                    overload,
+                    read,
+                    replay_key,
+                },
+            )
+        }
         Err(e) => fail(inner, n, "failed", e, None),
     }
+}
+
+/// What the worker knows about a finished search besides its outcome.
+struct Finished {
+    class: Option<ContentClass>,
+    overload: Option<bool>,
+    read: TimeRange,
+    replay_key: Value,
 }
 
 enum LiveEnd {
@@ -1300,91 +1398,99 @@ impl Observer for JobObserver {
     }
 }
 
-/// The resolution of a finished search (ADR-0021 §7A.2). `None` when a result solved. Only a
-/// `done` job may say `unknown`; a cancelled or failed one ruled nothing out.
+/// The resolution of a finished search (ADR-0021 §7A.2), **sealed by `hk-synth`**
+/// ([`SearchOutcome::seal`], ADR-0021 §9.3). `None` when a result solved. Only a `done` job may
+/// say `unknown`; a cancelled or failed one ruled nothing out.
 pub fn resolution_of(o: &SearchOutcome, summary: &TraceSummary, ended: &str) -> Option<Resolution> {
-    if o.state != JobState::Done {
-        return Some(Resolution::not_searched(Some(ended.to_owned())));
-    }
-    if o.results.iter().any(|r| r.verdict == Verdict::Solved) {
-        return None;
-    }
-    let deepest = o.results.iter().map(|r| r.verdict).max();
-    let (kind, text) = if o.reason == Some(Reason::UnsupportedStructure) {
-        (
-            ResolutionKind::UnsupportedStructure,
-            "The structure this looks like has no block to decode it yet.".to_owned(),
-        )
-    } else if o.results.iter().any(|r| r.characterisation.is_some()) {
-        (
-            ResolutionKind::StructuredUnidentified,
-            "Framed and check-valid, but no known format matches.".to_owned(),
-        )
-    } else {
-        let why = match o.reason {
-            Some(Reason::NoSignal) => "no signal measured above the floor",
-            Some(Reason::NothingScored) => "every hypothesis measured below its floor",
-            Some(Reason::Tied) => "the best candidates tied within the margin",
-            Some(Reason::BudgetExhausted) => "the budget ran out before the space was covered",
-            _ => "nothing reached the solve rule",
-        };
-        (
-            ResolutionKind::Unknown,
-            format!("Searched and not identified: {why}."),
-        )
-    };
-    Some(Resolution {
-        kind,
-        deepest_verdict: deepest,
-        reason: o.reason,
-        coverage: Some(o.coverage.clone()),
-        suspected: None,
-        null_control: None,
-        ruled_out: Vec::new(),
-        retry: None,
-        trace_summary: serde_json::to_value(summary).ok(),
-        replay_key: None,
-        explanations: Vec::new(),
-        last_attempt: None,
-        summary: text,
-    })
+    o.seal(serde_json::to_value(summary).ok(), None, ended)
 }
 
-fn finish_search(
-    inner: &Inner,
-    n: u64,
-    mut o: SearchOutcome,
-    class: Option<ContentClass>,
-    _started_at: &str,
-) {
+fn finish_search(inner: &Inner, n: u64, mut o: SearchOutcome, f: Finished) {
+    let job_replay_key = f.replay_key.clone();
+    let class = f.class;
     // Content leaves only when the IQ's class permits it (module docs).
     if !class.is_some_and(ContentClass::permits_content) {
         for r in &mut o.results {
             r.frames_preview.clear();
         }
+        for fr in &mut o.holdout_frames {
+            fr.content = None;
+        }
     }
     let summary = TraceSummary::of(&o.trace, !o.nondeterministic);
     let ended = now_s();
-    let mut resolution = resolution_of(&o, &summary, &ended.to_string());
+    let summary_value = serde_json::to_value(&summary).ok();
+    // Sealed by hk-synth (ADR-0021 §9.3) before anything else reads it.
+    let resolution = o.seal(
+        summary_value.clone(),
+        Some(f.replay_key.clone()),
+        &ended.to_string(),
+    );
+    // ---- attach (M-9): a `done` job, asked to, with an attacher; outside the lock ----
+    let (request, cancelled) = {
+        let g = inner.lock();
+        match g.jobs.get(&n) {
+            Some(j) => (
+                Some(Arc::clone(&j.request)),
+                j.snap.state == JobState::Cancelled,
+            ),
+            None => (None, true),
+        }
+    };
+    let mut attach_warning = None;
+    let attached = match (&inner.attacher, &request) {
+        (Some(a), Some(req)) if req.attach && !cancelled && o.state == JobState::Done => {
+            // Re-read under the lock at the end of the attach transaction: a cancel that lands
+            // while attaching rolls the attach back. (Today the engine's last progress report
+            // already marks the job `done`, so a `DELETE` in this window *forgets* the finished
+            // job rather than cancelling it — and forgetting a job does not undo its analysis, so
+            // a vanished job is not a cancelled one.)
+            let is_cancelled = || {
+                inner
+                    .lock()
+                    .jobs
+                    .get(&n)
+                    .is_some_and(|j| j.snap.state == JobState::Cancelled)
+            };
+            let input = AttachInput {
+                job_id: &format!("a{n}"),
+                profile: req.profile,
+                target: req.emitter_id,
+                band: req.band,
+                window: f.read,
+                outcome: &o,
+                trace_summary: summary_value,
+                replay_key: Some(f.replay_key),
+                resolution: resolution.as_ref(),
+                content_class: class.unwrap_or(ContentClass::FAIL_CLOSED),
+                overload: f.overload,
+                cancelled: Some(&is_cancelled),
+            };
+            match a.attach(&input) {
+                Ok(x) => x,
+                Err(e) => {
+                    attach_warning = Some(format!("the results could not be attached: {e}"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     let mut g = inner.lock();
     let Some(job) = g.jobs.get_mut(&n) else {
         return;
     };
     let s = &mut job.snap;
-    let mut replay_key = o.replay_key.clone();
-    replay_key.window = s.window.as_ref().and_then(|w| serde_json::to_value(w).ok());
-    if let Some(r) = &mut resolution
-        && r.kind != ResolutionKind::NotSearched
-    {
-        r.replay_key = serde_json::to_value(&replay_key).ok();
-    }
-    s.replay_key = Some(replay_key);
     let cancelled = s.state == JobState::Cancelled;
     s.ended = s.ended.or(Some(ended));
     s.end_reason = o.stop;
     s.used = o.used;
-    s.results = o.results;
+    s.results = std::mem::take(&mut o.results);
     s.trace_summary = Some(summary);
+    s.replay_key = Some(job_replay_key);
+    if let Some(w) = attach_warning {
+        s.warnings.push(w);
+    }
     if cancelled {
         // An acknowledged cancel is final; the partial results are kept.
         s.progress.state = Some(JobState::Cancelled);
@@ -1392,11 +1498,35 @@ fn finish_search(
         s.state = o.state;
         s.progress.state = Some(o.state);
         s.resolution = resolution;
-        if let Some(e) = o.error {
+        if let Some(e) = o.error.take() {
             s.error = Some(JobError {
                 code: "failed",
                 message: e,
             });
+        }
+        if s.state == JobState::Done {
+            match &attached {
+                Some(a) => {
+                    if let Some(e) = a.emitter {
+                        s.emitter_id = Some(e.to_string());
+                    }
+                    s.decodes =
+                        Some(json!({ "stored": a.decodes_stored, "valid": a.decodes_valid }));
+                    s.confirm = serde_json::to_value(&a.confirm).ok();
+                }
+                None => {
+                    s.confirm = Some(json!({
+                        "rule": crate::inventory::CONFIRM_SYNTH_RULE,
+                        "outcome": "not-attached",
+                        "evidence_bits": s.results.first().and_then(|r| r.analytic_holdout_bits),
+                        "reason": if s.attach {
+                            "the results were not attached to the inventory"
+                        } else {
+                            "attach was not requested"
+                        },
+                    }));
+                }
+            }
         }
     }
     let snap = s.clone();

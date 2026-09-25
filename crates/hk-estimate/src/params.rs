@@ -14,8 +14,11 @@
 //!    noise-subtracted (negative bins zeroed) PSD; **x-dB** bandwidths on the same trace.
 //! 5. **SNR** = unclipped in-band power / (N0·OBW99) over the box. Bias: see the crate docs.
 //! 6. **CFO centroid**, then the **burst extent**: recentre, ±0.75·OBW channel filter, moving
-//!    average of |y|² over `2·fs/OBW` samples, first→last above N0·ENBW + 6 dB. **SNR over the
-//!    extent** with the box's OBW99 band.
+//!    average of |y|² over `2·fs/OBW` samples, first→last above N0·ENBW + 6 dB **among the runs
+//!    that hold a significant sample** (T-876, [`EstimatorConfig::extent_pfa`]); each edge then
+//!    sits where the moving average crosses half-way to the burst's on-level, which is where the
+//!    burst starts or ends (T-887, [`half_level_edges`]). **SNR over the extent** with the box's
+//!    OBW99 band.
 //! 7. **Hinted CFO** on the filtered extent: x² line (DSB/BPSK), x⁴ line (QPSK), FSK cluster
 //!    mid-point. Power-of-M without a hint is only a shape feature.
 //! 8. **Shape features**, flags, RF centre (optionally ppm-corrected).
@@ -97,8 +100,17 @@ pub struct EstimatorConfig {
     pub peak_z_margin: f64,
     /// Clip fraction above which amplitudes are untrusted (docs/04 §10.4).
     pub clip_fraction_max: f64,
-    /// Burst extent threshold over the filtered noise power, dB.
+    /// Burst extent threshold over the filtered noise power, dB. Sets the extent's **edges**.
     pub extent_threshold_db: f64,
+    /// False-alarm probability, over the whole snippet, of the test that decides which runs above
+    /// `extent_threshold_db` belong to the burst (T-876). A run counts only if some sample of its
+    /// moving average clears the level that noise alone reaches with this probability anywhere in
+    /// the snippet (the `Gamma(K)` law of a `K`-effective-average window, Bonferroni over the
+    /// snippet's windows), or if it lies within one window of a run that does. A 6 dB crossing is
+    /// a ~10⁻⁴ event per window of noise, so a few-thousand-sample snippet carried one often
+    /// enough that `first..last` ran milliseconds past the burst into noise.
+    #[serde(default = "default_extent_pfa")]
+    pub extent_pfa: f64,
     /// Channel filter passband as a fraction of OBW99 (±).
     pub channel_filter_obw: f64,
     /// Floor on spectral-line significance thresholds, dB.
@@ -132,6 +144,7 @@ impl Default for EstimatorConfig {
             peak_z_margin: 3.0,
             clip_fraction_max: 1e-4,
             extent_threshold_db: 6.0,
+            extent_pfa: default_extent_pfa(),
             channel_filter_obw: 0.75,
             line_min_significance_db: 12.0,
             line_pfa: 1e-3,
@@ -143,6 +156,10 @@ impl Default for EstimatorConfig {
             min_band_z: 50.0,
         }
     }
+}
+
+fn default_extent_pfa() -> f64 {
+    1e-3
 }
 
 /// One x-dB bandwidth.
@@ -408,6 +425,125 @@ pub fn cfo_from_fsk_levels(levels_hz: &[f64], sigmas_hz: &[f64]) -> Estimate {
         0.5 * (sigmas_hz[lo].powi(2) + sigmas_hz[hi].powi(2)).sqrt(),
         method,
     )
+}
+
+/// The extent's significance level over its edge threshold: a noise-only moving average of `win`
+/// samples of noise filtered to `enbw_frac`·fs is `Gamma(K)` with `K` its effective number of
+/// independent averages (sinc autocorrelation of a band-limited process), and the level is the one
+/// it exceeds with probability `pfa` over the snippet's `n / win` windows. `rel`, the N0 estimate's
+/// relative standard error, widens it by two of its sigmas: an N0 read low is exactly what lets
+/// noise clear a fixed level.
+fn extent_seed_factor(win: usize, enbw_frac: f64, n: usize, pfa: f64, rel: f64) -> f64 {
+    let w = win as f64;
+    let b = enbw_frac.clamp(1e-6, 1.0);
+    let lag_sum: f64 = (1..win)
+        .map(|l| {
+            let a = std::f64::consts::PI * b * l as f64;
+            2.0 * (w - l as f64) * (a.sin() / a).powi(2)
+        })
+        .sum();
+    let k = (w * w / (w + lag_sum)).clamp(1.0, w);
+    let tests = (n as f64 / w).max(1.0);
+    let t = hk_dsp::floor::gamma::mean_threshold(k, (pfa / tests).clamp(1e-300, 0.5));
+    t * (1.0 + 2.0 * rel.max(0.0))
+}
+
+/// First and last sample of the burst's moving average `ma` above `thr`, counting only the runs
+/// above `thr` that reach `seed` somewhere (or that lie within one window of a run already
+/// counted). Noise alone clears `thr` now and then in a long snippet; it essentially never clears
+/// `seed`, so an isolated noise blip milliseconds from the burst no longer sets its end (T-876).
+/// When no run reaches `seed` — a burst too weak for any window of it to be significant on its
+/// own — every run counts, as before: there is nothing firmer to measure the edges from.
+fn burst_bounds(
+    n: usize,
+    win: usize,
+    thr: f64,
+    seed: f64,
+    ma: &impl Fn(usize) -> f64,
+) -> (Option<usize>, Option<usize>) {
+    // Runs above `thr`, each with whether it holds a seed.
+    let mut runs: Vec<(usize, usize, bool)> = Vec::new();
+    let mut open: Option<(usize, bool)> = None;
+    for i in 0..n {
+        let v = ma(i);
+        match (&mut open, v > thr) {
+            (None, true) => open = Some((i, v > seed)),
+            (Some((_, seeded)), true) => *seeded |= v > seed,
+            (Some((s, seeded)), false) => {
+                runs.push((*s, i - 1, *seeded));
+                open = None;
+            }
+            (None, false) => {}
+        }
+    }
+    if let Some((s, seeded)) = open {
+        runs.push((s, n - 1, seeded));
+    }
+    let seeded: Vec<usize> = (0..runs.len()).filter(|&r| runs[r].2).collect();
+    let (Some(&r0), Some(&r1)) = (seeded.first(), seeded.last()) else {
+        return (runs.first().map(|r| r.0), runs.last().map(|r| r.1));
+    };
+    // Bridge outward across gaps no longer than one window.
+    let (mut a, mut b) = (r0, r1);
+    while a > 0 && runs[a].0 - runs[a - 1].1 <= win {
+        a -= 1;
+    }
+    while b + 1 < runs.len() && runs[b + 1].0 - runs[b].1 <= win {
+        b += 1;
+    }
+    (Some(runs[a].0), Some(runs[b].1))
+}
+
+/// The burst's edges, `start..end` in snippet samples, from the run `first..=last` of the centred
+/// moving average `ma` above the edge threshold (T-887).
+///
+/// **Each edge is where `ma` crosses half-way between the noise and the burst's on-level.** `ma(i)`
+/// averages `win` samples centred on `i`, so across a step from noise `p_noise` to `p_noise + P`
+/// at sample `B` it ramps linearly over `B − win/2 ..= B + win/2` and passes the half-way level
+/// exactly at `B`, at any SNR: noise only adds jitter to the crossing, never bias. The on-level is
+/// the median of `ma` over the run (robust to a ragged edge and, for a keyed emission, low rather
+/// than high, which moves the edge outward — the safe side).
+///
+/// Until T-887 the edges were `first − win/2` and `last + win/2`. `first` is where `ma` clears
+/// `p_noise` + 6 dB, and at any useful SNR that takes only a sliver of the window on the burst,
+/// so `first` already sat about `win/2` *before* the burst — and a second `win/2` was then taken
+/// off. Every extent ran about one full window into the noise on each side: measured on the
+/// mock-SDR `fsk_burst_train` scene, −44 and +56 source samples at 500 kS/s on a 23.3 ms burst,
+/// which the classifier's normalised snippet carried as ~4 noise-only samples at each end of
+/// ~1200. An envelope sample at the noise floor is `|a/ā − 1| ≈ 1`, so those 8 samples alone
+/// doubled `sigma_aa` (0.083 against 0.025 over the same snippet with its edges dropped), and
+/// the classifier's `2fsk` density, fitted on edge-free dev-grid records, put every row at z ≈ +4.
+/// The bias is a fixed number of samples, so it is the short bursts it costs most.
+///
+/// The half-level edges never widen the extent: they are clamped inside the old
+/// `first − win/2 .. last + win/2 + 1`, which remains the bound at an SNR so low that the
+/// on-level barely clears the threshold.
+fn half_level_edges(
+    n: usize,
+    win: usize,
+    first: usize,
+    last: usize,
+    p_noise: f64,
+    ma: &impl Fn(usize) -> f64,
+) -> (usize, usize) {
+    let lo = first.saturating_sub(win / 2);
+    let hi = (last + win / 2 + 1).min(n);
+    let mut run: Vec<f64> = (first..=last).map(ma).collect();
+    run.sort_by(f64::total_cmp);
+    let on = run[run.len() / 2];
+    if !(on.is_finite() && on > p_noise) {
+        return (lo, hi);
+    }
+    let half = p_noise + 0.5 * (on - p_noise);
+    let start = (lo..=last).find(|&i| ma(i) >= half).unwrap_or(lo);
+    let end = (first..hi)
+        .rev()
+        .find(|&i| ma(i) >= half)
+        .map_or(hi, |i| i + 1);
+    if end <= start {
+        return (lo, hi);
+    }
+    (start, end)
 }
 
 struct Noise {
@@ -696,12 +832,16 @@ impl ParamEstimator {
             let b = (a + win).min(n);
             (prefix[b] - prefix[a]) / (b - a).max(1) as f64
         };
-        let first = (0..n).find(|&i| ma(i) > thr);
-        let last = (0..n).rev().find(|&i| ma(i) > thr);
+        let (first, last) = burst_bounds(
+            n,
+            win,
+            thr,
+            thr * extent_seed_factor(win, enbw / fs, n, cfg.extent_pfa, rel),
+            &ma,
+        );
         let extent = match (first, last) {
             (Some(f), Some(l)) if l >= f => {
-                let e0 = f.saturating_sub(win / 2);
-                let e1 = (l + win / 2 + 1).min(n);
+                let (e0, e1) = half_level_edges(n, win, f, l, n0 * enbw, &ma);
                 Some(Extent {
                     start: e0,
                     end: e1,
@@ -1472,5 +1612,72 @@ mod tests {
         assert_eq!(peak_count(&single, 1e-3), 1);
         assert!(!multi_signal(&single, 1e-3));
         assert!(cumulative_edges(&single, 0.005).0 < 50);
+    }
+
+    /// T-876: an isolated excursion over the edge threshold far from the burst no longer sets
+    /// its end; one within a window of it is the burst's own ragged edge and still does.
+    #[test]
+    fn burst_bounds_ignore_isolated_noise_runs() {
+        let (n, win, thr, seed) = (1000usize, 10usize, 1.0, 3.0);
+        let mut v = vec![0.5; n];
+        v[200..400].iter_mut().for_each(|x| *x = 10.0); // the burst
+        v[405..408].iter_mut().for_each(|x| *x = 1.5); // ragged tail, within a window
+        v[700..703].iter_mut().for_each(|x| *x = 1.5); // noise excursion, 300 samples later
+        v[50..52].iter_mut().for_each(|x| *x = 2.0); // and one well before
+        let ma = |i: usize| v[i];
+        assert_eq!(burst_bounds(n, win, thr, seed, &ma), (Some(200), Some(407)));
+        // The pre-T-876 rule (every run counts) ran from the early excursion to the late one.
+        assert_eq!(burst_bounds(n, win, thr, thr, &ma), (Some(50), Some(702)));
+        // A burst with no significant sample keeps that rule: nothing firmer to measure from.
+        assert_eq!(burst_bounds(n, win, thr, 100.0, &ma), (Some(50), Some(702)));
+        assert_eq!(burst_bounds(n, win, 20.0, 30.0, &ma), (None, None));
+    }
+
+    /// T-887: a centred moving average crosses half-way to the on-level exactly at a step, so the
+    /// edges land on the burst at any SNR — not a window outside it, as `first − win/2` did.
+    #[test]
+    fn half_level_edges_land_on_the_burst_not_a_window_outside_it() {
+        let (n, win) = (1000usize, 20usize);
+        let (b, e) = (300usize, 700usize);
+        for (p_noise, p_on) in [(1.0, 4.5), (1.0, 100.0), (1.0, 1e4)] {
+            let x: Vec<f64> = (0..n)
+                .map(|i| {
+                    if (b..e).contains(&i) {
+                        p_noise + p_on
+                    } else {
+                        p_noise
+                    }
+                })
+                .collect();
+            let ma = |i: usize| {
+                let a = i.saturating_sub(win / 2);
+                let z = (a + win).min(n);
+                x[a..z].iter().sum::<f64>() / (z - a) as f64
+            };
+            let thr = 4.0 * p_noise;
+            let (first, last) = burst_bounds(n, win, thr, thr, &ma);
+            let (f, l) = (first.unwrap(), last.unwrap());
+            let (s, t) = half_level_edges(n, win, f, l, p_noise, &ma);
+            assert!(s.abs_diff(b) <= 1 && t.abs_diff(e) <= 1, "{p_on}: {s}..{t}");
+            // The rule it replaced ran a window into the noise at every useful SNR.
+            if p_on >= 100.0 {
+                assert!(
+                    b - f.saturating_sub(win / 2) >= win - 1,
+                    "{p_on}: first {f}"
+                );
+            }
+        }
+        // Never wider than the old bounds, whatever the on-level.
+        let ma = |i: usize| if (400..420).contains(&i) { 5.0 } else { 1.0 };
+        let (s, t) = half_level_edges(n, win, 400, 419, 1.0, &ma);
+        assert!(s >= 400 - win / 2 && t <= 419 + win / 2 + 1);
+    }
+
+    #[test]
+    fn extent_seed_factor_grows_with_the_snippet_and_the_n0_error() {
+        let f = |n, rel| extent_seed_factor(64, 0.2, n, 1e-3, rel);
+        assert!(f(10_000, 0.0) > 1.0);
+        assert!(f(100_000, 0.0) > f(10_000, 0.0));
+        assert!(f(10_000, 0.05) > f(10_000, 0.0));
     }
 }

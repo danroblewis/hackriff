@@ -3,6 +3,7 @@
 // against them without waiting.
 import type { AppContext } from "../context";
 import { removeOutput, upsertOutput, type OutputEntry } from "../state";
+import type { AudioHeader } from "../../audio-frames";
 import { AudioSession, type AudioSessionEvents } from "./audio-session";
 import { audioSubText, listenTcpTarget, nextId, recordsTcpTarget, refusalText } from "./outputs";
 
@@ -26,17 +27,25 @@ function events(ctx: AppContext): AudioSessionEvents {
       return e ? upsertOutput(fn(e))(s) : {};
     });
   };
+  // Each live stream's header, for re-deriving the sub-line when a status changes `stereo` (T-874).
+  const headers = new Map<string, AudioHeader>();
+  const sub = (h: AudioHeader, stereo: boolean | null) =>
+    audioSubText(h.audio?.mode, h.sample_rate_hz, h.audio?.channels ?? 1, stereo);
   return {
     onHeader(id, header) {
-      patch(id, (e) => ({ ...e, state: "live", sub: audioSubText(header.audio?.mode, header.sample_rate_hz), message: null }));
+      headers.set(id, header);
+      patch(id, (e) => ({ ...e, state: "live", sub: sub(header, null), message: null }));
     },
     onRefused(id, status, reason) {
       patch(id, (e) => ({ ...e, state: "refused", message: refusalText(status, reason) }));
     },
     onStatus(id, status) {
-      patch(id, (e) => ({ ...e, levelDbfs: status.level_dbfs }));
+      const h = headers.get(id);
+      const next = h && typeof status.stereo === "boolean" ? sub(h, status.stereo) : null;
+      patch(id, (e) => ({ ...e, levelDbfs: status.level_dbfs, sub: next ?? e.sub }));
     },
     onClosed(id, _hadHeader, reason) {
+      headers.delete(id);
       patch(id, (e) => ({ ...e, state: e.state === "refused" ? "refused" : "ended", message: reason }));
     },
   };

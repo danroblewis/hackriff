@@ -56,6 +56,13 @@ def test_gate_fail_with_no_red_test_says_lint_build():
     assert fixes.reason_for("x  task-t7  T-7  GATE_FAIL", log, "task-t7")[1] == "merge gate red"
 
 
+def test_gate_fail_with_a_pytest_red_names_it():
+    """09-24 05:50: T-879's fix worker was told "lint/build/ui-unit" for a red in test_work_accounting."""
+    log = ("[09-24 05:40:00] MERGE start task-t879\n[09-24 05:49:50] TRIAGE: no FAIL lines found (pytest red: "
+           "tests/test_work_accounting.py::test_x) - not a flake candidate\n[09-24 05:49:52] GATE FAILED task-t879 x\n")
+    assert fixes.gate_fail_detail(log, "task-t879") == "pytest red: tests/test_work_accounting.py::test_x"
+
+
 def _ts(s):
     return int(datetime(2026, 9, 23, *map(int, s.split(":"))).timestamp())
 

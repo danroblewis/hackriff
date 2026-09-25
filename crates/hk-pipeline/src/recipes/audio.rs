@@ -227,6 +227,7 @@ impl AudioSink {
         nodes: &Map<String, Value>,
         lost_samples: u64,
         backlog_s: f64,
+        (refined, refine_updates): (Option<(f64, f64)>, u64),
     ) {
         let first = |block: &str| -> Option<Status> {
             graph
@@ -257,9 +258,12 @@ impl AudioSink {
             lost_samples,
             latency_ms: round2(self.latency_ms),
             backlog_s: round2(backlog_s),
-            refined_center_hz: None,
-            refined_bandwidth_hz: None,
-            refine_updates: 0,
+            refined_center_hz: refined.map(|(c, _)| c),
+            refined_bandwidth_hz: refined.map(|(_, b)| b),
+            refine_updates,
+            // A recipe's `audio` output is mono (hk-recipe; T-874 changed only Listen's opener).
+            stereo: None,
+            stereo_lock_losses: None,
         };
         let mut m = match status.to_value() {
             Value::Object(m) => m,

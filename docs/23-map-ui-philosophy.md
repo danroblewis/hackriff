@@ -419,7 +419,8 @@ backend already serves.
 *This section is the contract MAP-01…MAP-05, MAP-13 and MAP-24 build to. The mockup
 [`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html) is the visual reference; where the two
 disagree, this section wins and the mockup is a bug report. Rationale is
-[ADR-0023](adr/0023-map-ui-and-research-state.md) §1 and §7.*
+[ADR-0023](adr/0023-map-ui-and-research-state.md) §1 and §7. The user's five principles in §10.6
+override the rest of this section where they conflict.*
 
 ### 10.1 Four z-bands, and the band decides the coordinate system
 
@@ -448,6 +449,10 @@ Two rules make the table load-bearing rather than decorative:
 Chrome docks to viewport edges as floating translucent panels: Go-to top-left; layers / tools /
 Research top-right; zoom right; follow-live FAB bottom-right above the sheet; pane status bottom-left.
 Chrome **fades to ~35 % opacity after ~6 s idle** and returns on any pointer, key or focus event.
+**No overlay is draggable or repositionable; users choose visibility only** (§10.6 rule 3): each
+dock above is the one position this section gives it, no dock position is read from or written to
+local or user state, and a reload restores which panels are shown, never where (guarded by
+`ui/test/map-overlay-position.test.ts`, T-896, part of T-825's suite).
 
 **Fade never applies to:** the bottom sheet, the Research slide-in, an open menu, a focused control,
 the retune offer, the mode banner, or any honesty statement (the per-pane tier/level readout, the
@@ -509,6 +514,94 @@ to un-tuned *frequency* **offers** a retune, and an explicit press commits one t
 - **State is never encoded in hue alone** (§7; docs/24 §8): candidate/confirmed/unknown and
   observed/unobserved/unknown/excluded each carry a shape or pattern; red-green pairings are avoided.
 
+### 10.6 The user's five map-UI principles (normative, 2026-09-24)
+
+*Stated by the user on 2026-09-24 after reviewing T-801/T-802/T-803 on staging. Where anything else in
+this document, ADR-0023 or the mockup disagrees, these win. An audit on the same day found each only
+partly planned; the tickets that close the gaps are named per principle.*
+
+1. **Minimize overlay; expose as much map as possible.** An overlay is temporary: it exists to be
+   **closed**, returning its pixels to the map. Every band-2/3 overlay therefore has a visible
+   **dismiss**; §10.2's fade-to-35 % is an idle courtesy for band-2 chrome, **never a substitute for
+   closing**. A panel's default state is its smallest: the left inventory column collapses to a chip or
+   a peek strip no taller than 56 px on every width, and expanded it is an overlay with a dismiss —
+   a column that keeps the height it had before the redesign is not minimal. (Left column: the
+   collapse ticket; closeability across the sheet, the Research slide-in and the left column: the
+   closeable-overlays ticket, amending T-824.)
+2. **Anything with coordinates is drawn on the map.** A thing with a (time x frequency) place is
+   rendered on the surface — as a point or pin (docs/24), a box, or a **traced path** (an ordered
+   (t, f) polyline, like a directions line) — laid out through the pane's capture-time mapping in the
+   same pass as the tiles (the shared-time-axis invariant, §10.1). Listing it only in a panel is not
+   enough. First path producers: chirps, frequency-hop sequences, sweep paths, and the device's retune
+   history (the path-layer and retune-history tickets).
+3. **We decide the overlay arrangement.** No overlay is draggable or repositionable: each has one
+   position this section assigns (§10.1-§10.3), and the user chooses only **whether** it is shown. No
+   chrome dock position is read from or written to local or user state. (The sheet's vertical
+   peek/half/full snap, T-803, is a size state of a fixed-position panel and does not conflict.) This is
+   a deliberate Google-Maps-style choice to try, guarded by T-825.
+4. **Size is inversely proportional to influence.** The bigger a panel, the less it may change the
+   map. Big panels (the bottom sheet, the Explore drawer, the Research slide-in, the left column) only
+   add or remove marks, or shift coordinates slightly. Anything that changes the map in a **major**
+   way — retune, zoom, jump the view, switch base style or layers, follow live — is a **small button
+   or a small cluster**. So a bare click on a row in a big panel never jumps the map and never offers a
+   retune: that action lives on a small, explicit per-row button. §11 rule 1 (device routes only from
+   Go-to and Selected actions) still holds, and T-825 guards that no device route or view-jump handler
+   is bound to a panel body element.
+   **Rule 4 applied to the MMAP tickets (re-spec, T-899, 2026-09-24).** These replace the matching
+   words in each ticket's acceptance; the tickets' 2026-09-24 notes point here.
+
+   | Ticket | Big panel | A bare row / body click does | The major action lives on |
+   |---|---|---|---|
+   | T-814 (MAP-14) Explore drawer, to ~90 vh | bottom sheet, Explore tab | selects the item and highlights its mark on the surface (if it has one on screen); nothing else | a small per-row **Go** button: pan/zoom there, or — where no tuned window covers it — raise the ordinary gated retune **offer** (band 4), which itself needs an explicit press |
+   | T-815 (MAP-15) past-surveys browse | bottom sheet, Explore tab | selects the survey window and outlines its (time x frequency) extent on the surface | a small per-row **Jump** button that restores the pane to that extent |
+   | T-821 (MAP-21) Research slide-in, 460 px full height | Research slide-in | selects the row and highlights its mark (table <-> canvas sync is a *highlight*, not a move); inline edits of a row's own fields are writes, not map changes | small per-row buttons: **Go** (view jump, or the gated retune offer when un-tuned) and, on a saved view, **Restore** |
+   | T-804 (MAP-04) Selected tab | bottom sheet, Selected tab | nothing on the body: it is read-only measurements, explanations and liveness | a **compact action cluster** of small buttons (Listen, Decode/RDS, Record clip, Stream out, Analyze, Promote/Delete, any retune) — one row of 36-48 px icon+label buttons or a small overflow menu, never a large surface of full-width action blocks |
+
+   Two things stay allowed on a big panel's body because they do not change the map in a major way:
+   **selecting / highlighting** a mark (the focus sheet raising itself to `half` is the panel's own
+   size, not the map's), and durable writes that **add or remove** a mark (a new annotation, deleting a
+   marker). A **follow-on** change is caught too: a subscriber to the selection (`focus`) may not jump the
+   view or reach a device either, or the rule would be defeated one hop away.
+
+   **The guard (T-825's, landed by T-899):** `ui/test/app-panel-influence.test.ts` reads every module
+   under `ui/src/app/` except a short named list of non-panels (the band-2 map controls, the canvas, the
+   nudge cluster, the decoder workbench — each with its reason), so a new panel file is covered the day
+   it lands. Every press handler (click, dblclick, key, pointer/mouse/touch down/up, contextmenu) bound
+   to anything but a `<button>`/`<input>`/`<select>`/`<textarea>` — a row, a panel body, a mount's host —
+   must name no device route and no view jump, following same-file helpers two calls deep. It is proven
+   red on injected violations (a row-click jump, a row-click retune, a keyboard twin, a body listener,
+   a jump behind a helper, and a jump swapped into each real Explore row) and green when the same call
+   moves onto a per-row button.
+5. **The existing small controls are right; keep them.** The +/- zoom cluster, the follow-live
+   reticle FAB, the map-type/layers button and the Go-to frequency box (T-802) are the model for
+   rule 4, and are not to be replaced or enlarged.
+6. **The map is GIS, not Google Maps: features are drawn at their true extent; markers are a
+   generalization, never the representation** (user, 2026-09-24 19:35, after T-809's pins on
+   staging: "a point doesn't represent something meaningful on a waterfall graph. A signal has a
+   frequency width and a duration, that's a rectangle"). This is the signal-model invariant (a
+   signal is a time-frequency region, ADR-0017/0019) applied to symbolization:
+   - **Geometry is the feature's true extent.** Every detection, emitter and event is a polygon in
+     (t, f) — its box — drawn in content space through the pane's capture-time mapping (§10.1,
+     band 0/1). A single-frame impulse is the only true point, and even it is a thin bar of its
+     measured bandwidth. An ongoing signal's box runs to the live edge by assumption; the box is
+     drawn at the resolution tier the pane was drawn at.
+   - **Scale-dependent generalization.** Only when a box is under ~6 px on screen does it collapse to
+     a small symbol at its centre, with the same symbology; once zoom makes it at least that big it
+     is the box again. Pins exist only as this generalization.
+   - **Symbology by attribute, on the polygon:** Confirmed = solid outline + light fill; Candidate =
+     dashed outline, no or very light fill; unexplained = outline + '?' label; curated/human marks =
+     a distinct outline style. Class is carried by fill, outline and label — never by glyph shape —
+     and is colour-blind safe (T-813).
+   - **Identify = hit-test the polygon.** Hover anywhere inside the box shows the MapTip; a click
+     selects it (thicker outline, corner handles, the sheet rises); Tab walks features in reading
+     order (time, then frequency).
+   - **Labels by placement rules**, not tooltips only: where a box is wide enough its label
+     (frequency · bandwidth · class) sits inside or just above it, and overlapping labels thin by
+     priority (Confirmed > Candidate).
+   - **Density, not clustering, at coarse zoom.** Where many features would generalize, a
+     density layer (features per cell, from `/api/tiles/events`) replaces numbered cluster bubbles;
+     drilling in resolves to boxes.
+
 ---
 
 ## 11. Panel -> state -> route: the frontend/API map (normative)
@@ -524,8 +617,9 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
 | Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
+| Left inventory column (Candidate / Confirmed lists + selections), collapsed to a chip by default | T-895 (P1) | `explore` (existing `inventory` / `selections` slices; the chip's open/closed is presentation only) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the chip's counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening, closing and the counts reach no route) |
 | Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/history` | - |
-| Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` |
+| Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
 | Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
 | Detections layer | MAP-08 | `explore` (existing rows) | `GET /api/events` | - |
@@ -540,8 +634,10 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 
 **Three rules this table encodes.**
 
-1. **Only two rows in the whole table reach a device route**, and both need an explicit press: Go-to,
-   and the Selected tab's actions. Everything else is a view change or a durable-state write.
+1. **Only two rows in the whole table reach a device route**, and both need an explicit press on a
+   **small** control: Go-to, and the Selected tab's compact action cluster (§10.6 rule 4). A per-row
+   **Go** button in the Explore drawer or Research may *raise* the gated retune offer, which is itself
+   the band-4 transient that needs its own press. Everything else is a view change or a durable-state write.
 2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client
    exists.** The client is thin because the route is the contract, not because the panel is small.
 3. **The guard is the request the client *builds*.** Contract tests prove the server serves a route

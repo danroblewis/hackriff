@@ -211,3 +211,40 @@ def test_a_conflict_the_work_runner_took_is_not_a_touchpoint_but_its_escalations
     assert "T-875" not in text and "T-7 " not in text and "NO_WORK" not in text and "DEFLAKE_REQUESTED" not in text
     assert "T-9  CONFLICT" in text and "GATE_FAIL_ESCALATE" in text and "coordinator  NOTE" in text and "a person must" in text
     assert len(tp) == 4
+
+
+def test_the_tick_line_shows_what_the_one_solo_pass_rule_saved(tmp_path):
+    """User decision 2026-09-24 14:20: the one-solo-pass saving must be visible in `just flow`."""
+    from datetime import datetime as _dt
+    t = _dt.now().strftime("%Y-%m-%dT%H:%M:%S")
+    (tmp_path / "flaky.jsonl").write_text(
+        f'{{"ts":"{t}","tests":"a","passes_alone":1,"accepted":true,"saved_s":300,"solo_saved_s":200}}\n'
+        f'{{"ts":"{t}","tests":"b","passes_alone":2,"accepted":true,"saved_s":600}}\n')
+    (tmp_path / "merge-runner.log").write_text("")
+    line = flow.tick_line(str(tmp_path), flow.summary(str(tmp_path)))
+    assert "flake-accepts 2 (saved 15 min; 1 after one solo pass, 3 min of it)" in line
+
+
+def test_branches_not_yet_on_main_is_one_number(tmp_path):
+    """User, 2026-09-24 17:02: the dashboard said 14 and the queue file 8 - an isolation's remainder
+    lives in the runner's memory. One union: queue file, batch, isolation remainder, merging now."""
+    (tmp_path / "merge-queue.txt").write_text("task-a\n# a comment\ntask-b\ntask-a\n")
+    (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-c task-d\n")
+    (tmp_path / "isolate-remaining").write_text("task-e task-f task-b\n")
+    (tmp_path / "merging-now").write_text("task-g\n")
+    q = flow.queue_waiting(str(tmp_path))
+    assert q["waiting"] == 7 and q["queued"] == 2 and q["gating"] == 3 and q["isolating"] == 3
+    assert flow.queue_waiting(str(tmp_path / "empty"))["waiting"] == 0
+
+
+def test_queue_depth_hourly_shows_in_versus_out(tmp_path):
+    t0 = datetime(2026, 9, 24, 16, 0)
+    rows = [{"ts": (t0.timestamp() + m * 60), "waiting": w} for m, w in ((1, 8), (30, 12), (59, 14), (61, 14), (119, 13))]
+    (tmp_path / "queue-depth.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "landed.jsonl").write_text("".join(json.dumps({"ticket": f"T-{i}", "merge_ts": t0.timestamp() + 3600 + i * 60}) + "\n"
+                                                   for i in range(3)))
+    h = flow.queue_depth_hourly(str(tmp_path), t0, t0.replace(hour=18))
+    assert h[0] == {"hour": "09-24 16", "out": 0, "min": 8, "max": 14, "mean": 11.3, "in": 6}     # grew by 6, nothing left
+    assert h[1] == {"hour": "09-24 17", "out": 3, "min": 13, "max": 14, "mean": 13.5, "in": 2}     # 3 out, depth -1 -> 2 in
+    s = flow.queue_depth_series(str(tmp_path), t0, t0.replace(hour=18), points=2)
+    assert len(s) <= 3 and s[0][1] == 8

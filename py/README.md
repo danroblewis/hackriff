@@ -31,13 +31,16 @@ python3 py/examples/hk_bits.py --port 8788                    # print decoded bu
 python3 py/examples/hk_bits.py --symbols --emitter <id>       # soft symbols of one emitter
 python3 py/examples/hk_bits.py --file bursts.hkstream         # parse a netcat dump
 python3 py/examples/hk_audio_wav.py --emitter <id> --seconds 10 --out station.wav
+python3 py/examples/hk_audio_wav.py --emitter <id> --stereo --out station-stereo.wav
 ```
 
 - `hkstream.py` is the reusable parser: frames, header (or a refusal frame), binary records,
   status records, drop markers, `connect()` and `pack_bits()`.
 - `hk_bits.py` pairs each burst's status record (sync and payload offsets, bit order, CRC,
   emitter) with its data record and prints the payload bytes.
-- `hk_audio_wav.py` writes 48 kHz mono 16-bit WAV, filling `sample_index` gaps with silence.
+- `hk_audio_wav.py` writes 48 kHz 16-bit WAV with the stream's own channel count (mono, or
+  two channels after `--stereo` — which sends `channels=2` — on a broadcast-FM station; the
+  header's `audio.channels` says which it got, T-874), filling `sample_index` gaps with silence.
 - `tests/test_stream_examples.py` runs the parser on `tests/data/t060_fsk_bits.hkstream`, bytes read
   over TCP from the mock-SDR e2e test (regenerate with `HK_T060_CAPTURE=<path> cargo test -p
   hk-e2e --test stream_external`).

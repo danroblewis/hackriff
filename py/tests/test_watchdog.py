@@ -488,3 +488,229 @@ def test_a_stale_or_missing_tick_says_nothing_rather_than_clear_or_contended():
     assert W.contention(snap, W.CONTENTION_STALE_S + 1) == ""
     assert W.contention({}, 1.0) == ""
     assert W.contention(None, 1.0) == ""
+
+
+# --------------------------------------------------------------------- (f) role-session liveness
+# Incident 2026-09-24 04:07: a `pkill` took the coordinator (`dev`) and the pipeline manager
+# (`flow`) down and nothing noticed for 5.5 h. tmux and ops/launch.sh are faked at
+# `subprocess.run`, the one door both go through; the ps table is synthetic as above.
+COORD = "claude --model opus --effort high --append-system-prompt-file /r/.claude/roles/coordinator.md"
+PM = "claude --model opus --effort high --append-system-prompt-file /r/.claude/roles/pipeline-manager.md"
+
+
+class FakeTmux:
+    """`sessions` maps a session name to its pane pid, or to (pid, "1") for a `remain-on-exit`
+    corpse; every argv run is recorded."""
+
+    def __init__(self, sessions):
+        self.sessions, self.calls = dict(sessions), []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        out, rc = "", 0
+        if argv[0] == "tmux":
+            name = argv[argv.index("-t") + 1].lstrip("=")
+            if argv[1] == "kill-session":
+                self.sessions.pop(name, None)
+            elif name not in self.sessions:
+                rc = 1
+            elif argv[1] == "list-panes":
+                pid, dead = (self.sessions[name] if isinstance(self.sessions[name], tuple)
+                             else (self.sessions[name], "0"))
+                out = f"{pid} {dead}\n"
+            elif argv[1] == "capture-pane":
+                out = "error: claude: command not found\n"
+        else:                                         # ops/launch.sh <role>
+            out = f"launched '{argv[1]}'\n"
+        return W.subprocess.CompletedProcess(argv, rc, out, "")
+
+    def launches(self):
+        return [c[1] for c in self.calls if c[0].endswith("launch.sh")]
+
+    def kills(self):
+        return [c[-1] for c in self.calls if c[:2] == ["tmux", "kill-session"]]
+
+
+def _live(monkeypatch, sessions, ps=None):
+    """`ps` is what a fresh `read_ps()` returns - the re-read before any kill-session."""
+    fake = FakeTmux(sessions)
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "read_ps", lambda: ps if ps is not None else [])
+    return fake
+
+
+ALIVE = table(row(100, 1, COORD), row(200, 1, PM), row(300, 1, "/sbin/launchd"))
+
+
+def test_liveness_alive_sessions_raise_nothing(monkeypatch):
+    fake = _live(monkeypatch, {"dev": 100, "flow": 200})
+    since: dict = {}
+    for i in range(5):
+        assert W.liveness(ALIVE, since, 1000.0 + 60 * i) == []
+    assert fake.launches() == [] and fake.kills() == []
+
+
+def test_liveness_claude_below_the_pane_pid_counts(monkeypatch):
+    """launch.sh execs claude into the pane, but a claude one shell down is alive too."""
+    fake = _live(monkeypatch, {"dev": 50, "flow": 60})
+    rows = table(row(50, 1, "-zsh"), row(100, 50, COORD), row(60, 1, "-zsh"), row(61, 60, "sh -c x"),
+                 row(200, 61, PM))
+    assert W.liveness(rows, {}, 1000.0) == [] and fake.launches() == []
+
+
+def test_liveness_missing_session_alerts_then_relaunches_on_the_second_miss(monkeypatch):
+    fake = _live(monkeypatch, {"flow": 200})          # `dev` is gone
+    since: dict = {}
+    a1 = W.liveness(ALIVE, since, 1000.0)
+    assert [(a["level"], a["key"]) for a in a1] == [("red", "watchdog:liveness:coordinator")]
+    assert "'dev'" in a1[0]["title"] and "no tmux session" in a1[0]["title"]
+    assert fake.launches() == []                      # one miss is not enough
+    a2 = W.liveness(ALIVE, since, 1060.0)
+    assert fake.launches() == ["coordinator"]
+    assert fake.kills() == []                         # nothing to kill: the session was gone
+    assert [a["key"] for a in a2] == ["watchdog:liveness:coordinator", "watchdog:relaunch:coordinator"]
+    assert "exit 0" in a2[1]["body"] and "launched 'coordinator'" in a2[1]["body"]
+    assert "liveness:miss:coordinator" not in since   # the count starts again after a relaunch
+
+
+def test_liveness_a_miss_between_alive_checks_does_not_add_up(monkeypatch):
+    fake = _live(monkeypatch, {"flow": 200})
+    since: dict = {}
+    W.liveness(ALIVE, since, 1000.0)                  # miss 1
+    fake.sessions["dev"] = 100
+    W.liveness(ALIVE, since, 1060.0)                  # alive: resets
+    del fake.sessions["dev"]
+    W.liveness(ALIVE, since, 1120.0)                  # miss 1 again, not 2
+    assert fake.launches() == []
+
+
+def test_liveness_session_without_claude_is_killed_then_relaunched(monkeypatch, tmp_path):
+    """A `remain-on-exit` pane whose claude died: the session exists, so launch.sh would refuse."""
+    rows = table(row(100, 1, "-zsh"), row(200, 1, PM))
+    fake = _live(monkeypatch, {"dev": 100, "flow": 200}, ps=rows)
+    since: dict = {}
+    a1 = W.liveness(rows, since, 1000.0)
+    assert "no claude" in a1[0]["title"] and fake.kills() == []
+    a2 = W.liveness(rows, since, 1060.0)
+    assert fake.kills() == ["=dev"] and fake.launches() == ["coordinator"]
+    kill_at = next(i for i, c in enumerate(fake.calls) if c[:2] == ["tmux", "kill-session"])
+    launch_at = next(i for i, c in enumerate(fake.calls) if c[0].endswith("launch.sh"))
+    assert kill_at < launch_at
+    assert "killed the claude-less session" in a2[-1]["title"]
+    log = (tmp_path / "watchdog.log").read_text()
+    assert "PANE dev before kill-session" in log and "command not found" in log
+    capture_at = next(i for i, c in enumerate(fake.calls) if c[:2] == ["tmux", "capture-pane"])
+    assert capture_at < kill_at
+
+
+def test_liveness_relaunches_a_role_at_most_once_per_ten_minutes(monkeypatch):
+    fake = _live(monkeypatch, {"flow": 200})
+    since: dict = {}
+    t = 1000.0
+    for _ in range(2):                                # relaunch #1 at t=1060
+        W.liveness(ALIVE, since, t)
+        t += 60
+    assert fake.launches() == ["coordinator"]
+    fake.sessions.pop("dev", None)                    # it died again at once
+    for _ in range(6):                                # two more misses, well inside ten minutes
+        a = W.liveness(ALIVE, since, t)
+        t += 60
+        assert a and a[0]["key"] == "watchdog:liveness:coordinator"   # still alerting
+    assert fake.launches() == ["coordinator"]
+    assert "Not relaunching" in a[0]["body"]
+    t = 1060.0 + W.RELAUNCH_GAP
+    W.liveness(ALIVE, since, t)
+    assert fake.launches() == ["coordinator", "coordinator"]
+
+
+def test_liveness_dry_run_never_kills_or_launches(monkeypatch, tmp_path):
+    rows = table(row(100, 1, "-zsh"))
+    fake = _live(monkeypatch, {"dev": 100}, ps=rows)  # dev without claude, flow gone
+    since: dict = {}
+    W.liveness(rows, since, 1000.0, dry=True)
+    alarms = W.liveness(rows, since, 1060.0, dry=True)
+    assert fake.kills() == [] and fake.launches() == []
+    assert {a["key"] for a in alarms} >= {"watchdog:relaunch:coordinator",
+                                          "watchdog:relaunch:pipeline-manager"}
+    assert "DRY-RUN would relaunch coordinator" in (tmp_path / "watchdog.log").read_text()
+
+
+def test_liveness_checks_at_most_once_a_minute(monkeypatch):
+    fake = _live(monkeypatch, {"flow": 200})
+    since: dict = {}
+    for t in (1000.0, 1020.0, 1040.0):                # three 20 s ticks = one check
+        W.liveness(ALIVE, since, t)
+    assert since["liveness:miss:coordinator"] == 1 and fake.launches() == []
+    assert sum(c[:2] == ["tmux", "has-session"] for c in fake.calls) == 2   # dev + flow, once
+    W.liveness(ALIVE, since, 1060.0)
+    assert fake.launches() == ["coordinator"]
+
+
+def test_liveness_an_empty_ps_table_is_unknown_not_dead(monkeypatch):
+    fake = _live(monkeypatch, {"dev": 100, "flow": 200})
+    since: dict = {}
+    for t in (1000.0, 1060.0, 1120.0):
+        assert W.liveness([], since, t) == []
+    assert fake.calls == []
+
+
+def test_liveness_a_remain_on_exit_corpse_is_dead(monkeypatch):
+    """`#{pane_dead}` = 1: claude exited and tmux kept the pane; its old pid means nothing."""
+    fake = _live(monkeypatch, {"dev": (100, "1"), "flow": 200}, ps=ALIVE)
+    since: dict = {}
+    a = W.liveness(ALIVE, since, 1000.0)             # pid 100 is even still `claude` in ps
+    assert [x["key"] for x in a] == ["watchdog:liveness:coordinator"] and "pane dead" in a[0]["title"]
+    W.liveness(ALIVE, since, 1060.0)
+    assert fake.kills() == ["=dev"] and fake.launches() == ["coordinator"]
+
+
+def test_liveness_a_pane_pid_missing_from_ps_is_unknown_not_dead(monkeypatch):
+    """The tick's ps table predates the pane (a fresh launch): skip, never count a miss."""
+    fake = _live(monkeypatch, {"dev": 999, "flow": 200})
+    since: dict = {}
+    for t in (1000.0, 1060.0, 1120.0):
+        assert W.liveness(ALIVE, since, t) == []
+    assert fake.kills() == [] and fake.launches() == []
+
+
+def test_liveness_rereads_ps_before_a_kill_and_spares_a_live_claude(monkeypatch):
+    stale = table(row(100, 1, "-zsh"), row(200, 1, PM))
+    fresh = table(row(100, 1, "-zsh"), row(101, 100, COORD), row(200, 1, PM))
+    fake = _live(monkeypatch, {"dev": 100, "flow": 200}, ps=fresh)
+    since: dict = {}
+    W.liveness(stale, since, 1000.0)
+    a = W.liveness(stale, since, 1060.0)
+    assert fake.kills() == [] and fake.launches() == [] and a == []
+    assert not any(c[:2] == ["tmux", "capture-pane"] for c in fake.calls)
+
+
+@pytest.mark.parametrize("marker", ["roles-stopped", "dispatch-paused"])
+def test_liveness_a_deliberate_stop_alerts_but_never_relaunches(monkeypatch, tmp_path, marker):
+    rows = table(row(100, 1, "-zsh"))                 # dev claude-less, flow gone
+    fake = _live(monkeypatch, {"dev": 100}, ps=rows)
+    (tmp_path / marker).write_text("")
+    since: dict = {}
+    for t in (1000.0, 1060.0, 1120.0, 1180.0):
+        a = W.liveness(rows, since, t)
+        assert {x["key"] for x in a} == {"watchdog:liveness:coordinator",
+                                         "watchdog:liveness:pipeline-manager"}
+    assert fake.kills() == [] and fake.launches() == []
+    assert f"{marker} exists" in a[0]["body"]
+    (tmp_path / marker).unlink()                      # /dev-env start removed it: back to normal
+    W.liveness(rows, since, 1240.0)
+    assert fake.launches() == ["coordinator", "pipeline-manager"]
+
+
+def test_liveness_gives_up_after_three_relaunches_that_came_back_dead(monkeypatch):
+    fake = _live(monkeypatch, {"flow": 200})          # dev never comes up
+    since: dict = {}
+    t = 1000.0
+    while t < 1000.0 + 6 * W.RELAUNCH_GAP:
+        a = W.liveness(ALIVE, since, t)
+        t += 60
+    assert fake.launches() == ["coordinator"] * 3
+    assert a and a[0]["key"] == "watchdog:liveness:coordinator"      # still alerting
+    assert "giving up relaunching coordinator after 3 attempts - see watchdog.log" in a[0]["body"]
+    fake.sessions["dev"] = 100                        # a person brought it back: the count resets
+    W.liveness(ALIVE, since, t)
+    assert "liveness:failed:coordinator" not in since

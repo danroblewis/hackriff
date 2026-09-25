@@ -212,3 +212,20 @@ def test_the_dashboard_re_executes_itself_above_its_rss_limit(monitor):
                              execv=lambda exe, argv: seen.update(exe=exe, argv=argv) or "re-executed",
                              sleep=lambda s: None)
     assert out == "re-executed" and seen["argv"][0] == seen["exe"]
+
+
+def test_flow_shows_which_tests_were_blamed_on_a_branch(monitor, tmp_path, monkeypatch):
+    """Supervisor for the user, 2026-09-24 14:55: make the ledger's branch_defects visible on /flow."""
+    (tmp_path / "flakes.json").write_text(json.dumps({"tests": {
+        "canvas-journey.e2e.mjs": {"branch_defects": 3, "failed_alone": 0, "passed_alone": 2},
+        "app-trace.e2e.mjs": {"branch_defects": 1, "failed_alone": 2, "passed_alone": 11},
+        "quiet.e2e.mjs": {"branch_defects": 0}}}))
+    monkeypatch.setattr(monitor, "SCRATCH", str(tmp_path))
+    assert [(r["test"], r["blamed"]) for r in monitor.blamed_alone()] == [("canvas-journey.e2e.mjs", 3), ("app-trace.e2e.mjs", 1)]
+
+
+def test_flow_panel_carries_the_queue_depth(monitor, tmp_path):
+    (tmp_path / "merge-queue.txt").write_text("task-a\n")
+    (tmp_path / "isolate-remaining").write_text("task-b task-c\n")
+    d = monitor.build_flow_panel(str(tmp_path))
+    assert d.get("queue_depth", {}).get("now", {}).get("waiting") == 3, d.get("error")

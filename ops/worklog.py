@@ -34,7 +34,9 @@ import time
 PROJ = os.path.expanduser("~/.claude/projects/-Users-daniellewis-hackriff")
 SESSIONS = os.path.expanduser("~/.claude/sessions")
 OPS = os.environ.get("HACKRIFF_OPS") or os.path.expanduser("~/.hackriff-ops")
-TMUX_ROLE = {"flow": "pipeline-manager", "dev": "coordinator", "super": "supervisor"}
+import sys  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from roles import SESSION_ROLE as TMUX_ROLE  # noqa: E402  ops/roles.py, the one role->session map
 ROLE_ORDER = ["pipeline-manager", "coordinator", "supervisor"]
 _ROLE_ARG = re.compile(r"roles/([\w-]+)\.md")
 _TURN_LINE = re.compile(r'"type":\s*"(user|assistant)"')

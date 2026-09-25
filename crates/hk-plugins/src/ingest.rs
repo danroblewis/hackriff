@@ -344,6 +344,7 @@ mod tests {
             }),
             content_class: ContentClass::Unrestricted,
             t: Timestamp::from_unix_nanos(i64::from(icao) + 1),
+            provenance: None,
         }
     }
 
