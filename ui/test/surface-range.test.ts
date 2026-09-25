@@ -335,15 +335,21 @@ test("T-946(b): the orientation note follows the backend's coverage as it grows,
     any: { cells: Array.from({ length: 128 * 32 }, (_, i) => ({ state: i < n ? "observed" : "unobserved" })) },
   });
   let n = 1;
+  let latest = 1_700_000_000;
+  const coverageT1: number[] = [];
   const get = async (path: string) => {
     if (path.startsWith("/api/tiles")) return tileProbe();
-    if (path === "/api/navigation") return { time: { latest_s: 1_700_000_000 } };
+    if (path === "/api/navigation") return { time: { latest_s: latest } };
+    coverageT1.push(Number(new URL(path, "http://x").searchParams.get("t1") ?? NaN));
     return lit(n);
   };
   const p = await probeSurface(get);
   const first = p.note;
   n = 400;
+  latest += 300; // the sweep lit cells AFTER first paint, past the probe's frozen box
   const later = await refreshOrientationNote(get, p);
   assert.notEqual(later, first, "the sentence stayed at its first-paint census after coverage grew");
   assert.match(later, /400 of 4096/);
+  const asked = coverageT1[coverageT1.length - 1];
+  assert.ok(asked >= latest, `the refresh queried a box ending at ${asked}, before the newest capture ${latest}`);
 });
