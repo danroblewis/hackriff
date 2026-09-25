@@ -12572,7 +12572,80 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     let (st, e) = get(addr, &tile(f_index, settled, "&planes=f8"));
     assert_eq!(st, 400, "{e}");
     let msg = e["error"].as_str().unwrap_or_default();
-    assert!(msg.contains("f8") && msg.contains("json, f16"), "{msg}");
+    assert!(
+        msg.contains("f8") && msg.contains("json, f16, compact"),
+        "{msg}"
+    );
+
+    // ---- T-1019: `compact`, the other three planes -------------------------------------------
+    //
+    // The same grid again: `max_db` byte-identical to `f16`'s plane, `frames` exact at whatever
+    // width this tile's counts need, and `grid.coverage` NOT SENT — `coverage.planes[].runs`
+    // beside the grid already carries per-cell coverage, which is the duplication this spelling
+    // exists to stop.
+    let (st, compact) = get(addr, &tile(f_index, settled, "&planes=compact"));
+    assert_eq!(st, 200, "{compact}");
+    assert_eq!(compact["grid"]["encoding"]["planes"], json!("compact"));
+    for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+        assert!(
+            compact["grid"][k].is_null(),
+            "grid.{k} is still spelled per cell under `compact`: {}",
+            compact["grid"][k]
+        );
+    }
+    assert!(
+        !compact["coverage"]["planes"]
+            .as_array()
+            .map(|p| p.is_empty())
+            .unwrap_or(true),
+        "the grey authority must still be served: {}",
+        compact["coverage"]
+    );
+    assert_eq!(
+        compact["grid"]["planes"]["max_db"], packed["grid"]["planes"]["max_db"],
+        "one spelling of the measurement plane, not two"
+    );
+    let occ = &compact["grid"]["planes"]["occupancy_max"];
+    assert_eq!(occ["type"], json!("f16"), "{occ}");
+    assert_eq!(occ["scale"], json!("fraction"), "{occ}");
+    assert_eq!(occ["absent"], json!("nan"), "{occ}");
+    let want_occ = plain["grid"]["occupancy_max"].as_array().unwrap();
+    let occ_bytes = b64_decode(occ["data"].as_str().unwrap());
+    assert_eq!(occ_bytes.len(), want_occ.len() * 2, "{occ}");
+    for (i, cell) in want_occ.iter().enumerate() {
+        let v = f16_to_f32(u16::from_le_bytes([occ_bytes[i * 2], occ_bytes[i * 2 + 1]]));
+        match cell.as_f64() {
+            None => assert!(
+                !v.is_finite(),
+                "occupancy cell {i}: null in JSON, {v} packed"
+            ),
+            Some(w) => assert!(
+                (v as f64 - w).abs() <= 1e-3 + w.abs() * 1e-3,
+                "occupancy cell {i}: {w} in JSON, {v} packed"
+            ),
+        }
+    }
+    let fr = &compact["grid"]["planes"]["frames"];
+    let want_frames = plain["grid"]["frames"].as_array().unwrap();
+    assert!(
+        ["u8", "u16", "u32", "u64"].contains(&fr["type"].as_str().unwrap_or_default()),
+        "{fr}"
+    );
+    let width = fr["bytes"].as_u64().unwrap() as usize / want_frames.len();
+    let fr_bytes = b64_decode(fr["data"].as_str().unwrap());
+    assert_eq!(fr_bytes.len(), want_frames.len() * width, "{fr}");
+    let mut counted = 0usize;
+    for (i, cell) in want_frames.iter().enumerate() {
+        let mut got = [0u8; 8];
+        got[..width].copy_from_slice(&fr_bytes[i * width..(i + 1) * width]);
+        let want = cell.as_u64().expect("frames is a count, never null");
+        assert_eq!(u64::from_le_bytes(got), want, "frames cell {i}");
+        counted += usize::from(want > 0);
+    }
+    assert!(
+        counted > 0,
+        "no cell carried a frame count, so the comparison above would pass on an empty grid"
+    );
 
     // ---- the transfer coding ------------------------------------------------------------------
     let path = tile(f_index, settled, "&planes=f16");
@@ -12640,16 +12713,19 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     let (gz_enc, json_gz_b) = read("&planes=json", Some("gzip"));
     let (_, f16_b) = read("&planes=f16", None);
     let (f16_gz_enc, f16_gz_b) = read("&planes=f16", Some("gzip"));
+    let (_, compact_b) = read("&planes=compact", None);
+    let (_, compact_gz_b) = read("&planes=compact", Some("gzip"));
     let build_ms = |extra: &str| {
         get(addr, &format!("{big}{extra}")).1["cost"]["build_ms"]
             .as_f64()
             .unwrap_or(f64::NAN)
     };
     eprintln!(
-        "T-700 / T-533 re-measured (256x256 tile, one address, four spellings):\n           json              {json_b} B   build_ms {:.1}\n           json + gzip       {json_gz_b} B\n           f16               {f16_b} B\n           f16 + gzip        {f16_gz_b} B   build_ms {:.1}   -> {:.1}x",
+        "T-700 / T-533 / T-1019 re-measured (256x256 tile, one address, six spellings):\n           json              {json_b} B   build_ms {:.1}\n           json + gzip       {json_gz_b} B\n           f16               {f16_b} B   build_ms {:.1}\n           f16 + gzip        {f16_gz_b} B\n           compact           {compact_b} B   build_ms {:.1}\n           compact + gzip    {compact_gz_b} B   -> {:.1}x off json",
         build_ms("&planes=json"),
         build_ms("&planes=f16"),
-        json_b as f64 / f16_gz_b as f64,
+        build_ms("&planes=compact"),
+        json_b as f64 / compact_gz_b as f64,
     );
     assert_eq!(gz_enc.as_deref(), Some("gzip"));
     assert_eq!(f16_gz_enc.as_deref(), Some("gzip"));
@@ -12665,6 +12741,16 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     assert!(
         f16_gz_b < json_gz_b && f16_gz_b < f16_b,
         "packed+gzipped {f16_gz_b} B must beat gzip alone ({json_gz_b} B) and f16 alone ({f16_b} B)"
+    );
+    // T-1019: the spelling that packs the other three planes and stops sending `grid.coverage`
+    // twice must beat the one that packs only `max_db`, uncompressed and gzipped alike.
+    assert!(
+        compact_b < f16_b,
+        "compact {compact_b} B against f16 {f16_b} B"
+    );
+    assert!(
+        compact_gz_b < f16_gz_b,
+        "compact+gzip {compact_gz_b} B against f16+gzip {f16_gz_b} B"
     );
     // The headline claim, asserted rather than quoted: an order of magnitude off the wire.
     assert!(

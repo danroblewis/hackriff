@@ -194,10 +194,10 @@ test("probeSurface asks exactly five read-only routes, in dependency order", asy
       : coverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 60, f1: 62, t0: 0, t1: 31 });
   });
   assert.deepEqual(asked, [
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=f16",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=compact",
     // T-505: the second tier, probed the same cheap way. Both lattices are READ OFF an answer;
     // neither is ever chosen here.
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8&planes=f16",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8&planes=compact",
     "/api/navigation",
     coverageUrl({ f0Hz: 1e6, f1Hz: 6e9, t0Ns: T0 * S, t1Ns: T1 * S }, ORIENT_CELLS, ORIENT_ROWS),
     coverageUrl(surfaceWide.box!, ORIENT_CELLS, ORIENT_ROWS),
@@ -290,7 +290,7 @@ test("the route's backpressure is answered by ASKING AGAIN, never by a banner qu
     undefined,
     { backoffMs: 4, sleep: async (ms) => { slept.push(ms); } },
   );
-  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=f16";
+  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=compact";
   assert.deepEqual(asked.slice(0, 3), [probePath, probePath, probePath],
     "the request the client builds on a refusal is the SAME request, again");
   assert.deepEqual(slept, [4, 8], "and it waits longer each time rather than re-asking on one cadence");

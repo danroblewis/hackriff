@@ -948,7 +948,7 @@ A record that names no device — every record written before T-378, and any sou
 
 ### `GET /api/tiles` — one tile of the unified surface, at independent `(level_f, level_t)` (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5 / §8)
 
-Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `planes` (`json` — the default — or `f16`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)).
+Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `planes` (`json` — the default — `f16`, or `compact`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)).
 
 One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
 
@@ -972,6 +972,12 @@ One route serves every viewport — the panes, the zoomable minimap and the live
             //  "planes": { "max_db": { "type": "f16", "byte_order": "little-endian",
             //                          "transfer": "base64", "cells": 65536, "bytes": 131072,
             //                          "scale": "dbfs-per-hz", "absent": "nan", "data": "…" } },
+            // …and with `?planes=compact` (T-1019) `occupancy_max` and `frames` join it, while
+            // `coverage` is NOT SENT AT ALL — `coverage.planes[].runs` below already carries it:
+            //  "planes": { "max_db": { "type": "f16", … },
+            //              "occupancy_max": { "type": "f16", "scale": "fraction", … },
+            //              "frames": { "type": "u8", "scale": "count", "absent": "none",
+            //                          "cells": 65536, "bytes": 65536, "data": "…" }, "rule": "…" },
             "max_db": [-102.4, null, "…"], "occupancy_max": ["…"], "coverage": ["…"], "frames": ["…"],
             "cells": 65536, "observed_cells": 4096, "range_db": { "lo": -138.2, "hi": -91.0 },
             "unit": "dbfs", "percentiles": "unknown: a de-welded fold cannot split …",
@@ -1117,16 +1123,25 @@ Two consequences a client can see. **The lattice stays 4 × 4, and zooming out c
 
 `grid.max_db` is 65 536 JSON decimal numbers on a rendered tile — **1 197 118 B of a 1 878 289 B live body, 64 %** — and its destination in the one client that reads it is an **R16F texture**: seventeen significant digits sent, eleven bits kept. `?planes=f16` spells that plane as base64 of little-endian IEEE 754 binary16 instead.
 
-| | `?planes=json` (default) | `?planes=f16` |
-|---|---|---|
-| `grid.max_db` | the array | **absent** |
-| `grid.planes.max_db` | **absent** | `{type, byte_order, transfer, cells, bytes, scale, absent, data}` |
-| `occupancy_max`, `coverage`, `frames` | arrays | arrays, unchanged |
-| `grid.encoding.planes` | `"json"` | `"f16"` |
+| | `?planes=json` (default) | `?planes=f16` | `?planes=compact` (T-1019) |
+|---|---|---|---|
+| `grid.max_db` | the array | **absent** | **absent** |
+| `grid.planes.max_db` | **absent** | `{type, byte_order, transfer, cells, bytes, scale, absent, data}` | the same plane, byte for byte |
+| `grid.occupancy_max` | the array | the array | **absent** |
+| `grid.planes.occupancy_max` | **absent** | **absent** | `f16`, `scale: "fraction"`, `absent: "nan"` |
+| `grid.frames` | the array | the array | **absent** |
+| `grid.planes.frames` | **absent** | **absent** | `u8`/`u16`/`u32`/`u64`, `scale: "count"`, `absent: "none"` |
+| `grid.coverage` | the array | the array | **NOT SENT** — `coverage.planes[].runs` carries it |
+| `grid.encoding.planes` | `"json"` | `"f16"` | `"compact"` |
 
 - **Same values, one spelling.** The packed plane is the same cells in the same row-major order, equal to within binary16's own precision — which is the precision the texture keeps either way. `NaN` is what `null` is: **not observed**, never a level of zero (C26). `crates/hk-cli/tests/api_contract.rs` asserts the two cell for cell on one live tile.
 - **The wire states its own type**, and a reader that does not recognise `encoding.planes` must **refuse the tile** rather than decode it as the spelling it does know — a plane read against the wrong type is a measurement invented, not a degraded one. `ui/src/surface/tile.ts` throws `TileDecodeError`, which leaves the place *pending*, never grey. A different packing in future gets a **new name**, never a redefinition of `f16`. An unrecognised `planes=` value is a `400` naming it and the accepted set, never a quiet fall back to the other spelling.
-- **Only `max_db`, because only `max_db` wins.** For the other three planes JSON is the *smaller* spelling: measured on the same tile, `frames` is 131 073 B as text (two distinct values over 65 536 cells) against 349 528 B as base64 `u32`, and `occupancy_max`/`coverage` lose likewise. A "pack everything" mode would have grown three planes by 394 kB to shrink one.
+- **`f16` packs only `max_db`, because at a FIXED width only `max_db` won.** Measured on the same tile, `frames` is 131 073 B as text (two distinct values over 65 536 cells) against 349 528 B as base64 `u32`. That is a fact about `u32`, not about `frames`, which is what `compact` corrects.
+- **`compact` (T-1019) packs the other two and stops sending the third.** The review this came from (2026-09-25, staging, live HackRF, loopback) found that even a hot-cache hit whose `cost.build_ms` was 0.6 took ~12 ms of wall clock, that wall ≈ build everywhere, and that transport, gzip and JSON-versus-binary *on the wire* were **not** the cause — what is left is producing an 826–925 kB body, of which `max_db` packed is 174 764 B and the rest is three 65 536-element JSON number arrays. So:
+  - `occupancy_max` becomes a **binary16** plane, the same `absent: nan` rule as `max_db` (it is a fraction in `[0, 1]`, which binary16 holds to ~3 decimal digits — the same "what survives is what is sent" argument);
+  - `frames` becomes an **unsigned-integer** plane at the **narrowest width that holds this tile's own maximum**, stated in `type`. Nothing is lost at any width *because* the width is measured: a saturated count would be an invented measurement. On a rendered tile that is `u8` — 87 384 B base64 against 131 073 B of text, where the fixed `u32` cost 349 528 B;
+  - `grid.coverage` is **not sent**. It is 65 536 `f32` fractions as decimal text, and `coverage.planes[].runs` in the same answer already carries per-cell coverage — by *state*, run-length encoded, a few kB. This is the duplication T-467 removed between two coverage planes, still present between the coverage plane and the grid. A caller that wants the per-cell observed **fraction** asks `planes=json` or `planes=f16`, where every field is unchanged. `grid.encoding.rule` says so on the wire.
+- **Measured (T-1019).** Through the route, one 256 × 256 address on the acceptance fixture: **1 267 029 B** JSON → **922 024 B** `f16` → **466 840 B** `compact` (−49 % on `f16`), and gzipped 94 830 → 53 765 → 51 778 B. And where the ticket actually aimed — **producing** the body, timed in-process on a full, fully-observed 256 × 256 grid, release build, best of 20: **11.43 ms** JSON, **6.54 ms** `f16`, **1.57 ms** `compact` (4.2× off `f16`), for 3 269 829 / 2 396 901 / 440 138 B. That is the ~12 ms → ~3 ms hot-hit floor the review predicted, and it is why this spelling exists: unlike T-533's, its win is in `build_ms`, not only on the wire.
 - **The absent one is ABSENT, not empty or null**, in both directions — an empty array would read as a grid of no cells, which is a different claim from a grid whose cells are spelled elsewhere. The uniform short-circuit grid (below) carries no plane in either spelling and still states its `encoding`.
 - **Measured through the route, one address, four spellings back to back** on a 256 × 256 tile. Originally (2026-09-20, a fully-populated live tile): **1 879 209 B** as JSON, **856 178 B** packed, **244 012 B** JSON gzipped, **117 382 B** packed *and* gzipped — **16×**. **Re-measured on relanding** (T-700, 2026-09-22, after T-571 changed how a tile is produced and T-595 added `excluded`; the acceptance fixture's tile, which carries more absence and therefore compresses further): **1 202 453 B** → **912 435 B** packed → **71 005 B** JSON gzipped → **43 090 B** packed *and* gzipped, **27.9×**. The magnitudes move with the tile; the *ordering* is what the contract test asserts, because both levers pay and neither subsumes the other — JSON decimal text is high-entropy by construction, so compressing it is not the same as not sending it.
 - **Where the win lands, stated honestly.** `cost.build_ms` did not move (20.0 → 20.4 ms originally; 16.7 → 17.8 ms on the reland, inside the run-to-run spread): the route's own work was never the float formatting. Measured in Chrome over **loopback**, one tile's fetch-to-decoded hop is 36 → 31 ms and a 16-tile pane row at the four-slot cap is 182 → 166 ms — both dominated by tile *production*, not by the bytes. The body is what a tunnel, a phone or a second machine waits for, and what the browser parses. Making a tile produce faster is a different ticket from making it smaller, and this is the second.
@@ -1212,7 +1227,7 @@ A viewport needs tens of tiles and used to ask for them one HTTP request at a ti
 Query: `device`, `scheme`, `cells`, `planes` and `client` are shared by the batch (they are properties of the viewport, and one request is one asker); `addresses` carries the per-tile part.
 
 ```
-GET /api/tiles/batch?addresses=<level_f>.<level_t>.<f_index>.<t_index>[,…]&cells=256&planes=f16
+GET /api/tiles/batch?addresses=<level_f>.<level_t>.<f_index>.<t_index>[,…]&cells=256&planes=compact
 { "requested": 5, "returned": 5, "truncated": false, "remaining": [],
   "limits": { "max_addresses": 64, "max_response_bytes": 8388608,
               "over_addresses": "refused (400), naming the cap",

@@ -17,8 +17,9 @@
 //
 // **The measurement plane arrives as binary16, not as decimal text** (T-533). `grid.max_db` was
 // 1 197 118 B of a 1 878 289 B live tile — seventeen significant digits per cell, for values this
-// file writes straight into an R16F texture. Every tile request carries `planes=f16`
-// ([[TILE_PLANES]]) and the answer states what it sent (`grid.encoding.planes`, and the plane's own
+// file writes straight into an R16F texture. T-1019 finished the job: every tile request carries
+// `planes=compact` ([[TILE_PLANES]]), which types `frames` too and drops `grid.coverage` — the
+// coverage plane beside the grid already carries it — and the answer states what it sent (`grid.encoding.planes`, and the plane's own
 // type, byte order and transfer); an encoding this client does not know throws rather than being
 // decoded as one it does.
 //
@@ -195,9 +196,14 @@ export interface TileResponse {
      * The typed spelling of the planes it names — `max_db` as base64 of little-endian IEEE
      * binary16. Every plane NOT named here is a JSON array beside it.
      */
-    planes?: { max_db?: { type?: string; byte_order?: string; transfer?: string; cells?: number; data?: string } };
-    /** Per-cell folded frame count. The evidence that separates [[CELL.AWAITING]] from
-     * [[CELL.NO_LEVEL]] — see [[decodeTile]]. */
+    planes?: {
+      max_db?: TilePlane;
+      /** T-1019: the frame counts as unsigned integers, `u8`/`u16`/`u32`/`u64` wide. */
+      frames?: TilePlane;
+      occupancy_max?: TilePlane;
+    };
+    /** Per-cell folded frame count, in the JSON spelling. The evidence that separates
+     * [[CELL.AWAITING]] from [[CELL.NO_LEVEL]] — see [[decodeTile]]. */
     frames?: (number | null)[];
     /** T-461: the one cell **every** cell of this grid is, served instead of the per-cell arrays
      * when the coverage map answered the tile on its own. `max_db: null` is the absence of a
@@ -313,6 +319,9 @@ function numberNamed(message: string, word: string): number | null {
  * `NO_LEVEL`, never `AWAITING`: the more specific state is granted only on positive evidence, the
  * same direction as `BiasTee::Unknown` is not `Off`.
  */
+/** One typed plane out of `grid.planes`: the wire states its own type, order and transfer. */
+interface TilePlane { type?: string; byte_order?: string; transfer?: string; cells?: number; data?: string }
+
 export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
   const nf = resp.extent?.nf ?? resp.grid?.nf, nt = resp.extent?.nt ?? resp.grid?.nt;
   if (!(nf > 0) || !(nt > 0)) throw new TileDecodeError(`tile ${keyOf(addr)}: no grid dimensions`);
@@ -328,9 +337,13 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
   let framesAt: (i: number) => number | null | undefined;
   const packed = packedLevels(addr, resp, n);
   if (packed) {
+    // T-1019: `frames` may be a typed plane beside the levels, or still a JSON array (a `f16`
+    // server, or one that predates `compact`). Neither is a default for the other, and a plane
+    // that is present and unreadable throws rather than decoding as "no counts".
+    const packedCounts = packedFrames(addr, resp, n);
     const counted = Array.isArray(frames) && frames.length === n ? frames : null;
     levelAt = (i) => packed[i];
-    framesAt = counted ? (i) => counted[i] : () => undefined;
+    framesAt = packedCounts ? (i) => packedCounts[i] : counted ? (i) => counted[i] : () => undefined;
   } else if (Array.isArray(db) && db.length === n) {
     const counted = Array.isArray(frames) && frames.length === n ? frames : null;
     levelAt = (i) => db[i];
@@ -453,7 +466,10 @@ function shadowSourceOf(resp: TileResponse): ShadowSource | null {
 }
 
 /** Plane spellings this client can read. Anything else is refused, never guessed at (T-533). */
-const PLANE_ENCODINGS: readonly string[] = ["json", "f16"];
+const PLANE_ENCODINGS: readonly string[] = ["json", "f16", "compact"];
+
+/** The spellings that carry typed planes in `grid.planes` rather than JSON arrays. */
+const PACKED_ENCODINGS: readonly string[] = ["f16", "compact"];
 
 /**
  * The `max_db` plane out of `grid.planes`, decoded — or `null` when this answer spells it as a
@@ -473,11 +489,59 @@ function packedLevels(addr: TileAddr, resp: TileResponse, n: number): Float32Arr
   if (named !== undefined && !PLANE_ENCODINGS.includes(String(named))) {
     throw new TileDecodeError(`tile ${keyOf(addr)}: grid.encoding.planes is ${String(named)}, which this client cannot decode`);
   }
-  const p = resp.grid?.planes?.max_db;
+  const bin = planeBytes(addr, resp, "max_db", n, { f16: 2 });
+  if (!bin) return null;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = f16ToF32(bin.data.charCodeAt(i * 2) | (bin.data.charCodeAt(i * 2 + 1) << 8));
+  }
+  return out;
+}
+
+/**
+ * The `frames` plane out of `grid.planes`, decoded — or `null` when this answer spells the counts
+ * as a JSON array instead (T-1019).
+ *
+ * **The width is the server's, read off the plane's own `type`.** `frames` is a count, so the
+ * route picks the narrowest unsigned width that holds this tile's values rather than a fixed one;
+ * the only thing this client asks of the number is `=== 0` ([[decodeTile]]'s `AWAITING`
+ * discriminator), and a count above 2^53 is not representable here — which cannot arise from a
+ * tile of folded frames and would in any case read as "many", never as zero.
+ */
+function packedFrames(addr: TileAddr, resp: TileResponse, n: number): Float64Array | null {
+  const bin = planeBytes(addr, resp, "frames", n, { u8: 1, u16: 2, u32: 4, u64: 8 });
+  if (!bin) return null;
+  const w = bin.width;
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = 0;
+    for (let b = w - 1; b >= 0; b--) v = v * 256 + bin.data.charCodeAt(i * w + b);
+    out[i] = v;
+  }
+  return out;
+}
+
+/**
+ * One typed plane's bytes, with everything about it CHECKED rather than trusted: the answer's
+ * stated encoding, the plane's own type against the widths this reader accepts, byte order,
+ * transfer, cell count, and a `data` string that decodes to exactly `width · cells` bytes.
+ *
+ * **A plane decoded against the wrong type is not a degraded measurement, it is a different number
+ * entirely**, so anything unreadable throws and the place stays *pending* rather than being
+ * painted with whatever the bytes happened to mean. Absent is `null` — the JSON spelling, which
+ * every caller here already handles.
+ */
+function planeBytes(
+  addr: TileAddr, resp: TileResponse, name: "max_db" | "frames", n: number,
+  widths: Record<string, number>,
+): { data: string; width: number } | null {
+  const named = resp.grid?.encoding?.planes;
+  const p = resp.grid?.planes?.[name];
   if (p === undefined || p === null) return null;
-  const bad = (why: string) => new TileDecodeError(`tile ${keyOf(addr)}: grid.planes.max_db ${why}`);
-  if (named !== "f16") throw bad(`is present but grid.encoding.planes says ${String(named)}`);
-  if (p.type !== "f16") throw bad(`has type ${String(p.type)}, not f16`);
+  const bad = (why: string) => new TileDecodeError(`tile ${keyOf(addr)}: grid.planes.${name} ${why}`);
+  if (!PACKED_ENCODINGS.includes(String(named))) throw bad(`is present but grid.encoding.planes says ${String(named)}`);
+  const width = widths[String(p.type)];
+  if (width === undefined) throw bad(`has type ${String(p.type)}, not one of ${Object.keys(widths).join(", ")}`);
   if (p.byte_order !== "little-endian") throw bad(`has byte order ${String(p.byte_order)}`);
   if (p.transfer !== "base64") throw bad(`has transfer ${String(p.transfer)}`);
   if (p.cells !== n) throw bad(`covers ${String(p.cells)} cells, expected ${n}`);
@@ -488,12 +552,8 @@ function packedLevels(addr: TileAddr, resp: TileResponse, n: number): Float32Arr
   } catch {
     throw bad("is not base64");
   }
-  if (bin.length !== n * 2) throw bad(`decodes to ${bin.length} bytes, expected ${n * 2}`);
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    out[i] = f16ToF32(bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8));
-  }
-  return out;
+  if (bin.length !== n * width) throw bad(`decodes to ${bin.length} bytes, expected ${n * width}`);
+  return { data: bin, width };
 }
 
 /** One IEEE 754 binary16, as the sixteen bits the wire sent. NaN and infinities stay non-finite. */
