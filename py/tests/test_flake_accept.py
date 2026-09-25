@@ -345,8 +345,9 @@ log(){{ echo "LOG $*" >&2; }}
 ticket_of(){{ echo "$1"; }}
 git(){{ shift 2
   case "$1" in
+    rev-parse) [ -s {state} ] && echo moved || echo base ;;
     reset) : > {state} ;;
-    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
+    merge) [ "$2" = --abort ] && return 0; b="${{@: -1}}"; b=${{b#sha-}}; [ "$b" = "{merge_fail}" ] && return 1; echo "$b" >> {state} ;;
   esac; return 0; }}
 probe(){{ echo "$1 $(tr '\\n' ' ' < {state})" >> {calls}; [ "$(grep -cxE '{culprit_re}' {state})" -ge {need} ] && return 1; return 0; }}
 cargo(){{ [ "$1" = build ] && return 0; probe cargo; }}
@@ -354,7 +355,7 @@ npm(){{ [ "$2" = build ] && return 0; probe npm; }}
 TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
 {_function("bisect_red")}
 {_function("bisect_culprit")}
-echo "CULPRIT=[$(bisect_culprit base {' '.join(branches)})]"
+echo "CULPRIT=[$(bisect_culprit base {' '.join(f"{b}=sha-{b}" for b in branches)})]"
 cat {state} | wc -l | tr -d ' ' | sed 's/^/LEFT_MERGED=/'
 """
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
@@ -367,9 +368,9 @@ def test_bisection_names_the_one_branch_red_alone_in_log2_probes(tmp_path):
     """Supervisor for the user, 2026-09-24: bisect a red batch by the failing test alone, not n gates."""
     bs = [f"b{i}" for i in range(8)]
     out, probes, remaining = _bisect(tmp_path, bs, ["b5"])
-    assert "CULPRIT=[b5]" in out
-    assert len(probes) == 4                      # 3 halvings + the confirmation of b5 ALONE
-    assert probes[-1].split() == ["cargo", "b5"]  # confirmed on base + the culprit only
+    assert "CULPRIT=[b5=sha-b5]" in out          # by the tip recorded before the bisect
+    assert len(probes) == 5                      # 3 halvings + b5 ALONE, twice
+    assert probes[-2].split() == probes[-1].split() == ["cargo", "b5"]  # base + the culprit only
     assert "LEFT_MERGED=0" in out                # every probe is reset back to base
     assert remaining.split() == bs               # a restart mid-bisect re-queues the whole batch
 
@@ -377,7 +378,7 @@ def test_bisection_names_the_one_branch_red_alone_in_log2_probes(tmp_path):
 def test_bisection_blames_nobody_when_the_red_needs_two_branches(tmp_path):
     """b1 and b6 only break it together: no single branch is red alone -> nothing, and the caller isolates."""
     out, probes, _ = _bisect(tmp_path, [f"b{i}" for i in range(8)], ["b1", "b6"], together=True)
-    assert "CULPRIT=[]" in out and len(probes) == 4 and "LEFT_MERGED=0" in out
+    assert "CULPRIT=[]" in out and len(probes) == 4 and "LEFT_MERGED=0" in out   # green alone: no 2nd confirm
 
 
 def test_bisection_gives_up_on_a_merge_it_cannot_make(tmp_path):
@@ -387,7 +388,27 @@ def test_bisection_gives_up_on_a_merge_it_cannot_make(tmp_path):
 
 def test_bisection_runs_the_browser_specs_when_the_red_is_a_spec(tmp_path):
     out, probes, _ = _bisect(tmp_path, ["b0", "b1", "b2"], ["b0"], filt="", specs="app-surface.e2e.mjs")
-    assert "CULPRIT=[b0]" in out and probes and all(p.startswith("npm ") for p in probes)
+    assert "CULPRIT=[b0=sha-b0]" in out and probes and all(p.startswith("npm ") for p in probes)
+
+
+def test_a_red_alone_only_once_is_not_blamed(tmp_path):
+    """Flaky even alone: the first confirmation red, the second green -> no culprit (review, 2026-09-24)."""
+    state, calls, flip = tmp_path / "merged", tmp_path / "calls", tmp_path / "flip"
+    state.write_text("")
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}
+log(){{ :; }}; ticket_of(){{ echo "$1"; }}
+git(){{ shift 2; case "$1" in rev-parse) [ -s {state} ] && echo moved || echo base ;; reset) : > {state} ;;
+  merge) b="${{@: -1}}"; echo "${{b#sha-}}" >> {state} ;; esac; return 0; }}
+cargo(){{ echo x >> {calls}; grep -qx b1 {state} || return 0; [ -e {flip} ] && return 0; touch {flip}; return 1; }}
+TRIAGE_FILTER=t; TRIAGE_SPECS=""
+{_function("bisect_red")}
+{_function("bisect_culprit")}
+echo "CULPRIT=[$(bisect_culprit base b0=sha-b0 b1=sha-b1)]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert "CULPRIT=[]" in out.stdout, out.stdout + out.stderr
 
 
 def test_a_bisected_culprit_is_failed_and_the_rest_go_back_as_one_batch():
@@ -397,6 +418,10 @@ def test_a_bisected_culprit_is_failed_and_the_rest_go_back_as_one_batch():
     block = text[i:text.index("return 1\n}", i)]
     assert "bisect_culprit" in block
     assert '[ "${TRIAGE_KIND:-test}" = "test" ]' in block and '"${#branches[@]}" -ge 2' in block
+    assert '"${TRIAGE_ALONE_FIRST:-0}" = 1' in block        # never for a red that once passed alone
+    assert "main_side_of \"$culprit\"" in block            # main-side reds are not blamed here
+    assert 'record_attempt "$culprit" "$tip"' in block      # the tip that was probed
+    assert "\"GATE FAILED $culprit (bisected" in block      # hkpy.fixes / flakes read this wording
     assert '{ printf \'%s\\n\' "${others[@]}"; cat "$QUEUE"' in block   # others at the FRONT
-    assert "record_attempt \"$culprit\"" in block and "GATE_FAIL\" >> \"$NEEDS\"" in block
+    assert "GATE_FAIL\" >> \"$NEEDS\"" in block
     assert "isolate by merging each individually" in block             # the fallback is kept
