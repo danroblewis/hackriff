@@ -26329,7 +26329,7 @@ tasks:
   - id: T-885
     milestone: MAUTO
     title: "Rule on synthesized confirm with zero in-window detections: T-860 fails closed, narrowing ADR-0015 §6's one-burst confirm (ADR clarification)"
-    status: todo
+    status: blocked
     priority: normal
     deps:
     - T-860
@@ -26342,6 +26342,7 @@ tasks:
     notes: |
       FOUND BY T-860 worker + Opus review 2026-09-24.
     effort_reason: "an ACCEPTED-ADR clarification of a one-way confirm rule (CLAUDE.md: changing an ACCEPTED ADR goes to Fable + the user)"
+    blocked_on: "user + Fable ruling: synthesized confirm with zero in-window detections (T-860 fails closed, narrowing ACCEPTED ADR-0015 §6's one-burst confirm) - an ADR clarification, not a coding call"
   - id: T-886
     milestone: M3
     title: "T-878 follow-ups: merged-away tracks lose their classification row, posterior hidden on tied emitters, classify chain memory at 20 Msps, first-come classify coverage"
