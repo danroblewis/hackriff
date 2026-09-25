@@ -94,7 +94,8 @@ pub use components::FrameOutcome;
 pub use config::{
     BandProfile, Branches, CfarWindow, ClockHarmonicRule, CombRule, ConfigError, ConfirmConfig,
     DETECT_RESET_ON, DcRule, DetectionProfile, DetectorConfig, EdgeRule, FloorReference,
-    Hysteresis, ImageRule, IntegrationConfig, RefHarmonicRule, Rules, RunContext,
+    Hysteresis, ImageRule, IntegrationConfig, NOISE_BAND_MAX_CANDIDATES_PER_MIN, RefHarmonicRule,
+    Rules, RunContext,
 };
 pub use detector::{Detector, DetectorStats, SegmentInfo};
 pub use integrated::{IntegratedEmitter, IntegratedEvaluation, IntegratedSnapshot, SpanMeasure};
