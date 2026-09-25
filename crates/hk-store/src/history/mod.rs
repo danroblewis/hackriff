@@ -130,6 +130,7 @@
 
 mod codec;
 mod config;
+mod deferred;
 mod export;
 pub mod frame;
 mod live;
@@ -149,6 +150,7 @@ pub use config::{
     Geometry, HistogramConfig, LevelConfig, LevelGeometry, MAX_LEVELS, PyramidConfig,
     RetentionOverride, ViewLattice,
 };
+pub use deferred::{PendingWrites, WrittenBatch};
 pub use export::{
     HistoryStat, PNG_UNOBSERVED_RGB, SweepCsvImport, SweepCsvOptions, import_sweep_csv,
     waterfall_index, waterfall_png, waterfall_range, write_sweep_csv,

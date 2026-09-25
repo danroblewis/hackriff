@@ -1294,6 +1294,9 @@ impl Pipeline {
                     &dir,
                     crate::history::view_config(view_f_cell_hz, view_t_cell),
                 )
+                // T-901: a seal only indexes and queues; the view writer does the file work with
+                // the lock released, so a live row push never waits out a seal.
+                .and_then(|mut p| p.set_deferred_writes(true).map(|()| p))
                 .map(|p| Arc::new(Mutex::new(p)))
                 .map_err(|e| eprintln!("view-scheme history disabled: {e}"))
                 .ok()

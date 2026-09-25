@@ -1646,6 +1646,16 @@ impl Pyramid {
         {
             return Ok(Some(Source::Mem(t, None)));
         }
+        // T-901: sealed, but its file has not landed yet — read the tile the seal kept.
+        match self.unwritten.get(&(level, fb, tb)) {
+            Some(super::deferred::Unwritten::Full(t)) => return Ok(Some(Source::Mem(t, None))),
+            Some(u) => {
+                let bins = usize::from(self.cfg.histogram.bins);
+                let t = u.to_tile(self.geom.nf, &self.geom.levels[level], bins);
+                return Ok(Some(Source::Disk(Box::new(t))));
+            }
+            None => {}
+        }
         Ok(self
             .read_sealed(level, fb, tb)?
             .map(|t| Source::Disk(Box::new(t))))
