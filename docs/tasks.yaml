@@ -28196,7 +28196,7 @@ tasks:
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-BOOT
@@ -28221,6 +28221,7 @@ tasks:
       Commits: cdf2aa1f, dfb16473
       Observed, not chased: The review process failed twice with terminal_reason=api_error / api_error_status=429 (account monthly spend limit), never producing a verdict against this diff - not something this branch can fix. Recorded on the ticket via `just task note T-955` with the exact evidence (the two raw review JSON artifacts' terminal_reason/api_error_status/result fields) for whoever re-runs the review once the limit resets. | The new ui/e2e/app-reload-retune.e2e.mjs (retune via POST /api/control/window, reload, assert the drawn pane + its retune offer) was authored per the ticket's ask for an app e2e, but has still not been RUN in any session: no `hk` binary exists in this worktree or its target dir, and building the whole workspace for one e2e run is outside a targeted-tests pass. It appears to be exactly what one of the failed review attempts got stuck trying to do (a Bash call to build+run it was denied, then that session ran out of budget) - flagging this explicitly in case a future review pass hits the same wall: the unit-level tests are the primary, run evidence for this fix, and the e2e file is additional coverage for whoever next builds hk. | docs/tasks.yaml's root CLAUDE.md states the T-376 rule as 'never derived from frequency.current or a band plan' for the opening window; this fix does not read frequency.current for the OPENING (it derives recency purely from the coverage map's own row timestamps), but followLive's frequency reset does read frequency.current directly - deliberately, since that is on an explicit user press rather than at open. Worth a second look if a future ADR pass tightens that wording.
       Resources: 689 CPU-s, peak 2.0 GB
+    commit: a5575655
   - id: T-956
     milestone: MAUTO
     title: Production Evaluator over acquired IQ for /api/analyze (every job ends no_evaluator) - next MAUTO tranche
