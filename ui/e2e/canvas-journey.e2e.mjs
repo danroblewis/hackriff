@@ -289,8 +289,8 @@ const ROWS = `JSON.stringify([...document.querySelectorAll('.sf-scale')].map((v)
   return {
     id: v.dataset.pane ?? '',
     viewport: 'pane',
-    following: /LIVE/.test(v.dataset.when ?? ''),
-    where: `+"`"+`${v.dataset.where ?? ''} · ${v.dataset.when ?? ''}`+"`"+`,
+    following: v.dataset.following === 'true',
+    where: (v.dataset.where ?? '') + ' · ' + (v.dataset.when ?? ''),
     level: v.dataset.level ?? '',
     counts: v.dataset.counts ?? '',
     spanS: Number(v.dataset.spanS),

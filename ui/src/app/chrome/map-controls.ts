@@ -430,7 +430,12 @@ export function mountMapControls(host: MapControlHost): {
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
     svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, retune, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
+  // T-996: the left column under the nudges is a STACK, not a set of fixed `top:` constants — the
+  // persistent capture block, the transient Go-to offer and (below 1180 px) the tool-mode banner
+  // are each as tall as their words make them, so a fixed top per block is exactly how the offer
+  // came to be drawn over the width presets at 400 px. In flow, each starts where the last ended.
+  const stack = h("div", { class: "map-stack" }, retune, offer, modeBanner);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, stack, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the

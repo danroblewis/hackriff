@@ -206,3 +206,65 @@ for (const width of [1280, 400]) test(`at ${width} px: a scale bar per pane, one
     "reading the scale or zooming the view reached a device route");
   assert.deepEqual(page.exceptions, [], "uncaught exception");
 });
+
+/**
+ * T-996's rehomed capture controls (T-476's Retune, T-496's width presets), in the left column under
+ * Go-to, at every width the cluster has a layout for. The block is a fixed-position stack of fixed
+ * tops (`map-controls.css`), so what can go wrong is geometry: a block squeezed to a sliver that
+ * wraps into a tower, or the transient offer / mode banner stacked over it. Read with BOTH of those
+ * showing — the worst case — and every control in the column must be pressable at its own centre.
+ */
+const COLUMN = `JSON.stringify((() => {
+  const shown = (e) => { const r = e.getBoundingClientRect(); return !e.closest('[hidden]') && r.width > 0 && r.height > 0; };
+  const blocks = ['.map-goto', '.map-nudge', '.map-retune', '.map-offer', '.map-mode', '.map-status', '.map-topright']
+    .map((sel) => [sel, document.querySelector(sel)]).filter(([, e]) => e && shown(e))
+    .map(([sel, e]) => { const r = e.getBoundingClientRect(); return { sel, x: r.left, y: r.top, r: r.right, b: r.bottom }; });
+  const overlaps = [];
+  for (let i = 0; i < blocks.length; i++) for (let j = i + 1; j < blocks.length; j++) {
+    const a = blocks[i], q = blocks[j];
+    if (Math.min(a.r, q.r) - Math.max(a.x, q.x) > 0.5 && Math.min(a.b, q.b) - Math.max(a.y, q.y) > 0.5) overlaps.push(a.sel + ' x ' + q.sel);
+  }
+  const controls = [...document.querySelectorAll('.map-retune button, .map-offer button')].filter(shown);
+  const unpressable = controls.map((el) => {
+    const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    return { name: el.textContent.trim() || el.getAttribute('aria-label'), w: Math.round(r.width), h: Math.round(r.height),
+      on: top ? String(top.className?.baseVal ?? top.className ?? top.tagName) : 'nothing',
+      ok: !!top && (top === el || el.contains(top)) && r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && r.height >= 24 };
+  }).filter((b) => !b.ok);
+  const retune = blocks.find((b) => b.sel === '.map-retune');
+  return { blocks, overlaps, unpressable, controls: controls.length, retune,
+    widths: document.querySelectorAll('.map-retune .map-width').length,
+    scrollW: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), innerW: innerWidth };
+})())`;
+
+for (const [width, height] of [[1280, 800], [1000, 860], [920, 860], [400, 860]]) test(`T-996 at ${width} px: the rehomed Retune and width presets are pressable, clear of the offer and the mode banner`, async (t) => {
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { width, height });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
+  await page.waitFor("the capture controls to mount under Go-to",
+    `!!document.querySelector('.sf-scale') && !document.querySelector('.map-retune').hidden &&
+     document.querySelectorAll('.map-retune .map-width').length > 0`, { timeoutMs: 60000 });
+  // The worst case: the transient Go-to offer (a destination no tuned window covers) AND the tool
+  // mode banner, both shown at once beside the persistent block.
+  await page.eval(`(() => { const i = document.querySelector('.map-goto input'); i.value = '2400M';
+    document.querySelector('.map-goto').requestSubmit(); })()`);
+  await page.waitFor("the retune offer to appear", `!document.querySelector('.map-offer').hidden`, { timeoutMs: 10000 });
+  await page.eval(`document.querySelector('.map-measure-btn').click()`);
+  await page.waitFor("the mode banner to appear", `!document.querySelector('.map-mode').hidden`, { timeoutMs: 5000 });
+  await page.frames(4);
+  const c = JSON.parse(await page.eval(COLUMN));
+  t.diagnostic(`at ${width} px: ${JSON.stringify(c)}`);
+  if (SHOTS) await page.shot(path.join(SHOTS, `retune-${width}.png`));
+  assert.ok(c.retune, "no Retune block is shown");
+  assert.ok(c.controls >= 1 + c.widths + 1, `the column matched too few controls to mean anything: ${c.controls}`);
+  assert.deepEqual(c.overlaps, [], `left-column chrome drawn over each other at ${width} px`);
+  assert.deepEqual(c.unpressable, [], `a capture control is not pressable at its own centre at ${width} px`);
+  // A block squeezed into a tower is not "small floating chrome" (docs/23 §10.6 rule 4).
+  assert.ok(c.retune.b - c.retune.y <= 80, `the Retune block is ${Math.round(c.retune.b - c.retune.y)} px tall at ${width} px`);
+  assert.ok(c.scrollW <= c.innerW, `the page scrolls sideways at ${width} px`);
+  assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), [],
+    "showing the capture controls reached a device route");
+  assert.deepEqual(page.exceptions, [], "uncaught exception");
+});

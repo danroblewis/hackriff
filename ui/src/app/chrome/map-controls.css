@@ -51,8 +51,21 @@
 .map-goto:focus-within { border-color: var(--amber); }
 .map-hint { color: var(--dim); font-size: 11px; }
 
+/* T-996: the left column under the nudge row — the capture block, the Go-to offer and (at or below
+   1180 px) the tool-mode banner — is one STACK in flow (`map-controls.ts`), each block starting where
+   the one above it ended. The fixed `top:` per block it replaces assumed each block's height, and
+   the offer was drawn over the width presets as soon as a block wrapped (400 px). The stack is the
+   only in-flow child of the cluster and is itself pointer-transparent; it starts under the nudge row
+   and so below the top-right cluster, which is why its blocks may use the full width. */
+.map-ctl > .map-stack {
+  position: static; pointer-events: none; margin-top: 88px; width: min(460px, 100%);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+}
+.map-stack > * { pointer-events: auto; max-width: 100%; box-sizing: border-box; }
+.map-stack > [hidden] { display: none; }
+
 /* The retune offer under Go-to. Never faded (§10.2). */
-.map-offer { top: 44px; left: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; max-width: min(460px, calc(100% - var(--topright-w, 132px))); border-color: var(--amber); }
+.map-offer { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-color: var(--amber); }
 .map-offer-why { flex: 1; min-width: 0; font-size: 11.5px; }
 .map-offer-go { min-height: 28px; border: 1px solid var(--amber); color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
 .map-offer-go:disabled { opacity: .5; cursor: not-allowed; }
@@ -63,10 +76,7 @@
    painted-offer rule, T-476/T-407: a press lands where the row SAID, so the sentence is on screen
    beside the button, never only in a tooltip), and the capture-width presets. Never faded: it is a
    device command with a stated destination (§10.2). Hidden entirely when the host offers none. */
-.map-retune {
-  top: 88px; left: 0; display: flex; flex-direction: column; gap: 4px; padding: 5px 8px;
-  max-width: min(460px, calc(100% - var(--topright-w, 132px))); box-sizing: border-box; border-color: var(--amber);
-}
+.map-retune { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px; border-color: var(--amber); }
 .map-retune-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .map-retune-why { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-retune-go {
@@ -112,7 +122,7 @@
 .map-pane-item:disabled { opacity: .5; cursor: not-allowed; }
 
 /* T-882: measure mode's banner (the mockup's `#mode`), top-centre under Go-to's row. Never faded. */
-.map-mode { top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
+.map-mode { position: absolute; top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
 
 /* Zoom: right edge, vertically centred. */
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
@@ -171,15 +181,13 @@
 
 .map-nudge { top: 44px; left: 0; display: flex; align-items: center; padding: 3px 6px; min-height: 36px; box-sizing: border-box; }
 .map-nudge .nudge-btn { min-height: 28px; min-width: 28px; }
-/* With the nudges shown, the capture block sits under them and the transient Go-to offer under it. */
-.map-offer { top: 164px; }
 
 /* Not enough room for the pill between Go-to and the cluster: it drops under the cluster (right),
    beside the nudges (left); the tool-mode banner moves below both rows. */
 @media (max-width: 1180px) {
   .map-status { top: 44px; left: auto; right: 0; transform: none; max-width: calc(100% - 8px); }
-  /* T-996: clear of the capture block (88 … ~160) in the left column. */
-  .map-mode { top: 176px; }
+  /* T-996: the banner joins the left column's stack, under the capture block and the offer. */
+  .map-stack > .map-mode { position: static; transform: none; }
 }
 @media (max-width: 900px) {
   .map-status .readouts { display: none; }
@@ -196,8 +204,6 @@
   .map-nudge .nudge-label { display: none; }
   .map-nudge .nudge-btn { padding: 2px 4px; }
   .map-status { top: 88px; gap: 6px; padding-right: 8px; }
-  .map-retune { top: 132px; }
+  .map-ctl > .map-stack { margin-top: 132px; }
   .map-status .mode { padding: 4px 7px; font-size: 11.5px; }
-  .map-offer { top: 208px; }
-  .map-mode { top: 252px; }
 }

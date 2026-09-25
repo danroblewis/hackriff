@@ -52,7 +52,10 @@ export function sideTopPx(bottoms: readonly (number | null | undefined)[]): numb
 }
 
 // T-993: the top bar is gone from Explore; its controls are the nudge row and the status pill.
-const TOP_CHROME = [".map-goto", ".map-nudge", ".map-topright", ".map-status"];
+// T-996: and the left column's stack under the nudges (the persistent Retune and width presets, the
+// Go-to offer, the narrow-width mode banner) — the open lists sit in that same column, so they start
+// below it rather than under it. The stack measures 0 tall when all of it is hidden.
+const TOP_CHROME = [".map-goto", ".map-nudge", ".map-topright", ".map-status", ".map-stack"];
 
 export const mountSideChip: MountFn = (el, ctx) => {
   el.classList.add("is-collapsed");
