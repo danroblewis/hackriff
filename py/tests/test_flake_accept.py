@@ -550,10 +550,58 @@ def test_a_pytest_red_alone_only_once_is_not_blamed(tmp_path):
 def test_try_bulk_sets_the_pytest_culprits_aside_and_re_queues_the_rest_first():
     text = RUNNER.read_text()
     i = text.index("\ntry_bulk(){")
-    block = text[text.index("suite_split", i):text.index('batch_sig "${branches[@]}" > "$S/suite-broken"', i)]
+    block = text[text.index("suite_split", i):text.index('printf \'%s\' "$gated_sig" > "$S/suite-broken"', i)]
     assert '"${TRIAGE_WHAT#pytest red: }" != "${TRIAGE_WHAT:-}"' in text[i:]           # only a NAMED pytest red
     assert '"${#culprits[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0' in block               # all red = interaction/main
     assert '{ printf \'%s\\n\' "${rest[@]}"; cat "$QUEUE"' in block                     # the rest at the FRONT
     assert '"GATE FAILED $b (its own' in block and 'GATE_FAIL" >> "$NEEDS"' in block   # hkpy.fixes reads these
     assert 'record_attempt "${b%%=*}" "${b#*=}"' in block                        # the tip probed, not a later one
     assert "held as before" in block                                                    # the fallback is kept
+
+
+def test_a_suite_hold_names_the_tips_the_gate_merged_not_a_tip_pushed_mid_gate(tmp_path):
+    """2026-09-25 06:51: task-t943 was merged into the batch at 820bd656, a fix 09d0a797 was pushed at 06:51:40 while the
+    batch gated, and the suite-broken hold (06:51:44) recorded 09d0a797 - so the fixed batch would have been held as
+    'unchanged'. The hold now records the merged tips, in exactly batch_sig's format (the release compares the two)."""
+    repo = tmp_path / "r"
+
+    def run(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (repo / "f").write_text("0")
+    run("add", "f")
+    run("commit", "-qm", "base")
+    for b in ("task-t1", "task-t2"):
+        run("checkout", "-qb", b, "main")
+        (repo / b).write_text(b)
+        run("add", b)
+        run("commit", "-qm", b)
+    run("checkout", "-q", "main")
+    text = RUNNER.read_text()
+    i = text.index("\ntry_bulk(){")
+    loop = text[text.index("  local merged=() gated=()", i):text.index('  [ -n "$skipped" ]', i)]
+    sig = text[text.index("  local gated_sig;", i):text.index("\n", text.index("  local gated_sig;", i))]
+    batch_sig = re.search(r"^batch_sig\(\)\{.*$", text, re.M).group(0)
+    script = f"""
+set -u
+REPO={repo}; LOG={tmp_path}/log; NEEDS={tmp_path}/needs
+log(){{ :; }}; ticket_of(){{ echo "$1"; }}
+{batch_sig}
+branches=(task-t1 task-t2)
+{loop}
+branches=("${{merged[@]}}")
+{sig}
+echo "UNMOVED=$([ "$gated_sig" = "$(batch_sig "${{branches[@]}}")" ] && echo same || echo DIFFERENT)"
+git -C $REPO checkout -q task-t2; echo fix > $REPO/fix; git -C $REPO add fix; git -C $REPO commit -qm fix; git -C $REPO checkout -q main
+echo "MOVED=$([ "$gated_sig" = "$(batch_sig "${{branches[@]}}")" ] && echo same || echo DIFFERENT)"
+echo "GATED=${{gated[*]}}"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert "UNMOVED=same" in out.stdout           # an unchanged batch still matches its hold
+    assert "MOVED=DIFFERENT" in out.stdout        # a tip pushed after the merge releases it
+    t1, t2 = run("rev-parse", "task-t1"), run("rev-parse", "task-t2~1")
+    assert f"GATED=task-t1={t1} task-t2={t2}" in out.stdout     # bisect and the pytest probe get the merged tips
+    assert run("log", "-1", "--format=%s", "HEAD") == "Merge task-t2 (task-t2): batch, gated together (automated, no AI)"
