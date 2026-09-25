@@ -570,8 +570,10 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
         pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
         running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running")
         sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
-        merged = set(_git(repo, "branch", "--format=%(refname:short)", "--merged", "main", "--list", "task-t*").split())
-        landed = [t for t in sent if t.lower().replace("-", "") in {b[len("task-"):] for b in merged}]   # the runner's branch_of
+        # Landed = main carries the runner's merge commit for the ticket's branch ('... (task-t567): gate passed' or
+        # '... (task-t567): batch, gated together'); a just-dispatched branch with no commits is 'merged' but not landed.
+        subjects = _git(repo, "log", "main", "--merges", "--since=30 days ago", "--format=%s")
+        landed = [t for t in sent if f"(task-{t.lower().replace('-', '')})" in subjects]   # the runner's branch_of
         out.append({"name": h, "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
                     "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
                     "landed": len(landed)})

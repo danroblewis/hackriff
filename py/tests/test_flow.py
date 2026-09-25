@@ -264,11 +264,12 @@ def test_remote_hosts_report_running_landed_and_the_mirrors_drift(tmp_path):
     for step in (("config", "user.email", "t@t"), ("config", "user.name", "t"), ("commit", "-q", "--allow-empty", "-m", "base"),
                  ("update-ref", "refs/remotes/node2/main", "HEAD"),               # what the last push put on the mirror
                  ("checkout", "-q", "-b", "task-t9"), ("commit", "-q", "--allow-empty", "-m", "t9"),
-                 ("checkout", "-q", "main"), ("merge", "-q", "--no-ff", "--no-edit", "task-t9"),
+                 ("checkout", "-q", "main"), ("merge", "-q", "--no-ff", "-m", "Merge task-t9 (task-t9): gate passed", "task-t9"),
                  ("checkout", "-q", "-b", "task-t10"), ("commit", "-q", "--allow-empty", "-m", "t10"),   # never landed
                  ("checkout", "-q", "main"),
                  ("checkout", "-q", "-b", "task-t099"), ("commit", "-q", "--allow-empty", "-m", "t099"),  # zero-padded id
-                 ("checkout", "-q", "main"), ("merge", "-q", "--no-ff", "--no-edit", "task-t099")):
+                 ("checkout", "-q", "main"), ("merge", "-q", "--no-ff", "-m", "Merge T-099 (task-t099): batch, gated together", "task-t099"),
+                 ("branch", "task-t11")):                                          # just dispatched: no commits yet
         g(*step)
     (ops / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h"}}))
     (ops / "work-claims.json").write_text(json.dumps({"T-11": {"host": "node2", "state": "running"},
@@ -276,8 +277,9 @@ def test_remote_hosts_report_running_landed_and_the_mirrors_drift(tmp_path):
     (ops / "work-runner.log").write_text("[09-25 00:20:00] DISPATCH T-9 [opus/high] pid=1 -> node2:/r/wt (remote)\n"
                                          "[09-25 00:21:00] DISPATCH T-10 [opus/high] pid=2 -> node2:/r/wt (remote)\n"
                                          "[09-25 00:22:00] DISPATCH T-12 [opus/high] pid=3 -> /Users/x/wt (target clone)\n"
-                                         "[09-25 00:23:00] DISPATCH T-099 [opus/high] pid=4 -> node2:/r/wt (remote)\n")
+                                         "[09-25 00:23:00] DISPATCH T-099 [opus/high] pid=4 -> node2:/r/wt (remote)\n"
+                                         "[09-25 00:31:21] DISPATCH T-11 [opus/medium] pid=5 -> node2:/r/wt (remote)\n")
     [h] = flow.remote_hosts(str(ops), str(repo))
-    assert h["name"] == "node2" and h["running"] == ["T-11"] and h["dispatched"] == 3 and h["landed"] == 2
+    assert h["name"] == "node2" and h["running"] == ["T-11"] and h["dispatched"] == 4 and h["landed"] == 2   # T-11: not landed
     assert h["behind"] == 4 and h["mirror"]                              # t9 + its merge, t099 + its merge
     assert flow.remote_hosts(str(tmp_path / "nowhere"), str(repo)) == []
