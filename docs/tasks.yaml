@@ -27717,6 +27717,8 @@ tasks:
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): CLEAN REPRO (section 'Repro: the inventory freeze after a retune', fresh data dir): start the server with --hackrf --center-hz 101.7e6 --rate 2.4e6, wait 45 s, POST /api/control/window {162.3e6, 2.4e6} (content class unrestricted -> metadata-only), then poll /api/status detect.tracks_opened and /api/inventory?f_lo=161.1e6&f_hi=163.5e6: tracks_opened stuck at 78 for 80 s while detections_written rose 2945 -> 12202 (~9 000 detections, 0 tracks, inventory total 0); back at 101.7 (unrestricted) tracks resumed within 20 s. NO log warning in this common form - the freeze is SILENT; the straggler lines appear only sometimes (13x in one 'Scan everything' pass, incl. hk-history). A run that STARTS at 162.2 does form tracks, so it is the class-boundary transition, not the band. Scan detection (T-965) depends on this fix. The mock-SDR repro should cross a content-class boundary.
+
+      2026-09-25 coordinator: related, filed as T-973 (waits on you): replumb_never_pays_for_the_ring fails ALONE on main - a re-plumb stalls the always-on readers 1.8 s (bound 1 s). If your straggler fix is the cause, say so in your handback and T-973 can close with your evidence.
   - id: T-942
     milestone: M2-hardening
     title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
@@ -28225,6 +28227,22 @@ tasks:
       Seen 2026-09-25 by the T-567 conflict-fix worker: hk-cli tests/api_contract.rs inventory_entry_promote_and_delete_answer_as_documented failed once at api_contract.rs:2826 under load ~23 - fetching the entry BY ID returned a different id than the list row it was taken from; passed alone 3/3 and the whole binary then 71/71. The diff (T-567) does not touch it. Shape: a live inventory under the mock SDR can merge/re-key an emitter between the list call and the by-id call (the self-cleaning, near-duplicate merge the invariants require), so the test picks a row that is renamed under it - a race in the TEST's choice, not necessarily a product bug; but if by-id for a merged-away id should redirect (docs/api.md), it may be a product gap.
       DELIVER (deflake-triage): reproduce under load; decide from docs/api.md whether a merged-away id must answer (redirect / 410 with the survivor's id) - if the contract says so and it does not, that is the fix (api.md + api_contract.rs together, T-079); otherwise make the test choose a row that cannot be merged during the call (a settled Confirmed row, or read the id the server reports for the promote) - never a retry or a loosened assertion. Red-on-regression proof.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-cli -E 'binary(api_contract)'), then HAND BACK. Never `just gate`.
+  - id: T-973
+    milestone: M2-hardening
+    title: "replumb_never_pays_for_the_ring fails alone on main: a re-plumb stalls the always-on readers 1.8 s (bound 1 s)"
+    status: todo
+    priority: P1
+    deps:
+    - T-941
+    parallel_group: PIPE-REPLUMB
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      Seen 2026-09-25 by the T-937 worker: hk-pipeline tests/replumb_never_pays_for_the_ring.rs a_re_plumb_never_pays_for_the_iq_ring (T-536) FAILS ALONE on main's src (T-937's files reverted): 'a re-plumb stalled the always-on readers for 1.8s (bound 1s)' on an emptier box, 13.1 s under load. It is in the per-merge gate (heavy-serial group, not the timing tier). A re-plumb that stalls the always-on readers is exactly the real-time-path cost T-536 guards, and tonight's explorer saw re-plumbs leave hk-detect/hk-control/hk-history stragglers 'did not stop within 8s' (T-941) - so this may be a REAL regression, not a slow box.
+      DELIVER (deflake-triage): run it alone x5 on the quietest box available and on the tree before tonight's re-plumb-path landings (T-917 survey thread, T-868 listen parity, T-891 accessory source) - bisect if it was green before; fails alone on a quiet box => a real stall: root-cause what the always-on readers wait on during a re-plumb (a lock held across segment teardown? the survey/detect straggler joining?) and fix it; if the assertion is genuinely a latency bound that only a quiet box meets, move that bound to the `timing` tier (just timing, docs/10 §3.6) and keep a DETERMINISTIC correctness assertion in the gate (the readers are never blocked on ring allocation - e.g. the ring is allocated off the readers' path, asserted structurally). No threshold change, no retry. Coordinate with T-941 (running; same re-plumb path) - this ticket waits for it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-pipeline -E 'binary(replumb_never_pays_for_the_ring)'), then HAND BACK. Never `just gate`.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
