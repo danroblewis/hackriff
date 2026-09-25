@@ -314,7 +314,7 @@ pub struct CommandedWindow {
 }
 
 impl CommandedWindow {
-    fn new(window: (f64, f64)) -> Self {
+    pub(crate) fn new(window: (f64, f64)) -> Self {
         Self {
             center_bits: AtomicU64::new(window.0.to_bits()),
             rate_bits: AtomicU64::new(window.1.to_bits()),
@@ -333,7 +333,7 @@ impl CommandedWindow {
     /// sides of the two loads, so the pair returned is never half of one command and half of
     /// another — a torn pair would make the guard wait for a window that was never commanded at
     /// all, which is the very fault this type exists to remove.
-    fn get(&self) -> ((f64, f64), u64) {
+    pub(crate) fn get(&self) -> ((f64, f64), u64) {
         loop {
             let before = self.generation.load(Ordering::SeqCst);
             let center = f64::from_bits(self.center_bits.load(Ordering::SeqCst));
@@ -648,6 +648,11 @@ pub(crate) struct Shared {
     pub specs: Vec<ChainSpec>,
     /// Display settings (shared by every segment of the run).
     pub display: Arc<DisplayControl>,
+    /// T-974: the window the run last commanded the front end to (the run's own, shared by every
+    /// segment; a further front end with no control plane holds its fixed window). What a channel
+    /// is planned against before the capture thread has published a block's tune
+    /// ([`crate::recipes::runtime::planning_tune`]).
+    pub commanded: Arc<CommandedWindow>,
     /// The run continues in a new segment after this one: history is not sealed at its end.
     pub continues: AtomicBool,
     /// T-510: this segment's history reader takes the end-of-run seal itself. True for a
@@ -1668,6 +1673,7 @@ fn start_segment(
         inventory: Mutex::new(inventory),
         specs,
         display: Arc::clone(&common.display),
+        commanded: Arc::clone(&common.commanded),
         continues: AtomicBool::new(false),
         successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
         seal_at_end: !common.defer_seal,
