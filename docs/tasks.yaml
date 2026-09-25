@@ -27053,6 +27053,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-911 worker 2026-09-24.
+  - id: T-917
+    milestone: M2-hardening
+    title: "hk-pipeline: requests_during_a_replumb (survey thread outlives its segment by 8 s) and chains_attached_and_detached_mid_run (wall-clock attach cycles) fail on main under load - triage and make deterministic"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-915 worker (handback ~/.hackriff-ops/work/T-915/handback.json), reproduced ON MAIN at load ~30:
+      1. hk-pipeline listen_lifecycle `requests_during_a_replumb_are_refused_503_replumbing_never...`: main 3/3 FAIL (a T-915 branch 2/3), message "hk-survey: still running 8s after its segment ended; left behind" - either a real teardown defect (the survey thread outliving its segment) or an 8 s wall-clock deadline that load exceeds. Triage alone on a quiet box first (deflake-triage): fails alone = real defect, fix the teardown.
+      2. hk-pipeline runtime_attach `chains_attached_and_detached_mid_run_drop_no_always_on_sa...`: fails on main too ("attached 10") - wall-clock attach/detach cycles inside a 3 s real-time replay, so the count depends on scheduling. A test that uses the wall clock to decide what it asserts is a bug (docs/10 §3.6): drive the cycles by events/sample positions, not wall time; a throughput bound, if any, goes to the `timing` tier.
+      Both pass in the merge gate today (serialised heavy group), so they surface as load reds in worker runs and would surface in the RC run.
+      DELIVER: triage each alone; make both deterministic (or fix the real defect), with red-on-regression proof; no retry, skip or quarantine.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-915 worker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
