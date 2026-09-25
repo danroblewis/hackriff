@@ -4,9 +4,10 @@
    offer. Mounted inside `.sf-stage`, so it floats over the picture only — never over the rows below
    the stage. Since T-882 it is the ONLY control surface over the canvas (no toolbar row).
 
-   `.map-ctl` is a pointer-transparent box inset 8 px from the stage (T-895: the inventory
-   column no longer shares its rows — collapsed it is a mid-height chip, open it starts below Go-to,
-   `map-layout.css`), so no control is ever drawn under a panel; only its children take the pointer, so every other pixel still reaches the canvas. */
+   `.map-ctl` is a pointer-transparent box inset 8 px from the stage (T-997: the inventory column is
+   gone from the map — its counts are two pills IN this cluster, `.map-inv` below, and its lists are
+   in the sheet), so no control is ever drawn under a panel; only its children take the pointer, so
+   every other pixel still reaches the canvas. */
 .map-ctl {
   position: absolute; z-index: 20; pointer-events: none;
   /* `--chrome-top` (T-882, set by the surface's `fit`): how far the app's top bar overlaps the
@@ -104,6 +105,22 @@
 .map-fab svg { width: 22px; height: 22px; }
 .map-fab.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 4px var(--teal-soft), 0 4px 18px var(--shadow); }
 .map-fab.frozen { color: var(--amber); border-color: var(--amber); }
+/* T-955: following live TIME over spectrum the radio has left — the press brings it to the tuned window. */
+.map-fab.following.off-tuned { color: var(--amber); border-color: var(--teal); border-style: dashed; box-shadow: 0 4px 18px var(--shadow); }
+
+/* T-1000 (docs/23 §10.7): the number of the pane a per-pane control acts on, shown only while there
+   are two or more — the same number the outline on the canvas carries (`.sf-active-pane[data-pane]`). */
+.map-layers-btn { position: relative; }
+.map-pane-badge[hidden], .map-goto-pane[hidden] { display: none; }
+.map-pane-badge {
+  min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px;
+  background: var(--text); color: var(--panel); font: 600 10px/14px var(--mono); text-align: center;
+  pointer-events: none;
+}
+.map-layers-btn .map-pane-badge, .map-fab .map-pane-badge { position: absolute; right: 1px; top: 1px; }
+.map-zoom-pane { align-self: center; margin: 2px 0; }
+@media (max-width: 600px) { .map-goto-pane .map-goto-word { display: none; } }
+.map-goto-pane { flex: none; font: 600 11px var(--mono); color: var(--text); padding: 1px 6px; border-radius: 7px; background: var(--raise); white-space: nowrap; }
 
 /* Below the breakpoint the side/focus columns drop to the bottom of the screen (`map-layout.css`),
    so the cluster uses the canvas's whole width. */
@@ -147,13 +164,30 @@
 
 .map-nudge { top: 44px; left: 0; display: flex; align-items: center; padding: 3px 6px; min-height: 36px; box-sizing: border-box; }
 .map-nudge .nudge-btn { min-height: 28px; min-width: 28px; }
-.map-offer { top: 88px; }
+
+/* ---- T-997: the inventory pills, the left stack's third row -------------------------------------
+   The lists' counts used to be a chip pinned at MID-HEIGHT on the left edge (T-895) — over each
+   pane's time ruler (`surface/hud.ts` prints the time labels down that edge), belonging to no
+   cluster. They are two small pills here instead: docked under Go-to and the nudge row, in one
+   fixed position at every width, fading with the rest of the cluster (`map-fade`), and each opening
+   the bottom sheet on its own list (`chrome/inv-pills.ts`). No hamburger glyph: the pills ARE the
+   affordance. Every row below them moves down by one row's height — the left stack is a stack. */
+.map-inv { top: 88px; left: 0; display: flex; align-items: center; gap: 2px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; }
+.map-pill { display: flex; align-items: baseline; gap: 4px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 7px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
+.map-pill:hover { background: var(--raise); }
+.map-pill:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.map-pill-n { font-family: var(--mono); font-weight: 600; }
+.map-pill-n.candidate { color: var(--lav); }
+.map-pill-n.confirmed { color: var(--teal); }
+.map-pill small { color: var(--muted); font-size: 11px; }
+.map-pill-sep { color: var(--dim); }
+.map-offer { top: 132px; }
 
 /* Not enough room for the pill between Go-to and the cluster: it drops under the cluster (right),
    beside the nudges (left); the tool-mode banner moves below both rows. */
 @media (max-width: 1180px) {
   .map-status { top: 44px; left: auto; right: 0; transform: none; max-width: calc(100% - 8px); }
-  .map-mode { top: 132px; }
+  .map-mode { top: 176px; }
 }
 @media (max-width: 900px) {
   .map-status .readouts { display: none; }
@@ -171,6 +205,9 @@
   .map-nudge .nudge-btn { padding: 2px 4px; }
   .map-status { top: 88px; gap: 6px; padding-right: 8px; }
   .map-status .mode { padding: 4px 7px; font-size: 11.5px; }
-  .map-offer { top: 132px; }
-  .map-mode { top: 176px; }
+  /* T-997: the status pill takes the row at 88 px here and is as wide as the phone, so the pills
+     drop under it rather than beside it — one fixed position per width, never an overlap. */
+  .map-inv { top: 132px; }
+  .map-offer { top: 176px; }
+  .map-mode { top: 220px; }
 }
