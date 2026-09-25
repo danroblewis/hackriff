@@ -23,8 +23,11 @@
 //!   recipe id) as decoder evidence.
 //! - **A vote bar on weak identities (T-962).** A scheme whose check cannot carry an identity on
 //!   one frame ([`hk_model::IdentityScheme::commit_votes`] > 1; today `rds-pi`, whose block check
-//!   is 10 bits) is counted per writer: each CRC-valid row naming the identity is one agreeing
-//!   vote at the row's own capture time ([`IdentityTally`]), and until the scheme's bar of votes
+//!   is 10 bits) is counted **per pipeline, across all its `messages` outputs**
+//!   ([`PipelineStats::identity_tally`]): each CRC-valid row naming the identity is an agreeing
+//!   vote at the row's own capture time ([`IdentityTally`]), counted once per distinct capture
+//!   time ([`VoteWindow::vote_distinct`]) — so the unit is the received frame (the RDS group),
+//!   the unit the bar was derived in, whichever outputs report it — and until the scheme's bar of votes
 //!   has fallen **within its capture-time window** (10 in 5 s for `rds-pi`: a rate, so a
 //!   long-running pipeline on a chance lock cannot accumulate its way there) the row is written
 //!   **without** its identity — no sighting, so no emitter is created, keyed or confirmed by it —
@@ -32,14 +35,19 @@
 //!   `identity_votes`, `identity_votes_needed`, `identity_votes_in_window` and
 //!   `identity_votes_window_s` in its metadata, linked to the pipeline's target
 //!   emitter when it has one. It is the same bar `hk-demod`'s always-on RDS decoder applies, so an
-//!   RDS PI becomes an identity on the same evidence whichever decoder heard it. One frame is at
-//!   least one RDS group, so counting frames never credits more groups than were received. The
-//!   bar lives in the scheme, not the recipe, so a user-saved copy of a recipe cannot lower it.
+//!   RDS PI becomes an identity on the same evidence whichever decoder heard it. Why shared
+//!   (round 3): a `station` (PS) row is emitted once per completed four-segment PS cycle, at most
+//!   ~1 per second on a real station, so a per-writer count could never put 10 of them in 5 s
+//!   and a clean station's PS never gained its PI; sharing lets the `group-info` output's
+//!   per-group rows commit the PI for the whole pipeline. Counting each capture time once keeps
+//!   the sum honest: the PS string, the group row it completed and a CT row from that group are
+//!   one frame, and N outputs over the same frames still add up to the frames received. The bar
+//!   lives in the scheme, not the recipe, so a user-saved copy of a recipe cannot lower it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use hk_blocks::{Output, PortVec};
@@ -168,7 +176,9 @@ fn keyed(paths: &[String]) -> Vec<(String, String)> {
 const MAX_TALLIED: usize = 256;
 
 /// Agreeing CRC-valid frames per identity, for schemes with a vote bar (T-962; module docs),
-/// each held as an [`hk_model::VoteWindow`] over the rows' own capture times.
+/// each held as an [`hk_model::VoteWindow`] over the rows' own capture times, one vote per
+/// distinct capture time. One per pipeline ([`PipelineStats::identity_tally`]), shared by its
+/// `messages` writers.
 #[derive(Debug, Default)]
 pub struct IdentityTally {
     votes: BTreeMap<(hk_model::IdentityScheme, String), VoteWindow>,
@@ -194,10 +204,14 @@ impl IdentityTally {
         let key = (id.scheme.clone(), id.value.clone());
         let full = self.votes.len() >= MAX_TALLIED;
         let (committed, votes, in_window) = match self.votes.get_mut(&key) {
-            Some(w) => (w.vote(t, needed, window_ns), w.votes(), w.window_votes()),
+            Some(w) => (
+                w.vote_distinct(t, needed, window_ns),
+                w.votes(),
+                w.window_votes(),
+            ),
             None => {
                 let mut w = VoteWindow::default();
-                let c = w.vote(t, needed, window_ns);
+                let c = w.vote_distinct(t, needed, window_ns);
                 let r = (c, w.votes(), w.window_votes());
                 if !full {
                     self.votes.insert(key, w);
@@ -311,7 +325,6 @@ impl MessagesSink {
             emitter: ctx.emitter_id,
             bandwidth_hz: ctx.bandwidth_hz,
             max_batch: MAX_BATCH,
-            tally: IdentityTally::default(),
             on_emitters: Box::new(move |new, t| {
                 classify_decoder_emitters(&classify, &evidence, None, new, t);
             }),
@@ -378,7 +391,6 @@ impl MessagesSink {
             emitter,
             bandwidth_hz: 0.0,
             max_batch: max_batch.max(1),
-            tally: IdentityTally::default(),
             on_emitters: Box::new(on_emitters),
             on_error: Box::new(|_| {}),
         };
@@ -486,8 +498,6 @@ struct Writer {
     emitter: Option<EmitterId>,
     bandwidth_hz: f64,
     max_batch: usize,
-    /// Agreeing votes per weak identity (T-962).
-    tally: IdentityTally,
     /// The family step for new emitters.
     on_emitters: OnEmitters,
     /// Counts rows that could not be stored.
@@ -522,7 +532,8 @@ impl Writer {
         };
         let (row, policy) = (&self.row, self.policy.as_ref());
         let (emitter, bandwidth_hz) = (self.emitter, self.bandwidth_hz);
-        let tally = &mut self.tally;
+        // The pipeline's one tally, shared with its other `messages` writers (T-962 round 3).
+        let tally = &self.stats.identity_tally;
         let mut attempted = 0u64;
         let result = self.ingest.batch(|ingest| {
             store_rows(
@@ -573,7 +584,7 @@ fn store_rows(
     row: &RowSpec,
     policy: Option<&MetadataPolicy>,
     (emitter, bandwidth_hz): (Option<EmitterId>, f64),
-    tally: &mut IdentityTally,
+    tally: &Mutex<IdentityTally>,
     batch: &mut Vec<QueuedFrame>,
     attempted: &mut u64,
 ) -> (u64, u64) {
@@ -586,7 +597,10 @@ fn store_rows(
         *attempted += 1;
         // T-962: below its scheme's vote bar the identity comes off the row before anything
         // downstream (sanitising, the sighting, the republish) can see it.
-        let provisional = tally.gate(&mut d);
+        let provisional = tally
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .gate(&mut d);
         // The same sanitising as `hk_plugins::output::parse_line`: a no-op under a class that
         // permits content, the output policy's allowlist otherwise.
         policy::sanitize_decode(policy, DECODE_MESSAGE_SCHEMA, &mut d);

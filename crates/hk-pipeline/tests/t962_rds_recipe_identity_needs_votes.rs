@@ -338,3 +338,213 @@ fn t962_dense_recipe_votes_inside_a_second_commit() {
         json!(RDS_PI_COMMIT_VOTES)
     );
 }
+
+/// A PS string as the recipe's `text` node (`ps`) emits it: key (PI) and text.
+fn ps_tree(pi: u16, text: &str) -> Arc<LayerTree> {
+    let node = |id: u32, path: &str, ty: NodeType, value: Value| LayerNode {
+        id,
+        parent: (id > 0).then_some(0),
+        name: path.rsplit('.').next().unwrap().into(),
+        path: path.into(),
+        ty,
+        bits: [0, 0],
+        bytes: [0, 0],
+        value: Some(value),
+        text: None,
+        label: None,
+        error: false,
+    };
+    Arc::new(LayerTree {
+        nodes: vec![
+            LayerNode {
+                value: None,
+                ..node(0, "ps", NodeType::Layer, Value::Null)
+            },
+            node(1, "ps.key", NodeType::Uint, json!(pi)),
+            node(2, "ps.text", NodeType::Ascii, json!(text)),
+        ],
+        byte_index: Vec::new(),
+        fit: FitStatus::Ok,
+        errors: Vec::new(),
+    })
+}
+
+/// Runs output `output` of the `rds` recipe over `frames` (`(bit position, layer tree)`, all
+/// CRC-valid) with the pipeline's `stats` — shared, as a running pipeline shares it between its
+/// outputs — and waits for the writer to store them.
+fn feed_output(
+    db: &std::path::Path,
+    station: EmitterId,
+    output: &str,
+    stats: &Arc<PipelineStats>,
+    frames: &[(u64, Arc<LayerTree>)],
+) {
+    let recipe = rds_recipe();
+    let mut sink = MessagesSink::spawn_standalone_targeting(
+        db,
+        &recipe,
+        output,
+        ContentClass::Unrestricted,
+        Some(station),
+        16,
+        Arc::clone(stats),
+        |_, _| {},
+    )
+    .unwrap();
+    let mut out = Output::for_port(&PortInfo {
+        ty: PortType::Frames,
+        rate_hz: 1187.5,
+        max_items: 64,
+        hold_items: 0,
+    });
+    let PortVec::Frames(buf) = &mut out.data else {
+        unreachable!("a frames port")
+    };
+    for (i, (bit, tree)) in frames.iter().enumerate() {
+        let mut info = FrameInfo::new(i as u64, *bit, 0);
+        info.bit_len = 64;
+        info.check = CrcStatus::Valid;
+        info.layers = Some(Arc::clone(tree));
+        buf.push(&[0u8; 8], info);
+    }
+    let ctx = FrameCtx {
+        decoder: "recipe:rds@1",
+        frame_model: "rds",
+        emitter_id: Some(station),
+        channel_hz: CENTER,
+        channels_hz: &[],
+        recipe_version: 1,
+        edit_rev: 0,
+    };
+    let t_of = |bit: f64| Timestamp::from_unix_nanos(T0_NS + (bit / 1187.5 * 1e9) as i64);
+    assert_eq!(sink.publish(&out, &ctx, &t_of), frames.len() as u64);
+    drop(sink);
+}
+
+/// The `station` rows linked to `station`: `(PS text, identity value if committed)`.
+fn station_rows(repo: &Repository, station: EmitterId) -> Vec<(String, Option<String>)> {
+    let mut rows: Vec<_> = repo
+        .decodes_for_identity(&pi_1704())
+        .unwrap()
+        .into_iter()
+        .chain(linked_rows(repo, station))
+        .filter(|d| d.frame_model == "rds-ps")
+        .map(|d| (d.t, d))
+        .collect();
+    rows.sort_by_key(|(t, d)| (*t, d.id));
+    rows.dedup_by_key(|(_, d)| d.id);
+    rows.into_iter()
+        .map(|(_, d)| {
+            (
+                d.content.as_ref().unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                d.identity.map(|i| i.value),
+            )
+        })
+        .collect()
+}
+
+/// T-962 round 3, the gate red (`listen_recipe_parity`): a `station` (PS) row is emitted once
+/// per completed four-segment PS cycle — about one per second on a real station — so counted
+/// per writer it could never put 10 votes in 5 s, and a clean station's PS never carried its PI.
+/// The pipeline's outputs share one tally: the `group-info` output's per-group rows (11.4/s)
+/// commit the PI, and the station's PS rows after it carry the identity.
+#[test]
+fn t962_station_ps_commits_on_the_pipelines_groups() {
+    let dir = TempDir::new("t962-recipe-station");
+    let db = dir.0.join("hk.sqlite");
+    let station = {
+        let mut repo = Repository::open(&db).unwrap();
+        seed_station(&mut repo)
+    };
+    // Three seconds of clean air: 34 groups back to back, a PS completing every 11th group.
+    let groups: Vec<(u64, Arc<LayerTree>)> =
+        (0..34u64).map(|i| (104 * i, group_tree(PI))).collect();
+    let ps: Vec<(u64, Arc<LayerTree>)> = [11u64, 22, 33]
+        .iter()
+        .map(|&i| (104 * i, ps_tree(PI, "RADIO 1 ")))
+        .collect();
+
+    // Counted per writer (the round-2 rule; still what a PS-only recipe gets): the PS rows alone
+    // are three votes in three seconds, and none commits.
+    feed_output(
+        &db,
+        station,
+        "station",
+        &Arc::new(PipelineStats::default()),
+        &ps,
+    );
+    let repo = Repository::open(&db).unwrap();
+    assert!(
+        station_rows(&repo, station)
+            .iter()
+            .all(|(_, id)| id.is_none()),
+        "[{T962}] {:?}",
+        station_rows(&repo, station)
+    );
+    drop(repo);
+
+    // One pipeline: its group rows and PS rows share the tally.
+    let dir = TempDir::new("t962-recipe-station-shared");
+    let db = dir.0.join("hk.sqlite");
+    let station = {
+        let mut repo = Repository::open(&db).unwrap();
+        seed_station(&mut repo)
+    };
+    let stats = Arc::new(PipelineStats::default());
+    feed_output(&db, station, "group-info", &stats, &groups);
+    feed_output(&db, station, "station", &stats, &ps);
+    let repo = Repository::open(&db).unwrap();
+    let rows = station_rows(&repo, station);
+    assert_eq!(rows.len(), 3, "[{T962}] {rows:?}");
+    for (text, id) in &rows {
+        assert_eq!(text, "RADIO 1 ");
+        assert_eq!(
+            id.as_deref(),
+            Some("1704"),
+            "[{T962}] a clean station's PS, after ten agreeing groups in under a second, carries \
+             its PI: {rows:?}"
+        );
+    }
+    let e = repo.emitter_by_identity(&pi_1704()).unwrap().unwrap();
+    assert_eq!(
+        identity_decision(&repo, e.id).map(|(r, _)| r),
+        Some(ConfirmRoute::Identity)
+    );
+}
+
+/// T-962 round 3, the property sharing must keep: outputs reporting the **same frames** add no
+/// evidence. Five groups, each reported by two outputs (its group row and a PS row at the same
+/// capture time), are five votes — ten rows, no identity.
+#[test]
+fn t962_outputs_reporting_the_same_frames_count_each_once() {
+    let dir = TempDir::new("t962-recipe-dedupe");
+    let db = dir.0.join("hk.sqlite");
+    let station = {
+        let mut repo = Repository::open(&db).unwrap();
+        seed_station(&mut repo)
+    };
+    let stats = Arc::new(PipelineStats::default());
+    let bits: Vec<u64> = (0..5u64).map(|i| 104 * i).collect();
+    let groups: Vec<_> = bits.iter().map(|&b| (b, group_tree(PI))).collect();
+    let ps: Vec<_> = bits.iter().map(|&b| (b, ps_tree(PI, "RADIO 1 "))).collect();
+    feed_output(&db, station, "group-info", &stats, &groups);
+    feed_output(&db, station, "station", &stats, &ps);
+    let repo = Repository::open(&db).unwrap();
+    assert!(
+        repo.emitter_by_identity(&pi_1704()).unwrap().is_none(),
+        "[{T962}] ten rows over five frames placed an identity"
+    );
+    let rows = linked_rows(&repo, station);
+    assert_eq!(rows.len(), 10, "[{T962}] every reading is kept");
+    for d in &rows {
+        assert!(d.identity.is_none(), "{d:?}");
+        assert!(
+            d.metadata["identity_votes_in_window"].as_u64().unwrap() <= 5,
+            "{d:?}"
+        );
+    }
+    assert_eq!(identity_decision(&repo, station), None, "[{T962}]");
+}

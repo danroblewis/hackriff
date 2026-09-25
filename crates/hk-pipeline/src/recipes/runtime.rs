@@ -340,6 +340,9 @@ pub struct PipelineStats {
     pub decodes: AtomicU64,
     /// Frames `messages` outputs dropped because their writer's queue was full (T-111).
     pub decodes_dropped: AtomicU64,
+    /// Agreeing votes per weak identity, shared by every `messages` writer of the pipeline and
+    /// kept across edits (T-962 round 3; [`crate::recipes::messages`] module docs).
+    pub identity_tally: std::sync::Mutex<crate::recipes::messages::IdentityTally>,
 }
 
 impl PipelineStats {

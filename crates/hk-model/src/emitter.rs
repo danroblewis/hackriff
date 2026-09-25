@@ -101,6 +101,20 @@ impl VoteWindow {
         self.committed(needed)
     }
 
+    /// [`Self::vote`] for producers that may report **the same frame more than once** (T-962
+    /// round 3: a recipe pipeline's `messages` outputs share one tally, and a PS string, the
+    /// group row it completed and a CT row all carry that group's capture time): a vote at a
+    /// capture time already held is the same evidence and is not counted again, so each distinct
+    /// frame is one vote however many outputs name it. A duplicate of a time the bound has
+    /// already evicted is older than every held time: it is inserted and evicted again at once,
+    /// so it can never raise the peak (it only adds one to the lifetime [`Self::votes`]).
+    pub fn vote_distinct(&mut self, t_ns: i64, needed: u32, window_ns: i64) -> bool {
+        if self.times.binary_search(&t_ns).is_ok() {
+            return self.committed(needed);
+        }
+        self.vote(t_ns, needed, window_ns)
+    }
+
     /// Whether `needed` votes have ever fallen within the window (latched).
     pub fn committed(&self, needed: u32) -> bool {
         self.peak >= needed.max(1)
@@ -582,5 +596,34 @@ mod tests {
         // One frame suffices for a strong scheme.
         let a = IdentityScheme::AdsbIcao;
         assert!(VoteWindow::default().vote(0, a.commit_votes(), a.commit_window_ns()));
+    }
+
+    /// T-962 round 3: `vote_distinct` counts frames, not reports of them. Five frames each
+    /// reported by two outputs are five votes; ten distinct frames commit.
+    #[test]
+    fn vote_window_distinct_counts_each_capture_time_once() {
+        let s = IdentityScheme::RdsPi;
+        let (n, w) = (s.commit_votes(), s.commit_window_ns());
+        let mut v = VoteWindow::default();
+        for k in 0..5i64 {
+            assert!(!v.vote_distinct(k * 87_719_298, n, w));
+            assert!(
+                !v.vote_distinct(k * 87_719_298, n, w),
+                "a repeat is no vote"
+            );
+        }
+        assert_eq!((v.votes(), v.window_votes()), (5, 5));
+        for k in 5..n as i64 {
+            v.vote_distinct(k * 87_719_298, n, w);
+        }
+        assert!(v.committed(n));
+        // A stale duplicate (older than every held time) cannot raise the peak.
+        let mut late = VoteWindow::default();
+        for k in 0..n as i64 - 1 {
+            late.vote_distinct(10_000_000_000 + k * 87_719_298, n, w);
+        }
+        late.vote_distinct(0, n, w);
+        assert!(!late.vote_distinct(0, n, w));
+        assert!(!late.committed(n));
     }
 }
