@@ -27563,6 +27563,24 @@ tasks:
     notes: |
       FOUND BY rc-20260925.
     branch: task-rcfix-surface-nav
+  - id: T-934
+    milestone: M2-hardening
+    title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: DEFLAKE-WC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND BY T-891.
+      THREE WALL-CLOCK TESTS keep failing ALONE under load, "observed, not chased" by at least 5 workers (T-891 on 2026-09-25 at load ~28: all three, 2/2 runs each at main 333d8284; also earlier T-579/T-581 and two hk-core workers' results on the board). None has an owner - this ticket is it:
+      1. hk-api tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay: `assert!(records > 20)` after 1.5 s of wall clock (sees 9-11 records under load; ping 50 ms, peer timeout 400 ms).
+      2. hk-core src/source/hackrf.rs tests::a_slow_reader_gets_counted_drops_and_an_exact_gap: sleeps 200 ms and assumes the fake producer overflowed a 2-buffer pool ('the pool overflowed').
+      3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
+      DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
+      TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
