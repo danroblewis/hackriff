@@ -59,7 +59,7 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
     await page.waitForSurfaceMounted({ timeoutMs: 60000 });
     await page.waitFor("the surface, its floating chrome, the sheet and both pills",
       `!!document.querySelector('.map-topright button') && !!document.querySelector('.map-ctl .map-fab') &&
-       document.querySelector('.sheet')?.dataset.snap === 'peek' &&
+       document.querySelector('.sheet')?.hidden === true &&
        document.querySelectorAll('.map-inv .map-pill').length === 2 &&
        document.querySelectorAll('.sf-hud-label.time').length > 0`, { timeoutMs: 60000 });
     await page.frames(3);
@@ -91,8 +91,8 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
     // with its rows inside the sheet's own box.
     for (const list of ["candidate", "confirmed"]) {
       await page.click(`document.querySelector('.map-inv .map-pill[data-list="${list}"]')`);
-      await page.waitFor(`the sheet to open on the ${list} list`,
-        `document.querySelector('.sheet')?.dataset.snap !== 'peek' &&
+      await page.waitFor(`the card to open on the ${list} list`,
+        `document.querySelector('.sheet')?.hidden === false &&
          document.querySelector('.side-inv .tab[data-tab="${list}"]')?.getAttribute('aria-selected') === 'true'`,
         { timeoutMs: 10000 });
       await settled(page, ".sheet", `the sheet's rise for ${list}`);

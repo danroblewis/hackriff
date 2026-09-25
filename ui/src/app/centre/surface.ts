@@ -87,7 +87,7 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest } from "../explore/annotate";
-import { focusSelection, focusSignal } from "../explore/slice";
+import { closeCard, focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { trackOverlay } from "../chrome/dismiss";
@@ -1282,7 +1282,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const pin = pinLayer.pick(c.x, c.y);
         if (pin) { selectPin(pin); return; }
         const hit = hitAt(p.x, p.y);
-        if (!hit?.mark) return;
+        if (!hit?.mark) {
+          // T-1026 (the Google-Maps place card): a click on BARE MAP closes the detail card and
+          // clears the selection — "if they click on the back of the map it goes away". Bare means
+          // nothing was under the pointer: no pin (above), no mark box, and no annotation either.
+          // A human-authored annotation is a feature with a place, not the back of the map, so a
+          // click on one leaves the card showing whatever it showed rather than dismissing it (its
+          // own card content is T-820's panel, not this handler's to invent).
+          if (!(hit && annotationAt(annotations, hit.pane.box, hit.pane.rect, p))) store.set(closeCard());
+          return;
+        }
         if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
         else if (hit.mark.kind === "selection-box") store.set(focusSelection(hit.mark.id));
         else if (hit.mark.kind === "research-box") {
@@ -1533,6 +1542,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
       }
     };
     fit();
+    // T-1026: the card is hidden until a feature is clicked, so the strip's clearance of it is no
+    // longer a one-off measurement — it changes when the card opens and closes, and a closed card
+    // gives the minimap its rows back (a hidden `.sheet` measures a zero box, so `sheetUnder` is 0).
+    // Measured twice: once now, in case the sheet was shown/hidden before this subscriber ran, and
+    // once on the next frame, because subscriber order does not guarantee the DOM has caught up.
+    store.select((s) => s.card.open, () => {
+      fit();
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => fit());
+    });
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);

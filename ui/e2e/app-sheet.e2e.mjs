@@ -2,10 +2,14 @@
 // proves the snap model and the spy-client rule over a fake DOM; this proves the three things only a
 // browser can say: a real pointer drag on the grab handle snaps it, the canvas BESIDE an open sheet
 // is still the canvas (hit test) and still pans (non-modal), and nothing the sheet or that pan does
-// reaches a device route. It also checks the per-viewer snap state survives a reload.
+// reaches a device route. It also checks the per-viewer SIZE survives a reload — while the card
+// itself does not, because T-1026 made it hidden until something is clicked: every journey here
+// therefore opens it first, from the small control that opens it (an inventory pill, T-997), and the
+// card's own hidden-until-clicked behaviour is `ui/e2e/app-card.e2e.mjs`'s.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
+import { settled } from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
@@ -44,9 +48,10 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
-  await page.waitFor("the app's surface to draw and the sheet to mount",
+  await page.waitFor("the app's surface to draw and the card to mount closed",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
-     document.querySelector('.sheet')?.dataset.snap === 'peek'`, { timeoutMs: 60000 });
+     document.querySelector('.sheet')?.hidden === true && !!document.querySelector('.map-inv .map-pill')`,
+    { timeoutMs: 60000 });
 
   const vh = await page.eval("window.innerHeight");
   const snap = () => page.eval("document.querySelector('.sheet').dataset.snap");
@@ -55,9 +60,21 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
     `document.querySelector('.sheet').dataset.snap === ${JSON.stringify(s)} &&
      Math.abs(document.querySelector('.sheet').getBoundingClientRect().height - parseFloat(document.querySelector('.sheet').style.height)) < 1`);
 
-  // (1) Peek is a title strip that states the (empty) selection.
+  // (1) Opened from its small control (a pill), it arrives at half; cycling twice leaves it at the
+  // peek strip, which is where the FAB/zoom clearance below starts (T-1026: peek is a state of an
+  // OPEN card now, never the resting state of a closed one).
+  await page.click("document.querySelector('.map-inv .map-pill[data-list=\"confirmed\"]')");
+  await waitSnap("half");
+  // One press per state, each waiting for the card to ARRIVE before the next reads the handle's rect
+  // (T-958): the handle rides the moving top edge, and a press at a stale rect lands on the canvas,
+  // which since T-1026 closes the card instead of resizing it.
+  for (const want of ["full", "peek"]) {
+    await page.click("document.querySelector('.sheet-grab')");
+    await waitSnap(want);
+    await settled(page, ".sheet", `the cycle to ${want}`);
+  }
   assert.ok((await height()) < 80, `peek is a strip, got ${await height()} px`);
-  assert.match(await page.$text(".sheet-title"), /nothing yet/);
+  assert.match(await page.$text(".sheet-title"), /^Confirmed signals in view$/);
   await page.waitFor("the floating controls to mount", "!!document.querySelector('.map-fab')", { timeoutMs: 30000 });
   assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at peek, the sheet covers the FAB or zoom");
   assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at peek, the FAB or zoom overlaps the sheet");
@@ -123,13 +140,18 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at full, the sheet covers the FAB or zoom");
   assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at full, the FAB or zoom overlaps the sheet");
 
-  // (5) Per-viewer state: a reload comes back at full.
+  // (5) Per-viewer state: a reload remembers the SIZE and forgets the SELECTION (T-1026) — the card
+  // comes back closed, and opening it again comes back at full.
   // (A reload, not a goto: the app strips `#token=` from the address bar, so navigating back to the
   // same URL is a fragment change that never reloads. The token survives in this tab's storage.)
   await page.eval("window.__beforeReload = true");
   await page.eval("setTimeout(() => location.reload(), 0), true");
-  await page.waitFor("the page to reload and the sheet to remount",
-    "!window.__beforeReload && !!document.querySelector('.sheet')?.dataset.snap", { timeoutMs: 60000 });
+  await page.waitFor("the page to reload and the card to remount closed",
+    "!window.__beforeReload && document.querySelector('.sheet')?.hidden === true && !!document.querySelector('.map-inv .map-pill')",
+    { timeoutMs: 60000 });
+  await page.click("document.querySelector('.map-inv .map-pill[data-list=\"confirmed\"]')");
+  await page.waitFor("the re-opened card to come back at the size it was left",
+    "document.querySelector('.sheet').dataset.snap === 'full'", { timeoutMs: 15000 });
   assert.equal(await snap(), "full", "the viewer's snap state was not remembered");
 
   assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), [],
@@ -147,9 +169,15 @@ for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sh
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
-  await page.waitFor("the floating top controls and a full sheet",
-    `!!document.querySelector('.map-topright button') && document.querySelector('.sheet')?.dataset.snap === 'full'`,
-    { timeoutMs: 60000 });
+  await page.waitFor("the floating top controls, the pills and a card that is closed",
+    `!!document.querySelector('.map-topright button') && !!document.querySelector('.map-inv .map-pill') &&
+     document.querySelector('.sheet')?.hidden === true`, { timeoutMs: 60000 });
+  // T-1026: the card is hidden until something is clicked; opening it never lowers the stored size,
+  // so it comes up at the `full` this profile was seeded with.
+  await page.click("document.querySelector('.map-inv .map-pill[data-list=\"confirmed\"]')");
+  await page.waitFor("the card to open at full",
+    `document.querySelector('.sheet')?.hidden === false && document.querySelector('.sheet').dataset.snap === 'full'`,
+    { timeoutMs: 15000 });
   // Settled: the drawn height is the height the script set (the CSS transition has finished).
   await page.waitFor("the full sheet to settle",
     `Math.abs(document.querySelector('.sheet').getBoundingClientRect().height - parseFloat(document.querySelector('.sheet').style.height)) < 1`,

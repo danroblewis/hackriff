@@ -1,5 +1,6 @@
 // T-900 (user P1, docs/23 §10.6 rule 1): overlays are CLOSED, not faded. In the real app, at three
-// widths, every band-2/3 overlay over the map — the bottom sheet, the left column, the layers menu —
+// widths, every band-2/3 overlay over the map — the detail card (T-1026: hidden until a pill or a
+// clicked feature opens it), the layers menu, the viewport menu —
 // opens from its small control, has a visible close (×) that is what a click at its centre lands on,
 // and closing it gives the map back: the canvas columns it covered are clear again (the
 // `unoccludedColumns` hit test, same rows before, open and after). Escape then closes the TOPMOST
@@ -24,8 +25,18 @@ const pressable = (sel) => `(() => { const e = document.querySelector(${JSON.str
   const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return !!top && (top === e || e.contains(top)); })()`;
 
 const OVERLAYS = [
-  { name: "the bottom sheet", open: ".sheet-head", close: ".sheet-close", box: ".sheet",
-    isOpen: "document.querySelector('.sheet').dataset.snap !== 'peek'" },
+  // T-1026: the card is HIDDEN until something is clicked, so what opens it is the small control the
+  // user presses (an inventory pill — T-997), and "open" is "on screen at all" rather than a snap
+  // state. Closed, it takes no pixels, which is the strongest form of P1 this check can assert.
+  { name: "the detail card", open: ".map-inv .map-pill[data-list=\"confirmed\"]", close: ".sheet-close", box: ".sheet",
+    isOpen: "document.querySelector('.sheet').hidden === false",
+    // T-1026: closing the card also RELEASES the strip's worth of lift the map kept clear of it
+    // (`centre/surface.ts`'s `fit`: `PEEK_PX` + 8), so the surface's own bottom-docked rows — the
+    // coverage sentence and the pane readouts, full width — move DOWN by that much. Those rows are
+    // chrome, so a band that was clear of them while the card was open is crossed by them once it
+    // closes, and the columns check would read the map getting rows back as columns being taken
+    // away. The band therefore stops short of the card's bottom edge by what the close releases.
+    releasesPx: 64 },
   // T-997: the left inventory column and its chip are retired — the lists are sheet content now, so
   // the sheet's own close is their dismiss (the entry above), and there is no second overlay here.
   { name: "the layers menu", open: ".map-layers-btn", close: ".map-layers .map-layers-close", box: ".map-layers",
@@ -54,11 +65,11 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-layers-btn') && !!document.querySelector('.sheet-close') &&
      !!document.querySelector('.map-inv .map-pill')`, { timeoutMs: 60000 });
-  // Every overlay starts closed (a stored snap state from nothing: fresh profile).
+  // Every overlay starts closed (a fresh profile, and T-1026's hidden-by-default card).
   if (await page.eval(OVERLAYS[0].isOpen)) {
     await page.click("document.querySelector('.sheet-close')");
-    await page.waitFor("the sheet at peek", `!(${OVERLAYS[0].isOpen})`, { timeoutMs: 5000 });
-    // T-958: and arrived, before the loop below measures it shut and presses its head open again.
+    await page.waitFor("the card to be off the screen", `!(${OVERLAYS[0].isOpen})`, { timeoutMs: 5000 });
+    // T-958: and arrived, before the loop below measures it shut and presses it open again.
     await settled(page, OVERLAYS[0], "reset");
   }
   await page.frames(3);
@@ -69,19 +80,42 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   assert.deepEqual([bleed.x, bleed.y, bleed.w, bleed.h].map(Math.round), [0, 0, width, 860],
     `the canvas is not full-bleed at ${width} px: ${JSON.stringify(bleed)}`);
 
-  // T-933: the lifted minimap (the strip along the canvas's bottom edge, `MINIMAP_PX` tall) and the
-  // sheet's peek strip (never hidden — T-803) must not cover each other, at every width. The sheet
-  // starts at peek here (the reset above), so this is the every-width, no-interaction case the
-  // ticket's evidence measured; `insetBottom` is `surface.ts`'s own lift, read off the canvas the
-  // way the surface itself states it (`canvas.dataset.insetBottom`), never a second guess at it.
+  // T-933 x T-1026: the lifted minimap (the strip along the canvas's bottom edge, `MINIMAP_PX` tall)
+  // and the card's peek strip must not cover each other, at every width. Two cases now, because the
+  // card is hidden until something is clicked:
+  //   (a) CLOSED — the no-interaction case: the card is not on screen at all, so it can cover nothing;
+  //   (b) OPEN at its strip — the case T-933 measured, reached the way a viewer reaches it (a pill,
+  //       then two cycles of the handle: half -> full -> peek).
+  // `insetBottom` is `surface.ts`'s own lift, read off the canvas the way the surface itself states
+  // it (`canvas.dataset.insetBottom`), never a second guess at it.
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  const insets = await page.canvasInsets();
-  const mapTop = bleed.y + bleed.h - insets.bottom - MINIMAP_PX / dpr;
-  const mapBottom = bleed.y + bleed.h - insets.bottom;
+  const band = async () => {
+    const insets = await page.canvasInsets();
+    const b = await page.$rect(".sf-canvas");
+    return { top: b.y + b.h - insets.bottom - MINIMAP_PX / dpr, bottom: b.y + b.h - insets.bottom };
+  };
+  const shutCard = await page.$rect(".sheet");
+  assert.equal(Math.round(shutCard.h), 0, `a closed card still takes ${shutCard.h} px at ${width} px`);
+  await page.click(`document.querySelector(${JSON.stringify(OVERLAYS[0].open)})`);
+  await page.waitFor("the card to open", OVERLAYS[0].isOpen, { timeoutMs: 5000 });
+  await settled(page, OVERLAYS[0], "opening");
+  // T-958's rule, one press per state: the handle rides the card's moving top edge, so each press
+  // waits for the state it asked for AND for the card to arrive before the next press reads a rect.
+  // (Pressing at a stale rect lands on the canvas, which since T-1026 CLOSES the card — a miss that
+  // used to be harmless is now the opposite of what the press meant.)
+  for (const want of ["full", "peek"]) {
+    await page.click("document.querySelector('.sheet-grab')");
+    await page.waitFor(`the card at ${want}`, `document.querySelector('.sheet').dataset.snap === ${JSON.stringify(want)}`, { timeoutMs: 5000 });
+    await settled(page, OVERLAYS[0], `the cycle to ${want}`);
+  }
+  const map = await band();
   const peek = await page.$rect(".sheet");
-  t.diagnostic(`at ${width} px minimap y ${Math.round(mapTop)}-${Math.round(mapBottom)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
-  assert.ok(mapBottom <= peek.y || mapTop >= peek.y + peek.h,
-    `the minimap (y ${Math.round(mapTop)}-${Math.round(mapBottom)}) and the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) overlap at ${width} px`);
+  t.diagnostic(`at ${width} px minimap y ${Math.round(map.top)}-${Math.round(map.bottom)}, card strip y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
+  assert.ok(map.bottom <= peek.y || map.top >= peek.y + peek.h,
+    `the minimap (y ${Math.round(map.top)}-${Math.round(map.bottom)}) and the card's strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) overlap at ${width} px`);
+  await page.click("document.querySelector('.sheet-close')");
+  await page.waitFor("the card closed again", `!(${OVERLAYS[0].isOpen})`, { timeoutMs: 5000 });
+  await settled(page, OVERLAYS[0], "the close");
 
   // (1) Each overlay alone: open from its small control, visible close, map back after.
   for (const o of OVERLAYS) {
@@ -100,7 +134,7 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     // and would otherwise count as covered both before and after).
     const { y0, y1 } = await page.eval(`(() => {
       const me = document.querySelector(${JSON.stringify(o.box)});
-      const lo = Math.max(${box.y}, ${canvas.y}) + 1, hi = Math.min(${box.y + box.h}, ${canvas.y + canvas.h}) - 1;
+      const lo = Math.max(${box.y}, ${canvas.y}) + 1, hi = Math.min(${box.y + box.h}, ${canvas.y + canvas.h}) - 1 - ${o.releasesPx ?? 0};
       const cuts = [...document.querySelectorAll('[data-band="chrome"] > *')]
         .filter((c) => !c.contains(me) && !me.contains(c))
         .map((c) => c.getBoundingClientRect())

@@ -500,24 +500,24 @@ export const __selftestMark = __selftestPredicate(1);
     // goes red when the close genuinely stops working, rather than having been turned into a wait
     // that passes whatever the sheet does. This is that check, and it is the defect in its real
     // shape: the dismiss is still there, still visible, still pressable, and does nothing.
-    name: "t958-sheet-close-never-collapses",
+    name: "t958-sheet-close-never-closes",
     // Named singly, not as an array: app-detail and app-dismiss press the same close and are
     // expected to redden too, but the guard this entry is FOR is app-phone's, and "any of three"
     // would let it pass while the one that flaked stayed blind.
     expect: "app-phone.e2e.mjs",
-    what: "T-958: the sheet's close (x) stops collapsing it — the button swallows its click and " +
-      "leaves the snap state alone, so an overlay that has a visible dismiss cannot be dismissed " +
+    what: "T-958/T-1026: the sheet's close (x) stops closing it — the button swallows its click and " +
+      "leaves the card on screen, so an overlay that has a visible dismiss cannot be dismissed " +
       "(docs/23 section 10.6 P1).",
     file: "app/chrome/sheet.ts",
     patch: (src) => {
       const from = `  close.addEventListener("click", (ev) => {
-    // Not the head's click below, which would re-open a collapsed sheet.
+    // Not the head's click below, which would re-size a collapsed sheet.
     ev.stopPropagation();
-    ctl.set("peek");
+    dismiss();
   });`;
       if (!src.includes(from)) throw new Error("selftest: anchor not found in sheet.ts: the close handler");
       return src.replace(from, `  close.addEventListener("click", (ev) => {
-    ev.stopPropagation(); // injected by ui/e2e/selftest.mjs — the close no longer collapses the sheet
+    ev.stopPropagation(); // injected by ui/e2e/selftest.mjs — the close no longer closes the card
   });`);
     },
   },

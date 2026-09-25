@@ -82,6 +82,10 @@ export async function rehomedHitTest(page) {
  * The deadline below bounds a HANG only: a green run returns as soon as the page agrees with itself.
  */
 export const arrived = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false;
+  // T-1026: an overlay that is OFF the screen (\`hidden\`, the detail card's closed state) is not
+  // moving — it has a zero box and runs no transition, so it has arrived by definition. Judging it by
+  // the inline height the product last set would wait forever for a box that will never be measured.
+  if (e.hidden) return true;
   const want = parseFloat(e.style.height);
   return e.getAnimations().length === 0 &&
     (!Number.isFinite(want) || Math.abs(e.getBoundingClientRect().height - want) < 1); })()`;
