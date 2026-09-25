@@ -69,6 +69,10 @@ use crate::http::ServerConfig;
 /// Longest close reason (the WebSocket limit is 123 bytes).
 const MAX_CLOSE_REASON: usize = 120;
 
+/// Write timeout for the close-frame attempt on a peer already reaped for silence (T-954): short,
+/// because the full peer timeout already established it is not answering.
+const UNRESPONSIVE_CLOSE_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+
 fn http_error(stream: &mut TcpStream, status: u16, message: &str) {
     let body = json!({ "error": message }).to_string();
     let head = format!(
@@ -139,6 +143,23 @@ struct Conn {
     sink: bridge::WsSink,
     /// The `101` response and the first messages went out: pings may follow.
     started: bool,
+    /// A close frame was already written (T-954): the producer's subscribe closer and `serve`'s
+    /// own end-of-session code both reach for this, from different threads, on whichever end
+    /// happens first — see [`Conn::send_close`].
+    close_sent: bool,
+}
+
+impl Conn {
+    /// Sends the close frame at most once, and only once the handshake actually went out
+    /// (`started`): whichever of the subscribe closer (a producer-side close, T-954) or `serve`'s
+    /// own `watch`-driven end reaches this first, through the same lock, wins; the other is a
+    /// no-op here (the socket still gets shut down either way, by its own caller).
+    fn send_close(&mut self, code: CloseCode, reason: &str) {
+        if self.started && !self.close_sent {
+            self.sink.close(code, reason);
+            self.close_sent = true;
+        }
+    }
 }
 
 struct ConnSink(Arc<Mutex<Conn>>);
@@ -160,6 +181,23 @@ impl Write for ConnSink {
     }
 }
 
+/// How each producer-side [`hk_stream::CloseReason`] closes the WebSocket (T-954 follow-up): the
+/// producer can drop this consumer from its own thread — finished, too slow, not drained in
+/// time — with `serve`'s `watch` loop not yet aware anything happened, so the subscribe closer in
+/// [`attach`] is the only place that can reliably send the frame before the raw shutdown that
+/// same closer performs. Without this, that shutdown always won the race against `serve`'s own
+/// close-frame write once `watch` woke up on the resulting EOF, and every producer-initiated end
+/// still read as `1006`.
+fn close_frame_for_reason(reason: hk_stream::CloseReason) -> (CloseCode, &'static str) {
+    use hk_stream::CloseReason;
+    match reason {
+        CloseReason::PublisherFinished => (CloseCode::Normal, "producer finished"),
+        CloseReason::SlowConsumer => (CloseCode::Policy, "too slow to keep up"),
+        CloseReason::DrainTimeout => (CloseCode::Policy, "did not drain in time"),
+        CloseReason::PeerGone | CloseReason::Detached => (CloseCode::Normal, "closed"),
+    }
+}
+
 /// Subscribes the connection as a remote consumer, like [`bridge::attach`], through a writer
 /// [`watch`] can ping between messages.
 fn attach(
@@ -171,12 +209,19 @@ fn attach(
     let conn = Arc::new(Mutex::new(Conn {
         sink: bridge::WsSink::new(stream.try_clone()?, handle.kind(), handshake),
         started: false,
+        close_sent: false,
     }));
     let closer = stream.try_clone()?;
+    let conn_for_closer = Arc::clone(&conn);
     let id = handle.subscribe(
         label,
         Declared::remote(ConnSink(Arc::clone(&conn))),
-        Box::new(move |_reason| {
+        Box::new(move |reason| {
+            let (code, msg) = close_frame_for_reason(reason);
+            conn_for_closer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send_close(code, msg);
             let _ = closer.shutdown(Shutdown::Both);
         }),
     )?;
@@ -377,18 +422,21 @@ pub(crate) fn serve(
                 PeerEnd::Reset => hk_stream::SessionEnd::Transport,
             });
             // T-954: an honest close frame, not a bare TCP hang-up — see [`close_frame_for`].
-            // `watch` already returned, so this thread holds `conn` uncontended. Only once the
-            // `101` response and the first message actually went out (`started`, the same guard
-            // `watch`'s pinger uses): a session that ended before anything was ever written has
-            // no valid WebSocket to close on the wire, and writing framed bytes ahead of the
-            // handshake would corrupt it. This must happen **before** `handle.close(id)`: that
-            // call runs the subscribe callback, which shuts the raw socket down (T-633's
+            // `watch` already returned, so this thread holds `conn` uncontended: send *this*
+            // reason (the one `watch` actually observed) if nobody has already, i.e. the
+            // producer did not close this consumer first — see [`Conn::send_close`] and
+            // [`close_frame_for_reason`] for that race. Must happen **before** `handle.close(id)`:
+            // that call runs the subscribe callback, which shuts the raw socket down (T-633's
             // `closer.shutdown`) and would otherwise race ahead of this write.
+            let (code, reason) = close_frame_for(end);
             let mut c = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            if c.started {
-                let (code, reason) = close_frame_for(end);
-                c.sink.close(code, reason);
+            if end == PeerEnd::Unresponsive {
+                // Already waited out the full peer timeout to conclude the peer is gone: do not
+                // wait it out a second time on a write that will, for the same reason, very
+                // likely also time out.
+                c.sink.set_write_timeout(UNRESPONSIVE_CLOSE_WRITE_TIMEOUT);
             }
+            c.send_close(code, reason);
             drop(c);
             opened.handle.close(id);
             let _ = stream.shutdown(Shutdown::Both);

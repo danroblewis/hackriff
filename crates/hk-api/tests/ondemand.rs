@@ -252,6 +252,80 @@ fn opened_streams_are_bridged_and_stop_on_disconnect() {
     );
 }
 
+/// Publishes a few records, then finishes on its own (drops the [`Publisher`]) — the *producer*
+/// decides the session is over, never the client. This closes the consumer from that consumer's
+/// own writer thread ([`hk_stream::publisher`]'s drain-on-finish), not from anything this test's
+/// client does or from `serve`'s own `watch` loop — the race the first review attempt caught
+/// (T-954): the subscribe closer used to only shut the raw socket down, racing ahead of `serve`'s
+/// close-frame write once `watch` woke on the resulting EOF, so a producer-initiated end still
+/// read as `1006` despite the client never having done anything.
+struct Finishing;
+
+impl StreamOpener for Finishing {
+    fn open(&self, _req: &OpenRequest) -> Result<OpenedStream, OpenRefusal> {
+        let mut h = StreamHeader::new(
+            "listen/finishing",
+            StreamKind::Audio,
+            ContentClass::Unrestricted,
+            "test",
+        );
+        h.datatype = Some(AUDIO_DATATYPE.into());
+        h.sample_rate_hz = Some(AUDIO_SAMPLE_RATE_HZ);
+        h.max_frame_len = AUDIO_MAX_FRAME_LEN;
+        h.audio = Some(AudioInfo {
+            mode: "nbfm".into(),
+            channels: 1,
+            frame_samples: 4,
+            ..AudioInfo::default()
+        });
+        let mut p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
+        let handle = p.handle();
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            while p.handle().open_consumers() == 0 && t0.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            for i in 0..3u64 {
+                let _ = p.publish_binary(BinaryRecord {
+                    t: Timestamp::from_unix_nanos(1),
+                    sample_index: 4 * i,
+                    flags: RecordFlags::empty(),
+                    payload: &[0u8; 8],
+                });
+            }
+            // Dropping `p` here finishes the publisher: the consumer's own writer thread drains
+            // it and closes with `CloseReason::PublisherFinished` once empty.
+        });
+        Ok(OpenedStream {
+            header: h,
+            handle,
+            session: Box::new(()),
+            end: hk_stream::SessionEndSlot::default(),
+        })
+    }
+}
+
+#[test]
+fn a_producer_that_finishes_on_its_own_still_closes_with_a_real_frame() {
+    let server = serve(OpenerRegistry::new().with("listen", Arc::new(Finishing)));
+    let mut ws = connect(
+        server.local_addr(),
+        &format!("/ws/open/listen?token={TOKEN}"),
+    )
+    .unwrap();
+    let Message::Text(_) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    // Keep reading records; the client never closes or stops reading. The producer alone decides
+    // the session is over once it has drained its three records.
+    let (_, _, code) = drain(&mut ws);
+    assert_eq!(
+        code,
+        Some(u16::from(CloseCode::Normal)),
+        "a producer-initiated end must still close with a real frame, not a bare hang-up"
+    );
+}
+
 /// Publishes a small record every 20 ms until its session drops; counts live sessions (T-066).
 #[derive(Default)]
 struct Ticking {

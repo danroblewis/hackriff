@@ -598,6 +598,15 @@ impl WsSink {
         }));
         let _ = self.ws.flush();
     }
+
+    /// Overrides the underlying socket's write timeout (T-954), best-effort. For closing a peer
+    /// already known not to be responding: without this, [`Self::close`]'s write inherits
+    /// whatever timeout the caller set on the socket earlier (the full peer timeout, e.g.), so an
+    /// unresponsive session's teardown would wait out that timeout twice — once detecting the
+    /// silence, again trying to write the close frame it already knows will not be read.
+    pub fn set_write_timeout(&mut self, timeout: Duration) {
+        let _ = self.ws.get_mut().set_write_timeout(Some(timeout));
+    }
 }
 
 /// Longest close reason (the WebSocket limit is 123 bytes).
