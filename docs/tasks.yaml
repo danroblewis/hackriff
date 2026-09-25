@@ -27833,6 +27833,7 @@ tasks:
 
       2026-09-25 coordinator: the FLEX capture is an EXTERNAL fixture (57.6 MB > the 25 MB LFS cap; T-949 indexed it in fixtures/manifest.json as status: external, store path store/explorer-2026-09-25/). The original stays in ~/.hackriff-ops/explorer/captures/20260925/ on the Mac: in your worktree run `just fixtures-fetch --from ~/.hackriff-ops/explorer/captures/20260925` (never copy into the main checkout). Oracle: py/fixtures/flex_ref.py (T-949) agrees on sync counts 3/1/2; it DISAGREES with the explorer's truth on the FSK level count at 2 of 3 channels (recorded in the fixture README) - settle it from your decoder's evidence. Use case SIGNAL-088 (paging); T-952 APRS uses SIGNAL-089. Mac-only while the fixture is external.
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
+    dispatch: manual
   - id: T-951
     milestone: MAUTO
     title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
