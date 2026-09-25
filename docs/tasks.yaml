@@ -29240,12 +29240,12 @@ tasks:
 
       Merge: main's T-997 chrome reserve conflicted in hud.ts/tests; combined hudLabels(r, h, dpr, reserve, mode) and narrowed TIME_LABEL_BOX_CSS to the 40px ruler box. app-ruler + app-inv-pills e2e green.
     result: |
-      DONE (work-runner, from handback.json, 2026-09-25 14:37).
-      HUD time ruler narrowed to <=40 px (8px type, labels 4px off the edge, ticks 5/3 px, no UTC sub-label); mode toggle 'Time ruler: seconds ago / clock time' in the ⋯ settings menu, persisted per viewer in localStorage key hk-hud-time-labels (try/catch, default relative); absolute mode shows local HH:MM:SS derived from the label's own capture-time ns. Frequency ruler got the same narrow treatment (8px type, 13px above the bottom edge, shorter ticks). New e2e app-ruler.e2e.mjs (1280 and 400 px, following and frozen pane, both modes, width<=40, no overlap with .map-glass chrome, persistence) passes; unit tests added in surface-hud.test.ts; storage key registered in map-overlay-position test. Screenshots in ~/.hackriff-ops/work/T-998/ruler-1280.png and ruler-400.png. No Rust touched so precheck (cargo fmt/clippy) not applicable.
-      Tests: node test/run.mjs (ui, all) -> exit 0 (91/91 files passed); HK_E2E_PORT=9216 node e2e/run.mjs app-ruler -> exit 0 (2 passed)
+      DONE (work-runner, from handback.json, 2026-09-25 15:56).
+      The uncommitted file was the board note from the earlier fix round; committed. Merged main (ac899f5b): T-997's label reserve conflicted with this ticket in hud.ts, surface-hud.test.ts and map-controls.ts. Combined: hudLabels(r, canvasHpx, dpr, reserve, mode); TIME_LABEL_BOX_CSS narrowed to the 40 px ruler box and RULER_BAND_CSS in centre/surface.ts derives from it; both unit tests kept. The settings toggle is built via h(...) children + setAttribute so the fake-DOM map-controls test still mounts. e2e app-ruler freezes via the FAB only (a pan ending at the tuned live edge re-follows by T-955, so the drag made it geometry-dependent). Clock labels carry fractions below 1 s and relative labels are compacted (earlier review fix).
+      Tests: node test/run.mjs (ui, all) -> exit 0 (92/92 files passed); node e2e/run.mjs app-ruler app-inv-pills -> exit 0 (4 passed (ruler 1280/400, inventory pills 1280/400))
       precheck exit 0
-      Commits: 6be9ab92
-      Observed, not chased: e2e without mockDevice never mounted the surface within 240s under load avg ~39 (requests stayed open); unrelated to this change
+      Commits: 3ff533fa
+      Observed, not chased: e2e first mount often exceeds the timeout under load avg ~40; passes once warm. Port 9216 was held by another worker, used 9520/9600.
       Resources: 1166 CPU-s, peak 2.9 GB — LEAKED 7 processes (killed at reap)
   - id: T-999
     milestone: MMAP
