@@ -26785,7 +26785,8 @@ tasks:
   - id: T-912
     milestone: M2-hardening
     title: "CI matches the check-tier gate: 'check' on push/PR, 'acceptance' nightly + manual; rust-toolchain.toml pins 1.93.1; nextest installed in the acceptance job"
-    status: todo
+    status: in-progress
+    branch: task-t912
     priority: normal
     deps: []
     parallel_group: CI
