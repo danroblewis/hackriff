@@ -28519,7 +28519,7 @@ tasks:
   - id: T-964
     milestone: MSCAN
     title: "Scan everything (fast) does not light the coverage map: 4.3 % sampled after a full 1 MHz-6 GHz pass; /api/coverage observed only for the current step"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: SCAN-COVERAGE
@@ -28536,6 +28536,7 @@ tasks:
 
       2026-09-25 coordinator: node2 handback (ffab0588) was reaped as a false NO_WORK (sync-back bug); coordinator ran the core-interface Opus review: PASS (bands census on /api/coverage consistent with the served cells, grey stays unobserved, T-376 opening rule intact, thin client). SCOPE: this lands the census + banner only; the canvas symptom (no last-known shadow over the swept range after a full scan), the contradictory preview-page coverage line, the un-timed query's IQ-ring default window and record-limit truncation moved to T-1014.
     core_interface: true
+    commit: 57a23e81
   - id: T-965
     milestone: MSCAN
     title: Scan everything finds 0 FM rows, every row has null SNR/family, and a pass takes 237 s against a stated 125 s
