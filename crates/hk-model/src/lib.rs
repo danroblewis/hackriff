@@ -100,7 +100,8 @@ pub use detection::{
 pub use emitter::{
     Appearance, Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation,
     FRAMING_IDENTITY_SCHEME, Identity, IdentityScheme, KnownStatus, KnownStatusChange,
-    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, Recurrence, StatusAuthor,
+    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, RDS_PI_COMMIT_VOTES,
+    RDS_PI_COMMIT_WINDOW_NS, Recurrence, StatusAuthor, VoteWindow,
 };
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,

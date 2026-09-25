@@ -2916,6 +2916,31 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
             row["source_session"].is_null() || row["source_session"].is_string(),
             "{row}"
         );
+        // T-962: every vote-gated identity row states its vote, the bar and its window, and
+        // `provisional` is exactly "the bar has not yet fallen within the window" — a rate, not
+        // a lifetime count (docs/api.md, "Provisional identity").
+        let f = &row["fields"];
+        if row["frame_model"] == json!("rds-pi") {
+            assert!(f["pi_provisional"].is_boolean(), "{row}");
+            assert_eq!(f["pi_provisional"], f["identity_provisional"], "{row}");
+        }
+        if let Some(provisional) = f.get("identity_provisional") {
+            let votes = f["identity_votes"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let needed = f["identity_votes_needed"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let in_window = f["identity_votes_in_window"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let window_s = f["identity_votes_window_s"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{row}"));
+            assert!(in_window <= votes.min(needed), "{row}");
+            assert!(window_s > 0.0, "{row}");
+            assert_eq!(provisional, &json!(in_window < needed), "{row}");
+        }
     }
     let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
     assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
