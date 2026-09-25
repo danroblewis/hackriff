@@ -28153,6 +28153,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): the 1006 close is on EVERY WebSocket opener session, /ws/open/listen too (every listen and bits tap ended 1006 when closed) - fix at the shared opener close path.
+
+      Review attempt 1 FAIL: a producer-initiated end (publisher finished, or the producer dropped a slow/undrained consumer) runs the subscribe closer on hk-stream's own writer thread, which only shut the raw socket down -- serve()'s close-frame write (after its watch loop woke on the resulting EOF) always found an already-dead socket, so those sessions still read as 1006 despite docs/api.md promising 1000. Fix: Conn tracks close_sent and exposes a guarded send_close(); both the subscribe closer (mapping hk_stream::CloseReason) and serve()'s own end-of-watch code call it through the same lock, whichever gets there first wins, the other is a no-op for the frame (socket still shuts down either way). Also capped the write timeout for an already-known-unresponsive peer's close attempt to 200ms so it isn't held open for the full peer timeout twice. New test a_producer_that_finishes_on_its_own_still_closes_with_a_real_frame, confirmed red on the pre-fix closer via git stash, green with the fix.
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
