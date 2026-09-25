@@ -638,6 +638,18 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     for want in ["listen", "bits", "symbols", "playback"] {
         assert!(names.contains(&want), "on_demand openers: {names:?}");
     }
+    // T-874: Listen advertises its one opt-in parameter besides the target; still never a mode.
+    let listen = v["on_demand"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "listen")
+        .unwrap();
+    assert_eq!(
+        listen["params"],
+        json!(["emitter", "detection", "f_lo", "f_hi", "channels"]),
+        "{listen}"
+    );
     assert!(v["tcp"]["addr"].is_string(), "{v}");
     wait_for(
         "the spectrum stream to be offered",
@@ -856,6 +868,87 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         );
     }
     assert_eq!(compute["provider_changes"], json!(0), "{v}");
+
+    // T-904: `storage` — the detection store's size and the retention policy in force, refreshed
+    // by the run's retention thread (its first refresh is at start-up, so wait for it rather than
+    // race it). The composed daemon prunes by default: 1 hour, rolled up, the full 256-row tail.
+    wait_for(
+        "the storage figures in /api/status",
+        Duration::from_secs(30),
+        || get(addr, "/api/status").1["storage"]["measured_s"].is_f64(),
+    );
+    let (_, v) = get(addr, "/api/status");
+    let storage = &v["storage"];
+    for field in [
+        "db_bytes",
+        "free_bytes",
+        "detection_rows",
+        "rollup_rows",
+        "passes",
+    ] {
+        assert!(storage[field].is_u64(), "storage.{field}: {storage}");
+    }
+    assert!(storage["db_bytes"].as_u64().unwrap() > 0, "{storage}");
+    assert!(
+        storage["wal_bytes"].is_u64(),
+        "a file database in WAL mode has a -wal file: {storage}"
+    );
+    for field in ["oldest_detection_s", "newest_detection_s"] {
+        assert!(
+            storage[field].is_null() || storage[field].is_f64(),
+            "storage.{field}: {storage}"
+        );
+    }
+    let measured = storage["measured_s"].as_f64().unwrap();
+    assert!(
+        (before - 60.0..=unix_now() + 1.0).contains(&measured),
+        "{storage}"
+    );
+    // Pruning is on, so a next pass is always scheduled, never in the past of the snapshot.
+    // How far ahead depends on whether the first pass (one minute in) has run yet, which is the
+    // wall clock's business, not this test's: the server's own `last_prune` says which.
+    let next = storage["next_prune_s"]
+        .as_f64()
+        .expect("next_prune_s: {storage}");
+    assert!(next >= measured - 1.0, "{storage}");
+    assert_eq!(
+        storage["retention"],
+        json!({
+            "enabled": true,
+            "max_age_s": 3_600.0,
+            "min_age_s": 600.0,
+            "clamped_from_s": null,
+            "rollup": true,
+            "keep_per_emitter": 256,
+            "batch": 100,
+            "interval_s": 600.0,
+            "rollup_gap_s": 10.0,
+            "rollup_span_s": 60.0,
+        }),
+        "{storage}"
+    );
+    // Either no pass has run yet (`null`, and the first is due within its one-minute delay of
+    // the snapshot), or one has and reports itself whole; which, is read off the server's report.
+    let last = &storage["last_prune"];
+    if last.is_null() {
+        assert_eq!(storage["passes"], json!(0), "{storage}");
+        assert!(next <= measured + 61.0, "the first pass is due: {storage}");
+    } else {
+        assert!(
+            storage["passes"].as_u64().is_some_and(|n| n >= 1),
+            "{storage}"
+        );
+        assert!(last["error"].is_null(), "{storage}");
+        for field in ["t_s", "duration_s", "lock_ms_max", "wait_ms_max"] {
+            assert!(last[field].is_f64(), "last_prune.{field}: {storage}");
+        }
+        for field in ["examined", "deleted", "batches"] {
+            assert!(last[field].is_u64(), "last_prune.{field}: {storage}");
+        }
+        assert!(last["complete"].is_boolean(), "{storage}");
+        // The next pass is one interval (600 s) after the last.
+        assert!(next <= measured + 601.0, "{storage}");
+    }
 
     // /api/history over the fixture's band: cell grid.
     let t1 = unix_now() + 5.0;
@@ -1221,6 +1314,11 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "cluster_status",
         // T-284 (ADR-0017 TM-2): when this row was on the air, through the request's window.
         "presence",
+        // T-860 (ADR-0015 §5.4): the latest analysis, summarised (present; null = not searched).
+        "synthesis",
+        // T-860 (ADR-0015 §5.5): the identity rests only on synthesized decodes (present, possibly
+        // null).
+        "identity_synthesized",
     ] {
         assert!(
             row.get(field).is_some(),
@@ -1772,6 +1870,118 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     stop_server(serving);
 }
 
+/// T-904: a window whose per-frame detection rows have been pruned still answers
+/// `/api/inventory`, `/api/events` and each listed emitter's `/api/inventory/{id}/presence` (the
+/// durable catalogue: presence intervals, `measured`, relations) **exactly** as before the prune. A finished, unpaced replay makes the store stable,
+/// so the two answers can be compared whole. The prune here is harsher than the product's: every
+/// row older than one second of the recording, keeping only each emitter's newest **one** — the
+/// one `/api/inventory`'s `measured` reads (`Repository::prune_detections` keeps 256 by default,
+/// every per-emitter query's cap; `hk-model`'s retention tests hold that bound).
+#[test]
+fn a_pruned_window_still_answers_inventory_and_events_as_before() {
+    let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
+    let Serving { server, handle, .. } = start(&ServeOptions {
+        source: ServeSource::Replay {
+            path: fixture_path(),
+            loop_replay: false,
+            realtime: false,
+        },
+        data_dir: Some(dir.clone()),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: Default::default(),
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = server.local_addr();
+    handle.wait().expect("the replay runs to its end");
+
+    let db = dir.join("hackriff.db");
+    let mut repo = hk_model::Repository::open(&db).unwrap();
+    let rows = repo.detection_storage().unwrap();
+    let newest = rows
+        .newest_detection_end
+        .expect("the replay detected something");
+    let t1 = newest.as_unix_nanos() as f64 / 1e9 + 1.0;
+    let t0 = t1 - 3600.0;
+    let (f_lo, f_hi) = (STATION_HZ - 1.2e6, STATION_HZ + 1.2e6);
+    let window = format!("f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}");
+    let read = || {
+        let (st, inv) = get(addr, &format!("/api/inventory?{window}&limit=500"));
+        assert_eq!(st, 200, "{inv}");
+        let (st, ev) = get(addr, &format!("/api/events?{window}"));
+        assert_eq!(st, 200, "{ev}");
+        // Each listed emitter's own presence track (`/api/inventory/{id}/presence`).
+        let presence: Vec<Value> = inv["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let id = e["id"].as_str().expect("an inventory entry has an id");
+                // Windowed, so liveness derives against `t1` rather than the wall clock.
+                let (st, track) = get(
+                    addr,
+                    &format!("/api/inventory/{id}/presence?t0={t0}&t1={t1}"),
+                );
+                assert_eq!(st, 200, "{track}");
+                track
+            })
+            .collect();
+        (inv, ev, presence)
+    };
+    let (inv_before, ev_before, presence_before) = read();
+    assert!(
+        presence_before
+            .iter()
+            .any(|p| p["intervals"].as_array().is_some_and(|i| !i.is_empty())),
+        "some listed emitter has a presence track: {presence_before:?}"
+    );
+    assert!(
+        !inv_before["entries"].as_array().unwrap().is_empty(),
+        "the blind FM station is in the inventory: {inv_before}"
+    );
+    assert!(
+        ev_before["total"].as_u64().is_some_and(|n| n > 0),
+        "{ev_before}"
+    );
+
+    let report = repo
+        .prune_detections(
+            &hk_model::DetectionRetention {
+                max_age_ns: 1_000_000_000,
+                keep_per_emitter: 1,
+                batch: 64,
+                ..hk_model::DetectionRetention::default()
+            },
+            || true,
+        )
+        .unwrap();
+    assert!(
+        report.deleted > rows.detection_rows / 2,
+        "most per-frame rows went: {report:?} of {rows:?}"
+    );
+    let after = repo.detection_storage().unwrap();
+    assert_eq!(after.detection_rows, rows.detection_rows - report.deleted);
+    assert!(after.rollup_rows > 0, "{after:?}");
+
+    let (inv_after, ev_after, presence_after) = read();
+    assert_eq!(inv_after, inv_before, "the inventory answer did not move");
+    assert_eq!(ev_after, ev_before, "the event catalogue did not move");
+    assert_eq!(
+        presence_after, presence_before,
+        "every listed emitter's presence track did not move"
+    );
+    drop(repo);
+    drop(server);
+}
+
 /// T-264 (ADR-0017 stage TM-8): the History surface's two routes — the durable catalogue of
 /// events in a region over a time range, and one emitter's presence track.
 ///
@@ -2132,6 +2342,84 @@ fn events_and_presence_serve_the_durable_catalogue() {
     assert_eq!(st, 404, "{e}");
     let (st, e) = post(addr, &format!("/api/inventory/{id}/presence"), "{}");
     assert_eq!(st, 405, "read-only route: {e}");
+
+    stop_server(serving);
+}
+
+/// T-897 (docs/23 §10.6 rule 2): `GET /api/paths` answers as `docs/api.md` documents it, on a live
+/// `hk serve` over the mock device's FM window. By value, not only shape: the fixture's one
+/// emitter is a **steady** broadcast station, so once the run has stored detections of it the
+/// route must have read them (`detections_read > 0`) and traced **no** path through them — a
+/// carrier cut into segments is not a chirp. The chirp/sweep/hop producers are asserted blind, with
+/// hidden truth, through the mock device in `hk-pipeline/tests/paths_blind.rs`.
+#[test]
+fn paths_route_answers_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    let (f_lo, f_hi) = (STATION_HZ - 400e3, STATION_HZ + 400e3);
+    let url = |t0: f64, t1: f64, extra: &str| {
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}{extra}")
+    };
+    wait_for(
+        "the station's detections to reach the paths route",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(addr, &url(t1 - 3600.0, t1, "")).1["detections_read"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(addr, &url(t0, t1, ""));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "context",
+        "paths",
+        "total",
+        "limit",
+        "truncated",
+        "detections_read",
+        "detections_truncated",
+        "method",
+    ] {
+        assert!(v.get(field).is_some(), "paths answer missing {field}: {v}");
+    }
+    assert_eq!(v["method"], json!("hk-model/path@1"), "{v}");
+    assert_eq!(v["limit"], json!(200), "{v}");
+    assert_eq!(v["window"]["f_lo_hz"].as_f64(), Some(f_lo), "{v}");
+    assert_eq!(v["window"]["f_hi_hz"].as_f64(), Some(f_hi), "{v}");
+    // The context is the window widened by its own span, the time margin capped at 600 s.
+    assert_eq!(v["context"]["f_lo_hz"].as_f64(), Some(f_lo - 800e3), "{v}");
+    assert_eq!(v["context"]["f_hi_hz"].as_f64(), Some(f_hi + 800e3), "{v}");
+    let ct0 = v["context"]["t0_s"].as_f64().unwrap();
+    assert!((ct0 - (t0 - 600.0)).abs() < 1e-3, "{v}");
+    assert_eq!(v["paths"], json!([]), "a steady station draws no path: {v}");
+    assert_eq!(v["total"], json!(0), "{v}");
+    assert_eq!(v["truncated"], json!(false), "{v}");
+    // `kind` and `limit` narrow; malformed ones refuse.
+    let (st, k) = get(addr, &url(t0, t1, "&kind=hop&limit=5"));
+    assert_eq!(st, 200, "{k}");
+    assert_eq!(k["limit"], json!(5), "{k}");
+    for bad in ["&kind=radar", "&limit=0", "&limit=5000"] {
+        let (st, e) = get(addr, &url(t0, t1, bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // A viewport route needs the whole viewport.
+    for q in [
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+        format!("/api/paths?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),
+        "/api/paths".to_owned(),
+    ] {
+        let (st, e) = get(addr, &q);
+        assert_eq!(st, 400, "{q}: {e}");
+    }
+    let (st, e) = post(addr, "/api/paths", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(t0, t1, ""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
 
     stop_server(serving);
 }
@@ -2977,6 +3265,11 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
         "coverage is what was read: {job}"
     );
     assert_eq!(job["resolution"]["kind"], json!("not-searched"), "{job}");
+    // T-860 (MAUTO M-9): a job that searched nothing attached nothing — `decodes` and `confirm`
+    // are present and null; only a `done` job states a confirm outcome.
+    for key in ["decodes", "confirm"] {
+        assert!(job.get(key).is_some_and(Value::is_null), "{key}: {job}");
+    }
     assert!(
         job["channel"]["center_hz"]
             .as_f64()
@@ -4464,11 +4757,13 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     let (_dir_guard, serving, addr) = start_server();
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
 
-    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi);
+    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi, "");
     assert_eq!(header["schema"], json!("hackriff.stream"));
     assert_eq!(header["kind"], json!("audio"));
     assert_eq!(header["datatype"], json!("ri16_le"));
     assert!(header["audio"]["mode"].is_string(), "{header}");
+    // T-874: a client that does not ask gets mono.
+    assert_eq!(header["audio"]["channels"], json!(1), "{header}");
 
     // At least one binary data record (type 1: 32-byte header + i16 LE PCM payload) within a
     // bounded number of messages (status records, type 3, interleave).
@@ -4489,9 +4784,9 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
                 );
                 if record_type == 1 {
                     assert_eq!(
-                        (b.len() - 32) % 2,
-                        0,
-                        "ri16_le PCM payload must be a whole number of samples"
+                        b.len() - 32,
+                        2 * 960,
+                        "one 960-sample mono ri16_le frame per data record"
                     );
                     saw_data = true;
                 }
@@ -4504,6 +4799,37 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     assert!(
         saw_data,
         "no PCM data record arrived on the station within 30 s"
+    );
+    let _ = ws.close(None);
+
+    // T-874 (ADR-0015 §12.13): `channels=2` opts in to stereo. The station is broadcast FM, so the
+    // stream carries two channels — 960 interleaved L/R frames per record — and its status records
+    // say whether L−R is decoded right now (`stereo`), whatever this recording's pilot does.
+    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi, "&channels=2");
+    assert_eq!(header["audio"]["mode"], json!("wfm"), "{header}");
+    assert_eq!(header["audio"]["channels"], json!(2), "{header}");
+    assert_eq!(header["max_frame_len"], json!(32 + 8 * 960), "{header}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut saw_data, mut saw_status) = (false, false);
+    while Instant::now() < deadline && !(saw_data && saw_status) {
+        match ws.read() {
+            Ok(Message::Binary(b)) if b[0] == 1 => {
+                assert_eq!(b.len() - 32, 4 * 960, "960 interleaved L/R frames");
+                saw_data = true;
+            }
+            Ok(Message::Binary(b)) if b[0] == 3 => {
+                let st: Value = serde_json::from_slice(&b[32..]).unwrap();
+                assert!(st["stereo"].is_boolean(), "{st}");
+                assert!(st["stereo_lock_losses"].is_u64(), "{st}");
+                saw_status = true;
+            }
+            Ok(_) => {}
+            Err(e) => panic!("stereo listen stream ended early: {e}"),
+        }
+    }
+    assert!(
+        saw_data && saw_status,
+        "no stereo data and status within 30 s"
     );
     let _ = ws.close(None);
 
@@ -4525,12 +4851,12 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
 /// Retries the `/ws/open/listen` handshake: the run may be mid-replumb (503 `replumbing`) right
 /// after start, before the mock's power-on window settles. Returns the connection *after* its
 /// header message, plus the parsed header (the caller's next read is the first data/status record).
-fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64) -> (Ws, Value) {
+fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64, extra: &str) -> (Ws, Value) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut ws = connect_ws(
             addr,
-            &format!("/ws/open/listen?f_lo={f_lo}&f_hi={f_hi}&token={TOKEN}"),
+            &format!("/ws/open/listen?f_lo={f_lo}&f_hi={f_hi}{extra}&token={TOKEN}"),
         )
         .unwrap();
         match ws.read().unwrap() {
@@ -9340,6 +9666,36 @@ fn row_push_route_serves_an_address_range_growing_or_sealed() {
         }
         assert_eq!(v["row0"], json!(row), "{v}");
         let n = v["rows"].as_i64().unwrap();
+        if v["type"] == "rows" {
+            // T-902: every block states the honesty tier its rows were measured at, and it is the
+            // tier `/api/tiles` states for the same address when the same level answered — one
+            // rule, so a client never has to infer a pushed-row tile's tier.
+            let res = &v["resolution"];
+            let src = res["source"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no tier: {v}"));
+            assert!(
+                ["live-iq", "spectrum-history", "survey-overview"].contains(&src),
+                "{v}"
+            );
+            assert_eq!(res["live"], json!(src == "live-iq"), "{v}");
+            assert_eq!(res["fold"]["time"]["served"], json!(n), "{v}");
+            assert_eq!(res["fold"]["frequency"]["served"], json!(N), "{v}");
+            let t_index = v["tile"]["t_index"].as_i64().unwrap();
+            let (st, tile) = get(
+                addr,
+                &format!(
+                    "/api/tiles?level_f=0&level_t=0&f_index={f_index}&t_index={t_index}&cells={N}"
+                ),
+            );
+            assert_eq!(st, 200, "{tile}");
+            if tile["resolution"]["answered"]["level"] == v["answered"]["level"] {
+                assert_eq!(
+                    tile["resolution"]["source"], res["source"],
+                    "the row feed and the tile route disagree on a tier: {v} vs {tile}"
+                );
+            }
+        }
         if v["type"] == "rows" && v["final"] == json!(true) {
             let db = v["max_db"].as_array().unwrap();
             for r in 0..n {

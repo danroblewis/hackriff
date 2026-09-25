@@ -15,8 +15,10 @@
 //! 5. **SNR** = unclipped in-band power / (N0·OBW99) over the box. Bias: see the crate docs.
 //! 6. **CFO centroid**, then the **burst extent**: recentre, ±0.75·OBW channel filter, moving
 //!    average of |y|² over `2·fs/OBW` samples, first→last above N0·ENBW + 6 dB **among the runs
-//!    that hold a significant sample** (T-876, [`EstimatorConfig::extent_pfa`]). **SNR over the
-//!    extent** with the box's OBW99 band.
+//!    that hold a significant sample** (T-876, [`EstimatorConfig::extent_pfa`]); each edge then
+//!    sits where the moving average crosses half-way to the burst's on-level, which is where the
+//!    burst starts or ends (T-887, [`half_level_edges`]). **SNR over the extent** with the box's
+//!    OBW99 band.
 //! 7. **Hinted CFO** on the filtered extent: x² line (DSB/BPSK), x⁴ line (QPSK), FSK cluster
 //!    mid-point. Power-of-M without a hint is only a shape feature.
 //! 8. **Shape features**, flags, RF centre (optionally ppm-corrected).
@@ -492,6 +494,58 @@ fn burst_bounds(
     (Some(runs[a].0), Some(runs[b].1))
 }
 
+/// The burst's edges, `start..end` in snippet samples, from the run `first..=last` of the centred
+/// moving average `ma` above the edge threshold (T-887).
+///
+/// **Each edge is where `ma` crosses half-way between the noise and the burst's on-level.** `ma(i)`
+/// averages `win` samples centred on `i`, so across a step from noise `p_noise` to `p_noise + P`
+/// at sample `B` it ramps linearly over `B − win/2 ..= B + win/2` and passes the half-way level
+/// exactly at `B`, at any SNR: noise only adds jitter to the crossing, never bias. The on-level is
+/// the median of `ma` over the run (robust to a ragged edge and, for a keyed emission, low rather
+/// than high, which moves the edge outward — the safe side).
+///
+/// Until T-887 the edges were `first − win/2` and `last + win/2`. `first` is where `ma` clears
+/// `p_noise` + 6 dB, and at any useful SNR that takes only a sliver of the window on the burst,
+/// so `first` already sat about `win/2` *before* the burst — and a second `win/2` was then taken
+/// off. Every extent ran about one full window into the noise on each side: measured on the
+/// mock-SDR `fsk_burst_train` scene, −44 and +56 source samples at 500 kS/s on a 23.3 ms burst,
+/// which the classifier's normalised snippet carried as ~4 noise-only samples at each end of
+/// ~1200. An envelope sample at the noise floor is `|a/ā − 1| ≈ 1`, so those 8 samples alone
+/// doubled `sigma_aa` (0.083 against 0.025 over the same snippet with its edges dropped), and
+/// the classifier's `2fsk` density, fitted on edge-free dev-grid records, put every row at z ≈ +4.
+/// The bias is a fixed number of samples, so it is the short bursts it costs most.
+///
+/// The half-level edges never widen the extent: they are clamped inside the old
+/// `first − win/2 .. last + win/2 + 1`, which remains the bound at an SNR so low that the
+/// on-level barely clears the threshold.
+fn half_level_edges(
+    n: usize,
+    win: usize,
+    first: usize,
+    last: usize,
+    p_noise: f64,
+    ma: &impl Fn(usize) -> f64,
+) -> (usize, usize) {
+    let lo = first.saturating_sub(win / 2);
+    let hi = (last + win / 2 + 1).min(n);
+    let mut run: Vec<f64> = (first..=last).map(ma).collect();
+    run.sort_by(f64::total_cmp);
+    let on = run[run.len() / 2];
+    if !(on.is_finite() && on > p_noise) {
+        return (lo, hi);
+    }
+    let half = p_noise + 0.5 * (on - p_noise);
+    let start = (lo..=last).find(|&i| ma(i) >= half).unwrap_or(lo);
+    let end = (first..hi)
+        .rev()
+        .find(|&i| ma(i) >= half)
+        .map_or(hi, |i| i + 1);
+    if end <= start {
+        return (lo, hi);
+    }
+    (start, end)
+}
+
 struct Noise {
     n0: f64,
     rel: f64,
@@ -787,8 +841,7 @@ impl ParamEstimator {
         );
         let extent = match (first, last) {
             (Some(f), Some(l)) if l >= f => {
-                let e0 = f.saturating_sub(win / 2);
-                let e1 = (l + win / 2 + 1).min(n);
+                let (e0, e1) = half_level_edges(n, win, f, l, n0 * enbw, &ma);
                 Some(Extent {
                     start: e0,
                     end: e1,
@@ -1578,6 +1631,46 @@ mod tests {
         // A burst with no significant sample keeps that rule: nothing firmer to measure from.
         assert_eq!(burst_bounds(n, win, thr, 100.0, &ma), (Some(50), Some(702)));
         assert_eq!(burst_bounds(n, win, 20.0, 30.0, &ma), (None, None));
+    }
+
+    /// T-887: a centred moving average crosses half-way to the on-level exactly at a step, so the
+    /// edges land on the burst at any SNR — not a window outside it, as `first − win/2` did.
+    #[test]
+    fn half_level_edges_land_on_the_burst_not_a_window_outside_it() {
+        let (n, win) = (1000usize, 20usize);
+        let (b, e) = (300usize, 700usize);
+        for (p_noise, p_on) in [(1.0, 4.5), (1.0, 100.0), (1.0, 1e4)] {
+            let x: Vec<f64> = (0..n)
+                .map(|i| {
+                    if (b..e).contains(&i) {
+                        p_noise + p_on
+                    } else {
+                        p_noise
+                    }
+                })
+                .collect();
+            let ma = |i: usize| {
+                let a = i.saturating_sub(win / 2);
+                let z = (a + win).min(n);
+                x[a..z].iter().sum::<f64>() / (z - a) as f64
+            };
+            let thr = 4.0 * p_noise;
+            let (first, last) = burst_bounds(n, win, thr, thr, &ma);
+            let (f, l) = (first.unwrap(), last.unwrap());
+            let (s, t) = half_level_edges(n, win, f, l, p_noise, &ma);
+            assert!(s.abs_diff(b) <= 1 && t.abs_diff(e) <= 1, "{p_on}: {s}..{t}");
+            // The rule it replaced ran a window into the noise at every useful SNR.
+            if p_on >= 100.0 {
+                assert!(
+                    b - f.saturating_sub(win / 2) >= win - 1,
+                    "{p_on}: first {f}"
+                );
+            }
+        }
+        // Never wider than the old bounds, whatever the on-level.
+        let ma = |i: usize| if (400..420).contains(&i) { 5.0 } else { 1.0 };
+        let (s, t) = half_level_edges(n, win, 400, 419, 1.0, &ma);
+        assert!(s >= 400 - win / 2 && t <= 419 + win / 2 + 1);
     }
 
     #[test]

@@ -356,6 +356,7 @@ fn graph() -> Graph {
         identity: None,
         content_class: ContentClass::Unrestricted,
         t: t(10),
+        provenance: None,
     };
     b.repo.insert_decode(&decode).unwrap();
 
@@ -1473,7 +1474,7 @@ fn batch_is_one_transaction_and_rolls_back_on_failure() {
     let mut b = base();
     let d = det(b.survey.id, b.prov_id, 915.0e6, 40e3, tr(10, 11));
     let track = channel_track(915.0e6, 40e3, tr(10, 11), 1);
-    let unknown = DetectionId::new();
+    let unknown_track = TrackId::new();
     let err = b
         .repo
         .batch(|tx| {
@@ -1485,8 +1486,10 @@ fn batch_is_one_transaction_and_rolls_back_on_failure() {
                 vec![d.id],
                 "own writes visible"
             );
-            // Foreign key: the detection was never written.
-            tx.link_detections_to_track(track.id, &[unknown], t(12))
+            // Foreign key: the track was never written. (A link to a detection that was never
+            // written is skipped, not an error — T-904: retention can age a row out while the
+            // tracker holds its link.)
+            tx.link_detections_to_track(unknown_track, &[d.id], t(12))
         })
         .unwrap_err();
     assert!(matches!(err, RepoError::Engine(_)), "{err}");
@@ -1909,6 +1912,7 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         identity: Some(pi.clone()),
         content_class: ContentClass::Unrestricted,
         t: t(30),
+        provenance: None,
     };
     b.repo.insert_decode(&decode).unwrap();
     let label = Annotation {

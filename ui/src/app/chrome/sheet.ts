@@ -18,6 +18,8 @@
 // never replaces the host's children, because a body can itself be another area's `data-slot`
 // (Explore's focus panel is), and that area owns its subtree.
 
+import { trackOverlay } from "./dismiss";
+
 export type SheetSnap = "peek" | "half" | "full";
 export const SNAPS: readonly SheetSnap[] = ["peek", "half", "full"];
 
@@ -32,7 +34,7 @@ export const FLICK_PX_PER_MS = 0.5;
 export const DRAG_SLOP_PX = 4;
 
 /** The three snap heights for a viewport `viewportH` tall with `reservedPx` of chrome the sheet must
- * never cover (the top bar and the surface's own toolbar above it, the dock below it). Monotone
+ * never cover (the top bar and the floating top chrome above it, the dock below it). Monotone
  * non-decreasing whatever the viewport, so the model's ordering holds on a tiny window too. */
 export function snapHeights(viewportH: number, reservedPx: number): Record<SheetSnap, number> {
   const full = Math.max(PEEK_PX, Math.round(viewportH - reservedPx));
@@ -124,8 +126,8 @@ export interface SheetOptions {
   reservedPx?: number;
   /** Test/embedding seam; defaults to `localStorage`. */
   storage?: SnapStorage;
-  /** The viewport y of the lowest chrome edge the sheet's top must stay below (e.g. the surface's
-   * toolbar, which wraps to more rows on a narrow window), read at every layout. `null` = none. The
+  /** The viewport y of the lowest chrome edge the sheet's top must stay below (e.g. the
+   * floating top chrome, T-882), read at every layout. `null` = none. The
    * sheet reserves whichever is more: `reservedPx`, or what this edge needs. */
   clearOf?: () => number | null;
 }
@@ -185,6 +187,7 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   host.classList.add("sheet");
   host.setAttribute("aria-label", opts.label);
 
+  const overlay = trackOverlay(`sheet:${opts.storageKey}`, () => { ctl.set("peek"); grab.focus?.(); });
   let snap = readSnap(storage, opts.storageKey, opts.initial ?? "peek");
   const heights = () => {
     const vh = window.innerHeight;
@@ -201,6 +204,8 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     // Collapsed content is not on screen, so it must not be in the tab order either.
     if (body) body.inert = snap === "peek";
     close.hidden = snap === "peek";
+    // T-900: an open sheet is an overlay on the one stack, so Escape collapses it when it is topmost.
+    overlay.open(snap !== "peek");
   }
 
   let drag: { y0: number; h0: number; moved: boolean; lastY: number; lastT: number; v: number } | null = null;

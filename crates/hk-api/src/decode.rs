@@ -247,6 +247,7 @@ mod tests {
             identity: None,
             content_class: hk_model::ContentClass::Unrestricted,
             t: Timestamp::from_unix_nanos(t_s * 1_000_000_000),
+            provenance: None,
         };
 
         let decodes = vec![
@@ -283,6 +284,7 @@ mod tests {
             identity: None,
             content_class: hk_model::ContentClass::Unrestricted,
             t: at(t_s),
+            provenance: None,
         };
         let decodes = || vec![mk("rds-group", 1), mk("rds-ps", 2), mk("rds-group", 5)];
 

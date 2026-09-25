@@ -89,6 +89,14 @@ export interface PaneView {
    * T-470's browser-tier measurements are calibrated against it.
    */
   readonly scales?: boolean;
+  /**
+   * **The pane's coverage-fog layer** (T-807 / MAP-07, docs/24 §13.3). Default `true` (shown). When
+   * `false`, the fog states (`cellrule.ts`'s `FOG_STATES`: unobserved, unknown) draw as the flat
+   * `FOG_HIDDEN` ground instead of the grey and the hatch. A flag on the one cell rule, read by the
+   * one data pass — never a quad and never a second rule. Every measurement-bearing state is drawn
+   * either way.
+   */
+  readonly fog?: boolean;
 }
 
 /** What one pane drew, this frame. `levelF`/`levelT` are §8.5a's "state the level per pane": two
@@ -268,6 +276,7 @@ uniform vec2  uSrcPx;       // the on-screen size of one cell the front end ACTU
 uniform float uShadowGain;  // the shadow's brightness multiplier (T-526): client-adjustable, default
                              // SHADOW_MARK.gain (0.32) from ./shadow-gain.ts; the shadow shape itself
                              // (scanlines, which ramp) stays whatever CELL_MARKS says
+uniform bool  uFog;         // the pane's coverage-fog layer (T-807): false draws FOG_STATES as FOG_HIDDEN
 ${CMAP_GLSL}
 ${CELL_RULE_GLSL}
 void main() {
@@ -279,7 +288,7 @@ void main() {
   vec2 px = vQ * uSizePx;
   int s = int(floor(texture(uState, vUv).r * 255.0 + 0.5));
   float v = texture(uValue, vUv).r;
-  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px, uShadowGain);
+  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px, uShadowGain, uFog);
   // **The honesty tier qualifies a measurement and nothing else** (docs/16 §8.3). Only an OBSERVED
   // cell carries a resolution claim to overstate; a tier wash over an unobserved cell would make a
   // second grey, which is the one thing this shader may not contain.
@@ -449,11 +458,13 @@ export class Surface {
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(String(gl.getProgramInfoLog(p)));
     this.prog = p;
-    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx", "uShadowGain"]) {
+    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx", "uShadowGain", "uFog"]) {
       this.u[n] = gl.getUniformLocation(p, n);
     }
     this.vao = gl.createVertexArray()!;
     this.cache = typeof cache === "function" ? cache(new GlTileTextures(gl)) : cache;
+    // Every lane that can start a request reads the survey, not only [[render]] (T-905).
+    this.cache.setSettled((a) => this.settledBySurvey(a));
   }
 
   /** The **detail** lattice both axes are addressed on. Set once from a probe; changing it drops
@@ -469,6 +480,21 @@ export class Surface {
   /** Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580). */
   setSurvey(s: Survey | "awaiting" | null): void { this.survey = s; }
   get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /**
+   * **May no request be started for this place?** (T-905) — the cache's gate for every miss lane.
+   * True while a survey is awaited (coverage FIRST: nothing is requested before it answers) and
+   * where the survey settles the place as never sampled; false with no survey, and for an address
+   * on a lattice this surface does not know (the conservative direction: fetch).
+   */
+  private settledBySurvey(a: TileAddr): boolean {
+    const s = this.survey;
+    if (s === null) return false;
+    if (s === "awaiting") return true;
+    const { detail, overview } = this.lattices;
+    const lat = a.scheme === detail.scheme ? detail : a.scheme === overview.scheme ? overview : null;
+    return lat !== null && s.unobservedThrough(extentOf(lat, a)) !== null;
+  }
 
   /** When the survey settles `region` as never sampled, the instant it is grey up to; else null. */
   private surveyedThrough(region: Box): number | null {
@@ -586,6 +612,9 @@ export class Surface {
       // cleared panes to grey; that is precisely finding F3, one line long.
       gl.clearColor(PENDING[0], PENDING[1], PENDING[2], 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
+      // T-807: the pane's coverage-fog layer, for every cell this pane draws (tiles, stand-ins and
+      // surveyed places alike — they all reach the one `cellMark`).
+      gl.uniform1i(this.u.uFog, pane.fog === false ? 0 : 1);
 
       // **Which tier answers this viewport** (T-505). Decided per pane, per frame, from the pane's
       // own box and rectangle — the same pass that lays out everything else, never a mode a host

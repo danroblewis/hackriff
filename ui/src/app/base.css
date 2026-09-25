@@ -113,12 +113,10 @@ button, input, select { font: inherit; color: inherit; }
    lit segments live. T-506 removed the Capture panel's 92px row under it: the canvas's time axis
    now carries the IQ horizon and the retention bound itself, so the surface takes the whole column. */
 .centre { display: grid; grid-template-rows: minmax(0,1fr); min-height: 0; min-width: 0; background: var(--ground); }
-/* The bar's row is `minmax(26px, auto)`, not a flat 26px (T-528). The flat value pinned the row to
-   a height the bar's contents were free to exceed, and a wrapped second line then painted over the
-   stage below it — the grid equivalent of the overflow that made `.sf-actions`' buttons unclickable
-   (see centre.css). The floor keeps today's height for the common single-line case; `auto` is what
-   makes the bar's height a function of what is in the bar. */
-.surface { display: grid; grid-template-rows: minmax(26px, auto) minmax(0,1fr) auto auto; min-height: 0; min-width: 0; }
+/* T-882: no toolbar row any more — the stage is the first row and runs full-bleed to the top of the
+   column; every control floats over it (`chrome/map-controls.ts`). The rows under it are the trace,
+   ring and level readouts and the note, each as tall as its text. */
+.surface { display: grid; grid-template-rows: minmax(0,1fr) auto auto auto auto; min-height: 0; min-width: 0; }
 .focus { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; min-height: 0; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 16px; }
 
 /* ---- Decode grid ---- */

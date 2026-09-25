@@ -65,7 +65,7 @@ Never returns content, only stream *metadata*: every offered stream's header fie
   "on_demand": [
     { "name": "listen", "ws_path": "/ws/open/listen", "tcp_target": "open/listen",
       "kind": "audio", "datatype": "ri16_le", "sample_rate_hz": 48000,
-      "params": ["emitter", "detection", "f_lo", "f_hi"], "records": "…" },
+      "params": ["emitter", "detection", "f_lo", "f_hi", "channels"], "records": "…" },
     { "name": "bits", "ws_path": "/ws/open/bits", "tcp_target": "open/bits", "kind": "bits", "...": "…" },
     { "name": "symbols", "ws_path": "/ws/open/symbols", "tcp_target": "open/symbols", "kind": "symbols", "...": "…" },
     { "name": "iq", "ws_path": "/ws/open/iq", "tcp_target": "open/iq", "kind": "iq", "datatype": "cf32_le",
@@ -259,7 +259,9 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
       "snr_db": 21.4, "peak_dbfs": -18.25,
       "measured": { "snr_db": 21.4, "peak_dbfs": -18.25,
                     "t_start_s": 1789300812.0, "t_end_s": 1789300813.0, "duration_s": 1.0 },
-      "relation": null
+      "relation": null,
+      "identity_synthesized": false,
+      "synthesis": null                      // null = not searched (T-860)
     }
   ],
   "next_cursor": null, "limit": 100, "total": 214, "identity_access": "standard"
@@ -336,6 +338,10 @@ The full classification (likelihood, prior, provenance, reasons) is not on the r
 
 `distance` is the tolerance-normalised distance that decided it, when one was computed; `t_s` when the decision was made. An abstention is recorded once and not rewritten while the emitter stays unassigned, so `reason` and `t_s` are those of the *first* decline, not the latest look. Presentation is the client's; the field only carries the fact.
 
+**`synthesis` (T-860, ADR-0015 §5.4, MAUTO M-9).** The emitter's **latest analysis**, summarised — the `emitter_synthesis` row a region-analyze job (`/api/analyze`, below) or the trunking chain appended; the full row is `POST /api/analyze {"emitter_id"}`. `null` means **not searched**, never "searched and found nothing": a finished search that identified nothing still writes a row, whose `resolution` says so (ADR-0021 §7A.4). Otherwise `{"t_s", "engine", "verdict", "stage_reached", "summary", "resolution", "job_id", "profile", "template", "analytic_holdout_bits", "decodes_stored", "confirm"}`: `verdict`/`stage_reached` as in `AnalyzeResult`; `summary` the backend-rendered pipeline (or resolution) sentence; `resolution` the resolution `kind`, or `null` when solved; the job fields are `null` on a row the trunking chain wrote, and otherwise the job id, its profile, the template `{id, version}` (`null` for open search), the **confirm key** (ADR-0022's analytic hold-out bits), how many decodes the job stored, and `confirm` — the `ConfirmPolicy.synthesized` outcome (`confirmed` · `already` · `insufficient` · `not-attached`). An analysis never overwrites the emitter's measured values. `null` on a withheld-identity row whatever storage holds, exactly as `estimated_params` and `cluster_id` are (T-159/T-163).
+
+**`identity_synthesized` (T-860, ADR-0015 §5.5).** `true` when the row's decoded identity rests **only** on decodes made by a synthesized pipeline (decoder id `synth:…`), `false` when an ordinary decoder's decode carries it too (or no decode does), `null` without an identity or on a withheld row. A synthesized identity — even a real one, such as an `adsb-icao` from a template-bound pipeline — is strong evidence, never an unexplained fact, so a client shows this beside the identity. Synthesized decodes never count toward the identity confirm route; they confirm only through `ConfirmPolicy.synthesized`.
+
 **`cluster_group` (T-320).** The same membership, served as **grouping data** so a list can show *which* rows measure alike instead of only that each one has been seen before. `null` exactly when `cluster_id` is (no cluster, not yet visible, or a withheld-identity row), else `{"cluster_id", "label", "rows_in_view"}`:
 
 - **`label`** is a short, stable form of `cluster_id` (`hk_model::cluster_label`): the same cluster always reads the same label, two different clusters read differently, and it is derived from the id alone — so it cannot vary with which front end reported the row (T-259/T-305: dedup, clustering and identity never read the device).
@@ -347,7 +353,7 @@ The full classification (likelihood, prior, provenance, reasons) is not on the r
 
 **`total` (T-171).** The number of rows the query's filters match, ignoring `cursor`/`limit`, so a UI can show a count past one page (e.g. "512 confirmed" instead of capping at "500+"). It is computed with the same filters as the list, as a single indexed `COUNT(*)` — except a `tag` filter naming a label outside the controlled vocabulary (gating hides such tags on a withheld-identity row, so matching them needs per-row checks SQL alone can't do): that path scans and gates up to 5 000 candidate rows and reports the match count found within that scan, a lower bound past the cap. That combination (a non-vocabulary tag filter over a very large inventory) is rare.
 
-**Lifecycle (T-078).** Every emitter starts `candidate`. An auto rule (e.g. a continuous trust-confirmed track, or a valid decode/identity) or a user promotes it to `confirmed`; a user (or nothing) can delete either. `deleted` is final for that row — it leaves the default list and entity resolution, but its detections, tracks, links and history are kept (visible with `state=deleted`); a later sighting of the same signal creates a *new* candidate. See `docs/07` §2.11.
+**Lifecycle (T-078).** Every emitter starts `candidate`. An auto rule (e.g. a continuous trust-confirmed track, or a valid decode/identity) or a user promotes it to `confirmed`; a user (or nothing) can delete either. `deleted` is final for that row — it leaves the default list and entity resolution, but its detections, tracks, links and history are kept (visible with `state=deleted`; per-frame detection rows age out under the same retention policy as every other row's, T-904 — see `/api/status` `storage`); a later sighting of the same signal creates a *new* candidate. See `docs/07` §2.11.
 
 ### `/api/inventory/{id}` — one entry, promote, delete (T-078), user band (T-191)
 
@@ -1171,6 +1177,40 @@ The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), ans
 
 `counts` is row-major on **exactly** the tile's axes (`nt` time rows × `nf` frequency cells, earliest row and lowest frequency first), so a client indexes it with the tile's own index.
 
+### `GET /api/paths` — traced (t, f) paths over a viewport (T-897, [docs/23](23-map-ui-philosophy.md) §10.6 rule 2)
+
+The backend half of the map's `paths` layer ([ADR-0023](adr/0023-map-ui-and-research-state.md) §2): every **chirp**, **sweep** and **frequency-hop sequence** whose route crosses a (time × frequency) window, as an ordered list of `(t, f)` vertices at **absolute capture time**. Code: `hk_model::path` (the derivation, unit-tested on its own), `crates/hk-api/src/paths.rs` (the route).
+
+| Query | |
+|---|---|
+| `f_lo`, `f_hi` | Hz, `0 <= f_lo < f_hi` — **required** (a viewport route answers about a viewport) |
+| `t0`, `t1` | Unix s, `t0 < t1` — **required** |
+| `kind` | optional: `chirp`, `sweep` or `hop` |
+| `limit` | optional, 1..=1000, default 200 |
+
+```jsonc
+{ "window":  { "f_lo_hz": 1.0e8, "f_hi_hz": 1.004e8, "t0_s": 1790000000.0, "t1_s": 1790000010.0 },
+  "context": { "f_lo_hz": 0.996e8, "f_hi_hz": 1.008e8, "t0_s": 1789999940.0, "t1_s": 1790000070.0 },
+  "paths": [
+    { "id": "chirp:0192…", "kind": "chirp",          // chirp | sweep | hop — a morphology, never an identity
+      "t0_s": 1790000000.31, "t1_s": 1790000003.30, "f_lo_hz": 99800000.0, "f_hi_hz": 99890000.0,
+      "rate_hz_per_s": 30010.0,                      // chirp: fitted slope; sweep: median ramp's; hop: null
+      "ramps": 1, "hops": 0, "channels_hz": [],      // sweep: ramps >= 2; hop: dwells and the channels visited
+      "vertices": [ { "t_s": 1790000000.31, "f_hz": 99800400.0, "detection": "0192…", "at": "start" },
+                    { "t_s": 1790000000.81, "f_hz": 99815300.0, "detection": "0192…", "at": "centre" }, "…" ],
+      "provenance": { "method": "hk-model/path@1", "detections": ["0192…", "…"],
+                      "provenance_refs": ["…"], "detector_versions": ["…"], "surveys": ["…"] } } ],
+  "total": 1, "limit": 200, "truncated": false,
+  "detections_read": 72, "detections_truncated": false, "method": "hk-model/path@1" }
+```
+
+- **Derived on read, from measurement only.** A path is `hk_model::derive_paths` over the stored detections — immutable rows — recomputed per request, the way presence intervals are recomputed from the observation ledger. No band plan, catalogue or known hop set is read and nothing is snapped to a raster. A **chirp** is a ladder of detections abutting in time and frequency, each centre stepping the same way (≥ 3, each step ≥ ½ width); a **sweep** is two or more such ramps joined by a flyback (sawtooth) or a reversal (triangle); a **hop** sequence is ≥ 5 contiguous dwells, alike in width and length, over ≥ 3 channels. A steady carrier cut into segments and an isolated burst draw **no** path. Spur-, image-, impulse- and IMD-flagged detections are never traced.
+- **Every vertex is a measurement, and says which.** `at: "centre"` is a detection's measured centre at its time midpoint; `"start"`/`"end"` is a hop dwell's measured centre at its start/end, or a ramp's end carried along the neighbouring measured slope to the detection's start/end time — **clamped inside that detection's measured frequency extent**. `detection` names the row it came from.
+- **Stable across pans.** Paths are traced through `context` — the window widened by its own span on each side in both axes, the time margin clamped to 60–600 s (a path's kind depends on its neighbours: one ramp of a sawtooth alone is a chirp, so a deep zoom must read the neighbours a wide one does) — so a route crossing the window's edge is the same route (same vertices, same `id`) whichever part of it is on screen. A path is served when its extent overlaps `window`. `id` is `kind:first-detection`, stable across polls.
+- **Bounded, and says so.** At most 20 000 detections are traced (the newest; `detections_truncated`) and at most `limit` paths served (earliest first; `truncated`).
+- **Honest limit.** A sweep that completes inside one analysis frame has no ladder (ADR-0017 §1.3(b)) and draws no path; its measured sweep *rate* is the `sweep_rate_hz_per_s` feature field, not a route.
+- `400 invalid` for a missing or malformed window, `kind` or `limit`; `503 unavailable` with no inventory. Read-only: it reaches no device and is not audited.
+
 ### `GET /ws/tiles/rows` — rows pushed to a subscription over an **address range** (T-468)
 
 WebSocket; token as for every `/ws/` route. Query: the tile address **without** `t_index` — `level_f`, `level_t`, `f_index` (required), `scheme` (`view` default, `overview`, or a store scheme id), `device` (`any` default), `cells` (8…256, default 256) — and the **row range**: `t_from` (**required**) and `t_to` (optional). Row `r` at `level_t` is the time cell `[r·t_cell, (r+1)·t_cell)` from the Unix epoch, which is row `r mod cells` of the tile `t_index = r div cells` that [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) serves at the same address — so a client files every row under the tile key it already uses.
@@ -1193,6 +1233,9 @@ Messages are JSON text, in order:
                 "nt": 5, "nf": 32, "aligned": true, "present": true,
                 "plane": { "runs": [1, 160], "cells": 160, "uniform": "observed", "…": "…" } },
   "answered": { "level": 0, "store": "view-lattice", "f_cell_hz": …, "t_cell_s": …, "tried": [0] },
+  "resolution": { "source": "spectrum-history", "live": false, "statement": "…",   // T-902
+                  "fold": { "frequency": { "direction": "exact", "source_cells": 32, "served": 32, "…": "…" },
+                            "time": { "direction": "exact", "source_cells": 5, "served": 5, "…": "…" } } },
   "final": false }
 { "type": "unobserved", "row0": 0, "rows": 4096, "t0_s": …, "t1_s": …, "final": true, "rule": "…" }
 { "type": "end", "row": 44731500200, "reason": "range-complete" }   // only when t_to is given
@@ -1205,6 +1248,7 @@ Messages are JSON text, in order:
 - **Grey is decided by each block's `coverage`**, the selected device's plane on the block's own axes, in the same four-state alphabet and run encoding as the tile route's (T-467): `unobserved` is grey, `excluded` is drawn. A named device with no record here is `present: false` and uniformly `unobserved`.
 - **`unobserved`** — a client should keep it as a **row range**, never expand it into tiles (`ui/src/surface/rowfeed.ts` does) — is a stretch the coverage map calls uniformly unobserved for the selected device, answered from the map alone (T-461's short-circuit, over a range): no `max_db`, no level. It may span many tiles. While consecutive probes keep finding grey the probe span doubles from 4096 rows, so a range starting at `t_from=0` reaches the first recorded row in a few dozen messages.
 - **The level that answered** is the tile read's own rule: finest affordable first, walking coarser only when a level holds nothing (T-426), stated per block in `answered`.
+- **The honesty tier those rows were measured at is stated per block, in `resolution`** (T-902) — `source` (`live-iq` / `spectrum-history` / `survey-overview`), `live`, `statement` and per-axis `fold`, computed by **the tile route's own rule** (`tiles::tier_of`) over the level in `answered`: a tile wider than a capture window is `survey-overview`, so is an answering level coarser than the address on either axis (`fold.<axis>.direction` `replicated`), and otherwise it is the tile route's `spectrum-history`. `fold.time.served` is the block's row count, not `cells`. A client that builds a tile out of pushed rows before `/api/tiles` has answered for it states **this** tier — the weakest of the blocks it holds — and never borrows one from a neighbouring tile (the implied-detail defect T-893 found); a block without a recognised `source` is refused, not defaulted.
 - **Cadence (T-901).** At the live edge rows go out as they are recorded — in blocks of the few rows the tune record has reached, never a 64-row burst after a stall. The view store's seals do their file work (encode, zstd, fsync, rename) on a writer I/O thread **outside** the store's lock and fold no backlog of held-back rows, so no push waits out a seal; what a push can still wait for is the tune record's reach (above, up to a control tick). Measured through the mock SDR (`hk-cli/tests/row_push_cadence.rs`, `timing` tier): max gap 0.29 s over 240 rows, where the old path stalled 1.2-4.3 s once per 64-row block.
 - **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never holds the history mutex longer than one tile chunk. A subscription holds **no** `/api/tiles` in-flight slot (it is long-lived; a slot is the unit of a request); instead at most **16** are open per server and the seventeenth is refused `503`. The server never paces a sealed range — it writes as fast as the socket takes it; a reader that wants to walk slower asks for a shorter range.
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
@@ -1232,6 +1276,23 @@ Opaque, per-build JSON object of counters (source samples, chain stats, control-
 | `attention.unloaded_engines` | number | Baseline keys saved and unloaded by the cap (reloaded on their next fold) |
 | `attention.refused_folds` | number | Folds whose learning the cap refused; their novelty is still scored against what is loaded |
 | `attention.gain_overflow_folds` | number | Folds under a gain state beyond a subject's kept gain slots (4 per level class); scored, not learned |
+
+**Storage and detection retention (T-904)** are reported under `"storage"`: how big the run's database is and what the retention policy for per-frame detection rows did. Refreshed by the run's `hk-retention` thread (its own connection, off the real-time path) every 60 s and after every pass — `measured_s` says when — and `null` in a run with no retention thread (a library run). The composed daemons (`hk serve`, `hk run`, `hackriffd`) prune by default; `HK_DETECTION_RETENTION` sets the age (default `1h`; `1d`, `12h`, …; `off` or `0` keeps every row and still reports the figures), `HK_DETECTION_ROLLUP` `on`/`off`, `HK_DETECTION_PRUNE_INTERVAL` the time between passes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `storage.db_bytes` | number | Database file bytes (`page_count × page_size`). SQLite reuses freed pages rather than shrinking the file, so pruning bounds this rather than lowering it |
+| `storage.free_bytes` | number | Of `db_bytes`, pages on the free list — space the next inserts reuse |
+| `storage.wal_bytes` | number \| null | The `-wal` file's bytes (`null`: no WAL file) |
+| `storage.detection_rows` | number | Per-frame `Detection` rows stored |
+| `storage.rollup_rows` | number | Rollup rows (below) |
+| `storage.oldest_detection_s` / `newest_detection_s` | number \| null | End time (Unix s) of the oldest-ending and the newest stored detection. Age is measured on this capture clock, never the wall clock, so a replayed recording is not "old": an **open** survey's rows age from that survey's own newest detection (a replay into an existing data directory, or a host clock behind the store, never ages rows the running tracker still holds), a closed survey's from `newest_detection_s` |
+| `storage.next_prune_s` | number \| null | Wall-clock Unix s the next pass is due; `null` when pruning is off |
+| `storage.retention` | object | The policy in force: `enabled`, `max_age_s` (`null` when off), `min_age_s` (600: the floor, ten times the tracker's 60 s idle timeout — a shorter `HK_DETECTION_RETENTION` is clamped up to it), `clamped_from_s` (the age asked for when it was clamped, else `null`), `rollup`, `keep_per_emitter`, `batch`, `interval_s`, `rollup_gap_s`, `rollup_span_s` |
+| `storage.last_prune` | object \| null | The last pass: `t_s`, `duration_s`, `watermark_s` / `cutoff_s` (the newest survey's), `examined`, `deleted`, `kept_pinned`, `kept_tail`, `kept_moved`, `rollups_inserted`, `rollups_extended`, `batches`, **`lock_ms_max`** / `lock_ms_total` (the measured write-lock holds, T-453: lock granted → commit, excluding the post-commit WAL checkpoint, which runs with the lock released), `wait_ms_max` (the longest wait for the lock behind the detector's own writes — paid by the pass, not by ingest), `complete`, `error`. `null` before the first pass (one minute into the run) |
+| `storage.passes` / `deleted_total` / `errors` | number | Totals for the run |
+
+**What is pruned, and why the served routes do not change.** Only per-frame `Detection` rows (and their track links) older than the age are deleted, in batches of `batch` rows per write transaction with a pause between batches. Tracks, emitters, presence intervals, the observation ledger, links, relations and decodes are durable and never touched, so `/api/inventory`, `/api/events` and presence for a pruned window answer as they did. Three kinds of reader of detection rows are kept answerable. (1) The per-emitter "newest linked detections" reads — `/api/inventory`'s `snr_db`/`peak_dbfs`/`measured`, the overlap re-analysis's measured bands, the artefact and retune evidence — rank by start time and read at most 256 rows, so each emitter's newest `keep_per_emitter` (256) rows are never pruned and those answers are exact. (2) A row named by id — decode provenance (a demodulation's detection), a recording's trigger, a retune verdict, a direct emitter link, an annotation, an anomaly subject, a classification input, an observation-ledger source — is pinned for good. (3) The time-windowed reads (occupancy spans, the channel plan) read **rollups** past the age: before a row is deleted it is folded into its track's rollup, one row per contiguous run (same survey and provenance, no gap over `rollup_gap_s`, no longer than `rollup_span_s`) holding the time hull, the time on air inside it (the members' summed duration), frequency envelope, mean/max OBW and SNR, peak level, count, clip count and the OR/AND of the flags. A rollup is a summary, never served as a detection. Detections remain not a served record kind. Contract: `api_contract.rs::discovery_history_floor_status_and_control_state_have_the_documented_shape` (the shape and defaults by value) and `::a_pruned_window_still_answers_inventory_and_events_as_before` (the whole `/api/inventory` and `/api/events` answers equal before and after a prune); the policy itself: `hk-model` `repo::retention_tests`.
 
 ## Control API (T-050)
 
@@ -1454,12 +1515,12 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 
 `Session`: `{id, active, selection_id, emitter_id, f_lo_hz, f_hi_hz, kinds, max_s, max_bytes, bytes, started_at, elapsed_s, ended, links_saved, files: [{kind, file, sidecar, extra_files, state, bytes, records, dropped_records, message, recording_id, bitstream_id, url, sidecar_url, extra_urls}]}` — `url`/`sidecar_url`/`extra_urls` are the matching `/api/outputs/{id}/files/{name}` download paths, to which a browser appends `?token=`.
 
-## Analyze / synthesize decoder (T-190, T-546, T-859)
+## Analyze / synthesize decoder (T-190, T-546, T-859, T-860)
 
 `/api/analyze` is the MUI "Analyze / synthesize decoder" action (docs/14, `docs/15-decoder-synthesis.md` §7): point it at a signal and ask **what decodes it, and why, in terms of what was measured**. It has two answers, told apart by the body of the `POST`:
 
 - **A region-analyze job** (ADR-0015 §5.1–§5.3, MAUTO M-8, T-859): a `selection_id` or `band` target — or an `emitter_id` target **with any job field** (`profile`, `max_wall_s`, `source`, `live_s`, `templates`, `attach`) — answers **`202 {"job": AnalyzeJob}`** with `Location: /api/analyze/{id}`, audited `analyze_start`. The job runs in the pipeline (`hk_pipeline::synth::jobs`): it acquires IQ from the ring or live, searches, and is polled, streamed, cancelled and fetched through the routes below.
-- **The emitter's persisted analysis** (T-546): a bare **`{"emitter_id"}`** answers `200` with the emitter's latest analysis — the `emitter_synthesis` row (ADR-0015 §5.4) the pipeline wrote while it ran. This form **reads**; it never starts DSP, and every call is answered synchronously. Today the only producer is the trunking chain (`hk_pipeline::synth`), so a confirmed control channel has an answer and most emitters do not. It is audited `analyze`.
+- **The emitter's persisted analysis** (T-546): a bare **`{"emitter_id"}`** answers `200` with the emitter's latest analysis — the `emitter_synthesis` row (ADR-0015 §5.4) the pipeline wrote while it ran. This form **reads**; it never starts DSP, and every call is answered synchronously. Its producers are the trunking chain (`hk_pipeline::synth`) and attached region-analyze jobs (T-860). It is audited `analyze`.
 
 **`not-searched` is not `unknown`** (ADR-0021 §7A.4). An emitter no analysis has run on answers `200` with `pipeline: null` and `resolution: {"kind": "not-searched", "summary"}` — *un-looked-at*, which is a different fact from *looked at and found nothing*, and the two are never rendered alike. A job that **failed or was cancelled** carries the same `not-searched`: it ruled nothing out. This is the decode-side statement of the canvas's grey rule: a client that shows them the same way has the same defect as one that paints unobserved spectrum as quiet.
 
@@ -1483,7 +1544,7 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 - **`source`**: `auto` (default: the ring if it holds the window, else live) · `ring` (needs a window) · `live`. An **explicit** window (a selection's or a band's) never silently becomes "whatever is on the air now": if the ring no longer holds it the request is refused. An emitter's default window is not explicit, so `auto` falls back to live for it (ADR-0015 §5.3).
 - **`live_s`** (> 0, ≤ 30, default 2): how much new IQ a live job collects. The wait is on the **capture clock** — the ring's own live edge — never a wall clock.
 - **`templates`**: `{"only"?: [id], "exclude"?: [id], "off"?: bool}`, carried to the search's seeding.
-- **`attach`** (default `true`): attach results to an emitter when done (ADR-0015 §5.4, MAUTO M-9; `confirm` stays `null` until it lands).
+- **`attach`** (default `true`): attach a `done` job's results to an emitter (ADR-0015 §5.4, MAUTO M-9 — *Attach and confirm-by-decode*, below).
 
 **Admission** is one running job and a queue of four (`503 busy` beyond); the power policy may refuse a profile (`422 power`: `deep` on battery, anything but `quick` in low-power mode) and halves threads on battery. **The source is resolved at admission**, so its errors are answered on the `POST`: `410 evicted` (an explicit window older than the ring's oldest sample), `422 no_iq` (an explicit window the ring holds nothing of, or an empty ring), `409 outside_window` (a live job whose band is not inside the tuned window), `503 unavailable` (no IQ ring on this run, or no job manager on this server).
 
@@ -1491,7 +1552,7 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 
 ### `AnalyzeJob`
 
-`{id ("a<n>"), href, state, end_reason, error, target, profile, source, live_s, attach, templates, window, channel, budget, used, progress, results, trace_summary, resolution, emitter_id, confirm, content_class, created, started, ended, warnings}`:
+`{id ("a<n>"), href, state, end_reason, error, target, profile, source, live_s, attach, templates, window, channel, budget, used, progress, results, trace_summary, resolution, emitter_id, decodes, confirm, content_class, created, started, ended, warnings}`:
 
 - `state`: `queued` → `acquiring` → `searching` → (`refining` · `validating` · `throttled`) → `done` · `cancelled` · `failed`. A `DELETE` makes a queued or running job `cancelled` **at once and finally** — a search that finishes in the same instant cannot turn an acknowledged cancel back into `done`; its partial `results`/`used`/`trace_summary` still arrive when the engine hands back.
 - `end_reason`: why the search stopped — `solved` · `plateau` · `budget` · `exhausted` · `cancelled` · `source_ended` · `evicted`; `null` while running and when the job failed before searching.
@@ -1503,9 +1564,21 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 - `results`: ≤ 10 ranked `PipelineResult`s (ADR-0015 §3.4): `{rank, verdict, summary, recipe, template, stage_reached, stages, evidence_bits, prior_bits, analytic_holdout_bits, check, frames_preview, characterisation}`. `recipe` is an ordinary, runnable recipe — start it as a live decoder with `POST /api/pipelines`. `frames_preview` is decoded content and is **emptied unless the acquired IQ's `content_class` permits content**.
 - `trace_summary` (ADR-0021 §4.1): `{decisions, nodes_recorded, nodes_elided, truncated, by_outcome: {<outcome>: n}, by_stage: [{stage, tried, not_tried, best_bits}], replayable}`. `decisions = nodes_recorded + nodes_elided`; `replayable` is false when a wall/CPU backstop, a throttle or a thermal pause decided something.
 - `resolution` (ADR-0021 §7A.2): present whenever the job finished without a `solved` result — the same object as `AnalyzeResult.resolution` below, with `coverage` for a finished search. `unknown` is written **only** by a `done` job.
+- `emitter_id`: the emitter target, or — once a `done` job has attached — the emitter its results attached to.
+- `decodes` (M-9): `{stored, valid}` — decode rows stored from the rank-1 result's **hold-out** run, and how many were CRC-valid without correction; `null` until the job has attached.
+- `confirm` (M-9): `{rule, outcome, evidence_bits, reason}` on a `done` job, `null` otherwise. `rule` is `hk-pipeline/confirm-synth@2`; `outcome` is `confirmed` (this job confirmed the emitter), `already` (it would have, and the emitter was already confirmed — or a user deleted it, and a user delete wins), `insufficient` (the gate refused; `reason` names the clause) or `not-attached` (nothing to attach to, `attach: false`, or the server has no inventory); `evidence_bits` is the confirm key, the analytic hold-out bits. `reason` is backend-rendered and, on a confirm, is the lifecycle reason itself (below).
 - `created`, `started`, `ended`: Unix s.
 
 The last **50** finished jobs are kept in memory (results persist through `attach`, M-9). An id this server never issued is `404 not_found`; a job that ran and has been forgotten — by age or by `DELETE` — is **`410 gone`**. *We forgot* is not *it never ran* (ADR-0021 §4.2). `?state=` takes a state name, else `400 invalid`.
+
+### Attach and confirm-by-decode (T-860, ADR-0015 §5.4–§5.5, ADR-0022 §6)
+
+A job that finished **`done`** with results, asked to `attach`, attaches on the server (`hk_pipeline::synth::attach`); cancelled and failed jobs never do. The attach is **one transaction** — decodes, any new candidate, the row and the confirmation land together or not at all — so a failed attach (a `warnings` entry, never a failed job) leaves nothing half-written.
+
+- **The emitter.** An emitter target is that emitter — never a user-deleted one: such a target is refused at `POST` (`404 not_found`, as every mutating inventory route answers for a deleted entry), and one deleted while the job searched gets `not-attached` with nothing stored, linked or appended. Otherwise the inventory emitter nearest the searched channel **among those seen in the analysed window** (centre within half the band, at most twice as wide; a user-deleted row is never chosen). If there is none, the job's **first** stored decode creates a candidate through ordinary decode ingestion, and every later decode is linked to it — one emission, one candidate.
+- **Stored decodes.** Only for a rank-1 result that **solved on hold-out**, and only the frames of that hold-out run — search-window frames are never stored. Each is an ordinary `Decode` row (repository content gate, stream-policy shape rule) with `decoder_id` `synth:<template id | open>`, `decoder_version` `<engine>+sha256:<recipe hash>`, and `provenance: {kind: "synthesized", job_id, holdout: true, evidence_bits, hypotheses, analytic_holdout_bits, check_bits?, l_check?, check_searched, template_provenance?}` — the numbers the gate read, so a confirmation is reconstructible from the stored row. An open search's decodes carry the structural identity `other:hk-framing`; a template-bound identity is kept and still marked synthesized. Content is dropped unless the acquired IQ's class permits it.
+- **The row.** An `emitter_synthesis` row is appended (append-only; the emitter's measured values are never touched) carrying the job's contribution `job: {job_id, profile, evidence_bits, prior_bits, analytic_holdout_bits, template, recipe (the rank-1 document inline), recipe_hash, check, holdout, trace_summary, replay_key, null_control, sealed_resolution, decodes_stored, decodes_valid, confirm}`, so `AnalyzeResult` carries `job` on rows a job wrote. `sealed_resolution` is the `Resolution` `hk-synth` sealed before any context lookup could shape it (ADR-0021 §9.3).
+- **`ConfirmPolicy.synthesized`** (actor `hk-pipeline/confirm-synth@2`, ADR-0022 §6) confirms a **candidate** only when every clause holds, in order: the rank-1 verdict is `solved` (a partial verdict never changes lifecycle state) and the profile is not `quick`; the check is at least **8** bits wide; `check_bits = width × differences − L_check ≥ 16` over hold-out (an evaluator's larger figure is clamped to that bound, and the excess comes off the analytic total), counting only frames valid without FEC correction; **analytic hold-out bits ≥ 24**, each stage net of its own look-elsewhere; a **searched** check (open search, or a template an earlier search discovered, which inherits that search's look-elsewhere) needs ADR-0021 §8.2's null control to have **run and passed**; and front-end trust over the analysed window — at most **50 %** of the emitter's detections in the window suspect, **at least one** detection in it, and the acquired IQ known not to be overloaded. A missing number refuses; nothing unmeasured is assumed clean. The rule never demotes, and a user delete wins. The lifecycle reason names the arithmetic, e.g. *"decoded by synthesized pipeline `generic-fsk-framed`: CRC-16 (searched), 3 differing frame(s) valid on hold-out without correction, 48.0 − 21.0 = 27.0 check bits, 30.0 analytic bits against a 24-bit threshold; null control passed with a 11.4-bit margin"*.
 
 ### The trace (`GET /api/analyze/{id}/trace`)
 
@@ -1523,7 +1596,7 @@ A `messages` stream (`message_schema: "hackriff.analyze/1"`, `content_class: unr
 
 ### `AnalyzeResult` (the bare `{"emitter_id"}` read)
 
-`AnalyzeResult`: `{emitter_id, provenance ("synthesized by output analysis"), engine, t_ns, verdict, stage_reached, pipeline, evidence: [StageEvidence], trace: [TraceNode], resolution, receiver}`. For a never-analysed emitter only `emitter_id`, `pipeline` (null), `evidence` (empty), `trace` (empty) and `resolution` are present.
+`AnalyzeResult`: `{emitter_id, provenance ("synthesized by output analysis"), engine, t_ns, verdict, stage_reached, pipeline, evidence: [StageEvidence], trace: [TraceNode], resolution, receiver, job?}` — `job` only on a row a region-analyze job wrote (above). For a never-analysed emitter only `emitter_id`, `pipeline` (null), `evidence` (empty), `trace` (empty) and `resolution` are present.
 
 - `verdict` (ADR-0015 §3.4, how deep the search got, never what it means): `energy` → `demodulated` → `clocked` → `framed` → `checked` → `solved`.
 - `stage_reached` (ADR-0015 §1.1): `s0-channel`, `s1-demod`, `s2-clock`, `s3-bits`, `s4-framing`, `s5-check`, `s6-fields`.
@@ -1808,7 +1881,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 
 **`spectrum/live` is computed only while somebody is reading it (T-489).** The stream is always *offered* — it appears on `/api/streams` and accepts a subscriber whenever the run is live — but the producer's FFT runs only while at least one consumer is open, so a headless run (a scheduled survey with no browser attached) publishes **no rows at all** and the run's spectrum row counter honestly reads `0`. A **consumer** is what counts: this WebSocket, a TCP stream client, or an in-process subscriber. Nothing else changes — capture, the IQ ring, detection, the spectrum-history pyramid and the coverage map each read the ring themselves and are identical either way, which is the point: the data must not change because nobody was looking. On subscribing, rows start within one producer read timeout plus a row period (measured ~0.1 s), and the first one carries `DISCONTINUITY`, because it is not contiguous with whatever row was published before the quiet stretch.
 
-**`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`), `iq?emitter=<id>` or `iq?f_lo=<Hz>&f_hi=<Hz>` (T-165, ADR-0013 §4.9 gap 8: raw channelised IQ, `cf32_le`, stream-contract §12.3 — no mode or parameter either, there is nothing to demodulate). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …).
+**`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter; `&channels=2` opts in to **stereo**, T-874: on a broadcast-FM channel the header's `audio.channels` is then 2 and each record interleaves `L, R`, other modes stay mono and say `channels: 1`, and without the parameter the stream is exactly the mono one — stream contract §12.2), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`), `iq?emitter=<id>` or `iq?f_lo=<Hz>&f_hi=<Hz>` (T-165, ADR-0013 §4.9 gap 8: raw channelised IQ, `cf32_le`, stream-contract §12.3 — no mode or parameter either, there is nothing to demodulate). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …; on a two-channel stream also `stereo` — the pilot is locked and L−R decoded — and `stereo_lock_losses`).
 
 ### `hk` stream-tail
 
@@ -1831,6 +1904,16 @@ Consumers never send after the handshake line; any byte, or a hang-up, closes th
 
 ```sh
 printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
+```
+
+Listen from the command line (T-874). The stream is framed, so pipe it through the WAV example rather than straight into a player; `--stereo` sends `channels=2` and writes a two-channel WAV when the station is broadcast FM (the header says which it got):
+
+```sh
+HK_TOKEN=... python3 py/examples/hk_audio_wav.py --f-lo 101.2e6 --f-hi 101.4e6 --seconds 10 --out fm.wav
+HK_TOKEN=... python3 py/examples/hk_audio_wav.py --f-lo 101.2e6 --f-hi 101.4e6 --stereo --out fm-stereo.wav
+# the raw handshake, for any other client: mono unless it asks
+printf 'open/listen?f_lo=%s&f_hi=%s&channels=2&token=%s\n' 101200000 101400000 "$HK_TOKEN" | nc 127.0.0.1 8788 > fm.hkstream
+python3 py/examples/hk_audio_wav.py --file fm.hkstream --out fm-stereo.wav
 ```
 
 Python clients (standard library only): `py/examples/` (`hkstream.py`, `hk_bits.py`, `hk_audio_wav.py`), documented in `py/README.md`.
@@ -2414,7 +2497,7 @@ Both errors grow **linearly with age**, so a box drawn from a declared rate walk
 
 **What does not change, at any stage:**
 
-- `GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi=` and TCP `open/listen?…` keep their names, parameters and refusal codes. There is still **no `mode` parameter** — mode and every other parameter stay estimated.
+- `GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi=` and TCP `open/listen?…` keep their names, parameters and refusal codes. There is still **no `mode` parameter** — mode and every other parameter stay estimated. (T-874 added the one opt-in `channels=2` for stereo, ADR-0015 §12.13; without it nothing changed.)
 - The audio profile (`docs/stream-contract.md` §12.2) keeps `kind: "audio"`, `datatype: "ri16_le"`, `sample_rate_hz: 48000`, `frame_samples: 960`, its type-1 data records and its type-3 status keys (`level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …). A closed squelch stays a jump in `sample_index` plus `DISCONTINUITY`.
 - Audio stays **content**: the pre-attach gate (`listen_class`) still runs before any ring read, and the egress gate still withholds payloads under a class that forbids content.
 - `/api/status` keeps reporting `listen.budget`: an audio pipeline counts as a listener, not only as a chain.

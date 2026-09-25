@@ -13,6 +13,27 @@
 # must be asserted by the token the checker prints, never by its exit status alone.
 set -uo pipefail
 
+# MAIN MERGE GUARD (2026-09-24, incident 292de09b; the second of the ea91c27c class). In the MAIN checkout
+# (its .git is a directory; a linked worktree's is a file, and worktrees merge main into themselves
+# freely), no commit while the merge runner has a merge staged (.git/MERGE_HEAD) or a batch provisionally
+# on main ($HACKRIFF_OPS/bulk-in-progress): at 15:05:04 a board note committed then became a merge
+# commit of task-t899 and landed it UNGATED. ops/merge-runner.sh sets HK_MERGE_RUNNER=1 on its own
+# commits (the gated merge commit, the board flip), and only those.
+_top=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -n "$_top" ] && [ -d "$_top/.git" ] && [ "${HK_MERGE_RUNNER:-0}" != 1 ]; then
+  _ops="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+  _why=""
+  [ -e "$_top/.git/MERGE_HEAD" ] && _why="the merge runner has a merge STAGED (.git/MERGE_HEAD)"
+  [ -z "$_why" ] && [ -e "$_ops/bulk-in-progress" ] && _why="a batch is provisionally merged on main and gating ($_ops/bulk-in-progress)"
+  if [ -n "$_why" ]; then
+    echo "main-guard: REFUSING this commit - $_why." >&2
+    echo "  A commit in main's checkout now becomes part of the runner's merge (2026-09-24 15:05: a board note" >&2
+    echo "  landed task-t899 ungated). Wait until the gate ends (just wait-for-gate), then edit -> check -> commit" >&2
+    echo "  in one step - or put the change on a branch in a worktree and queue it in merge-queue.txt." >&2
+    exit 1
+  fi
+fi
+
 BOARD=docs/tasks.yaml
 staged=$(git diff --cached --name-only --diff-filter=ACMRD 2>/dev/null)
 merging=$(git rev-parse --verify --quiet MERGE_HEAD 2>/dev/null || true)

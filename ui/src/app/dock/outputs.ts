@@ -39,11 +39,15 @@ export function outputsCountText(outputs: readonly OutputEntry[]): string {
   return `${outputs.length} live · ${pipelines} pipeline${pipelines === 1 ? "" : "s"}`;
 }
 
-/** An audio entry's sub-line from its stream header, once known (e.g. "WFM audio · 48 kHz"). */
-export function audioSubText(mode: string | undefined, sampleRateHz: number | undefined): string {
+/** An audio entry's sub-line from its stream header, once known (e.g. "WFM audio · 48 kHz"), and
+ * — on a two-channel stream (T-874) — what the latest status says it carries: "stereo" only while
+ * the server reports the pilot locked, "mono · no pilot lock" when it does not, "2 ch" before the
+ * first status. Never "stereo" from the header alone. */
+export function audioSubText(mode: string | undefined, sampleRateHz: number | undefined, channels = 1, stereo: boolean | null = null): string {
   const parts: string[] = [];
   if (mode) parts.push(`${mode.toUpperCase()} audio`);
   if (sampleRateHz) parts.push(`${Math.round(sampleRateHz / 1000)} kHz`);
+  if (channels === 2) parts.push(stereo === null ? "2 ch" : stereo ? "stereo" : "mono · no pilot lock");
   return parts.length ? parts.join(" · ") : "audio";
 }
 

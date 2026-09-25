@@ -121,6 +121,7 @@ impl RowSpec {
             identity,
             content_class: self.class,
             t,
+            provenance: None,
         })
     }
 }

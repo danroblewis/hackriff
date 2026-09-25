@@ -107,3 +107,7 @@ mod signal_085;
 // T-627: the coverage manifest, the sealed hold-out and the expected-failure rows (docs/22 §6).
 #[path = "acceptance/mauto_corpus.rs"]
 mod mauto_corpus;
+// T-568: the negative-control guard suite (docs/22 §4.3, §6.2): five populations, the stated
+// false-label budget, and a stub that proves the suite can fail.
+#[path = "acceptance/mauto_negatives.rs"]
+mod mauto_negatives;

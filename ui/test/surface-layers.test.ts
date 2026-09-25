@@ -181,7 +181,7 @@ test("MAP-06: the surface routes its overlays through the registry, into the one
   assert.match(src, /marks: \(pane, edge\) => \{[^]*?composeOverlays\(layersFor\(pane\.id\), overlayFns, pane, edge\)/,
     "the marks hook is not composed from the pane's registry");
   assert.equal([...src.matchAll(/\bmarks: \(/g)].length, 1, "a second overlay path appeared");
-  assert.match(src, /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{ rules: ringQuads, detections: detectionQuads \}/);
+  assert.match(src, /overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = \{ rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn \}/);
   // The base style reaches the trace by the pane's own registry, per frame.
   assert.match(src, /const phosphor = layersFor\(pane\.id\)\.base === "phosphor";/);
   // A split inherits the creating pane's registry.

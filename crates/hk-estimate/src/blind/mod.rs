@@ -240,6 +240,11 @@ pub const MIN_ENVELOPE_TRANSITIONS: usize = 12;
 /// the discriminating: a high `c8` on its own is common and means nothing.
 const PSK8_C8_MIN: f64 = 0.15;
 
+/// Order-2 line coherence at which the BPSK score starts to rise (the S5 constant, unchanged).
+const BPSK_C2_MIN: f64 = 0.25;
+/// Order-4 line coherence at which the QPSK score starts to rise (the S5 constant, unchanged).
+const QPSK_C4_MIN: f64 = 0.2;
+
 /// Score at which [`RateTrust::higher_order_linear`] is asserted (T-589).
 ///
 /// Half, matching the `digital` gate's own `ranked[0] ≥ 0.5`: the same bar the four family scores
@@ -287,9 +292,9 @@ pub struct FamilyScores {
     pub ook: f64,
     /// FSK. Not measured when [`FamilyFeatures::fsk`] is `None`.
     pub fsk: f64,
-    /// BPSK.
+    /// BPSK. Not measured when [`FamilyFeatures::bpsk_measured`] is false.
     pub bpsk: f64,
-    /// QPSK.
+    /// QPSK. Not measured when [`FamilyFeatures::qpsk_measured`] is false.
     pub qpsk: f64,
 }
 
@@ -334,6 +339,36 @@ pub struct FamilyFeatures {
     /// leaves behind and what orders 2 and 4 cannot see.
     #[serde(default)]
     pub c8: f64,
+    /// Whether [`FamilyScores::bpsk`] is a measurement (T-888). False when the on-record is too
+    /// short for a line search, or when the order-1 line **decisively** explains the order-2 one
+    /// (see [`psk_order_measured`]). Defaults to false: an estimate that never ran measured nothing.
+    #[serde(default)]
+    pub bpsk_measured: bool,
+    /// Whether [`FamilyScores::qpsk`] is a measurement (T-888): as
+    /// [`bpsk_measured`](Self::bpsk_measured), one order up (order 2 explaining order 4).
+    #[serde(default)]
+    pub qpsk_measured: bool,
+}
+
+/// Whether an order-`p` PSK score says anything about order-`p` structure (T-888, the
+/// [`MIN_ENVELOPE_TRANSITIONS`] rule for OOK applied to the two PSK families).
+///
+/// Raising a signal that already has a line at order `p/2` to the power `p` gives a line at order
+/// `p` **whatever the modulation**: a carrier squared is a line, and every line squared is one. So
+/// when the lower-order line decisively dominates — its ratio test `lower − 0.5·higher` sits past
+/// the far edge of its ±3σ ramp, where [`family::soft_veto`] is pinned at its penalty — the
+/// order-`p` score is `ramp(higher) × penalty`, a function of the veto constant and not of the
+/// signal: every integer-h FSK row read `blind_qpsk` = 0.200 exactly (T-877). That is C14 being
+/// unable to look past the lower order, not "looked, no evidence", so the score is **absent**.
+/// Inside the ramp the two orders are not separable from noise and the score stays a measurement,
+/// exactly as [`family::soft_veto`] treats it; a lower order that is weaker than the higher is
+/// always a measurement. So is a higher order **below its own line threshold** (`higher_min`):
+/// then the score is 0 because there is no order-`p` line at all — "looked, no evidence" — and
+/// what the lower order does cannot change that (QPSK's `blind_bpsk`: no order-2 line, whatever
+/// residual order-1 coherence sits beside it). A record under 8 on-samples has no line search.
+fn psk_order_measured(n_on: usize, lower: f64, higher: f64, higher_min: f64, width: f64) -> bool {
+    n_on >= lines::MIN_LINE_SAMPLES
+        && (higher <= higher_min || lower - 0.5 * higher < width.max(f64::MIN_POSITIVE))
 }
 
 /// Settings. Defaults are the S5 constants (see the [module docs](self) for their
@@ -1265,10 +1300,10 @@ impl BlindEstimator {
         // the SAME Rayleigh field, where the two order statistics differ by about `1/(2·ln M)`.
         let ratio_w = |a: f64, b: f64| (a * a + 0.25 * b * b).sqrt();
         let u2_w = 1.0 / (2.0 * (xon.len().max(2) as f64).ln());
-        let bpsk_score = ((c2 - 0.25) / 0.25).clamp(0.0, 1.0)
+        let bpsk_score = ((c2 - BPSK_C2_MIN) / BPSK_C2_MIN).clamp(0.0, 1.0)
             * soft_veto(c1 - 0.5 * c2, 0.0, ratio_w(n1, n2), 0.3, true)
             * soft_veto(u2, 0.6, u2_w, 0.2, true);
-        let qpsk_score = ((c4 - 0.2) / 0.2).clamp(0.0, 1.0)
+        let qpsk_score = ((c4 - QPSK_C4_MIN) / QPSK_C4_MIN).clamp(0.0, 1.0)
             * soft_veto(c2 - 0.5 * c4, 0.0, ratio_w(n2, n4), 0.2, true);
         // T-589: the same ratio test one order up, used as **structure evidence only**.
         //
@@ -1389,6 +1424,8 @@ impl BlindEstimator {
             x2_second_line: u2,
             c4,
             c8,
+            bpsk_measured: psk_order_measured(xon.len(), c1, c2, BPSK_C2_MIN, ratio_w(n1, n2)),
+            qpsk_measured: psk_order_measured(xon.len(), c2, c4, QPSK_C4_MIN, ratio_w(n2, n4)),
         };
         out.analog_likely = analog_likely;
         out.rate_trust = RateTrust {

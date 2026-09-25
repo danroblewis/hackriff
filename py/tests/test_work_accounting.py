@@ -21,6 +21,7 @@ import importlib.util
 import json
 import time
 import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -1102,3 +1103,119 @@ def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monke
     assert R.dispatch_cap() == 4                                          # the gap before the next gate
     clock[0] += 100
     assert R.dispatch_cap() == 6                                          # the pipeline went quiet
+
+
+def test_a_red_that_is_not_the_workers_own_queues_instead_of_blocking(monkeypatch):
+    """Supervisor, 2026-09-24 18:55: T-809 read BLOCKED 'needs a person' for app-surface failing the same
+    way on main's build at load 44 - the gate and its flake triage are the arbiter of such a red."""
+    class E:
+        def __init__(self, n): self.passed_alone = n
+    import types
+    fake = types.SimpleNamespace(ledger=lambda ops: {"app-surface.e2e.mjs": E(2), "app-sheet.e2e.mjs": E(1), "canvas.e2e.mjs": E(0)})
+    monkeypatch.setitem(__import__("sys").modules, "hkpy.flakes", fake)
+    monkeypatch.setattr(__import__("hkpy"), "flakes", fake, raising=False)
+    assert R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 1, "reproduces_on_main": True})
+    assert R.not_own_red({"cmd": "x", "exit": 1, "known_flake": True})
+    assert R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-sheet", "exit": 1})          # ledger-known flakers
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-detail", "exit": 1})     # app-detail unknown
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs canvas", "exit": 1})                     # never passed alone
+    assert not R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 101})                          # a plain red: blocked
+
+
+def test_work_clone_target_0_launches_without_a_target_clone(monkeypatch):
+    """2026-09-24 18:11: 83 GB of main's target/ still shared with three worker clones against 101 GB
+    free - WORK_CLONE_TARGET=0 stops new pins; the worker builds from sccache."""
+    monkeypatch.setattr(R, "CLONE_TARGET", True)
+    assert "cp -c -R -p" in R.clone_cmd("/w/t1")
+    monkeypatch.setattr(R, "CLONE_TARGET", False)
+    assert R.clone_cmd("/w/t1") == ""
+
+
+def test_the_queue_depth_is_sampled_once_a_minute(tmp_path, monkeypatch):
+    """User, 2026-09-24 17:02: track 'branches not yet on main' on /flow; the work runner samples it
+    (it ticks through a gate; the merge runner's loop does not)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "_DEPTH_AT", [0.0])
+    (tmp_path / "merge-queue.txt").write_text("task-a\ntask-b\n")
+    (tmp_path / "isolate-remaining").write_text("task-c\n")
+    R.record_queue_depth()
+    R.record_queue_depth()                                               # inside the minute: nothing
+    (line,) = (tmp_path / "queue-depth.jsonl").read_text().splitlines()
+    rec = json.loads(line)
+    assert rec["waiting"] == 3 and rec["queued"] == 2 and rec["isolating"] == 1
+
+
+def test_the_merge_runner_writes_what_it_holds_in_memory():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert 'echo "$1" > "$S/merging-now"; process "$1"' in text and 'rm -f "$S/merging-now"' in text
+    loop = text[text.index('        rest="$isolate"'):]
+    assert '> "$S/isolate-remaining"' in loop[:400] and 'rm -f "$S/isolate-remaining"' in loop[:1200]
+
+
+def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_path):
+    """Review 2026-09-24: a runner killed mid-isolation or mid single merge left those branches in no
+    queue (the reason a restart during an isolation lost them) and now a stale depth file."""
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    i = text.index('for f in "$S/isolate-remaining" "$S/merging-now"; do')
+    block = text[i:text.index("\ndone\n", i) + 6]
+    (tmp_path / "isolate-remaining").write_text("task-b task-c task-d\n")
+    (tmp_path / "merging-now").write_text("task-a\n")
+    (tmp_path / "q").write_text("task-x\n")
+    script = f'set -u\nS={tmp_path}; QUEUE={tmp_path}/q\nlog(){{ echo "LOG $*"; }}\n{block}\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "q").read_text().split() == ["task-x", "task-b", "task-c", "task-d", "task-a"]
+    assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()
+
+
+def test_a_workers_red_proof_beside_a_green_run_is_not_a_failing_test():
+    """2026-09-24: T-894 (15:25) and T-905 (20:16) handed back DONE with their new test's red run on the old
+    code listed at exit 1, and read BLOCKED 'needs a person'. "expect": "red" + a green run = evidence."""
+    proof = {"cmd": "cd ui && node test/run.mjs surface-survey (on old code)", "exit": 1, "expect": "red"}
+    fixed = {"cmd": "cd ui && node test/run.mjs surface-survey", "exit": 0}
+    assert R.hand_back_reds({"tests": [proof, fixed]}) == ([], [])
+    assert R.hand_back_reds({"tests": [proof]}) == ([proof], [proof])            # no green run beside it
+    plain = {"cmd": "cargo nextest run -p hk-x", "exit": 101}
+    assert R.hand_back_reds({"tests": [plain, fixed]}) == ([plain], [plain])     # an unmarked red still blocks
+    assert R.hand_back_reds(None) == ([], [])
+
+
+def test_a_timed_out_worker_is_resumed_once_to_wrap_up(killed_run, monkeypatch):
+    """2026-09-24: T-852, T-878, T-888, T-887 and T-904 each hit the 180-min limit, were parked 'worktree kept'
+    and finished by hand. One wrap-up resume of the same session first; a second limit is a person's."""
+    claim, fixes, alerts, seen = killed_run
+    state = {"alive": True}
+    monkeypatch.setattr(R, "alive", lambda pid: state["alive"])
+    monkeypatch.setattr(R, "track_usage", lambda c: False)
+    monkeypatch.setattr(R.os, "killpg", lambda pid, sig: state.update(alive=False))
+    monkeypatch.setattr(R, "_gone", lambda pid: True)                      # the real one: the test below
+    claims = claim(session_id="abc", started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("TIMEOUT") and seen == []
+    state["alive"] = True                                                  # the wrap-up runs out of time too
+    claims = claim(session_id="abc", kind="fix", timeout_resumes=1, started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and [k for _, k, _ in seen] == ["TIMEOUT"]
+
+
+def test_the_wrap_up_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch):
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running"))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    c = R.launch_fix({"ticket": "T-9", "branch": "task-t9", "wt": "/w/t9", "session_id": "s", "fix_attempts": 0},
+                     "TIMEOUT your run reached the 180-min limit and was stopped")
+    n, prompt, out = runs[0]
+    assert n == 0 and out == "wrapup1.json" and c["timeout_resumes"] == 1
+    assert "WRAP UP" in prompt and "Start no new scope" in prompt and "blocked.needs" in prompt
+
+
+def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_child():
+    """Review, 2026-09-24: os.kill(pid, 0) succeeds on a zombie, and the runner never waits on its Popen
+    children - the resume never fired and each timeout stalled the tick 31 s. A real child, dropped unwaited."""
+    import signal
+    p = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 60"], start_new_session=True)
+    pid = p.pid
+    del p
+    R.os.killpg(pid, signal.SIGTERM)
+    t0 = time.time()
+    assert R._gone(pid, wait_s=10) and time.time() - t0 < 5

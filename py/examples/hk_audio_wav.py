@@ -5,10 +5,14 @@ Listen picks the mode and parameters from the signal; you only say what to liste
 
     HK_TOKEN=... python3 py/examples/hk_audio_wav.py --emitter <id> --seconds 10 --out station.wav
     HK_TOKEN=... python3 py/examples/hk_audio_wav.py --f-lo 101.2e6 --f-hi 101.4e6 --out fm.wav
+    HK_TOKEN=... python3 py/examples/hk_audio_wav.py --f-lo 101.2e6 --f-hi 101.4e6 --stereo --out fm.wav
 
-Audio records are 20 ms of mono ``int16`` at 48 kHz. A jump in ``sample_index`` (squelch closed,
-samples skipped to stay live) is filled with silence, up to one second per gap, so the file keeps
-real time. Status records (level, SNR, squelch) are printed to stderr.
+Audio records are 20 ms of ``int16`` at 48 kHz: mono, or — only when asked with ``--stereo``
+(``channels=2``) and the station is broadcast FM — two channels interleaved ``L, R``. The header's
+``audio.channels`` says which the stream carries; the WAV gets the same (stream contract §12.2,
+T-874). Whether L−R is actually decoded right now (the pilot is locked) is in the status records,
+printed to stderr with level, SNR and squelch. A jump in ``sample_index`` (squelch closed, samples
+skipped to stay live) is filled with silence, up to one second per gap, so the file keeps real time.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ def write_wav(reader: hkstream.StreamReader, out: BinaryIO | str, seconds: float
         raise ValueError(f"not an ri16_le audio stream: {h.get('kind')} {h.get('datatype')}")
     rate = int(h.get("sample_rate_hz", 48000))
     channels = int((h.get("audio") or {}).get("channels", 1))
+    if channels not in (1, 2):
+        raise ValueError(f"unsupported channel count {channels}")
     want = int(seconds * rate)
     written, next_index = 0, None
     with wave.open(out, "wb") as w:
@@ -72,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--detection")
     p.add_argument("--f-lo", type=float)
     p.add_argument("--f-hi", type=float)
+    p.add_argument("--stereo", action="store_true",
+                   help="ask for two channels (channels=2); broadcast FM only, others stay mono")
     p.add_argument("--seconds", type=float, default=10.0)
     p.add_argument("--out", default="listen.wav")
     p.add_argument("--file", help="read a dumped stream instead of connecting ('-' for stdin)")
@@ -82,13 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         if not a.token:
             p.error("--token or HK_TOKEN is required")
         f = hkstream.connect(a.host, a.port, "open/listen", a.token, emitter=a.emitter,
-                             detection=a.detection, f_lo=a.f_lo, f_hi=a.f_hi)
+                             detection=a.detection, f_lo=a.f_lo, f_hi=a.f_hi,
+                             channels=2 if a.stereo else None)
     try:
         n = write_wav(hkstream.StreamReader(f), a.out, a.seconds)
     except hkstream.Refused as e:
         print(e, file=sys.stderr)
         return 1
-    print(f"wrote {n} samples to {a.out}", file=sys.stderr)
+    print(f"wrote {n} sample frames to {a.out}", file=sys.stderr)
     return 0
 
 

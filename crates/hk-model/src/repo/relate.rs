@@ -57,7 +57,7 @@ const MAX_TUNED_LO: usize = 16;
 const MAX_PREDICTED_TARGETS: usize = 8;
 
 /// T-369: measured detection bands read per row when a region is re-analysed.
-const MAX_REGION_BANDS: usize = 256;
+pub(super) const MAX_REGION_BANDS: usize = 256;
 
 /// T-369: the marker on a contested verdict row's `detail`, so the bound can count them apart from
 /// the ordinary revocations [`revoke_kind`] writes (both are `active = 0` rows).

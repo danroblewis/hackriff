@@ -80,8 +80,9 @@ import { waitForSurfaceHistory } from "./harness.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-// One JSON file per run, `{pid, startedAt, children: [{pid, marker, lstart}]}` — the record
-// `sweepStaleRuns()` reads at the START of the NEXT run to find what a SIGKILLed run left behind.
+// One JSON file per run, `{pid, root, startedAt, children: [{pid, marker, lstart}]}` — the record
+// `sweepStaleRuns()` reads at the START of the NEXT run IN THE SAME CHECKOUT (`root`, T-883) to find
+// what a SIGKILLed run left behind.
 // Lives in the OS tmp dir, not `ui/e2e/`, so it survives independent of this checkout and is
 // naturally per-machine. A lock older than this is deleted outright rather than acted on — by then
 // any recorded child is either long gone or, if its pid number has been reused, definitely not ours;
@@ -102,7 +103,7 @@ const trackedChildren = new Map();
 function persistLock() {
   try {
     const children = [...trackedChildren].map(([pid, info]) => ({ pid, marker: info.marker, lstart: info.lstart }));
-    writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, startedAt: Date.now(), children }));
+    writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, root: HERE, startedAt: Date.now(), children }));
   } catch { /* best effort */ }
 }
 
@@ -183,6 +184,13 @@ function sweepStaleRuns() {
       try { unlinkSync(file); } catch { /* already gone */ }
       continue; // too old to touch — see the constant's own comment above
     }
+    // T-883: only THIS checkout's runs. The lock dir is machine-wide (the OS tmp dir), and several
+    // worktrees run this file at once; a run in one worktree has no business killing, or even
+    // judging, another worktree's children — whether that run is alive is answered by a pid check
+    // that a reused pid can fool, and "is it an orphan" is that worktree's own next run's question.
+    // A lock with no `root` predates this rule: its checkout is unknown, so it is left alone (fail
+    // closed) and ages out under STALE_LOCK_MAX_AGE_MS like any other.
+    if (entry.root !== HERE) continue;
     let alive = true;
     try { process.kill(entry.pid, 0); } catch { alive = false; }
     if (alive) continue; // a concurrent run genuinely still in flight — leave it alone

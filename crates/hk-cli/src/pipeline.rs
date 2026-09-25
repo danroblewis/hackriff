@@ -1114,9 +1114,11 @@ pub fn serve_api(
     ));
     // T-859 (MAUTO M-8): region-analyze jobs over the run's IQ ring. No search backend yet —
     // stage evaluation over IQ is MAUTO M-2 — so a job acquires and then says it searched nothing.
+    // T-860 (MAUTO M-9): a finished job attaches to the run's inventory and may confirm through
+    // `ConfirmPolicy.synthesized`.
     let analyze = {
         let tuned_ctl = controller.clone();
-        Arc::new(hk_pipeline::synth::jobs::AnalyzeJobs::new(
+        Arc::new(hk_pipeline::synth::jobs::AnalyzeJobs::with_attacher(
             Arc::new(hk_pipeline::synth::jobs::RingJobEnv::new(
                 handle.iq_buffer(),
                 Box::new(move || {
@@ -1127,6 +1129,10 @@ pub fn serve_api(
             )),
             None,
             hk_pipeline::synth::jobs::PowerPolicy::Mains,
+            Some(Arc::new(hk_pipeline::synth::jobs::RepoAttacher::new(
+                handle.data_dir().join("hackriff.db"),
+                hk_pipeline::inventory::SynthesizedConfirm::default(),
+            ))),
         ))
     };
     let openers = hk_api::stream::OpenerRegistry::new()
@@ -1306,6 +1312,9 @@ pub(crate) fn config_for(
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
     // The IQ capture buffer is on for the composed daemon (the library default is off, T-178).
     cfg.iq_buffer = hk_store::iqbuffer::IqBufferConfig::from_env();
+    // T-904: per-frame detection retention (1 hour, rolled up; HK_DETECTION_RETENTION, …) and the
+    // `/api/status` `storage` figures. Off for the library default.
+    cfg.retention = Some(hk_pipeline::retention::RetentionSettings::from_env());
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
     let reg = registry.clone();

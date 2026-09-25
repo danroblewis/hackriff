@@ -15,7 +15,12 @@ pub const STREAM_VERSION_MAJOR: u32 = 1;
 /// 1.1 (T-043): the optional header `audio` profile and the binary `status` record type (3).
 /// 1.2 (T-089, ADR-0011): inspector streams: the optional header `inspector` profile and the
 /// `frame`, `status` and `edit` message record types (§14).
-pub const STREAM_VERSION_MINOR: u32 = 2;
+/// 1.3 and 1.4 (T-410, T-413) changed only the presence stream's own `message_schema`; headers
+/// kept saying 1.2.
+/// 1.5 (T-874, ADR-0015 §12.13): audio `channels` may be 2 — interleaved `ri16_le` L/R frames,
+/// only on a stream whose client asked for them (`channels=2`); a mono stream is unchanged. The
+/// header now carries the document's version again.
+pub const STREAM_VERSION_MINOR: u32 = 5;
 /// Default `max_frame_len` for new streams (1 MiB).
 pub const DEFAULT_MAX_FRAME_LEN: u32 = 1024 * 1024;
 
@@ -304,6 +309,14 @@ impl StreamHeader {
                 self.kind.as_str()
             )));
         }
+        if let Some(a) = &self.audio
+            && !(1..=crate::audio::AUDIO_MAX_CHANNELS).contains(&a.channels)
+        {
+            return Err(HeaderError::Invalid(format!(
+                "audio channels {} (1 or 2)",
+                a.channels
+            )));
+        }
         Ok(())
     }
 
@@ -458,5 +471,16 @@ mod tests {
         m.max_frame_len = 1024;
         m.schema = "other".into();
         assert!(matches!(m.validate(), Err(HeaderError::Schema(_))));
+        // Audio channels (T-874): 1 or 2, nothing else.
+        let mut a = StreamHeader::new("a", StreamKind::Audio, ContentClass::Unrestricted, "t");
+        a.datatype = Some("ri16_le".into());
+        a.sample_rate_hz = Some(48_000.0);
+        for (channels, ok) in [(0, false), (1, true), (2, true), (3, false)] {
+            a.audio = Some(crate::audio::AudioInfo {
+                channels,
+                ..Default::default()
+            });
+            assert_eq!(a.validate().is_ok(), ok, "channels {channels}");
+        }
     }
 }

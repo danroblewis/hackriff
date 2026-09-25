@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,7 @@ def _break_it(text: str) -> str:
 
 
 def _git(repo: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    e = {**os.environ, **(env or {})}
+    e = {**os.environ, "HACKRIFF_OPS": _EMPTY_OPS, **(env or {})}
     return subprocess.run(
         ["git", *args], cwd=repo, env=e, capture_output=True, text=True, check=False
     )
@@ -135,9 +136,15 @@ def hooked_repo(tmp_path, good_board) -> Path:
     return repo
 
 
+_EMPTY_OPS = tempfile.mkdtemp(prefix="hk-boardcheck-ops-")
+
+
 def _checker_env() -> dict[str, str]:
     """Point the hook at THIS interpreter's hkpy — the temp repo has no `py/` of its own."""
     return {
+        # Never the live ops dir: the main merge guard reads its bulk-in-progress, and the merge gate runs
+        # these tests while a batch is in progress (2026-09-24: the fixture's first commit was refused).
+        "HACKRIFF_OPS": _EMPTY_OPS,
         "HK_BOARDCHECK": f"{sys.executable} -m hkpy.boardcheck",
         "PYTHONPATH": str(PYDIR) + os.pathsep + os.environ.get("PYTHONPATH", ""),
     }
@@ -267,7 +274,7 @@ def test_a_merge_commit_carrying_a_broken_board_is_refused(hooked_repo, good_boa
     _git(hooked_repo, "checkout", "-q", "main")
     m = _git(hooked_repo, "merge", "--no-ff", "--no-commit", "task-tbad")
     assert m.returncode == 0, m.stderr + m.stdout
-    r = _git(hooked_repo, "commit", "-qm", "Merge T-x (task-tbad): gate passed", env=_checker_env())
+    r = _git(hooked_repo, "commit", "-qm", "Merge T-x (task-tbad): gate passed", env={**_checker_env(), "HK_MERGE_RUNNER": "1"})
     assert r.returncode != 0, "a merge commit put a board no loader accepts on main"
     assert "REFUSING" in r.stderr, r.stderr
     assert _git(hooked_repo, "rev-list", "--count", "main").stdout.strip() == "1"
@@ -289,3 +296,44 @@ def test_the_board_test_rejects_the_same_break(good_board) -> None:
         if isinstance(v, str) and v[:1] not in ("'", '"', "|", ">", "[") and ": " in v
     ]
     assert bad, "the gate-layer textual guard no longer sees the 2026-09-22 break"
+
+
+# --------------------------------------------------------------------------- the main merge guard
+
+def test_no_commit_in_main_while_the_runner_has_a_merge_staged(hooked_repo, tmp_path) -> None:
+    """2026-09-24 15:05:04 (292de09b): a board note committed in main while task-t899's merge was staged
+    became a merge commit that landed T-899 UNGATED; 09-22 ea91c27c was the first. Only the merge
+    runner's own commits (HK_MERGE_RUNNER=1) go through while a merge or a batch is in flight."""
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    env = {**_checker_env(), "HACKRIFF_OPS": str(ops)}
+    _git(hooked_repo, "checkout", "-qb", "task-x")
+    (hooked_repo / "x.txt").write_text("x\n")
+    _git(hooked_repo, "add", "x.txt")
+    assert _git(hooked_repo, "commit", "-qm", "work", env=env).returncode == 0
+    _git(hooked_repo, "checkout", "-q", "main")
+    assert _git(hooked_repo, "merge", "--no-ff", "--no-commit", "task-x", env=env).returncode == 0
+    r = _git(hooked_repo, "commit", "-qm", "Board: a note", env=env)
+    assert r.returncode != 0 and "main-guard: REFUSING" in r.stderr and "MERGE_HEAD" in r.stderr
+    r = _git(hooked_repo, "commit", "-qm", "Merge task-x: gate passed", env={**env, "HK_MERGE_RUNNER": "1"})
+    assert r.returncode == 0, r.stderr
+    (ops / "bulk-in-progress").write_text("base=abc\n")
+    (hooked_repo / "y.txt").write_text("y\n")
+    _git(hooked_repo, "add", "y.txt")
+    r = _git(hooked_repo, "commit", "-qm", "Board: another", env=env)
+    assert r.returncode != 0 and "bulk-in-progress" in r.stderr
+    (ops / "bulk-in-progress").unlink()
+    assert _git(hooked_repo, "commit", "-qm", "Board: after the gate", env=env).returncode == 0
+
+
+def test_a_worktree_merging_main_into_itself_is_never_refused(hooked_repo, tmp_path) -> None:
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    (ops / "bulk-in-progress").write_text("base=abc\n")
+    env = {**_checker_env(), "HACKRIFF_OPS": str(ops)}
+    wt = tmp_path / "wt"
+    _git(hooked_repo, "worktree", "add", "-q", "-b", "task-w", str(wt))
+    (wt / "w.txt").write_text("w\n")
+    _git(wt, "add", "w.txt")
+    r = _git(wt, "commit", "-qm", "T-1: work", env=env)
+    assert r.returncode == 0, r.stderr

@@ -99,6 +99,31 @@ impl DetectionExtent {
     }
 }
 
+impl DetectionExtent {
+    /// From a T-904 rollup of pruned detections: its time hull and frequency envelope, the mean
+    /// OBW and mean SNR, and suspect only when every member carried a common §2.6 suspect flag
+    /// (`flags_all`) — a rollup cannot say more than that, and the DC-twin refutation, which needs
+    /// each member's own tuning, is not applied to it.
+    pub fn of_rollup(r: &hk_model::DetectionRollup) -> Self {
+        let obw = if r.obw_mean_hz.is_finite() && r.obw_mean_hz > 0.0 {
+            r.obw_mean_hz
+        } else {
+            0.0
+        };
+        Self {
+            time: r.time,
+            freq: r.freq,
+            obw_hz: obw,
+            snr_db: if r.snr_mean_db.is_finite() {
+                r.snr_mean_db
+            } else {
+                0.0
+            },
+            suspect: detection_is_suspect(&r.flags_all),
+        }
+    }
+}
+
 /// A detection is suspect only for its DC (tuned-centre) spur flag: `spur_reason = Dc` with no
 /// other §2.6 suspect flag.
 pub fn dc_only_suspect(f: &DetectionFlags) -> bool {
@@ -1000,6 +1025,46 @@ pub fn raster_hint(center_hz: f64, spacing_hz: f64, origin_hz: f64, source: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-904: a rollup of pruned detections reads as one extent over its hull and envelope, and
+    /// is suspect only when a suspect flag was common to every member.
+    #[test]
+    fn a_rollup_is_one_extent_suspect_only_if_every_member_was() {
+        let t = |s: i64| Timestamp::from_unix_nanos(1_789_000_000_000_000_000 + s * 1_000_000_000);
+        let clipped = DetectionFlags {
+            clipped: true,
+            ..DetectionFlags::default()
+        };
+        let mut r = hk_model::DetectionRollup {
+            id: 1,
+            track_id: None,
+            survey_id: hk_model::SurveyId::new(),
+            provenance_ref: hk_model::ProvenanceId::new(),
+            time: TimeRange::new(t(0), t(60)),
+            on_air_ns: 30_000_000_000,
+            freq: FreqRange::new(433.90e6, 433.94e6),
+            f_center_mean_hz: 433.92e6,
+            obw_mean_hz: 12e3,
+            obw_max_hz: 40e3,
+            snr_peak_max_db: 30.0,
+            snr_mean_db: 14.0,
+            peak_level_dbfs_max: -20.0,
+            detections: 600,
+            flags_any: clipped,
+            flags_all: DetectionFlags::default(),
+            clip_count: 3,
+        };
+        let e = DetectionExtent::of_rollup(&r);
+        assert_eq!(e.time, r.time);
+        assert_eq!(e.freq, r.freq);
+        assert_eq!((e.obw_hz, e.snr_db), (12e3, 14.0));
+        assert!(
+            !e.suspect,
+            "one clipped member does not make the run suspect"
+        );
+        r.flags_all = clipped;
+        assert!(DetectionExtent::of_rollup(&r).suspect);
+    }
 
     fn det_snr(center: f64, obw: f64, snr_db: f64, suspect: bool) -> DetectionExtent {
         let t = Timestamp::from_unix_nanos(1_000_000_000);

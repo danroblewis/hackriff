@@ -25,7 +25,7 @@ import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import {
   DEFAULT_RANGE_MODE, RANGE_MODE_KEY, autoContrastButton, loadRangeMode, pressAutoContrast,
-  pressViewportScale, saveRangeMode, viewportScaleButton,
+  pressViewportScale, saveRangeMode, scaleMode, scaleRows, viewportScaleButton,
 } from "../src/surface/contrast";
 import { extentOf, keyOf, type Box, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { rangeEntry, rangeLabel } from "../src/surface/legend";
@@ -405,14 +405,33 @@ test("SPY: switching contrast mode fetches nothing — not on the press, and not
 });
 
 test("the toggle's code in the app centre names no route and writes no store state", () => {
+  // T-882: the control is the layers menu's "Colour scale" radio group; its code in the app centre
+  // is the host's `setScale` and the `renderRange`/`setMode` pair it calls.
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  const from = src.indexOf("const paint = (btn");
-  const to = src.indexOf("renderRange();", src.indexOf("vscaleBtn.addEventListener"));
-  assert.ok(from > 0 && to > from, "the contrast control's block moved; re-point this guard");
-  const region = src.slice(from, to);
-  assert.ok(!/\/api\//.test(region), "a route is named inside the contrast control");
-  assert.ok(!/store\.set/.test(region), "the contrast control writes app state");
-  assert.match(src, /vscaleBtn = h\("button",/);
+  const block = (needle: string, end: string) => {
+    const from = src.indexOf(needle);
+    assert.ok(from > 0, `${needle}: the contrast control's block moved; re-point this guard`);
+    return src.slice(from, src.indexOf(end, from) + end.length);
+  };
+  const setScale = block("setScale: (id) =>", "\n");
+  for (const region of [block("const renderRange = () => {", "};"), block("const setMode = (", "};"), setScale]) {
+    assert.ok(region.length > 10, "a guarded region is empty");
+    assert.ok(!/\/api\//.test(region), "a route is named inside the contrast control");
+    assert.ok(!/store\.set/.test(region), "the contrast control writes app state");
+  }
+  assert.match(setScale, /scaleMode\(id\)/, "the menu's press is parsed by contrast.ts, not by the host");
+  // The menu's rows are DERIVED from the mode, so they cannot disagree with the surface.
+  assert.match(src, /scale: \{ rows: scaleRows\(pv\.range\.mode\), note: rangeLabel\(pv\.range\) \}/);
+});
+
+test("T-882: the colour-scale rows are one radio group derived from the mode", () => {
+  for (const m of ["anchored", "auto", "viewport"] as const) {
+    const rows = scaleRows(m);
+    assert.deepEqual(rows.map((r) => r.id), ["anchored", "auto", "viewport"]);
+    assert.deepEqual(rows.filter((r) => r.on).map((r) => r.id), [m], `exactly one row is on for ${m}`);
+    assert.equal(scaleMode(m), m);
+  }
+  assert.equal(scaleMode("gain"), null, "an unknown id is refused, not guessed");
 });
 
 // ———————————————————————————————————————————————————————————————————————————

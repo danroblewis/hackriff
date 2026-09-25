@@ -5,9 +5,9 @@
 // the close (or Escape) puts every pixel back to the map. Collapsed means GONE, not faded.
 //
 // Fixed position, never draggable (P3). The chip, and the open overlay, stay clear of the floating
-// Go-to, the zoom cluster and the FAB (T-802), the surface's toolbar (T-528) and the sheet's handle
+// Go-to, the top-right cluster, the zoom cluster and the FAB (T-802/T-882) and the sheet's handle
 // (T-803): collapsed, the chip sits at mid-height on the left edge; open, the column starts below
-// the lowest of the top chrome's bottoms (bar, toolbar, Go-to) — measured here into `--side-top` —
+// the lowest of the top chrome's bottoms (bar, Go-to, top-right) — measured here into `--side-top` —
 // ends above the sheet's peek strip, and on narrow screens stops short of the right-edge column the
 // zoom stack and FAB live in (`map-layout.css`).
 //
@@ -18,6 +18,7 @@
 import type { MountFn } from "../context";
 import { renderedInventory, type Row } from "../explore/inventory";
 import { h } from "../dom";
+import { trackOverlay } from "./dismiss";
 
 /** The chip's height bound in CSS px (the ticket's "no taller than 56 px"). `map-layout.css`
  * sizes the chip to fit inside it. */
@@ -41,7 +42,7 @@ export function sideChipLabel(c: SideCounts): string {
 
 /**
  * Where the open overlay's top goes on a narrow screen: below the lowest of the top chrome's
- * bottoms (the bar, the surface's toolbar, the floating Go-to), plus a gap. Non-finite readings
+ * bottoms (the bar, the floating Go-to and top-right cluster), plus a gap. Non-finite readings
  * (an element not built yet) are ignored; null when nothing was measurable, so the CSS fallback
  * stands.
  */
@@ -50,7 +51,7 @@ export function sideTopPx(bottoms: readonly (number | null | undefined)[]): numb
   return ok.length ? Math.ceil(Math.max(...ok)) + SIDE_TOP_GAP_PX : null;
 }
 
-const TOP_CHROME = [".app > .bar", ".sf-bar", ".map-goto"];
+const TOP_CHROME = [".app > .bar", ".map-goto", ".map-topright"];
 
 export const mountSideChip: MountFn = (el, ctx) => {
   el.classList.add("is-collapsed");
@@ -71,6 +72,8 @@ export const mountSideChip: MountFn = (el, ctx) => {
   el.prepend(chip, top);
 
   let open = false;
+  // T-900: Escape goes through the one overlay stack, so it closes only the topmost overlay.
+  const overlay = trackOverlay("side", () => setOpen(false));
   function place() {
     if (typeof document === "undefined" || !document.querySelector) return;
     const px = sideTopPx(TOP_CHROME.map((sel) => {
@@ -87,13 +90,11 @@ export const mountSideChip: MountFn = (el, ctx) => {
     el.classList.toggle("is-open", on);
     el.classList.toggle("is-collapsed", !on);
     chip.setAttribute("aria-expanded", String(on));
+    overlay.open(on);
     if (on) { place(); close.focus?.(); } else chip.focus?.();
   }
   if (typeof window !== "undefined") {
     window.addEventListener("resize", () => { if (open) place(); });
-    window.addEventListener("keydown", (e: Event) => {
-      if (open && (e as KeyboardEvent).key === "Escape") setOpen(false);
-    });
   }
 
   ctx.store.select(

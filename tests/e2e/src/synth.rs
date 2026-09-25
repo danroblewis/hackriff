@@ -326,7 +326,8 @@ fn read_json(path: &Path) -> Result<Value, SynthError> {
     })
 }
 
-fn find_uv() -> Option<PathBuf> {
+/// The `uv` binary (`HK_UV`, else the first on `PATH`); `None` when neither exists.
+pub fn find_uv() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("HK_UV") {
         let p = PathBuf::from(explicit);
         return p.is_file().then_some(p);

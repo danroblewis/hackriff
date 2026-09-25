@@ -135,6 +135,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // coarse-zoom event aggregate that a tile deliberately does not carry (docs/16 §5.3)
     ("GET", "/api/tiles"),
     ("GET", "/api/tiles/events"),
+    // T-897: traced (t, f) paths - chirps, sweeps, hop sequences - over a viewport (the map's
+    // `paths` layer, docs/23 §10.6 rule 2)
+    ("GET", "/api/paths"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
     // T-463: the one playhead of historical playback (view state over recorded history; audio at
@@ -1287,6 +1290,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
+        .or_else(|| crate::paths::route(state, &ctl)) // T-897
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
         .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))
