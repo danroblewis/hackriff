@@ -1277,6 +1277,68 @@ The backend half of the map's `paths` layer ([ADR-0023](adr/0023-map-ui-and-rese
 - **Honest limit.** A sweep that completes inside one analysis frame has no ladder (ADR-0017 §1.3(b)) and draws no path; its measured sweep *rate* is the `sweep_rate_hz_per_s` feature field, not a route.
 - `400 invalid` for a missing or malformed window, `kind` or `limit`; `503 unavailable` with no inventory. Read-only: it reaches no device and is not audited.
 
+### `GET /api/tune-history` — where the radio has been, as a traced path (T-898, [docs/23](23-map-ui-philosophy.md) §10.6 rule 2)
+
+The backend half of the map's `tune` layer: **the device's own movement through frequency**, one
+directions-style polyline per front end, from the tune records this server already keeps. Code:
+`hk_store::tunepath` (the derivation, unit-tested on its own), `crates/hk-api/src/tune_history.rs`
+(the route).
+
+| Query | |
+|---|---|
+| `f_lo`, `f_hi` | Hz, `0 <= f_lo < f_hi` — **required** (a viewport route answers about a viewport) |
+| `t0`, `t1` | Unix s, `t0 < t1` — **required** |
+| `device` | optional: one front end's id, or `unknown` (a record that named none). `any` is refused — it is the label of a union, never a selector |
+| `limit` | optional, 1..=512, default 64 |
+
+```jsonc
+{ "window":  { "f_lo_hz": 1.0e8, "f_hi_hz": 1.004e8, "t0_s": 1790000000.0, "t1_s": 1790000010.0 },
+  // The time window widened by its own duration (60…600 s); the frequency axis is NOT narrowed.
+  "context": { "f_lo_hz": null, "f_hi_hz": null, "t0_s": 1789999940.0, "t1_s": 1790000070.0 },
+  "paths": [
+    { "id": "tune:hackrf-1:1789999950000000000",    // device : the run's first instant, stable across polls
+      "device": "hackrf-1", "device_named": true,
+      "t0_s": 1789999950.0, "t1_s": 1790000010.0,
+      "f_lo_hz": 88000000.0, "f_hi_hz": 433920000.0, // the lowest and highest CENTRE the route reached
+      "legs": 3, "retunes": 2,
+      "vertices": [ { "t_s": 1789999950.0, "f_hz": 88000000.0, "sample_rate_hz": 2000000.0, "at": "start" },
+                    { "t_s": 1789999980.0, "f_hz": 88000000.0, "sample_rate_hz": 2000000.0, "at": "end" },
+                    { "t_s": 1789999980.0, "f_hz": 433920000.0, "sample_rate_hz": 2000000.0, "at": "start" }, "…" ],
+      "vertices_truncated": false } ],
+  "devices": ["hackrf-1"], "total": 1, "limit": 64, "truncated": false,
+  "horizon": { "oldest_record_s": 1789999900.0, "recording_began_s": 1789999900.0,
+               "forgotten": null, "as_of_s": 1790000010.0, "rule": "…" },
+  "method": "hk-store/tune-path@1" }
+```
+
+- **Read from the records that already exist.** The evidence is exactly the coverage map's — the IQ
+  ring's journal (a segment per provenance change), the observation log's sealed dwells and sweep
+  visits, and the dwell in flight — i.e. the "coverage map derived from the SDR configuration/tune
+  history" (CLAUDE.md). Nothing new is recorded and nothing is derived client-side.
+- **A dwell is a vertical run; a retune is a vertex.** Each leg contributes two vertices, its start
+  and its end, at the same centre; consecutive legs at different centres are joined by the retune's
+  jump, at the instant the record says the tune changed. With the canvas's axes (X = frequency,
+  Y = time) that draws as a vertical run per dwell and a near-horizontal step per retune.
+- **One timeline per front end** (the several-SDRs rule). Two radios are two routes, never merged;
+  `unknown` — a record that named no radio — is its own route and never folded into a named one,
+  the same rule `/api/coverage`'s `devices[]` keeps. The same tune described by several sources (the
+  ring, the seal, the open dwell) or split by the DC notch is **one** leg, not a stack.
+- **A gap no record covers breaks the path**, rather than being drawn across: where nothing says
+  where the radio was, no line is drawn — the honesty of the coverage grey, applied to the route. A
+  device therefore has several `paths` when its record has gaps, each labelled with it.
+- **Read over every band, served for this viewport.** Spans are read over the whole frequency axis,
+  because a retune's line enters the pane from wherever the radio was; a route is served when its
+  own extent overlaps `window` in both axes — so a jump that merely *crosses* the band in transit is
+  served, and a route the window never touches is not.
+- **Bounded, and says so.** A path carries at most 2 000 vertices (the newest; `vertices_truncated`)
+  and at most `limit` paths are served (`truncated`).
+- **`horizon` says how far the evidence reaches**, both ways, so an absent line is read as *no
+  record reaches here*, never as *the radio was not tuned anywhere* — the same two sentences
+  `/api/coverage`'s horizon states about a grey cell.
+- `400 invalid` for a missing or malformed window, `device` or `limit`; `503 unavailable` when this
+  server holds no tune history at all (no ring journal and no observation log). Read-only: it
+  reaches no device and is not audited.
+
 ### `GET /ws/tiles/rows` — rows pushed to a subscription over an **address range** (T-468)
 
 WebSocket; token as for every `/ws/` route. Query: the tile address **without** `t_index` — `level_f`, `level_t`, `f_index` (required), `scheme` (`view` default, `overview`, or a store scheme id), `device` (`any` default), `cells` (8…256, default 256) — and the **row range**: `t_from` (**required**) and `t_to` (optional). Row `r` at `level_t` is the time cell `[r·t_cell, (r+1)·t_cell)` from the Unix epoch, which is row `r mod cells` of the tile `t_index = r div cells` that [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) serves at the same address — so a client files every row under the tile key it already uses.

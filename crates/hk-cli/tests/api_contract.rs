@@ -2675,6 +2675,120 @@ fn paths_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-898 (docs/23 §10.6 rule 2): `GET /api/tune-history` answers as `docs/api.md` documents it, on
+/// a live `hk serve` over the mock device. By value: the run is tuned to the fixture's window, so
+/// the served route must be that front end's, its vertices must sit at the tuned centre, and a
+/// window the radio was never in (nor crossed) must draw nothing. The blind end-to-end assertion —
+/// vertices landing on **scripted retune instants** — is `hk-pipeline/tests/tune_history_path.rs`.
+#[test]
+fn tune_history_route_answers_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    // The route is drawn at the TUNED CENTRE, so the viewport is the fixture's own window.
+    let (f_lo, f_hi) = (FIXTURE_CENTER_HZ - 400e3, FIXTURE_CENTER_HZ + 400e3);
+    let url = |t0: f64, t1: f64, extra: &str| {
+        format!("/api/tune-history?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}{extra}")
+    };
+    wait_for(
+        "a tune record to reach the tune-history route",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(addr, &url(t1 - 3600.0, t1, "")).1["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(addr, &url(t0, t1, ""));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "context",
+        "paths",
+        "devices",
+        "total",
+        "limit",
+        "truncated",
+        "horizon",
+        "method",
+    ] {
+        assert!(
+            v.get(field).is_some(),
+            "tune-history answer missing {field}: {v}"
+        );
+    }
+    assert_eq!(v["method"], json!("hk-store/tune-path@1"), "{v}");
+    assert_eq!(v["limit"], json!(64), "{v}");
+    assert_eq!(v["window"]["f_lo_hz"].as_f64(), Some(f_lo), "{v}");
+    // The context widens the time window by its own duration, capped at 600 s, and never narrows
+    // the frequency axis: the band bounds are null, not numbers.
+    assert_eq!(v["context"]["f_lo_hz"], json!(null), "{v}");
+    assert_eq!(v["context"]["f_hi_hz"], json!(null), "{v}");
+    let ct0 = v["context"]["t0_s"].as_f64().unwrap();
+    assert!((ct0 - (t0 - 600.0)).abs() < 1e-3, "{v}");
+    // The one front end's route, over the window it is tuned to.
+    let p = &v["paths"][0];
+    assert!(p["device"].is_string(), "{v}");
+    assert!(
+        p["vertices"].as_array().is_some_and(|a| a.len() >= 2),
+        "{v}"
+    );
+    for vx in p["vertices"].as_array().unwrap() {
+        assert!(vx["t_s"].as_f64().is_some_and(f64::is_finite), "{vx}");
+        let f = vx["f_hz"].as_f64().expect("a vertex names a frequency");
+        assert!(
+            (f - FIXTURE_CENTER_HZ).abs() < 1.0,
+            "the route sits at the tuned centre: {vx}"
+        );
+        assert!(
+            ["start", "end"].contains(&vx["at"].as_str().unwrap_or("")),
+            "{vx}"
+        );
+    }
+    assert!(
+        p["legs"].as_u64().unwrap_or(0).max(1) > p["retunes"].as_u64().unwrap_or(0),
+        "retunes are the changes of centre between legs: {p}"
+    );
+    assert!(v["horizon"]["as_of_s"].as_f64().is_some(), "{v}");
+    // A band the radio was never in and never crossed draws nothing.
+    let (st, far) = get(
+        addr,
+        &format!("/api/tune-history?f_lo=2.0e9&f_hi=2.1e9&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{far}");
+    assert_eq!(far["total"], json!(0), "{far}");
+    // `device` and `limit` narrow; malformed ones refuse.
+    let dev = p["device"].as_str().unwrap().to_owned();
+    let (st, d) = get(addr, &url(t0, t1, &format!("&device={dev}&limit=5")));
+    assert_eq!(st, 200, "{d}");
+    assert_eq!(d["limit"], json!(5), "{d}");
+    assert_eq!(d["total"], v["total"], "{d}");
+    let (st, none) = get(addr, &url(t0, t1, "&device=no-such-radio"));
+    assert_eq!(st, 200, "{none}");
+    assert_eq!(none["total"], json!(0), "{none}");
+    for bad in ["&device=any", "&limit=0", "&limit=5000"] {
+        let (st, e) = get(addr, &url(t0, t1, bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // A viewport route needs the whole viewport.
+    for q in [
+        format!("/api/tune-history?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+        format!("/api/tune-history?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+        format!("/api/tune-history?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),
+        "/api/tune-history".to_owned(),
+    ] {
+        let (st, e) = get(addr, &q);
+        assert_eq!(st, 400, "{q}: {e}");
+    }
+    let (st, e) = post(addr, "/api/tune-history", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(t0, t1, ""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
