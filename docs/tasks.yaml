@@ -29541,7 +29541,7 @@ tasks:
   - id: T-1012
     milestone: M2-hardening
     title: "Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: DEFLAKE-REPLUMB
@@ -29560,6 +29560,7 @@ tasks:
     high_effort_reason: "bulk red with no single culprit: interaction-vs-nondeterminism triage across three branches on the replay/recovery path, a real-time-adjacent area"
     result: |
       FIXED (test-only; no product defect; none of t567/t934/t938 at fault). Commit 2de52a33 on task-t1012: loop_survives_replumb's stall is now a device fault shared by every pass (Stall), and the rate/window asserts read the first pass opened after retune returned, once played out; t884 scans for 'a7'/'pocsag' with emitter_id removed. RED PROOFS: old arming forced into its window -> 2/2 FAIL 'capture never recovered' (90.5 s); recovery dropping --loop reopen (T-534 regression injected) -> FAIL 'a recovered segment dropped the run's --loop policy: wrapped 7, wanted 9'; reopen factory not re-sending the commanded window -> FAIL 'not sent the commanded rate'; withheld body leaking 'job a7' -> FAIL at the new scan. VERIFIED: fixed loop test 20/20 base + 12/12 merge (load 28-42; 9 loops, 2 scripted stalls consumed per run); fixed t884 300/300 base + 300/300 merge + 3/3 nextest (vs 277/300 unfixed).
+    commit: 37187b01
   - id: T-1016
     milestone: M2-hardening
     title: "sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point"
