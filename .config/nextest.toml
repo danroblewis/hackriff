@@ -204,7 +204,11 @@ fail-fast = false
 # T-913 a fifth beside it: what the DETECT WRITER pays while that pass runs (the figure the
 # pass's own report cannot give). T-901
 # added the /ws/tiles/rows push-cadence bound, whose deterministic half is hk-store's
-# deferred-seal tests. T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
+# deferred-seal tests. T-939 added the detection reader's 20 Msps throughput bound — it streams a
+# paced 20 Msps front end for 10 s of wall clock and asserts the reader is never lapped and
+# analyses essentially all of it, which is a property of the box's headroom above all; its
+# deterministic halves gate normally (hk-core's ring reader-independence tests and
+# hk-pipeline::waterfall_survives_drops). T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
 # audio branch against the legacy Listen chain, same IQ); its audio/RDS/refinement parity half
 # gates normally (hk-pipeline::listen_recipe_parity).
 default-filter = '''
@@ -217,6 +221,7 @@ not (
   or test(the_retention_index_build_is_measured_per_row)
   or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
   or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
+  or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 )
 '''
 
@@ -484,4 +489,5 @@ or test(a_detect_writer_waits_at_most_one_batch_behind_a_prune_pass)
 or test(the_retention_index_build_is_measured_per_row)
 or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
 or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
+or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 '''
