@@ -122,6 +122,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // emitter's presence track
     ("GET", "/api/events"),
     ("GET", "/api/inventory/{id}/presence"),
+    // T-812 (MAP-12): ranked band-plan allocations over a viewport, as explanations - suggestions,
+    // never truth, never a tile channel, never pre-populating the inventory
+    ("GET", "/api/priors"),
     ("GET", "/api/analysis/strongest"),
     // T-341: the achievable (centre, span) grid, and which tier answers for a requested state
     ("GET", "/api/navigation"),
@@ -1336,6 +1339,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/floor"
         | "/api/inventory"
         | "/api/events"
+        | "/api/priors"
         | "/api/analysis/strongest"
         | "/api/navigation"
         | "/api/timeline"
@@ -1378,6 +1382,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/inventory" => inventory(state, &req),
         // T-264 (ADR-0017 TM-8): the durable all-time catalogue, where Explore is window-scoped.
         "/api/events" => events(state, &req),
+        // T-812 (MAP-12): the band plan as ranked suggestions for this box, computed on demand.
+        "/api/priors" => crate::priors::priors_json(state, &req.query),
         "/api/analysis/strongest" => strongest(state, &req),
         // T-341: the backend owns which capture states are realizable; the client snaps against
         // this grid rather than deciding for itself what the front end can do.

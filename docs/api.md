@@ -454,6 +454,60 @@ One row per `(decoder, frame_model)` pair the emitter's decoded identity has pro
 - **`coverage` keeps three answers apart, and never collapses them.** `statement` is backend-rendered and is what a client shows beside an empty catalogue: with no spectrum history on the server, coverage is **unknown** and an empty answer is evidence of nothing; with `observed_cells: 0` it reads *no data for this period, not a quiet band*; with `gaps[]` it says how much was observed and that the gaps are no data; only a box observed throughout says an empty catalogue means nothing was on the air. Unobserved is never reported as quiet (C26), and `gaps` are the fully unobserved time runs of `/api/history`'s own grid.
 - **Bounds, disclosed rather than silent.** At most 500 emitters are expanded per answer (`emitters_truncated` when more matched the box); `total` is the events found over those emitters, and `limit`/`cursor` page them newest first. `emitters_no_interval` counts rows the box selected that carry **no presence interval at all** (a legacy writer's row, matched on its `first_seen`/`last_seen` hull): they contribute no event, because a hull is not a timespan and inventing one would fabricate a measurement — so the count is disclosed instead.
 
+### `GET /api/priors` — band-plan priors over a viewport, as ranked suggestions (T-812, MAP-12)
+
+`GET /api/priors?f_lo&f_hi&t0&t1` (Hz, Hz, Unix s, Unix s; all four required, validated exactly as
+`/api/events` validates them — `400 invalid` otherwise). Gated like every `/api/*` GET (bearer header
+or `?token=`), never audited, read-only. It answers **the band-plan allocations that intersect the
+box, ranked as explanations** for what the receiver measured there — the exploration-first rule as a
+route ([docs/24 §3f/§7](24-canvas-as-data-surface.md)): **a suggestion, never truth**. It never adds a
+row to the inventory, never sets a family, and never overrides a measurement; a measured emission off
+its allocation's channel raster is **flagged, not snapped**. Computed **on demand** from the bundled
+C17 allocation table (`us-47cfr2106-compact`) and the explanations the pipeline already stored on the
+window's emitters — it is not a tile channel (priors are mutable reference data, and the ranking
+depends on what this window measured).
+
+```json
+{
+  "window": {"f_lo_hz": 87e6, "f_hi_hz": 109e6, "t0_s": 1790000000.0, "t1_s": 1790003600.0},
+  "kind": "suggestion",
+  "source": "us-47cfr2106-compact",
+  "region": "us",
+  "priors": [{
+    "rank": 1, "id": "fm-broadcast", "f_lo_hz": 88e6, "f_hi_hz": 108e6,
+    "viewport_fraction": 0.909,
+    "service": "broadcasting", "primary_services": ["broadcasting"], "secondary_services": [],
+    "allocation": "non-federal", "tags": ["fm-broadcast"],
+    "source": "us-47cfr2106-compact:fm-broadcast", "unverified": false,
+    "support": "cited", "emitters_in_band": 3, "emitters_citing": 2,
+    "off_raster_hz": 150000.0,
+    "off_raster": [{"emitter_id": "…", "f_center_hz": 98.25e6, "offset_hz": 150000.0,
+                    "nearest_channel_hz": 98.1e6, "raster_hz": 200000.0}],
+    "reason": "fm-broadcast is allocated primary to broadcasting 88.000 MHz–108.000 MHz (non-federal, us-47cfr2106-compact). 3 measured emissions in this window lie in it; 2 ranked it among their explanations. 1 emission sits off the 200.0 kHz raster (largest 150.0 kHz from 98.100 MHz): flagged, not snapped. A suggestion, never truth."
+  }],
+  "total": 2, "truncated": false,
+  "emitters_considered": 3, "emitters_truncated": false,
+  "statement": "Band-plan priors are suggestions, never truth: …"
+}
+```
+
+- **Ranking, best first:** allocations the window's own emitters **cited** in their ranked
+  explanations (more citing emitters, then the better rank they gave it); then allocations holding
+  measured emissions (`support: "in-band"`); then context-only rows (`support: "context"`). Ties go
+  to the **narrower** (more specific) allocation, then the lower edge. `support: "no-inventory"` on
+  every row when the server keeps no inventory — the rows are then context only, and
+  `emitters_truncated` is `null`.
+- **Measured side is read, never recomputed.** An emitter is *in band* when its centre lies in the
+  allocation; it *cites* the allocation when its stored ranked explanations (`explanations` on its
+  `/api/inventory` row) carry this row's `prior_ref`; `off_raster` lists the raster evidence those
+  explanations recorded with `on_raster: false`. So this route cannot disagree with the explanation
+  beside an inventory row.
+- `f_lo_hz`/`f_hi_hz` are the **allocation's** edges (not clipped); `viewport_fraction` is the share of
+  the requested width it covers. `reason` and `statement` are backend-rendered — a client shows them
+  as written and labels every drawn band a **prior**, never a detection.
+- Capped at 64 allocations (`truncated`); at most 500 window emitters are read to rank them
+  (`emitters_truncated`, a cap on work, never a claim).
+
 ### `GET /api/inventory/{id}/presence` — one emitter's presence track (T-264, ADR-0017 TM-8)
 
 The row's `presence` object is a *projection through a window* (how many intervals intersect it, time on air inside it, the latest one, liveness). This is the **track itself** — every interval with its own timespan — which History needs for one row and a live list must never carry.
@@ -2620,7 +2674,7 @@ four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023]
 | GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | **served (T-818)** — `{cursors?, n?, note?, collection_id?, view?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
 | GET/POST | `/api/views` | MAP-19 | **served (T-819)** — see [Saved views](#saved-views-t-819-map-19); `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
 | GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | **served (T-819)** — any create field but `id` | `SavedView` / `{deleted}` |
-| GET | `/api/priors` | MAP-12 | `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
+| GET | `/api/priors` | MAP-12 | **served (T-812)** — see [`GET /api/priors`](#get-apipriors--band-plan-priors-over-a-viewport-as-ranked-suggestions-t-812-map-12); `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
 
 **Rules every one of them inherits** (`docs/25 §10`):
 

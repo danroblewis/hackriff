@@ -15,6 +15,9 @@ hk-recipe.workspace = true
 hk-estimate.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
+# T-812 (MAP-12): `/api/priors` reads the bundled C17 allocation table. hk-context does not depend
+# on hk-api, so the edge is acyclic (it was already a dev-dependency, below).
+hk-context.workspace = true
 flate2.workspace = true
 httparse.workspace = true
 libc.workspace = true
