@@ -1089,17 +1089,31 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
         .view_history()
         .expect("the pipeline opens a view-scheme pyramid");
     // 5 phases = 20 s of capture time: enough rows for node (3, 1) (8 bins × 2 rows) to hold
-    // committed rows of its own, and a finished run, so the store is still while it is compared.
+    // committed rows of its own. Then the radio HOLDS — the run is still live, nothing finished or
+    // flushed — so the live edge can be read in a still state (section 0), before the run ends.
     for _ in 0..5 {
         assert!(
             ctl.wait_emitted(ctl.emitted() + PHASE_SAMPLES, LIMIT),
             "the run stopped delivering samples"
         );
     }
-    ctl.finish();
-    let (summary, fired) = wait_guarded(handle, LIMIT);
-    assert!(!fired, "the run had to be stopped by the watchdog");
-    assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+    ctl.hold_at(ctl.emitted());
+    // Wait for the chain to drain what the radio already delivered: the store's edge stops moving.
+    // This only waits; nothing asserted below is chosen by the clock.
+    let edge = || view.lock().unwrap().latest_frame_end();
+    let deadline = Instant::now() + LIMIT;
+    let mut last = edge();
+    let mut still = 0;
+    while still < 5 {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = edge();
+        still = if now == last { still + 1 } else { 0 };
+        last = now;
+        assert!(
+            Instant::now() < deadline,
+            "the view store never stopped moving"
+        );
+    }
 
     let (f0, t0_ns, n3_1) = {
         let p = view.lock().unwrap();
@@ -1120,12 +1134,15 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
         ..ApiState::default()
     };
     let cells = TILE_CELLS;
-    // The tile holding the tone, 5 s into the run, at `(level_f, level_t)` of the view lattice.
+    // The tile holding the tone at the capture instant `pin`, at `(level_f, level_t)` of the view
+    // lattice. `pin` is set from the STORE'S OWN state before each phase (never the clock), so
+    // the address a phase reads is the one its claim is about whatever block the run stopped in.
+    let pin = std::cell::Cell::new(radio::T0_NS);
     let address = |lf: usize, lt: usize| {
         let f_span = f0 * 2f64.powi(lf as i32) * cells as f64;
         let t_span = t0_ns * (1i64 << lt) * cells as i64;
         let f_index = ((CENTER + OFFSET_HZ) / f_span).floor() as i64;
-        let t_index = (radio::T0_NS + 5_000_000_000).div_euclid(t_span);
+        let t_index = pin.get().div_euclid(t_span);
         (f_index, t_index, f_span, t_span)
     };
     let tile = |lf: usize, lt: usize| {
@@ -1157,6 +1174,106 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
         );
         v
     };
+
+    // The level-0 fold of a tile's extent: what the finest-first walk served, and the reference
+    // every answer below is compared with.
+    let fold0 = |lf: usize, lt: usize| {
+        let (f_index, t_index, f_span, t_span) = address(lf, lt);
+        let freq = FreqRange::new(f_index as f64 * f_span, (f_index + 1) as f64 * f_span);
+        let time = TimeRange::new(
+            Timestamp::from_unix_nanos(t_index * t_span),
+            Timestamp::from_unix_nanos((t_index + 1) * t_span),
+        );
+        let p = view.lock().unwrap();
+        p.query(&RegionQuery {
+            freq,
+            time,
+            resolution: Resolution::Level(0),
+        })
+        .expect("level 0 answers")
+        .overview(time, freq, cells, cells)
+    };
+    // Cell for cell: the same cells observed, the same max-hold (up to the 0.01 dB stored form).
+    let same_as_fold0 = |v: &serde_json::Value, fine: &hk_store::Overview, what: &str| {
+        let served = v["grid"]["max_db"].as_array().expect("json planes");
+        assert_eq!(served.len(), fine.cells.len());
+        let mut worst = 0f64;
+        for (i, (s, f)) in served.iter().zip(&fine.cells).enumerate() {
+            match (s.as_f64(), f.sources > 0) {
+                (None, false) => {}
+                (Some(s), true) => worst = worst.max((s - f64::from(f.max_db)).abs()),
+                (s, f) => panic!(
+                    "{what}: cell {i} served {s:?} where the level-0 fold is observed={f} \
+                     (answered level {}, tried {})",
+                    v["resolution"]["answered"]["level"], v["resolution"]["tried"]
+                ),
+            }
+        }
+        assert_eq!(
+            v["grid"]["observed_cells"].as_u64().unwrap(),
+            fine.observed_cells as u64,
+            "{what}: the same cells are observed"
+        );
+        eprintln!("{what}: max |Δ max_db| against the level-0 fold = {worst} dB");
+        assert!(
+            worst <= 0.011,
+            "{what}: max-hold differs from level 0's by {worst} dB"
+        );
+    };
+
+    // ---- 0. the LIVE EDGE, mid-run: never a node that has not folded its newest rows yet ----
+    //
+    // A closed level-0 row folds into the coarse nodes only `seal_lag` after the clock leaves it,
+    // and the read-time preview does not cover those rows (the T-1018 review). So with the run
+    // live, node (3, 1) is missing the newest rows level 0 holds — asserted, or this proves nothing
+    // — and the tile over that edge must still show every one of them.
+    let lag = view
+        .lock()
+        .unwrap()
+        .coarse_lag_start()
+        .expect("mid-run, level 0 holds closed rows the coarse nodes have not folded yet");
+    // The tile holding the first held-back row: by construction it reaches into them.
+    pin.set(lag.as_unix_nanos());
+    let live = tile(3, 1);
+    same_as_fold0(&live, &fold0(3, 1), "live-edge (3, 1)");
+    assert_eq!(
+        live["resolution"]["answered"]["level"],
+        json!(0),
+        "a tile reaching into the held-back rows keeps finest-first"
+    );
+
+    // Now end the run: its seal folds every held-back row, and the same address takes its node.
+    ctl.run_free();
+    ctl.finish();
+    let (summary, fired) = wait_guarded(handle, LIMIT);
+    assert!(!fired, "the run had to be stopped by the watchdog");
+    assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+    // The run-end seal goes through the last frame and no further (`history::view_writer`), so
+    // the newest `seal_lag` of rows may stay held back. The tiles below are the last whose extent
+    // ends at or before them — wholly folded, which is what lets a node answer — and still hold
+    // most of the run's 20 s, since a (·, 1) tile is 512 rows.
+    let t_span_1 = t0_ns * 2 * cells as i64;
+    let back_from = view
+        .lock()
+        .unwrap()
+        .coarse_lag_start()
+        .map(|t| t.as_unix_nanos())
+        .or_else(|| {
+            view.lock()
+                .unwrap()
+                .latest_frame_end()
+                .map(|t| t.as_unix_nanos())
+        })
+        .expect("the run recorded frames");
+    pin.set((back_from.div_euclid(t_span_1) - 1) * t_span_1);
+    let (_, ti, _, ts) = address(3, 1);
+    assert!(
+        view.lock()
+            .unwrap()
+            .coarse_lag_start()
+            .is_none_or(|t| (ti + 1) * ts <= t.as_unix_nanos()),
+        "the node-read tile must end before the rows the finished run still holds back"
+    );
 
     // ---- 1. on-node: the exact node answers, cells² source cells, one lock hold ----
     let on = tile(3, 1);
@@ -1192,44 +1309,7 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
     }
 
     // ---- 2. the same pixels as the level-0 fold, cell for cell ----
-    let (f_index, t_index, f_span, t_span) = address(3, 1);
-    let freq = FreqRange::new(f_index as f64 * f_span, (f_index + 1) as f64 * f_span);
-    let time = TimeRange::new(
-        Timestamp::from_unix_nanos(t_index * t_span),
-        Timestamp::from_unix_nanos((t_index + 1) * t_span),
-    );
-    let fine = {
-        let p = view.lock().unwrap();
-        p.query(&RegionQuery {
-            freq,
-            time,
-            resolution: Resolution::Level(0),
-        })
-        .expect("level 0 answers")
-        .overview(time, freq, cells, cells)
-    };
-    let served = on["grid"]["max_db"].as_array().expect("json planes");
-    assert_eq!(served.len(), fine.cells.len());
-    assert_eq!(
-        fine.observed_cells as u64, observed,
-        "the same cells are observed"
-    );
-    let mut worst = 0f64;
-    for (i, (s, f)) in served.iter().zip(&fine.cells).enumerate() {
-        match (s.as_f64(), f.sources > 0) {
-            (None, false) => {}
-            (Some(s), true) => worst = worst.max((s - f64::from(f.max_db)).abs()),
-            (s, f) => panic!("cell {i}: served {s:?}, level-0 fold observed {f}"),
-        }
-    }
-    eprintln!(
-        "node (3, 1) against the level-0 fold: max |Δ max_db| = {worst} dB over {observed} cells"
-    );
-    // Max-hold composes exactly; the only slack is the store's 0.01 dB stored form (codec).
-    assert!(
-        worst <= 0.011,
-        "the node's max-hold differs from level 0's by {worst} dB"
-    );
+    same_as_fold0(&on, &fold0(3, 1), "node (3, 1)");
 
     // ---- 3. off-lattice: the cheapest candidate that folds, never the finest ----
     assert!(
@@ -1260,6 +1340,7 @@ fn a_coarse_tile_reads_its_own_node_and_an_off_lattice_one_the_cheapest_that_fol
     // (6, 1) over node (3, 1): 8× the frequency cells, the time cells one for one.
     assert_eq!(off["cost"]["source_cells"], json!(8 * cells * cells));
     // Every other folding candidate costs more to read — which is the whole rule.
+    let (_, _, f_span, t_span) = address(3, 1);
     let p = view.lock().unwrap();
     let g = p.geometry();
     let src = |l: usize| {

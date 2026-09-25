@@ -794,6 +794,43 @@ impl Pyramid {
         (self.latest_ns != i64::MIN).then(|| Timestamp::from_unix_nanos(self.latest_ns))
     }
 
+    /// **Through when a live coarse node holds everything level 0 does** (T-1018): the start of the
+    /// earliest level-0 row holding data whose column has closed but which live coarse maintenance
+    /// has not yet folded upwards — `None` when no such row exists, so the coarse nodes are complete for every
+    /// row the store holds. Always `None` for a store without [`PyramidConfig::coarse_live`],
+    /// whose coarse nodes are not maintained row by row at all (callers must not read it as
+    /// "complete" there; they check the switch first).
+    ///
+    /// Why a reader needs it: a closed row folds up only once the ingest clock has left it by
+    /// `seal_lag` ([`Self::fold_finished_rows`]), and [`Self::live_preview`] adds level 0's
+    /// still-open column and each node's in-progress row at read time, not these held-back rows.
+    /// So over `[this, live edge)` a coarse node is missing up to `seal_lag` of rows level 0 has,
+    /// and before this instant it is missing none. Exact, from the open tiles' own counters — a
+    /// handful of level-0 tiles at the live edge, so it costs a key walk, not a cell walk.
+    pub fn coarse_lag_start(&self) -> Option<Timestamp> {
+        if !self.cfg.coarse_live {
+            return None;
+        }
+        let t_cell_ns = self.geom.levels[0].t_cell_ns;
+        self.open[0]
+            .values()
+            .filter_map(|t| match t {
+                OpenTile::Full(t) => Some(t),
+                OpenTile::Live(_) => None,
+            })
+            .filter_map(|t| {
+                // Only a held-back row that HOLDS something is missing from the nodes: an empty
+                // one folds nothing when it goes up, so the nodes already agree with it.
+                let next = t.folded_through.map_or(0, |r| r + 1);
+                let done = t.col_done?;
+                (next..=done)
+                    .find(|&r| t.row_has_data(r))
+                    .map(|r| (t.t_cell0 + r as i64).saturating_mul(t_cell_ns))
+            })
+            .min()
+            .map(Timestamp::from_unix_nanos)
+    }
+
     /// Keys of the sealed tiles on disk at `level`, oldest first.
     pub fn sealed_keys(&self, level: usize) -> Vec<TileKey> {
         self.sealed.get(level).map_or_else(Vec::new, |m| {

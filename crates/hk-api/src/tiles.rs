@@ -1097,7 +1097,7 @@ pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
 /// # The exact node first, else the fewest source cells that still fold
 ///
 /// On a store whose coarse nodes are maintained **live** ([`hk_store::PyramidConfig::coarse_live`],
-/// T-571/T-585) every node is current to the live edge — its committed rows are folded as they
+/// T-571/T-585) every node is current up to the fold edge (below) — its committed rows are folded as they
 /// arrive and its in-progress row is folded at read time (T-583) — and retention evicts finer
 /// tiles before coarser ones, so a coarser node holds everything a finer one does over any extent.
 /// Max-hold, frame counts and observed seconds compose under folding, so reading a coarser level
@@ -1120,14 +1120,37 @@ pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
 ///
 /// # Where it is NOT applied
 ///
+/// **A tile that reaches past [`hk_store::Pyramid::coarse_lag_start`]** keeps the finest-first
+/// order: a closed level-0 row folds into the coarse nodes only once the ingest clock has left it
+/// by `seal_lag` (2 s shipped), and the read-time preview covers level 0's open column and each
+/// node's in-progress row but not those held-back rows. So "current to the live edge" above holds
+/// only before that instant, and a live-edge tile — or a `/ws/tiles/rows` block, which is pushed
+/// once and never re-sent — would otherwise lose its newest rows to a node that has not got them
+/// yet (T-1018 review). Once the rows fold, the next read of the same address takes the node.
+///
 /// A store without live coarse nodes keeps the finest-first order. Scheme 1's eager ladder rolls a
 /// child into its parent only when the child **seals**, so its open coarse tiles trail level 0 by a
 /// whole producer block at the live edge — preferring them there would stop the live edge
 /// appending, which the live-rendering invariant forbids. `coarse_on_demand` would fold the node
 /// inside the request, which is the batch work T-571 removed.
 pub(crate) fn read_order(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
+    read_order_until(p, key, key.region.t1_ns)
+}
+
+/// [`read_order`] for a read that ends at `end_ns` rather than at the tile's own end — a
+/// `/ws/tiles/rows` block is a few rows of one tile, and whether the coarse nodes are complete is a
+/// question about THOSE rows, asked when the block is read (a row is pushed once and never again).
+pub(crate) fn read_order_until(p: &hk_store::Pyramid, key: &TileKey, end_ns: i64) -> Vec<usize> {
     let mut out = affordable_levels(p, key);
     if !p.config().coarse_live {
+        return out;
+    }
+    // Only where the coarse nodes are complete: a closed level-0 row folds up `seal_lag` after
+    // the clock leaves it, and the read-time preview does not cover those held-back rows. A tile
+    // reaching into them keeps finest-first, so the live edge never loses its newest rows.
+    if p.coarse_lag_start()
+        .is_some_and(|t| end_ns > t.as_unix_nanos())
+    {
         return out;
     }
     let geom = p.geometry();
