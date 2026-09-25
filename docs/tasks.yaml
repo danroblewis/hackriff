@@ -24027,7 +24027,7 @@ tasks:
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
-    status: in-progress
+    status: done
     branch: task-t812
     priority: normal
     parallel_group: MAP-LAYERS
@@ -24069,6 +24069,7 @@ tasks:
       Observed, not chased: just test-crate hk-api: 288/289 passed. The failure was hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay (crates/hk-api/tests/ondemand.rs:365, 'assert!(records > 20)' panicked with '9 records'). It also failed 3/3 when run alone, but at load average 28-45, so this was not a quiet machine. It is a wall-clock throughput bound (records received in 1500 ms from a ticking test opener) in code this diff does not touch: on-demand WebSocket, not /api/priors. Candidate for the timing tier or the deflaker; I did not confirm on a quiet box. | The FM fixture (fm_100p8M...) holds emitters at 99.78, 100.44 and 100.80 MHz that the pipeline's US 200 kHz odd-tenth raster flags off-raster (100.8 is an even tenth, which suggests a non-US / 100 kHz-step recording). /api/priors reports them as flagged, as designed. A non-US band table / raster (ITU R1) is the existing C17 'future work'.
       Use cases: AWARE-042
       Resources: 235 CPU-s, peak 2.1 GB
+    commit: 13c6e86e
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
