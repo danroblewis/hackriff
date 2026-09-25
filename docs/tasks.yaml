@@ -29247,7 +29247,8 @@ tasks:
   - id: T-1007
     milestone: MMAP
     title: "Settings menu replaces most of Review: theme, contrast, ruler mode, devices and which pane uses which, retention/capture window, colour scale; Review keeps only anomalies/alarms"
-    status: todo
+    status: in-progress
+    branch: task-t1007
     priority: normal
     deps:
     - T-993
@@ -29265,7 +29266,8 @@ tasks:
   - id: T-1008
     milestone: MMAP
     title: "Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop"
-    status: todo
+    status: in-progress
+    branch: task-t1008
     priority: normal
     deps: []
     parallel_group: MAP-SCAN
@@ -29520,7 +29522,8 @@ tasks:
   - id: T-1023
     milestone: MLIVE
     title: One rolling storage budget (IQ ring + tile pyramid + DB), sized to the device and configurable (flag + settings), eviction keeps the coarse levels so zoom-out over all history is a read; budget and per-level horizon in /api/status
-    status: todo
+    status: in-progress
+    branch: task-t1023
     priority: high
     deps: []
     parallel_group: STORAGE-BUDGET
@@ -29543,7 +29546,8 @@ tasks:
   - id: T-1024
     milestone: MLIVE
     title: "Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)"
-    status: todo
+    status: in-progress
+    branch: task-t1024
     priority: medium
     deps: []
     parallel_group: TILE-DISK
@@ -29561,7 +29565,8 @@ tasks:
   - id: T-1025
     milestone: MMAP
     title: "Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them"
-    status: todo
+    status: in-progress
+    branch: task-t1025
     priority: high
     deps:
     - T-993
@@ -29579,7 +29584,8 @@ tasks:
   - id: T-1026
     milestone: MMAP
     title: "Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list"
-    status: todo
+    status: in-progress
+    branch: task-t1026
     priority: high
     deps: []
     parallel_group: MAP-CARD
