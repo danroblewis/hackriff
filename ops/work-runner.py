@@ -495,7 +495,8 @@ def remote_prepare(host, wt, branch, d, resume=False):
     its uncommitted files - is the newer one, and this Mac's branch is pushed only when the mirror has none."""
     base = merge_target()
     # --no-verify: the only pre-push hook is Git LFS's upload, which the mirror cannot serve - LFS objects go by rsync.
-    sh(["git", "push", "-q", "--no-verify", "-f", host, f"{base}:refs/heads/main"], check=True)
+    # Never --force: the gated base only ever moves forward; a push that is not a fast-forward refuses the start.
+    sh(["git", "push", "-q", "--no-verify", host, f"{base}:refs/heads/main"], check=True)
     if not resume and sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
         sh(["git", "push", "-q", "--no-verify", host, f"{branch}:refs/heads/{branch}"])      # no -f: never over the host's
     sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",

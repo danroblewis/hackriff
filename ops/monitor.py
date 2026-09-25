@@ -2015,6 +2015,8 @@ def build_flow_panel(ops, now=None):
                             "hourly": flow_mod.queue_depth_hourly(ops, now - timedelta(hours=24), now),
                             "spark": flow_mod.queue_depth_series(ops, now - timedelta(hours=24), now)},
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
+            # Remote worker hosts (user, 2026-09-25): running/landed per host and its mirror's drift from main.
+            "remote_hosts": flow_mod.remote_hosts(ops),
             "experiment": experiment,
         }
     except Exception as e:
@@ -2951,6 +2953,18 @@ function drawCauses(el, d){
   el.innerHTML=h;
 }
 
+// 4c. remote worker hosts: running / landed, and the mirror's drift from main (it must never serve a stale base).
+function drawRemoteHosts(el, d){
+  if(!el) return; const H=d.remote_hosts||[];
+  if(!H.length){ el.innerHTML='<div class=kv><span>no remote host configured</span></div>'; return; }
+  el.innerHTML=H.map(h=>{
+    const drift=h.behind==null?'<span>mirror never pushed</span>':(h.behind>0?`<span style="color:${C.amber}">mirror behind by <b>${h.behind}</b></span>`:'<span>mirror current</span>');
+    const when=h.pushed_at?new Date(h.pushed_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'-';
+    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed</span><span>${h.dispatched} dispatched</span></div>`+
+           `<div class=kv>${drift}<span>mirror ${esc(h.mirror||'-')} · pushed ${when}</span></div>`;
+  }).join('');
+}
+
 // 4b. merge-queue depth: branches not yet on main (queue file + batch + isolation remainder).
 function drawQueueDepth(el, d){
   const q=d.queue_depth; if(!el) return; if(!q){ el.innerHTML='<div class=kv><span>no data</span></div>'; return; }
@@ -3009,6 +3023,7 @@ async function load(){
       <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
       <div class=card><h2>Merge queue depth <em>not yet on main</em></h2><div id=cQueueDepth></div></div>
       <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
+      <div class=card><h2>Remote hosts <em>workers off this Mac</em></h2><div id=cRemote></div></div>
       <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
     </div>`;
     drawLandings($('#cLand'), d);
@@ -3016,6 +3031,7 @@ async function load(){
     drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
     drawCauses($('#cCauses'), d);
     drawQueueDepth($('#cQueueDepth'), d);
+    drawRemoteHosts($('#cRemote'), d);
     drawTouchpoints($('#cTouch'), d);
     drawExperiment($('#cExp'), d);
   }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }
