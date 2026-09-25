@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, tileUrl, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { RECOVER_AFTER, RECOVER_QUIET, REFRESH_DUTY, TileCache, parseKey, type MovingViewport, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
+import { RECOVER_AFTER, RECOVER_QUIET, REFRESH_DUTY, TileCache, heldText, parseKey, type MovingViewport, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
 import { TileBusyError, TileDecodeError, type TileData } from "../src/surface/tile";
 
 const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
@@ -62,7 +62,8 @@ function harness(opts: TileCacheOptions = {}) {
     uploads: () => uploads,
     destroys: () => destroys,
     /** Settle with a tile carrying the route's own `cost` numbers (T-630). */
-    async settle2(a: TileAddr, cost: { serverInFlightLimit: number | null; serverInFlightShare: number | null }) {
+    async settle2(a: TileAddr, cost: Partial<Pick<TileData,
+      "serverInFlightLimit" | "serverInFlightShare" | "serverInFlightHeld" | "serverHoldsThisRead">>) {
       waiting.get(keyOf(a))!.resolve({ ...data(a), ...cost });
       waiting.delete(keyOf(a));
       await flush();
@@ -288,6 +289,163 @@ test("an abort does NOT hand the route its slot back, so a drag cannot pump requ
   await flush();
   assert.deepEqual(h.urls.slice(2), [tileUrl(addr(9)), tileUrl(addr(8))],
     "and only the still-visible ones are retried");
+});
+
+test("T-959: the charge for an abandoned read is the ROUTE'S held count, not the average service time", async () => {
+  // The defect this is the contract for (T-932's release-candidate red, 2026-09-25). An aborted read
+  // reaches the browser and not `hk-api`, so the route goes on producing the tile and holding its
+  // slot; the client charges it the route's MEASURED MEAN, and under load an overview read takes
+  // 7-9 s against a mean of a few hundred ms. So the charge lapses while the route still holds the
+  // slot, the client's next reads are refused over slots ITS OWN leftover reads hold, and an AIMD
+  // that reads every 503 as contention halves the cap for the client's own slow reads — measured
+  // with the page's cap pinned at 1, share 2, with nothing of its own on the wire.
+  //
+  // Every answer and (since T-959) every refusal states `in_flight_held`: what THIS client holds,
+  // server-side. Subtracting the reads it is still waiting for — the one thing the route cannot
+  // know — is the count of abandoned reads still in production, and it replaces the guess.
+  let clock = 0;
+  const h = harness({ inFlight: 2, busyBackoffMs: 50, now: () => clock, serverMsGuess: 100 });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0));
+  h.cache.acquire(addr(1));
+  h.cache.setViewports(LAT, [paneView(0, 2)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.urls.length, 2);
+
+  // The user pans away: both reads are abandoned, and charged the mean.
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.setViewports(LAT, [paneView(8, 9)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.cache.abandonedSlots, 2, "the abort does not hand the slots back (T-454)");
+  assert.equal(h.urls.length, 2, "and nothing new goes out while they are charged");
+
+  // The mean elapses. The GUESS says the route is done with them; it is not — these are the 7-9 s
+  // reads — so the one request this buys is refused, and the refusal says whose slots they are.
+  clock = 101;
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.setViewports(LAT, [paneView(8, 9)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.urls.length, 3, "the charge lapsed, so the still-wanted tile was asked for");
+  await h.fail(addr(8), new TileBusyError(
+    4, "too many tile reads in flight (limit 4, share 2, held 2) — you already hold that many, " +
+    "so these are your own reads still being produced", 2, 2));
+
+  // (1) THE CHARGE IS CORRECTED TO THE ROUTE'S OWN COUNT. Two slots held, none of this client's
+  // reads outstanding: two abandoned reads are still being produced, whatever the mean said.
+  assert.equal(h.cache.abandonedSlots, 2,
+    "the route STATED it holds two slots for this client with nothing of its own on the wire — " +
+    "charging the average service time instead is the guess T-959 removes");
+  assert.equal(h.cache.serverHeldStated, 2, "and the statement is reported, with its age");
+  assert.equal(h.cache.serverHeldStatedAgeMs, 0);
+
+  // (2) AND THE CAP IS NOT HALVED, BECAUSE THIS IS NOT CONTENTION. `held >= share` is the client
+  // being refused over its own reads; halving there is a client punishing itself for its own slow
+  // reads, and it is what pinned a page at a cap of 1 with an empty wire.
+  assert.equal(h.cache.inFlightLimit, 2,
+    "a 503 whose `held` says the slots are this client's own says nothing about other tenants: " +
+    "the cap is already right and the leftover reads are what must be waited for");
+  assert.equal(h.cache.stats.busyRefusals, 1, "it is still SEEN and counted (T-455)");
+
+  // (3) AND IT ASKS FOR NOTHING WHILE THE ROUTE SAYS IT HOLDS THEM — the backoff can expire and
+  // the budget is still spent, because the slots are genuinely out.
+  clock = 200;
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.setViewports(LAT, [paneView(8, 9)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.urls.length, 3,
+    "the backoff ended, but the route's own count says both slots are still out: asking again is " +
+    "how four server slots became forty");
+
+  // (4) AND IT IS NOT A WEDGE: the statement carries an expiry, so with nothing further said the
+  // client probes again rather than stalling on a charge nothing will ever clear.
+  clock = 402;
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.setViewports(LAT, [paneView(8, 9)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.urls.length, 4, "the charge lapses, so the client asks again rather than stalling");
+  await h.settle2(addr(8), { serverInFlightLimit: 4, serverInFlightShare: 2, serverInFlightHeld: 1 });
+  assert.equal(h.cache.serverHeldStated, 1, "and every answer restates it");
+});
+
+test("T-959: the route's held count BOUNDS the charge in both directions, soundly under batching", async () => {
+  // The correction has to survive a batched source (T-573), where several of this cache's in-flight
+  // keys are answered by one HTTP read and therefore occupy ONE slot, not one each. Subtracting the
+  // keys in flight from the held count would then release a charge the route is still holding — the
+  // very defect — so the statement is used as two bounds that are true either way: the charge can
+  // never exceed the slots the route says this client holds, and can never be fewer than those
+  // slots minus the reads it is still waiting for.
+  let clock = 0;
+  const h = harness({ inFlight: 3, now: () => clock, serverMsGuess: 1000 });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0));
+  h.cache.acquire(addr(1));
+  h.cache.setViewports(LAT, [paneView(0, 2)]);
+  h.cache.endFrame();
+  await flush();
+  // Pan away: both are abandoned and charged a full (long) service time.
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.setViewports(LAT, [paneView(8, 9)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.cache.abandonedSlots, 2);
+  assert.equal(h.urls.length, 3, "a slot was left in the budget, so the visible tile went out");
+
+  // The answer states ONE slot held — this read's own. The upper bound is what acts: this client
+  // cannot be holding two abandoned reads while the route says it holds one slot in total, so one
+  // charge is released, and the other is not, because the count alone cannot say more than that.
+  clock = 100;
+  await h.settle2(addr(8), { serverInFlightLimit: 4, serverInFlightShare: 4, serverInFlightHeld: 1 });
+  assert.equal(h.cache.abandonedSlots, 1,
+    "the route holds one slot for this client, so at most one charge can be a leftover read");
+
+  // And a hot-tile-cache answer — served without a slot at all (T-581) — stating zero is the route
+  // saying it holds nothing of this client's: every charge goes, whatever the estimate said.
+  clock = 200;
+  h.cache.beginFrame();
+  h.cache.acquire(addr(9));
+  h.cache.setViewports(LAT, [paneView(8, 10)]);
+  h.cache.endFrame();
+  await flush();
+  await h.settle2(addr(9), {
+    serverInFlightLimit: 4, serverInFlightShare: 4, serverInFlightHeld: 0, serverHoldsThisRead: false,
+  });
+  assert.equal(h.cache.abandonedSlots, 0,
+    "the route holds nothing for this client, so there is nothing left to wait for — releasing on " +
+    "its word is the other half of not releasing on a timer");
+  assert.equal(h.cache.serverHeldStated, 0);
+});
+
+test("T-959: a refusal over ANOTHER client's slots still halves the cap — `held` is what separates them", async () => {
+  // The control for the test above, and the guard on T-454/T-455: the multiplicative decrease is
+  // not weakened, it is aimed. `held 0` is the route saying the slots that refused this read belong
+  // to somebody else, which is exactly what backing off is for.
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 50, now: () => clock, serverMsGuess: 100 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TileBusyError(
+    4, "too many tile reads in flight (limit 4, share 2, held 0) — 2 client(s) are reading tiles", 2, 0));
+  assert.equal(h.cache.inFlightLimit, 2, "another client's slots: halve, as AIMD requires");
+  assert.equal(h.cache.abandonedSlots, 0, "and nothing of this client's is charged");
+  assert.equal(h.cache.serverHeldStated, 0);
+
+  // A pre-T-959 server states no `held` at all. It cannot be told which case it is, so it halves —
+  // the behaviour every deployed client had, unchanged.
+  clock = 1000;
+  h.cache.beginFrame(); h.cache.acquire(addr(2)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(2), new TileBusyError(4, "too many tile reads in flight (limit 4, share 2)", 2));
+  assert.equal(h.cache.inFlightLimit, 1, "a server that states no `held` is met exactly as before");
 });
 
 test("the cap in force is never exceeded, even when the budget is shared with another client", async () => {
@@ -1473,6 +1631,18 @@ test("T-630: an answer states the share even when its tile is not kept, and the 
   assert.equal(h.cache.inFlightShareStatedAt, statedAt);
   clock.t += 12_000;
   assert.equal(h.cache.inFlightShareAgeMs, 12_000, "an idle tab's share is as old as the answer that stated it");
+});
+
+test("T-959: a readout says whether the abandoned charge is the ROUTE'S word or this client's guess", () => {
+  // The two are different findings — "my own leftover reads are holding the slots" against "another
+  // client is" — and the count alone cannot tell them apart, which is the whole reason the route
+  // states `in_flight_held`. A readout that showed only the count would state a fact about the
+  // route that the client may merely have estimated.
+  assert.equal(heldText(0, null, null), "", "nothing charged and nothing stated says nothing");
+  assert.equal(heldText(2, null, null),
+    "2 abandoned charged (estimated — the route has not stated one)");
+  assert.equal(heldText(2, 2, 400), "2 abandoned charged (route held 2, stated 0.4 s ago)");
+  assert.equal(heldText(0, 0, 38000), "0 abandoned charged (route held 0, stated 38 s ago)");
 });
 
 test("T-630: a readout states the share with its age, and says so when the route never stated one", async () => {

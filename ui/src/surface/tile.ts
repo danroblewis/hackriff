@@ -135,6 +135,30 @@ export interface TileData {
    */
   readonly serverInFlightShare: number | null;
   /**
+   * `cost.in_flight_held`: how many of the route's producer slots **this client held** at the
+   * instant this answer was written (T-959), or null from a server that states none.
+   *
+   * It is the fact the client cannot know for itself. An aborted read reaches the browser and not
+   * `hk-api`, so the route goes on producing that tile and holding its slot; the client's charge
+   * for it ([[TileCache.abandon]]) is the route's *measured mean*, and under load an overview read
+   * outlives the mean by seconds. This is the route's own count, so the charge is corrected to it
+   * — downwards when a read finished early, upwards when it is still out — rather than guessed.
+   */
+  readonly serverInFlightHeld?: number | null;
+  /**
+   * Does [[serverInFlightHeld]] include **this** answer's own read?
+   *
+   * It does for every answer that took a slot, and it does not for a hot-tile-cache hit
+   * (`cost.served_from: "hot-tile-cache"`), which is served without one. The client subtracts the
+   * reads it is still waiting for from the held count to learn how many abandoned ones the route is
+   * still producing, and getting this wrong by one is the difference between charging a leftover
+   * read and releasing it early.
+   *
+   * Optional only so a locally-built [[TileData]] (a synthesised row tile, a stand-in) need not
+   * answer a question about a read that never happened; every decoded answer states it.
+   */
+  readonly serverHoldsThisRead?: boolean;
+  /**
    * **Where this tile's last-known (shadow) values were read from** (T-916), or `null` when the
    * answer carries no shadow run from before the tile.
    *
@@ -226,7 +250,10 @@ export interface TileResponse {
       time?: { direction: string; source_cells?: number; served?: number };
     };
   };
-  cost?: { in_flight_limit?: number; in_flight_share?: number; clients?: number };
+  cost?: {
+    in_flight_limit?: number; in_flight_share?: number; in_flight_held?: number;
+    clients?: number; served_from?: string;
+  };
   /**
    * **The last-known tier** (T-519/T-520, ADR-0020): column runs, each carrying a band's newest
    * known max-hold down rows the radio was not looking at. Parallel arrays of `runs` entries; run
@@ -265,7 +292,15 @@ export class TileBusyError extends Error {
    * is how a client learns its share shrank because another client arrived, so the number is
    * carried here and not only on the answers it is no longer getting.
    */
-  constructor(readonly limit: number | null, message: string, readonly share: number | null = null) {
+  /**
+   * @param held what **this client** already holds of the route's slots, as the refusal states it
+   * (T-959), or null from a server that states none. `held >= share` is the refusal a client caused
+   * itself — its own reads, including the ones it walked away from and the route is still producing
+   * — and it is not evidence about contention, so it must not halve the operating cap. `held <
+   * share` is somebody else's slots, which is what AIMD's multiplicative decrease is for.
+   */
+  constructor(readonly limit: number | null, message: string, readonly share: number | null = null,
+              readonly held: number | null = null) {
     super(message);
     this.name = "TileBusyError";
   }
@@ -279,6 +314,17 @@ export function capFromRefusal(message: string): number | null {
 /** This client's share, as a `503` names it (T-630), or null from a server that named none. */
 export function shareFromRefusal(message: string): number | null {
   return numberNamed(message, "share");
+}
+
+/**
+ * What this client holds, as a `503` names it (T-959) — **zero included**, because "you hold none
+ * of these slots" is the reading that means the refusal is contention and the client should back
+ * off. Null only when the server named no such number at all.
+ */
+export function heldFromRefusal(message: string): number | null {
+  const m = /held\s+(\d+)/.exec(message);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 function numberNamed(message: string, word: string): number | null {
@@ -409,6 +455,8 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     bytes: n * BYTES_PER_CELL,
     serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,
     serverInFlightShare: typeof resp.cost?.in_flight_share === "number" ? resp.cost.in_flight_share : null,
+    serverInFlightHeld: typeof resp.cost?.in_flight_held === "number" ? resp.cost.in_flight_held : null,
+    serverHoldsThisRead: resp.cost?.served_from !== "hot-tile-cache",
     shadowSource: shadowSourceOf(resp),
   };
 }
@@ -646,7 +694,10 @@ export async function fetchTile(addr: TileAddr, token: string, fetchFn: TileFetc
   const body = await r.json().catch(() => ({}));
   if (!r.ok) {
     const e = errorFrom(r.status, body, r.statusText);
-    if (r.status === 503) throw new TileBusyError(capFromRefusal(e.message), e.message, shareFromRefusal(e.message));
+    if (r.status === 503) {
+      throw new TileBusyError(capFromRefusal(e.message), e.message, shareFromRefusal(e.message),
+        heldFromRefusal(e.message));
+    }
     throw e;
   }
   return decodeTile(addr, body as TileResponse);
