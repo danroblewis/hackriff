@@ -19024,7 +19024,7 @@ tasks:
   - id: T-570
     milestone: MAUTO
     title: "MUI: the trace panel - why not PSK, answered with five distinct served answers and no signal logic in the client"
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MUI-X1
     model: opus
@@ -19078,6 +19078,7 @@ tasks:
       Resources: 5 CPU-s, peak 0.3 GB
     effort: high
     effort_reason: two sonnet rounds failed review on the trace-panel resolution headline race (supervisor 2026-09-25 03:22)
+    commit: e6ed22e3
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
