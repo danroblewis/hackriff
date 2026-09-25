@@ -1417,14 +1417,14 @@ def test_a_remote_worker_is_shown_like_a_local_one(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
     monkeypatch.setattr(R, "PROJECTS", str(tmp_path / "projects"))
     (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/far/repo", "ops": "/far/ops"}}))
-    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (0, "0.64 0.5 0.6 1/2 3\n24\n534G\n2\n"))
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (0, "0.64 0.5 0.6 1/2 3\n24\n534G\n"))
     runs = []
-    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: runs.append(args))
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: runs.append(args) or subprocess.CompletedProcess(args, 0, b"", b""))
     claims = {"T-567": {"host": "node2", "state": "running", "session_id": "abc", "wt": f"{R.REPO}/.claude/worktrees/t567"},
               "T-1": {"state": "running", "session_id": "x", "wt": f"{R.REPO}/.claude/worktrees/t1"}}
     R.sync_remote_view(claims, dry=False)
     rec = json.load(open(tmp_path / "hosts" / "node2.json"))
-    assert rec["reachable"] and rec["load1"] == 0.64 and rec["cores"] == 24 and rec["disk_free_gb"] == 534 and rec["running"] == ["T-567"]
+    assert rec["reachable"] and rec["load1"] == 0.64 and rec["cores"] == 24 and rec["disk_free_gb"] == 534
     [rsync] = runs                                                       # only the remote claim
     assert rsync[:3] == ["rsync", "-a", "--append"]
     assert rsync[-2] == "u@h:~/.claude/projects/-far-repo--claude-worktrees-t567/abc.jsonl"

@@ -2019,8 +2019,8 @@ def build_flow_panel(ops, now=None):
                             "spark": flow_mod.queue_depth_series(ops, now - timedelta(hours=24), now)},
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
             # Remote worker hosts (user, 2026-09-25): running/landed per host and its mirror's drift from main.
-            "remote_hosts": flow_mod.remote_hosts(ops),
-            "landings_by_host_24h": flow_mod.landings_by_host(ops, 24),
+            "remote_hosts": (rh := flow_mod.remote_hosts(ops)),
+            "landings_by_host_24h": flow_mod.landings_by_host(ops, hosts=rh),
             "experiment": experiment,
         }
     except Exception as e:

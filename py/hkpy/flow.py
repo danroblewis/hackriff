@@ -586,12 +586,12 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
     return out
 
 
-def landings_by_host(ops: str, hours: int = 24, repo: str = REPO) -> dict:
-    """Landed task branches on main in the last `hours`, split by the host their worker ran on (remote hosts from
-    remote_hosts(); the rest ran on this Mac)."""
-    subjects = _git(repo, "log", "main", "--merges", f"--since={hours} hours ago", "--format=%s")
+def landings_by_host(ops: str, repo: str = REPO, hosts: list[dict] | None = None) -> dict:
+    """Landed task branches on main in the last 24 h, split by the host their worker ran on (remote hosts from
+    remote_hosts(); the rest ran on this Mac). `hosts` = an already computed remote_hosts() result."""
+    subjects = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
     total = len(set(re.findall(r"\((task-t\d+[a-z]?)\)", subjects)))
-    remote = {h["name"]: h["landed_24h"] for h in remote_hosts(ops, repo)} if hours == 24 else {}
+    remote = {h["name"]: h["landed_24h"] for h in (hosts if hosts is not None else remote_hosts(ops, repo))}
     return {"mac": total - sum(remote.values()), **remote} if remote else {}
 
 
