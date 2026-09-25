@@ -1854,6 +1854,48 @@ fn t567_a_characterised_hold_out_seals_structured_unidentified() {
     assert!(o.results[0].characterisation.is_none());
 }
 
+/// ADR-0021 §8.2, the other half of the same rule: a fit the **null windows reproduce** is
+/// capped, and a capped fit may not become a durable positive finding by another door. The
+/// evaluator still reports "framed and check-valid" on the hold-out — that is exactly the claim
+/// the control just said it could not tell from chance — so the characterisation is dropped and
+/// the seal is `unknown` / `tied`, never `structured-unidentified`.
+#[test]
+fn t567_a_null_capped_fit_is_unknown_and_never_structured_unidentified() {
+    let mut world = World::new(FSK);
+    world.null_fits = true;
+    world.characterisation = Some(json!({
+        "framing": { "sync_word": "0x2DD4", "sync_bits": 16, "frames": 12 },
+        "note": "framed, CRC-16 valid on hold-out"
+    }));
+    let o = run(
+        &spec(standard_roots(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    assert_eq!(o.reason, Some(Reason::Tied));
+    assert!(
+        o.null_control().is_some_and(|n| n.capped),
+        "the control fired: this is the case the rule is about"
+    );
+    assert!(
+        o.results.iter().all(|r| r.characterisation.is_none()),
+        "a capped result carries no characterisation, however sure the evaluator was"
+    );
+    let res = o.seal(None, None, "1000").expect("nothing solved");
+    assert_eq!(
+        res.kind,
+        ResolutionKind::Unknown,
+        "the control can only cap, so it may never manufacture §7A.5's positive finding"
+    );
+    assert_eq!(res.reason, Some(Reason::Tied));
+    assert!(res.null_control.is_some_and(|n| n.capped));
+    assert!(res.summary.contains("null windows"), "{}", res.summary);
+    // The control's own cap must not reach the user as "framed and check-valid".
+    assert!(!res.summary.contains("no known format"), "{}", res.summary);
+}
+
 /// ADR-0021 §7A.4, the invariant this ticket exists for: **not-yet-analysed and
 /// analysed-and-found-nothing are different states, and neither may be rendered as the other.**
 /// An aborted look ruled nothing out, so it seals `not-searched` with no coverage, no reason and

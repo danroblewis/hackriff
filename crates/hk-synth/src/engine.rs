@@ -555,7 +555,20 @@ impl SearchOutcome {
         }
         let deepest = self.results.iter().map(|r| r.verdict).max();
         let null_control = self.null_control();
-        let (kind, text) = if let Some(u) = &self.suspected {
+        // ADR-0021 §8.2 first: a capped result is `unknown` / `tied`, whatever else it carries.
+        // The control exists to stop a manufactured verdict, so nothing below it may outrank it.
+        let capped = null_control.filter(|n| n.capped);
+        let (kind, text) = if let Some(n) = capped {
+            (
+                ResolutionKind::Unknown,
+                format!(
+                    "Searched and not identified: the best candidate met the solve rule on \
+                     hold-out, but the null windows came within {:.1} bits of it, under the \
+                     {MIN_NULL_MARGIN_BITS}-bit margin.",
+                    n.margin_bits
+                ),
+            )
+        } else if let Some(u) = &self.suspected {
             (
                 ResolutionKind::UnsupportedStructure,
                 format!(
@@ -577,14 +590,8 @@ impl SearchOutcome {
             let why = match self.reason {
                 Some(Reason::NoSignal) => "no signal measured above the floor".to_owned(),
                 Some(Reason::NothingScored) => "every hypothesis measured below its floor".into(),
-                Some(Reason::Tied) => match null_control.filter(|n| n.capped) {
-                    Some(n) => format!(
-                        "the best candidate met the solve rule on hold-out, but the null windows \
-                         came within {:.1} bits of it, under the {MIN_NULL_MARGIN_BITS}-bit margin",
-                        n.margin_bits
-                    ),
-                    None => "the best candidates tied within the margin".to_owned(),
-                },
+                // A cap is handled above; this is the genuine tie of §7A.3.
+                Some(Reason::Tied) => "the best candidates tied within the margin".to_owned(),
                 Some(Reason::BudgetExhausted) => {
                     "the budget ran out before the space was covered".to_owned()
                 }
@@ -3087,10 +3094,14 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             frames_preview: Vec::new(),
             // ADR-0021 §7A.5: only a hold-out characterisation counts, and only on an unsolved
             // result — a solved one is identified, so there is nothing left uncharacterised.
+            // **Never on a capped one** (§8.2): the characterisation asserts "framed and
+            // check-valid", which is precisely the claim the null control just said it could not
+            // tell from chance. Carrying it would let the control's own cap create a durable
+            // positive finding, and the control may only cap.
             characterisation: n
                 .holdout
                 .as_ref()
-                .filter(|h| !h.solved)
+                .filter(|h| !h.solved && !h.capped)
                 .and_then(|h| h.characterisation.clone()),
             holdout: n.holdout.as_ref().map(|h| h.ev.clone()),
         }
