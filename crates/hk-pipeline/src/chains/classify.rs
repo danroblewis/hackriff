@@ -586,8 +586,12 @@ fn active_ml(shared: &Shared) -> Option<&crate::ml::MlStage> {
 /// the host batches and a batch must never stall other writers — offers it to the C38 shadow stage
 /// (T-844). The published row is final before the stage sees it: the stage borrows it and has no
 /// path that writes a `Classification` (`crate::ml`).
-fn publish(shared: &Shared, emitter: EmitterId, result: &Classified) {
-    write(shared, emitter, &result.classification);
+fn publish(shared: &Shared, emitter: EmitterId, measured: &Measured) {
+    write(shared, emitter, measured);
+    // T-989's DMR verdict has no learned stage; only a classification is offered to C38.
+    let Some(result) = &measured.classification else {
+        return;
+    };
     let Some(ml) = active_ml(shared) else { return };
     if !ml.wants(&result.classification.family) {
         return;
@@ -616,7 +620,8 @@ fn emitter_of(shared: &Shared, track: TrackId) -> Option<EmitterId> {
 /// What the chain measured about one region: the C15 classification, and whether the region is
 /// conventional DMR (T-989). Either may be absent, and a region with neither is never written.
 struct Measured {
-    classification: Option<Classification>,
+    /// The classification with the learned stage's input and subject (T-844's [`Classified`]).
+    classification: Option<Classified>,
     dmr: Option<hk_detect::dmr_tier2::Tier2Scan>,
     region: Option<Region>,
 }
@@ -672,9 +677,9 @@ fn dmr_scan(shared: &Shared, b: &Chosen) -> Option<hk_detect::dmr_tier2::Tier2Sc
 /// always writes) and, where the region was identified as DMR, its verdict row and its headers.
 fn write(shared: &Shared, emitter: EmitterId, measured: &Measured) {
     let c = &shared.counters.chains;
-    if let Some(classification) = &measured.classification {
+    if let Some(classified) = &measured.classification {
         let mut repo = shared.repo();
-        match crate::classify::record(&mut repo, emitter, classification) {
+        match crate::classify::record(&mut repo, emitter, &classified.classification) {
             Ok(_) => inc(&c.classifications),
             Err(e) => {
                 inc(&c.errors);
