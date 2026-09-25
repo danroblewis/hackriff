@@ -24491,6 +24491,15 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): you can draw a box, marker or label directly on the canvas and it persists as an annotation (visible after reload). Say in your handback exactly what to open on staging to see it.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 17:15).
+      Annotation authoring on the canvas (MAP-20). Two new tool modes beside Measure, completing docs/23 §10.4's table: Annotate (bare drag = box, bare click = text note) and Pin (bare click = marker, drag still pans). They are latched at the press, Shift+drag still marks a region in every mode, and a tap in a tool mode never also focuses a row. A banner shows what a drag will do, and Esc returns to Navigate. Each gesture asks for a label (1–120 chars; cancel writes nothing) and POSTs {kind,f_lo_hz,f_hi_hz,t0_s,t1_s,label,view} to /api/annotations. The server stamps provenance. A windowed GET /api/annotations every 2 s draws the annotations in view back onto the canvas, so they persist across reloads. They are drawn DASHED in rose through the same toClip as the tiles, with DOM labels. TO SEE IT ON STAGING: open the app's Explore view (the surface canvas), press 'Annotate' in the toolbar above the canvas, drag a rectangle and type a label (or click once for a text note). Or press 'Pin' and click to drop a marker. Reload the page: the dashed rose box, note or marker and its label are still there, and hovering one names it in the readout.
+      Tests: just test-ui -> exit 0 (71/71 test files passed (build, typecheck, node tests incl. 7 new input, 7 geometry, 8 request tests))
+      precheck exit 0
+      Commits: 067d5044
+      Observed, not chased: No Rust crate touched, so precheck was cargo fmt --all --check only (exit 0); clippy scope empty. | Label entry uses window.prompt: functional but plain; an inline label editor (and edit/delete via PUT/DELETE) belongs with T-821's Research slide-in. | docs/23 §10.4 also names 'annotate this' from a Shift+drag region (the selection context menu); not added here — the tool mode covers authoring. | The 'research' layer in surface/layers.ts (default hidden) is still not wired; annotations (like T-822's measurements) are drawn as always-on user marks so they are visible after reload without a toggle.
+      Use cases: RESEARCH-003, RESEARCH-001
+      Resources: 51 CPU-s, peak 1.0 GB
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
@@ -28315,6 +28324,55 @@ tasks:
       Seen by at least 4 workers as 'observed, not chased' (latest T-844 on 2026-09-25: fails ALONE 3/3 with hk-store byte-identical to main; earlier load ~10-17): hk-store src/decoded.rs tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at decoded.rs:1529 `assert c.dropped_records > 0` with CaptureInfo{frames: 29, dropped_records: 0}. The test runs a 600 ms wall-clock loop (Instant::now() + 600 ms, sleep 5 ms) against disconnect_after 100 ms and assumes a stall long enough to force drops happened inside it - the wall-clock-chooses-the-assertion shape (docs/10 §3.6). Same class as T-934 (its three tests); a separate ticket so the two run in parallel.
       DELIVER per deflake-triage: drive the stall deterministically (a stall injected until the policy's disconnect has been observed - wait on the writer's reported state/counter, a generous deadline only bounding a hang), assert drops are counted; no #[ignore], no retry, no threshold change. Red-on-regression proof: a policy that never counts drops goes red.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-store -E 'test(/a_disk_stall/)' alone + just test-crate hk-store), then HAND BACK. Never `just gate`.
+  - id: T-933
+    milestone: MMAP
+    title: Sheet peek strip covers the lower half of the lifted minimap at every width
+    status: done
+    branch: task-t933
+    priority: P2
+    deps: []
+    parallel_group: UI-CHROME
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND BY rc-20260925.
+      FOUND 2026-09-25 by the T-931 RC-fix worker (rects measured on main 37bf55ff + T-919): the sheet's peek strip covers the lower half of the lifted minimap at EVERY width. The minimap sits 70 px above the bottom (y 680-790 at 860 px tall); the peek strip is at y 734-790 - at 1440 px it spans x 856-1376, at 420 px x 8-356 (nearly the whole minimap). The minimap is the where-am-I overview (docs/16 §8) and its capture-window segments are honesty marks; half of it is hidden whenever the sheet peeks.
+      DELIVER: lay out the minimap and the sheet peek strip so neither covers the other at 1440/1000/420 px (e.g. lift the minimap above the peek strip when the sheet spans that x range, or dock the peek beside it) consistent with docs/23 §10.6 P1/P3 (minimal overlay, fixed positions); extend the app-phone / app-dismiss floating-control assertions (or add one) so an overlapping peek strip and minimap goes red - prove red on current main.
+      WHAT THE USER WILL SEE ON STAGING: the whole minimap is visible whether the sheet is peeking or not, at any window width.
+      TESTING PROTOCOL: targeted tests only (just test-ui; the touched specs alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
+
+      Review (fix attempt 1) FAILED: sheet clearance was measured from the peek-state sheet's LIVE height (gated on dataset.snap==='peek'), so the minimap (and every pane above it) followed the sheet up/down during a drag toward full and during the .28s open/close transition — violating docs/23 P3 fixed positions. Fixed by anchoring off the sheet's fixed BOTTOM edge (sheet.css pins it; only the top moves with height) minus the constant PEEK_PX, applied unconditionally (no longer needs dataset.snap). Extended app-sheet.e2e.mjs's existing drag test with a mid-drag insetBottom sample; proved red with the defect re-injected (134 -> 314 mid-drag), green with the fix. app-dismiss/app-phone/app-sheet all re-verified after merging main@7a9fa8ab. app-phone.e2e.mjs's idle-fade subtest is an intermittent flake reproduced identically on unmodified main (7a9fa8ab) run alone — not caused by this change.
+
+      Merge-gate fail (attempt 2): 1 uncommitted file (docs/tasks.yaml) left from an earlier 'just task note' call, no code change needed. Committed it (495d1528) and re-verified: typecheck clean, npm test 85/85, e2e app-dismiss + app-sheet green after a rebuild. origin/main still at the cited 7a9fa8ab, already merged into this branch.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 05:09).
+      Merge gate fail (attempt 2) was not a test failure: it was 1 uncommitted file, docs/tasks.yaml, left in the worktree from an earlier `just task note T-933` call (the sanctioned board-note tool, which edits the file directly rather than through a commit) that the previous hand-back forgot to commit. No code change was needed - the ui/src/app/centre/surface.ts fix (anchored to the sheet's fixed bottom edge, not its live height/top) and the app-dismiss.e2e.mjs / app-sheet.e2e.mjs assertions from the prior two passes are unchanged. Committed the pending note, re-ran the full targeted suite (typecheck, unit tests, and the two touched e2e specs after a rebuild) to confirm nothing regressed, and the working tree is now clean.
+      Tests: npm run typecheck (ui/) -> exit 0 (tsc --noEmit clean); npm test (ui/, 85 files) -> exit 0 (85/85 test files passed); HK_BIN=target/debug/hk HK_E2E_PORT=9221 node e2e/run.mjs app-dismiss app-sheet -> exit 0 (2/2 files passed: app-dismiss 3/3 subtests (minimap y 616-726 vs sheet peek y 734-790, disjoint at 1440/1000/420 px); app-sheet 5/5 subtests (mid-drag minimap clearance unchanged: 'before 134, mid-drag [134]'))
+      precheck exit None
+      Commits: 0f905e18, 4ebe821d, 88c7876f, a4441745, 495d1528, 79d543ef
+      Observed, not chased: app-surface.e2e.mjs's 'T-806: the layers menu has two axes...' and 'T-807: the coverage fog is a per-pane layer...' subtests fail on unmodified main too (isolated in the first review pass) - a real pre-existing red the coordinator should ticket separately. | app-phone.e2e.mjs's idle-fade/sheet-close step is intermittently flaky (~1/4 runs) even on unmodified main@7a9fa8ab run alone with no other load on the box (isolated in the second review pass) - worth a deflake pass, but not this ticket's scope and not caused by this change.
+      Resources: 4 CPU-s, peak 0.3 GB
+    commit: 952d3847
+  - id: T-934
+    milestone: M2-hardening
+    title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
+    status: in-progress
+    branch: task-t934
+    priority: P2
+    deps: []
+    parallel_group: DEFLAKE-WC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND BY T-891.
+      THREE WALL-CLOCK TESTS keep failing ALONE under load, "observed, not chased" by at least 5 workers (T-891 on 2026-09-25 at load ~28: all three, 2/2 runs each at main 333d8284; also earlier T-579/T-581 and two hk-core workers' results on the board). None has an owner - this ticket is it:
+      1. hk-api tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay: `assert!(records > 20)` after 1.5 s of wall clock (sees 9-11 records under load; ping 50 ms, peer timeout 400 ms).
+      2. hk-core src/source/hackrf.rs tests::a_slow_reader_gets_counted_drops_and_an_exact_gap: sleeps 200 ms and assumes the fake producer overflowed a 2-buffer pool ('the pool overflowed').
+      3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
+      DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
+      TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
   - id: T-969
     milestone: MAUTO
     title: "All captured signals decode: add the 88.5 (PI 3AAB) and 106.1 (PI 1323) FM members to T-936's set"
@@ -28369,55 +28427,6 @@ tasks:
       DELIVER: continuous RDS accumulation on the DETECTION row - once a WFM emitter has RDS, the chain keeps decoding it incrementally (CLAUDE.md: decode extends with the region, never re-decoding what is done) and accumulates PS (segment-assembled, stable-until-changed, dynamic PS tracked as a sequence), RT (A/B flag), PTY, AF, CT into the emitter's decode record as an accumulated field view (the user's 'RDS as accumulated field view, not packets'); bounded CPU per station (listener-budget, T-872) and it stops when the emitter ends. Tests through the mock SDR on the FM fixtures: PS/RT/PTY accumulate on the station's own row matching the hidden truth / the rds_ref oracle; red on current code. Depends on T-926 (auto-attach, touching the same chains) to avoid two workers in chains/.
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     core_interface: true
-  - id: T-933
-    milestone: MMAP
-    title: Sheet peek strip covers the lower half of the lifted minimap at every width
-    status: done
-    branch: task-t933
-    priority: P2
-    deps: []
-    parallel_group: UI-CHROME
-    needs: none
-    model: sonnet
-    effort: medium
-    notes: |
-      FOUND BY rc-20260925.
-      FOUND 2026-09-25 by the T-931 RC-fix worker (rects measured on main 37bf55ff + T-919): the sheet's peek strip covers the lower half of the lifted minimap at EVERY width. The minimap sits 70 px above the bottom (y 680-790 at 860 px tall); the peek strip is at y 734-790 - at 1440 px it spans x 856-1376, at 420 px x 8-356 (nearly the whole minimap). The minimap is the where-am-I overview (docs/16 §8) and its capture-window segments are honesty marks; half of it is hidden whenever the sheet peeks.
-      DELIVER: lay out the minimap and the sheet peek strip so neither covers the other at 1440/1000/420 px (e.g. lift the minimap above the peek strip when the sheet spans that x range, or dock the peek beside it) consistent with docs/23 §10.6 P1/P3 (minimal overlay, fixed positions); extend the app-phone / app-dismiss floating-control assertions (or add one) so an overlapping peek strip and minimap goes red - prove red on current main.
-      WHAT THE USER WILL SEE ON STAGING: the whole minimap is visible whether the sheet is peeking or not, at any window width.
-      TESTING PROTOCOL: targeted tests only (just test-ui; the touched specs alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
-
-      Review (fix attempt 1) FAILED: sheet clearance was measured from the peek-state sheet's LIVE height (gated on dataset.snap==='peek'), so the minimap (and every pane above it) followed the sheet up/down during a drag toward full and during the .28s open/close transition — violating docs/23 P3 fixed positions. Fixed by anchoring off the sheet's fixed BOTTOM edge (sheet.css pins it; only the top moves with height) minus the constant PEEK_PX, applied unconditionally (no longer needs dataset.snap). Extended app-sheet.e2e.mjs's existing drag test with a mid-drag insetBottom sample; proved red with the defect re-injected (134 -> 314 mid-drag), green with the fix. app-dismiss/app-phone/app-sheet all re-verified after merging main@7a9fa8ab. app-phone.e2e.mjs's idle-fade subtest is an intermittent flake reproduced identically on unmodified main (7a9fa8ab) run alone — not caused by this change.
-
-      Merge-gate fail (attempt 2): 1 uncommitted file (docs/tasks.yaml) left from an earlier 'just task note' call, no code change needed. Committed it (495d1528) and re-verified: typecheck clean, npm test 85/85, e2e app-dismiss + app-sheet green after a rebuild. origin/main still at the cited 7a9fa8ab, already merged into this branch.
-    result: |
-      DONE (work-runner, from handback.json, 2026-09-25 05:09).
-      Merge gate fail (attempt 2) was not a test failure: it was 1 uncommitted file, docs/tasks.yaml, left in the worktree from an earlier `just task note T-933` call (the sanctioned board-note tool, which edits the file directly rather than through a commit) that the previous hand-back forgot to commit. No code change was needed - the ui/src/app/centre/surface.ts fix (anchored to the sheet's fixed bottom edge, not its live height/top) and the app-dismiss.e2e.mjs / app-sheet.e2e.mjs assertions from the prior two passes are unchanged. Committed the pending note, re-ran the full targeted suite (typecheck, unit tests, and the two touched e2e specs after a rebuild) to confirm nothing regressed, and the working tree is now clean.
-      Tests: npm run typecheck (ui/) -> exit 0 (tsc --noEmit clean); npm test (ui/, 85 files) -> exit 0 (85/85 test files passed); HK_BIN=target/debug/hk HK_E2E_PORT=9221 node e2e/run.mjs app-dismiss app-sheet -> exit 0 (2/2 files passed: app-dismiss 3/3 subtests (minimap y 616-726 vs sheet peek y 734-790, disjoint at 1440/1000/420 px); app-sheet 5/5 subtests (mid-drag minimap clearance unchanged: 'before 134, mid-drag [134]'))
-      precheck exit None
-      Commits: 0f905e18, 4ebe821d, 88c7876f, a4441745, 495d1528, 79d543ef
-      Observed, not chased: app-surface.e2e.mjs's 'T-806: the layers menu has two axes...' and 'T-807: the coverage fog is a per-pane layer...' subtests fail on unmodified main too (isolated in the first review pass) - a real pre-existing red the coordinator should ticket separately. | app-phone.e2e.mjs's idle-fade/sheet-close step is intermittently flaky (~1/4 runs) even on unmodified main@7a9fa8ab run alone with no other load on the box (isolated in the second review pass) - worth a deflake pass, but not this ticket's scope and not caused by this change.
-      Resources: 4 CPU-s, peak 0.3 GB
-    commit: 952d3847
-  - id: T-934
-    milestone: M2-hardening
-    title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
-    status: in-progress
-    branch: task-t934
-    priority: P2
-    deps: []
-    parallel_group: DEFLAKE-WC
-    needs: none
-    model: opus
-    effort: medium
-    notes: |
-      FOUND BY T-891.
-      THREE WALL-CLOCK TESTS keep failing ALONE under load, "observed, not chased" by at least 5 workers (T-891 on 2026-09-25 at load ~28: all three, 2/2 runs each at main 333d8284; also earlier T-579/T-581 and two hk-core workers' results on the board). None has an owner - this ticket is it:
-      1. hk-api tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay: `assert!(records > 20)` after 1.5 s of wall clock (sees 9-11 records under load; ping 50 ms, peer timeout 400 ms).
-      2. hk-core src/source/hackrf.rs tests::a_slow_reader_gets_counted_drops_and_an_exact_gap: sleeps 200 ms and assumes the fake producer overflowed a 2-buffer pool ('the pool overflowed').
-      3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
-      DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
-      TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
   - id: T-972
     milestone: M2-hardening
     title: "api_contract inventory_entry_promote_and_delete: by-id fetch returns a different id than the listed row under load"
