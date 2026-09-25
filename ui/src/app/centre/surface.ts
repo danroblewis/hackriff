@@ -52,7 +52,7 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
-import type { HudReserve } from "../../surface/hud";
+import { TIME_LABEL_BOX_CSS, type HudReserve } from "../../surface/hud";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
@@ -180,7 +180,7 @@ const HUD_IDLE_ALPHA = 0.45;
  * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
  * most one layout and never a read-write thrash.
  */
-const RULER_BAND_CSS = 14 + 150; // `hud.ts`'s TIME_LABEL_BOX_CSS: where a time label prints.
+const RULER_BAND_CSS = TIME_LABEL_BOX_CSS.left + TIME_LABEL_BOX_CSS.width; // where a time label prints.
 function chromeReserve(canvas: HTMLCanvasElement, ctl: HTMLElement | null): HudReserve | null {
   if (!ctl) return null;
   const base = canvas.getBoundingClientRect();

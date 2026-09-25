@@ -168,15 +168,15 @@
 .sf-hud { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; transition: opacity .4s; }
 .sf-hud:is(body.chrome-idle *) { opacity: .45; }
 .sf-hud-label {
-  position: absolute; left: 0; top: 0; white-space: nowrap; font: 11px var(--mono); line-height: 1.2;
+  position: absolute; left: 0; top: 0; white-space: nowrap; font: 8px var(--mono); line-height: 1.2; letter-spacing: -.3px;
   color: #d5dee2; text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
 }
 .sf-hud-label span { color: #8595a0; margin-left: 6px; }
 .sf-hud-label span:empty { display: none; }
 /* Frequency: centred on its tick, sitting just above the pane's bottom edge (the ticks rise from it). */
-.sf-hud-label.freq { margin-top: -30px; translate: -50% 0; }
+.sf-hud-label.freq { margin-top: -13px; translate: -50% 0; }
 /* Time: just right of the tick, vertically centred on it. */
-.sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }
+.sf-hud-label.time { margin-left: 4px; max-width: 36px; overflow: hidden; translate: 0 -50%; }
 
 /* T-820 (MAP-20): human-authored annotation labels, placed per frame from the same mapping the
    dashed marks are stroked with; never hit-tested, so a label cannot steal a pan. Rose, like the
