@@ -3,7 +3,10 @@
    laid out per frame by the surface (unchanged). Decode/History keep the framed shell. */
 .app:has(#view-explore:not([hidden])) { display: block; position: relative; height: 100vh; height: 100dvh; width: 100%; overflow: hidden; }
 .app:has(#view-explore:not([hidden])) #view-explore { position: fixed; inset: 0; display: block; z-index: 0; }
-#view-explore > .centre { position: absolute; inset: 0; width: 100vw; height: 100vh; height: 100dvh; max-width: 100%; box-sizing: border-box; padding: 56px 0 70px; }
+#view-explore > .centre { position: absolute; inset: 0; width: 100vw; height: 100vh; height: 100dvh; max-width: 100%; box-sizing: border-box; }
+/* T-918: no padding — T-801 round 3's `56px 0 70px` kept a toolbar row clear of the floating bar and
+   dock, and outlived that row (T-882). The canvas is 100vw x 100vh (docs/23 §10.1); the map strip
+   lifts itself clear of the dock (`centre/surface.ts` fit), and nothing else subtracts. */
 #view-explore > .centre > .surface { min-height: 0; height: 100%; }
 .app:has(#view-explore:not([hidden])) > .bar { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 5; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px); min-height: 40px; }
 .app:has(#view-explore:not([hidden])) > .dock { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 5; height: 54px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); }
@@ -52,7 +55,7 @@
   body:has(#view-explore:not([hidden])) { overflow: hidden; }
   .app:has(#view-explore:not([hidden])) { height: 100dvh; }
   .app:has(#view-explore:not([hidden])) > .bar { flex-wrap: wrap; max-height: 40dvh; overflow: auto; }
-  #view-explore > .centre { grid-template-rows: minmax(0, 1fr); padding-top: 96px; }
+  #view-explore > .centre { grid-template-rows: minmax(0, 1fr); }
   /* T-895: open on a narrow screen, the lists span the width between the top chrome's measured
      bottom (`--side-top`) and the sheet's peek strip, stopping short of the right-edge column the
      zoom stack and the FAB live in (`sheet.css`'s 64 px gutter). */

@@ -44,12 +44,12 @@ import { newClientId, setTileClientId } from "../../surface/clientid";
 import { markSurface } from "../../surface/mounted";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
-  markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
+  GENERALIZE_BELOW_CSS_PX, markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
   selectionMarkBoxes, signalMarkBoxes,
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
-import { PinLayer, detectionPins, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
+import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
@@ -199,7 +199,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, tipEl, captureEl, readout);
+  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -233,7 +233,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   recordBtn.dataset.paneAct = "record";
   // T-882: there is no toolbar row. Live is the follow-live FAB, Trace/Signals/Contrast are the
   // layers menu, Measure and pane management are the floating cluster's top-right (`map-controls`).
-  el.replaceChildren(stage, traceEl, ringEl, fogEl, priorsEl, chrome, note);
+  // T-918: the canvas is full-bleed (docs/23 §10.1) — no row below the stage subtracts from it.
+  // The statements that used to be those rows (trace, IQ ring, fog, priors, per-viewport level,
+  // orientation) float bottom-left with the readout, above the map strip: screen-space chrome over
+  // the canvas, never faded (docs/23 §10.2: honesty statements).
+  const statusEl = h("div", { class: "sf-status", "data-band": "chrome" }, traceEl, ringEl, fogEl, priorsEl, chrome, note, readout);
+  stage.append(statusEl);
+  el.replaceChildren(stage);
 
   let preview: SurfacePreview | null = null;
   /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
@@ -397,7 +403,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
-    return markQuads(signalMarkBoxes(Object.values(s.inventory.rows), focusId), edge, pane.box, pane.rect);
+    // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
+    // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
+    const rows = Object.values(s.inventory.rows);
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
+      { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
   // through the pane's own box. The frame only records which window the pane showed; the fetch is on
@@ -515,8 +525,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
     const s = store.get();
     const all = detectionPins(Object.values(s.inventory.rows));
+    // T-910: the feature layer (hit areas, focus, labels) is over the DETECTIONS it identifies, so a
+    // pane that hides its detections has none of it either — no invisible target for an undrawn box.
     const layouts = panes
-      .filter((v) => isLayerVisible(layersFor(v.id), "pins"))
+      .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
     pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
     placeTip();
@@ -1232,13 +1244,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
-      // The map strip is drawn in device px; the FAB docks above it in CSS px.
-      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr}px`);
+      // T-918: the canvas runs under the floating dock at the bottom (full-bleed, docs/23 §10.1), so
+      // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
+      const dock = document.querySelector<HTMLElement>(".app > .dock");
+      const dr = dock?.getBoundingClientRect();
+      const under = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      const lift = under > 0 ? under + 8 : 0;
+      stage.style.setProperty("--chrome-bottom", `${under}px`);
+      // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
+      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + lift}px`);
       // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
       // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
       // rather than under it. Layout arithmetic over two measured boxes; 0 where they do not meet.
       const over = topBar ? Math.max(0, Math.ceil(topBar.getBoundingClientRect().bottom - r.top)) : 0;
       stage.style.setProperty("--chrome-top", `${over}px`);
+      // T-918: the panes' content stops short of both full-width bars (never of a closeable overlay).
+      // Stated on the canvas (CSS px) so a test indexing pixels by pane reads the layout, not a copy.
+      const top = over > 0 ? over + 8 : 0;
+      canvas.dataset.insetTop = String(top);
+      canvas.dataset.insetBottom = String(lift);
+      if (preview) {
+        preview.view.insetTopPx = Math.round(top * dpr);
+        preview.view.insetBottomPx = Math.round(lift * dpr);
+      }
     };
     fit();
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;

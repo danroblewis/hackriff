@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -539,6 +540,63 @@ DIGEST_EVERY_S = 2 * 3600
 BREAK_LOOKBACK_S = 2 * 3600
 
 
+REPO = "/Users/daniellewis/hackriff"
+
+
+def _git(repo: str, *args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
+    """Per remote worker host (hosts.json; user, 2026-09-25): its mirror's main as this repo last pushed it (the
+    remote-tracking ref - local, no network) and how far main is ahead of it, its running claims, and how many of
+    the tickets the work runner dispatched to it are on main."""
+    try:
+        hosts = json.load(open(os.path.join(ops, "hosts.json")))
+    except (OSError, ValueError):
+        return []
+    try:
+        claims = json.load(open(os.path.join(ops, "work-claims.json")))
+    except (OSError, ValueError):
+        claims = {}
+    wlog = _read(os.path.join(ops, "work-runner.log"))
+    out = []
+    for h in hosts:
+        tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/remotes/{h}/main")
+        behind = _git(repo, "rev-list", "--count", f"{tip}..main") if tip else ""
+        pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
+        # Work on the host: a review keeps its claim's host but runs on this Mac (the work runner's busy_workers).
+        running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running"
+                         and c.get("kind", "work") in ("work", "fix", "deflake"))
+        sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
+        # Landed = main carries the runner's merge commit for the ticket's branch ('... (task-t567): gate passed' or
+        # '... (task-t567): batch, gated together'); a just-dispatched branch with no commits is 'merged' but not landed.
+        subjects = _git(repo, "log", "main", "--merges", "--since=30 days ago", "--format=%s")
+        landed = [t for t in sent if f"(task-{t.lower().replace('-', '')})" in subjects]   # the runner's branch_of
+        recent = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+        try:
+            probe = json.load(open(os.path.join(ops, "hosts", f"{h}.json")))      # the work runner's per-tick probe
+        except (OSError, ValueError):
+            probe = {}
+        out.append({"name": h, "cap": (hosts[h] or {}).get("cap", 2), "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+                    "landed_24h": sum(1 for t in sent if f"(task-{t.lower().replace('-', '')})" in recent), "probe": probe,
+                    "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
+                    "landed": len(landed)})
+    return out
+
+
+def landings_by_host(ops: str, repo: str = REPO, hosts: list[dict] | None = None) -> dict:
+    """Landed task branches on main in the last 24 h, split by the host their worker ran on (remote hosts from
+    remote_hosts(); the rest ran on this Mac). `hosts` = an already computed remote_hosts() result."""
+    subjects = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+    total = len(set(re.findall(r"\((task-t\d+[a-z]?)\)", subjects)))
+    remote = {h["name"]: h["landed_24h"] for h in (hosts if hosts is not None else remote_hosts(ops, repo))}
+    return {"mac": total - sum(remote.values()), **remote} if remote else {}
+
+
 def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     """Invariant 23: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> ·
     <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`."""
@@ -560,7 +618,10 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
             + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min"
                + (f"; {s['flake_solo_24h']} after one solo pass, {s['flake_solo_saved_min_24h']} min of it" if s.get("flake_solo_24h") else "")
                + ")"
-               if s.get("flake_accepts_24h") else ""))
+               if s.get("flake_accepts_24h") else "")
+            # user, 2026-09-25: every tick line says what the remote hosts add
+            + "".join(f" · {h['name']}: {len(h['running'])} running, {h['landed']} landed"
+                      + (f", mirror behind by {h['behind']}" if h.get("behind") else "") for h in remote_hosts(ops)))
 
 
 def _holding(ops: str, now: datetime) -> str:

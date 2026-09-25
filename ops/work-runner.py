@@ -432,11 +432,53 @@ def hosts():
         return {}
 
 
-def host_for(t):
-    """Stage 1: a ticket goes remote only when named by hand (WORK_REMOTE_TICKETS=T-nnn,...)."""
-    named = {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
-    h = hosts()
-    return next(iter(h), None) if h and t.get("id") in named else None
+# Stage 2: a host takes work by itself while it is reachable and below its own cap (hosts.json `cap`); the Mac's
+# cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
+# Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
+REMOTE_DEFAULT_CAP = 2
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+PROBE_FRESH_S = 180
+
+
+def remote_eligible(t):
+    text = " ".join(str(t.get(k) or "") for k in ("title", "notes", "acceptance", "parallel_group"))
+    return t.get("needs") in (None, "", "none") and not _MAC_ONLY.search(text)
+
+
+def host_ready(h):
+    """The host's last per-tick probe is fresh and says reachable."""
+    try:
+        p = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        return False
+    return bool(p.get("reachable")) and time.time() - p.get("at", 0) < PROBE_FRESH_S
+
+
+def named_remote():
+    """Tickets named by hand for a remote host (WORK_REMOTE_TICKETS=T-nnn,...): never run on this Mac."""
+    return {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
+
+
+def slot_cap(host):
+    """How many workers a host takes: this Mac's dispatch cap, or the remote host's hosts.json cap."""
+    return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
+
+
+def host_for(t, claims=None):
+    """The remote host a ticket goes to, or None for this Mac. WORK_REMOTE_TICKETS=T-nnn,... still names tickets
+    by hand (they go to the first host whatever its cap)."""
+    named = named_remote()
+    hs = hosts()
+    if not hs:
+        return None
+    if t.get("id") in named:
+        return next(iter(hs))
+    if claims is None or not remote_eligible(t):
+        return None
+    for h, cfg in hs.items():
+        if host_ready(h) and busy_workers(claims, h) < slot_cap(h):
+            return h
+    return None
 
 
 def to_remote(host, text):
@@ -495,7 +537,8 @@ def remote_prepare(host, wt, branch, d, resume=False):
     its uncommitted files - is the newer one, and this Mac's branch is pushed only when the mirror has none."""
     base = merge_target()
     # --no-verify: the only pre-push hook is Git LFS's upload, which the mirror cannot serve - LFS objects go by rsync.
-    sh(["git", "push", "-q", "--no-verify", "-f", host, f"{base}:refs/heads/main"], check=True)
+    # Never --force: the gated base only ever moves forward; a push that is not a fast-forward refuses the start.
+    sh(["git", "push", "-q", "--no-verify", host, f"{base}:refs/heads/main"], check=True)
     if not resume and sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
         sh(["git", "push", "-q", "--no-verify", host, f"{branch}:refs/heads/{branch}"])      # no -f: never over the host's
     sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",
@@ -554,6 +597,7 @@ def sync_back(c):
         if rc:
             raise RuntimeError(f"remote status: {dirty.strip()[:160]}")
         c["remote_dirty"] = [l for l in dirty.splitlines() if l.strip()]
+        sync_transcript(c)                      # the run's last stretch, which no tick copied
         log(f"REMOTE {tid}: synced back from {host} at {sh(['git', 'rev-parse', '--short', host + '/' + branch]).strip()}"
             + (f"; {len(c['remote_dirty'])} file(s) left uncommitted there" if c["remote_dirty"] else ""))
         return True
@@ -565,7 +609,56 @@ def sync_back(c):
         return False
 
 
-def launch(t, dry):
+PROJECTS = os.path.expanduser("~/.claude/projects")
+
+
+def _proj_dir(path):
+    """Claude Code's per-cwd transcript dir name: the path with '/' and '.' as '-'."""
+    return re.sub(r"[/.]", "-", path)
+
+
+def sync_remote_view(claims, dry):
+    """Every tick (user via supervisor, 2026-09-25 00:40: a remote worker must show on the dashboard like a local one):
+    per remote host, ONE ssh that reports reachability, load, disk and its running claude sessions to
+    $HACKRIFF_OPS/hosts/<host>.json; per running remote claim, its session transcript appended into this Mac's
+    transcript dir for that worktree - the dashboard's worker row and transcript modal read exactly that file."""
+    if dry or not hosts():
+        return
+    os.makedirs(f"{S}/hosts", exist_ok=True)
+    for h in hosts():
+        rc, out = remote_sh(h, "cat /proc/loadavg; nproc; df -BG --output=avail $HOME | tail -1", timeout=20)
+        rec = {"at": int(time.time()), "reachable": rc == 0}
+        if rc == 0:
+            try:
+                parts = out.split()
+                rec.update(load1=float(parts[0]), cores=int(parts[5]), disk_free_gb=int(parts[6].rstrip("G")))
+            except (IndexError, ValueError):
+                pass
+        with open(f"{S}/hosts/{h}.json.tmp", "w") as f:
+            json.dump(rec, f)
+        os.replace(f"{S}/hosts/{h}.json.tmp", f"{S}/hosts/{h}.json")
+        if not rec["reachable"]:
+            continue
+        for tid, c in claims.items():
+            if c.get("host") == h and c.get("state") == "running":
+                sync_transcript(c)
+
+
+def sync_transcript(c):
+    """Append a remote claim's session transcript into this Mac's transcript dir for its worktree."""
+    if not c.get("session_id"):
+        return
+    h = c["host"]
+    remote = f"~/.claude/projects/{_proj_dir(to_remote(h, c['wt']))}/{c['session_id']}.jsonl"
+    local_dir = f"{PROJECTS}/{_proj_dir(c['wt'])}"
+    os.makedirs(local_dir, exist_ok=True)
+    r = subprocess.run(["rsync", "-a", "--append", "-e", "ssh " + " ".join(SSH_OPTS),
+                        f"{hosts()[h]['ssh']}:{remote}", f"{local_dir}/{c['session_id']}.jsonl"], capture_output=True, timeout=120)
+    if r.returncode not in (0, 23):          # 23: the transcript is not there yet (a run's first seconds)
+        log(f"REMOTE {c['ticket']}: transcript copy from {h} failed (rsync {r.returncode}): {(r.stderr or b'')[-160:]!r}")
+
+
+def launch(t, dry, host=None):
     tid, branch, wt = t["id"], branch_of(t["id"]), worktree_of(t["id"])
     model = MODEL_ALIAS.get((t.get("model") or "sonnet").lower(), "sonnet")
     effort = (t.get("effort") or "medium").lower()
@@ -578,7 +671,9 @@ def launch(t, dry):
         else:
             sh(["git", "worktree", "add", wt, branch], check=True)
     else:
-        sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
+        # From the GATED base, never a batch still gating on main (2026-09-25 00:31: T-567 was cut from main while
+        # the T-577/T-915 batch gated, so its branch carried those provisional merges to node2).
+        sh(["git", "worktree", "add", wt, "-b", branch, merge_target()], check=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
@@ -595,7 +690,6 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
-    host = host_for(t)
     if host:
         try:
             remote_prepare(host, wt, branch, d)
@@ -1502,7 +1596,7 @@ def handle_gate_failures(claims, dry):
             # A conflict run is a worker: it waits for a slot under the dispatch cap, one per tick,
             # and never while a hold is in force (a held one would all relaunch at once). The line
             # stays unseen until then, so a backlog cannot burst.
-            if (conflict_runs >= 1 or busy_workers(claims) >= dispatch_cap()
+            if (conflict_runs >= 1 or busy_workers(claims, c.get("host")) >= slot_cap(c.get("host"))
                     or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
                 continue
             c.setdefault("gate_fails_seen", []).append(line)
@@ -1731,24 +1825,53 @@ def dispatch_cap():
     return min(CAP, RESERVE_CAP) if time.time() - _GATE_SEEN[0] < RESERVE_GRACE_S else CAP
 
 
-def busy_workers(claims):
-    """Running work, fix AND deflake runs: each is a worker on the box (dispatch counted only `work`)."""
-    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake"))
+def busy_workers(claims, host=None):
+    """Running work, fix AND deflake runs on one host (None = this Mac): each is a worker there (dispatch counted
+    only `work`). A remote claim holds a slot on its host, not on this Mac (remote workers stage 2)."""
+    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake")
+               and c.get("host") == host)
+
+
+def dispatch_remote(claims, dry):
+    """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
+    (dispatch-paused) does. One launch per host per tick."""
+    # The alone-mode gate hold binds here too: in that mode the merge runner waits for EVERY claim, remote included.
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+        return False
+    try:
+        tasks = board()
+    except Exception:
+        return False
+    changed, launched = False, set()
+    for t in candidates(tasks, claims):
+        h = host_for(t, claims)
+        if not h or h in launched:
+            continue
+        g = t.get("parallel_group")
+        if g and sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
+            continue
+        c = launch(t, dry, host=h)
+        if c:
+            claims[t["id"]] = dict(c, state="running")
+            changed = True
+            launched.add(h)
+    return changed
 
 
 def dispatch(claims, dry):
-    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
+    changed_remote = dispatch_remote(claims, dry)
+    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work" and not c.get("host")]
     cap = dispatch_cap()
-    free = cap - busy_workers(claims)          # fix runs are workers on the box too
+    free = cap - busy_workers(claims)          # this Mac's: fix runs are workers on the box too
     if free <= 0:
-        return False
+        return changed_remote
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
-        return False
+        return changed_remote
     load1 = os.getloadavg()[0]
     if load1 > LOAD_MAX:
         log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
-        return False
+        return changed_remote
     # THE GATE GETS THE BOX TO ITSELF (user, 2026-09-22). Two rules, one cycle:
     #   1. no dispatch while a gate runs (the merge runner only starts one once no worker is
     #      running - see merge-runner.sh workers_running) - so a gate never shares the box;
@@ -1761,36 +1884,39 @@ def dispatch(claims, dry):
     # to stop all dispatch; delete it to resume. Reaping, results and queueing carry on.
     if os.path.exists(f"{S}/dispatch-paused"):
         log(f"HOLD: dispatch-paused file present ({len(running)} running)")
-        return False
+        return changed_remote
     # The three holds below are the alone-mode cycle (WORK_GATE_ALONE=1, see gate_holds_dispatch).
     # In the default overlap mode a gate only lowers the cap to the reserve (above) and the queue
     # never pauses dispatch: the merge runner gates whatever is queued as soon as the previous
     # gate ends, so the batch is "what handed back during the last gate".
     if gate_holds_dispatch():
         log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
-        return False
+        return changed_remote
     depth = queue_depth()
     if GATE_ALONE and depth >= QUEUE_PAUSE:
         log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
-        return False
+        return changed_remote
     # The gate is IMMINENT when something is queued and no worker is running: the merge runner
     # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
     # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
     # dispatch into that window; the gate takes the batch, then dispatch resumes.
     if GATE_ALONE and depth > 0 and not running:
         log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
-        return False
+        return changed_remote
     free = min(free, PER_TICK)
     try:
         tasks = board()
     except Exception as e:
         attention("board", "main", "BOARD_UNREADABLE", str(e)[:200])
-        return False
+        return changed_remote
     changed = False
     taken = {}   # launches per parallel_group this tick, on top of the running-claim count
+    named = named_remote()
     for t in candidates(tasks, claims):
         if free <= 0:
             break
+        if t["id"] in named:              # named for a remote host: waits for it, never falls back to this Mac
+            continue
         g = t.get("parallel_group")
         if g and taken.get(g, 0) + sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
             continue
@@ -1802,7 +1928,7 @@ def dispatch(claims, dry):
             if g:
                 taken[g] = taken.get(g, 0) + 1
             free -= 1
-    return changed
+    return changed or changed_remote
 
 
 #: Untracked paths a worktree regenerates on its own - build output, installed hooks, envs. A
@@ -2420,6 +2546,10 @@ def tick(dry):
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
         log(f"release_stale_claims error: {e}")
+    try:
+        sync_remote_view(claims, dry)
+    except Exception as e:
+        log(f"sync_remote_view error: {e}")
     try:
         sync_board(claims, dry)
     except Exception as e:

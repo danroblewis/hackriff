@@ -280,6 +280,19 @@ bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (t
   return 0
 }
 
+# REMOTE MIRRORS (user, 2026-09-25 00:15): after every landing, main goes to each remote worker host's mirror
+# ($HACKRIFF_OPS/hosts.json names them; each is a git remote of this repo), so a remote worker never starts from a
+# stale base and the drift is visible. Only the LANDED HEAD (after the bulk marker is gone and the board synced), never --force, in the
+# background - a slow or absent host never delays the next gate. A failure is logged; the next landing retries.
+push_mirrors(){
+  [ -s "$S/hosts.json" ] || return 0
+  local sha h; sha=$(git -C "$REPO" rev-parse HEAD)
+  for h in $(python3 -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1]))))' "$S/hosts.json" 2>/dev/null); do
+    ( if timeout 120 git -C "$REPO" push -q --no-verify "$h" "$sha:refs/heads/main" >/dev/null 2>&1; then log "PUSHED $h ${sha:0:8}"
+      else log "PUSH FAILED $h ${sha:0:8} - host down or its mirror not a fast-forward; the next landing retries"; fi ) &
+  done
+}
+
 rc_due(){ # 0 = run the release candidate now
   [ -e "$S/rc-requested" ] && return 0
   [ "$GATE_TIERS" = check ] || return 1      # under full every merge already runs the acceptance phase
@@ -433,6 +446,7 @@ process(){
     clear_attempts "$branch"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGED" >> "$DONELOG"
     board_sync_now
+    push_mirrors       # the landed tip, board sync included (a mirror behind by the sync would read as drift)
     local wt; wt=$(worktree_of "$branch")
     if [ -n "$wt" ] && [ "$(cd "$wt" && pwd -P)" != "$(cd "$REPO" && pwd -P)" ]; then
       git worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
@@ -498,7 +512,9 @@ workers_running(){
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    print(sum(1 for c in d.values() if c.get("state") == "running"))
+    # A claim with a host runs on that remote host: it shares neither this box's CPU nor its ports, so the gate
+    # never waits for it (2026-09-25 01:2x: 'gating a contended box - 10 worker(s) running' counted node2's three).
+    print(sum(1 for c in d.values() if c.get("state") == "running" and not c.get("host")))
 except Exception:
     print(0)
 PY
@@ -932,6 +948,8 @@ try_bulk(){
     done
     rm -f "$BULKMARK"
     board_sync_now
+    # Only now: while the bulk marker stood, a killed runner's startup still rewinds this batch (review, 2026-09-25).
+    push_mirrors
     local q; q=$(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0)
     notify_ok "MERGED batch ($tickets); queue now $q waiting." "${#branches[@]} landed · gate $(( (SECONDS - ${GATE_T0:-$SECONDS} + 30) / 60 )) min · queue now $q waiting" "${branches[@]}"
     return 0

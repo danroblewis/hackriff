@@ -1407,3 +1407,114 @@ def test_only_a_ticket_named_by_hand_goes_remote_in_stage_one(tmp_path, monkeypa
     (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o"}}))
     assert R.host_for({"id": "T-9"}) == "node2" and R.host_for({"id": "T-11"}) == "node2"
     assert R.host_for({"id": "T-10"}) is None
+
+
+def test_a_remote_worker_is_shown_like_a_local_one(tmp_path, monkeypatch):
+    """User via supervisor, 2026-09-25 00:40: T-567 ran on node2 and the dashboard showed nothing. Each tick: one
+    probe per host into hosts/<host>.json, and each running remote claim's transcript appended into this Mac's
+    transcript dir for its worktree (what the dashboard's worker row and transcript modal read)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setattr(R, "PROJECTS", str(tmp_path / "projects"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/far/repo", "ops": "/far/ops"}}))
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (0, "0.64 0.5 0.6 1/2 3\n24\n534G\n"))
+    runs = []
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: runs.append(args) or subprocess.CompletedProcess(args, 0, b"", b""))
+    claims = {"T-567": {"host": "node2", "state": "running", "session_id": "abc", "wt": f"{R.REPO}/.claude/worktrees/t567"},
+              "T-1": {"state": "running", "session_id": "x", "wt": f"{R.REPO}/.claude/worktrees/t1"}}
+    R.sync_remote_view(claims, dry=False)
+    rec = json.load(open(tmp_path / "hosts" / "node2.json"))
+    assert rec["reachable"] and rec["load1"] == 0.64 and rec["cores"] == 24 and rec["disk_free_gb"] == 534
+    [rsync] = runs                                                       # only the remote claim
+    assert rsync[:3] == ["rsync", "-a", "--append"]
+    assert rsync[-2] == "u@h:~/.claude/projects/-far-repo--claude-worktrees-t567/abc.jsonl"
+    assert rsync[-1] == f"{tmp_path}/projects/{R._proj_dir(R.REPO)}--claude-worktrees-t567/abc.jsonl"
+    monkeypatch.setattr(R, "remote_sh", lambda h, cmd, timeout=120, input=None: (255, "timed out"))
+    runs.clear()
+    R.sync_remote_view(claims, dry=False)
+    assert not json.load(open(tmp_path / "hosts" / "node2.json"))["reachable"] and runs == []
+
+
+def test_a_reachable_host_below_its_cap_takes_eligible_work_and_the_macs_cap_counts_only_the_mac(tmp_path, monkeypatch):
+    """Remote workers stage 2 (supervisor 2026-09-25 00:31: keep node2 going): the remote pass dispatches an eligible
+    ticket to a reachable host below its own cap; never the Mac-first GPU paths; the Mac's cap counts only its own."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o", "cap": 2}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    remote_claims = {"T-1": {"state": "running", "kind": "work", "host": "node2"}}
+    local_claims = {"T-2": {"state": "running", "kind": "work"}, "T-3": {"state": "running", "kind": "fix"}}
+    claims = {**remote_claims, **local_claims}
+    assert R.busy_workers(claims) == 2 and R.busy_workers(claims, "node2") == 1
+    t = {"id": "T-9", "title": "hk-store retention follow-ups", "needs": "none"}
+    assert R.host_for(t, claims) == "node2"
+    assert R.host_for({"id": "T-10", "title": "wgpu provider for the FFT", "needs": "none"}, claims) is None
+    assert R.host_for(t, dict(claims, **{"T-4": {"state": "running", "kind": "work", "host": "node2"}})) is None   # at cap
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time() - 600, "reachable": True}))
+    assert R.host_for(t, claims) is None                                          # stale probe: not ready
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": False}))
+    assert R.host_for(t, claims) is None
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-10")
+    assert R.host_for({"id": "T-10", "title": "wgpu"}, claims) == "node2"         # named by hand: always
+
+
+def test_the_remote_pass_launches_one_per_host_per_tick_and_its_claims_are_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 3}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    tasks = [{"id": f"T-{i}", "title": "x", "needs": "none", "status": "todo"} for i in (21, 22)]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "candidates", lambda ts, cl: [t for t in ts if t["id"] not in cl])
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append((t["id"], host)) or {"ticket": t["id"], "host": host, "kind": "work"})
+    claims = {}
+    assert R.dispatch_remote(claims, dry=False) is True
+    assert launched == [("T-21", "node2")] and claims["T-21"]["state"] == "running"
+
+
+def test_a_new_task_branch_starts_from_the_gated_base_while_a_batch_gates(tmp_path, monkeypatch):
+    """2026-09-25 00:31: T-567 was cut from main while the T-577/T-915 batch gated, carrying provisional merges."""
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    (tmp_path / "bulk-in-progress").write_text("base=gatedbase123\nbranches=task-t1\n")
+    calls = []
+
+    def sh(args, cwd=R.REPO, timeout=120, check=False):
+        calls.append(args)
+        if args[:3] == ["git", "worktree", "add"]:
+            raise RuntimeError("stop here")                  # only the branch point is under test
+        return ""
+    monkeypatch.setattr(R, "sh", sh)
+    with pytest.raises(RuntimeError):
+        R.launch({"id": "T-9", "model": "opus"}, dry=False)
+    assert calls[-1][:3] == ["git", "worktree", "add"] and calls[-1][-1] == "gatedbase123"
+
+
+def test_a_named_remote_ticket_never_falls_back_to_the_mac_and_alone_mode_holds_remote_dispatch(tmp_path, monkeypatch):
+    """Review 2026-09-25: a named ticket skipped by the remote pass (one launch per host per tick, or a failed prepare)
+    was launched on the Mac; and in alone mode remote dispatch kept adding workers the gate was waiting out."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 3}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-31,T-32")
+    tasks = [{"id": t, "title": "x", "needs": "none", "status": "todo"} for t in ("T-31", "T-32")]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "candidates", lambda ts, cl: [t for t in ts if t["id"] not in cl])
+    for k, v in {"dispatch_cap": lambda: 3, "disk_free_gb": lambda: 500.0, "gate_holds_dispatch": lambda: False,
+                 "queue_depth": lambda: 0}.items():
+        monkeypatch.setattr(R, k, v)
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append((t["id"], host)) or {"ticket": t["id"], "host": host, "kind": "work"})
+    claims = {}
+    R.dispatch(claims, dry=False)
+    assert launched == [("T-31", "node2")]                    # T-32 waits for node2's next tick, not the Mac
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: True)
+    launched.clear()
+    assert R.dispatch_remote({}, dry=False) is False and launched == []
