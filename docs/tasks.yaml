@@ -28230,7 +28230,7 @@ tasks:
   - id: T-957
     milestone: MMAP
     title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-SURFACE-RC
@@ -28244,6 +28244,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: the T-820 conflict-fix worker saw app-surface fail on the bulk base d4c82050 WITHOUT its merge on: 'pane 2's priors toggle never flips' (T-806's assertion) and 'the fog key list has an extra none' (T-807's) - same two as the T-933 worker's (layers-menu toggle + fog key). Same defect set; bisect covers both.
+    commit: daf76a79
   - id: T-958
     milestone: MMAP
     title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
