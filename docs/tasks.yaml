@@ -24401,7 +24401,7 @@ tasks:
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAP-RESEARCH
     model: opus
@@ -24440,6 +24440,7 @@ tasks:
       Observed, not chased: precheck: `cargo fmt --all --check` passed; the clippy half was stopped deliberately because this diff touches no crate (with no crate arguments `just precheck` runs clippy over the whole workspace, which took more than 10 min here) | No UI creates markers or annotations in a user collection yet (MAP-16's drawing UI, and an 'add to collection' action from the detail sheet). Until one lands, staging shows only the Bookmarks collection's pins as rows | Collection layers are drawn after composeOverlays (z 40, above every overlay drawn today). Once artifacts (z50) or priors (z60) get renderers, collections must go through the registry's z ordering
       Use cases: RESEARCH-003
       Resources: 65 CPU-s, peak 1.1 GB
+    commit: "91363265"
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
