@@ -5,6 +5,7 @@
 // plus the new Analyze stub call (T-190 lands the backend later).
 import { ControlError } from "../../controls/client";
 import type { AppContext } from "../context";
+import { runAutoDecode } from "../decode/pipelines";
 import { startListen, stopOutput } from "../dock/api";
 import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
@@ -12,7 +13,7 @@ import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row }
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
 import { watchAnalyzeJob } from "../explore/analyze-slice";
 import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setBandEdit } from "../explore/slice";
-import { setMode, toast } from "../state";
+import { toast } from "../state";
 import type { MenuItem } from "./model";
 
 const fmtMHz = (hz: number) => (hz / 1e6).toFixed(4);
@@ -63,8 +64,10 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
       onSelect: () => { if (onId) stopOutput(ctx, onId); else startListen(ctx, { kind: "emitter", emitterId: r.id, label: `${fmtMHz(r.f_center_hz)} MHz` }); },
     },
     {
-      id: "decode", label: decodeActionLabel(r), hint: "build a pipeline",
-      onSelect: () => ctx.store.set(setMode("decode")),
+      // T-944: starts the backend's best-matching recipe on this emitter (`/api/recipes/match`),
+      // then opens the Decode tab on it; the recipe list there is the override.
+      id: "decode", label: decodeActionLabel(r), hint: "best-matching recipe",
+      onSelect: () => { void runAutoDecode(ctx, r.id); },
     },
     {
       id: "analyze", label: "Analyze", hint: "synthesize decoder",

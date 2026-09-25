@@ -9,12 +9,12 @@ import type { InventoryWindow, WindowCoverage } from "./slice";
 
 export interface ApiClient { get<T>(path: string): Promise<T>; post<T>(path: string, body?: unknown): Promise<T> }
 
-/** The Decode action's label: names the known identity scheme when there is one (RDS, …), else the
- * generic invitation — never claims a decode will run automatically (GAP 7b: recipes are listed,
- * never auto-started). */
+/** The Decode action's label: names the known identity scheme when there is one (RDS, …), else
+ * plain "Decode". T-944: the action starts the recipe the backend ranks best against the signal's
+ * measurements (`/api/recipes/match`); the Decode tab's recipe list is the override. */
 export function decodeActionLabel(r: Pick<Row, "identity_scheme">): string {
   const scheme = r.identity_scheme?.split("-")[0];
-  return scheme ? `Decode ${scheme.toUpperCase()}` : "Open in Decode";
+  return scheme ? `Decode ${scheme.toUpperCase()}` : "Decode";
 }
 
 /** Starts a recording of this emitter forward from now (§4.5 "Record / Export clip"; GAP 1: not
