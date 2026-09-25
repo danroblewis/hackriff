@@ -15,6 +15,7 @@ use super::*;
 
 mod bias_tee;
 mod coverage_fold;
+mod deferred;
 mod followups;
 mod last_known;
 mod lattice;

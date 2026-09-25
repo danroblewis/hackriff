@@ -33,7 +33,7 @@ export type LayerPlane = "data" | "overlay" | "dom";
 
 export type LayerId =
   | "base" | "coverage" | "tier"
-  | "detections" | "artifacts" | "priors" | "rules" | "research"
+  | "detections" | "paths" | "artifacts" | "priors" | "rules" | "research"
   | `collection:${string}`
   | "pins";
 
@@ -64,6 +64,9 @@ export const LAYER_DEFS: readonly LayerDef[] = [
   { id: "tier", plane: "data", z: 20, visibleByDefault: false, label: "Honesty-tier bands", hint: "per pane" },
   { id: "rules", plane: "overlay", z: 10, visibleByDefault: true, label: "Capture rules", hint: "retention bound · oldest IQ" },
   { id: "detections", plane: "overlay", z: 20, visibleByDefault: true, label: "Detections", hint: "confirmed · candidate · unknown" },
+  // T-897 (docs/23 §10.6 rule 2): traced (t, f) routes — a chirp's diagonal, a sweep's sawtooth, a
+  // hopper's staircase — over the boxes they belong to and under the user's own research marks.
+  { id: "paths", plane: "overlay", z: 25, visibleByDefault: true, label: "Paths", hint: "chirps · sweeps · hops" },
   { id: "research", plane: "overlay", z: 30, visibleByDefault: false, label: "Research", hint: "measurements · annotations" },
   { id: "artifacts", plane: "overlay", z: 50, visibleByDefault: false, label: "Artifacts", hint: "image · harmonic · IMD" },
   { id: "priors", plane: "overlay", z: 60, visibleByDefault: false, label: "Band-plan priors", hint: "suggestions, never truth" },

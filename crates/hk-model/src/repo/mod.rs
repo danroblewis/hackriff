@@ -88,6 +88,9 @@ mod refined;
 mod relate; // T-219
 #[cfg(test)]
 mod relate_tests;
+mod retention; // T-904 per-frame detection retention and rollup
+#[cfg(test)]
+mod retention_tests;
 mod retune; // T-598 persisted cross-centre retune verdict
 #[cfg(test)]
 mod retune_tests;
@@ -153,6 +156,9 @@ pub use authored::{
     AuthoredKind, AuthoredPage, authored_block,
 };
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
+pub use retention::{
+    DetectionRetention, DetectionRollup, DetectionStorage, KEEP_PER_EMITTER, PruneReport,
+};
 pub use retune::{
     MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, RETUNE_RULE, RetuneFamily,
     RetuneOutcome, RetuneVerdict,
@@ -189,6 +195,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0016_tdma_slots.sql"), // T-272 C23 P25 Phase 2 TDMA slot count
     include_str!("migrations/0017_multipath_relation.sql"), // T-222 C40 content-correlated multipath
     include_str!("migrations/0018_call_observed_until.sql"), // T-308 C23 truncated-call boundary
+    include_str!("migrations/0019_detection_retention.sql"), // T-904 detection retention + rollup
 ];
 
 /// Schema version this build creates and understands.
@@ -287,6 +294,10 @@ pub struct ProvenanceChain {
     pub spur_mask: Option<SpurMask>,
 }
 
+/// `PRAGMA journal_size_limit` for file databases (T-904): the WAL file is truncated back to
+/// this after each reset.
+const WAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// The relational store.
 pub struct Repository {
     conn: Connection,
@@ -304,6 +315,10 @@ impl Repository {
                 "could not enable WAL journal (got {mode})"
             )));
         }
+        // T-904: SQLite never shrinks the WAL file on its own, so a burst of writes (a retention
+        // pass's deletes) would leave its high-water mark on disk for good. With a limit, the
+        // file is truncated back to it whenever the WAL is reset.
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
         Self::init(conn)
     }
 

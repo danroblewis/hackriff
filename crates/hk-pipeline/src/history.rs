@@ -61,7 +61,7 @@ use hk_model::attention::baseline::SiteKey;
 use hk_store::history::{FrameOrigin, source_key};
 use hk_store::{
     FloorIngest, FloorIngestQueue, FloorProduct, FrameInput, HistogramConfig, IngestOutcome,
-    Pyramid, PyramidConfig, StoreError, ViewLattice,
+    PendingWrites, Pyramid, PyramidConfig, StoreError, ViewLattice,
 };
 use num_complex::Complex;
 
@@ -752,70 +752,150 @@ impl Drop for ViewWriter {
 
 /// The writer thread: fold, and at the end seal (if asked) and checkpoint.
 ///
-/// The thread takes the pyramid's lock **per batch**, not per frame, so a `/api/tiles` reader
-/// interleaves with it at batch granularity and neither waits long for the other. Nothing here can
-/// reach the ring.
+/// **T-901: nothing here holds the lock across file work, and nothing here WAITS for it.** The
+/// view pyramid runs with deferred writes ([`Pyramid::set_deferred_writes`], set where it is
+/// opened), so a seal inside `ingest` only indexes the sealed tiles and queues their files. The
+/// queue goes to a second thread, `hk-view-io`, which encodes, compresses, fsyncs and renames with
+/// the lock released and books the result under it; this thread goes straight back to folding.
+/// Both halves matter, and each was measured on its own:
+///
+/// - the version before held the mutex across a whole batch **including** the seal — 1.0-4.5 s
+///   per seal on the dev box, once per 64-row level-0 block — and every `/ws/tiles/rows` step,
+///   `/api/tiles` read and coverage lookup queued behind it;
+/// - releasing the lock but performing the writes **on this thread** moved the stall rather than
+///   removing it: a 24-tile write took 2-3.4 s under load, the data edge (`latest_frame_end`)
+///   stood still meanwhile, and a row push had nothing to send.
+///
+/// The lock is taken per **frame**, not per batch — a batch is whatever piled up meanwhile, and a
+/// fold of 80 frames is itself a ~200 ms hold under load — and between frames of a backlog this
+/// thread yields: `std`'s mutex is not fair on every platform (macOS's `os_unfair_lock`), and a
+/// thread that re-locks in a tight loop can keep a waiting reader out for the whole backlog.
+/// Nothing here can reach the ring.
 fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, counters: &Counters) {
     let h = &counters.history;
-    let mut batch: Vec<(SpectrumFrame, FrameOrigin)> = Vec::new();
-    loop {
-        // `may_end` is read in the same critical section as the drain, so once it is true every
-        // frame any producer pushed is in `batch` (T-915).
-        let finish = {
-            let mut st = q.state.lock().unwrap_or_else(PoisonError::into_inner);
-            while st.pending.is_empty() && !st.may_end() {
-                st = q.wake.wait(st).unwrap_or_else(PoisonError::into_inner);
+    let lock = || view.lock().unwrap_or_else(PoisonError::into_inner);
+    let (to_io, io_rx) = std::sync::mpsc::channel::<PendingWrites>();
+    std::thread::scope(|sc| {
+        let io = std::thread::Builder::new()
+            .name("hk-view-io".into())
+            .spawn_scoped(sc, || {
+                for writes in io_rx {
+                    if !land_writes(view, writes) {
+                        // What an inline seal would have returned from its frame's `ingest`.
+                        inc(&h.view_rejected);
+                    }
+                    update_view_tile_counters(counters, &lock());
+                }
+            });
+        // No I/O thread (the OS refused one): write on this thread, as the lock-free fallback.
+        let send = |w: PendingWrites| {
+            if w.is_empty() {
+                return;
             }
-            batch.extend(st.pending.drain(..));
-            st.may_end().then_some(st.finish).flatten()
-        };
-        if !batch.is_empty() {
-            let mut p = view.lock().unwrap_or_else(PoisonError::into_inner);
-            let (mut folded, mut late, mut rejected) = (0u64, 0u64, 0u64);
-            for (f, o) in batch.drain(..) {
-                match p.ingest(&FrameInput::from_dsp(&f).with_origin(o)) {
-                    Ok(IngestOutcome::Folded) => folded += 1,
-                    Ok(IngestOutcome::Late) => late += 1,
-                    Err(_) => rejected += 1,
+            match &io {
+                Ok(_) => {
+                    let _ = to_io.send(w);
+                }
+                Err(_) => {
+                    if !land_writes(view, w) {
+                        inc(&h.view_rejected);
+                    }
                 }
             }
-            add(&h.view_frames, folded);
-            add(&h.view_late, late);
-            add(&h.view_rejected, rejected);
-            update_view_tile_counters(counters, &p);
-        }
-        if let Some(seal) = finish {
-            let mut p = view.lock().unwrap_or_else(PoisonError::into_inner);
-            if seal && let Some(t) = p.latest_frame_end() {
-                // **Through the last frame, NOT an hour past it — and that is the whole
-                // difference between 70 ms and 1288 ms.**
-                //
-                // Scheme 1's run-end seal adds an hour of slack so that every partially-filled
-                // tile is forced shut and a finished replay's history is complete on disk at every
-                // level. That is 9 files for a five-rung ladder. For a 64-node lattice the same
-                // gesture seals every node's current tile however little of it was observed:
-                // measured on a 10 s, 21 MHz run, **273 files and 1288 ms to persist 0.1 MB**,
-                // against scheme 1's 9 files and 67 ms. The bytes were never the cost; the file
-                // creations are, and under the acceptance suite's 28 concurrent runs they
-                // serialise on one volume — 31.7 s of suite became 162.8 s, and the four tests
-                // that failed were exactly the four that wait in wall clock on a live run.
-                //
-                // Sealing through the last frame costs 70 ms, the same as scheme 1, and loses
-                // nothing that was measured: level 0's open tiles are written by `checkpoint`
-                // below, and a coarse node fills when a finer tile actually completes — which is
-                // what a growing edge does anyway. Forcing it early would write an 8192 s tile to
-                // record ten seconds, and call it sealed.
-                //
-                // The monotonic watermark still applies: a segment that CONTINUES must not seal at
-                // all (T-446), which is why `seal` arrives from the reader rather than being
-                // decided here.
-                let _ = p.seal_through(t);
+        };
+        let mut batch: Vec<(SpectrumFrame, FrameOrigin)> = Vec::new();
+        loop {
+            // `may_end` is read in the same critical section as the drain, so once it is true
+            // every frame any producer pushed is in `batch` (T-915).
+            let finish = {
+                let mut st = q.state.lock().unwrap_or_else(PoisonError::into_inner);
+                while st.pending.is_empty() && !st.may_end() {
+                    st = q.wake.wait(st).unwrap_or_else(PoisonError::into_inner);
+                }
+                batch.extend(st.pending.drain(..));
+                st.may_end().then_some(st.finish).flatten()
+            };
+            if !batch.is_empty() {
+                let (mut folded, mut late, mut rejected) = (0u64, 0u64, 0u64);
+                let n = batch.len();
+                for (k, (f, o)) in batch.drain(..).enumerate() {
+                    let writes = {
+                        let mut p = lock();
+                        match p.ingest(&FrameInput::from_dsp(&f).with_origin(o)) {
+                            Ok(IngestOutcome::Folded) => folded += 1,
+                            Ok(IngestOutcome::Late) => late += 1,
+                            Err(_) => rejected += 1,
+                        }
+                        p.take_writes()
+                    };
+                    send(writes);
+                    if k + 1 < n {
+                        std::thread::yield_now();
+                    }
+                }
+                add(&h.view_frames, folded);
+                add(&h.view_late, late);
+                add(&h.view_rejected, rejected);
+                update_view_tile_counters(counters, &lock());
             }
-            let _ = p.checkpoint();
-            update_view_tile_counters(counters, &p);
-            return;
+            if let Some(seal) = finish {
+                let writes = {
+                    let mut p = lock();
+                    if seal && let Some(t) = p.latest_frame_end() {
+                        // **Through the last frame, NOT an hour past it — and that is the whole
+                        // difference between 70 ms and 1288 ms.**
+                        //
+                        // Scheme 1's run-end seal adds an hour of slack so that every
+                        // partially-filled tile is forced shut and a finished replay's history is
+                        // complete on disk at every level. That is 9 files for a five-rung
+                        // ladder. For a 64-node lattice the same gesture seals every node's
+                        // current tile however little of it was observed: measured on a 10 s,
+                        // 21 MHz run, **273 files and 1288 ms to persist 0.1 MB**, against scheme
+                        // 1's 9 files and 67 ms. The bytes were never the cost; the file creations
+                        // are, and under the acceptance suite's 28 concurrent runs they serialise
+                        // on one volume — 31.7 s of suite became 162.8 s, and the four tests that
+                        // failed were exactly the four that wait in wall clock on a live run.
+                        //
+                        // Sealing through the last frame costs 70 ms, the same as scheme 1, and
+                        // loses nothing that was measured: level 0's open tiles are written by
+                        // `checkpoint` below, and a coarse node fills when a finer tile actually
+                        // completes — which is what a growing edge does anyway. Forcing it early
+                        // would write an 8192 s tile to record ten seconds, and call it sealed.
+                        //
+                        // The monotonic watermark still applies: a segment that CONTINUES must not
+                        // seal at all (T-446), which is why `seal` arrives from the reader rather
+                        // than being decided here.
+                        let _ = p.seal_through(t);
+                    }
+                    let _ = p.checkpoint();
+                    p.take_writes()
+                };
+                send(writes);
+                break;
+            }
         }
+        // Hang up; the scope joins `hk-view-io` once it has landed everything it was sent.
+        drop(to_io);
+    });
+    // Whatever was queued behind the last batch still out when this segment took (with several
+    // front ends, another writer's), flushed inline: nothing is out now unless another writer
+    // has one, and then its own next take, `devices::finish` or the pyramid's drop lands it.
+    let mut p = lock();
+    let _ = p.flush_writes();
+    update_view_tile_counters(counters, &p);
+}
+
+/// T-901: performs `writes` with the view lock **released**, then books them under it. `false`
+/// when a file failed to land.
+fn land_writes(view: &Mutex<Pyramid>, writes: PendingWrites) -> bool {
+    if writes.is_empty() {
+        return true;
     }
+    let done = writes.perform();
+    view.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .land_writes(done)
+        .is_ok()
 }
 
 /// T-136: the site a frame at sample time `t` is folded under: the attention service's assignment

@@ -1168,6 +1168,102 @@ def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_pat
     assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()
 
 
+def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a_landing(tmp_path, monkeypatch):
+    """Supervisor, 2026-09-24 21:14: 2365 superseded test executables (~40 GB apparent) sat in main's target/,
+    gate-target and every worker clone - the same blocks, freed only when the last copy goes. A unit is cargo's
+    (package, target kind), never the file stem: `hk` is hk-cli's bin AND its test harness, and `review_fixes`
+    is an integration test in two crates (review: the stem-keyed first pass deleted current twins)."""
+    import os
+    repo, ops = tmp_path / "repo", tmp_path / "ops"
+
+    def profile(base):
+        (base / "debug" / "deps").mkdir(parents=True)
+        return base / "debug"
+
+    def exe(prof, pkg, kind, stem, h, mtime, mode=0o755, profile=1):
+        fp = prof / ".fingerprint" / f"{pkg}-{h}"
+        fp.mkdir(parents=True)
+        (fp / kind).write_text("")
+        (fp / f"{kind}.json").write_text(json.dumps({"profile": profile, "features": "[]", "rustflags": []}))
+        (fp / "invoked.timestamp").write_text("")
+        p = prof / "deps" / f"{stem}-{h}"
+        p.write_text("x")
+        p.chmod(mode)
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def units(prof):
+        return {
+            "old": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000a1", 100),
+            "new": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000a2", 200),
+            "bin": exe(prof, "hk-cli", "bin-hk", "hk", "00000000000000b1", 300),            # same stem,
+            "harness": exe(prof, "hk-cli", "test-bin-hk", "hk", "00000000000000b2", 100),   # different units
+            "rf1": exe(prof, "hk-plugins", "test-integration-test-review_fixes", "review_fixes", "00000000000000c1", 50),
+            "rf2": exe(prof, "hk-stream", "test-integration-test-review_fixes", "review_fixes", "00000000000000c2", 90),
+            # the same unit in the workers' line-tables-only profile: current too, never "superseded"
+            "lt": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000e1", 50, profile=2),
+        }
+    main_p, gate_p = profile(repo / "target"), profile(ops / "gate-target")
+    busy_p, idle_p = profile(repo / ".claude/worktrees/t1/target"), profile(repo / ".claude/worktrees/t2/target")
+    made = {prof: units(prof) for prof in (main_p, gate_p, busy_p, idle_p)}
+    orphan = gate_p / "deps" / "mystery-00000000000000d1"                               # no fingerprint: kept
+    orphan.write_text("x")
+    orphan.chmod(0o755)
+    held = made[idle_p]["old"]
+    monkeypatch.setattr(R, "REPO", str(repo))
+    monkeypatch.setattr(R, "S", str(ops))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.setattr(R, "BULKMARK", str(ops / "bulk-in-progress"))
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 0.0)
+    wt1 = str(repo / ".claude/worktrees/t1")
+    obj = gate_p / "deps" / "api_contract-00000000000000a1.api_contract.abc123-cgu.0.rcgu.o"   # split debuginfo
+    obj.write_text("o")
+    lsof = {"stderr": ""}
+
+    class Run:
+        def __init__(self, stdout, stderr):
+            self.stdout, self.stderr = stdout, stderr
+
+    def run(args, **kw):
+        assert args[:2] == ["lsof", "-Fn"]
+        return Run(f"p9\nn{held}\n" if str(held.parent) in args else "", lsof["stderr"])
+    monkeypatch.setattr(R.subprocess, "run", run)
+
+    def sh(args, cwd=None, timeout=120, check=False):
+        if args[:2] == ["git", "-C"]:
+            return "merge1\n"
+        if "-d" in args and "cwd" in args:          # cargo in t1's tree; stage's release cargo in main's checkout
+            return f"p1\nn{wt1}/crates/hk-core\np2\nn{repo}\n"
+        if args[:2] == ["ps", "eww"]:
+            return f"cargo build CARGO_TARGET_DIR={ops}/target-serve" if args[-1] == "2" else "cargo test"
+        return ""
+    monkeypatch.setattr(R, "sh", sh)
+    (ops / "bulk-in-progress").write_text("base=x\n")
+    R.sweep_superseded(dry=False)
+    assert all(p.exists() for u in made.values() for p in u.values())            # never during a gate
+    (ops / "bulk-in-progress").unlink()
+    lsof["stderr"] = "lsof: WARNING: can't stat() directory"                     # lsof failed: nothing deleted
+    R.sweep_superseded(dry=False)
+    assert all(p.exists() for u in made.values() for p in u.values())
+    assert not (ops / "sweep-last").exists()
+    lsof["stderr"] = ""
+    R.sweep_superseded(dry=False)
+    for prof in (main_p, gate_p):                    # main swept: stage's cargo writes to target-serve
+        u = made[prof]
+        assert not u["old"].exists() and u["new"].exists()
+        assert u["bin"].exists() and u["harness"].exists() and u["rf1"].exists() and u["rf2"].exists()
+        assert u["lt"].exists()                      # the other profile's build of the same unit is current
+    assert not obj.exists()                          # the swept executable's .rcgu.o go with it
+    assert held.exists() and made[idle_p]["new"].exists()                        # open in a process: kept
+    assert all(p.exists() for p in made[busy_p].values())                        # a cargo works there: skipped
+    assert orphan.exists()
+    assert (ops / "sweep-last").read_text().strip() == "merge1"
+    made[gate_p]["old"].write_text("x")
+    made[gate_p]["old"].chmod(0o755)
+    R.sweep_superseded(dry=False)
+    assert made[gate_p]["old"].exists()                                          # once per landing, not every tick
+
+
 def test_a_workers_red_proof_beside_a_green_run_is_not_a_failing_test():
     """2026-09-24: T-894 (15:25) and T-905 (20:16) handed back DONE with their new test's red run on the old
     code listed at exit 1, and read BLOCKED 'needs a person'. "expect": "red" + a green run = evidence."""
@@ -1178,3 +1274,44 @@ def test_a_workers_red_proof_beside_a_green_run_is_not_a_failing_test():
     plain = {"cmd": "cargo nextest run -p hk-x", "exit": 101}
     assert R.hand_back_reds({"tests": [plain, fixed]}) == ([plain], [plain])     # an unmarked red still blocks
     assert R.hand_back_reds(None) == ([], [])
+
+
+def test_a_timed_out_worker_is_resumed_once_to_wrap_up(killed_run, monkeypatch):
+    """2026-09-24: T-852, T-878, T-888, T-887 and T-904 each hit the 180-min limit, were parked 'worktree kept'
+    and finished by hand. One wrap-up resume of the same session first; a second limit is a person's."""
+    claim, fixes, alerts, seen = killed_run
+    state = {"alive": True}
+    monkeypatch.setattr(R, "alive", lambda pid: state["alive"])
+    monkeypatch.setattr(R, "track_usage", lambda c: False)
+    monkeypatch.setattr(R.os, "killpg", lambda pid, sig: state.update(alive=False))
+    monkeypatch.setattr(R, "_gone", lambda pid: True)                      # the real one: the test below
+    claims = claim(session_id="abc", started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("TIMEOUT") and seen == []
+    state["alive"] = True                                                  # the wrap-up runs out of time too
+    claims = claim(session_id="abc", kind="fix", timeout_resumes=1, started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and [k for _, k, _ in seen] == ["TIMEOUT"]
+
+
+def test_the_wrap_up_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch):
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running"))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    c = R.launch_fix({"ticket": "T-9", "branch": "task-t9", "wt": "/w/t9", "session_id": "s", "fix_attempts": 0},
+                     "TIMEOUT your run reached the 180-min limit and was stopped")
+    n, prompt, out = runs[0]
+    assert n == 0 and out == "wrapup1.json" and c["timeout_resumes"] == 1
+    assert "WRAP UP" in prompt and "Start no new scope" in prompt and "blocked.needs" in prompt
+
+
+def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_child():
+    """Review, 2026-09-24: os.kill(pid, 0) succeeds on a zombie, and the runner never waits on its Popen
+    children - the resume never fired and each timeout stalled the tick 31 s. A real child, dropped unwaited."""
+    import signal
+    p = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 60"], start_new_session=True)
+    pid = p.pid
+    del p
+    R.os.killpg(pid, signal.SIGTERM)
+    t0 = time.time()
+    assert R._gone(pid, wait_s=10) and time.time() - t0 < 5

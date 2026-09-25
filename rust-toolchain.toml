@@ -1,0 +1,5 @@
+# Pinned so the local gate and CI run the same compiler (T-912).
+[toolchain]
+channel = "1.93.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
