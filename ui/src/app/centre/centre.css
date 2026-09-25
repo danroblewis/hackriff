@@ -178,6 +178,17 @@
 /* Time: just right of the tick, vertically centred on it. */
 .sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }
 
+/* T-820 (MAP-20): human-authored annotation labels, placed per frame from the same mapping the
+   dashed marks are stroked with; never hit-tested, so a label cannot steal a pan. Rose, like the
+   dashed ink, and italic so a note never reads as a measured value. */
+.sf-annos { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.sf-anno-label {
+  position: absolute; left: 0; top: 0; margin-top: -16px; max-width: 28ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font: italic 11px var(--mono); line-height: 1.2; color: #f379a3;
+  text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+}
+/* The Annotate/Pin tool modes (docs/23 §10.4); their banner is the cluster's `.map-mode`. */
+.sf-stage[data-tool="annotate"] .sf-canvas, .sf-stage[data-tool="pin"] .sf-canvas { cursor: cell; }
 /* T-812 (MAP-12): band-plan priors. The canvas labels are band 2 like the HUD's — placed per frame
    by `surface/priors.ts` from the pane's own box, pointer-transparent so a label never takes a pan,
    italic lavender and always prefixed "prior", so a suggestion can never read as a detection. The

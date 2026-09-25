@@ -225,10 +225,13 @@ fn declarations() -> Vec<Unreachable> {
         family: "thermal-noise",
         planes: &[],
         when: &[],
-        reason: "the structureless population (N1) is the NEG plane's n1-thermal row (T-568); \
-                 SNR/support/check/CFO and an edge to fail past do not apply to it, and its full-n \
-                 run (docs/22 n = 400) is the false-confirm suite's",
-        ticket: Ticket::Filed("T-576"),
+        reason: "the structureless population (N1) is the NEG plane's n1-thermal row (T-568), \
+                 also run by T-576's false-confirm suite at both profiles over an ad-hoc band; \
+                 SNR/support/check/CFO and an edge to fail past do not apply to it, and its \
+                 full-n run (docs/22 n = 400, and ADR-0022 §10.2's n ~ 60 000) is a \
+                 milestone/nightly batch nobody owns yet -- it needs the production search \
+                 backend before a job becomes a decision (T-576's stated position)",
+        ticket: Ticket::Unfiled,
     });
     d.push(Unreachable {
         family: "css-lora",
@@ -251,16 +254,20 @@ fn declarations() -> Vec<Unreachable> {
     // --- Families with blocks. The check axis: T-622 put CRC width / off-catalogue polynomial /
     // constant payload on the 2-level FSK generator (`fsk_burst_train`, which also yields MSK at
     // deviation = rate / 4), so for 2-FSK the gap is now the confirm-gate rows that consume it
-    // (ADR-0022 §10.1 A3 (b)/(c), T-576's recall control). The C4FM generators (the trunk
-    // scenes) still carry only the fixed P25 framing: that is a generator gap nobody owns.
+    // (ADR-0022 §10.1 A3 (b)/(c)). T-576 landed that recall control **over the shipped gate**
+    // (`mauto_false_confirm::false_confirm_recall_control_*`), which is what can be asserted while
+    // nothing searches; running it over these fixtures needs a result that reached `solved` on
+    // hold-out, and so the production search backend. The C4FM generators (the trunk scenes) still
+    // carry only the fixed P25 framing: that is a generator gap nobody owns.
     d.push(Unreachable {
         family: "2fsk",
         planes: &["A1xA7"],
         when: &[],
-        reason: "check parameterisation exists on fsk_burst_train (T-622) but no row runs it: the \
-                 CRC-8 / off-catalogue-poly / constant-payload rows are the confirm-gate recall \
-                 control of the false-confirm suite, which needs the derived ConfirmPolicy",
-        ticket: Ticket::Filed("T-576"),
+        reason: "check parameterisation exists on fsk_burst_train (T-622) and T-576's recall \
+                 control asserts the CRC-8 / repeated-payload rows against the shipped gate, but \
+                 no row runs them over IQ: that needs a production search backend to reach \
+                 solved-on-hold-out (unowned)",
+        ticket: Ticket::Unfiled,
     });
     d.push(Unreachable {
         family: "msk",

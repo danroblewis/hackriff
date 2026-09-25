@@ -500,7 +500,10 @@ def _build_new_block(tid: str, args: argparse.Namespace) -> str:
         lines.extend(_prefixed(acc))
     notes_body = []
     if args.found_by:
-        notes_body.append(f"FOUND BY {args.found_by}.")
+        # Name the ticket in its provenance line: two tickets filed from one source must not open
+        # with the same sentence (test_no_ticket_carries_another_tickets_body reads that as one
+        # ticket carrying another's body - 22 explorer tickets tripped it on 2026-09-25).
+        notes_body.append(f"FOUND BY {args.found_by}: {args.title}")
     if args.notes_file:
         notes_body.extend(Path(args.notes_file).read_text(encoding="utf-8").rstrip("\n").splitlines())
     if notes_body:
