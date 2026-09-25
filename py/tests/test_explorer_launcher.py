@@ -251,7 +251,11 @@ def test_a_second_server_under_the_window_is_stopped_and_reaped_untouched_first(
     ps_file = tmp_path / "ps.txt"
     ps_file.write_text("")
     env["EXPLORER_PS_OUTPUT"] = str(ps_file)
-    p = subprocess.Popen([str(WINDOW), "--window", "20s"], env=env,
+    # The launcher's own foreground child is the 30 s claude stub, and bash does not run a TERM trap
+    # until that foreground command returns - so at teardown this signals the whole process GROUP
+    # (like test_a_kill_of_the_pane_releases below), not just the launcher's own pid, or the wait
+    # below would hang for the stub's remaining sleep every time.
+    p = subprocess.Popen([str(WINDOW), "--window", "20s"], env=env, start_new_session=True,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     rogue = None
     try:
@@ -280,15 +284,20 @@ def test_a_second_server_under_the_window_is_stopped_and_reaped_untouched_first(
             time.sleep(0.1)
         assert "ALERT: rogue hk serve detected" in log_path.read_text()
 
-        for _ in range(50):
-            if rogue.poll() is not None:
+        # The watcher's own kill-then-reap sequence (ops/explorer-window.sh: kill -TERM, a bounded
+        # kill -0 wait loop, then the reap) takes a moment after the ALERT line - poll for its
+        # completion (the "ring reaped" log line, which the script writes right after deleting the
+        # directory) rather than asserting the instant the rogue process itself dies, which races it.
+        for _ in range(100):
+            if log_path.exists() and "rogue server's ring reaped" in log_path.read_text():
                 break
             time.sleep(0.1)
+        assert "rogue server's ring reaped" in log_path.read_text()
         assert rogue.poll() is not None, "the rogue server was never stopped"
         assert not (rogue_datadir / "iqbuffer").exists(), "the rogue's ring was never reaped"
         assert os.kill(int(kept_pid), 0) is None  # the window's own server is untouched
     finally:
-        p.send_signal(signal.SIGTERM)
+        os.killpg(p.pid, signal.SIGTERM)
         p.wait(timeout=15)
         if rogue is not None and rogue.poll() is None:
             rogue.kill()
