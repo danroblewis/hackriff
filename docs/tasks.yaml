@@ -27988,6 +27988,16 @@ tasks:
       FOUND 2026-09-25 by the explorer (FM sweep, 88-108): the sweep's product view is hard to read - (a) the "last known" scanlined shadow makes stations barely visible (shot 0355); (b) the "0.8 % of this surface was ever sampled (32 of 4096)" banner stays at its first-paint value after the sweep has lit 20 MHz; (c) at first paint of / the lower-right of the live pane was a black rectangle (0352). Also (d, unconfirmed - the explorer's synthetic change event): Review -> Device -> Span 20 MHz sent POST /api/control/rate {"sample_rate_hz": 2400000} (the OLD value, audit log), and afterwards the Device panel still showed "Span 2.400 MHz" while the header said 20 MHz (shot 0401) - verify with a real select before fixing. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: (a) shadow contrast so observed-then-quiet reads as dim but stations stay legible (docs/23 §10.6 honesty tiers; do not make shadow read as live); (b) the sampled-fraction banner refreshes as coverage grows (from the backend's coverage, not a client counter); (c) find the black rectangle (unpainted pane region? a tile never requested?) - grey only where unobserved; (d) reproduce with a real select in an e2e; fix if real (assert the request the client builds). Thin client; red tests for each fixed item.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      Review: refresh queried the frozen first-paint box; now re-asks /api/navigation and extends t1 to latest_s. Test asserts coverage query t1 >= newest capture (red with the fix reverted).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 06:47).
+      Review fix: refreshOrientationNote now re-asks /api/navigation and extends the coverage box top to the newest latest_s (never shrinks), so coverage swept after first paint is counted. Test asserts the coverage request's t1 >= newest capture; verified red with the fix reverted. Other items as before: (a) lighter shadow scanlines, (d) rate select reads value before re-render; (c) black rectangle not reproduced. Gate finding was only the uncommitted board note (just task note); committed.
+      Tests: node test/run.mjs surface-range surface-honesty app-review -> exit 0 (3/3 files passed); node test/run.mjs surface-range (fix reverted) -> exit 1 (T-946(b) fails)
+      precheck exit 0
+      Commits: d7de029a, cdc127d9, 70fecce0
+      Observed, not chased: (c) black live-pane rectangle not investigated | no DOM harness for DeviceTab select
+      Resources: 27 CPU-s, peak 0.6 GB
   - id: T-947
     milestone: MMAP
     title: Go-to-frequency retune offer takes its span from the view width (15.8 MHz -> 16 Msps)
