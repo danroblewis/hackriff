@@ -27520,6 +27520,46 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-570 Opus re-review 2026-09-25.
+  - id: T-931
+    milestone: MMAP
+    title: "RC red: floating controls / left chip covered or off-screen (app-phone, app-dismiss, app-side-chip) at main 92d0f6f1"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RC_RED P1 x3 (release candidate at main 92d0f6f1, 2026-09-25 03:53; last green: none yet; first red tip 92d0f6f1):
+      - ui/e2e/app-phone.e2e.mjs: "a floating control is off screen, too small or covered" (repro: cd ui && node e2e/run.mjs app-phone)
+      - ui/e2e/app-dismiss.e2e.mjs: "a floating control is off screen, too small or covered" (repro: ... app-dismiss)
+      - ui/e2e/app-side-chip.e2e.mjs: "the chip itself is not pressable" (repro: ... app-side-chip)
+      Likely ONE root cause from tonight's layout landings interacting: T-918 (full-bleed canvas; the surface status rows now float in a box at the BOTTOM-LEFT, up to ~560x184 px, never faded; drawing insets), T-824 (phone-width + fade/immersive pass), T-895 (left column chip <= 56 px), T-900 (dismiss), T-882 (rehomed controls). Hypothesis: the new floating status box (or the minimap lift above the dock) now covers the left chip and/or a floating control, especially at phone width.
+      DELIVER: find the landing and the element that covers/pushes off-screen each control (elementFromPoint at each control's centre, bounding rects at 1440/1000/420 px); fix the LAYOUT so every floating control and the chip are on screen, >= 24 px (P5/§10.5 hit targets) and uncovered at every width - consistent with docs/23 §10.6 (P1 minimal overlay, P3 fixed positions) and T-919 (the status box should become a compact, closeable line; if compacting it IS the fix, do that part here and note T-919). The three specs then pass UNCHANGED; change a spec only if it is provably wrong under a deliberate product change (rcfix rule, red proof).
+      WHAT THE USER WILL SEE ON STAGING: at any window width, the left chip and all floating controls are visible and pressable, nothing covers them.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the three specs + app-surface + app-sheet alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY rc-20260925.
+    branch: task-rcfix-chrome
+  - id: T-932
+    milestone: MLIVE
+    title: "RC red: surface-nav - the tile route refuses a request while nothing moves the view and the client cap never adapts, at main 92d0f6f1"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RC_RED P1 (release candidate at main 92d0f6f1, 2026-09-25 03:53; last green: none yet). Repro: `cd ui && node e2e/run.mjs surface-nav`. ui/e2e/surface-nav.e2e.mjs fails: "the tile route refused 1 of 10 tile requests during 8 s in which NOTHING moved the view, while the client raised its operating cap only 0 time(s) (cap trace over the wi..." - an idle view got a backpressure refusal and the client's adaptive cap never reacted.
+      Tonight's candidates touching the tile request path: T-903 (a silent probe's place re-enters at the BACK of the queue), T-905 (every tile-request lane consults the coverage survey), T-890/T-893 (look-ahead + /ws/tiles/rows push), T-810 (density fetches, now refreshed while following), T-897 (paths), T-812 (priors). Possibly the RC ran under load (an explorer window started 03:43, gates running).
+      DELIVER (deflake-triage rules): run surface-nav ALONE x3 on 92d0f6f1 and on the tree before tonight's tile-path landings (bisect); fails alone => a real defect: find which request lane now fires while idle or exceeds the server's backpressure cap, and why the cap adaptation did not raise (ui/src/surface/tilecache.ts cap logic); fix so an idle view makes no refused requests (or the cap reacts as designed); passes alone only under load => make the spec's idle window wait on server-reported state, never loosen the refusal assertion. Red-on-regression proof.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (surface-nav alone; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY rc-20260925.
+    branch: task-rcfix-surface-nav
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
