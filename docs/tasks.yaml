@@ -27909,7 +27909,8 @@ tasks:
   - id: T-945
     milestone: M2-hardening
     title: Automatic front-end gain management closed-loop on decode quality (overload flagged at every clip, nothing reduces gain)
-    status: todo
+    status: in-progress
+    branch: task-t945
     priority: P2
     deps: []
     parallel_group: GAIN-CTRL
@@ -27953,7 +27954,8 @@ tasks:
   - id: T-948
     milestone: M2-hardening
     title: DC point listed as a candidate at the tuned centre; a steady -57.5 dB line at 161.984 MHz never detected or explained
-    status: todo
+    status: in-progress
+    branch: task-t948
     priority: P2
     deps: []
     parallel_group: DETECT-DC
@@ -28010,7 +28012,8 @@ tasks:
   - id: T-951
     milestone: MAUTO
     title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
-    status: todo
+    status: in-progress
+    branch: task-t951
     priority: P2
     deps: []
     parallel_group: RECIPE-POCSAG
@@ -28024,7 +28027,8 @@ tasks:
   - id: T-952
     milestone: MAUTO
     title: "APRS: AFSK1200/AX.25 recipe (no APRS decode path exists)"
-    status: todo
+    status: in-progress
+    branch: task-t952
     priority: P2
     deps: []
     parallel_group: RECIPE-APRS
@@ -28040,7 +28044,8 @@ tasks:
   - id: T-953
     milestone: M3
     title: "Burst emitters get no family/params: burst-tap symbol rates never reach estimated_params; unknown at 0.999 confidence; no paging band-plan prior"
-    status: todo
+    status: in-progress
+    branch: task-t953
     priority: P2
     deps: []
     parallel_group: CLASSIFY-BURST
@@ -28057,7 +28062,8 @@ tasks:
   - id: T-954
     milestone: M2-hardening
     title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
-    status: todo
+    status: in-progress
+    branch: task-t954
     priority: P2
     deps: []
     parallel_group: STREAM-BITS
