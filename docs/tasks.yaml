@@ -29490,7 +29490,7 @@ tasks:
   - id: T-1022
     milestone: MMAP
     title: "app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)"
-    status: todo
+    status: done
     priority: high
     deps:
     - T-993
@@ -29513,6 +29513,7 @@ tasks:
       Commits: 34a70184
       Observed, not chased: app-surface T-802 (zoom-in should change the pane's window) failed with 'timed out after 15000 ms waiting for zoom-in to change the pane's window' (headline stayed '100.800 MHz ± 1.68 MHz · LIVE'). It failed on UNMODIFIED product code, in the run of HEAD's old spec (/tmp/t1022-red-old.log), and also under the missing-More mutation. It passed in all 4 green runs. Earlier tests in the same file had also failed in every run where it failed. Possibly order- or load-dependent. The ticket counted 4 red tests on main; this is a 5th, seen on this box at load ~30-40. | The e2e tier used a stale Sep-24 target/debug/hk seeded from main, and two parallel lanes at load ~43 timed out mounting the surface (240 s). Rebuilding hk and setting HK_E2E_CONCURRENCY=1 fixed that; it was the environment, not the spec.
       Resources: 1400 CPU-s, peak 4.6 GB
+    commit: 659426ba
   - id: T-1023
     milestone: MLIVE
     title: One rolling storage budget (IQ ring + tile pyramid + DB), sized to the device and configurable (flag + settings), eviction keeps the coarse levels so zoom-out over all history is a read; budget and per-level horizon in /api/status
