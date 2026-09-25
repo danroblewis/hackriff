@@ -26346,7 +26346,8 @@ tasks:
   - id: T-886
     milestone: M3
     title: "T-878 follow-ups: merged-away tracks lose their classification row, posterior hidden on tied emitters, classify chain memory at 20 Msps, first-come classify coverage"
-    status: todo
+    status: in-progress
+    branch: task-t886
     priority: normal
     deps:
     - T-878
