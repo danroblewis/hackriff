@@ -2382,17 +2382,22 @@ def reclaim_idle_targets(claims, dry):
     if not re.search(r"^p\d+", cwds, re.M):
         return   # lsof said nothing: no evidence the worktrees are unused, so no delete
     seen = sh(["ps", "-axo", "command"]) + "\n" + cwds
+    doomed = []
     for wt, age in idle:
         if re.search(re.escape(wt) + r"(/|\s|$)", seen, re.M):
             continue
         if dry:
             log(f"DRY-RUN would reclaim {wt}/target (idle {age / 3600:.1f} h)")
             continue
-        # Renamed first: a build that starts during a long delete finds no target, never half of one.
+        # Renamed first: a build that starts during a long delete finds no target, never half of one. Every rename
+        # happens before any delete (review: the process snapshot above is minutes old by the last of several
+        # 4-8 GB deletes, and short of disk many targets qualify in one pass).
         gone = os.path.join(wt, f"target.reclaim-{int(time.time())}")
         os.rename(os.path.join(wt, "target"), gone)
-        shutil.rmtree(gone, ignore_errors=True)
+        doomed.append(gone)
         log(f"RECLAIM {wt}/target (idle {age / 3600:.1f} h, no running claim or process; source kept)")
+    for gone in doomed:
+        shutil.rmtree(gone, ignore_errors=True)
 
 
 # ---------- deflake dispatch (user, 2026-09-23) ----------
