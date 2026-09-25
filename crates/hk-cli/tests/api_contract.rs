@@ -4625,8 +4625,9 @@ fn ws_stream_header_matches_the_stream_contract() {
 /// One thing a stream consumer saw, in arrival order.
 #[derive(Debug)]
 enum Saw {
-    /// A data record and its capture time (ns).
-    Row(i64),
+    /// A data record: its capture time (ns), its stream sample index, and whether it carries
+    /// `DISCONTINUITY` (the rows before it are not contiguous with it).
+    Row(i64, u64, bool),
     /// A text message that parsed as JSON — on a binary stream, a stream header.
     Header(Value),
 }
@@ -4640,7 +4641,10 @@ struct Seen {
 
 impl Seen {
     fn rows(&self) -> usize {
-        self.saw.iter().filter(|s| matches!(s, Saw::Row(_))).count()
+        self.saw
+            .iter()
+            .filter(|s| matches!(s, Saw::Row(..)))
+            .count()
     }
 
     /// Everything seen after the first header satisfying `pick` (none if no such header arrived).
@@ -4658,7 +4662,7 @@ impl Seen {
     /// The capture time of the last row seen.
     fn last_row(&self) -> Option<i64> {
         self.saw.iter().rev().find_map(|s| match s {
-            Saw::Row(t) => Some(*t),
+            Saw::Row(t, ..) => Some(*t),
             _ => None,
         })
     }
@@ -4677,8 +4681,11 @@ fn drain_ws(ws: &mut Ws, deadline: Instant, done: impl Fn(&Seen) -> bool) -> See
         match ws.read() {
             Ok(Message::Binary(b)) => {
                 if b.len() >= 32 && b[0] == 1 {
-                    seen.saw
-                        .push(Saw::Row(i64::from_le_bytes(b[16..24].try_into().unwrap())));
+                    seen.saw.push(Saw::Row(
+                        i64::from_le_bytes(b[16..24].try_into().unwrap()),
+                        u64::from_le_bytes(b[24..32].try_into().unwrap()),
+                        b[1] & hk_api::stream::RecordFlags::DISCONTINUITY.0 != 0,
+                    ));
                 }
             }
             Ok(Message::Text(t)) => {
@@ -4760,8 +4767,9 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
             .is_some_and(|c| (c - moved_to).abs() < 1.0)
     };
     let after = drain_ws(&mut ws, Instant::now() + Duration::from_secs(30), |s| {
-        s.after_header(new_centre)
-            .is_some_and(|(_, rest)| rest.iter().filter(|x| matches!(x, Saw::Row(_))).count() >= 10)
+        s.after_header(new_centre).is_some_and(|(_, rest)| {
+            rest.iter().filter(|x| matches!(x, Saw::Row(..))).count() >= 10
+        })
     });
     assert!(
         after.closed.is_none(),
@@ -4774,7 +4782,7 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     assert_eq!(hd["stream_id"], json!("spectrum/live"), "{hd}");
     assert_eq!(hd["schema"], json!("hackriff.stream"), "{hd}");
     assert!(
-        rest.iter().any(|s| matches!(s, Saw::Row(_))),
+        rest.iter().any(|s| matches!(s, Saw::Row(..))),
         "rows of the new window after its header: {after:?}"
     );
 
@@ -4785,8 +4793,9 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
 
     let new_rate = |h: &Value| h["bandwidth_hz"].as_f64() == Some(4.8e6);
     let across = drain_ws(&mut ws, Instant::now() + Duration::from_secs(60), |s| {
-        s.after_header(new_rate)
-            .is_some_and(|(_, rest)| rest.iter().filter(|x| matches!(x, Saw::Row(_))).count() >= 10)
+        s.after_header(new_rate).is_some_and(|(_, rest)| {
+            rest.iter().filter(|x| matches!(x, Saw::Row(..))).count() >= 10
+        })
     });
     assert!(
         across.closed.is_none(),
@@ -4800,7 +4809,7 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     let rows_after: Vec<i64> = rest
         .iter()
         .filter_map(|s| match s {
-            Saw::Row(t) => Some(*t),
+            Saw::Row(t, ..) => Some(*t),
             _ => None,
         })
         .collect();
@@ -4853,7 +4862,7 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
         .saw
         .iter()
         .filter_map(|s| match s {
-            Saw::Row(t) => Some(*t),
+            Saw::Row(t, ..) => Some(*t),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -4872,31 +4881,75 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     );
     // And the hole is at the seam and nowhere else: no row is a held or repeated one (capture time
     // strictly advances everywhere, seam included — a held last frame would show as a repeated or
-    // non-advancing timestamp), and no row after the seam lands *earlier* than one row period
-    // after its predecessor, which is what back-filling the hole with squeezed rows would look
-    // like. Only the "never shorter" half is asserted: rows lost in delivery lengthen a step and
-    // never shorten one, so this stays true under any load.
+    // non-advancing timestamp), and no row after the seam is moved to fill the hole (below).
     for (a, b) in std::iter::once(&last_before)
         .chain(rows_after.iter())
         .zip(rows_after.iter())
     {
         assert!(b > a, "row timestamps strictly advance: {a} then {b}");
     }
-    let mut steps: Vec<i64> = rows_after.windows(2).map(|w| w[1] - w[0]).collect();
-    steps.sort_unstable();
-    // The new window has its own row period (192 000 samples at 4.8 MHz = 40.0 ms, against the old
-    // window's 40.107 ms), so it is measured here rather than carried over from `period_ns`.
-    let new_period_ns = steps[steps.len() / 2];
-    for w in rows_after.windows(2) {
-        // ±2 ns: row times are sample_index / rate rounded to whole nanoseconds.
+    // T-974: the window's own row period comes from its header, not from the median step. The
+    // steps after a re-plumb are not all whole rows: a front end that is losing blocks (the mock's
+    // real-time pacing drops them whenever the capture thread falls behind 4.8 Msps, which on a
+    // loaded box is every few blocks — `source_dropped` 4.2 M samples in one failing run) resets
+    // the STFT at each gap, and since T-915 a reset in a freshly retuned stream emits the averaging
+    // in progress as a partial row with its true `n_avg` (T-139). Those rows are real measurements
+    // of real samples and shorter than a row; the median of a window of them is not the row
+    // period, and "no step shorter than the median" failed 5 runs of 5 on a busy worker while
+    // holding everywhere the source kept up. What a back-filled or squeezed seam breaks is not
+    // step length, it is **where a row sits**: a row's time is its sample index on the capture
+    // clock, and a row pulled earlier to close a hole no longer is. So each step is checked on
+    // exactly that, and a step shorter than one row is legal only where the stream itself
+    // declares the break (`DISCONTINUITY` on the later row) — between rows it calls contiguous,
+    // a step is a whole number of row periods (more than one only when rows were lost in delivery,
+    // which lengthens a step and never shortens one).
+    let fs_new = hd["bandwidth_hz"].as_f64().expect("bandwidth_hz");
+    assert_eq!(
+        hd["content_class"],
+        json!("unrestricted"),
+        "an ungated class declares its actual row rate, so the header gives the row period: {hd}"
+    );
+    let new_period_ns = 1e9
+        / hd["sample_rate_hz"]
+            .as_f64()
+            .expect("the declared row rate");
+    let recs: Vec<(i64, u64, bool)> = rest
+        .iter()
+        .filter_map(|s| match s {
+            Saw::Row(t, i, d) => Some((*t, *i, *d)),
+            _ => None,
+        })
+        .collect();
+    let (mut contiguous, mut declared_breaks) = (0, 0);
+    for w in recs.windows(2) {
+        let ((t0, i0, _), (t1, i1, cut)) = (w[0], w[1]);
+        assert!(i1 > i0, "sample indices strictly advance: {recs:?}");
+        let step = (t1 - t0) as f64;
+        let from_samples = (i1 - i0) as f64 / fs_new * 1e9;
+        // Each time is rounded to whole nanoseconds from one clock, so two differ by < 1 ns.
         assert!(
-            w[1] - w[0] >= new_period_ns - 2,
-            "a row after the seam is {} ns after the one before it, shorter than the new window's \
-             {new_period_ns} ns row period — the hole belongs at the seam, not squeezed back into \
-             the window: {rows_after:?}",
-            w[1] - w[0]
+            (step - from_samples).abs() <= 1.0,
+            "a row after the seam is placed {step} ns after the one before it, but its samples \
+             start {from_samples} ns after them — a row's time is its sample index on the capture \
+             clock, and a row moved to fill the hole breaks exactly that: {recs:?}"
         );
+        if cut {
+            declared_breaks += 1;
+        } else {
+            contiguous += 1;
+            let periods = (step / new_period_ns).round();
+            assert!(
+                periods >= 1.0 && (step - periods * new_period_ns).abs() <= 2.0,
+                "rows the stream calls contiguous are whole row periods apart: {step} ns against \
+                 the new window's {new_period_ns} ns row period — the hole belongs at the seam, \
+                 not squeezed back into the window: {recs:?}"
+            );
+        }
     }
+    assert!(
+        contiguous + declared_breaks >= 9,
+        "{contiguous} contiguous + {declared_breaks} declared-break steps checked: {recs:?}"
+    );
 
     let _ = ws.close(None);
     stop_server(serving);
@@ -5088,7 +5141,7 @@ fn one_clients_pause_never_freezes_another_clients_stream() {
         seen.saw
             .iter()
             .filter_map(|s| match s {
-                Saw::Row(t) => Some(*t),
+                Saw::Row(t, ..) => Some(*t),
                 _ => None,
             })
             .collect()
@@ -7259,23 +7312,37 @@ fn the_band_collapsed_activity_series_is_measured_and_states_its_fold() {
     // describe the **same** window for the comparison to mean anything — the live edge advances
     // between requests — so the pair is re-taken until both report the same capture window, and the
     // test refuses to compare otherwise rather than comparing across a moved window.
+    //
+    // T-974: and the live edge is **stopped** first. `window.t1_s` is the ring's newest sample and
+    // moves every 20-100 ms (measured: 40 distinct values in 1.8 s of back-to-back requests), while
+    // one pair of these requests took 30-40 ms on a quiet box and longer on a busy one — so whether
+    // any of 40 re-takes landed inside one step was a race against the machine's load, and a
+    // worker under load lost it (T-920: "two timeline answers over the same capture window").
+    // Nothing below is about liveness: the fold, the unobserved steps and the budget are properties
+    // of whatever the ring holds. Stopping the run freezes that — the capture window is still the
+    // ring's retention, the retained capture is still drawn on it, and the answer no longer depends
+    // on how fast this machine serves two requests.
+    serving.handle.stop();
     let pair = || {
         let (sa, a) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=4"));
         let (sb, b) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=1"));
         assert_eq!((sa, sb), (200, 200), "{a} {b}");
         (a, b)
     };
+    // The stop lands at the capture thread's next block, so the edge may still take a last step;
+    // after that every pair agrees. Bounded by the run's end, not by a count of attempts.
     let mut same = None;
-    for _ in 0..40 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while same.is_none() && Instant::now() < deadline {
         let (a, b) = pair();
         if a["window"]["t1_s"] == b["window"]["t1_s"] && a["window"]["t0_s"] == b["window"]["t0_s"]
         {
             same = Some((a, b));
-            break;
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    let (rows4, rows1) = same.expect("two timeline answers over the same capture window");
+    let (rows4, rows1) = same.expect("two timeline answers over the same (stopped) capture window");
 
     let g1 = &rows1["grid"];
     let g4 = &rows4["grid"];

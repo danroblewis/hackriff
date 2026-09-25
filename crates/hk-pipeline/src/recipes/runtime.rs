@@ -582,16 +582,43 @@ pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
 }
 
 /// The tune `(centre, rate)` to plan a channel at `center` for: the tune the capture thread last
-/// published, or — before it has published one (no block captured yet) — a provisional window
-/// centred on `center` at the run's rate. The pipeline thread re-plans for the tune its chunks
-/// carry (`Runner::chunk`, `Hops::apply_channels`) and refuses a channel outside it then.
-/// T-175: an optimised build serves a start and a channel change before the first block.
+/// published, or — before it has published one (no block captured yet) — the window the run has
+/// **commanded** the front end to ([`crate::run::CommandedWindow`]). The pipeline thread re-plans
+/// for the tune its chunks carry (`Runner::chunk`, `Hops::apply_channels`) and refuses a channel
+/// outside it then. T-175: an optimised build serves a start and a channel change before the first
+/// block.
 pub(crate) fn planning_tune(shared: &crate::run::Shared, center: f64) -> (f64, f64) {
-    let tune = shared.counters.tune();
-    if tune.1.is_finite() && tune.1 > 0.0 {
-        tune
+    provisional_tune(
+        shared.counters.tune(),
+        shared.commanded.get().0,
+        center,
+        shared.fs,
+    )
+}
+
+/// [`planning_tune`]'s rule, pure.
+///
+/// **T-974: before the first block the window is the commanded one, not one centred on the
+/// request.** T-175 planned against `(center, fs)` — a window built around whatever was asked for
+/// — so every target fitted it, and `POST /api/pipelines` answered **201 running** for a band the
+/// radio was nowhere near (90 MHz against a 100.8 MHz / 2.4 Msps window) whenever it arrived before
+/// the capture thread had published its first block, and `409 outside_window` after. The window
+/// the front end is being tuned to is known from the start — the run commands it — so the answer
+/// no longer depends on which side of the first block a request lands. The request-centred window
+/// is left only for a run with no usable commanded window at all.
+pub(crate) fn provisional_tune(
+    published: (f64, f64),
+    commanded: (f64, f64),
+    center: f64,
+    fs: f64,
+) -> (f64, f64) {
+    let usable = |t: (f64, f64)| t.0.is_finite() && t.1.is_finite() && t.1 > 0.0;
+    if usable(published) {
+        published
+    } else if usable(commanded) {
+        commanded
     } else {
-        (center, shared.fs)
+        (center, fs)
     }
 }
 
@@ -2162,5 +2189,42 @@ impl Runner {
             }
         }
         inc(&self.ctl.stats.status_ticks);
+    }
+}
+
+#[cfg(test)]
+mod provisional_tune_tests {
+    use super::{in_window, provisional_tune};
+
+    const UNPUBLISHED: (f64, f64) = (0.0, 0.0);
+
+    /// T-974: a start before the first block is judged against the commanded window, so a band
+    /// outside it is refused then exactly as it is after the first block.
+    #[test]
+    fn before_the_first_block_a_band_outside_the_commanded_window_is_outside_it() {
+        let commanded = (100.8e6, 2.4e6);
+        let center = 90.05e6;
+        let (c, r) = provisional_tune(UNPUBLISHED, commanded, center, 2.4e6);
+        assert_eq!((c, r), commanded);
+        assert!(!in_window(c, r, 90.0e6, 90.1e6));
+        // The same answer as once a block has published the same tune.
+        let (c, r) = provisional_tune(commanded, commanded, center, 2.4e6);
+        assert!(!in_window(c, r, 90.0e6, 90.1e6));
+        // And a band inside the window is planned inside it either way.
+        let (c, r) = provisional_tune(UNPUBLISHED, commanded, 100.8e6, 2.4e6);
+        assert!(in_window(c, r, 100.7e6, 100.9e6));
+    }
+
+    #[test]
+    fn a_published_tune_wins_and_nothing_usable_falls_back_to_the_request() {
+        let published = (101.8e6, 4.8e6);
+        assert_eq!(
+            provisional_tune(published, (100.8e6, 2.4e6), 90e6, 2.4e6),
+            published
+        );
+        assert_eq!(
+            provisional_tune(UNPUBLISHED, (f64::NAN, 0.0), 90e6, 2.4e6),
+            (90e6, 2.4e6)
+        );
     }
 }
