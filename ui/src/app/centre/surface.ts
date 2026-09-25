@@ -86,6 +86,10 @@ import {
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
+import {
+  collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, selectResearch, setResearchOpen,
+  type Collection, type ResearchRow, type ResearchSlice,
+} from "../map/research-slice";
 
 const S_TO_NS = 1e9;
 /** The map strip along the bottom of the canvas, device px. */
@@ -398,8 +402,41 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
-   * `base` is the base-style axis, not a toggle. */
-  const drawnLayers = new Set<LayerId>(Object.keys(overlayFns) as LayerId[]);
+   * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
+   * every `collection:*` layer are drawn by `researchBoxesFor` below. */
+  const drawnLayers = new Set<LayerId>([...Object.keys(overlayFns) as LayerId[], "research"]);
+
+  // ---- T-821 (MAP-21): collections as overlay layers; every mark also a row in the Research panel ----
+  // One model (`state.research`) behind both views: the rows are derived once per data change and
+  // placed per frame through the pane's own box, like every other mark. A collection's layer is on
+  // for a pane when that pane's layers menu says so, else by the collection's stored default; an
+  // unfiled annotation follows the `research` layer. The SELECTED mark is drawn whatever its layer —
+  // it is the viewer's own selection, which is always shown (a row click must light its mark).
+  // Collections sit at z 40 (`COLLECTION_Z`), above every overlay drawn today, so they are appended
+  // after `composeOverlays`' output rather than routed through the registry, which lists only the
+  // collections a menu has touched.
+  let researchSrc: ResearchSlice | null = null;
+  let researchRowsNow: ResearchRow[] = [];
+  let researchColors = new Map<string, readonly [number, number, number, number]>();
+  let researchColls = new Map<string, Collection>();
+  const researchBoxesFor = (pane: PaneView): MarkBox[] => {
+    const r = store.get().research;
+    if (r !== researchSrc) {
+      researchSrc = r;
+      researchRowsNow = researchRows(r);
+      researchColls = new Map(r.collections.map((c) => [c.id, c]));
+      researchColors = new Map(r.collections.map((c) => [c.id, parseColor(c.color)]));
+    }
+    if (researchRowsNow.length === 0) return [];
+    const reg = layersFor(pane.id);
+    const unfiledOn = isLayerVisible(reg, "research");
+    const on = (row: ResearchRow) => {
+      if (row.key === r.selected) return true;
+      const c = row.collectionId === null ? undefined : researchColls.get(row.collectionId);
+      return c ? collectionVisibleOn(reg, c) : unfiledOn;
+    };
+    return researchMarkBoxes(researchRowsNow, researchColors, on, r.selected, pane.box, pane.rect);
+  };
 
   // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
   //
@@ -733,7 +770,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (!hit) return null;
     const { view: v, at } = hit;
     const { fHz, tNs } = pointOn(v.box, v.rect, at.x, at.y);
-    return { pane: v, fHz, tNs, mark: markAt(boxesFor(v), preview!.edgeNs, fHz, tNs) };
+    return { pane: v, fHz, tNs, mark: markAt([...boxesFor(v), ...researchBoxesFor(v)], preview!.edgeNs, fHz, tNs) };
   }
 
   // ---- shift+drag marks out a region (T-458) ----
@@ -842,7 +879,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
               setText(ringEl, "Capture rules (retention bound, oldest IQ) are hidden on this pane — Layers menu to show them");
             }
           }
-          return [...composeOverlays(layersFor(pane.id), overlayFns, pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)];
+          return [
+            ...composeOverlays(layersFor(pane.id), overlayFns, pane, edge),
+            ...markQuads(researchBoxesFor(pane), edge, pane.box, pane.rect),
+            ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
+          ];
         },
         trace: traceFor, tracePx: TRACE_PX,
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
@@ -876,6 +917,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const markLabel = hit?.mark
           ? hit.mark.kind === "signal-box" ? "signal"
             : hit.mark.kind === "measurement-box" ? "measurement"
+              : hit.mark.kind === "research-box" ? "mark"
               : hit.mark.kind === "pending-region" ? null : "selection"
           : null;
         hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}` : "";
@@ -885,6 +927,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!hit?.mark) return;
         if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
         else if (hit.mark.kind === "selection-box") store.set(focusSelection(hit.mark.id));
+        else if (hit.mark.kind === "research-box") {
+          // T-821: a collection mark selects its row in the Research panel (opened to show it).
+          store.set(selectResearch(hit.mark.id));
+          store.set(setResearchOpen(true));
+        }
         // A measurement box has no focus target yet (T-821's collections panel is where a click
         // through to it belongs); a click on one does nothing rather than mis-focusing a selection.
       },
@@ -961,7 +1008,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
           overlays: paintOrder(reg).filter((l) => l.plane === "overlay" && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
             return { id: l.id, label: d.label, hint: d.hint, on: l.visible };
-          }),
+          }).concat(store.get().research.collections.map((c) => ({
+            id: collectionLayer(c.id), label: c.name, hint: c.reserved ? "collection · bookmarks" : "my collection",
+            on: collectionVisibleOn(reg, c),
+          }))),
           viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceBtn.getAttribute("aria-pressed") === "true" }],
         };
       },
@@ -971,16 +1021,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
       },
       toggleOverlay: (id) => {
         const lid = id as LayerId;
-        if (!drawnLayers.has(lid)) return;
-        const on = !isLayerVisible(layersFor(pv.activePane), lid);
+        const coll = lid.startsWith("collection:") ? store.get().research.collections.find((c) => collectionLayer(c.id) === lid) : undefined;
+        if (!drawnLayers.has(lid) && !coll) return;
+        const reg = layersFor(pv.activePane);
+        const on = coll ? !collectionVisibleOn(reg, coll) : !isLayerVisible(reg, lid);
         editLayers(setPaneLayer(pv.activePane, lid, on, seedFor(pv.activePane)), pv.activePane);
         if (lid === "detections") writeShowSignals(on);
       },
       toggleViewWide: (id) => { if (id === "trace") traceBtn.click(); },
       viewChanged: () => { lastMirror = ""; mirror(); renderLive(); },
       toast: (text) => store.set(toast(text)),
+      research: {
+        isOpen: () => store.get().research.open,
+        toggle: () => store.set(setResearchOpen(!store.get().research.open)),
+      },
     };
     const controls = mountMapControls(host);
+    store.select((s) => s.research.open, () => controls.syncResearch());
+    // A collection created, renamed or deleted in the panel re-states an open layers menu.
+    store.select((s) => s.research.collections, () => controls.syncLayers());
     stage.append(controls.el);
     renderFollow = controls.syncFollow;
     renderLayers = controls.syncLayers;
