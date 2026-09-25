@@ -13,11 +13,23 @@
 /* T-882: the toolbar row (`.sf-bar`) is gone. Its controls float over the canvas
    (`chrome/map-controls.ts`); its two readouts float here, bottom-left above the map strip — the
    colour scale stated (T-470: a fixed range that clips is only honest if the range is read) and the
-   hover readout. Status text, so it never takes the pointer from the surface under it. */
-.sf-readout {
+   hover readout. Status text, so it never takes the pointer from the surface under it.
+   T-918: the rows that used to sit UNDER the stage (trace, IQ ring, fog, priors, per-viewport
+   level, orientation note) subtracted ~120 px from the canvas, against docs/23 §10.1 ("no chrome
+   subtracts from it"). They float in the same bottom-left stack now, the readout nearest the map
+   strip, capped below the vertically centred side chip and scrolling past that. Honesty statements:
+   never faded (docs/23 §10.2). */
+.sf-status {
   position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 110px) + 30px); /* clear of the HUD's frequency labels */
-  max-width: min(560px, calc(100% - 80px)); display: flex; flex-direction: column; gap: 2px;
-  padding: 3px 8px; border-radius: 6px; pointer-events: none;
+  max-width: min(560px, calc(100% - 80px)); max-height: max(60px, calc(50% - var(--map-strip, 110px) - 66px));
+  overflow-y: auto; display: flex; flex-direction: column; gap: 2px; pointer-events: none;
+}
+.sf-status > * { pointer-events: auto; flex: none; border: 1px solid var(--line); border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent); }
+.sf-status > :empty { display: none; }
+.sf-status > .sf-readout {
+  display: flex; flex-direction: column; gap: 2px; border: 0;
+  padding: 3px 8px; pointer-events: none;
   background: color-mix(in srgb, var(--panel) 70%, transparent);
   font: 11px var(--mono); color: var(--muted);
 }

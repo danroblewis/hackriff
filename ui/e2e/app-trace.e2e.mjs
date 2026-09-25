@@ -145,7 +145,9 @@ const SNAPSHOT = `(() => {
     headline: row ? row.children[1].textContent : "",
     // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
     // the words** — see [[heldObservation]] for what a stale one costs.
-    rect: box ? { x: box.x, y: box.y, w: box.width, h: box.height } : null,
+    // T-918: the canvas is full-bleed; the pane (trace strip on top) starts below the inset it states.
+    rect: box ? { x: box.x, y: box.y + (Number(canvas.dataset.insetTop) || 0), w: box.width,
+      h: box.height - (Number(canvas.dataset.insetTop) || 0) - (Number(canvas.dataset.insetBottom) || 0) } : null,
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
     counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
