@@ -18832,7 +18832,8 @@ tasks:
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
-    status: todo
+    status: in-progress
+    branch: task-t576
     priority: high
     parallel_group: M-E
     model: opus
@@ -25999,7 +26000,7 @@ tasks:
   - id: T-869
     milestone: MAUTO
     title: "LP-5: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate"
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-868
@@ -26015,7 +26016,12 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      2026-09-25 coordinator, explorer finding for the chooser: at 162.4008 MHz (NOAA WX, SNR ~5 dB) Listen was refused 4422 no-analog-mode ('no occupied band: C13 OBW99 abstained (LowSnr) and no dominant carrier line'; FillsBand/LowSnr for drag regions). The refusal is honest, but for a weak NFM carrier the chooser could demodulate with the squelch closed rather than refuse outright - decide it here with the chooser (evidence: ~/.hackriff-ops/explorer/journal-20260925.md, NOAA section).
+
+      2026-09-25 coordinator, explorer APRS/pager/ISM: Listen probes once at open and refuses if nothing is present at that instant (144.37-144.41 refused LowSnr) - a user cannot open a squelched listener on a packet channel and wait for the next burst; APRS, pagers and ISM all need that. Decide with the chooser: open squelched on a burst channel vs refuse.
     core_interface: true
+    branch: task-t869
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
@@ -26563,8 +26569,7 @@ tasks:
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
-    status: in-progress
-    branch: task-t891
+    status: done
     priority: normal
     deps:
     - T-277
@@ -26589,6 +26594,17 @@ tasks:
     notes: |
       FOUND BY T-277 Opus review 2026-09-24 (split).
     core_interface: true
+    branch: task-t891
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:18).
+      T-277's VLF/LF analyses now run end to end through the device interface, but only with the accessory attached. hk-core::source::accessory adds AccessorySource: any AudioInput behind Source/SourceControl, delivering real audio at baseband (im=0). It handles rate changes (RATE_CHANGE), start/stop, timestamps that follow the sample counter, and xruns as exact GAPs counted in SourceStats. tune answers Unsupported because the receiver is fixed at baseband. Provenance marks the accessory in two places, device_id `vlf-receiver:<device>` and antenna_port `accessory:vlf-receiver`, and AccessoryKind::from_provenance requires both. AccessoryMockDriver replays rf32_le/ri16_le SigMF files (recorded or synthetic) with overrun injection, and passes every conformance check that applies to a device that cannot tune. hk-pipeline::vlf (VlfAnalyzer/VlfService/analyze_source) refuses any stream that is not accessory-fed and finds carriers blind, with no transmitter list. It reports SPACE-001 amplitude steps, PROP-019 phase steps with drift removed (plus the reflection-height change when path geometry is given, and phase_disciplined from the clock), and SPACE-041 sferics as Detections flagged impulsive and carrying the accessory's provenance_ref. History is bounded, and PipelineHandle owns and stops the services. GET /api/vlf is documented in docs/api.md and covered by api_contract.rs. `hk serve --device vlf-mock:<meta>` attaches the mock; a live `vlf:` receiver is refused because this build has no audio backend. The detect_sferics floor fix takes the median over non-zero samples with a minimum threshold, proved with a red run. All three use cases stay needs-accessory.
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(vlf_accessory)' -> exit 0 (5 passed: blind SPACE-001/SPACE-041/PROP-019 through the mock accessory, overrun mid-stream, live service, free-running clock, base device refused); cargo nextest run -p hk-core -E 'binary(accessory_source)' -> exit 0 (6 passed incl. device conformance checks that apply); just test-crate hk-dsp -> exit 0 (187 passed (incl. 9 vlf)); cargo nextest run -p hk-dsp -E 'test(space_041_muted_soundcard_does_not_make_every_sample_a_sferic)' (old zero-median threshold re-injected) -> exit 100 (fails on the T-277 behaviour; passes with the floor (hk-dsp run above)); cargo nextest run -p hk-api -E 'test(/vlf/)' -> exit 0 (1 passed); cargo nextest run -p hk-cli -E 'binary(api_contract) & (test(/vlf/) | test(every_route_in_the_route_table_is_documented))' -> exit 0 (2 passed); just test-crate hk-api -> exit 100 (296/297; the failure is ondemand::silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay, which also fails alone on an untouched worktree at main 333d8284 (scratch worktree, 2/2 runs, '10 records')); cargo nextest run -p hk-core -E 'kind(lib) | binary(accessory_source) | binary(device_conformance)' -> exit 100 (118/119; the failure is source::hackrf::tests::a_slow_reader_gets_counted_drops_and_an_exact_gap ('the pool overflowed'), which also fails alone at main 333d8284 (2/2 runs)); cargo nextest run -p hk-cli -E 'kind(lib) | binary(two_device_e2e)' -> exit 100 (25/26 (incl. new accessory-spec unit test); the failure is pipeline::tests::daemon_drives_the_scheduler_and_serves_token_gated_status ('scheduler: 9 steps', needs >10), which also fails alone at main 333d8284 with 9 steps)
+      precheck exit 0
+      Commits: 8b826641
+      Observed, not chased: hk-cli pipeline::tests::daemon_drives_the_scheduler_and_serves_token_gated_status fails alone on main 333d8284: summary 'scheduler: 9 steps' against assert steps > 10 (crates/hk-cli/src/pipeline.rs ~2517). A paced 3 s replay's step count is wall-clock bound, so this is a timing-shaped assertion. | hk-api tests/ondemand.rs:365 silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails alone on main 333d8284 ('10 records'; '13 records' on this branch). Load average at the time was ~14-19. | hk-core source/hackrf.rs:1412 a_slow_reader_gets_counted_drops_and_an_exact_gap fails alone on main 333d8284 ('the pool overflowed'). | No platform audio backend (CoreAudio/ALSA, e.g. cpal) exists, so a live `vlf:<device>` soundcard receiver is refused with that reason. Plugging one in is an AudioInput implementation, plus the hardware (SPACE-001/041/PROP-019 stay test_tier field). | Carriers are discovered once, over the first 10 s (and again after a rate change). A transmitter that switches on later is not tracked. Periodic re-discovery would be a follow-up. | VLF sferic Detections live only in the /api/vlf report, not in the run's inventory DB or on the canvas (the canvas covers 1 MHz-6 GHz). Surfacing sub-1 MHz accessory data on the canvas is a separate UI decision. | The C01 capability card does not yet mention the accessory source.
+      Use cases: SPACE-001, SPACE-041, PROP-019
+      Resources: 329 CPU-s, peak 2.6 GB
+    commit: 6f67a59b
   - id: T-892
     milestone: M2-hardening
     title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
@@ -27457,7 +27473,7 @@ tasks:
   - id: T-924
     milestone: M2-hardening
     title: "docs/reference/sf-targets.md: cited San Francisco target list with expected modulation and what 'decoded' means, for the explorer"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: DOCS-REF
@@ -27470,10 +27486,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): docs only; HAND BACK.
     notes: |
       FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+
+      Review FAIL: NOAA SAME tones wrong (said 1050 Hz mark/2083 Hz space; correct is mark 2083.3 Hz / space 1562.5 Hz per 47 CFR §11.31, 1050 Hz is the separate Warning Alarm Tone). Fixed the table cell + added §11.31 citation; also fixed a malformed AIS table separator row (4 cols vs 5-col header) and loosened 'CQPSK (P25 Phase 2)' to H-DQPSK/CQPSK-is-Phase-1 per the reviewer's nits. Commit 85389315.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:11).
+      Gate found an uncommitted file: the docs/tasks.yaml note appended by `just task note T-924` during the prior review-fix attempt (recording the reviewer's SAME-tone finding and the fix) had not been committed. Committed it now (66a32bc8) - it is legitimate ticket work (the note the previous handback instructions explicitly required), not stray state, so nothing was discarded. Working tree is clean, main (9f502902...) remains an ancestor of task-t924, no re-merge needed. Docs-only change overall; no tests apply.
+      precheck exit 0
+      Commits: 4ea24538, 85389315, 66a32bc8
+      Observed, not chased: Could not read ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md from this worktree (not present/accessible) - relied on the ticket's acceptance text, which quotes it, for the design requirements.
+      Resources: 3 CPU-s, peak 0.3 GB
+    commit: 1178474e
   - id: T-925
     milestone: M2-hardening
     title: "Dashboard: explorer row (target, phase, journal tail) + radio-owner tile (holder, until, staging live/replay)"
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-922
@@ -27487,11 +27513,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:11).
+      Added a RADIO-OWNER tile (holder, until, staging live/replay) and an EXPLORER row (current target, phase, journal tail) to the ops dashboard (ops/monitor.py), reading $HACKRIFF_OPS/radio-lock via hkpy.radio (T-922) and the explorer journal/wrap-up marker per .claude/agents/explorer.md (T-923). New radio_status()/explorer_status() functions feed data.json alongside stage_status(); the existing client-side tick() renders the two new cards, following the Staging server card's log-tail pattern. New test file py/tests/test_monitor_radio_explorer.py covers free/held/stale radio-lock states and no-window/running/wrap-up/summarized/ended explorer phases. Both are read-only - no explorer/radio code was touched, only the dashboard that displays their state.
+      Tests: uv run --locked --project py python -m pytest py/tests/test_monitor_radio_explorer.py py/tests/test_monitor_layout.py -q -> exit 0 (13 passed); cd py && uv run --locked ruff check . -> exit 0 (All checks passed); for f in ops/*.py; do python3 -m py_compile "$f" || exit 1; done -> exit 0 (ops/monitor.py compiles)
+      precheck exit 0
+      Commits: dd35f3b8
+      Observed, not chased: py/tests/test_monitor_flow.py::test_heavy_builds_run_in_a_child_and_errors_surface fails on unmodified main too (FileNotFoundError: /Users/daniellewis/hackriff, a hardcoded macOS path) - reproduces identically before my change (verified via git stash), so not mine; pre-existing environment mismatch on this Linux worktree, not scoped to T-925.
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: 0fc5503b
   - id: T-926
     milestone: MAUTO
     title: "P1: RDS decodes across the whole FM band unprompted - measure the live 88-108 MHz ratio (present / pilot+RDS / PI-PS decoded), fix detection->WFM->RDS across ALL detections to >= 90 %, per-station capture set as the guard"
     status: in-progress
-    branch: task-t926
     priority: high
     deps:
     - T-922
@@ -27510,11 +27544,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 P1 + supervisor 02:44.
+
+      2026-09-25 coordinator, from the explorer's first window (journal-20260925.md): STEP (1) IS MEASURED - live 88-108 MHz tonight, this antenna: 19 stations present, 6 pilot-locked, 2 gave RDS, PI decoded UNPROMPTED for 1 (101.3, PI 1694 - PS never committed unprompted), prompted PI for 2 (101.3, 98.9 A4FF); every other station rds57.quality 0.006-0.07. Only the strongest station got the wfm chain unprompted; station-shaped detections sit family=null, resolution not-searched - auto-attaching the pilot/RDS probe to every WFM-shaped candidate is THIS ticket's core. So T-926 no longer needs live air to start: work on the fixtures T-935 and make T-936's blind tests green. Split out as their own tickets: T-937 (FM fragmented into 349 narrow candidates at 2.4 Msps - prerequisite for one chain per station), T-938 (centre refinement from pilot/discriminator), T-945 (closed-loop gain: overload at every clip; reducing gain made RDS worse - front-end limited beyond the two strongest stations at this location), T-940 (on-air stations read ended).
     core_interface: true
+    branch: task-t926
   - id: T-927
     milestone: MMAP
     title: "Density layer follow-ups: a hung GET never clears (no timeout), joined-request edge stamp, stale late-batch addrs, NaN-edge guard, poll-period constant (T-810 re-review)"
-    status: in-progress
+    status: done
     branch: task-t927
     priority: normal
     deps:
@@ -27534,10 +27571,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-810 Opus re-review 2026-09-25.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:49).
+      All five density follow-ups from T-810's re-review, then re-applied on top of gated main after a conflict: main had landed a50166bb (T-810 review fix 3) after this branch was cut, which keys DensityFetches copies PER PANE, never seals a tile at its end (counts are back-dated to an event's start) and adds sharedDensityReader to share one in-flight GET per address. That design is kept whole; the follow-ups sit on it. (1) The read now has a deadline: ui/src/app/centre/density-poll.ts wraps the shared reader's get in withDeadline (DENSITY_REQUEST_TIMEOUT_MS = 10 s) which aborts the request AND rejects the wait, so a hung GET releases the pane's batch marker and the address returns to the retry backoff instead of stalling every pane joining that address through the shared reader; ControlClient.call/get take an optional caller-owned signal (no default deadline). (2) sharedDensityReader answers DensityAnswer { tile, edgeAtFetchNs } - the edge the request was ISSUED at - and the poll records that, so a pane joining a request in flight no longer stamps its copy with its own later tick, which read as 'no rows arrived since' and skipped the next refresh. (3) A batch completion writes every pane's tiles from the addresses they ask for NOW, so a pan or layer-off no longer sees the old set return for a second. (4) DensityFetches.succeeded stores a non-finite edge as -Infinity: against main's rule (edgeAtFetchNs < edgeNs) a NaN edge was an accidental seal - the very thing review fix 3 removed. (5) DENSITY_POLL_MS is the one spelling of the period, imported by the host's startPoll. The host orchestration moved out of surface.ts's wiring into density-poll.ts so each rule is asserted directly instead of by regex over a 1400-line file. Thin client throughout: no signal logic, no device route, pacing still counted in poll ticks.
+      Tests: just test-ui (after the merge) -> exit 0 (85/85 test files passed (esbuild build + tsc typecheck + node tests); surface-density 26 pass, including all of main's per-pane/never-sealed/back-dated/shared-request cases); npx tsx --test test/surface-density.test.ts (deadline race removed, merged code) -> exit 1 (RED PROOF fix 1: 'a read that never settles is abandoned at its deadline' fails without the deadline); npx tsx --test test/surface-density.test.ts (joining tick's edge stamped, merged code) -> exit 1 (RED PROOF fix 2: recording edgeNs of the joining tick instead of DensityAnswer.edgeAtFetchNs leaves the joining pane's copy never refreshed); npx tsx --test test/surface-density.test.ts (write-back of the SENT addrs, merged code) -> exit 1 (RED PROOF fix 3: writing the addresses the batch was sent with restores the old set after a layer-off); npx tsx --test test/surface-density.test.ts (NaN guard removed, merged code) -> exit 1 (RED PROOF fix 4: storing NaN as edgeAtFetchNs seals the address against main's 'rows arrived since' test); cargo fmt --all --check -> exit 0 (fmt clean; the branch's own diff contains no Rust (the merge brings main's gated crates changes unmodified))
+      precheck exit 0
+      Commits: 21c81378, 85214ef1
+      Observed, not chased: The conflict was purely a same-file collision with T-810's later review fix (a50166bb); nothing of main's was reverted - its per-pane copies, its no-seal rule and its shared reader are all still asserted by their own tests, which pass unchanged except for the reader's new answer shape. | ui/test/surface-priors.test.ts pinned the density poll's literal period ('..., 1000)') in an assertion about priors - a second file's test broke on a density-only change. Updated to the constant here; the wider pattern (host-source regex assertions spread across per-layer test files) is why the host logic moved into its own module.
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: ab76e0d9
   - id: T-928
     milestone: MAUTO
     title: Confirm-gate init-cancel guard misses spans with start_bit > 0 (must precede template seeding / floor 8); stale floor-8 doc text; CheckTally preallocates ~790 KB per check block (T-575 review)
-    status: todo
+    status: in-progress
+    branch: task-t928
     priority: high
     deps:
     - T-575
@@ -27575,8 +27622,7 @@ tasks:
   - id: T-930
     milestone: MAUTO
     title: "Analyze trace panel follow-ups: the trace poll never stops for failed/queued-cancelled jobs (final only when job.trace is set), real-shape fixture, filter-labelled error, doc tidy (T-570 re-review)"
-    status: in-progress
-    branch: task-t930
+    status: done
     priority: normal
     deps:
     - T-570
@@ -27594,10 +27640,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-570 Opus re-review 2026-09-25.
+    branch: task-t930
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:08).
+      Fixed the never-ending trace poll at the source: GET /api/analyze/{id}/trace now serves `final: true` for a job that ENDED without ever producing a trace (a failure - every job on a build with no evaluator - or a cancel of a job still queued). `final` is `job.trace.is_some() || ended`, where `ended` is 'off the running slot and off the queue', the same test `subscribe` uses, never a terminal `state`: a cancelled job whose worker is still running stays `final:false` because its partial trace may yet arrive. docs/api.md and crates/hk-cli/tests/api_contract.rs updated together (T-079). The client's tracePollDone is unchanged and now terminates for those jobs; its doc comments (including the mountTracePanel block the review flagged) say so. Item 2: the mount tests gain the real server shape - final:false with empty nodes while the job runs, final:true once it ended - pinning the headline path and the poll stop. Item 3: the results now carry the filter they were FETCHED with (new pure helper `filterLabel`, rendered as `showing: ...` above the list), so the previous filter's rows deliberately kept under a failed fetch's error line no longer read as the failed filter's answer. Item 4: the stray doc block above nodesElidedNote is back on emptyTraceText. Thin client throughout: `final` and every sentence are served fields.
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(analyze_jobs)' -> exit 0 (15 passed (new final assertions: failed job final:true, queued-cancel final:true, running job final:false, handed-back cancel final:true)); cargo nextest run -p hk-pipeline -E 'binary(analyze_jobs)' with the old `final: job.trace.is_some()` re-injected -> exit 100 (13 passed, 2 FAILED - without_an_evaluator_... and cancel_is_immediate_and_final_... - the deliberate red proof on the old behaviour; src restored afterwards); cargo nextest run -p hk-cli -E 'binary(api_contract) and test(analyze_jobs_run_over_the_ring)' -> exit 0 (1 passed - the contract now asserts final:true for the failed job); just test-ui -> exit 0 (83/83 test files passed, tsc clean; 4 new T-930 tests green); just precheck hk-pipeline hk-cli -> exit 0 (fmt clean, clippy clean)
+      precheck exit 0
+      Commits: 38fb8fb8
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: d23f43f0
   - id: T-931
     milestone: MMAP
     title: "RC red: floating controls / left chip covered or off-screen (app-phone, app-dismiss, app-side-chip) at main 92d0f6f1"
-    status: in-progress
+    status: cancelled
     priority: high
     deps: []
     parallel_group: MAP-CHROME
@@ -27616,6 +27671,7 @@ tasks:
     notes: |
       FOUND BY rc-20260925.
     branch: task-rcfix-chrome
+    cancelled_reason: "Fixed on main by T-919 (d0e496ce, landed 37bf55ff) before this ticket's fix could land: T-919 removed T-824's phone.css paddings (the root cause - they undid T-918's full-bleed canvas and lifted the status box over the side chip) and compacted the status box. Verified on task-rcfix-chrome merged with main (61069930, empty diff vs main): app-phone, app-dismiss, app-side-chip, app-surface, app-sheet each exit 0 alone; just test-ui 83/83."
   - id: T-932
     milestone: MLIVE
     title: "RC red: surface-nav - the tile route refuses a request while nothing moves the view and the client cap never adapts, at main 92d0f6f1"
@@ -27634,6 +27690,455 @@ tasks:
     notes: |
       FOUND BY rc-20260925.
     branch: task-rcfix-surface-nav
+    result: |
+      DONE 2026-09-25 on task-rcfix-surface-nav (9aab332e, queued): a LOAD FLAKE, not a product defect - surface-nav passed alone 3/3 at 92d0f6f1 (load 25-32). The steady window opened when the gestures' requests were answered on the wire, but an aborted read is 'answered' (canceled) while /api/tiles still builds it and holds the slot; the refusal ~4 s in was over the page's own leftover reads (cap at AIMD floor 1, not a cap that failed to react). Fix (spec only, no assertion loosened): after the wire drain, poll a serial probe until the route reports it holds no slot but the probe's (cost.in_flight - cost.in_flight_held == 0); a slot held > 31.2 s while the page is idle fails as the T-454 leak with the server's numbers. Red proof with a fault-injected hk: the RC case red 3/3 on the old spec, green 3/3 on the new; a never-released slot green on the old, red on the new. Spec 4/4 alone, just test-ui 81/81, tsc clean. Product follow-up: T-959 (client uses in_flight_held, not an average charge).
+  - id: T-933
+    milestone: MMAP
+    title: Sheet peek strip covers the lower half of the lifted minimap at every width
+    status: done
+    branch: task-t933
+    priority: P2
+    deps: []
+    parallel_group: UI-CHROME
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND BY rc-20260925.
+      FOUND 2026-09-25 by the T-931 RC-fix worker (rects measured on main 37bf55ff + T-919): the sheet's peek strip covers the lower half of the lifted minimap at EVERY width. The minimap sits 70 px above the bottom (y 680-790 at 860 px tall); the peek strip is at y 734-790 - at 1440 px it spans x 856-1376, at 420 px x 8-356 (nearly the whole minimap). The minimap is the where-am-I overview (docs/16 §8) and its capture-window segments are honesty marks; half of it is hidden whenever the sheet peeks.
+      DELIVER: lay out the minimap and the sheet peek strip so neither covers the other at 1440/1000/420 px (e.g. lift the minimap above the peek strip when the sheet spans that x range, or dock the peek beside it) consistent with docs/23 §10.6 P1/P3 (minimal overlay, fixed positions); extend the app-phone / app-dismiss floating-control assertions (or add one) so an overlapping peek strip and minimap goes red - prove red on current main.
+      WHAT THE USER WILL SEE ON STAGING: the whole minimap is visible whether the sheet is peeking or not, at any window width.
+      TESTING PROTOCOL: targeted tests only (just test-ui; the touched specs alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
+
+      Review (fix attempt 1) FAILED: sheet clearance was measured from the peek-state sheet's LIVE height (gated on dataset.snap==='peek'), so the minimap (and every pane above it) followed the sheet up/down during a drag toward full and during the .28s open/close transition — violating docs/23 P3 fixed positions. Fixed by anchoring off the sheet's fixed BOTTOM edge (sheet.css pins it; only the top moves with height) minus the constant PEEK_PX, applied unconditionally (no longer needs dataset.snap). Extended app-sheet.e2e.mjs's existing drag test with a mid-drag insetBottom sample; proved red with the defect re-injected (134 -> 314 mid-drag), green with the fix. app-dismiss/app-phone/app-sheet all re-verified after merging main@7a9fa8ab. app-phone.e2e.mjs's idle-fade subtest is an intermittent flake reproduced identically on unmodified main (7a9fa8ab) run alone — not caused by this change.
+
+      Merge-gate fail (attempt 2): 1 uncommitted file (docs/tasks.yaml) left from an earlier 'just task note' call, no code change needed. Committed it (495d1528) and re-verified: typecheck clean, npm test 85/85, e2e app-dismiss + app-sheet green after a rebuild. origin/main still at the cited 7a9fa8ab, already merged into this branch.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 05:09).
+      Merge gate fail (attempt 2) was not a test failure: it was 1 uncommitted file, docs/tasks.yaml, left in the worktree from an earlier `just task note T-933` call (the sanctioned board-note tool, which edits the file directly rather than through a commit) that the previous hand-back forgot to commit. No code change was needed - the ui/src/app/centre/surface.ts fix (anchored to the sheet's fixed bottom edge, not its live height/top) and the app-dismiss.e2e.mjs / app-sheet.e2e.mjs assertions from the prior two passes are unchanged. Committed the pending note, re-ran the full targeted suite (typecheck, unit tests, and the two touched e2e specs after a rebuild) to confirm nothing regressed, and the working tree is now clean.
+      Tests: npm run typecheck (ui/) -> exit 0 (tsc --noEmit clean); npm test (ui/, 85 files) -> exit 0 (85/85 test files passed); HK_BIN=target/debug/hk HK_E2E_PORT=9221 node e2e/run.mjs app-dismiss app-sheet -> exit 0 (2/2 files passed: app-dismiss 3/3 subtests (minimap y 616-726 vs sheet peek y 734-790, disjoint at 1440/1000/420 px); app-sheet 5/5 subtests (mid-drag minimap clearance unchanged: 'before 134, mid-drag [134]'))
+      precheck exit None
+      Commits: 0f905e18, 4ebe821d, 88c7876f, a4441745, 495d1528, 79d543ef
+      Observed, not chased: app-surface.e2e.mjs's 'T-806: the layers menu has two axes...' and 'T-807: the coverage fog is a per-pane layer...' subtests fail on unmodified main too (isolated in the first review pass) - a real pre-existing red the coordinator should ticket separately. | app-phone.e2e.mjs's idle-fade/sheet-close step is intermittently flaky (~1/4 runs) even on unmodified main@7a9fa8ab run alone with no other load on the box (isolated in the second review pass) - worth a deflake pass, but not this ticket's scope and not caused by this change.
+      Resources: 4 CPU-s, peak 0.3 GB
+    commit: 952d3847
+  - id: T-934
+    milestone: M2-hardening
+    title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
+    status: in-progress
+    branch: task-t934
+    priority: P2
+    deps: []
+    parallel_group: DEFLAKE-WC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND BY T-891.
+      THREE WALL-CLOCK TESTS keep failing ALONE under load, "observed, not chased" by at least 5 workers (T-891 on 2026-09-25 at load ~28: all three, 2/2 runs each at main 333d8284; also earlier T-579/T-581 and two hk-core workers' results on the board). None has an owner - this ticket is it:
+      1. hk-api tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay: `assert!(records > 20)` after 1.5 s of wall clock (sees 9-11 records under load; ping 50 ms, peer timeout 400 ms).
+      2. hk-core src/source/hackrf.rs tests::a_slow_reader_gets_counted_drops_and_an_exact_gap: sleeps 200 ms and assumes the fake producer overflowed a 2-buffer pool ('the pool overflowed').
+      3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
+      DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
+      TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
+  - id: T-935
+    milestone: MAUTO
+    title: "Explorer FM captures into fixtures/ (LFS) with hidden truth: 101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot"
+    status: done
+    commit: "810bcc01"
+    priority: P1
+    deps: []
+    parallel_group: FIXTURE-EXPLORER
+    use_cases:
+    - SIGNAL-062
+    needs: none
+    model: sonnet
+    effort: medium
+    dispatch: manual
+    notes: |
+      FOUND 2026-09-25 by the explorer (first window). Two live captures clipped through POST /api/iqbuffer/clip while the app's RDS was decoding, each with hidden truth:
+      - ~/.hackriff-ops/explorer/captures/20260925/fm-101p3-pi1694.sigmf-{meta,data} + .truth.json - 2.4 Msps x 5 s at 100.9 MHz, 24 MB; truth: 101.3 MHz WFM, pilot, RDS PI 1694, RT "Star 101.3 - ..." (PS scrolling/dynamic).
+      - ~/.hackriff-ops/explorer/captures/20260925/fm-98p9-piA4FF.sigmf-{meta,data} + .truth.json - 2.4 Msps x 5 s at 98.5 MHz; truth: 98.9 MHz WFM + RDS PI A4FF, and 98.1 MHz WFM with pilot, no PI (second emission).
+      DELIVER: move both into fixtures/ under Git LFS following fixtures/README.md (e.g. fixtures/hackrf/explorer-2026-09-25/): hackriff:truth annotations written with py/fixtures/annotate.py so the truth is HIDDEN from the system under test (the .sigmf-meta the mock SDR replays carries no truth the pipeline can read - check how the existing captures hide it and match that), manifest.json entries (truth_summary, purpose, lfs, datetime, the capture settings: LNA 32 / VGA 30 / amp on, overload flagged, antenna unknown/stock, HackRF serial from the journal), SIGNAL-062. Cross-check the truth PIs with py/fixtures/rds_ref.py (the independent oracle) and record the oracle's PI/PS per station. Keep SigMF metadata complete (every capture's settings recorded).
+      MAC ONLY: the captures live in ~/.hackriff-ops on the Mac Studio - not on node2.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`. (py/tests/test_fixture_tooling.py + just test-py for the manifest.)
+  - id: T-936
+    milestone: MAUTO
+    title: "All captured signals decode: failing-first blind FM/RDS acceptance tests through the mock SDR on the explorer captures (T-545 pattern)"
+    status: todo
+    priority: P1
+    deps:
+    - T-935
+    parallel_group: FIXTURE-EXPLORER-TESTS
+    use_cases:
+    - SIGNAL-062
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      THE FIRST MEMBERS OF THE "ALL CAPTURED SIGNALS DECODE" SET (user 2026-09-25): every signal the explorer captures becomes a failing-first blind acceptance test, T-545's pattern (tests/e2e/tests/acceptance_mauto.rs + acceptance/signal_087.rs): through the MOCK SDR replaying the fixture (never files into the pipeline), BLIND, no frequency/modulation/protocol passed in. Fixtures: the two explorer FM captures (the fixture ticket this depends on).
+      Per truth emission, assert: (1) DETECTED as ONE time-frequency region per station (centre within tolerance, bandwidth ~150-200 kHz, time extent; not the 13 narrow fragments the live app produced); (2) classified WFM with a pilot, with parameters estimated; (3) the WFM+RDS chain AUTO-ATTACHED without a prompt; (4) DECODED: PI 1694 (101.3) and PI A4FF (98.9) and PS/RT where the hidden truth has them, 98.1 reported as pilot-without-PI - checked against the hidden truth; (5) a sensible explanation (FM broadcast allocation) ranks in the top suggestions without identifying. Tests that fail today are red for the RIGHT reason (state per assertion what a passing run proves; a red from an empty fixture or a broken harness teaches nothing), registered the way T-545's were as a milestone exit target (acceptance-mauto / e2e_milestones - never in the per-merge gate), each naming the ticket that must turn it green (T-926 for auto-attach/decode, the FM-fragmentation ticket for (1), the centre-refinement ticket for the offset).
+      Name the set so later captures join it (one test per captured signal, same shape): "all captured signals decode".
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-937
+    milestone: MAUTO
+    title: Broadcast FM fragments into many narrow candidates in the 2.4 Msps sweep (349 for ~19 stations)
+    status: in-progress
+    branch: task-t937
+    priority: P1
+    deps: []
+    parallel_group: DETECT-MERGE
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (live FM band 88-108 MHz, 2.4 Msps fine sweep): broadcast FM is FRAGMENTED into many narrow candidates - 349 candidates for ~19 stations; e.g. 13 candidates of 9-47 kHz across 98.74-98.97 MHz, none WFM-classified, so no WFM/RDS chain ever attaches. The same stations at 20 Msps come out as single 123-200 kHz detections, so the merge works there but not in the fine sweep. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: one region per station in the 2.4 Msps sweep: find why the near-duplicate merge / OBW grouping splits a WFM emission at the fine-sweep resolution (FFT bin width, CFAR guard, per-segment merge across sweep steps?) and fix it at the source; overlap-is-an-error (CLAUDE.md) should already force re-analysis of 13 abutting boxes - say why it did not. Test through the mock SDR on the explorer FM fixtures (or a synthetic multi-station WFM scene at the sweep's resolution): one detection per station, red on current code.
+      WHAT THE USER WILL SEE ON STAGING: one box per FM station in a 2.4 MHz sweep of 88-108.
+      core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer ISM entry: the opposite merge error too - a 4.81 MHz-wide candidate at 914.8385 MHz (8 Msps at 915) is almost certainly several bursts plus DC merged. Fix both directions: the overlap/re-analysis invariant should split it.
+  - id: T-938
+    milestone: MAUTO
+    title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
+    status: in-progress
+    branch: task-t938
+    priority: P2
+    deps: []
+    parallel_group: RECIPE-RDS
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer: detection centres are biased and the RDS recipe does not refine them - 98.925 MHz where the recipe's fm.offset_hz says the carrier is at -24.4 kHz (~98.900); 98.088 -> +10.0 kHz. The rds recipe has refine: null. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: closed-loop centre refinement for the WFM/RDS recipe from the processed output (pilot phase/frequency and discriminator DC offset - CLAUDE.md "tune from the processed output"), so an attached chain converges on the carrier and the refined centre flows back to the emitter; say why the detection centre is biased at 2.4 Msps (asymmetric OBW edges?). Test on the explorer FM fixtures or a synthetic WFM+RDS offset by 25 kHz: refined centre within 1 kHz and RDS group rate recovers; red on current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-939
+    milestone: MLIVE
+    title: At 20 Msps the detect reader loses 3.1 G samples (39 overruns/4 min) and the live waterfall rows go empty
+    status: in-progress
+    branch: task-t939
+    priority: P1
+    deps: []
+    parallel_group: PIPE-DETECT-RT
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer at 20 Msps (live HackRF): the detect reader cannot keep up - readers.detect.lost_samples 3.1 G with 39 overruns in ~4 min, source.source_dropped 54 M, and the live waterfall shows mostly empty rows (shots 0402/0404). The history reader lost 0. A user choosing the 20 MHz span gets a broken live view and holes in detection. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: measure (T-453: measure, don't assume) where the detect reader spends its time at 20 Msps on the release build (profile per stage), and fix so detection keeps up at 20 Msps on the Mac (decimate/segment, bound per-frame work, or shed detection frames honestly with a coverage mark - never silently); the waterfall rows must never go empty because detection is behind (live is never gated on another reader). Also say why source_dropped is non-zero when only the detect reader lags (does a slow reader back-pressure the source?). Test: a throughput bound goes in the timing tier (just timing, docs/10 §3.6); a deterministic test in the gate that a lagging detect reader never starves the waterfall/history readers.
+      WHAT THE USER WILL SEE ON STAGING: at 20 MHz span the waterfall is solid and detection shows no loss counters climbing.
+      Real-time path. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-940
+    milestone: M2-hardening
+    title: "On-air FM stations (incl. Confirmed 101.3 while decoding) read liveness: ended; lists show Nothing on the air"
+    status: in-progress
+    branch: task-t940
+    priority: P1
+    deps: []
+    parallel_group: INV-LIVENESS
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (live FM band): continuously transmitting stations read ENDED - /api/inventory?t0=now-60&t1=now listed 18 FM entries, ALL liveness: ended, including Confirmed 101.3 while it was on air and decoding. The Signal lists panel showed "Confirmed 0" / "Nothing on the air in this window" (shots 0402/0404). This breaks the CLAUDE.md invariant (a signal is ongoing, end=null, until an end is affirmatively detected; the end is revocable). T-591 (events vs inventory liveness) landed earlier; this is a different or returned defect. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: root-cause why an on-air station's track gets an end (sweep dwell leaving the station's band? a quiet-gap timer counting un-observed time as quiet? the retune/segment change closing tracks?) - an emitter the receiver is not currently observing is NOT ended (unobserved is not quiet: Coverage::Unobserved is not quiet); a detected end must reopen when the signal is seen again. Test through the mock SDR: a continuous carrier under sweeping/retuning stays ongoing, and an in-window list query returns it live; red on current code.
+      WHAT THE USER WILL SEE ON STAGING: an FM station that is on air is listed (Confirmed or Candidate) and ongoing, never ended.
+      core_interface (inventory model, ADR-0017/0019). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-941
+    milestone: M2-hardening
+    title: "Class-boundary retune leaves the run with no inventory: detect/control stragglers lock the old segment's inventory"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: PIPE-REPLUMB
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (SEVERE): a class-boundary retune (100.9 -> 162.2 MHz, unrestricted -> metadata-only, re-plumb to segment 6) left the run with NO INVENTORY. hk-serve.log: "hk-detect did not stop within 8s of its segment ending ... hk-control did not stop within 8s ... segment state still held 5 s after its threads ended (26 holders); salvaging it" and "the old segment's inventory is locked by its straggler; continuing without inventory". Afterwards detect.detections_written kept rising (12 487 -> 15 619 in 20 s) while tracks_opened froze at 2163 and /api/inventory answered total 0: detection runs and writes rows but tracks, candidates and the inventory never update, the UI shows "Nothing on the air" everywhere, and only a restart fixes it. Log kept as ~/.hackriff-ops/explorer/hk-serve-run1.log. Related: T-917 (survey thread outlived its segment by 8 s - a different straggler). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: (1) why hk-detect / hk-control outlive their segment by 8 s on this path (what blocks their stop?) - fix so they stop promptly; (2) the re-plumb must hand the inventory to the new segment (or recover it) - never "continue without inventory"; a straggler holding the lock must not detach the live run's inventory for ever; if detection is ever detached it must be reported (status + UI), never silent. Test through the mock SDR: a class-boundary retune while detect is busy keeps tracks opening and /api/inventory populated; red on current code (reproduce the straggler deterministically - no wall-clock choice of what to assert).
+      WHAT THE USER WILL SEE ON STAGING: after any retune the signal lists keep filling; no restart needed.
+      core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-942
+    milestone: M2-hardening
+    title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: STORE-HISTORY
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer: after a restart on the same --data-dir, /api/status history reads frames_ingested 0, frames_late 2024 - every spectrum-history frame is rejected as late, /api/history has observed_cells 0 for the live window, and history is silently not recorded for the new run (view tiles still work: view_frames 5050). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: root-cause the late classification after a restart (a persisted watermark/last-sealed time from the previous run compared against the new run's capture clock? a clock-base mismatch?) and fix so a restarted run on an existing data dir records history; any frame genuinely rejected is counted AND surfaced, never a silent 100 % loss. Test: restart-on-existing-dir through the mock SDR ingests frames; red on current code.
+      WHAT THE USER WILL SEE ON STAGING: restarting the app keeps adding to history.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer APRS entry (likely the same time-base root cause - one owner): GET /api/analysis/strongest answered found:false for every range with window t0 1790337595..t1 1790337600, 34 min AHEAD of the wall clock (date +%s 1790335567); /api/navigation time.latest_s is also 1790337600, an exact hour boundary; the pager surface preview said 'newest recorded 5:00:00 AM' at 04:32 and the pane was 'drawn to 689.6 s short of the top', hiding all data. Include: the latest-time / strongest window never sits in the future, and the pane draws live rows.
+  - id: T-943
+    milestone: MMAP
+    title: Selected-region panel lists signals outside the region and offers no Listen/Decode; list-row context menu opens nothing
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-SELECTED
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer (two targets):
+      (a) The Selected-region panel is not scoped to the region: a region selected at 98.8226-99.0407 MHz listed 107.816, 106.997, 106.159 and 107.662 MHz as "Unknown & unexplained - the priority" and 106.166 as "Strongest" (shots/0404-region-989.png) - the whole UI is scoped to the (t x f) window (CLAUDE.md), the region panel included.
+      (b) Listen / Decode are not reachable from a selection: the region panel offered no Listen or Decode; a candidate row and the "Selected signal" panel offer only "Go"; Listen lives only in a right-click context menu (ui/src/app/menu/actions.ts) and a right-click on a list row opened nothing.
+      Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: (a) the region panel lists only what the backend reports inside the selected region (assert the request the client builds - the region bounds - not only the render); (b) a visible Listen and Decode action on a selected signal and a selected region (the same gated actions the context menu calls), and the list-row context menu works. Thin client. Tests in ui/test (request built) + an app e2e spec that selects a region and finds Listen; red on current code.
+      WHAT THE USER WILL SEE ON STAGING: select a region -> only its signals are listed, with Listen and Decode buttons.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-944
+    milestone: MAUTO
+    title: "Decode: manual recipe choice as the entry point; /api/pipelines omits a just-created pipeline; no started confirmation"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-DECODE
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer: decoding needs a manual recipe choice and gives no confirmation it started. Decode tab -> "New from recipe: ACARS / ADS-B / Analog WFM / POCSAG / RDS" makes the user pick the decoder by hand; after the click the Pipelines list still said "no pipelines running" and GET /api/pipelines briefly answered [] although p1 had been created (shots/0407-rds-recipe.png). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: (1) the backend race: why /api/pipelines omits a just-created pipeline (created before registered? a list snapshot taken before insert?) - fix so a created pipeline is listed from the moment the create call returns (contract test in api_contract.rs); (2) the UI shows the created pipeline immediately from the create response and its running state; (3) the default action on a selected signal is the backend's auto-chosen decode (the MAUTO/T-926 chooser) with the recipe list as an override, not the entry point - wire to whatever the backend offers today and say what is missing. Thin client. Red on current code for (1) and (2).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-945
+    milestone: M2-hardening
+    title: Automatic front-end gain management closed-loop on decode quality (overload flagged at every clip, nothing reduces gain)
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: GAIN-CTRL
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (live FM band, SF, stock antenna): every clip is flagged overload: true at LNA 32 / VGA 30 / amp on; the app flags it but nothing reduces gain (no AGC). One manual retry at amp off / LNA 24 / VGA 24 made RDS WORSE (98.9: 106 groups -> 0; 98.1: 3 -> 0). So the gain choice is a trade the app should make from the processed output, not a flag. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: automatic front-end gain management, closed-loop on measured quality (CLAUDE.md: AGC estimated from the signal; tune from the processed output): a policy that walks LNA/VGA/amp through the gated DeviceAction path (settle gap, provenance recorded per interval) scoring overload flags AND the decode/SNR quality of what is being worked (RDS group rate, pilot lock, noise-floor rise from IMD), converging on the best state and reporting why; never oscillating; off by default until proven, per-device capability-aware (no HackRF specifics in core). Design note first (docs/, which ADR it touches), then the mock-SDR implementation with a synthetic overload model; test red on current code that an overloaded scene converges to a better decode state.
+      HARDWARE NOTE FOR THE USER (not this ticket): at this location RDS on all but the two strongest stations is front-end limited (8-bit, no preselector, strong SF FM) - an FM-band antenna + FM notch/preselector is the physical fix (existing user item).
+      core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-946
+    milestone: MMAP
+    title: "Sweep view legibility: shadow hides stations, sampled-fraction banner frozen at first paint, black live-pane rectangle, span select sends stale rate"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-SHADOW
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer (FM sweep, 88-108): the sweep's product view is hard to read - (a) the "last known" scanlined shadow makes stations barely visible (shot 0355); (b) the "0.8 % of this surface was ever sampled (32 of 4096)" banner stays at its first-paint value after the sweep has lit 20 MHz; (c) at first paint of / the lower-right of the live pane was a black rectangle (0352). Also (d, unconfirmed - the explorer's synthetic change event): Review -> Device -> Span 20 MHz sent POST /api/control/rate {"sample_rate_hz": 2400000} (the OLD value, audit log), and afterwards the Device panel still showed "Span 2.400 MHz" while the header said 20 MHz (shot 0401) - verify with a real select before fixing. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: (a) shadow contrast so observed-then-quiet reads as dim but stations stay legible (docs/23 §10.6 honesty tiers; do not make shadow read as live); (b) the sampled-fraction banner refreshes as coverage grows (from the backend's coverage, not a client counter); (c) find the black rectangle (unpainted pane region? a tile never requested?) - grey only where unobserved; (d) reproduce with a real select in an e2e; fix if real (assert the request the client builds). Thin client; red tests for each fixed item.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-947
+    milestone: MMAP
+    title: Go-to-frequency retune offer takes its span from the view width (15.8 MHz -> 16 Msps)
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-GOTO
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer: Explore -> "Go to frequency" 162.2M offers "Retune to 162.2000 MHz at 15.819 MHz span" (shots/0416-goto-offer.png) - the retune offer takes its span from the current VIEW width, so accepting it from a zoomed-out view puts the HackRF at 16 Msps. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: the go-to retune offer proposes the device's default working span (or keeps the current tuned span) - never the view width - snapped to a realizable config through the gated DeviceAction path (CLAUDE.md navigation rules); the view may stay wide. Assert the request the client builds (ui/test); red on current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-948
+    milestone: M2-hardening
+    title: DC point listed as a candidate at the tuned centre; a steady -57.5 dB line at 161.984 MHz never detected or explained
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: DETECT-DC
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (162.2 MHz tuned, 2.4 Msps): (a) the DC point is listed as a signal - a candidate at the exact tuned centre (162.1998 MHz, 8.5 kHz); it should be excluded by the DC notch (the excluded coverage state, T-595) and never listed; (b) a steady line at ~161.984 MHz is the readout's "peak -57.5 dB" but never became a detection or an explanation (spur? interferer? - either way list it or explain it). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
+      DELIVER: (a) candidates overlapping the DC-notch exclusion are not admitted (test: mock SDR with a DC spike -> no candidate at centre; red on current code); (b) find why a steady -57.5 dB line is not detected at 162 MHz (floor estimate, CFAR guard, a spur mask that swallowed it?) - if it is masked as a known spur, the inventory/explanation must say so rather than drop it silently; test on a synthetic steady line near a DC notch.
+      core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, more explorer evidence (APRS/pagers/ISM): the DC point is listed on EVERY tune (144.600, 930.800, 434.200); fixed spurs listed as candidates with band-plan explanations - 144.000 MHz, a 37.5 kHz comb at 930.884-931.071 (14 kHz lines), integer-MHz carriers at 912.000/915.000/916.99/918.008 (159 of 585 'bursts' on /ws/open/bits came from the 918.000 spur). Deliver a per-device, per-rate spur/DC mask applied before candidates are admitted and before chains attach (T-951's follow-hops relies on it), with the artifact-of relation where the source is known.
+  - id: T-949
+    milestone: MAUTO
+    title: "FLEX pager capture into fixtures/ (LFS, hidden truth) + new use cases: terrestrial paging, terrestrial APRS"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: FIXTURE-EXPLORER
+    needs: none
+    model: sonnet
+    effort: medium
+    dispatch: manual
+    notes: |
+      FOUND 2026-09-25 by the explorer (pagers, 929.6-932.0 MHz): a live capture of 3 FLEX channels, oracle-confirmed and NOT decodable by the app: ~/.hackriff-ops/explorer/captures/20260925/flex-pagers-930p8.sigmf-{meta,data} + .truth.json - 12 s, 2.4 Msps at 930.8 MHz, 57.6 MB (FLEX frames are 1.875 s; 6 s held only 1 sync). Truth: FLEX sync 0xA6C6AAAA at 1600 bps on 929.608 (4-level, +-4.9/+-1.6 kHz), 929.933, 931.733 (2-level, +-4.8 kHz) - 3, 1 and 2 syncs in the clip (the explorer's numpy oracle tools/oracle_pager.py); 0 POCSAG syncs. use_case: null - a paging use case is proposed in the truth file.
+      DELIVER: (1) append use cases (never renumber; docs/05 + docs/use-cases.yaml together, per CLAUDE.md "Adding a use case"): terrestrial 929-932 MHz paging (FLEX/POCSAG) and terrestrial APRS 144.390 MHz AFSK1200/AX.25 (only SIGNAL-036 ISS APRS exists) - capabilities/hardware_fit/test_tier per docs/06 §3 + docs/10 §2; (2) the FLEX capture into fixtures/hackrf/explorer-2026-09-25/ under Git LFS exactly as T-935 did (hackriff:truth via py/fixtures/annotate.py, hidden from the mock SDR; manifest.json; settings LNA 32 / VGA 30 / amp on, overload flagged, stock antenna, HackRF serial from the journal; py/fixtures/build_explorer_2026_09_25.py extended); cross-check the FLEX syncs with an independent oracle (py/fixtures - add a small FLEX sync reference beside rds_ref.py if none exists).
+      MAC ONLY (the capture is in ~/.hackriff-ops on the Mac Studio). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-950
+    milestone: MAUTO
+    title: FLEX pager decode (2/4-FSK 1600-6400 bps, BCH(31,21)) - the dominant 929-932 MHz protocol; app has only POCSAG
+    status: todo
+    priority: P2
+    deps:
+    - T-949
+    parallel_group: DECODE-FLEX
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      FOUND 2026-09-25 by the explorer: FLEX is the dominant 929-932 MHz paging protocol in SF tonight (oracle: FLEX sync at 1600 bps on 3 channels, 0 POCSAG) and the app has NO FLEX path - the only pager recipe is POCSAG, which got 0 frames on 11 channels in 75 s. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
+      DELIVER: FLEX decode (2/4-FSK, 1600/3200/6400 bps, sync 0xA6C6AAAA + frame info word, BCH(31,21) + interleave) as a recipe over existing hk-blocks where possible (mlevel_slicer T-612, BCH) or a plugin behind the process boundary if reusing a GPL decoder (ADR-0010, e.g. multimon-ng's FLEX) - decide and say why; rate/levels estimated from the signal, never hard-coded. Test through the mock SDR on the FLEX fixture (the FLEX fixture ticket): frames sync and BCH-validate; the blind 'all captured signals decode' member for it goes green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: the FLEX capture is an EXTERNAL fixture (57.6 MB > the 25 MB LFS cap; T-949 indexed it in fixtures/manifest.json as status: external, store path store/explorer-2026-09-25/). The original stays in ~/.hackriff-ops/explorer/captures/20260925/ on the Mac: in your worktree run `just fixtures-fetch --from ~/.hackriff-ops/explorer/captures/20260925` (never copy into the main checkout). Oracle: py/fixtures/flex_ref.py (T-949) agrees on sync counts 3/1/2; it DISAGREES with the explorer's truth on the FSK level count at 2 of 3 channels (recorded in the fixture README) - settle it from your decoder's evidence. Use case SIGNAL-088 (paging); T-952 APRS uses SIGNAL-089. Mac-only while the fixture is external.
+    model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
+    dispatch: manual
+  - id: T-951
+    milestone: MAUTO
+    title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: RECIPE-POCSAG
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer: the POCSAG recipe hard-codes clock_recovery.symbol_rate_bd: 1200 while its own match declares 500-2500 Bd - a manual-mode choice hidden in a recipe (512/2400 POCSAG never tried). Also its follow-hops channel choice takes channels straight from blind detections, so the DC point (930.800) and 3 comb spurs filled 4 of its 8 slots while real channels (929.883, 931.158, 931.733) were left out. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
+      DELIVER: (1) the recipe estimates the symbol rate per channel (or tries 512/1200/2400 by sync evidence) - no fixed rate; (2) follow-hops ranks channels by evidence and skips detections the spur/DC mask marks as artefacts (coordinate with T-948, which owns the mask). Tests: synthetic POCSAG at 512 and 2400 Bd decode through the recipe (red today); a scene with a DC spike + spur comb + 3 real channels picks the real ones.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-952
+    milestone: MAUTO
+    title: "APRS: AFSK1200/AX.25 recipe (no APRS decode path exists)"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: RECIPE-APRS
+    needs: none
+    model: sonnet
+    effort: high
+    notes: |
+      FOUND 2026-09-25 by the explorer: there is no AFSK1200/AX.25 (APRS) recipe or decoder in the app's list (ACARS, ADS-B, Analog WFM, POCSAG, RDS) - with a burst on the air the app has no APRS path except blind decoder synthesis, which has no evaluator yet. (No APRS energy reached this antenna tonight, so no capture.) Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
+      DELIVER: an APRS recipe (NFM discriminator -> Bell 202 AFSK 1200/2200 Hz demod -> NRZI -> HDLC bitstuff/flags (T-613's block) -> AX.25 frame + FCS) with the tone/baud estimated or verified from the signal, decoded frames as a stream output; a synthetic AX.25 AFSK scene (py synth or hk-sim) through the mock SDR with hidden truth: FCS-valid frames decode, blind (no frequency passed). Use case: the terrestrial APRS id added by the FLEX fixture ticket (or SIGNAL-036 until it lands).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: use case SIGNAL-089 (terrestrial APRS) was added by T-949.
+  - id: T-953
+    milestone: M3
+    title: "Burst emitters get no family/params: burst-tap symbol rates never reach estimated_params; unknown at 0.999 confidence; no paging band-plan prior"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: CLASSIFY-BURST
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (pagers + 902-928 ISM): burst emitters never get a family, parameters or a sensible explanation - FLEX/FSK pager bursts are family: unknown at CONFIDENCE 0.999 with explanations [] (no 929-932 paging band-plan prior fired at all, unlike FM/NOAA/2 m); 902-928 FHSS bursts are family: null, resolution not-searched, only "ISM / Part 15". The /ws/open/bits burst tap KNOWS the symbol rates (clusters at 4800/9600/19200/100000 Bd over 585 bursts) but that never reaches the inventory's estimated_params. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
+      DELIVER: (1) burst-tap estimates (symbol rate, FSK levels/deviation, burst duration) flow into the emitter's estimated_params; (2) "unknown" never carries 0.999 confidence - unknown/open-set is an explicit output with an honest score (CLAUDE.md: ML/classifiers must be able to say unknown); (3) a paging-allocation (929-932 MHz, FCC Part 22 Subpart E) band-plan prior exists and ranks for a ~25 kHz 2/4-FSK burst - as an explanation, never an identification; an FHSS-like suggestion for a hopping 100 kBd population. Blind tests with hidden truth (synthetic FSK pager bursts + FHSS bursts through the mock SDR): the estimated params match and the explanation ranks top-k; red today.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-954
+    milestone: M2-hardening
+    title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: STREAM-BITS
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer: the /ws/open/bits stream (585 bursts in 60 s, 902-928 MHz at 8 Msps) ended with close code 1006 (abnormal, no close frame) after 60 s; and the burst framer (5 framed bursts at 916.094 MHz, ~100 kBd FSK, preamble 0101..., sync 0x0C5F in all 5, payloads 21/118/21/322/36 bytes) reports no crc field in any status record. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
+      DELIVER: (1) find why the bits socket drops without a close frame at ~60 s (an idle/lifetime timeout? a send-buffer overflow at 585 bursts?) - close with a code and reason, or keep streaming; contract in docs/api.md + api_contract.rs (T-079); (2) framed bursts carry an explicit crc verdict field (unknown/absent/valid/invalid), never omitted. Tests red on current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-955
+    milestone: MMAP
+    title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-BOOT
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the explorer (after retuning 162.2 -> 144.6 MHz): a reloaded page restored the PREVIOUS 162.2 MHz view and a stale "Retune to 162.2000 MHz" offer instead of opening on the tuned window (the T-376/bootstrap rule: open on the observed extent from the coverage map), and the follow-live button froze the pane at -14 s instead of bringing it to 144.6 MHz (shots/0428-aprs.png, 0430-aprs-follow.png). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
+      DELIVER: on load the view opens on the tuned window (restored view state only if it overlaps the current tuning, and never a stale retune offer); follow-live always brings the pane to the live edge of the tuned window. Assert the requests/state the client builds (ui/test) + an app e2e: retune via the API, reload, the pane shows the new window; red on current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-956
+    milestone: MAUTO
+    title: Production Evaluator over acquired IQ for /api/analyze (every job ends no_evaluator) - next MAUTO tranche
+    status: deferred
+    priority: P1
+    deps: []
+    parallel_group: SYNTH-EVAL
+    needs: none
+    model: opus
+    effort: xhigh
+    core_interface: true
+    notes: |
+      FOUND 2026-09-25 by the explorer (pagers, ISM): /api/analyze ends every job failed / no_evaluator ("stage evaluation over IQ (MAUTO M-2) is not built on this server"; docs/api.md: nothing implements hk_synth::engine's Evaluator over acquired IQ, server_backend() is None). So blind symbol/bit recovery -> decoder synthesis on an unknown burst (e.g. the 916.094 MHz 100 kBd FSK emitter with a consistent sync 0x0C5F and no CRC model - a blind CRC poly/init/xorout search over recovered payloads is exactly the synthesis step) is unavailable - the product's north star for unknown signals.
+      DEFERRED: this is the next MAUTO tranche (the production Evaluator over acquired IQ, ADR-0015), not a follow-up - held for the supervisor's milestone planning once the pool clears (user rule 2026-09-25 01:45). Model: Fable/Opus xhigh; core_interface.
+  - id: T-957
+    milestone: MMAP
+    title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-SURFACE-RC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 04:56 by the T-933 worker: ui/e2e/app-surface.e2e.mjs has 2 failures on main's tree WITHOUT T-933's change (reproduced with surface.ts unmodified, base 0d0d7f70): (a) the layers-menu 'artifacts' toggle times out; (b) the fog symbology key list is off by one 'none' entry. The 03:53 RC at 92d0f6f1 had app-surface GREEN, so a landing between 92d0f6f1 and 0d0d7f70 broke it - browser e2e runs only in the daily RC now, so the merge gate could not see it. Suspects touching the layers menu / symbology key: T-916 (892d3edc, shadow follow-ups: auto/viewport contrast, ladder fallback), T-810 (1ce98bea, density refetch), T-898 (d4d4ce7d, retune paths layer), T-919 (37bf55ff, status box), T-886, T-913.
+      DELIVER (deflake-triage): run app-surface ALONE x3 on main (HK_E2E_PORT >= 9216); fails alone => bisect the first-parent merges 92d0f6f1..0d0d7f70 to the landing, then fix the PRODUCT (the menu toggle / the key list) so the spec passes UNCHANGED - change a spec assertion only if a deliberate product change made it provably wrong (say which, with the ticket). Passes alone => make it deterministic (wait on the menu's rendered state, never a timeout choice). Red-on-regression proof.
+      WHAT THE USER WILL SEE ON STAGING: the layers menu's artifacts toggle works and the fog key lists exactly the drawn states.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
+  - id: T-958
+    milestone: MMAP
+    title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-SHEET-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
+      DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
+  - id: T-959
+    milestone: MLIVE
+    title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: TILE-CLIENT
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FROM T-932's deflake (task-rcfix-surface-nav 9aab332e): the client (ui/src/surface/tilecache.ts AIMD) charges an abandoned tile read only the route's AVERAGE service time, but /api/tiles cannot see the abort and keeps building the tile and holding its slot until done - under load overview reads take 7-9 s and outlive the charge, so the page's next reads are refused over slots its own leftover reads still hold (the 03:53 RC red). The spec now waits for the route's own in_flight report; the product estimate is still a guess. Injected worst case (both share slots held ~27 s): 18 refusals over 9 gestures, red on the per-gesture bound.
+      DELIVER: the client stops guessing - it reads the per-client in_flight_held every tile answer already states and treats slots it still holds as its own (never as contention); the 503 body also states what THIS client holds beside share (docs/api.md + api_contract.rs together, T-079), so a refusal can be told apart as stale-charge vs contention. Thin client: the server reports, the client does arithmetic over it. Tests: ui/test asserts the client's cap/issue decision from a sequence of answers carrying in_flight_held (red on the average-charge logic); a contract test for the 503 field; surface-nav stays green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; api_contract; surface-nav alone), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

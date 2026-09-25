@@ -760,6 +760,79 @@ def stage_status():
     return {"alive": alive, "source": rd("hk-serve-source").replace("source: ", ""),
             "built": rd("hk-serve-built-commit"), "smoke": smoke, "lines": lines}
 
+def _radio_module():
+    import sys as _sys
+    py_dir = os.path.join(CODE_ROOT, "py")
+    if py_dir not in _sys.path:
+        _sys.path.insert(0, py_dir)
+    from hkpy import radio as radio_mod
+    return radio_mod
+
+
+def radio_status():
+    """The HackRF radio lock (T-922): who holds it, until when, and whether staging is
+    LIVE or REPLAY because of it. Reads hkpy.radio's own lock file/format - the same
+    module `just radio` and the explorer/capture-agent use - never re-parsed here."""
+    try:
+        radio_mod = _radio_module()
+    except Exception as e:
+        return {"error": str(e)}
+    now = time.time()
+    lock = radio_mod.read(SCRATCH)
+    staging = radio_mod.staging_mode(SCRATCH)
+    if lock is None:
+        return {"held": False, "staging": staging}
+    stale = radio_mod.is_stale(lock, now)
+    return {"held": not stale, "owner": lock["owner"], "since": lock["since"],
+            "until": lock["until"], "why": lock["why"], "stale": stale, "staging": staging}
+
+
+def explorer_status():
+    """The explorer window (T-923/T-925): current target, phase and a journal tail, read
+    from $HACKRIFF_OPS/explorer/ and the radio lock. A READER only - the explorer agent
+    is the sole writer of the journal, wrap-up marker and the lock.
+
+    phase: 'no window' (never run / nothing today) | 'running' (holds the radio lock) |
+           'wrap-up' (inside the last-15-min marker) | 'ended' (journal exists, lock gone)
+    target: the most recent '## HH:MM <target> (<freq range>)' heading in the newest
+            journal file, i.e. what it is on right now (or was on last, once ended).
+    """
+    edir = os.path.join(SCRATCH, "explorer")
+    files = sorted(glob.glob(os.path.join(edir, "journal-*.md")), key=os.path.getmtime)
+    jpath = files[-1] if files else None
+    text = ""
+    if jpath:
+        try:
+            text = open(jpath, encoding="utf-8").read()
+        except OSError:
+            text = ""
+    lines = [l for l in text.splitlines() if l.strip()]
+    target = ""
+    summarized = False
+    for l in reversed(lines):
+        if l.startswith("## "):
+            head = l[3:].strip()
+            if head == "Window summary":
+                summarized = True
+                continue
+            m = re.match(r"^\d{1,2}:\d{2}\s+(.*)$", head)   # drop the leading HH:MM
+            target = m.group(1) if m else head
+            break
+    wrap = os.path.exists(os.path.join(edir, "wrap-up"))
+    rlock = radio_status()
+    running = bool(rlock.get("held")) and rlock.get("owner") == "explorer"
+    if running:
+        phase = "wrap-up" if wrap else "running"
+    elif summarized:
+        phase = "summarized"
+    elif jpath:
+        phase = "ended"
+    else:
+        phase = "no window"
+    return {"phase": phase, "target": target,
+            "journal": os.path.basename(jpath) if jpath else "", "tail": lines[-20:]}
+
+
 def _ms_of(tid):
     try:
         return next((t.get("milestone", "") for t in load_tasks_yaml() if t.get("id") == tid), "")
@@ -1889,6 +1962,7 @@ def gather():
         "now": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
+        "radio": radio_status(), "explorer": explorer_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
         "gates": gates, "junit": junit,
         "timing": gate_timing(), "flakes": flake_top(),
@@ -2189,6 +2263,8 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
     <div class="card" style="max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
     <div class="card" style="height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
+    <div class="card" style="max-height:110px" title="who holds the HackRF (T-922 lock), until when, and whether staging serves live or replay because of it"><h2>Radio owner <em id=radio-sub></em></h2><div class="bd log" id=radio></div></div>
+    <div class="card" style="max-height:220px" title="the explorer agent (T-923): current target, phase, journal tail"><h2>Explorer <em id=explorer-sub></em></h2><div class="bd log" id=explorer></div></div>
   </div>
 </div></div>
 <script>
@@ -2344,6 +2420,26 @@ async function tick(){
   const stEl=$('#stage'); const atBottom=stEl.scrollHeight-stEl.scrollTop-stEl.clientHeight<20;
   stEl.innerHTML=(s.lines||[]).map(l=>{const c=l.includes('FAIL')?'#E47B68':l.includes('SMOKE OK')||l.includes('started')?'#52C2AE':l.includes('new code')?'#F0A542':'var(--mut)';return `<div style="color:${c}">${esc(l)}</div>`;}).join('')||'<div class=w>no staging log yet</div>';
   if(atBottom) stEl.scrollTop=stEl.scrollHeight;
+  const r=d.radio||{}; const rsub=$('#radio-sub'), rEl=$('#radio');
+  if(rsub&&rEl){
+    if(r.error){ rsub.innerHTML='<span class="rdot off"></span>?'; rEl.innerHTML=`<div class=w>${esc(r.error)}</div>`; }
+    else if(r.held){
+      const left=r.until?Math.max(0,r.until-Math.floor(Date.now()/1000)):0;
+      rsub.innerHTML=`<span class="rdot on"></span>${esc(r.owner)} · ${dur(left)} left`;
+      rEl.innerHTML=`<div>held by <b>${esc(r.owner)}</b> until ${r.until?new Date(r.until*1000).toLocaleTimeString():'?'}</div><div style="color:#8595A0">staging: ${esc(r.staging||'?')}</div>${r.why?`<div style="color:#5A6973">${esc(r.why)}</div>`:''}`;
+    } else {
+      rsub.innerHTML=`<span class="rdot off"></span>free`;
+      rEl.innerHTML=`<div>free</div><div style="color:#8595A0">staging: ${esc(r.staging||'?')}</div>`;
+    }
+  }
+  const ex=d.explorer||{}; const exsub=$('#explorer-sub'), exEl=$('#explorer');
+  if(exsub&&exEl){
+    const pcol={running:'#52C2AE','wrap-up':'#F0A542',summarized:'#8595A0',ended:'#8595A0','no window':'#5A6973'}[ex.phase]||'#5A6973';
+    exsub.innerHTML=`<span style="color:${pcol}">${esc(ex.phase||'?')}</span>${ex.target?' · '+esc(ex.target):''}`;
+    const exAtBottom=exEl.scrollHeight-exEl.scrollTop-exEl.clientHeight<20;
+    exEl.innerHTML=(ex.tail||[]).map(l=>`<div style="${l.startsWith('## ')?'color:#F0A542':''}">${esc(l)}</div>`).join('')||`<div class=w>${ex.phase==='no window'?'no explorer window yet':'no journal lines yet'}</div>`;
+    if(exAtBottom) exEl.scrollTop=exEl.scrollHeight;
+  }
  }catch(e){ $('#err').textContent='fetch error: '+e; $('#st').textContent='retrying'; }
 }
 tick(); setInterval(tick,5000);

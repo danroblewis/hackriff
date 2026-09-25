@@ -88,13 +88,14 @@ import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { trackOverlay } from "../chrome/dismiss";
+import { PEEK_PX } from "../chrome/sheet";
 import {
   BASE_STYLES, COLLECTION_Z, PLANE_ORDER, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
-import { DensityFetches, densityAddrs, densityQuads, isCoarseZoom, sharedDensityReader, type DensityTile } from "../../surface/density";
-import type { TileAddr } from "../../surface/lattice";
+import { densityQuads } from "../../surface/density";
+import { DENSITY_POLL_MS, DensityPoll } from "./density-poll";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
@@ -103,8 +104,6 @@ import {
 } from "../map/research-slice";
 
 const S_TO_NS = 1e9;
-/** The centre poll's period, ms — the unit the density refresh paces its asks in. */
-const DENSITY_POLL_MS = 1000;
 /** The map strip along the bottom of the canvas, device px. */
 const MINIMAP_PX = 110;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
@@ -523,56 +522,26 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // coarse-zoomed (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for
   // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
   // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
-  const densityByPane = new Map<string, DensityTile[]>();
-  // Per-pane, per-address copies and WHEN each is asked again (`DensityFetches`): while a pane
-  // follows, every tile it shows is re-asked on a bounded cadence as rows arrive (counts are
-  // back-dated to an event's start, so a tile the edge left still changes); a frozen pane asks once
-  // and keeps its own copy; a failed ask is retried with backoff. One request per address in
-  // flight, shared between panes (`sharedDensityReader`).
-  const densityFetches = new DensityFetches();
-  const densityInflight = new Set<string>();
-  const densityGet = sharedDensityReader((url) => client.get<unknown>(url));
-  // The refresh/backoff pacing is counted in POLL TICKS (the poll below runs every
-  // `DENSITY_POLL_MS`), never a browser clock — the centre modules are on the capture clock only
-  // (T-393/T-386's guard); this is request pacing, not a time anything is placed at.
-  let densityPolls = 0;
+  // Per-pane, per-address copies and WHEN each is asked again — plus the read's deadline, the joined
+  // request's edge stamp and the write-back against the CURRENT addresses — are `./density-poll.ts`'s
+  // (T-927). Here the layer is only polled and drawn.
+  const densityPoll = new DensityPoll((url, signal) => client.get<unknown>(url, { signal }));
   const densityQuadsFn: OverlayLayerFn = (pane) => {
     const lat = preview?.view.surface.lat;
     if (!lat) return [];
-    return densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
+    return densityQuads(densityPoll.tilesFor(pane.id), pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
   };
-  /** Ask for each density-on, coarse-zoomed pane's tile(s) that `DensityFetches.due` says need it
-   * (`isCoarseZoom`, the same gate `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane
-   * would draw nothing with is a request this layer has no use for). A `GET` of an inventory
-   * aggregate — never a device route — one batch in flight per pane; a pane whose current address
-   * needs no tile (a degenerate box) is simply left empty. */
+  /** One density poll: each density-on, coarse-zoomed pane's tile(s) (`isCoarseZoom`, the same gate
+   * `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane would draw nothing with is a
+   * request this layer has no use for). A `GET` of an inventory aggregate, never a device route. */
   const refreshDensity = () => {
     const p = preview;
     if (!p) return;
-    const lat = p.view.surface.lat;
-    const ids = new Set(p.view.panes.list().map((x) => x.id));
-    for (const id of [...densityByPane.keys()]) if (!ids.has(id)) densityByPane.delete(id);
     const edgeNs = p.view.panes.lastEdgeNs;
-    const nowMs = ++densityPolls * DENSITY_POLL_MS;
-    const keep: [string, TileAddr][] = [];
-    for (const pane of p.view.panes.views(edgeNs)) {
-      const on = isLayerVisible(layersFor(pane.id), "density") && isCoarseZoom(lat, pane.box, pane.rect.w, pane.rect.h);
-      if (!on) { densityByPane.set(pane.id, []); continue; }
-      const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
-      for (const a of addrs) keep.push([pane.id, a]);
-      densityByPane.set(pane.id, densityFetches.tiles(pane.id, addrs));
-      if (densityInflight.has(pane.id)) continue;
-      const due = densityFetches.due(pane.id, addrs, edgeNs, p.view.panes.isFollowing(pane.id), nowMs);
-      if (due.length === 0) continue;
-      const id = pane.id;
-      densityInflight.add(id);
-      Promise.all(due.map((a) => densityGet(a).then((t) => {
-        if (t) densityFetches.succeeded(id, a, t, edgeNs, nowMs); else densityFetches.failed(id, a, nowMs);
-      })))
-        .then(() => { densityByPane.set(id, densityFetches.tiles(id, addrs)); })
-        .finally(() => { densityInflight.delete(id); });
-    }
-    densityFetches.retain(keep);
+    densityPoll.tick(
+      p.view.surface.lat, p.view.panes.views(edgeNs), edgeNs,
+      (id) => isLayerVisible(layersFor(id), "density"), (id) => p.view.panes.isFollowing(id),
+    );
   };
   // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
   // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
@@ -1367,7 +1336,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
       const dock = document.querySelector<HTMLElement>(".app > .dock");
       const dr = dock?.getBoundingClientRect();
-      const under = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
+      // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
+      // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
+      // clear the peek strip too, not just the dock.
+      //
+      // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
+      // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
+      // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
+      // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
+      // height transition). Reading the live top/height, as an earlier version of this fix did,
+      // made the minimap — and so every pane, which packs above it — follow the sheet up and down
+      // on every drag and close (review finding on this ticket). The peek clearance itself is a
+      // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
+      // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
+      const sheet = document.querySelector<HTMLElement>(".sheet");
+      const sr = sheet?.getBoundingClientRect();
+      const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - (sr.bottom - PEEK_PX))) : 0;
+      const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
       // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
@@ -1391,6 +1378,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
+    // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
+    // height, see above), so this observer is not about tracking drag/snap changes — it exists so
+    // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
+    // is still picked up once it appears, rather than the minimap staying un-lifted until the next
+    // stage resize.
+    const sheetEl = document.querySelector<HTMLElement>(".sheet");
+    if (sheetEl) ro?.observe(sheetEl);
     window.addEventListener("resize", fit);
     preview.start();
 
@@ -1398,7 +1392,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
-    startPoll(async () => { mirror(); refreshPriors(); refreshDensity(); }, 1000);
+    startPoll(async () => { mirror(); refreshPriors(); refreshDensity(); }, DENSITY_POLL_MS);
 
     // T-897: the `paths` layer's records, for every pane that shows the layer — one read over the
     // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane

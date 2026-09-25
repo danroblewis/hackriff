@@ -1730,7 +1730,7 @@ A job that finished **`done`** with results, asked to `attach`, attaches on the 
 
 ### The trace (`GET /api/analyze/{id}/trace`)
 
-`{job_id, state, engine, final, replay_key, bounds: {max_nodes, max_bytes, truncated}, nodes: [TraceNode], elided: [{stage, family?, outcome, count, bits_max, bits_min, evaluations}]}`. Filters: `stage` (`S0`…`S6`), `outcome` (an outcome name, e.g. `pruned_floor`), `family`, `tried` (`true`/`false`), `limit` (1..=512, default 512); an unknown filter value is `400 invalid`. `final` is false while the job runs — the engine hands its trace over when it stops. The trace lives for the job's lifetime only; `trace_summary` is what persists.
+`{job_id, state, engine, final, replay_key, bounds: {max_nodes, max_bytes, truncated}, nodes: [TraceNode], elided: [{stage, family?, outcome, count, bits_max, bits_min, evaluations}]}`. Filters: `stage` (`S0`…`S6`), `outcome` (an outcome name, e.g. `pruned_floor`), `family`, `tried` (`true`/`false`), `limit` (1..=512, default 512); an unknown filter value is `400 invalid`. `final` is false only while the job can still produce a trace — the engine hands its trace over when it stops. A job that **ended without one** (a failure, or a cancel of a job that was still queued) serves `final: true` with empty `nodes`, so a watching client stops polling; a cancelled job whose worker is still handing back stays `false` until it does, because its partial trace may yet arrive. The trace lives for the job's lifetime only; `trace_summary` is what persists.
 
 ### The stream (`hackriff.analyze/1`)
 
@@ -2567,6 +2567,27 @@ A derived view over the [`GrantEvent`](07-data-model.md) stream (`hk_model::trun
 - Reads up to 20,000 grant rows per system per request (`MAX_GRANTS_PER_QUERY`), bounding the query even though the underlying event stream is append-only forever.
 
 Errors: `400 invalid` (missing/non-numeric `t0`/`t1`, `t1 <= t0`, or `system` not a UUID), `405` for other methods, `500 failed` for a store error, `503 unavailable` without a trunking store.
+
+## VLF accessory (T-891; SPACE-001, SPACE-041, PROP-019)
+
+VLF/LF science on an **accessory-fed source**: a VLF/LF E-field or loop receiver into a soundcard, attached as its own device behind the generic source interface (`hk_core::source::accessory`). The HackRF tunes no lower than 1 MHz, so all three use cases stay `needs-accessory`; a run with no accessory answers an empty list, and the analysis service refuses any stream whose provenance does not say it came through an accessory.
+
+Attach one with a further device spec, next to the radio: `hk serve --device <radio> --device vlf-mock:<file.sigmf-meta>` (the mock accessory, replaying a real-valued `rf32_le`/`ri16_le` SigMF recording — captured or synthetic VLF — in real time). `vlf:<device>` names a live soundcard receiver; no audio backend is linked in this build, so it is refused at start with that reason.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/vlf[?device=<device_id>][&points=1]` | One report per accessory source attached to the run; `device` narrows to one, `points=1` adds each carrier's amplitude/phase track |
+
+- **Response:** `{accessories: [report]}`. A report is `{state, error?, device_id, accessory, provenance_ref, provenance, sample_rate_hz, phase_disciplined, window, samples, gaps, dropped_samples, carriers, sferics, sferic_total}`.
+  - `state`: `waiting` (no block yet), `discovering` (collecting the blind carrier-search window, 10 s by default), `tracking`, `finished` (the source ended), `failed` (`error` says why — e.g. the stream is not accessory-fed).
+  - `device_id` is `<accessory kind>:<device>` (e.g. `vlf-receiver:mock:sid`) and `provenance.antenna_port` is `accessory:<kind>`: every result says it came through the accessory. The stream is real audio at baseband, so `provenance.tune.center_hz` is `0` and `bandwidth_hz` is `fs/2`.
+  - `phase_disciplined`: the stream's clock is GNSS/external-referenced and locked — what makes absolute VLF phase meaningful (PROP-019). Phase *steps* are reported either way, with the tracker's linear drift removed.
+  - `window` is `{start_ns, end_ns}` over the analysed samples; `gaps`/`dropped_samples` count soundcard overruns.
+  - `carriers`: narrowband transmitters **found blind** in the receiver band (no transmitter list is consulted), each `{carrier_hz, carrier_hz_refined, snr_db, point_count, points?, amplitude_steps, phase_steps}`. `amplitude_steps` (SPACE-001, a SID flare's signature) are `{t_ns, relative_change}`; `phase_steps` (PROP-019) are `{t_ns, dphi_rad, reflection_height_change_km, path_km}`, the height change present only where the server was given that transmitter's path geometry (a positive `dphi_rad` is a phase advance: a shorter path, a lower reflection). `points` are `{t_ns, amplitude, phase_rad}`, the most recent 36,000 per carrier.
+  - `sferics` (SPACE-041) are [`Detection`](07-data-model.md)s — each a time–frequency region with its own `time: {start_ns, end_ns}`, `flags.impulsive: true` and the accessory stream's `provenance_ref`. A sferic is broadband, so `f_center_hz`/`obw_hz` state the receiver band (`fs/4`, `fs/2`), not a measured occupancy, and `xdb_bandwidth_hz` is absent. The most recent 10,000 are held; `sferic_total` counts all.
+- Every time is absolute capture time (Unix nanoseconds, `_ns`), from the accessory stream's own sample clock.
+
+Errors: `400 invalid` (`points` not `0`/`1`), `404 not_found` (`device` names no accessory on this run), `405` for other methods, `503 unavailable` on a server with no accessory services at all.
 
 ## Attention and memory (planned, M2; ADR-0012)
 

@@ -4,6 +4,9 @@
 //    before the hand-back and the resolution only arrives on a later same-id job poll;
 //  - a failed trace fetch is stated plainly, never "loading trace…" forever, and the poll backs off;
 //  - `job.trace_summary.nodes_elided` is shown beside the list.
+// T-930 adds the REAL server shape (a job that ends without ever producing a trace serves
+// `final: false` with empty nodes while it runs, then `final: true` when it has ended) and the
+// filter label the results carry under a failed fetch's error line.
 // Imports only `mountTracePanel` (plus the client's own error type), so this file also builds
 // against the pre-fix module — which is how its red-on-old proof was taken.
 import { test } from "node:test";
@@ -160,5 +163,67 @@ test("job.trace_summary.nodes_elided is shown beside the list, with truncated an
     assert.ok(notes.some((t) => /list truncated/.test(t)), notes.join(" | "));
     assert.ok(notes.some((t) => /\b412\b.*nodes_elided/.test(t)), `nodes_elided shown: ${notes.join(" | ")}`);
     assert.equal(hx.root.findAll("tr-elided").length, 1);
+  } finally { hx.restore(); }
+});
+
+test("T-930 real shape: final:false + empty nodes while it runs, final:true once it ended without a trace — and the poll stops there", async () => {
+  const hx = harness();
+  try {
+    // Exactly what this build's server returns for a running job: no trace yet, so no nodes and
+    // `final:false` — NOT the mount fixtures' final:true-with-a-node.
+    const running = (): TraceFetch => ({
+      job_id: "a1", state: "searching", engine: "hk-synth", final: false, replay_key: null,
+      bounds: { max_nodes: 512, max_bytes: 262144, truncated: false }, nodes: [], elided: [],
+    });
+    hx.panel.setJob(job());
+    hx.pending[0].resolve(running());
+    await flush();
+    assert.doesNotMatch(hx.root.textContent, /loading trace/, "the empty answer replaces 'loading'");
+    assert.match(hx.root.textContent, /no trace nodes recorded for this filter/);
+    assert.equal(hx.timers.length, 1, "not final: the poll is re-armed");
+
+    // The engine hands back: the job failed with no trace at all, and the backend says `final`
+    // (T-930) instead of leaving `final:false` forever.
+    hx.panel.setJob(job({ state: "failed", end_reason: "no_evaluator", error: { code: "no_evaluator", message: "no evaluator in this build" }, resolution: NOT_SEARCHED }));
+    hx.timers[0].fn();
+    hx.pending[1].resolve({ ...running(), state: "failed", final: true });
+    await flush();
+    assert.equal(hx.root.findAll("tr-res-headline")[0]?.textContent, NOT_SEARCHED.summary, "the headline is the answer, not the empty list");
+    assert.equal(hx.timers.length, 1, "ended without a trace: the poll STOPS — no 2 s fetch forever");
+    assert.equal(hx.pending.length, 2, "and nothing else was fetched");
+  } finally { hx.restore(); }
+});
+
+test("T-930: the results say which filter they answer, so a failed fetch's error never labels the previous filter's list", async () => {
+  const hx = harness();
+  try {
+    hx.panel.setJob(job({ state: "done", resolution: NOT_SEARCHED }));
+    hx.pending[0].resolve(trace()); // the unfiltered list
+    await flush();
+    const shown = () => hx.root.findAll("tr-shown").map((e) => e.textContent);
+    assert.deepEqual(shown(), ["showing: the whole trace (no filter)"]);
+
+    // Ask "why not psk" through the family input (Enter), and have THAT fetch fail. The previous
+    // filter's rows stay on screen on purpose, so they must still read as the whole trace's
+    // answer — never as psk's.
+    const input = hx.root.children[1].children[0];
+    const enter = () => (input.onkeydown as (e: { key: string; preventDefault(): void }) => void)({ key: "Enter", preventDefault() {} });
+    input.value = "psk";
+    enter();
+    await flush();
+    assert.equal(hx.calls[hx.calls.length - 1], "GET /api/analyze/a1/trace?family=psk", hx.calls.join(", "));
+    hx.pending[1].reject(new ControlError(404, "not_found", "no trace for job a1 (expired with the job)"));
+    await flush();
+    assert.match(hx.root.textContent, /trace fetch failed: HTTP 404/);
+    assert.deepEqual(shown(), ["showing: the whole trace (no filter)"], "the surviving list is labelled with ITS filter, not the failed one");
+    assert.equal(hx.root.findAll("tr-not-tried").length, 1, "and the rows themselves are kept");
+
+    // When the filtered fetch succeeds, the label moves to it.
+    enter();
+    await flush();
+    hx.pending[2].resolve(trace());
+    await flush();
+    assert.deepEqual(shown(), ["showing: family psk"]);
+    assert.doesNotMatch(hx.root.textContent, /trace fetch failed/);
   } finally { hx.restore(); }
 });
