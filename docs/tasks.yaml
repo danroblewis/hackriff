@@ -27504,7 +27504,8 @@ tasks:
   - id: T-930
     milestone: MAUTO
     title: "Analyze trace panel follow-ups: the trace poll never stops for failed/queued-cancelled jobs (final only when job.trace is set), real-shape fixture, filter-labelled error, doc tidy (T-570 re-review)"
-    status: todo
+    status: in-progress
+    branch: task-t930
     priority: normal
     deps:
     - T-570
