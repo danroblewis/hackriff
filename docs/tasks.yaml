@@ -26430,6 +26430,8 @@ tasks:
       DELIVER: the user's ruling, written as a clarification in ADR-0022 §6 step 5 / ADR-0015 §5.5 condition 4 (and §6's example), and - if the ruling differs from fail-closed - the code change in hk-pipeline/src/inventory.rs's confirm gate with a test.
     notes: |
       FOUND BY T-860 worker + Opus review 2026-09-24.
+
+      2026-09-25 coordinator, ADDED for the user + Fable ruling (from the review of T-575's merge): ADR-0022 §5.1 carries only L_check forward, so a fully-bound DISCOVERED template reused later pays ~0 for its non-check stages (sync, field) - up to 8 of the 24 analytic bits (the part above the 16-bit check floor) can come from searches the discovering run already paid for, unre-charged. Matches the ADR as written, but it is the laundering pattern §5.1 itself warns about: an ADR-0022 open question to rule on alongside the zero-detections one.
     effort_reason: "an ACCEPTED-ADR clarification of a one-way confirm rule (CLAUDE.md: changing an ACCEPTED ADR goes to Fable + the user)"
     blocked_on: "user + Fable ruling: synthesized confirm with zero in-window detections (T-860 fails closed, narrowing ACCEPTED ADR-0015 §6's one-burst confirm) - an ADR clarification, not a coding call"
   - id: T-886
