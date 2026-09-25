@@ -26706,7 +26706,7 @@ tasks:
   - id: T-904
     milestone: M2-hardening
     title: "Detection rows grow without bound (~125 MB/h at 2.4 Msps, ~3 GB/day): a retention/rollup policy for per-frame detections; tracks/emitters stay durable"
-    status: in-progress
+    status: done
     branch: task-t904
     priority: high
     deps: []
@@ -26727,6 +26727,7 @@ tasks:
     notes: |
       FOUND BY supervisor, staging DB measurement 2026-09-24 (user asked 13:55).
     core_interface: true
+    commit: ec32d93a
   - id: T-905
     milestone: MCANVAS
     title: "fog-of-war: the pane sometimes requests a tile over never-swept band C - T-580's coverage short-circuit races the coverage survey (fails alone 1 in 9)"
