@@ -7431,6 +7431,67 @@ fn require_iq_ring(addr: SocketAddr) {
     }
 }
 
+/// The `sources[]` row a coverage answer serves for `kind`.
+fn coverage_source<'a>(coverage: &'a Value, kind: &str) -> &'a Value {
+    coverage
+        .get("sources")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.iter().find(|s| s["kind"] == json!(kind)))
+        .unwrap_or_else(|| panic!("the {kind} source row is always reported: {coverage}"))
+}
+
+/// **T-920: waits for the coverage answer whose evidence is the IQ RING's tune journal.**
+///
+/// `observed_cells > 0` alone is *not* that answer. Since T-596 the **open dwell** — the dwell in
+/// flight, before the observation log has sealed a record for it — rasterises into the same planes
+/// and can carry the tuned band on its own. The IQ ring, meanwhile, opens on a background thread
+/// (T-178/T-217), so for the first fraction of a second to several seconds of a run, depending on
+/// the quota and how loaded the box is, `/api/coverage` answers `observed_cells: 8` with
+/// `sources[iq-ring]` reporting `available: false, state: "allocating"`.
+///
+/// A wait that stops at the observed count therefore steps straight into an assertion about the
+/// ring while the ring is still being laid down. That is exactly how this file's coverage test ran
+/// red 4/4 on a loaded Linux host and green on a quiet Mac: not a platform defect, a wait that did
+/// not wait for its own evidence. [`require_iq_ring`] does not catch it either — `"allocating"` is
+/// deliberately "not an answer yet" there, because it is the one unavailable state that resolves
+/// itself.
+///
+/// So the wait is on **both**: the ring able to contribute, and the band observed. A settled
+/// refusal still fails immediately in the server's words, and a ring that never finishes opening
+/// fails naming the `state` and `reason` it was last serving (T-920 put them on the row for
+/// exactly this).
+fn wait_for_ring_backed_coverage(addr: SocketAddr, query: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = Value::Null;
+    loop {
+        // T-621: this loop's evidence is the ring's tune journal, so a server that was refused
+        // one can never satisfy it. Fail here, in the server's words, instead of 60 s later on
+        // an assertion about *coverage*.
+        require_iq_ring(addr);
+        // 404 until the ring has a live edge to hang a capture window on: a server with no
+        // capture window says so rather than inventing a span.
+        let (st, got) = get(addr, query);
+        if st == 200 {
+            let ring_ready = coverage_source(&got, "iq-ring")["available"] == json!(true);
+            let observed = got["any"]["observed_cells"].as_u64().unwrap_or(0) > 0;
+            last = got;
+            if ring_ready && observed {
+                return last;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the IQ ring to back the coverage answer for {query}. The ring              row's own words: {}. (`available: false` with `state: \"allocating\"` means it is              still opening; anything else settled is this machine, not the code under test.) Last              answer: {last}",
+            if last.is_null() {
+                Value::Null
+            } else {
+                coverage_source(&last, "iq-ring").clone()
+            },
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// T-368: **grey means genuinely unobserved.**
 ///
 /// The user's invariant: *"the view renders whatever samples are actually available for the current
@@ -7472,25 +7533,11 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     // away from the fixture's 100.8 MHz.
     let (flo, fhi) = (2.400e9, 2.410e9);
 
-    let mut tuned = Value::Null;
-    wait_for(
-        "the coverage map to report the tuned band as sampled",
-        Duration::from_secs(60),
-        || {
-            // T-621: this loop's evidence is the ring's tune journal, so a server that was
-            // refused one can never satisfy it. Fail here, in the server's words, instead of
-            // 60 s later on a coverage assertion.
-            require_iq_ring(addr);
-            // 404 until the ring has a live edge to hang a capture window on: a server with no
-            // capture window says so rather than inventing a span.
-            let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
-            if st != 200 {
-                return false;
-            }
-            tuned = got;
-            tuned["any"]["observed_cells"].as_u64().unwrap_or(0) > 0
-        },
-    );
+    // T-920: waits for the ring to be able to contribute, not merely for a cell to read
+    // `observed` — the open dwell can supply the latter while the ring is still allocating, and
+    // every assertion below is about the RING's journal. See [`wait_for_ring_backed_coverage`].
+    let tuned =
+        wait_for_ring_backed_coverage(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
 
     // ---- state 1/2: the tuned band was sampled, and the answer says how ----
     let cells = tuned["any"]["cells"].as_array().expect("cells").clone();
@@ -8034,16 +8081,25 @@ fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() 
         "a refused ring contributes no spans: {tuned}"
     );
     assert_eq!(ring["named_spans"], json!(0), "{tuned}");
-    // NOT asserted here: `sources[iq-ring].available`. Measured 2026-09-21 on this very server, a
-    // refused ring still reports `available: true` — the flag tracks whether a ring *handle* is
-    // wired into the API state, not whether a tune journal could answer. Under the documented
-    // meaning ("a client can tell 'this record had nothing here' from 'this record was not
-    // consulted'") that is the wrong way round, and it is a fail-open: `Evidence::unknown_rows`
-    // decides `no_tune_history` from these same flags, so a refused ring makes the server believe
-    // it still holds a tune history it does not have. The fix belongs in
-    // `crates/hk-api/src/coverage.rs`, which T-621 was told to stay out of (T-596 holds it);
-    // reported as a follow-up rather than asserted either way, because pinning today's value here
-    // would enshrine the defect and pinning tomorrow's would fail the gate now.
+    // T-640 closed what T-621 could only report here: `available` is measured (can this source
+    // contribute evidence?), not declared (is a handle wired?), so a refused ring reports
+    // `false` — and `Evidence::unknown_rows` reads `no_tune_history` from it rather than
+    // believing in a journal that was never allocated.
+    assert_eq!(
+        ring["available"],
+        json!(false),
+        "a refused ring holds no journal and must not claim one: {tuned}"
+    );
+    // T-920: and it says WHICH negative it is, end to end, in the words `/api/iqbuffer` served
+    // above. A client that cannot tell `"refused"` from `"allocating"` cannot tell *this device
+    // has no ring today* from *wait a moment*, and that silence is what sent a Linux worker
+    // hunting a portability defect that was not there.
+    assert_eq!(ring["state"], json!("refused"), "{tuned}");
+    assert_eq!(
+        ring["reason"].as_str(),
+        Some(reason.as_str()),
+        "the coverage row quotes the ring's own refusal verbatim: {tuned}"
+    );
     let log = src("observation-log");
     assert_eq!(log["available"], json!(true), "{tuned}");
     // T-680: the surviving tune history is the observation log's sealed records AND the dwell in
@@ -8053,6 +8109,12 @@ fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() 
     // the first poll, and the log's sealed spans may still be zero.
     let open = src("open-dwell");
     assert_eq!(open["available"], json!(true), "{tuned}");
+    // T-920: an available source states that too, rather than only the unavailable ones, so
+    // neither of the rows above can pass by carrying a complaint unconditionally.
+    for r in [&log, &open] {
+        assert_eq!(r["state"], json!("open"), "{tuned}");
+        assert_eq!(r["reason"], Value::Null, "{tuned}");
+    }
     assert!(
         log["spans"].as_u64().unwrap_or(0) + open["spans"].as_u64().unwrap_or(0) > 0,
         "the surviving tune history is what answered: {tuned}"

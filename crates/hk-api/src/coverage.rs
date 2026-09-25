@@ -445,6 +445,9 @@ pub(crate) struct Evidence {
     /// Whether the IQ ring **can contribute evidence**, not whether a handle is wired (T-640):
     /// [`ring_can_answer`], and the coverage state that turns on the difference.
     ring_available: bool,
+    /// **Why the ring cannot contribute, when it cannot** (T-920): see [`RingSilence`]. `None`
+    /// exactly when `ring_available` is true, or when no ring handle is wired at all.
+    ring_silence: Option<RingSilence>,
     log_available: bool,
     /// The earliest instant **any** consulted source still holds a record for; `None` when no
     /// source holds one at all.
@@ -606,6 +609,8 @@ impl Evidence {
             // T-640: whether this source can actually contribute evidence, NOT whether a handle is
             // wired — a refused ring answers `/api/iqbuffer` and holds no journal.
             ring_available: memory.ring_can_answer,
+            // T-920: `available: false` never travels alone.
+            ring_silence: memory.ring_silence,
             log_available: state.observations.is_some(),
             oldest_record: memory.oldest_record,
             recording_began: memory.recording_began,
@@ -620,21 +625,57 @@ impl Evidence {
     /// unattributed spans they are instead of claiming a device-local horizon it has not got. A
     /// source with no spans still appears, so a client can tell "this record had nothing here"
     /// from "this record was not consulted".
+    ///
+    /// **T-920: `available: false` states which negative it is.** Every row carries `state` and
+    /// `reason` beside `available`, so a client never has to guess whether a source that
+    /// contributed nothing is still being laid down (`state: "allocating"`, and it will answer in
+    /// a moment), was refused for want of disk (`"refused"`), is locked by another process
+    /// (`"locked"`), or is simply not configured (`state: null`). Both come from the status
+    /// `/api/iqbuffer` already serves; nothing new is measured here. A silent `false` cost a
+    /// remote Linux worker four red runs of
+    /// `coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked`, whose wait
+    /// was satisfied by the open dwell while the ring was still allocating.
     fn sources_json(&self) -> Value {
+        // T-920: what a source that cannot answer says about itself. `available: false` is never
+        // served bare — see [`RingSilence`] for why a silent negative is the defect.
+        let (ring_state, ring_reason) = match (&self.ring_silence, self.ring_available) {
+            (Some(s), _) => (
+                s.state.clone().map_or(Value::Null, Value::String),
+                s.reason.clone().map_or(Value::Null, Value::String),
+            ),
+            // No silence recorded and no ring handle wired: the run has no ring to ask.
+            (None, false) => (
+                Value::Null,
+                json!("this run has no IQ capture ring: no ring is wired to this server"),
+            ),
+            (None, true) => (json!("open"), Value::Null),
+        };
+        let log_reason = if self.log_available {
+            Value::Null
+        } else {
+            json!(
+                "this run has no observation log, so no sealed dwell can say where the radio looked"
+            )
+        };
         json!([
             { "kind": "iq-ring", "spans": self.ring, "named_spans": self.ring_named,
               "device_known": self.ring_named == self.ring,
-              "available": self.ring_available },
+              "available": self.ring_available,
+              "state": ring_state, "reason": ring_reason },
             { "kind": "observation-log", "spans": self.log, "named_spans": self.log_named,
               "device_known": self.log_named == self.log,
-              "available": self.log_available },
+              "available": self.log_available,
+              "state": if self.log_available { json!("open") } else { Value::Null },
+              "reason": log_reason.clone() },
             // T-596: the dwells in flight. Same claim as a sealed record and rasterised the same
             // way; named separately so a client can see that the live edge was carried by a dwell
             // the log has not sealed yet - which, with the IQ ring refused (a full disk on a
             // portable device), is the only evidence there is.
             { "kind": "open-dwell", "spans": self.open, "named_spans": self.open_named,
               "device_known": self.open_named == self.open,
-              "available": self.log_available },
+              "available": self.log_available,
+              "state": if self.log_available { json!("open") } else { Value::Null },
+              "reason": log_reason },
         ])
     }
 
@@ -726,6 +767,46 @@ struct Memory {
     /// **Whether the IQ ring can contribute evidence at all** (T-640) — not whether a handle is
     /// wired. See [`ring_can_answer`].
     ring_can_answer: bool,
+    /// **Why it cannot**, in the ring's own words, when it cannot (T-920): the `allocation` state
+    /// and the `reason` `/api/iqbuffer` is already serving. `None` when the ring can answer, or
+    /// when there is no ring handle at all to ask.
+    ring_silence: Option<RingSilence>,
+}
+
+/// Why the IQ ring is contributing nothing, read off its own status (T-920).
+///
+/// `available: false` on a source row used to be **silent**: a client could not tell a ring that
+/// is *still being laid down* (and will answer in a moment) from one *refused* for want of disk,
+/// from one another process has *locked*, from one *disabled by configuration*. Those are four
+/// different facts about the device, and only the first resolves itself. The distinction is the
+/// same one this module already insists on for a cell (`unobserved` is not `unknown`) and the same
+/// one `BiasTee::Unknown` is not `Off`: a negative must say **which** negative it is.
+///
+/// Both fields come from the status `/api/iqbuffer` already serves — this invents no new state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RingSilence {
+    /// The ring's `allocation` state (`"allocating"`, `"refused"`, `"locked"`, `"incompatible"`),
+    /// or `None` where the status carries none (disabled by configuration).
+    state: Option<String>,
+    /// The ring's own `reason`, as served on `/api/iqbuffer`.
+    reason: Option<String>,
+}
+
+impl RingSilence {
+    /// The silence of a ring that cannot answer, or `None` for one that can (or no ring at all).
+    fn of(status: Option<&Value>) -> Option<Self> {
+        let s = status?;
+        if ring_can_answer(Some(s)) {
+            return None;
+        }
+        Some(Self {
+            state: s
+                .get("allocation")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            reason: s.get("reason").and_then(Value::as_str).map(str::to_owned),
+        })
+    }
 }
 
 /// **Can the IQ ring journal actually answer "did we look here"?** (T-640)
@@ -851,6 +932,8 @@ impl Memory {
             forgotten,
             // T-640: measured off the status this function already read, not off the handle.
             ring_can_answer: ring_can_answer(ring.as_ref()),
+            // T-920: and when it cannot answer, why — off the same status.
+            ring_silence: RingSilence::of(ring.as_ref()),
         }
     }
 }
@@ -2868,5 +2951,135 @@ mod tests {
             states(&[("unobserved", 1), ("observed", 5), ("unobserved", 4)]),
             "the ring's own segment is observed, and after its reach nothing looked: {ring}"
         );
+    }
+
+    /// **T-920: an unavailable source says WHICH negative it is.**
+    ///
+    /// T-640 made `available` mean *this source can contribute evidence*, which is right — and
+    /// left it **silent**. A client reading `available: false` could not tell a ring that is still
+    /// being laid down, and will answer within a second or two, from one **refused** for want of
+    /// disk, from one another process has **locked**, from one **disabled by configuration**.
+    /// Only the first of those resolves itself, so a reader that cannot tell them apart cannot
+    /// tell *wait a moment* from *this device has no ring today* — the same distinction this
+    /// module already insists on one level down, where `"unobserved"` may not be spelled as
+    /// `"unknown"`.
+    ///
+    /// That silence is what made
+    /// `hk-cli::api_contract::coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked`
+    /// red on a loaded Linux host and green on a quiet Mac: its wait was satisfied by the **open
+    /// dwell** (T-596) while the ring was still allocating, and the `available: true` it then
+    /// asserted was a state the server was seconds away from reaching and could not say so.
+    ///
+    /// So every row carries `state` and `reason`, read off the status `/api/iqbuffer` already
+    /// serves. RED before the fix: no row has either key at all.
+    #[test]
+    fn an_unavailable_source_states_which_negative_it_is() {
+        let window = TimeRange::new(t(7080), t(7280));
+        let sources_of = |ring: Option<Value>| {
+            let state = ApiState {
+                iq_buffer: ring.map(|s| {
+                    std::sync::Arc::new(FakeRing(s)) as std::sync::Arc<dyn crate::IqBufferControl>
+                }),
+                ..ApiState::default()
+            };
+            overlay_json(&state, band(), window, 10, 1)["sources"].clone()
+        };
+        let row = |v: &Value, kind: &str| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["kind"] == json!(kind))
+                .cloned()
+                .unwrap_or_else(|| panic!("the {kind} source is always reported: {v}"))
+        };
+
+        // 1. Still being laid down: the one negative that resolves itself, and it says so.
+        let v = sources_of(Some(json!({
+            "enabled": true, "allocation": "allocating",
+            "reason": "allocating the IQ capture ring in the background: capture is not buffered \
+                       until it is allocated",
+            "allocation_progress": 0.4, "segments": [],
+        })));
+        let ring = row(&v, "iq-ring");
+        assert_eq!(ring["available"], json!(false), "{ring}");
+        assert_eq!(ring["state"], json!("allocating"), "{ring}");
+        assert!(
+            ring["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("allocating")),
+            "a ring that is still opening says so in its own words: {ring}"
+        );
+
+        // 2. Refused for want of disk: the same `available: false`, a different fact, and the
+        //    reason carries the numbers the operator needs.
+        let v = sources_of(Some(json!({
+            "enabled": false, "allocation": "refused",
+            "reason": "needs 134217728 bytes above the 8589934592-byte free-space floor and \
+                       4789297152 bytes are free",
+            "segments": [],
+        })));
+        let ring = row(&v, "iq-ring");
+        assert_eq!(ring["state"], json!("refused"), "{ring}");
+        assert!(
+            ring["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("free-space floor")),
+            "{ring}"
+        );
+
+        // 3. Locked by another process: a third fact, distinguishable from both.
+        let v = sources_of(Some(json!({
+            "enabled": false, "allocation": "locked",
+            "reason": "another process holds the ring's lock", "segments": [],
+        })));
+        assert_eq!(row(&v, "iq-ring")["state"], json!("locked"), "{v}");
+
+        // 4. Disabled by configuration: no allocation state at all, and the reason still speaks.
+        let v = sources_of(Some(json!({
+            "enabled": false, "allocation": Value::Null,
+            "reason": "disabled by configuration (--iq-retention off)", "segments": [],
+        })));
+        let ring = row(&v, "iq-ring");
+        assert_eq!(ring["state"], Value::Null, "{ring}");
+        assert!(
+            ring["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("disabled by configuration")),
+            "{ring}"
+        );
+
+        // 5. No ring wired at all: still not silent — the row says there is none to ask.
+        let v = sources_of(None);
+        let ring = row(&v, "iq-ring");
+        assert_eq!(ring["available"], json!(false), "{ring}");
+        assert_eq!(ring["state"], Value::Null, "{ring}");
+        assert!(ring["reason"].is_string(), "{ring}");
+        // The observation log is absent on this server too, and says which negative IT is - so
+        // the rule is the row's, not one source's special case.
+        for kind in ["observation-log", "open-dwell"] {
+            let r = row(&v, kind);
+            assert_eq!(r["available"], json!(false), "{r}");
+            assert!(
+                r["reason"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("observation log")),
+                "{r}"
+            );
+        }
+
+        // 6. Non-vacuity: a source that IS contributing reports `state: "open"` and no reason, so
+        //    none of the above can pass by stamping every row with a complaint.
+        let v = sources_of(Some(json!({
+            "enabled": true, "reason": Value::Null, "allocation": "full",
+            "t0": 7100.0, "t1": 7200.0,
+            "segments": [{
+                "device_id": RUNNING, "center_hz": 150e6, "sample_rate_hz": 20e6,
+                "t0_ns": 7_100i64 * 1_000_000_000, "t1_ns": 7_200i64 * 1_000_000_000,
+            }],
+        })));
+        let ring = row(&v, "iq-ring");
+        assert_eq!(ring["available"], json!(true), "{ring}");
+        assert_eq!(ring["state"], json!("open"), "{ring}");
+        assert_eq!(ring["reason"], Value::Null, "{ring}");
     }
 }
