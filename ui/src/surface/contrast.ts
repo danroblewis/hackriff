@@ -91,3 +91,22 @@ export function viewportScaleButton(mode: RangeMode): ContrastButton {
       : "Press to measure the range from the observed cells inside the view rather than from whole tiles, so a quiet band spreads across the ramp instead of sitting at the bottom of it. Turns auto-contrast on.",
   };
 }
+
+/**
+ * **The same three modes as one radio group** (T-882): the layers menu's "Colour scale" axis, which
+ * replaced the toolbar's two buttons. One row per mode, derived from the mode — never tracked beside
+ * it — so the menu and the surface cannot disagree about which scale is in force. The hints are the
+ * buttons' trades, shortened; the full sentence is the range label beside the group.
+ */
+export function scaleRows(mode: RangeMode): { id: RangeMode; label: string; hint: string; on: boolean }[] {
+  return [
+    { id: "anchored", label: "Anchored", hint: "same dB, same colour at every zoom", on: mode === "anchored" },
+    { id: "auto", label: "Auto-contrast", hint: "tracks the tiles on screen", on: mode === "auto" },
+    { id: "viewport", label: "Viewport scale", hint: "observed cells in view", on: mode === "viewport" },
+  ];
+}
+
+/** Parse a scale row's id back to a mode; anything else is `null` (the press is ignored). */
+export function scaleMode(id: string): RangeMode | null {
+  return (MODES as readonly string[]).includes(id) ? (id as RangeMode) : null;
+}

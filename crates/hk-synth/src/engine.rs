@@ -40,8 +40,10 @@
 //!    already meets the solve rule (that is how `solved` can be first to hit), and at the end for
 //!    the top 3 complete candidates. Only hold-out evidence solves.
 //!
-//! Local refinement (§3.1 step 6, `refined_into`) is M-7's `EvidenceObjective`; this engine never
-//! emits `refined_into`.
+//! Local refinement (§3.1 step 6, `refined_into`) runs M-7's [`crate::EvidenceObjective`] over
+//! IQ, which this engine never touches: it needs a refine call on the [`Evaluator`] seam, which
+//! arrives with the IQ-backed evaluator (M-6/M-8). Until then this engine never emits
+//! `refined_into`.
 //!
 //! # Determinism (ADR-0021 §5)
 //!
@@ -645,7 +647,10 @@ fn f64_value(v: f64) -> Value {
 
 /// The continuous grid for a free parameter (§3.1 step 3): the seed first, then its
 /// neighbours, within the domain, deduplicated.
-fn continuous_grid(domain: &Domain, seed: Option<&Value>) -> Option<(Vec<Value>, Scale)> {
+pub(crate) fn continuous_grid(
+    domain: &Domain,
+    seed: Option<&Value>,
+) -> Option<(Vec<Value>, Scale)> {
     match domain {
         Domain::Float(d) => {
             let (lo, hi) = (d.lo.min(d.hi), d.lo.max(d.hi));

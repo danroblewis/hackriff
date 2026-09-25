@@ -63,14 +63,20 @@ async function freePort(first, tries = 24) {
     "Another e2e run (or several) is in flight; wait for it, or set HK_E2E_PORT.");
 }
 
-function hkBinary() {
+export function hkBinary() {
   if (process.env.HK_BIN) {
     if (!existsSync(process.env.HK_BIN)) throw new Error(`HK_BIN=${process.env.HK_BIN} does not exist`);
     return process.env.HK_BIN;
   }
-  for (const p of ["target/release/hk", "target/debug/hk"]) {
-    const abs = path.join(REPO, p);
-    if (existsSync(abs)) return abs;
+  // CARGO_TARGET_DIR first: the merge runner builds in its own target dir so main's target/ stays a
+  // stable clone source for worker worktrees (2026-09-24: every gate rebuild of target/ in place made
+  // the shared blocks of every cloned worktree target exclusive, ~2 GB/min of disk).
+  const dirs = [process.env.CARGO_TARGET_DIR, "target"].filter(Boolean);
+  for (const d of dirs) {
+    for (const p of ["release/hk", "debug/hk"]) {
+      const abs = path.resolve(REPO, d, p);
+      if (existsSync(abs)) return abs;
+    }
   }
   throw new Error(
     "no `hk` binary. Build it once (`cargo build -p hk-cli --bin hk`) or set HK_BIN=/path/to/hk.\n" +
