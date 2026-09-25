@@ -23862,7 +23862,7 @@ tasks:
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
-    status: in-progress
+    status: done
     branch: task-t809
     priority: high
     parallel_group: MAP-LAYERS
@@ -23894,6 +23894,7 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): signals and events appear as pins; hovering one shows a tooltip (MapTip), and clicking selects it with a visible selected state. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): the user judged the pins 'awful, much worse than the boxes' on staging (a provisional batch at 19:27 put task-t809 there). T-809 lands as pins.ts + the quick fix T-909 (box >= 6 px draws no glyph; pin only as scale-dependent generalization; hit area = the box), done on task-t809 before its gate. The full re-scope into feature symbolization (polygons with class symbology, generalization, hit-test/select, labels) is T-910.
+    commit: 26cc2fa9
   - id: T-810
     milestone: MMAP
     title: Density layer at coarse zoom (features per cell from /api/tiles/events) instead of numbered cluster bubbles; drilling in resolves to boxes (re-scoped from pin clustering, user 19:35)
