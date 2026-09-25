@@ -28612,7 +28612,7 @@ tasks:
   - id: T-934
     milestone: M2-hardening
     title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: DEFLAKE-WC
@@ -28640,6 +28640,7 @@ tasks:
       Commits: 9d32ffbb
       Observed, not chased: hk-cli api_contract: three tests fail ALONE on base 7a9fa8ab (reproduced without the T-934 diff). (a) a_retune_keeps_connected_stream_consumers_connected, api_contract.rs:4854: 'a row after the seam is 10240000 ns after the one before it, shorter than the new window's 23893334 ns row period'. (b) recipe_and_pipeline_routes_match_the_documented_shapes, api_contract.rs:5499: got (201, Null), expected (409, 'outside_window'). (c) ws_stream_header_matches_the_stream_contract, api_contract.rs:4561: 't must be sample_index on the capture clock: 40106668 ns vs 40106666.666666664 ns' (a rounding error of 1.3 ns). | tests/ondemand.rs keeps `assert!(records > 20)` after the loop. The loop condition now guarantees it, so it is kept only as documentation.
       Resources: 112 CPU-s, peak 0.8 GB
+    commit: 5cda032c
   - id: T-969
     milestone: MAUTO
     title: "All captured signals decode: add the 88.5 (PI 3AAB) and 106.1 (PI 1323) FM members to T-936's set"
