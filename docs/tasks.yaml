@@ -27614,7 +27614,7 @@ tasks:
   - id: T-929
     milestone: M2-hardening
     title: "hk-pipeline listen_lifecycle fifty_sessions_closed_cleanly: 504 probe-timeout before Session::run (1/3 alone pre-T-917; T-868 saw it too) - triage and fix"
-    status: in-progress
+    status: done
     branch: task-t929
     priority: normal
     deps: []
@@ -27637,6 +27637,7 @@ tasks:
       Observed, not chased: The load reproduction needed ~88 CPU burners (sha1sum /dev/zero, started and killed inside the same command; the busy-loop hook denies the usual shapes and HK_ALLOW_LOAD cannot be set from a worker's command, since the hook reads it from its own environment). All burners were killed and uptime confirmed the box back to idle after each run. | hk-survey holding its gate cursor across the whole measurement is deliberate (survey.rs module doc: lossless determinism) and was left alone, T-917 included; the cost is that in lossless replay capture stops for seconds at a time on a loaded box, which any other wall-clock wait on the sample path could also misread as a failed source. Only chains/listen.rs's probe was audited for that pattern - it was the only wall-clock deadline there.
       Use cases: SIGNAL-062
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: ea5f77db
   - id: T-930
     milestone: MAUTO
     title: "Analyze trace panel follow-ups: the trace poll never stops for failed/queued-cancelled jobs (final only when job.trace is set), real-shape fixture, filter-labelled error, doc tidy (T-570 re-review)"
