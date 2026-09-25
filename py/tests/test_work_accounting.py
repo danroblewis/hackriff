@@ -1166,3 +1166,15 @@ def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_pat
     assert out.returncode == 0, out.stderr
     assert (tmp_path / "q").read_text().split() == ["task-x", "task-b", "task-c", "task-d", "task-a"]
     assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()
+
+
+def test_a_workers_red_proof_beside_a_green_run_is_not_a_failing_test():
+    """2026-09-24: T-894 (15:25) and T-905 (20:16) handed back DONE with their new test's red run on the old
+    code listed at exit 1, and read BLOCKED 'needs a person'. "expect": "red" + a green run = evidence."""
+    proof = {"cmd": "cd ui && node test/run.mjs surface-survey (on old code)", "exit": 1, "expect": "red"}
+    fixed = {"cmd": "cd ui && node test/run.mjs surface-survey", "exit": 0}
+    assert R.hand_back_reds({"tests": [proof, fixed]}) == ([], [])
+    assert R.hand_back_reds({"tests": [proof]}) == ([proof], [proof])            # no green run beside it
+    plain = {"cmd": "cargo nextest run -p hk-x", "exit": 101}
+    assert R.hand_back_reds({"tests": [plain, fixed]}) == ([plain], [plain])     # an unmarked red still blocks
+    assert R.hand_back_reds(None) == ([], [])
