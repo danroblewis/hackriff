@@ -34,9 +34,10 @@ use crate::ids::EmitterId;
 use crate::region::{FreqRange, Region, TimeRange};
 use crate::relate::{
     ARTIFACT_SOURCE_MIN_SNR_DB, ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation,
-    REGION_MAX_ROUNDS, ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RowEvidence,
-    TunedLo, bands_compete, boxes_overlap, center_uncertainty_hz, distinguishing_evidence, modes,
-    overlap_fraction, predict_artifacts, present_only_with,
+    REGION_MAX_ROUNDS, ReceiveChain, RegionMeasurement, RegionVerdict, RelationAuthor,
+    RelationClaim, RelationKind, RowEvidence, TunedLo, bands_compete, boxes_overlap,
+    center_uncertainty_hz, distinguishing_evidence, modes, overlap_fraction, predict_artifacts,
+    present_only_with, region_verdicts,
 };
 use crate::time::Timestamp;
 
@@ -66,6 +67,11 @@ const CONTESTED_VERDICT: &str = "contested";
 /// T-369: the marker on a claim the region re-analysis made, so the ranking stages above it do not
 /// revoke it for failing *their* pairwise test. See [`is_region_claim`].
 const ONE_EMISSION_VERDICT: &str = "one-emission";
+
+/// T-978: the marker on a claim made from the region's **re-measured spectrum** rather than from
+/// the rows' own recorded bands, so the two re-analyses are told apart on the wire and neither is
+/// revoked by a pairwise stage it has already overruled. See [`Repository::resolve_measured_region`].
+const MEASURED_REGION_VERDICT: &str = "measured-region";
 
 /// T-369: the measured bands of an emitter's linked detections, newest first. Reaches detections
 /// exactly like [`EMITTER_DETECTION_EVIDENCE_SQL`] — through the currently-linked tracks, or linked
@@ -591,6 +597,12 @@ pub struct OverlapOutcome {
     /// shown — a contested verdict never hides anything — and the record says what was tried and
     /// what blocked a merge. Bounded by [`crate::relate::REGION_MAX_ROUNDS`] per row.
     pub contested: Vec<EmitterRelation>,
+    /// T-978: the regions stage 4 examined and could **not** resolve from the rows alone — the
+    /// union band of each, for the caller to re-measure against the spectrum and hand back to
+    /// [`Repository::resolve_measured_region`]. Not a record: nothing is written for it, and it is
+    /// reported whether or not a contested verdict was appended (those are capped per row by
+    /// [`REGION_MAX_ROUNDS`], and a region does not stop being wrong when the cap is reached).
+    pub unresolved: Vec<FreqRange>,
 }
 
 impl OverlapOutcome {
@@ -1100,11 +1112,23 @@ fn resolve(
 /// measurements because the *pair* does not pass [`bands_compete`] (which is exactly why stage 4
 /// exists).
 fn is_region_claim(r: &EmitterRelation) -> bool {
+    verdict_of(r) == Some(ONE_EMISSION_VERDICT)
+}
+
+/// T-978: whether this claim was authored by [`Repository::resolve_measured_region`]. Kept apart
+/// from [`is_region_claim`] so that **each re-analysis revokes only its own claims**: stage 4
+/// revokes a standing claim whenever its pairwise guard blocks, which is precisely the case the
+/// measured re-analysis exists to overrule, so one predicate for both would have stage 4 undo every
+/// claim the spectrum made, one touch later.
+fn is_measured_claim(r: &EmitterRelation) -> bool {
+    verdict_of(r) == Some(MEASURED_REGION_VERDICT)
+}
+
+fn verdict_of(r: &EmitterRelation) -> Option<&str> {
     r.detail
         .as_ref()
         .and_then(|d| d.get("verdict"))
         .and_then(|v| v.as_str())
-        == Some(ONE_EMISSION_VERDICT)
 }
 
 /// Whether `id` currently defers for a reason **other** than the region re-analysis. Such a row is
@@ -1114,7 +1138,7 @@ fn is_region_claim(r: &EmitterRelation) -> bool {
 fn defers_elsewhere(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
     Ok(read_relations(conn, CURRENT_RELATION_SQL, id)?
         .iter()
-        .any(|r| !is_region_claim(r)))
+        .any(|r| !is_region_claim(r) && !is_measured_claim(r)))
 }
 
 /// Revokes a standing region claim on `id` (it no longer defers to the region's survivor).
@@ -1125,10 +1149,33 @@ fn revoke_region_claim(
     t: Timestamp,
     why: &str,
 ) -> Result<Vec<EmitterRelation>, RepoError> {
+    revoke_claim(conn, id, actor, t, why, is_region_claim)
+}
+
+/// T-978: revokes a standing **measured-region** claim on `id`. See [`is_measured_claim`] for why
+/// this is a separate revocation from stage 4's.
+fn revoke_measured_claim(
+    conn: &Connection,
+    id: EmitterId,
+    actor: &str,
+    t: Timestamp,
+    why: &str,
+) -> Result<Vec<EmitterRelation>, RepoError> {
+    revoke_claim(conn, id, actor, t, why, is_measured_claim)
+}
+
+fn revoke_claim(
+    conn: &Connection,
+    id: EmitterId,
+    actor: &str,
+    t: Timestamp,
+    why: &str,
+    mine: fn(&EmitterRelation) -> bool,
+) -> Result<Vec<EmitterRelation>, RepoError> {
     let mut out = Vec::new();
     for r in read_relations(conn, CURRENT_RELATION_SQL, id)?
         .iter()
-        .filter(|r| is_region_claim(r))
+        .filter(|r| mine(r))
     {
         out.push(insert_relation(
             conn,
@@ -1356,6 +1403,9 @@ fn reanalyse_region(
             .then_some("the measurements separate into more than one emission")
             .or_else(|| distinguishing_evidence(top, m, tol));
         if let Some(why) = blocked {
+            if !out.unresolved.contains(&region) {
+                out.unresolved.push(region);
+            }
             out.revoked.extend(revoke_region_claim(
                 conn,
                 m.emitter_id,
@@ -1422,4 +1472,224 @@ fn reanalyse_region(
         out.revoked.extend(revoked);
     }
     Ok(())
+}
+
+/// **T-978: resolve an overlapping region against its own re-measured spectrum.**
+///
+/// [`Repository::resolve_overlaps`]'s stage 4 detects the overlap; it cannot resolve the two
+/// geometries the explorer actually saw on 2026-09-25, because everything it has to reason with is
+/// the rows themselves. `modes` merges the bands *of those rows* and so answers "one" for any
+/// region whose boxes overlap by construction, and the verdict then falls to
+/// [`distinguishing_evidence`], whose bandwidth-ratio guard reads a 9.3 kHz box and a 26.2 kHz box
+/// over one P25 emission as two emissions and contests the region for ever.
+///
+/// So this takes a **measurement of the region** (`hk_detect::overlap::measure_region` over the
+/// integrated spectrum, made by the caller off the capture thread) and applies
+/// [`crate::relate::region_verdicts`] to the live rows in it:
+///
+/// - a row that is another **reading** of a measured emission defers to the row shown for it;
+/// - a row that **merges** emissions the spectrum separates defers to the row shown for the
+///   strongest of them — but only when every emission it merged has a row of its own, so retiring
+///   it can never lose an emission;
+/// - a row the measurement cannot resolve is **contested**: recorded, shown, nothing hidden.
+///
+/// Same discipline as every other claim here: append-only, `DuplicateOf`, revocable, and the losing
+/// row keeps its id, detections, tracks and history. The `detail` verdict is
+/// [`MEASURED_REGION_VERDICT`], so a claim made from the spectrum is told apart on the wire from
+/// T-369's [`ONE_EMISSION_VERDICT`] and from the pairwise stages' claims — and, like T-369's, it is
+/// not revoked by stage 3 for failing a *pairwise* test the measurement has already overruled.
+///
+/// **Bounded.** One pass over the live rows overlapping the measured region
+/// ([`MAX_NEIGHBOURS`]), one `claim` or `revoke` per row, and contested verdicts capped per row by
+/// [`REGION_MAX_ROUNDS`] exactly as stage 4's are.
+impl Repository {
+    /// See the module docs: applies `m` to the live rows of the region it measured.
+    pub fn resolve_measured_region(
+        &mut self,
+        m: &RegionMeasurement,
+        actor: &str,
+        t: Timestamp,
+        tol: &Tolerances,
+    ) -> Result<OverlapOutcome, RepoError> {
+        self.ensure_refined_table()?;
+        let tx = self.write_tx()?;
+        let out = apply_measured_region(&tx, m, actor, t, tol)?;
+        tx.commit()?;
+        Ok(out)
+    }
+}
+
+fn apply_measured_region(
+    conn: &Connection,
+    m: &RegionMeasurement,
+    actor: &str,
+    t: Timestamp,
+    tol: &Tolerances,
+) -> Result<OverlapOutcome, RepoError> {
+    let mut out = OverlapOutcome::default();
+    // The members: live, listed rows in the measured region that overlap another member in time
+    // *and* frequency. A row that merely shares the span with nothing is not part of an overlap.
+    let mut rows: Vec<RowEvidence> = Vec::new();
+    // `overlapping` excludes one row by id; the measurement is not about any one row, so the
+    // exclusion is the nil id and every live row in the region is a candidate member.
+    let none = EmitterId::from_uuid(uuid::Uuid::nil());
+    for id in overlapping(conn, m.region, none, MAX_NEIGHBOURS)? {
+        if defers_elsewhere(conn, id)? {
+            continue;
+        }
+        if let Some(ev) = evidence(conn, id)? {
+            rows.push(ev);
+        }
+    }
+    let members: Vec<&RowEvidence> = rows
+        .iter()
+        .filter(|a| rows.iter().any(|b| boxes_overlap(a, b)))
+        .collect();
+    if members.len() < 2 {
+        return Ok(out);
+    }
+
+    for (id, verdict) in region_verdicts(&members, m, tol) {
+        let row = members
+            .iter()
+            .copied()
+            .find(|r| r.emitter_id == id)
+            .expect("verdicts name members");
+        let (of, reason, detail) = match verdict {
+            RegionVerdict::Emission { emission } => {
+                out.revoked.extend(revoke_measured_claim(
+                    conn,
+                    id,
+                    actor,
+                    t,
+                    &format!(
+                        "the re-analysed spectrum measures an emission at {:.6} MHz and this row \
+                         is the box that reads it",
+                        m.emissions[emission].center_hz / 1e6,
+                    ),
+                )?);
+                continue;
+            }
+            RegionVerdict::Kept { why } => {
+                out.revoked.extend(revoke_measured_claim(
+                    conn,
+                    id,
+                    actor,
+                    t,
+                    "the re-analysed spectrum no longer resolves this row into another",
+                )?);
+                let against = members
+                    .iter()
+                    .find(|r| r.emitter_id != id)
+                    .map(|r| r.emitter_id)
+                    .expect("at least two members");
+                out.contested.extend(contest(
+                    conn,
+                    row,
+                    against,
+                    m.region,
+                    members.len(),
+                    m.emissions.len(),
+                    Some(why),
+                    actor,
+                    t,
+                )?);
+                continue;
+            }
+            RegionVerdict::Reading { emission, of } => {
+                let e = &m.emissions[emission];
+                (
+                    of,
+                    format!(
+                        "region re-analysis of the spectrum over {:.6}-{:.6} MHz at {:.0} Hz \
+                         resolution ({:.2} s integrated): {} boxes overlap in time and frequency, \
+                         and the spectrum there measures {} emission(s) - this box is another \
+                         reading of the one at {:.6} MHz (OBW {:.1} kHz, peak SNR {:.1} dB), so it \
+                         defers to emitter {of} (detections, tracks and history kept; reversible)",
+                        m.region.lo_hz / 1e6,
+                        m.region.hi_hz / 1e6,
+                        m.resolution_hz,
+                        m.span_s,
+                        members.len(),
+                        m.emissions.len(),
+                        e.center_hz / 1e6,
+                        e.obw_hz / 1e3,
+                        e.peak_snr_db,
+                    ),
+                    serde_json::json!({
+                        "verdict": MEASURED_REGION_VERDICT,
+                        "outcome": "reading",
+                        "region_lo_hz": m.region.lo_hz,
+                        "region_hi_hz": m.region.hi_hz,
+                        "resolution_hz": m.resolution_hz,
+                        "span_s": m.span_s,
+                        "members": members.len(),
+                        "measured": m.emissions.len(),
+                        "emission_center_hz": e.center_hz,
+                        "emission_obw_hz": e.obw_hz,
+                        "emission_peak_snr_db": e.peak_snr_db,
+                    }),
+                )
+            }
+            RegionVerdict::Merged { ref emissions, of } => {
+                let centres: Vec<f64> = emissions
+                    .iter()
+                    .map(|&i| m.emissions[i].center_hz)
+                    .collect();
+                (
+                    of,
+                    format!(
+                        "region re-analysis of the spectrum over {:.6}-{:.6} MHz at {:.0} Hz \
+                         resolution ({:.2} s integrated): this {:.1} kHz box covers {} emissions \
+                         the spectrum separates ({}), each of which another box reads, so it is a \
+                         merge of them and not an emission - it defers to emitter {of} \
+                         (detections, tracks and history kept; reversible)",
+                        m.region.lo_hz / 1e6,
+                        m.region.hi_hz / 1e6,
+                        m.resolution_hz,
+                        m.span_s,
+                        row.bandwidth_hz / 1e3,
+                        emissions.len(),
+                        centres
+                            .iter()
+                            .map(|f| format!("{:.6} MHz", f / 1e6))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    serde_json::json!({
+                        "verdict": MEASURED_REGION_VERDICT,
+                        "outcome": "merged",
+                        "region_lo_hz": m.region.lo_hz,
+                        "region_hi_hz": m.region.hi_hz,
+                        "resolution_hz": m.resolution_hz,
+                        "span_s": m.span_s,
+                        "members": members.len(),
+                        "measured": m.emissions.len(),
+                        "merged_centers_hz": centres,
+                    }),
+                )
+            }
+        };
+        let standing = read_relations(conn, CURRENT_RELATION_SQL, id)?;
+        let (claimed, revoked) = claim(
+            conn,
+            &standing,
+            RelationClaim {
+                emitter_id: id,
+                source_id: of,
+                kind: RelationKind::DuplicateOf,
+                artifact: None,
+                active: true,
+                t,
+                author: RelationAuthor::System,
+                actor: actor.to_owned(),
+                reason,
+                score: Some(row.rank()),
+                detail: Some(detail),
+            },
+        )?;
+        out.duplicates.extend(claimed);
+        out.revoked.extend(revoked);
+    }
+    Ok(out)
 }

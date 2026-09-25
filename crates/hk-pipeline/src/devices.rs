@@ -268,6 +268,8 @@ pub(super) fn start(
         // frame's provenance. Sharing one queue across devices would interleave two readers'
         // frames into a single drop-oldest buffer, so a fast device could starve a slow one of
         // view rows - and an under-fed view lattice greys time the radio really looked at.
+        // T-978: one hand-off for the whole run, shared by every front end.
+        region_spectrum: Arc::clone(&common.region_spectrum),
         view_queue: common.view.is_some().then(|| {
             Arc::new(crate::history::ViewQueue::new(
                 crate::history::VIEW_QUEUE_FRAMES,

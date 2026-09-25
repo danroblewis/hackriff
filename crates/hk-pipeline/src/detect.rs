@@ -444,6 +444,11 @@ impl DetectNode {
         );
         self.pending_floor = floor_events;
         self.now_ns = frame.t.host_time.as_unix_nanos();
+        // T-978: one atomic load per frame in the steady state; a snapshot is taken only when the
+        // inventory has an overlap it could not resolve from the rows (`crate::overlap`).
+        self.shared
+            .region_spectrum
+            .publish(|| self.det.integrated_snapshot());
 
         let stats = self.det.stats();
         let (segments, dense, dropped, frames) = (
@@ -908,6 +913,13 @@ impl Writer {
         };
         let site = shared.cfg.settings.site.map(|s| Site::new(s[0], s[1]));
         let presence = PresenceStream::new(shared.cfg.stream_sink.as_ref())?;
+        // T-978: the inventory resolves an unresolved overlap against the spectrum, which lives on
+        // the reader. It asks through this handle and the reader answers; see `crate::overlap`.
+        shared
+            .inventory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .region_spectrum(Arc::clone(&shared.region_spectrum));
         Ok(Self {
             detections: DetectionWriter::new(shared.cfg.settings.detection_batch),
             shared,

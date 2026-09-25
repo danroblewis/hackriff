@@ -698,6 +698,354 @@ pub fn distinguishing_evidence(
 }
 
 // ---------------------------------------------------------------------------------------------
+// T-978: the overlap is re-analysed against the spectrum, not against the rows
+// ---------------------------------------------------------------------------------------------
+
+/// T-978: the least resolution cells the narrowest box of a region must span before a measurement
+/// is allowed to say anything about it.
+///
+/// A mode in the integrated spectrum is a seed bin plus the extend bins either side of it, so four
+/// cells across the narrowest box is the least at which the measurement *could* show that box as an
+/// emission of its own. Measured coarser than that, the spectrum cannot separate what the rows
+/// claim, and [`region_verdicts`] refuses to act on it rather than resolving a region at a
+/// resolution it was not drawn at ("the UI never implies detail the front end can't deliver",
+/// applied to the analysis behind it).
+pub const REGION_MIN_BINS: usize = 4;
+
+/// One emission the spectrum itself shows inside an overlapping region: its occupied band, its
+/// excess-weighted centre and the peak SNR that made it an emission at all.
+///
+/// **A measurement, not a row.** Produced by re-analysing the region's own power spectrum
+/// (`hk_detect::overlap::measure_region`), so it is independent of how the inventory happened to
+/// cut that energy into boxes — which is exactly what [`modes`] could not be, because it merges the
+/// bands *of those boxes* and so answers "one" for any region whose boxes overlap by construction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasuredEmission {
+    /// Occupied band (the [`RegionMeasurement::obw_fraction`] span of the excess), Hz.
+    pub band: FreqRange,
+    /// Excess-weighted centroid, Hz.
+    pub center_hz: f64,
+    /// Occupied bandwidth, Hz (the width of `band`).
+    pub obw_hz: f64,
+    /// Peak bin SNR over the emission, dB.
+    pub peak_snr_db: f64,
+}
+
+/// What a re-analysis of one overlapping region measured, with the resolution it was measured at.
+///
+/// The resolution is carried because it decides what the measurement is *allowed* to say
+/// ([`REGION_MIN_BINS`]): a region drawn at 4.9 kHz cells has no opinion about whether a 9 kHz box
+/// and a 26 kHz box are one emission or two.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionMeasurement {
+    /// The union of the overlapping boxes, the span that was re-analysed.
+    pub region: FreqRange,
+    /// Width of one spectrum cell, Hz.
+    pub resolution_hz: f64,
+    /// Cells the region spans.
+    pub bins: usize,
+    /// Seconds of spectrum integrated into the measurement.
+    pub span_s: f64,
+    /// Share of the excess power inside [`MeasuredEmission::band`].
+    pub obw_fraction: f64,
+    /// The emissions measured, by frequency.
+    pub emissions: Vec<MeasuredEmission>,
+}
+
+impl RegionMeasurement {
+    /// An empty measurement over `region` (nothing was resolved there).
+    pub fn empty(region: FreqRange, resolution_hz: f64, bins: usize) -> Self {
+        Self {
+            region,
+            resolution_hz,
+            bins,
+            span_s: 0.0,
+            obw_fraction: 0.0,
+            emissions: Vec::new(),
+        }
+    }
+}
+
+/// What the re-analysis concluded about one row of an overlapping region.
+///
+/// Nothing here deletes anything: [`RegionVerdict::Reading`] and [`RegionVerdict::Merged`] become
+/// revocable `DuplicateOf` claims, [`RegionVerdict::Kept`] becomes a contested record that hides
+/// nothing, and [`RegionVerdict::Emission`] revokes whatever the region claimed about that row
+/// before.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RegionVerdict {
+    /// The row shown for measured emission `emission`: the box that best matches what was measured.
+    Emission {
+        /// Index into [`RegionMeasurement::emissions`].
+        emission: usize,
+    },
+    /// Another reading of the same measured emission — a second cut of one emission, which is what
+    /// two overlapping boxes over one signal are. Defers to the row shown for it.
+    Reading {
+        /// Index into [`RegionMeasurement::emissions`].
+        emission: usize,
+        /// The row shown for that emission.
+        of: EmitterId,
+    },
+    /// The box swallows emissions the spectrum separates: one wide box drawn over two (or more)
+    /// real signals. Defers to the row shown for the strongest of them.
+    Merged {
+        /// Indices into [`RegionMeasurement::emissions`], by frequency.
+        emissions: Vec<usize>,
+        /// The row shown for the strongest emission it merged.
+        of: EmitterId,
+    },
+    /// Kept and shown, with why the measurement did not resolve it.
+    Kept {
+        /// The reason, for the recorded verdict.
+        why: &'static str,
+    },
+}
+
+/// [`RegionVerdict::Kept`]: the region was measured with fewer than [`REGION_MIN_BINS`] cells
+/// across its narrowest box.
+pub const REGION_TOO_COARSE: &str = "the region was measured coarser than its narrowest box";
+/// [`RegionVerdict::Kept`]: no emission was measured anywhere in the region.
+pub const REGION_NO_EMISSION: &str = "the spectrum resolves no emission in this region";
+/// [`RegionVerdict::Kept`]: no measured emission explains this row's band.
+pub const REGION_ROW_UNEXPLAINED: &str = "no measured emission explains this row's band";
+/// [`RegionVerdict::Kept`]: the rows carry different decoded identities.
+pub const REGION_IDENTITY: &str = "a different decoded identity";
+/// [`RegionVerdict::Kept`]: the row sits off the measured emission's centre, so it is something
+/// inside the emission rather than another reading of it.
+pub const REGION_OFF_CENTRE: &str = "its centre is off the measured emission's, so it is something inside that emission rather \
+     than another reading of it";
+/// [`RegionVerdict::Kept`]: a box merging several measured emissions, at least one of which no
+/// other row represents — retiring it would lose that emission.
+pub const REGION_MERGE_UNCOVERED: &str =
+    "it merges measured emissions that no other row represents, so retiring it would lose them";
+
+/// **T-978: resolve an overlapping region against what the spectrum measures in it.**
+///
+/// CLAUDE.md: *"overlapping Confirmed/Candidate boxes are proof the analysis is wrong, with at
+/// least one true signal inside the union. The system detects the overlap and automatically
+/// re-analyzes that region to resolve it to the real signal(s)."* [`crate::repo`]'s stage 4
+/// (T-369) does the detecting; this does the resolving, from `m` — the region's own re-measured
+/// spectrum — rather than from the two boxes' recorded widths.
+///
+/// Why the recorded widths cannot decide it: they are the *symptom*. Two boxes over one P25
+/// emission measured 9.3 kHz and 26.2 kHz on the air on 2026-09-25, a ratio of 2.8, and
+/// [`distinguishing_evidence`]'s bandwidth test — which exists to stop a narrow emission being
+/// swallowed by a wide one — reads that as two emissions and contests the region for ever. The
+/// measurement does not have that problem: one contiguous emission at one centre is one emission,
+/// however many boxes were cut out of it.
+///
+/// Per row, from the measured emissions:
+///
+/// - the row **reads** the emission it overlaps most, when that overlap covers at least
+///   [`OVERLAP_MIN_FRACTION`] of the *row's own* band (the emission explains the row);
+/// - the row **swallows** every emission of which it covers at least [`OVERLAP_MIN_FRACTION`]
+///   (the row explains the emission).
+///
+/// A row swallowing two or more emissions is a **merge**: one box drawn over signals the spectrum
+/// separates. It defers, but only when every emission it merged has a row of its own — otherwise
+/// retiring it would lose an emission, and it is kept and recorded instead. Rows reading the same
+/// emission are **readings of one signal**: the best match to the measured centre and occupied
+/// bandwidth is shown and the rest defer.
+///
+/// **Two guards survive the measurement**, because merging is the dangerous direction (T-233):
+/// different decoded identities always block, and a row whose centre sits further than
+/// `tol.center_bw_fraction` of the measured occupied bandwidth from the measured centroid is
+/// **something inside that emission**, not another reading of it — a subcarrier is offset from its
+/// host by construction, which is what makes it a subcarrier. A concentric narrow box inside a wide
+/// one is the opposite case and is precisely the analysis being wrong: two real emissions sharing a
+/// centre would not demodulate.
+pub fn region_verdicts(
+    rows: &[&RowEvidence],
+    m: &RegionMeasurement,
+    tol: &Tolerances,
+) -> Vec<(EmitterId, RegionVerdict)> {
+    let kept = |why: &'static str| -> Vec<(EmitterId, RegionVerdict)> {
+        rows.iter()
+            .map(|r| (r.emitter_id, RegionVerdict::Kept { why }))
+            .collect()
+    };
+    if rows.len() < 2 {
+        return Vec::new();
+    }
+    if m.emissions.is_empty() {
+        return kept(REGION_NO_EMISSION);
+    }
+    let narrowest = rows
+        .iter()
+        .map(|r| r.freq().width_hz())
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    let resolved = m.resolution_hz.is_finite()
+        && m.resolution_hz > 0.0
+        && narrowest.is_finite()
+        && narrowest >= m.resolution_hz * REGION_MIN_BINS as f64;
+    if !resolved {
+        return kept(REGION_TOO_COARSE);
+    }
+
+    // Per row: the emission it reads, and the emissions it swallows.
+    let mut reads: Vec<Option<usize>> = Vec::with_capacity(rows.len());
+    let mut swallows: Vec<Vec<usize>> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let band = r.freq();
+        let mut best: Option<(usize, f64)> = None;
+        let mut mine: Vec<usize> = Vec::new();
+        for (i, e) in m.emissions.iter().enumerate() {
+            let common = (band.hi_hz.min(e.band.hi_hz) - band.lo_hz.max(e.band.lo_hz)).max(0.0);
+            if common <= 0.0 {
+                continue;
+            }
+            if e.obw_hz > 0.0 && common / e.obw_hz >= OVERLAP_MIN_FRACTION {
+                mine.push(i);
+            }
+            if band.width_hz() > 0.0
+                && common / band.width_hz() >= OVERLAP_MIN_FRACTION
+                && best.is_none_or(|(_, c)| common > c)
+            {
+                best = Some((i, common));
+            }
+        }
+        reads.push(if mine.len() >= 2 {
+            None
+        } else {
+            best.map(|(i, _)| i)
+        });
+        swallows.push(mine);
+    }
+
+    // The row shown for each emission: of those reading it, the best match to the measurement.
+    let mut shown: Vec<Option<usize>> = vec![None; m.emissions.len()];
+    for (k, r) in rows.iter().enumerate() {
+        let Some(e) = reads[k] else { continue };
+        let better = match shown[e] {
+            None => true,
+            Some(cur) => {
+                let (a, b) = (
+                    match_cost(rows[cur], &m.emissions[e]),
+                    match_cost(r, &m.emissions[e]),
+                );
+                b < a || (b == a && better_row(r, rows[cur]))
+            }
+        };
+        if better {
+            shown[e] = Some(k);
+        }
+    }
+
+    let mut out: Vec<(EmitterId, RegionVerdict)> = Vec::with_capacity(rows.len());
+    for (k, r) in rows.iter().enumerate() {
+        // A box over several measured emissions is a merge, not a reading of any of them.
+        if swallows[k].len() >= 2 {
+            let covered: Option<Vec<usize>> = swallows[k]
+                .iter()
+                .map(|&e| shown[e].filter(|&s| s != k))
+                .collect::<Option<Vec<usize>>>();
+            let strongest = swallows[k]
+                .iter()
+                .copied()
+                .reduce(|a, b| {
+                    if m.emissions[b].peak_snr_db > m.emissions[a].peak_snr_db {
+                        b
+                    } else {
+                        a
+                    }
+                })
+                .expect("swallows is non-empty");
+            match (covered, shown[strongest]) {
+                (Some(_), Some(s)) if s != k => out.push((
+                    r.emitter_id,
+                    RegionVerdict::Merged {
+                        emissions: swallows[k].clone(),
+                        of: rows[s].emitter_id,
+                    },
+                )),
+                _ => out.push((
+                    r.emitter_id,
+                    RegionVerdict::Kept {
+                        why: REGION_MERGE_UNCOVERED,
+                    },
+                )),
+            }
+            continue;
+        }
+        let Some(e) = reads[k] else {
+            out.push((
+                r.emitter_id,
+                RegionVerdict::Kept {
+                    why: REGION_ROW_UNEXPLAINED,
+                },
+            ));
+            continue;
+        };
+        let Some(s) = shown[e] else { continue };
+        if s == k {
+            out.push((r.emitter_id, RegionVerdict::Emission { emission: e }));
+            continue;
+        }
+        let top = rows[s];
+        if let (Some(x), Some(y)) = (&top.identity, &r.identity)
+            && x != y
+        {
+            out.push((
+                r.emitter_id,
+                RegionVerdict::Kept {
+                    why: REGION_IDENTITY,
+                },
+            ));
+            continue;
+        }
+        let em = &m.emissions[e];
+        let slack = (tol.center_bw_fraction.max(0.0) * em.obw_hz)
+            .max(center_uncertainty_hz(em.center_hz, tol));
+        if (r.f_center_hz - em.center_hz).abs() > slack {
+            out.push((
+                r.emitter_id,
+                RegionVerdict::Kept {
+                    why: REGION_OFF_CENTRE,
+                },
+            ));
+            continue;
+        }
+        out.push((
+            r.emitter_id,
+            RegionVerdict::Reading {
+                emission: e,
+                of: top.emitter_id,
+            },
+        ));
+    }
+    out
+}
+
+/// How badly a row matches a measured emission: centres in units of the measured occupied
+/// bandwidth, plus the log width ratio. Dimensionless in both terms, so neither scale dominates.
+fn match_cost(r: &RowEvidence, e: &MeasuredEmission) -> f64 {
+    let obw = if e.obw_hz.is_finite() && e.obw_hz > 0.0 {
+        e.obw_hz
+    } else {
+        return f64::INFINITY;
+    };
+    let centre = (r.f_center_hz - e.center_hz).abs() / obw;
+    let width = if r.bandwidth_hz.is_finite() && r.bandwidth_hz > 0.0 {
+        (r.bandwidth_hz / obw).ln().abs()
+    } else {
+        1.0
+    };
+    centre + width
+}
+
+/// Tie-break between two equally good matches: the better-supported row, then the more-sighted,
+/// then the older. Never a measurement — only which of two identical readings is shown.
+fn better_row(a: &RowEvidence, b: &RowEvidence) -> bool {
+    match a.rank().total_cmp(&b.rank()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => (a.count, -a.first_seen_ns) > (b.count, -b.first_seen_ns),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Geometric artifact prediction
 // ---------------------------------------------------------------------------------------------
 

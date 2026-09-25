@@ -142,10 +142,12 @@ pub use recording::{
 };
 pub use region::{FreqRange, Region, TimeRange};
 pub use relate::{
-    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, OVERLAP_MIN_FRACTION,
-    ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RelationVisibility, RowEvidence,
-    TunedLo, distinct_chains, distinguishing_evidence, overlap_fraction, predict_artifacts,
-    present_only_with, rank_score,
+    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, MeasuredEmission,
+    OVERLAP_MIN_FRACTION, REGION_IDENTITY, REGION_MERGE_UNCOVERED, REGION_MIN_BINS,
+    REGION_NO_EMISSION, REGION_OFF_CENTRE, REGION_ROW_UNEXPLAINED, REGION_TOO_COARSE, ReceiveChain,
+    RegionMeasurement, RegionVerdict, RelationAuthor, RelationClaim, RelationKind,
+    RelationVisibility, RowEvidence, TunedLo, distinct_chains, distinguishing_evidence,
+    overlap_fraction, predict_artifacts, present_only_with, rank_score, region_verdicts,
 };
 pub use repo::{
     AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
