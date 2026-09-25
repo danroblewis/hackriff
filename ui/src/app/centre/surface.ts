@@ -69,6 +69,11 @@ import {
 import type { OverlayQuad } from "../../surface/minimap";
 import { boxOf } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
+// T-898: the device's OWN route through frequency (`GET /api/tune-history`), drawn like a
+// directions line — one per front end, in the same render pass as the tiles.
+import {
+  parseTuneHistory, tuneHistoryRequest, tuneKeyEntries, tuneQuads, type TunePath,
+} from "../../surface/tunepath";
 import { liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -475,8 +480,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // other layer. The poll below only refreshes the records; it never positions anything (T-388).
   let paths: MarkPath[] = [];
   const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
+  // T-898 (docs/23 §10.6 rule 2): the radio's own route — the recorded tune intervals as the
+  // backend traced them (`GET /api/tune-history`), laid out HERE, per frame, through the pane's
+  // own box. The poll below only refreshes the records; it never positions anything (T-388).
+  let tunePaths: TunePath[] = [];
+  const tuneQuadsFn: OverlayLayerFn = (pane) => tuneQuads(tunePaths, pane.box, pane.rect);
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
-    rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
+    rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn,
+    tune: tuneQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -1194,7 +1205,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
           overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
             // T-813: the detections layer's key — same symbology, quoted from `marks.ts`, `markKeyEntries` draws.
-            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key: l.id === "detections" ? markKeyEntries() : undefined } };
+            // T-813: the detections key is `marks.ts`'s own symbology. T-898: the retune layer's
+            // key is one row per front end, so the route on screen is labelled by its radio.
+            const key = l.id === "detections"
+              ? markKeyEntries()
+              : l.id === "tune"
+                ? tuneKeyEntries(tunePaths).map((e) => ({ key: e.key, label: e.label, note: e.note, pixel: () => e.rgb }))
+                : undefined;
+            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key } };
           }).concat(store.get().research.collections.map((c) => ({ plane: "overlay" as const, z: COLLECTION_Z, row: {
             id: collectionLayer(c.id), label: c.name, hint: c.reserved ? "collection · bookmarks" : "my collection",
             on: collectionVisibleOn(reg, c),
@@ -1294,6 +1312,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
       if (!url) { paths = []; return; }
       const body = await client.get<unknown>(url).catch(() => null);
       if (body) paths = parsePaths(body);
+    }, 2000);
+
+    // T-898: the `tune` layer's records — the device's own retune route — on the same terms: one
+    // read over the union of the boxes of the panes showing the layer, nothing when none does.
+    startPoll(async () => {
+      const url = tuneHistoryRequest(pv.view.panes.list()
+        .filter((x) => isLayerVisible(layersFor(x.id), "tune"))
+        .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
+      if (!url) { tunePaths = []; return; }
+      const body = await client.get<unknown>(url).catch(() => null);
+      if (body) tunePaths = parseTuneHistory(body);
     }, 2000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
