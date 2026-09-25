@@ -27,4 +27,4 @@ export function openSelectionMenu(ctx: AppContext, sel: Selection, x: number, y:
   contextMenu().open(selectionMenuItems(ctx, sel, rows), x, y);
 }
 
-export { contextMenu, signalMenuItems };
+export { contextMenu, selectionMenuItems, signalMenuItems };

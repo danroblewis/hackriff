@@ -38,7 +38,7 @@ import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { readoutOf } from "../src/surface/chrome";
 import { PaneModel, type PaneState, type PaneStatus } from "../src/surface/panes";
 import {
-  acceptPaneRetune, acceptPaneWidth, coveringWindow, offerAcceptable, offerLabel, paneRetuneAction,
+  acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneAction,
   paneRetuneOffer, paneWidthAction, paneWidthOffer, widthOfferAcceptable, widthOfferLabel,
   type PaneRetuneOffer, type PaneRetuneSite, type PaneWidthOffer, type PaneWidthSite,
 } from "../src/surface/retune";
@@ -750,4 +750,64 @@ test("T-496/T-407: a pane that moved between paint and press refuses, and reache
   const out = await acceptPaneWidth(ctx, site, offer);
   assert.deepEqual(out, { ok: false, reason: "moved" });
   assert.deepEqual(calls, [], "a stale offer must reach nothing");
+});
+
+// ---------------------------------------------------------------------------
+// 5. T-947: the Go-to offer plans a SPAN, never the pane's viewport width
+// ---------------------------------------------------------------------------
+//
+// FOUND 2026-09-25: Explore -> "Go to frequency" 162.2M offered "Retune to 162.2000 MHz at
+// 15.819 MHz span" — the offer's span came from the pane's current VIEW width (15.819 MHz), so
+// accepting it put the front end at ~16 Msps for a plain frequency jump. `goToSpanHz` is the fix:
+// it names the span a Go-to should plan for — the device's OWN current window when one is tuned,
+// else a caller-chosen default — and never reads the pane's box at all.
+
+test("T-947: goToSpanHz prefers the front end's OWN current window over any default", () => {
+  assert.equal(goToSpanHz(GRID, 2e6), GRID.current!.span_hz, "GRID.current.span_hz is 2.4e6, not the 2e6 default");
+  assert.notEqual(goToSpanHz(GRID, 2e6), 2e6);
+});
+
+test("T-947: with no current window (or no grid), goToSpanHz falls back to the caller's default — never a view width", () => {
+  assert.equal(goToSpanHz({ ...GRID, current: null }, 2e6), 2e6);
+  assert.equal(goToSpanHz(null, 2e6), 2e6);
+});
+
+test("T-947 THE BUG: paneRetuneOffer — what the go-to control used before this ticket — plans the VIEWPORT's width, not a sane span", () => {
+  // Reproduces the reported scene: a pane zoomed out to a ~15.8 MHz view, sitting on a front end
+  // whose own tuned window is 2.4 MHz (GRID.current). The OLD go-to path (`offerNow`/`paneRetuneOffer`
+  // over the pane's own box) is exactly what proposed a 15.8xx MHz retune for a plain frequency jump.
+  const m = new PaneModel({
+    bounds: BOUNDS, lattice: LAT, width: 1200, height: 800,
+    freq: { centerHz: 162.2e6, spanHz: 15.819e6 }, spanNs: 20 * S,
+  });
+  const o = offerFor(m.get(m.list()[0].id)!);
+  assert.ok(o.plan.ok);
+  assert.ok(o.plan.ok && o.plan.spanHz > 15e6,
+    `paneRetuneOffer's plan inherited the view width: got ${o.plan.ok && o.plan.spanHz}`);
+});
+
+test("T-947 THE FIX: the go-to offer's request names the current/default span, never the pane's wide view", () => {
+  // The same wide-view pane as above, but planned through paneWidthOffer with goToSpanHz — the path
+  // surface.ts's floating Go-to now takes (`gotoOfferNow`/`pressGotoOffer`).
+  const m = new PaneModel({
+    bounds: BOUNDS, lattice: LAT, width: 1200, height: 800,
+    freq: { centerHz: 162.2e6, spanHz: 15.819e6 }, spanNs: 20 * S,
+  });
+  const pane = m.get(m.list()[0].id)!;
+  const askedSpanHz = goToSpanHz(GRID, 2e6); // GRID.current.span_hz = 2.4e6
+  const o = paneWidthOffer(pane, askedSpanHz, GRID, T0);
+  assert.ok(o.plan.ok);
+  assert.ok(o.plan.ok && o.plan.spanHz < 3e6, `expected close to the 2.4 MHz tuned span, got ${o.plan.ok && o.plan.spanHz}`);
+
+  const action = paneWidthAction(o)!;
+  assert.equal(action.centerHz, o.plan.ok ? o.plan.centerHz : NaN);
+  assert.equal(action.spanHz, o.plan.ok ? o.plan.spanHz : NaN, "the request's span is the tuned/default span");
+  assert.ok((action.spanHz ?? 0) < 3e6, `the DEVICE REQUEST must not carry the ~15.8 MHz view width: got ${action.spanHz}`);
+  assert.equal(action.source, "pane-width");
+
+  // And with no current window, the request falls back to the caller's default — still never the view.
+  const noCurrent: FrequencyGrid = { ...GRID, current: null };
+  const oDefault = paneWidthOffer(pane, goToSpanHz(noCurrent, 2e6), noCurrent, T0);
+  assert.ok(oDefault.plan.ok && Math.abs(oDefault.plan.spanHz - 2e6) < 1e3,
+    `expected ~2 MHz default, got ${oDefault.plan.ok && oDefault.plan.spanHz}`);
 });
