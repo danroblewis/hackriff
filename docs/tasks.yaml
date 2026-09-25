@@ -26565,7 +26565,7 @@ tasks:
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-277
@@ -26600,6 +26600,7 @@ tasks:
       Observed, not chased: hk-cli pipeline::tests::daemon_drives_the_scheduler_and_serves_token_gated_status fails alone on main 333d8284: summary 'scheduler: 9 steps' against assert steps > 10 (crates/hk-cli/src/pipeline.rs ~2517). A paced 3 s replay's step count is wall-clock bound, so this is a timing-shaped assertion. | hk-api tests/ondemand.rs:365 silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails alone on main 333d8284 ('10 records'; '13 records' on this branch). Load average at the time was ~14-19. | hk-core source/hackrf.rs:1412 a_slow_reader_gets_counted_drops_and_an_exact_gap fails alone on main 333d8284 ('the pool overflowed'). | No platform audio backend (CoreAudio/ALSA, e.g. cpal) exists, so a live `vlf:<device>` soundcard receiver is refused with that reason. Plugging one in is an AudioInput implementation, plus the hardware (SPACE-001/041/PROP-019 stay test_tier field). | Carriers are discovered once, over the first 10 s (and again after a rate change). A transmitter that switches on later is not tracked. Periodic re-discovery would be a follow-up. | VLF sferic Detections live only in the /api/vlf report, not in the run's inventory DB or on the canvas (the canvas covers 1 MHz-6 GHz). Surfacing sub-1 MHz accessory data on the canvas is a separate UI decision. | The C01 capability card does not yet mention the accessory source.
       Use cases: SPACE-001, SPACE-041, PROP-019
       Resources: 329 CPU-s, peak 2.6 GB
+    commit: 6f67a59b
   - id: T-892
     milestone: M2-hardening
     title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
