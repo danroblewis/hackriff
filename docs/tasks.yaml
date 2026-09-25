@@ -27660,7 +27660,8 @@ tasks:
   - id: T-933
     milestone: MMAP
     title: Sheet peek strip covers the lower half of the lifted minimap at every width
-    status: todo
+    status: in-progress
+    branch: task-t933
     priority: P2
     deps: []
     parallel_group: UI-CHROME
