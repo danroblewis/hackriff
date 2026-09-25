@@ -457,6 +457,15 @@ def _probe_age(h):
         return None
 
 
+def _probe_stats(h):
+    """The host's last probe (PROBE_STATS), for the status file's hosts[h] - {} when there is none."""
+    try:
+        rec = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        return {}
+    return {k: rec[k] for k in PROBE_STATS if k in rec}
+
+
 _ORPHANS_SAID = set()
 
 
@@ -769,6 +778,53 @@ def _proj_dir(path):
     return re.sub(r"[/.]", "-", path)
 
 
+# The per-tick host probe (user via supervisor, 2026-09-25 14:02: the dashboard showed system stats for the Mac only):
+# load, cores, disk, memory and the aggregate CPU counters, in the one ssh call the probe already made.
+PROBE_CMD = ("cat /proc/loadavg; nproc; df -BG --output=avail,size $HOME | tail -1; "
+             "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; head -1 /proc/stat")
+# What the status file's hosts[h]["stats"] carries from the probe (cpu_ticks is only the next delta's baseline).
+PROBE_STATS = ("at", "reachable", "interval_s", "cores", "load1", "load5", "load15", "cpu_pct",
+               "mem_used_gb", "mem_total_gb", "mem_pct", "disk_free_gb", "disk_total_gb")
+
+
+def parse_probe(out, prev, now):
+    """PROBE_CMD's output -> the host record. CPU % is a delta of /proc/stat's aggregate counters against the previous
+    record's `cpu_ticks` (the first sample has none, so no cpu_pct); `interval_s` is the time since that record."""
+    rec = {"at": now, "reachable": True}
+    if prev.get("at"):
+        rec["interval_s"] = now - int(prev["at"])
+    lines = out.splitlines()
+    try:
+        la = lines[0].split()
+        rec.update(load1=float(la[0]), load5=float(la[1]), load15=float(la[2]), cores=int(lines[1]))
+        df = lines[2].split()
+        rec["disk_free_gb"] = int(df[0].rstrip("G"))
+        if len(df) > 1:
+            rec["disk_total_gb"] = int(df[1].rstrip("G"))
+    except (IndexError, ValueError):
+        pass
+    mem = {}
+    for line in lines[3:]:
+        f = line.split()
+        try:
+            if f and f[0] in ("MemTotal:", "MemAvailable:"):
+                mem[f[0]] = int(f[1]) * 1024
+            elif f and f[0] == "cpu":
+                ticks = [int(x) for x in f[1:9]]          # user nice system idle iowait irq softirq steal
+                rec["cpu_ticks"] = [sum(ticks), ticks[3] + ticks[4]]
+        except (IndexError, ValueError):
+            pass
+    if mem.get("MemTotal:") and "MemAvailable:" in mem:
+        total, used = mem["MemTotal:"], mem["MemTotal:"] - mem["MemAvailable:"]
+        rec.update(mem_total_gb=round(total / 1e9), mem_used_gb=round(used / 1e9, 1), mem_pct=round(100 * used / total))
+    pt = prev.get("cpu_ticks")
+    if rec.get("cpu_ticks") and pt:
+        dt, di = rec["cpu_ticks"][0] - pt[0], rec["cpu_ticks"][1] - pt[1]
+        if dt > 0:
+            rec["cpu_pct"] = round(100 * (dt - di) / dt)
+    return rec
+
+
 def sync_remote_view(claims, dry):
     """Every tick (user via supervisor, 2026-09-25 00:40: a remote worker must show on the dashboard like a local one):
     per remote host, ONE ssh that reports reachability, load, disk and its running claude sessions to
@@ -778,14 +834,12 @@ def sync_remote_view(claims, dry):
         return
     os.makedirs(f"{S}/hosts", exist_ok=True)
     for h in hosts():
-        rc, out = remote_sh(h, "cat /proc/loadavg; nproc; df -BG --output=avail $HOME | tail -1", timeout=20)
-        rec = {"at": int(time.time()), "reachable": rc == 0}
-        if rc == 0:
-            try:
-                parts = out.split()
-                rec.update(load1=float(parts[0]), cores=int(parts[5]), disk_free_gb=int(parts[6].rstrip("G")))
-            except (IndexError, ValueError):
-                pass
+        rc, out = remote_sh(h, PROBE_CMD, timeout=20)
+        try:
+            prev = json.load(open(f"{S}/hosts/{h}.json"))
+        except (OSError, ValueError):
+            prev = {}
+        rec = parse_probe(out, prev, int(time.time())) if rc == 0 else {"at": int(time.time()), "reachable": False}
         with open(f"{S}/hosts/{h}.json.tmp", "w") as f:
             json.dump(rec, f)
         os.replace(f"{S}/hosts/{h}.json.tmp", f"{S}/hosts/{h}.json")
@@ -2898,7 +2952,7 @@ def tick(dry):
               # remote host's running workers against its own cap, and whether its probe says it can take work.
               "hosts": {"mac": {"running": busy_workers(claims), "cap": dispatch_cap(), "held": host_room(claims, None)},
                         **{h: {"running": busy_workers(claims, h), "cap": slot_cap(h), "ready": host_ready(h),
-                               "held": host_room(claims, h), "probe_age_s": _probe_age(h),
+                               "held": host_room(claims, h), "probe_age_s": _probe_age(h), "stats": _probe_stats(h),
                                **({"refs_in_sync": _REPOSYNC[h]["refs_in_sync"], "drifting": _REPOSYNC[h]["drifting"],
                                    "branches": {b: {k: e.get(k) for k in ("mirror", "local", "behind", "ahead", "state")}
                                                 for b, e in _REPOSYNC[h]["branches"].items()}} if h in _REPOSYNC else {})}

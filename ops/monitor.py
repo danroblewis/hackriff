@@ -1951,9 +1951,63 @@ def watchdog_box():
     return d
 
 
+PROBE_DEFAULT_S = 60      # a probe with no measured interval (its first, or an unreachable one): the runner's ~poll+tick
+PROBE_MAX_S = 180         # the runner's PROBE_FRESH_S: a probe after a long runner stop must not stretch "stale" to hours
+
+
+def _runner_hosts():
+    try:
+        return json.load(open(os.path.join(SCRATCH, "work-runner-status.json"))).get("hosts") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def host_tiles(now=None):
+    """One system-stats tile per remote host in hosts.json (user via supervisor, 2026-09-25 14:02): the work runner's
+    per-tick probe (its status file's hosts[h].stats) plus its running/cap and refs-in-sync. A probe older than two
+    probe intervals is 'stale', a failed one 'unreachable', none at all 'no probe' - never a blank tile."""
+    now = time.time() if now is None else now
+    try:
+        names = list(json.load(open(os.path.join(SCRATCH, "hosts.json"))))
+    except (OSError, ValueError):
+        return []
+    st = _runner_hosts()
+    out = []
+    for h in names:
+        hs = st.get(h) or {}
+        p = hs.get("stats")
+        if not p:          # a runner older than the stats field: its probe file, which has the older fields
+            try:
+                p = json.load(open(os.path.join(SCRATCH, "hosts", f"{h}.json")))
+            except (OSError, ValueError):
+                p = {}
+        age = round(now - p["at"]) if p.get("at") else None
+        every = min(p.get("interval_s") or PROBE_DEFAULT_S, PROBE_MAX_S)
+        state = ("no probe" if age is None else "stale" if age > 2 * every
+                 else "live" if p.get("reachable") else "unreachable")
+        mem = ({"used_gb": p["mem_used_gb"], "total_gb": p.get("mem_total_gb"), "pct": p.get("mem_pct")}
+               if "mem_used_gb" in p else {})
+        disk = {}
+        if "disk_free_gb" in p:
+            disk = {"free_gb": p["disk_free_gb"]}
+            if p.get("disk_total_gb"):
+                disk.update(total_gb=p["disk_total_gb"], pct=round(100 * (1 - p["disk_free_gb"] / p["disk_total_gb"])))
+        out.append({"name": h, "state": state, "age_s": age, "cores": p.get("cores"),
+                    "load": [p.get(k) for k in ("load1", "load5", "load15")], "cpu_pct": p.get("cpu_pct"),
+                    "mem": mem, "disk": disk, "running": hs.get("running"), "cap": hs.get("cap"),
+                    "refs_in_sync": hs.get("refs_in_sync"), "drifting": hs.get("drifting")})
+    return out
+
+
 def sysstats():
+    try:
+        load = [round(x, 1) for x in os.getloadavg()]
+    except OSError:
+        load = []
+    mac = _runner_hosts().get("mac") or {}
+    local = {"load": load, "running": mac.get("running"), "cap": mac.get("cap"), "hosts": host_tiles()}
     if psutil is None:
-        return {"cores": os.cpu_count() or 1, "per": [], "mem": {}, "box": watchdog_box()}
+        return {"cores": os.cpu_count() or 1, "per": [], "mem": {}, "box": watchdog_box(), **local}
     series = [[round(x) for x in snap] for snap in CPU_HIST]   # up to 5 one-second samples, oldest→newest
     per = series[-1] if series else [round(x) for x in psutil.cpu_percent(percpu=True)]
     vm = psutil.virtual_memory()
@@ -1969,6 +2023,8 @@ def sysstats():
         "mem": {"pct": round(vm.percent), "used_gb": round(vm.used / 1e9, 1), "total_gb": round(vm.total / 1e9)},
         "disk": disk,
         "box": watchdog_box(),
+        "cpu_pct": round(sum(per) / len(per)) if per else None,
+        **local,
     }
 
 _GATHER_LOCK = threading.Lock()
@@ -2296,7 +2352,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   .cores{height:40px;gap:1px}
   h2{font-size:10.5px}
   .col{display:contents}            /* promote cards to direct items so order works */
-  #syscard{order:-1}                /* System stats first on mobile */
+  #syscard,.hostcard{order:-1}      /* System stats first on mobile */
 }
 </style></head><body><div class=app>
 <div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><a class=maplink href="/metrics" title="Code metrics over committed main: lines, churn, test cost, outliers, hygiene, trends">metrics ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
@@ -2313,12 +2369,14 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   <div class=col>
     <div class="card" id=syscard style="flex-shrink:0.2"><h2>System <em id=sys-sub></em></h2>
       <div class="cpu-wrap"><div class="cores" id=cores></div></div>
+      <div class=boxline id=sys-line></div>
       <div class="gauges">
         <div><div class="mem-lbl"><span>Memory</span><span id=mem-txt></span></div><div class="mem-bar"><i id=mem-fill></i></div></div>
         <div><div class="mem-lbl"><span>Disk free</span><span id=disk-txt></span></div><div class="mem-bar"><i id=disk-fill></i></div></div>
       </div>
       <div class=boxline id=boxline title="ops/watchdog.py: per-owner CPU, and anything no worker/gate/role/demo owns"></div>
     </div>
+    <div id=hosttiles style="display:contents" title="remote worker hosts (hosts.json): the work runner's per-tick probe"></div>
     <div class="card" style="max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
     <div class="card" style="height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
@@ -2531,7 +2589,7 @@ async function sysTick(){
  try{
   const s=await (await fetch('/sys.json',{cache:'no-store'})).json();
   coreFrames=(s.series&&s.series.length)?s.series:[s.per||[]]; frameIdx=0; playFrame();
-  $('#sys-sub').textContent=`${s.saturated||0}/${s.cores} cores saturated · ${s.busy||0} busy`;
+  $('#sys-sub').textContent=`mac · ${s.saturated||0}/${s.cores} cores saturated · ${s.busy||0} busy`;
   const m=s.mem||{}; $('#mem-fill').style.width=(m.pct||0)+'%'; $('#mem-txt').textContent=`${m.used_gb||0} / ${m.total_gb||0} GB · ${m.pct||0}%`;
   $('#mem-fill').style.background=(m.pct||0)>=85?'linear-gradient(90deg,#F0A542,#E47B68)':'linear-gradient(90deg,#3a6ea5,#52C2AE)';
   const dk=s.disk||{}; const free=dk.free_gb; if(free!=null){
@@ -2542,7 +2600,34 @@ async function sysTick(){
     $('#disk-txt').style.color=free<10?'#E47B68':free<25?'#F0A542':'var(--mut)';
   }
   renderBox(s.box||{});
+  $('#sys-line').innerHTML=hostLine({load:s.load,cpu_pct:s.cpu_pct,running:s.running,cap:s.cap})+' · <span class=hd>local</span>';
+  $('#hosttiles').innerHTML=renderHosts(s.hosts||[]);
  }catch(e){}
+}
+// One tile per remote host (user, 2026-09-25 14:02), the Mac tile's fields from the work runner's probe. A probe
+// older than two intervals says 'stale <age>', a failed one 'unreachable' - never a blank tile.
+function hostLine(h){
+  const ld=(h.load||[]).map(x=>x==null?'—':x).join(' / ')||'—';
+  const refs=h.refs_in_sync==null?'':h.refs_in_sync?' · refs in sync':` · <span class=un>refs ${h.drifting==null?'not synced':h.drifting+' drifting'}</span>`;
+  return `load ${ld} · cpu ${h.cpu_pct==null?'—':h.cpu_pct+'%'} · workers ${h.running==null?'—':h.running}/${h.cap==null?'—':h.cap}${refs}`;
+}
+function gauge(lbl,txt,pct){
+  const hot=(pct||0)>=85;
+  return `<div><div class="mem-lbl"><span>${lbl}</span><span>${esc(txt)}</span></div><div class="mem-bar"><i style="width:${pct||0}%;${hot?'background:linear-gradient(90deg,#F0A542,#E47B68)':''}"></i></div></div>`;
+}
+function renderHosts(hs){
+  return hs.map(h=>{
+    const sub=h.state==='live'?`${h.cores==null?'?':h.cores} cores · probe ${dur(h.age_s)} ago`
+      :h.state==='stale'?`<span class=un>stale ${dur(h.age_s)}</span>`
+      :h.state==='unreachable'?`<span class=un>unreachable</span> · probe ${dur(h.age_s)} ago`
+      :'<span class=un>no probe yet</span>';
+    const m=h.mem||{}, d=h.disk||{};
+    return `<div class="card hostcard" style="flex-shrink:0.2"><h2>System <em>${esc(h.name)} · ${sub}</em></h2>`
+      +`<div class=boxline style="margin-top:0">${hostLine(h)}</div><div class="gauges">`
+      +gauge('Memory',m.used_gb==null?'—':`${m.used_gb} / ${m.total_gb} GB · ${m.pct}%`,m.pct)
+      +gauge('Disk free',d.free_gb==null?'—':`${d.free_gb} GB`+(d.pct==null?'':` · ${d.pct}% used`),d.pct)
+      +`</div></div>`;
+  }).join('');
 }
 // "Box": who owns the CPU right now, from ops/watchdog.py's last tick. Unowned is drawn in red
 // and never hidden — sixteen unowned busy loops ran for 2 h 18 m on 2026-09-22 because nothing
