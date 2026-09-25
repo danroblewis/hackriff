@@ -25968,7 +25968,7 @@ tasks:
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-867
@@ -25994,6 +25994,7 @@ tasks:
       Observed, not chased: hk-pipeline::listen_lifecycle (all 3 tests) fails at load ~30 with '504 probe-timeout: no samples for the probe'. It reproduces with main's chains/listen.rs (3/3 red). Legacy's probe_timeout is a 20 s wall-clock bound on collecting 1 s of contiguous IQ (refine window_s), and a debug pipeline on a lossless source advances far slower than real time under load. Candidate for the deflaker. | CPU: the analog-wfm recipe's audio branch (fm_demod -> squelch -> deemphasis -> agc -> audio_out) costs 3.3-5.0x the legacy AudioDemod on the same samples (debug build, loaded box); adding the RDS branch barely changes that. Worth profiling before stage 5's default flip (LP-5/T-869). The timing-tier bound is 6x, a regression guard, not an agreed target. | Legacy Listen record t still drifts after a live-edge seek on a non-lossless source: audio_index does not advance over skipped samples, so t = t0 + index/48000 falls behind capture time by the skipped span. LP-1 freezes t = t0 + sample_index/48000, so fixing it needs a contract decision (re-anchor t, or advance sample_index over the skip). | recipes/analog-wfm.recipe.json declares refine {node: crc, metric: error_rate}, which the runtime validates but never runs (T-870: only {builtin} runs), so the shipped recipe never refines. The harness substitutes {builtin: wfm-pilot}. The recipe, or the runtime's node-metric objectives, needs a decision before LP-5 makes it the opener's pipeline.
       Use cases: SIGNAL-062
       Resources: 580 CPU-s, peak 4.0 GB
+    commit: c02a65f9
   - id: T-869
     milestone: MAUTO
     title: "LP-5: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate"
