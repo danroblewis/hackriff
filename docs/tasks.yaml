@@ -26381,7 +26381,6 @@ tasks:
     milestone: M2-hardening
     title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
     status: in-progress
-    branch: task-t892
     priority: normal
     deps:
     - T-356
@@ -26395,6 +26394,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-356 HIL capture-agent 2026-09-24.
+    branch: task-t892
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:05).
+      A device another process holds is now reported as a typed, generic SourceError::DeviceInUse {source_name, device, certainty, driver_message} instead of libhackrf's verbatim 'Access denied (insufficient permissions) (-1000)'. InUseCertainty has two states and the weaker is never rounded up: HACKRF_ERROR_BUSY or libusb 'Resource busy' -> InUse; libusb 'Access denied' (-1000, which on macOS covers both a held device and missing USB rights) -> InUseOrNotPermitted, whose message reads 'in use by another process, or not permitted: the driver cannot tell which' with what to do for each case, keeping the driver's own text for the record. Any other open failure stays SourceError::Device. The message names the device: the requested serial, or for 'first HackRF' the serial(s) from hackrf_device_list (new FFI binding, checked against the installed hackrf.h; builds with --features hackrf). The mock gets MockFault::OpenAccessDenied (HK_MOCK_FAULT=open-access-denied), which refuses the open through the same HackRF classifier. Tests: classifier/naming unit tests, a driver-contract test through the mock, and an `hk serve --device mock:` startup test that goes red on the verbatim message. The DeviceAction path never opens a device today (it only controls an open source), so no new API error code was added; if a SourceError::DeviceInUse ever reached LiveControlError::Source it would answer 502 device_error with the honest message.
+      Tests: just test-crate hk-core -> exit 0 (184 passed (second run; first run 183/184, see observed_but_not_chased)); cargo nextest run -p hk-cli -E 'binary(device_in_use)' -> exit 0 (1 passed); cargo build -p hk-core --features hackrf -> exit 0 (real libhackrf FFI (hackrf_device_list binding) compiles and links)
+      precheck exit 0
+      Commits: eac91fe4
+      Observed, not chased: Load flake, pre-existing and untouched by this diff: hk-core source::hackrf::tests::a_slow_reader_gets_counted_drops_and_an_exact_gap panicked 'the pool overflowed' (hackrf.rs ~1412) in 1 of 3 and 2 of 5 isolated runs at load average ~18-21; it sleeps 200 ms of wall clock and assumes the fake producer thread overflowed a 2-buffer pool in that time. Passed in the second full `just test-crate hk-core`. A deflaker should make it wait on the drop counter rather than a fixed sleep. | If a future DeviceAction ever (re)opens a device (e.g. device hot-swap), LiveControlError should map SourceError::DeviceInUse to its own 409 code in docs/api.md + api_contract.rs rather than 502 device_error; not done here because no route reaches it today. | Classification of -1000 matches libusb's English strerror text (libusb's default locale); a non-English libusb_setlocale would fall back to the plain Device error, never to a false 'in use'.
+      Resources: 51 CPU-s, peak 1.4 GB
   - id: T-893
     milestone: MLIVE
     title: "Following panes still poll for new rows: wire /ws/tiles/rows (rowfeed.ts is parsed but unused), refresh coarse stand-ins, look ahead on still-pending columns (T-890 residue)"

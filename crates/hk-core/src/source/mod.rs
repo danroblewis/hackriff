@@ -180,6 +180,59 @@ pub enum SourceError {
         /// The driver's error.
         message: String,
     },
+    /// The device could not be opened because **another process holds it** — or, where the
+    /// driver cannot tell the two apart, because this user is not permitted to open it (T-892).
+    ///
+    /// Generic across drivers: each driver decides from its own error codes which
+    /// [`InUseCertainty`] it can honestly claim, and the message names the device and never
+    /// sends the user to fix permissions when the likelier cause is a second program. Distinct
+    /// from [`SourceError::Device`], which is every other driver failure.
+    #[error("{}", in_use_message(source_name, device, *certainty, driver_message))]
+    DeviceInUse {
+        /// Which source.
+        source_name: &'static str,
+        /// The device, as specifically as the driver can name it (a serial where known).
+        device: String,
+        /// Whether the driver could rule out a permissions failure.
+        certainty: InUseCertainty,
+        /// The driver's own error, verbatim, for the record.
+        driver_message: String,
+    },
+}
+
+/// How sure a driver is that a refused open means "another process holds the device" (T-892).
+///
+/// Two states, and the weaker one is not rounded up: some drivers (libhackrf through libusb on
+/// macOS) report a device held elsewhere and a user without USB permissions with the **same**
+/// code, and saying "in use" there would be a guess — `Unknown` is not `Off`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InUseCertainty {
+    /// The driver reported the device busy: another process (or another handle) holds it.
+    InUse,
+    /// The driver's code covers both "held by another process" and "not permitted".
+    InUseOrNotPermitted,
+}
+
+fn in_use_message(
+    source_name: &str,
+    device: &str,
+    certainty: InUseCertainty,
+    driver_message: &str,
+) -> String {
+    match certainty {
+        InUseCertainty::InUse => format!(
+            "{source_name} {device} is in use by another process; close the program holding it \
+             (another `hk serve`, hackrf_transfer, an SDR app) and try again \
+             [driver: {driver_message}]"
+        ),
+        InUseCertainty::InUseOrNotPermitted => format!(
+            "{source_name} {device} is in use by another process, or not permitted: the driver \
+             cannot tell which. Most often another program holds it (another `hk serve`, \
+             hackrf_transfer, an SDR app) — close it and try again; if nothing else is using \
+             the device, check this user's USB permissions (udev rules on Linux) \
+             [driver: {driver_message}]"
+        ),
+    }
 }
 
 /// Where a source's samples come from.

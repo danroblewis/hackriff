@@ -949,6 +949,71 @@ fn scene_gaps_jump_stream_time_at_the_window_boundary() {
     }
 }
 
+/// T-892: a device another process holds is reported as **in use**, naming the device — not as
+/// libhackrf's verbatim `Access denied (insufficient permissions) (-1000)`, which sent the user
+/// to fix permissions (T-356's HIL). libusb cannot tell "held elsewhere" from "not permitted" on
+/// that code, so the error says both rather than guessing.
+#[test]
+fn an_open_refused_with_the_access_code_is_device_in_use_not_a_permissions_error() {
+    use hk_core::{InUseCertainty, SourceDriver, SourceError};
+
+    let dir = Scratch::new("in-use");
+    let meta = Synth {
+        fs: 4e6,
+        secs: 0.05,
+        ..Synth::new(Datatype::Ci8)
+    }
+    .write(&dir.0, "in-use");
+    let driver = MockSdrDriver::new(
+        &meta,
+        MockOptions {
+            fault: Some(MockFault::OpenAccessDenied),
+            ..opts(16_384)
+        },
+    )
+    .unwrap();
+    // Through the generic driver contract — the path `hk serve` opens every live source by.
+    let err = match SourceDriver::open(&driver, &driver.default_request()) {
+        Ok(_) => panic!("the armed open fault must refuse the open"),
+        Err(e) => e,
+    };
+    let device_id = format!("mock:{}", driver.recording().provenance.device_id);
+    match &err {
+        SourceError::DeviceInUse {
+            device,
+            certainty,
+            driver_message,
+            ..
+        } => {
+            assert_eq!(device, &device_id, "the error names the device it refused");
+            assert_eq!(
+                *certainty,
+                InUseCertainty::InUseOrNotPermitted,
+                "the access code cannot rule out permissions, so it is not claimed as certain"
+            );
+            assert!(
+                driver_message.contains("-1000"),
+                "the driver's own code is kept for the record: {driver_message}"
+            );
+        }
+        other => panic!("expected DeviceInUse, got {other:?}"),
+    }
+    let text = err.to_string();
+    assert!(
+        text.contains("is in use by another process, or not permitted"),
+        "the message leads with the likely cause and admits the other: {text}"
+    );
+    assert!(text.contains(&device_id), "{text}");
+    assert!(
+        !text.starts_with("hackrf-one: hackrf_open_by_serial failed: Access denied"),
+        "the verbatim libusb text must not be the message: {text}"
+    );
+    assert_eq!(
+        MockFault::parse("open-access-denied"),
+        Ok(Some(MockFault::OpenAccessDenied))
+    );
+}
+
 /// T-508: the mock can **fail** a retune, the way the HackRF driver does — accepted by `tune`,
 /// refused when the capture thread applies it, surfacing as a read error — and the front end stays
 /// on the tuning it had. Without this every retune guard ran on a radio that always obeys.
