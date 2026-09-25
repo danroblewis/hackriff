@@ -28650,6 +28650,8 @@ tasks:
       core_interface (detection/inventory). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): more overlap cases left standing: overlapping Confirmed boxes at 462.0076 / 462.0099 MHz (~100 kHz each), a stationary 12.5 kHz comb at 445.3-445.6 MHz Confirmed as ONE 105 kHz emitter with overlapping candidates, and triplicate candidates - none re-analysed.
+
+      2026-09-25 coordinator, evidence from T-974's triage (mock SDR, deterministic enough to reproduce): hk-cli api_contract inventory_and_analysis_strongest_find_the_blind_fm_station fails ALONE on main's code 3 of 6 runs - api_contract.rs:1719 'two boxes served stacked in time and frequency': two Candidates for one station, 99.8309-99.8517 MHz over 1790360024.517-027.598 s (count 7) and 99.8363-99.9161 MHz over 1790360024.389-026.650 s (count 4), both closed, both served by /api/inventory; the T-369 overlap re-analysis did not resolve the pair. Use it as this ticket's CI-visible failing-first test (it already exists and is red intermittently); when fixed it must pass alone 20/20.
     core_interface: true
   - id: T-979
     milestone: M3
@@ -29276,6 +29278,53 @@ tasks:
       FOUND BY merge runner bisect 2026-09-25: Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix
     dispatch: manual
     high_effort_reason: "bulk red with no single culprit: interaction-vs-nondeterminism triage across three branches on the replay/recovery path, a real-time-adjacent area"
+  - id: T-1016
+    milestone: M2-hardening
+    title: "sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-SWEEP-RESIDENCY
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY the merge runner / supervisor (2026-09-25 11:34): hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads has reddened THREE bulk gates (2026-09-24 16:21, overnight, 2026-09-25 11:26 - base 6b521960, 12 branches; today 29 branches waited on it). Each red costs a solo re-run or a bisect. Messages (ops merge-runner.log):
+        crates/hk-pipeline/tests/sweep_residency.rs:188 '400 attaches left 17 chains running, above the 16 cap' (report: 'attaches 25: threads 60 running 16 ... + 0 classifying; attaches 400: threads 62 running 17 ... + 1 classifying')
+        crates/hk-pipeline/tests/sweep_residency.rs:229 '400 attaches left 17 chains (classifying chains excluded) running, above the 16 cap'
+      The test (T-558) asserts the run-wide chain cap (16) holds under a sustained survey. Flakes registry: branch_defects 2, never triaged alone.
+      DELIVER (deflake-triage rules): run it ALONE >= 10x on main (nextest -p hk-pipeline -E 'binary(sweep_residency)') and under load; then decide:
+      - red alone => a REAL cap defect (an admission race letting a 17th chain start, or a finishing chain counted before it releases its slot): fix the product (the admission/release ordering), prove red on regression. The cap is a CPU-budget invariant - do not raise it or loosen the bound.
+      - passes alone, red only under load => the COUNT is racy, not the cap: count at a deterministic point (join/quiesce the chains that have ended, or read the scheduler's own admitted-count under its lock) instead of sampling live threads at an instant; never a sleep or retry. If the assertion is inherently a load-dependent bound it moves to the `timing` tier (docs/10 §3.6) with evidence - but prefer the deterministic count.
+      Do not #[ignore], quarantine or loosen. Red-on-regression proof required (re-inject an off-by-one admission and show the test catches it).
+      TESTING PROTOCOL (CLAUDE.md): targeted only (cargo nextest run -p hk-pipeline -E 'binary(sweep_residency)'; just precheck hk-pipeline), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY supervisor 2026-09-25 11:34 (merge gate reds x3): sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point
+    high_effort_reason: "three bulk reds on a CPU-budget invariant (the run-wide chain cap): real admission race vs racy count must be told apart and fixed deterministically on the real-time scheduling path"
+    dispatch: manual
+  - id: T-1017
+    milestone: MAUTO
+    title: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+    status: todo
+    priority: medium
+    deps:
+    - T-967
+    parallel_group: IDENTITY-LABEL
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus review of T-967 (2026-09-25). T-967 serves identity_label / identity_confidence on /api/inventory rows. Its first implementation guessed the label from field NAMES (IDENTITY_LABEL_KEYS ["ps","callsign","flight","station"], IDENTITY_CONFIDENCE_KEYS ["pi_share","share"] in crates/hk-model/src/decode.rs:243,248), which silently made any plugin's `station`/`share` field an identity label/confidence - an implicit plugin-output contract. The T-967 fix round narrows it to decoders with a known summary (RDS) and serves null otherwise. THIS TICKET designs the real contract:
+      1. A DECLARED label + confidence per decoder: the decoder/recipe manifest (and the built-in chains) state which output field is the human-readable identity label (e.g. RDS PS voted most-frequent, ADS-B callsign, AIS vessel name, FLEX/POCSAG capcode alias) and which is its confidence, with the confidence's meaning (vote share, CRC-valid rate). Plugin/stream contract (ADR-0010/0011, docs/stream-contract.md) + docs/api.md + api_contract.rs together (T-079). Pluggable decoders are consumers (CLAUDE.md), so a plugin opts in by declaring, never by naming a field a certain way.
+      2. Show the label on the other surfaces that carry identity: /api/events rows and the Selected/focus panel's identity box (T-967 worker's GAP 3).
+      3. Window scoping: today the label (like identity_value) is the all-time latest committed one; when a pane is scrubbed into the past the row can show a label decoded after the window. Either scope the label to the viewed window (the inventory is time-scoped to the view - CLAUDE.md signal model) or state the rule in docs/api.md; prefer scoping.
+      ACCEPTANCE: a plugin that declares no label shows none; RDS, AIS (T-963) and FLEX (T-950) show their declared labels via the manifest path; a scrubbed pane shows the label known within its window; contract tests for each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-model/hk-api/hk-plugins binaries you touch, api_contract, just test-ui, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-967 2026-09-25: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+
+      2026-09-25 coordinator, from T-967's re-review (PASS): add the missing guard test while here - a restricted/metadata-only decode naming the same PI alongside an hk-rds summary row must make latest_decode_identity_summary return None (withheld row serves identity_label and identity_label_share null); correct by inspection today (crates/hk-model/src/repo/gating.rs, IdentityAccess::Standard.reveals), untested. T-967 landed the RDS-only summary; this ticket generalises it by declaration.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
