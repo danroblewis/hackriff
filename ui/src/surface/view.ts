@@ -125,8 +125,16 @@ export interface SurfaceViewOptions {
    * HUD, with the SAME pane views the data pass was handed — so a DOM mark is placed by the very
    * box and rect the tiles were, on the same frame (the one-shared-time-axis rule), never on a
    * poll. `canvasHpx`/`dpr` convert the GL-convention rects to CSS px, as the HUD labels do.
+   *
+   * T-996 hands it `statuses` as well — what each viewport was DRAWN at this frame, off the same
+   * `PaneReport`s the readout is built from. A band-1 mark that states a pane's level or its cell
+   * size (the scale bar's honesty tier) must read the frame's own report, not a second derivation
+   * beside it, and must not be a frame behind by reading `lastFrame`.
    */
-  dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
+  dom?: ((
+    panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number,
+    statuses: readonly PaneStatus[],
+  ) => void) | null;
 }
 
 /** One pane's trace strip this frame: where it is, and the window it is a trace across. */
@@ -197,7 +205,10 @@ export class SurfaceView {
   hudAxes: boolean;
   private readonly hud: HudAxes | null;
   private readonly hudAlpha: (() => number) | null;
-  private readonly dom: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
+  private readonly dom: ((
+    panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number,
+    statuses: readonly PaneStatus[],
+  ) => void) | null;
 
   constructor(opts: SurfaceViewOptions) {
     this.marks = opts.marks ?? null;
@@ -364,7 +375,7 @@ export class SurfaceView {
     // 5. band-1 DOM marks (T-809's pins): the same pane views, this frame.
     if (this.dom) {
       const cssW = this.canvas.clientWidth;
-      this.dom(paneViews, edgeNs, hPx, cssW > 0 ? w / cssW : 1);
+      this.dom(paneViews, edgeNs, hPx, cssW > 0 ? w / cssW : 1, statuses);
     }
 
     return {

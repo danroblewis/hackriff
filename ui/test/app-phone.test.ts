@@ -43,7 +43,10 @@ test("fade reaches the dock and the lists' chip — never what §10.2 exempts", 
   for (const want of ["> .dock", ".side-chip"]) {
     assert.ok(sels.some((s) => s.includes(want)), `${want} does not fade`);
   }
-  const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side.is-open"];
+  // T-996: the surface's statements are the one status line, each pane's scale block and the two
+  // conditional notes; `.map-retune` is a device command with a stated destination. None may fade.
+  const NEVER = [".sheet", ".research", ".map-offer", ".map-retune", ".map-mode", ".map-layers", ".map-pane-menu",
+    ".sf-status", ".sf-scale", ".sf-fog", ".sf-readout", ".side.is-open"];
   for (const s of sels) for (const n of NEVER) assert.ok(!s.includes(n), `${s} fades ${n}, which §10.2 says never fades`);
   assert.ok(sels.every((s) => /:not\(:focus-(within|visible)\)/.test(s)), "a focused control must never fade");
   assert.ok(!sels.some((s) => s.includes("> .bar")), "T-993: the retired top bar has no rule over the map");

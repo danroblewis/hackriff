@@ -31,7 +31,8 @@ const STATE = `JSON.stringify({
   rows: [...document.querySelectorAll('.side-inv .row[data-id]')].map((r) => r.dataset.id.slice(0, 8)),
   chip: document.querySelector('.side-chip')?.textContent ?? null,
   sheet: document.querySelector('.sheet-title')?.textContent ?? null,
-  chrome: document.querySelector('.sf-chrome')?.textContent?.slice(0, 300) ?? null,
+  where: document.querySelector('.sf-where')?.textContent ?? null,
+  scale: document.querySelector('.sf-scale')?.textContent ?? null,
   note: document.querySelector('.sf-note')?.textContent?.slice(0, 300) ?? null,
 })`;
 

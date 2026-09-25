@@ -39,6 +39,7 @@ import {
 import { batchedTileSource } from "./tilebatch";
 import { oneTier, tileUrl, type Box, type Lattice, type LatticeSet, type TileAddr } from "./lattice";
 import type { RowActionFor, WidthActionsFor } from "./chrome";
+import type { PaneStatus } from "./panes";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
@@ -625,7 +626,10 @@ export interface PreviewOptions {
   hud?: HTMLElement | null;
   hudAlpha?: (() => number) | null;
   /** Band-1 DOM marks laid out in the render frame (T-809, `./pins.ts`). See `SurfaceViewOptions.dom`. */
-  dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
+  dom?: ((
+    panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number,
+    statuses: readonly PaneStatus[],
+  ) => void) | null;
   /**
    * **Ask the coverage map before asking for tiles** (T-580, `./survey.ts`): how this host reads
    * `GET /api/coverage` for the survey. Supplied, no tile is requested until the first survey lands,

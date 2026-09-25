@@ -103,12 +103,14 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
     "a point beside the sheet is the surface, not an overlay");
   // Waited on the surface's own drawn state (its per-pane readout names the pane once addressed),
   // never on a clock: under load addressing takes tens of seconds, and a pan before it is not a pan.
+  // T-996: a drawn pane is one with a scale block (placed per render frame, `data-pane` on it), and
+  // its window is the kept `.sf-where` line.
   await page.waitFor("the surface to address its pane",
-    `/pane/.test(document.querySelector('.sf-chrome')?.textContent ?? "")`, { timeoutMs: 90000 });
-  const before = (await page.$text(".sf-chrome")) ?? "";
+    `!!document.querySelector('.sf-scale')?.dataset.pane`, { timeoutMs: 90000 });
+  const before = (await page.$text(".sf-where")) ?? "";
   await page.drag(at, { x: at.x - 150, y: at.y });
   await page.waitFor("the canvas to pan with the sheet open",
-    `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
+    `(document.querySelector('.sf-where')?.textContent ?? "") !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
   assert.equal(await snap(), "half", "panning the canvas leaves the sheet where it was");
 
   // (4) Clicking the handle cycles to full, which still leaves the top chrome clear.
