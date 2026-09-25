@@ -233,6 +233,12 @@ def anchor_owner(row: dict, claim_pids: dict[int, str]) -> str | None:
         return "fuzz-rig"
     if "ops/stage.sh" in cmd or "hk serve --bind 127.0.0.1:8899" in cmd:
         return "demo"
+    # The explorer window (T-923): its window script, its agent, and the server it runs on the HackRF (:8897, data under
+    # $HACKRIFF_OPS/explorer/) - started detached by the agent, so ancestry alone never finds it (2026-09-25 04:0x: the
+    # live-HackRF server alarmed 'unowned at 387 %, kill it' mid-window).
+    if ("ops/explorer-window.sh" in cmd or "--agent explorer" in cmd or "127.0.0.1:8897" in cmd
+            or "/.hackriff-ops/explorer/" in cmd):
+        return "explorer"
     if "--append-system-prompt-file" in cmd or "ops/launch.sh" in cmd or row.get("env"):
         return "role:" + role_name(cmd, row.get("env", ""))
     return None
