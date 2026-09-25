@@ -29,6 +29,9 @@ import { trackOverlay } from "./dismiss";
 export const ZOOM_STEP = 0.6;
 /** Chrome fades after this long with no pointer, key, wheel or focus event (docs/23 §10.2). */
 export const IDLE_MS = 6000;
+/** The class on <body> while the chrome is idle-faded (T-824). The one idle signal the rest of the
+ * floating chrome and the HUD read; set only by the cluster's [[IdleFade]]. */
+export const IDLE_CLASS = "chrome-idle";
 
 /** The subset of `surface/panes.ts`'s `PaneModel` the cluster drives. All of it is view state. */
 export interface PaneControl {
@@ -337,9 +340,16 @@ export function mountMapControls(host: MapControlHost): {
 
   const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, offer, modeBanner, topright, layers, paneMenu, zoom, fab);
 
-  const fade = new IdleFade((idle) => el.classList.toggle("is-idle", idle));
+  // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
+  // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
+  // HUD rulers (`centre/surface.ts`) — fades and returns with this cluster on the same timer. One
+  // timer, one class: two would let the bar come back while the zoom stack stayed faded.
+  const fade = new IdleFade((idle) => {
+    el.classList.toggle("is-idle", idle);
+    if (typeof document !== "undefined") document.body?.classList.toggle(IDLE_CLASS, idle);
+  });
   const poke = () => fade.poke();
-  for (const ev of ["pointermove", "pointerdown", "keydown", "wheel", "touchstart"]) {
+  for (const ev of ["pointermove", "pointerdown", "keydown", "wheel", "touchstart", "focusin"]) {
     window.addEventListener(ev, poke, { passive: true, capture: true });
   }
   // A focused control never fades (§10.2): hold while focus is inside the cluster.

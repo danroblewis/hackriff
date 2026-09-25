@@ -9,11 +9,12 @@
   border: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 30px var(--shadow);
   transition: height .28s cubic-bezier(.2,.8,.2,1); }
 .sheet.dragging { transition: none; }
-.sheet .sheet-grab { flex: none; height: 20px; width: 100%; display: grid; place-items: center; padding: 0;
+/* T-824: the handle is a >= 24 px target (docs/23 §10.5); the title strip gave up the 4 px, so peek stays 56. */
+.sheet .sheet-grab { flex: none; height: 24px; width: 100%; display: grid; place-items: center; padding: 0;
   border: 0; background: none; cursor: ns-resize; touch-action: none; }
 .sheet .sheet-grab i { width: 40px; height: 4px; border-radius: 2px; background: var(--dim); }
 .sheet .sheet-grab:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
-.sheet .sheet-head { flex: none; height: 34px; display: flex; align-items: center; padding: 0 16px 4px;
+.sheet .sheet-head { flex: none; height: 30px; display: flex; align-items: center; padding: 0 16px 4px;
   border-bottom: 1px solid var(--line-soft); cursor: pointer; }
 .sheet .sheet-close { margin-left: auto; flex: none; min-width: 28px; min-height: 28px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
 .sheet .sheet-close:hover, .sheet .sheet-close:focus-visible { border-color: var(--line); color: inherit; }

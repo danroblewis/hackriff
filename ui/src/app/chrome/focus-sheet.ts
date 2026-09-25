@@ -55,6 +55,16 @@ function watchToolbar(relayout: () => void): void {
   look();
 }
 
+/** Phone width (T-824): at or under this, Research is a full-height panel (`phone.css`) and the sheet
+ * drops to `peek` when it opens (docs/23 §10.3). Must agree with `phone.css`'s breakpoint. */
+export const PHONE_MAX_PX = 600;
+
+/** Is the window phone-width? False where the browser API is absent (a headless test). */
+export function isPhoneWidth(win: { matchMedia?: (q: string) => { matches: boolean } } | undefined =
+  typeof window === "undefined" ? undefined : window): boolean {
+  return typeof win?.matchMedia === "function" && win.matchMedia(`(max-width: ${PHONE_MAX_PX}px)`).matches;
+}
+
 export const mountFocusSheet: MountFn = (el, ctx) => {
   const sheet = mountSheet(el, {
     storageKey: FOCUS_SHEET_KEY, label: "Selected", reservedPx: FOCUS_SHEET_RESERVED_PX,
@@ -75,4 +85,10 @@ export const mountFocusSheet: MountFn = (el, ctx) => {
     const changed = prev !== undefined && (f.kind !== prev.kind || (f.kind !== "none" && prev.kind !== "none" && f.id !== prev.id));
     if (changed && f.kind !== "none") sheet.reveal("half");
   }, { immediate: true });
+  // T-824 (docs/23 §10.3): at phone width Research opening takes the whole height, so the sheet drops
+  // to its peek strip rather than sitting half-hidden behind it. Not persisted: it is the layout's
+  // move, not the viewer's choice, and closing Research leaves the sheet where it now is.
+  ctx.store.select((s) => s.research?.open === true, (open) => {
+    if (open && isPhoneWidth() && sheet.get() !== "peek") sheet.set("peek", false);
+  });
 };
