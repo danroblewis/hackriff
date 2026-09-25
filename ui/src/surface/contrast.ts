@@ -15,6 +15,27 @@
 // the only one of the three whose colours mean the same thing at every zoom, and a new viewer
 // should not have to know that the picture is re-scaling under them.
 
+// **Where the last-known (shadow) tier stands in all three modes** (T-916, the decision the ticket
+// asked for; ADR-0020 is the tier).
+//
+// A shadow is a real measurement of an *earlier* time drawn where the radio is not looking, so a
+// tracking mode has two questions about it, and they have different answers:
+//
+//  1. **Does it set the range?** *No, in every mode.* `viewport` excludes it by construction
+//     (`./vscale.ts` measures `CELL.OBSERVED` and nothing else) and `auto` cannot see it at all —
+//     it reads each tile's `grid.range_db`, which the route computes over measured cells, and a
+//     fully-departed tile carries none (`hk-api` `tile_cost.rs`, `crates/hk-api/src/tiles.rs`).
+//     Letting a remembered band decide the ramp would scale the live cells beside it to a time that
+//     is over.
+//  2. **Is it PINNED — held at the colour its live row had while the rest re-scales?** *No, and
+//     deliberately.* Within one frame every cell goes through one ramp, so a shadow and the live
+//     row it was copied from take the **same** colour; pinning would break exactly that, and two
+//     ramps on one screen is the honesty problem T-397 closed one layer up. What does move is the
+//     whole picture, across frames, as a tracking mode re-measures — which is what these buttons
+//     say they do, and why `anchored` is the [[DEFAULT_RANGE_MODE]] and the answer for a viewer who
+//     wants a departed band to keep the colour it had. The titles below say so rather than leaving
+//     it to be discovered on a departure.
+
 import type { RangeMode } from "./surface";
 
 export const RANGE_MODE_KEY = "hk-surface-range-mode";
@@ -75,7 +96,7 @@ export function autoContrastButton(mode: RangeMode): ContrastButton {
     label: `Auto-contrast: ${pressed ? "on" : "off"}`,
     pressed,
     title: pressed
-      ? "The display range tracks what is on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range."
+      ? "The display range tracks what is on screen: nothing clips, but the same signal changes colour as you navigate — last-known (shadow) cells with everything else, since they are drawn through the same ramp and never set it. Press to go back to the anchored range, where a departed band keeps the colour it had."
       : "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead.",
   };
 }
@@ -100,7 +121,7 @@ export function viewportScaleButton(mode: RangeMode): ContrastButton {
  */
 export function scaleRows(mode: RangeMode): { id: RangeMode; label: string; hint: string; on: boolean }[] {
   return [
-    { id: "anchored", label: "Anchored", hint: "same dB, same colour at every zoom", on: mode === "anchored" },
+    { id: "anchored", label: "Anchored", hint: "same dB, same colour at every zoom, last-known cells included", on: mode === "anchored" },
     { id: "auto", label: "Auto-contrast", hint: "tracks the tiles on screen", on: mode === "auto" },
     { id: "viewport", label: "Viewport scale", hint: "observed cells in view", on: mode === "viewport" },
   ];
