@@ -69,20 +69,22 @@ pub const MAX_CONFIDENCE: f64 = 0.999;
 /// genuinely out of taxonomy, and the row reads `unknown` at [`MAX_CONFIDENCE`] — the same number
 /// a CRC-valid decode would carry.
 ///
-/// That is what the explorer measured on live air on 2026-09-25: FLEX pager bursts, **and WFM
-/// stations with a locked 19 kHz pilot and a CRC-valid RDS decode**, all came back `unknown` at
-/// 0.999 with the known families at exactly 0 — the UI's "100 % unk". Reporting near-certainty of
-/// novelty from an uncalibrated distance is the same overconfidence ADR-0016 rejects softmax for
-/// ("Options considered"), and it destroys the information the classifier *did* have: with
-/// `p_unknown = 1` the known families share a mass of zero, so the posterior no longer says what
-/// the emission most resembles.
+/// That is what the explorer measured on live air on 2026-09-25: FLEX pager bursts came back
+/// `unknown` at 0.999 with the known families at exactly 0 — the UI's "100 % unk". Reporting
+/// near-certainty of novelty from an uncalibrated distance is the same overconfidence ADR-0016
+/// rejects softmax for ("Options considered").
 ///
 /// So the residual hypothesis is capped strictly below a family's cap. `0.9` is chosen, not
-/// measured: it is the largest round value that leaves a tenth of the mass for the known families
-/// to be *ranked* in (the ranking is what a reader uses when the top label is `unknown`), and it
-/// keeps `unknown` visibly separate from a confident family call. It bounds only the **reported
-/// number** — a saturated open set still wins the label, and [`Classification::open_set_score`]
-/// still carries the raw score, uncapped, which is the explicit open-set output.
+/// measured: it is the largest round value that keeps `unknown` visibly separate from a confident
+/// family call. It bounds only the **reported number** — a saturated open set still wins the
+/// label, and [`Classification::open_set_score`] still carries the raw score, uncapped, which is
+/// the explicit open-set output.
+///
+/// **What it does not do:** recover a ranking. The classifier builds `L[unknown] = open_set` with
+/// the families sharing `1 − open_set`, so at `open_set = 1.0` every known likelihood is 0 and the
+/// residual tenth is spread **uniformly** over the families. Only for `open_set < 1` does the
+/// residual follow the likelihood's order. (Why a pilot-locked WFM station saturates the open set
+/// at all is a separate defect, T-970.)
 pub const MAX_UNKNOWN_CONFIDENCE: f64 = 0.9;
 
 /// The confidence cap of `label`: [`MAX_UNKNOWN_CONFIDENCE`] for `unknown`, else

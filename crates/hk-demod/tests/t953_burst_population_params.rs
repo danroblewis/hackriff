@@ -69,8 +69,9 @@ const SPAN_S: f64 = 2.4;
 /// [`STANDARD_RATES_BD`](hk_demod::fsk::STANDARD_RATES_BD) — so the receiver's trial space can
 /// reach it, and a wrong answer here would be T-953's fault rather than the rate table's. (The
 /// FLEX rates 1600/3200/6400 Bd are **not** in that table: a 1600 Bd version of this scene locks
-/// at 4800 Bd, the 3rd harmonic, on every burst. That is a rate-table gap, not this rule's, and it
-/// is reported rather than papered over here.)
+/// at 4800 Bd, the 3rd harmonic, on every burst. The consensus must then abstain rather than
+/// store the harmonic — that is its own test below,
+/// `a_1600_bd_pager_population_stores_1600_bd_or_abstains_never_its_harmonic`.)
 const PAGER_RATE_BD: f64 = 4800.0;
 /// Hidden truth: ±4.8 kHz, a FLEX-shaped deviation in a 25 kHz channel.
 const PAGER_DEVIATION_HZ: f64 = 4800.0;
@@ -383,6 +384,124 @@ fn a_pager_population_that_no_framing_fits_still_stores_its_symbol_rate_and_alph
                     ));
                 }
             }
+        }
+    }
+    eprint!("{report}");
+    assert!(failures.is_empty(), "{}\n{report}", failures.join("\n"));
+}
+
+/// A pager population alone: `levels` are the FSK tones (Hz, about the carrier), one symbol clock
+/// at `rate` Bd, no preamble, no sync word, a fresh random payload per burst — the FLEX shape,
+/// whose 1600 Bd is **not** in the standard-rate table.
+fn pager_only_scene(rate: f64, levels: &[f64], seed: u64) -> (Vec<Complex32>, Vec<Burst>) {
+    let n = (SPAN_S * FS) as usize;
+    let mut rng = Rng::new(seed);
+    let mut x = complex_noise(&mut rng, n, 1e-4);
+    let offset = 5_000.0;
+    let sps = FS / rate;
+    let outer = levels.iter().fold(0.0f64, |m, l| m.max(l.abs()));
+    let mut bursts = Vec::new();
+    let mut t = 0.03;
+    while t + 0.12 < SPAN_S {
+        let syms: Vec<usize> = (0..160)
+            .map(|_| (rng.next_u64() % levels.len() as u64) as usize)
+            .collect();
+        let len = (syms.len() as f64 * sps) as usize;
+        let s = (t * FS) as usize;
+        if s + len >= n {
+            break;
+        }
+        let f: Vec<f64> = (0..len)
+            .map(|k| levels[syms[((k as f64 / sps) as usize).min(syms.len() - 1)]])
+            .collect();
+        add_fm(&mut x, s, offset, PAGER_AMP, &f);
+        bursts.push(Burst {
+            kind: Kind::Pager,
+            start: s,
+            end: s + len,
+            offset_hz: offset,
+            bw_hz: 2.0 * outer + rate,
+        });
+        t += len as f64 / FS + 0.09 + 0.04 * rng.unit();
+    }
+    (x, bursts)
+}
+
+/// **A harmonic lock is not a measured rate** (T-953 review). A true 1600 Bd FLEX-shaped
+/// population demodulated below the C14 trust floor locks, burst after burst, on the 4800 Bd
+/// table entry — the 3rd harmonic — and those bursts agree with each other to ±0.01 %, so a
+/// consensus over agreement alone stores `symbol_rate_hz: 4800` and a 4800 Bd fingerprint that
+/// entity resolution then matches on. At `k×` oversampling the bits come out in runs of ≈ `k`, so
+/// single-symbol runs all but vanish (random NRZ has ≈ half its runs one symbol long); the
+/// consensus must refuse such a burst exactly as the receiver's harmonic check does.
+///
+/// The emitter must store **1600 Bd or no rate at all** — never 4800 — for 2-FSK and for FLEX's
+/// 4-level alphabet. Red before the single-run gate: the 2-FSK population stored 4800 Bd.
+#[test]
+fn a_1600_bd_pager_population_stores_1600_bd_or_abstains_never_its_harmonic() {
+    const TRUE_RATE_BD: f64 = 1600.0; // hidden truth, read by the assertions only
+    let cases: [(&str, &[f64], u64); 2] = [
+        ("2-FSK ±4.8 kHz", &[-4800.0, 4800.0], 9531),
+        (
+            "4-FSK ±4.8/±1.6 kHz",
+            &[-4800.0, -1600.0, 1600.0, 4800.0],
+            9532,
+        ),
+    ];
+    let mut failures = Vec::new();
+    let mut report = String::new();
+    for (name, levels, seed) in cases {
+        let (x, bursts) = pager_only_scene(TRUE_RATE_BD, levels, seed);
+        let mine: Vec<&Burst> = bursts.iter().collect();
+        let out = demodulate(&x, &mine);
+        let consensus = rate_consensus(&out);
+        let bits: Vec<&[u8]> = out.iter().map(FskBurst::bits).collect();
+        let framing = infer_framing(&bits, &FramingConfig::default());
+        let mut repo = Repository::open_in_memory().unwrap();
+        let w = write_framed_bursts(&mut repo, &out, &framing, &FramedRecordContext::default())
+            .unwrap();
+        let stored: Vec<EstimatedParams> = w
+            .demodulation_ids
+            .iter()
+            .map(|(_, id)| repo.demodulation(*id).unwrap().params)
+            .collect();
+        let tracked: Vec<String> = out
+            .iter()
+            .filter_map(|b| b.symbols.as_ref())
+            .map(|s| format!("{:.0}", s.lock.tracked_rate_bd))
+            .collect();
+        let fp_rate = repo.emitter(w.emitter_id).unwrap().fingerprint["symbol_rate_hz"].as_f64();
+        report.push_str(&format!(
+            "[{T953}] {name}: {} bursts, tracked {tracked:?}, consensus {:?}, {} stored rows, \
+             fingerprint rate {fp_rate:?}\n",
+            out.len(),
+            consensus.map(|c| c.evidence()),
+            stored.len(),
+        ));
+        if out.len() < 8 {
+            failures.push(format!("{name}: only {} bursts", out.len()));
+        }
+        let wrong = |r: f64| (r / TRUE_RATE_BD - 1.0).abs() > 0.02;
+        if let Some(c) = consensus.filter(|c| wrong(c.rate_bd)) {
+            failures.push(format!(
+                "{name}: the population 'agreed' on {:.1} Bd, not the true {TRUE_RATE_BD} Bd",
+                c.rate_bd
+            ));
+        }
+        if let Some(r) = stored
+            .iter()
+            .filter_map(|p| p.symbol_rate_hz)
+            .find(|r| wrong(*r))
+        {
+            failures.push(format!(
+                "{name}: a Demodulation row stored {r:.1} Bd for a {TRUE_RATE_BD} Bd emitter"
+            ));
+        }
+        if let Some(r) = fp_rate.filter(|r| wrong(*r)) {
+            failures.push(format!(
+                "{name}: the emitter's fingerprint carries {r:.1} Bd for a {TRUE_RATE_BD} Bd \
+                 emitter"
+            ));
         }
     }
     eprint!("{report}");

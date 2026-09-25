@@ -38,6 +38,10 @@
 //!    timing RMS < 0.15 UI and eye opening > 0.2) with a finite tracked rate > 0, and its bits are
 //!    **not periodic** — the [`periodic_bits`](super::periodic_bits) veto that catches a
 //!    tone-modulated or unmodulated carrier is applied per burst here exactly as T-614 applies it;
+//!    and its bits are **not a harmonic lock** — at least 20 % of the inner runs are one symbol
+//!    long (random NRZ ≈ 50 %; a trial at `k×` the true clock ≈ 0), the receiver's own harmonic
+//!    threshold. Without it a 1600 Bd population that locks every burst on the 4800 Bd table
+//!    entry agrees perfectly on the wrong rate;
 //! 2. the contributing rates are clustered at [`CONSENSUS_TOLERANCE`] relative spacing;
 //! 3. the largest cluster measures the emitter's symbol rate when it holds at least
 //!    [`MIN_CONSENSUS_BURSTS`] bursts **and** at least [`CONSENSUS_FRACTION`] of the contributors.
@@ -52,7 +56,7 @@
 //!   the loop (RMS < 0.15 UI at lock) divided by the symbols integrated — well under 1 % on the
 //!   ≥ 64-symbol bursts this path sees. Two per cent is that with margin, and still an order of
 //!   magnitude tighter than the spacing of the standard-rate list (the closest neighbours in
-//!   [`STANDARD_RATES_BD`](super::STANDARD_RATES_BD) differ by ≥ 20 %), so two *different* trials
+//!   [`STANDARD_RATES_BD`](super::STANDARD_RATES_BD), 50 000 and 57 600 Bd, differ by 15.2 %), so two *different* trials
 //!   can never land in one cluster.
 //! - **[`MIN_CONSENSUS_BURSTS`] = 6 and [`CONSENSUS_FRACTION`] = 0.75.** Under the null the
 //!   winning trial is one of the `m ≥ 2` entries that fit the box, with no reason to repeat; the
@@ -69,6 +73,7 @@
 //! service, and it sets no `known_status`: `family.rs`'s rule that a modulation names no service
 //! is untouched.
 
+use super::receiver::{HARMONIC_SINGLE_RUN_MIN, single_run_fraction};
 use super::{FskBurst, PERIODIC_BITS_MIN_CORR, periodic_bits};
 
 /// Relative spacing at which two tracked rates count as the same clock (see the module docs).
@@ -154,11 +159,17 @@ pub fn clock_sample(burst: &FskBurst) -> ClockSample {
     let rate_bd = s.lock.tracked_rate_bd;
     // The T-614 veto, per burst: a tone or an unmodulated carrier repeats, data does not.
     let periodic = periodic_bits(&s.bits).is_some_and(|(_, r)| r >= PERIODIC_BITS_MIN_CORR);
+    // A `k×` harmonic lock: the demodulator oversamples the true clock, every run is ≈ `k`
+    // symbols long and single-symbol runs all but vanish. Such bursts lock, are not periodic and
+    // agree with each other to ±0.01 % (a 1600 Bd FLEX population locks every burst at the 4800 Bd
+    // table entry), so agreement alone would store the harmonic as a measured rate. Refused here
+    // with the receiver's own harmonic threshold.
+    let harmonic = single_run_fraction(&s.bits) < HARMONIC_SINGLE_RUN_MIN;
     ClockSample {
         rate_bd,
         deviation_hz: s.deviation_hz,
         duration_s,
-        usable: s.lock.locked && rate_bd.is_finite() && rate_bd > 0.0 && !periodic,
+        usable: s.lock.locked && rate_bd.is_finite() && rate_bd > 0.0 && !periodic && !harmonic,
     }
 }
 
@@ -329,8 +340,9 @@ mod tests {
 
     #[test]
     fn two_standard_rates_never_fall_into_one_cluster() {
-        // The closest neighbours in the standard-rate list are 20 % apart; the tolerance is 2 %.
-        let rates = [1200.0, 1200.0, 1200.0, 1440.0, 1440.0, 1440.0];
+        // The closest neighbours in the standard-rate list (50 000 / 57 600 Bd, and 100 000 /
+        // 115 200 Bd) are 15.2 % apart; the tolerance is 2 %.
+        let rates = [50_000.0, 50_000.0, 50_000.0, 57_600.0, 57_600.0, 57_600.0];
         assert!(
             consensus(&rates).is_none(),
             "two distinct rates must not merge into one agreeing cluster"

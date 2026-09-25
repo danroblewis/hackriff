@@ -230,8 +230,12 @@ fn run_lengths(bits: &[u8]) -> Vec<usize> {
     runs
 }
 
+/// Least [`single_run_fraction`] a burst's bits may have before its rate reads as a `k×`
+/// harmonic of the true clock (the receiver's harmonic check, and the T-953 consensus gate).
+pub(crate) const HARMONIC_SINGLE_RUN_MIN: f64 = 0.2;
+
 /// Fraction of inner runs that are one symbol long (random NRZ ≈ 0.5; a `k×` rate ≈ 0).
-fn single_run_fraction(bits: &[u8]) -> f64 {
+pub(crate) fn single_run_fraction(bits: &[u8]) -> f64 {
     let runs = run_lengths(bits);
     if runs.len() < 3 {
         return 0.0;
@@ -737,7 +741,9 @@ impl FskReceiver {
                         lock_quality: sy.lock.lock_quality,
                         error: None,
                     });
-                    if single_run_fraction(&sy.bits) >= 0.2 || sync_found == Some(true) {
+                    if single_run_fraction(&sy.bits) >= HARMONIC_SINGLE_RUN_MIN
+                        || sync_found == Some(true)
+                    {
                         seed.rate_bd = rate;
                         seed.harmonic_divisor = Some(k);
                         if sync_found.is_some() {
