@@ -672,6 +672,18 @@ export class Page {
   }
 
   /**
+   * A real key press (keyDown + keyUp) delivered to the focused element (T-900: Escape). `code` and
+   * the Windows virtual key code default to the common keys' values, which is what Chrome needs to
+   * build a `KeyboardEvent` whose `key` is the one named.
+   */
+  async key(key, { code = key, keyCode = { Escape: 27, Enter: 13, Tab: 9 }[key] ?? 0 } = {}) {
+    for (const type of ["keyDown", "keyUp"]) {
+      await this.conn.send("Input.dispatchKeyEvent",
+        { type, key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode }, this.sessionId);
+    }
+  }
+
+  /**
    * A press–move–release drag, in `steps` intermediate moves, with the modifiers held for **the
    * whole stream** — press, every move and the release — which is what a hand does and what a
    * latched gesture has to be driven with to be tested honestly (T-458).

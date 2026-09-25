@@ -21,6 +21,7 @@
 import { parseFrequency } from "../../controls/freq";
 import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
+import { trackOverlay } from "./dismiss";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
  * step. The pane's own `zoomBoth` holds the aspect lock and the bounds (T-472), so a press at a
@@ -266,7 +267,9 @@ export function mountMapControls(host: MapControlHost): {
   const offerX = h("button", { type: "button", class: "map-offer-x", "aria-label": "Dismiss the retune offer" }, "✕");
   const offer = h("div", { class: "map-glass map-offer", role: "status", hidden: true }, offerWhy, offerGo, offerX);
   let shown: GotoOffer | null = null;
-  const hideOffer = () => { shown = null; offer.hidden = true; };
+  // T-900: the offer is a transient on the one overlay stack — Escape dismisses it when topmost.
+  const offerOverlay = trackOverlay("retune-offer", () => hideOffer());
+  const hideOffer = () => { shown = null; offer.hidden = true; offerOverlay.open(false); };
 
   const layersBtn = h("button", {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
@@ -290,9 +293,13 @@ export function mountMapControls(host: MapControlHost): {
     b.addEventListener("click", () => { run(); setPaneOpen(false); });
     return b;
   };
+  // T-900 (P1): the viewport menu is an overlay too — a visible dismiss, and Esc via the one stack.
+  const paneClose = h("button", {
+    type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
-    h("h4", {}, "Viewport"),
+    h("div", { class: "map-layers-head" }, h("span", {}, "Viewport"), paneClose),
     paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
@@ -302,7 +309,12 @@ export function mountMapControls(host: MapControlHost): {
   const modeBanner = h("div", { class: "map-glass map-mode", role: "status", hidden: true },
     "Measure: drag on the surface to read Δf · Δt. Release to keep it. Esc exits.");
   const layersList = h("div", { class: "map-layers-rows" });
+  // T-900 (docs/23 §10.6 P1): an open menu is an overlay, so it has a visible dismiss, not just a fade.
+  const layersClose = h("button", {
+    type: "button", class: "map-layers-close", "aria-label": "Close layers — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
+    h("div", { class: "map-layers-head" }, h("span", {}, "Layers"), layersClose),
     layersList,
     h("div", { class: "map-note" }, "Display only: a layer changes what is drawn, never what is measured or detected."));
 
@@ -349,6 +361,7 @@ export function mountMapControls(host: MapControlHost): {
     offerWhy.textContent = shown.why;
     offerGo.disabled = !shown.enabled;
     offer.hidden = false;
+    offerOverlay.open(true);
   });
   offerGo.addEventListener("click", () => {
     const o = shown;
@@ -405,6 +418,8 @@ export function mountMapControls(host: MapControlHost): {
     if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
   };
   let layersOpen = false;
+  const layersOverlay = trackOverlay("layers", () => { setLayersOpen(false); layersBtn.focus(); });
+  const paneOverlay = trackOverlay("pane-menu", () => { setPaneOpen(false); paneBtn.focus(); });
   let paneOpen = false;
   const syncPaneMenu = () => {
     const last = host.paneCount() <= 1;
@@ -413,6 +428,7 @@ export function mountMapControls(host: MapControlHost): {
   };
   const setPaneOpen = (open: boolean) => {
     paneOpen = open;
+    paneOverlay.open(open);
     paneMenu.hidden = !open;
     paneBtn.setAttribute("aria-pressed", String(open));
     paneBtn.setAttribute("aria-expanded", String(open));
@@ -421,6 +437,7 @@ export function mountMapControls(host: MapControlHost): {
   };
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
+    layersOverlay.open(open);
     if (open && paneOpen) setPaneOpen(false);
     layers.hidden = !open;
     layersBtn.setAttribute("aria-pressed", String(open));
@@ -429,12 +446,9 @@ export function mountMapControls(host: MapControlHost): {
     fade.hold("layers", open); // an open menu never fades
   };
   layersBtn.addEventListener("click", () => setLayersOpen(!layersOpen));
+  layersClose.addEventListener("click", () => { setLayersOpen(false); layersBtn.focus(); });
   paneBtn.addEventListener("click", () => setPaneOpen(!paneOpen));
-  el.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key !== "Escape") return;
-    if (layersOpen) { setLayersOpen(false); layersBtn.focus(); }
-    if (paneOpen) { setPaneOpen(false); paneBtn.focus(); }
-  });
+  paneClose.addEventListener("click", () => { setPaneOpen(false); paneBtn.focus(); });
 
   const syncMeasure = () => {
     const on = host.measuring();

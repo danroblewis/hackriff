@@ -26596,7 +26596,6 @@ tasks:
     milestone: MMAP
     title: "Overlays are closeable, not just fadeable: a visible dismiss (and Esc) on the sheet, Research slide-in and left column (user P1)"
     status: in-progress
-    branch: task-t900
     priority: high
     deps:
     - T-895
@@ -26612,6 +26611,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 20:43).
+      Merged main (25ffc0f4) into task-t900; one conflict, in map-controls.ts. Main had added a Viewport (pane) menu with its own Escape handler. I kept main's menu and its rule that only one menu is open at a time. Its Esc now goes through the shared stack in chrome/dismiss.ts, and it gets a visible x like the layers menu. The e2e spec covers it, and now measures each overlay only over rows that no other fixed chrome crosses (main's .sf-range readout sits in the left column's rows whether or not anything is open). Unchanged from the first round: ui/src/app/chrome/dismiss.ts is the one overlay stack and the only Escape listener, so Esc closes the most recently opened overlay, one per press. The sheet, left column, layers menu, viewport menu and retune offer each have a visible x and reopen from their small control. The Research slide-in is not built yet (T-821); it should call trackOverlay('research', close). Presentation only; the e2e spec asserts no device route is called.
+      Tests: just test-ui -> exit 0 (72/72 test files passed after the merge); HK_E2E_CONCURRENCY=1 HK_BIN=/tmp/t900-hk node e2e/run.mjs app-dismiss -> exit 0 (3/3 passed at 1440/1000/420 px: sheet, left column, layers and viewport menus); HK_E2E_CONCURRENCY=2 HK_BIN=/tmp/t900-hk node e2e/run.mjs app-side-chip app-sheet -> exit 0 (app-side-chip and app-sheet all passed on the merged tree. That same run had app-dismiss red at 1440/1000 before its row-selection fix; app-dismiss then passed alone (row above))
+      precheck exit 0
+      Commits: c5a00cf6, c6006945
+      Observed, not chased: Under load average ~54, e2e with the worktree's debug target/debug/hk never became ready: the tileCost probe in e2e/run.mjs failed with UND_ERR_HEADERS_TIMEOUT, the lane took 220 s and saw no observed coverage in 60 s. I ran the specs against a copy of t904's release hk (/tmp/t900-hk) instead. The backend does not matter for a UI-only change. | Precheck: cargo fmt --all --check passed (exit 0). I touched no crates, so bare `just precheck` fell through to a workspace-wide clippy, which I stopped. My `pkill -f 'cargo clippy'` matched by pattern and may have killed other workers' concurrent clippy runs around 17:55. Sorry: those would need a rerun. | surface.ts measure-mode Esc listener (document keydown) runs regardless of the overlay stack, so one Esc both exits Measure mode and closes the topmost overlay. It is a tool mode, not an overlay, and I left it alone. | The context menu (ui/src/app/menu) closes on Esc, an outside click or Tab, but has no visible ×. It is a transient pointer menu; the stack correctly leaves its Esc alone. | The e2e runs used a release hk copied from t904 at 17:41 (/tmp/t900-hk), older than the merged main's backend. The spec's assertions are UI-only.
+      Resources: 651 CPU-s, peak 5.4 GB
+    branch: task-t900
   - id: T-901
     milestone: MLIVE
     title: Server row pushes on /ws/tiles/rows stall 0.35-5 s every ~64 rows (and /api/navigation with them) - live rows are not steady (T-893 finding)
