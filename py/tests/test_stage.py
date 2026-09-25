@@ -26,4 +26,5 @@ def test_the_stage_build_compiles_and_bundles_in_its_snapshot_worktree_only():
 def test_the_demo_serves_its_own_copy_of_the_bundle_not_mains_ui_dist():
     text = STAGE.read_text()
     assert '--ui-dist "$REPO/ui/dist"' not in text
-    assert text.count('--ui-dist "$DIST"') == 2
+    assert text.count('--ui-dist "$(ui_dist)"') == 2
+    assert 'if [ -f "$DIST/index.html" ]; then echo "$DIST"' in text     # never a missing dir

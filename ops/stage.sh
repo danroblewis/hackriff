@@ -32,8 +32,7 @@ build(){  # $1 = a landed commit
     || { log "BUILD FAILED: cannot create $SRC (see stage-build.log)"; return 1; }
   git -C "$SRC" checkout -q --force --detach "$1" > "$S/stage-build.log" 2>&1 \
     || { log "BUILD FAILED: cannot check out $1 in $SRC"; return 1; }
-  # node_modules: a clone of main's the first time; npm ci whenever the lockfile differs from the one installed.
-  [ -d "$SRC/ui/node_modules" ] || cp -c -R -p "$REPO/ui/node_modules" "$SRC/ui/node_modules"
+  # node_modules: npm ci whenever the lockfile differs from the one last installed there (and the first time).
   if ! cmp -s "$SRC/ui/package-lock.json" "$SRC/ui/node_modules/.stage-lock"; then
     ( cd "$SRC/ui" && npm ci --prefer-offline --no-audit --no-fund ) >> "$S/stage-build.log" 2>&1 \
       && cp "$SRC/ui/package-lock.json" "$SRC/ui/node_modules/.stage-lock"
@@ -53,8 +52,12 @@ stop_server(){
   pkill -9 -f "hk serve --bind 127.0.0.1:$PORT" 2>/dev/null; sleep 1
 }
 
+# The bundle a snapshot build copied out; until one has (the first start after this change), main's - the old
+# behaviour - rather than a directory that does not exist, which serves "UI not built" and still smokes OK.
+ui_dist(){ if [ -f "$DIST/index.html" ]; then echo "$DIST"; else log "no $DIST yet - serving $REPO/ui/dist until a snapshot build" >&2; echo "$REPO/ui/dist"; fi; }
+
 start_replay(){
-  HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$DIST" \
+  HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$(ui_dist)" \
     --data-dir "$DATA" --replay "$FIX" --loop > "$S/hk-serve-bears.log" 2>&1 &
   echo "source: replay" > "$S/hk-serve-source"
 }
@@ -62,7 +65,7 @@ start_replay(){
 start_server(){
   rm -rf "$DATA"; mkdir -p "$DATA"   # fresh data dir avoids stale-lock startup hangs
   if hackrf_info >/dev/null 2>&1; then
-    HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$DIST" \
+    HK_TOKEN=$TOKEN nohup "$BIN" serve --bind 127.0.0.1:$PORT --ui-dist "$(ui_dist)" \
       --data-dir "$DATA" --hackrf --center-hz 100800000 --rate 2400000 --lna 32 --vga 30 --amp \
       --iq-retention 30m --iq-buffer-max 9GiB \
       > "$S/hk-serve-bears.log" 2>&1 &
