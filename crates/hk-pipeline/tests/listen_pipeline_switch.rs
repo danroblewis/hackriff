@@ -28,6 +28,9 @@
 //!    chooses the chain that can actually deliver two channels rather than quietly serving one.
 //! 6. **Noise is still refused.** The chooser's weak-carrier rule (T-869) needs *measured*
 //!    energy, so the LP-1 freeze's `4422 no-analog-mode` on noise holds with the switch on.
+//! 7. **The weak-carrier rule, through the opener** (the NOAA finding). A narrow drag on a
+//!    channel whose band estimate gave up is **demodulated with the squelch armed**, not refused
+//!    — and it says the mode was not recognised (`mode_confidence: 0`) while it does so.
 //!
 //! **What stage 4 does not yet deliver** (ADR-0015 §12.9's stage-4 note, measured): on the
 //! recipe path `sample_index` counts the frames the sink published, so a closed squelch is not
@@ -74,6 +77,17 @@ const CENTER: f64 = 100.0e6;
 const FS: f64 = 1.0e6;
 const STATION_OFFSET_HZ: f64 = 200e3;
 const RECORDING_S: f64 = 2.0;
+/// The narrowband channel, relative to [`CENTER`]: the NOAA-shaped case (§7 below). Its
+/// deviation is wide enough that the occupied bandwidth **fills** the box a 20 kHz drag opens,
+/// which is exactly what the explorer saw at 162.4008 MHz — C13's band estimate gives up
+/// (`FillsBand`/`LowSnr`), and with it every estimate that abstains for a band reason. It sits
+/// 600 kHz from the wideband station so the probe's WFM trial (T-070, which searches outward
+/// from the selection) cannot wander onto that station instead.
+const NARROW_OFFSET_HZ: f64 = -400e3;
+/// Its peak deviation, Hz.
+const NARROW_DEVIATION_HZ: f64 = 25e3;
+/// Its amplitude (the wideband station's is 40, the noise ±6).
+const NARROW_AMPLITUDE: f64 = 3.0;
 const RATE_HZ: f64 = 48_000.0;
 const FRAME: u64 = 960;
 const RECORD_HEADER_LEN: usize = 32;
@@ -94,6 +108,8 @@ fn wfm_recording(dir: &Path) -> PathBuf {
     };
     let tau = std::f64::consts::TAU;
     let mut phase = 0.0f64;
+    let mut narrow_phase = 0.0f64;
+    let mut narrow_lp = 0.0f64;
     let mut data = Vec::with_capacity(2 * n);
     for i in 0..n {
         let t = i as f64 / FS;
@@ -101,8 +117,20 @@ fn wfm_recording(dir: &Path) -> PathBuf {
             + 0.3 * (tau * 2900.0 * t).sin()
             + 0.1 * (tau * 19_000.0 * t).sin();
         phase = (phase + tau * (STATION_OFFSET_HZ + 75e3 * m) / FS) % tau;
-        let re = (40.0 * phase.cos() + noise()).round().clamp(-128.0, 127.0) as i8;
-        let im = (40.0 * phase.sin() + noise()).round().clamp(-128.0, 127.0) as i8;
+        // The NOAA-shaped channel (see `nbfm_query`): an FM carrier modulated by BAND-LIMITED
+        // NOISE, the way speech is — so it has no dominant line — and wide enough that its
+        // occupancy fills the box a 20 kHz drag opens. That pair is exactly the explorer's
+        // refusal: "C13 OBW99 abstained and no dominant carrier line".
+        narrow_lp += 0.05 * (noise() / 6.0 - narrow_lp);
+        let nm = (10.0 * narrow_lp).clamp(-1.0, 1.0);
+        narrow_phase =
+            (narrow_phase + tau * (NARROW_OFFSET_HZ + NARROW_DEVIATION_HZ * nm) / FS) % tau;
+        let re = (40.0 * phase.cos() + NARROW_AMPLITUDE * narrow_phase.cos() + noise())
+            .round()
+            .clamp(-128.0, 127.0) as i8;
+        let im = (40.0 * phase.sin() + NARROW_AMPLITUDE * narrow_phase.sin() + noise())
+            .round()
+            .clamp(-128.0, 127.0) as i8;
         data.push(re as u8);
         data.push(im as u8);
     }
@@ -251,6 +279,12 @@ fn open(addr: SocketAddr, query: &str) -> Ws {
 fn station_query() -> String {
     let f = CENTER + STATION_OFFSET_HZ;
     format!("f_lo={}&f_hi={}", f - 75e3, f + 75e3)
+}
+
+/// A 20 kHz drag on the narrowband channel — the shape of the explorer's NOAA selection.
+fn nbfm_query() -> String {
+    let f = CENTER + NARROW_OFFSET_HZ;
+    format!("f_lo={}&f_hi={}", f - 10e3, f + 10e3)
 }
 
 /// The first message: the header (`Ok`) or the refusal (`Err`).
@@ -559,6 +593,53 @@ fn stereo_asks_for_the_legacy_chain() {
         "no pipeline promises stereo it cannot serve: {:?}",
         run.pipelines()
     );
+    close(ws);
+    run.finish();
+}
+
+/// §7: **the weak-carrier rule, through the real opener** (T-869, the NOAA finding). A narrow
+/// drag on a channel whose band estimate gives up is demodulated with the squelch armed instead
+/// of being refused `4422 no-analog-mode`.
+///
+/// The assertions are what make this a test of *the rule* rather than of ordinary mode
+/// selection: `mode_confidence` is zero and the plan is NBFM, i.e. nothing recognised the mode
+/// and the audio is served anyway, with a squelch armed from the measured noise
+/// (`squelch.noise_dbfs`). Red on the first cut of this rule, which asked for a measured
+/// `snr_box_db`: that estimate abstains for any band reason, so it was never measured here.
+#[test]
+fn a_narrow_channel_whose_band_estimate_gave_up_is_demodulated_not_refused() {
+    let run = Run::start("t869-weak-carrier", true);
+    let mut ws = open(run.addr(), &nbfm_query());
+    let header = match first(&mut ws) {
+        Ok(h) => h,
+        Err(r) => {
+            panic!("a narrow selection with measured energy must not be refused (T-869): {r}")
+        }
+    };
+    let audio = &header["audio"];
+    assert_eq!(audio["mode"], "nbfm", "{header}");
+    assert_eq!(
+        audio["mode_confidence"], 0.0,
+        "the rule serves audio for a mode NOTHING recognised, and must say so: {header}"
+    );
+    assert!(
+        audio["squelch"]["noise_dbfs"].is_f64(),
+        "the squelch is armed from the measured noise power: {header}"
+    );
+    // No NBFM recipe exists (§12.5), so this is the legacy chain — the chooser's `legacy` answer
+    // carrying the fallback plan.
+    assert!(
+        header["stream_id"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("listen/")),
+        "{header}"
+    );
+    assert!(run.pipelines().is_empty(), "{:?}", run.pipelines());
+    // The chain is live: a status record arrives whether or not the squelch has opened (a weak
+    // channel is meant to be silent until it rises, which is the point of arming the squelch
+    // rather than refusing).
+    let heard = Heard::read(&mut ws, 0, 1);
+    assert_eq!(heard.statuses, 1, "the chain reports status");
     close(ws);
     run.finish();
 }

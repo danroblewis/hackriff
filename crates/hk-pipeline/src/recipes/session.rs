@@ -103,7 +103,16 @@ impl Drop for Attachment {
             ended.as_deref(),
             self.end.get(),
         );
-        if left == 0 && self.ctl.owner == Owner::Session {
+        // The DECISION is taken under the lock — setting `stop` is what makes it, because
+        // `audio_pipeline_for` will not hand out a pipeline that is stopping — but the waiting
+        // part is not: `stop_json` polls for the pipeline thread to finish, and holding the lock
+        // across it would park every other listen open behind one slow stop.
+        let stop = left == 0 && self.ctl.owner == Owner::Session;
+        if stop {
+            self.ctl.stop.store(true, Ordering::SeqCst);
+        }
+        drop(_serial);
+        if stop {
             let _ = self.rt.stop_json(&self.ctl.id);
         }
     }
@@ -136,7 +145,12 @@ impl RecipeRuntime {
         center_hz: f64,
     ) -> Option<Arc<PipelineCtl>> {
         self.running_pipelines().into_iter().find(|ctl| {
-            if !ctl.running.load(Ordering::SeqCst) || audio_stream(ctl).is_none() {
+            // `stop` is how a detaching listener says "this one is going" while it is still
+            // running: attaching to it would hand the new listener a stream about to end.
+            if !ctl.running.load(Ordering::SeqCst)
+                || ctl.stop.load(Ordering::SeqCst)
+                || audio_stream(ctl).is_none()
+            {
                 return false;
             }
             if let (Some(want), Some(have)) = (emitter, ctl.streams_ctx.emitter_id) {

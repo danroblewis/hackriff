@@ -844,12 +844,20 @@ impl ListenManager {
         header.emitter_id = emitter;
         header.provenance_ref = Some(prov.id());
         header.max_frame_len = audio_max_frame_len(channels);
+        // A weak-carrier plan is not a recognised mode (T-869): the selector's own confidence
+        // is its confidence in *unknown*, so reporting it beside `mode: nbfm` would claim what
+        // nothing measured. Zero, and the rules version says which rule produced the plan.
+        let (mode_confidence, mode_rules) = if choice.weak_carrier() {
+            (0.0, format!("{}+weak-carrier", pr.mode.rules_version))
+        } else {
+            (pr.mode.confidence, pr.mode.rules_version.clone())
+        };
         header.audio = Some(AudioInfo {
             channels,
             frame_samples: AUDIO_FRAME_SAMPLES as u32,
             mode: plan.mode_name().into(),
-            mode_confidence: pr.mode.confidence,
-            mode_rules: pr.mode.rules_version.clone(),
+            mode_confidence,
+            mode_rules,
             params,
             snr_db: pr.params.snr_box_db.value(),
             squelch: SquelchInfo {
