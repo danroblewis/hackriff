@@ -18826,6 +18826,8 @@ tasks:
       leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
       ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: BOARD CORRECTION - this ticket's acceptance block is a copy of T-575's (the derived ConfirmPolicy), flagged by T-567's review; the TITLE is the real scope: the sealed Resolution - unknown as a durable finding, not-searched as its own state, the shuffled-null control, and suspected: Option<SuspectedStructure> (set only for UnsupportedStructure). T-575's text belongs to T-575 (landing separately). Judge T-567 against its title and handback (~/.hackriff-ops/work/T-567/handback.json), not the copied block. Landed branch: task-t567 f6a0a65a (compile fix b2851ba9 + main merge).
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
