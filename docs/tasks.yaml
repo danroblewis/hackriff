@@ -27459,7 +27459,7 @@ tasks:
   - id: T-924
     milestone: M2-hardening
     title: "docs/reference/sf-targets.md: cited San Francisco target list with expected modulation and what 'decoded' means, for the explorer"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: DOCS-REF
@@ -27481,6 +27481,7 @@ tasks:
       Commits: 4ea24538, 85389315, 66a32bc8
       Observed, not chased: Could not read ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md from this worktree (not present/accessible) - relied on the ticket's acceptance text, which quotes it, for the design requirements.
       Resources: 3 CPU-s, peak 0.3 GB
+    commit: 1178474e
   - id: T-925
     milestone: M2-hardening
     title: "Dashboard: explorer row (target, phase, journal tail) + radio-owner tile (holder, until, staging live/replay)"
