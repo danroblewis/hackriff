@@ -2821,9 +2821,24 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     };
 
     // GET one entry: same shape as a list row.
+    //
+    // T-972: the row that comes back is the **live** entry the id resolves to, and its `id` is the
+    // survivor's, not necessarily the one asked for (docs/api.md, "Inventory entry"). Under a live
+    // inventory that is not pedantry: detection is "fast, continuous and self-cleaning" (CLAUDE.md,
+    // ADR-0019), so the near-duplicate merge can re-key this station between the list call above and
+    // this one, and asserting the two ids are equal was a race in the *test's* choice of row — it
+    // failed once at ~load 23 with a 200 and a different id, which is reachable only through that
+    // resolution. So read the live id back off the server and use it from here on, exactly as a
+    // client holding a list id must. The resolution itself is pinned by value against a seeded
+    // repository in `crates/hk-api/tests/inventory_api.rs`
+    // (`the_entry_route_resolves_a_merged_id_to_its_survivor`), where the merge is made to happen
+    // rather than waited for.
     let (st, row) = get(addr, &format!("/api/inventory/{id}"));
     assert_eq!(st, 200, "{row}");
-    assert_eq!(row["id"], json!(id));
+    let id = row["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an entry row carries its id: {row}"))
+        .to_owned();
     for field in [
         "state",
         "lifecycle",
@@ -2946,6 +2961,18 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     assert_eq!(st, 200, "{v}");
     assert!(v.get("entry").is_some(), "{v}");
     assert_eq!(v["entry"]["state"], json!("confirmed"), "{v}");
+    // T-972, again from the server's own answer: `entry` is the live row, so this both re-anchors
+    // the id for the band/delete calls below and settles it — a same-emission merge keeps the
+    // confirmed entry's id over a candidate's (`merge_same_emission_rows`), so from here the id a
+    // client holds is the one the user accepted.
+    let id = v["entry"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a promoted entry carries its id: {v}"))
+        .to_owned();
+    // ...and the band block below must validate against *that* row's measured band, not the one
+    // read before the promote: the user band is checked against the live entry's `[f_lo_hz,
+    // f_hi_hz]`, which a merge moves.
+    let row = v["entry"].clone();
     let (st, v) = post(
         addr,
         &format!("/api/inventory/{id}/promote"),
