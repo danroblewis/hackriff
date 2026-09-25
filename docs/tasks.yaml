@@ -23969,7 +23969,8 @@ tasks:
   - id: T-810
     milestone: MMAP
     title: Density layer at coarse zoom (features per cell from /api/tiles/events) instead of numbered cluster bubbles; drilling in resolves to boxes (re-scoped from pin clustering, user 19:35)
-    status: todo
+    status: in-progress
+    branch: task-t810
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
