@@ -28468,7 +28468,7 @@ tasks:
   - id: T-962
     milestone: MAUTO
     title: RDS PI committed and Confirmed from ~3 CRC-valid groups (98.085 PI 1704; oracle saw no RDS) - identity needs vote counts and a provisional state
-    status: in-progress
+    status: done
     branch: task-t962
     priority: P1
     deps: []
@@ -28495,6 +28495,7 @@ tasks:
     core_interface: true
     result: |
       Round 2 landed on task-t962 at 2eaa3e1f: RDS PI identity commits only when 10 agreeing CRC-valid votes fall within 5 s of capture time (VoteWindow in hk-model, used by both the recipe messages writer and hk-demod's RDS decoder). Red->green: t962_sparse_recipe_votes_over_minutes_never_commit (20 rows over 300 s: red on count rule, confirmed via route A; green), rds::group::tests::t962_sparse_votes_over_a_long_session_stay_provisional (red with count rule re-injected; green); dense guards green. Tests: hk-demod 66/66, hk-pipeline t962+signal_062 6/6, messages unit 3/3, decode_api 8/8, api_contract 71/71, precheck clean.
+    commit: fbb1f07e
   - id: T-963
     milestone: MAUTO
     title: AIS recipe (GMSK 9600, NRZI, HDLC, CRC-16/X.25) + a validated AIS reference oracle
