@@ -28243,6 +28243,25 @@ tasks:
       DELIVER (deflake-triage): run it alone x5 on the quietest box available and on the tree before tonight's re-plumb-path landings (T-917 survey thread, T-868 listen parity, T-891 accessory source) - bisect if it was green before; fails alone on a quiet box => a real stall: root-cause what the always-on readers wait on during a re-plumb (a lock held across segment teardown? the survey/detect straggler joining?) and fix it; if the assertion is genuinely a latency bound that only a quiet box meets, move that bound to the `timing` tier (just timing, docs/10 §3.6) and keep a DETERMINISTIC correctness assertion in the gate (the readers are never blocked on ring allocation - e.g. the ring is allocated off the readers' path, asserted structurally). No threshold change, no retry. Coordinate with T-941 (running; same re-plumb path) - this ticket waits for it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-pipeline -E 'binary(replumb_never_pays_for_the_ring)'), then HAND BACK. Never `just gate`.
     core_interface: true
+  - id: T-974
+    milestone: M2-hardening
+    title: hk-cli api_contract tests fail alone in worker worktrees but pass in the merge gate (retune stream, recipe routes, ws header, band-collapsed activity)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: DEFLAKE-API-CONTRACT
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      PATTERN 2026-09-25: hk-cli tests/api_contract.rs tests fail ALONE in worker worktrees on main's code, reported as 'red not its own' by several workers, while the merge gate's full workspace run passes them:
+      - T-934 (Mac, base 7a9fa8ab, 3/3 with T-934's files at base): a_retune_keeps_connected_stream_consumers_connected, recipe_and_pipeline_routes_match_the_documented_shapes, ws_stream_header_matches_the_stream_contract.
+      - T-920 (base ~03:1x): the_band_collapsed_activity_series_is_measured_and_states_its_fold (api_contract.rs:7102 'two timeline answers over the same capture window').
+      - T-567 (02:49): api_contract exit 100 (its own E0063 then; later clean).
+      - earlier board notes: a_retune_keeps_connected... panicking at api_contract.rs:3846 'rows after the re-plumb' saw only a Header.
+      Either these are real defects the gate hides (heavy-serial scheduling, a warm artefact present in main's target but not a worker's, retries), or the worktree environment differs (fixtures LFS pointers not smudged after T-935/T-960 added LFS files, a stale ui dist, recipes/ or plugins/ binaries missing, ports) - the product must not depend on either.
+      DELIVER (deflake-triage): reproduce each ALONE in a fresh worktree seeded as workers are (cp -c target), and in main's target; for each, find the difference that decides pass/fail; fails alone on a clean tree => a real defect (fix the product, or the test's wall-clock choice per docs/10 §3.6); an environment dependency => make the test self-sufficient or fail with a clear precondition message (never skip silently). Red-on-regression proof for each fix. No retry, quarantine or threshold change.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-cli -E 'binary(api_contract) and test(...)'), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
