@@ -28751,7 +28751,7 @@ tasks:
   - id: T-983
     milestone: MAUTO
     title: "Explorer: one server per window, and the window script reaps IQ rings on exit (each per-target server left a 4.2 GB ring)"
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: OPS-EXPLORER
@@ -28777,6 +28777,7 @@ tasks:
       Commits: 70265224, 94e0b8da, b4f743f3, ee6058ca, c34bec31
       Observed, not chased: Review's 'smaller problem, not blocking': the agent prompt text now contains the literal substring 'hk serve at http://127.0.0.1:$PORT', which cleanup()'s fallback `pkill -f "hk serve.*127\.0\.0\.1:$PORT"` (ops/explorer-window.sh) can match against the agent's own command line if the agent process's argv is still visible to `ps` when cleanup runs. The reviewer confirmed this is 'mostly harmless in production, because the cleanup runs after the agent has exited' and only caused test cross-talk between two concurrent copies of the launcher test file sharing the same stub port under load - not something this fix round was asked to touch, and not reproducible from a single run. | Same as last round's non-blocking follow-ups (still not fixed, per the review's own triage): leftover IQ rings from a crashed earlier window are only reaped at the NEXT window's exit, not at start; rogue detection only catches a second hk serve whose --data-dir is under $HACKRIFF_OPS/explorer, not one pointed entirely outside that tree; explorer.md describes a server restart the launcher itself never performs. | The Mac-only bash tests (including both rogue-server ones) still cannot be executed on this Linux worker; reviewed by hand against the reviewer's exact repro, but a real Mac run is the next true verification.
       Resources: 12 CPU-s, peak 0.4 GB — LEAKED 1 processes (killed at reap)
+    commit: 9a55e429
   - id: T-984
     milestone: MMAP
     title: Annotations drawn twice with the Research layer on; new annotation reaches Research only on its 15 s refresh; no e2e for authoring
