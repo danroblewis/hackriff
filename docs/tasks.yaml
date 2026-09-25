@@ -25516,7 +25516,7 @@ tasks:
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-853
@@ -25553,6 +25553,7 @@ tasks:
       Use cases: RESEARCH-002, SIGNAL-062
       Resources: 192 CPU-s, peak 3.2 GB
     branch: task-t858
+    commit: 544f29f8
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
@@ -26984,6 +26985,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator + supervisor 2026-09-24 20:10.
+
+      2026-09-24 coordinator: task-deflake-app-surface-overlays was skipped as a conflict at 20:27 (T-811/T-882/T-809 landed around it). It is carried by task-t821 (built on it); a worker is re-merging task-t821 onto main, so T-914 lands inside T-821.
     branch: task-deflake-app-surface-overlays
   - id: T-915
     milestone: MLIVE
