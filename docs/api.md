@@ -259,7 +259,9 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
       "snr_db": 21.4, "peak_dbfs": -18.25,
       "measured": { "snr_db": 21.4, "peak_dbfs": -18.25,
                     "t_start_s": 1789300812.0, "t_end_s": 1789300813.0, "duration_s": 1.0 },
-      "relation": null
+      "relation": null,
+      "identity_synthesized": false,
+      "synthesis": null                      // null = not searched (T-860)
     }
   ],
   "next_cursor": null, "limit": 100, "total": 214, "identity_access": "standard"
@@ -335,6 +337,10 @@ The full classification (likelihood, prior, provenance, reasons) is not on the r
 - **`"unassessed"`** — the clusterer has never decided anything about this row: nothing measured yet, or a `full` catalogue match it leaves alone. `reason`, `distance` and `t_s` are `null`.
 
 `distance` is the tolerance-normalised distance that decided it, when one was computed; `t_s` when the decision was made. An abstention is recorded once and not rewritten while the emitter stays unassigned, so `reason` and `t_s` are those of the *first* decline, not the latest look. Presentation is the client's; the field only carries the fact.
+
+**`synthesis` (T-860, ADR-0015 §5.4, MAUTO M-9).** The emitter's **latest analysis**, summarised — the `emitter_synthesis` row a region-analyze job (`/api/analyze`, below) or the trunking chain appended; the full row is `POST /api/analyze {"emitter_id"}`. `null` means **not searched**, never "searched and found nothing": a finished search that identified nothing still writes a row, whose `resolution` says so (ADR-0021 §7A.4). Otherwise `{"t_s", "engine", "verdict", "stage_reached", "summary", "resolution", "job_id", "profile", "template", "analytic_holdout_bits", "decodes_stored", "confirm"}`: `verdict`/`stage_reached` as in `AnalyzeResult`; `summary` the backend-rendered pipeline (or resolution) sentence; `resolution` the resolution `kind`, or `null` when solved; the job fields are `null` on a row the trunking chain wrote, and otherwise the job id, its profile, the template `{id, version}` (`null` for open search), the **confirm key** (ADR-0022's analytic hold-out bits), how many decodes the job stored, and `confirm` — the `ConfirmPolicy.synthesized` outcome (`confirmed` · `already` · `insufficient` · `not-attached`). An analysis never overwrites the emitter's measured values. `null` on a withheld-identity row whatever storage holds, exactly as `estimated_params` and `cluster_id` are (T-159/T-163).
+
+**`identity_synthesized` (T-860, ADR-0015 §5.5).** `true` when the row's decoded identity rests **only** on decodes made by a synthesized pipeline (decoder id `synth:…`), `false` when an ordinary decoder's decode carries it too (or no decode does), `null` without an identity or on a withheld row. A synthesized identity — even a real one, such as an `adsb-icao` from a template-bound pipeline — is strong evidence, never an unexplained fact, so a client shows this beside the identity. Synthesized decodes never count toward the identity confirm route; they confirm only through `ConfirmPolicy.synthesized`.
 
 **`cluster_group` (T-320).** The same membership, served as **grouping data** so a list can show *which* rows measure alike instead of only that each one has been seen before. `null` exactly when `cluster_id` is (no cluster, not yet visible, or a withheld-identity row), else `{"cluster_id", "label", "rows_in_view"}`:
 
@@ -1453,12 +1459,12 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 
 `Session`: `{id, active, selection_id, emitter_id, f_lo_hz, f_hi_hz, kinds, max_s, max_bytes, bytes, started_at, elapsed_s, ended, links_saved, files: [{kind, file, sidecar, extra_files, state, bytes, records, dropped_records, message, recording_id, bitstream_id, url, sidecar_url, extra_urls}]}` — `url`/`sidecar_url`/`extra_urls` are the matching `/api/outputs/{id}/files/{name}` download paths, to which a browser appends `?token=`.
 
-## Analyze / synthesize decoder (T-190, T-546, T-859)
+## Analyze / synthesize decoder (T-190, T-546, T-859, T-860)
 
 `/api/analyze` is the MUI "Analyze / synthesize decoder" action (docs/14, `docs/15-decoder-synthesis.md` §7): point it at a signal and ask **what decodes it, and why, in terms of what was measured**. It has two answers, told apart by the body of the `POST`:
 
 - **A region-analyze job** (ADR-0015 §5.1–§5.3, MAUTO M-8, T-859): a `selection_id` or `band` target — or an `emitter_id` target **with any job field** (`profile`, `max_wall_s`, `source`, `live_s`, `templates`, `attach`) — answers **`202 {"job": AnalyzeJob}`** with `Location: /api/analyze/{id}`, audited `analyze_start`. The job runs in the pipeline (`hk_pipeline::synth::jobs`): it acquires IQ from the ring or live, searches, and is polled, streamed, cancelled and fetched through the routes below.
-- **The emitter's persisted analysis** (T-546): a bare **`{"emitter_id"}`** answers `200` with the emitter's latest analysis — the `emitter_synthesis` row (ADR-0015 §5.4) the pipeline wrote while it ran. This form **reads**; it never starts DSP, and every call is answered synchronously. Today the only producer is the trunking chain (`hk_pipeline::synth`), so a confirmed control channel has an answer and most emitters do not. It is audited `analyze`.
+- **The emitter's persisted analysis** (T-546): a bare **`{"emitter_id"}`** answers `200` with the emitter's latest analysis — the `emitter_synthesis` row (ADR-0015 §5.4) the pipeline wrote while it ran. This form **reads**; it never starts DSP, and every call is answered synchronously. Its producers are the trunking chain (`hk_pipeline::synth`) and attached region-analyze jobs (T-860). It is audited `analyze`.
 
 **`not-searched` is not `unknown`** (ADR-0021 §7A.4). An emitter no analysis has run on answers `200` with `pipeline: null` and `resolution: {"kind": "not-searched", "summary"}` — *un-looked-at*, which is a different fact from *looked at and found nothing*, and the two are never rendered alike. A job that **failed or was cancelled** carries the same `not-searched`: it ruled nothing out. This is the decode-side statement of the canvas's grey rule: a client that shows them the same way has the same defect as one that paints unobserved spectrum as quiet.
 
@@ -1482,7 +1488,7 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 - **`source`**: `auto` (default: the ring if it holds the window, else live) · `ring` (needs a window) · `live`. An **explicit** window (a selection's or a band's) never silently becomes "whatever is on the air now": if the ring no longer holds it the request is refused. An emitter's default window is not explicit, so `auto` falls back to live for it (ADR-0015 §5.3).
 - **`live_s`** (> 0, ≤ 30, default 2): how much new IQ a live job collects. The wait is on the **capture clock** — the ring's own live edge — never a wall clock.
 - **`templates`**: `{"only"?: [id], "exclude"?: [id], "off"?: bool}`, carried to the search's seeding.
-- **`attach`** (default `true`): attach results to an emitter when done (ADR-0015 §5.4, MAUTO M-9; `confirm` stays `null` until it lands).
+- **`attach`** (default `true`): attach a `done` job's results to an emitter (ADR-0015 §5.4, MAUTO M-9 — *Attach and confirm-by-decode*, below).
 
 **Admission** is one running job and a queue of four (`503 busy` beyond); the power policy may refuse a profile (`422 power`: `deep` on battery, anything but `quick` in low-power mode) and halves threads on battery. **The source is resolved at admission**, so its errors are answered on the `POST`: `410 evicted` (an explicit window older than the ring's oldest sample), `422 no_iq` (an explicit window the ring holds nothing of, or an empty ring), `409 outside_window` (a live job whose band is not inside the tuned window), `503 unavailable` (no IQ ring on this run, or no job manager on this server).
 
@@ -1490,7 +1496,7 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 
 ### `AnalyzeJob`
 
-`{id ("a<n>"), href, state, end_reason, error, target, profile, source, live_s, attach, templates, window, channel, budget, used, progress, results, trace_summary, resolution, emitter_id, confirm, content_class, created, started, ended, warnings}`:
+`{id ("a<n>"), href, state, end_reason, error, target, profile, source, live_s, attach, templates, window, channel, budget, used, progress, results, trace_summary, resolution, emitter_id, decodes, confirm, content_class, created, started, ended, warnings}`:
 
 - `state`: `queued` → `acquiring` → `searching` → (`refining` · `validating` · `throttled`) → `done` · `cancelled` · `failed`. A `DELETE` makes a queued or running job `cancelled` **at once and finally** — a search that finishes in the same instant cannot turn an acknowledged cancel back into `done`; its partial `results`/`used`/`trace_summary` still arrive when the engine hands back.
 - `end_reason`: why the search stopped — `solved` · `plateau` · `budget` · `exhausted` · `cancelled` · `source_ended` · `evicted`; `null` while running and when the job failed before searching.
@@ -1502,9 +1508,21 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 - `results`: ≤ 10 ranked `PipelineResult`s (ADR-0015 §3.4): `{rank, verdict, summary, recipe, template, stage_reached, stages, evidence_bits, prior_bits, analytic_holdout_bits, check, frames_preview, characterisation}`. `recipe` is an ordinary, runnable recipe — start it as a live decoder with `POST /api/pipelines`. `frames_preview` is decoded content and is **emptied unless the acquired IQ's `content_class` permits content**.
 - `trace_summary` (ADR-0021 §4.1): `{decisions, nodes_recorded, nodes_elided, truncated, by_outcome: {<outcome>: n}, by_stage: [{stage, tried, not_tried, best_bits}], replayable}`. `decisions = nodes_recorded + nodes_elided`; `replayable` is false when a wall/CPU backstop, a throttle or a thermal pause decided something.
 - `resolution` (ADR-0021 §7A.2): present whenever the job finished without a `solved` result — the same object as `AnalyzeResult.resolution` below, with `coverage` for a finished search. `unknown` is written **only** by a `done` job.
+- `emitter_id`: the emitter target, or — once a `done` job has attached — the emitter its results attached to.
+- `decodes` (M-9): `{stored, valid}` — decode rows stored from the rank-1 result's **hold-out** run, and how many were CRC-valid without correction; `null` until the job has attached.
+- `confirm` (M-9): `{rule, outcome, evidence_bits, reason}` on a `done` job, `null` otherwise. `rule` is `hk-pipeline/confirm-synth@2`; `outcome` is `confirmed` (this job confirmed the emitter), `already` (it would have, and the emitter was already confirmed — or a user deleted it, and a user delete wins), `insufficient` (the gate refused; `reason` names the clause) or `not-attached` (nothing to attach to, `attach: false`, or the server has no inventory); `evidence_bits` is the confirm key, the analytic hold-out bits. `reason` is backend-rendered and, on a confirm, is the lifecycle reason itself (below).
 - `created`, `started`, `ended`: Unix s.
 
 The last **50** finished jobs are kept in memory (results persist through `attach`, M-9). An id this server never issued is `404 not_found`; a job that ran and has been forgotten — by age or by `DELETE` — is **`410 gone`**. *We forgot* is not *it never ran* (ADR-0021 §4.2). `?state=` takes a state name, else `400 invalid`.
+
+### Attach and confirm-by-decode (T-860, ADR-0015 §5.4–§5.5, ADR-0022 §6)
+
+A job that finished **`done`** with results, asked to `attach`, attaches on the server (`hk_pipeline::synth::attach`); cancelled and failed jobs never do. The attach is **one transaction** — decodes, any new candidate, the row and the confirmation land together or not at all — so a failed attach (a `warnings` entry, never a failed job) leaves nothing half-written.
+
+- **The emitter.** An emitter target is that emitter — never a user-deleted one: such a target is refused at `POST` (`404 not_found`, as every mutating inventory route answers for a deleted entry), and one deleted while the job searched gets `not-attached` with nothing stored, linked or appended. Otherwise the inventory emitter nearest the searched channel **among those seen in the analysed window** (centre within half the band, at most twice as wide; a user-deleted row is never chosen). If there is none, the job's **first** stored decode creates a candidate through ordinary decode ingestion, and every later decode is linked to it — one emission, one candidate.
+- **Stored decodes.** Only for a rank-1 result that **solved on hold-out**, and only the frames of that hold-out run — search-window frames are never stored. Each is an ordinary `Decode` row (repository content gate, stream-policy shape rule) with `decoder_id` `synth:<template id | open>`, `decoder_version` `<engine>+sha256:<recipe hash>`, and `provenance: {kind: "synthesized", job_id, holdout: true, evidence_bits, hypotheses, analytic_holdout_bits, check_bits?, l_check?, check_searched, template_provenance?}` — the numbers the gate read, so a confirmation is reconstructible from the stored row. An open search's decodes carry the structural identity `other:hk-framing`; a template-bound identity is kept and still marked synthesized. Content is dropped unless the acquired IQ's class permits it.
+- **The row.** An `emitter_synthesis` row is appended (append-only; the emitter's measured values are never touched) carrying the job's contribution `job: {job_id, profile, evidence_bits, prior_bits, analytic_holdout_bits, template, recipe (the rank-1 document inline), recipe_hash, check, holdout, trace_summary, replay_key, null_control, sealed_resolution, decodes_stored, decodes_valid, confirm}`, so `AnalyzeResult` carries `job` on rows a job wrote. `sealed_resolution` is the `Resolution` `hk-synth` sealed before any context lookup could shape it (ADR-0021 §9.3).
+- **`ConfirmPolicy.synthesized`** (actor `hk-pipeline/confirm-synth@2`, ADR-0022 §6) confirms a **candidate** only when every clause holds, in order: the rank-1 verdict is `solved` (a partial verdict never changes lifecycle state) and the profile is not `quick`; the check is at least **8** bits wide; `check_bits = width × differences − L_check ≥ 16` over hold-out (an evaluator's larger figure is clamped to that bound, and the excess comes off the analytic total), counting only frames valid without FEC correction; **analytic hold-out bits ≥ 24**, each stage net of its own look-elsewhere; a **searched** check (open search, or a template an earlier search discovered, which inherits that search's look-elsewhere) needs ADR-0021 §8.2's null control to have **run and passed**; and front-end trust over the analysed window — at most **50 %** of the emitter's detections in the window suspect, **at least one** detection in it, and the acquired IQ known not to be overloaded. A missing number refuses; nothing unmeasured is assumed clean. The rule never demotes, and a user delete wins. The lifecycle reason names the arithmetic, e.g. *"decoded by synthesized pipeline `generic-fsk-framed`: CRC-16 (searched), 3 differing frame(s) valid on hold-out without correction, 48.0 − 21.0 = 27.0 check bits, 30.0 analytic bits against a 24-bit threshold; null control passed with a 11.4-bit margin"*.
 
 ### The trace (`GET /api/analyze/{id}/trace`)
 
@@ -1522,7 +1540,7 @@ A `messages` stream (`message_schema: "hackriff.analyze/1"`, `content_class: unr
 
 ### `AnalyzeResult` (the bare `{"emitter_id"}` read)
 
-`AnalyzeResult`: `{emitter_id, provenance ("synthesized by output analysis"), engine, t_ns, verdict, stage_reached, pipeline, evidence: [StageEvidence], trace: [TraceNode], resolution, receiver}`. For a never-analysed emitter only `emitter_id`, `pipeline` (null), `evidence` (empty), `trace` (empty) and `resolution` are present.
+`AnalyzeResult`: `{emitter_id, provenance ("synthesized by output analysis"), engine, t_ns, verdict, stage_reached, pipeline, evidence: [StageEvidence], trace: [TraceNode], resolution, receiver, job?}` — `job` only on a row a region-analyze job wrote (above). For a never-analysed emitter only `emitter_id`, `pipeline` (null), `evidence` (empty), `trace` (empty) and `resolution` are present.
 
 - `verdict` (ADR-0015 §3.4, how deep the search got, never what it means): `energy` → `demodulated` → `clocked` → `framed` → `checked` → `solved`.
 - `stage_reached` (ADR-0015 §1.1): `s0-channel`, `s1-demod`, `s2-clock`, `s3-bits`, `s4-framing`, `s5-check`, `s6-fields`.

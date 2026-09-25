@@ -356,6 +356,7 @@ fn graph() -> Graph {
         identity: None,
         content_class: ContentClass::Unrestricted,
         t: t(10),
+        provenance: None,
     };
     b.repo.insert_decode(&decode).unwrap();
 
@@ -1909,6 +1910,7 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         identity: Some(pi.clone()),
         content_class: ContentClass::Unrestricted,
         t: t(30),
+        provenance: None,
     };
     b.repo.insert_decode(&decode).unwrap();
     let label = Annotation {

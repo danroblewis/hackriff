@@ -1221,6 +1221,11 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "cluster_status",
         // T-284 (ADR-0017 TM-2): when this row was on the air, through the request's window.
         "presence",
+        // T-860 (ADR-0015 §5.4): the latest analysis, summarised (present; null = not searched).
+        "synthesis",
+        // T-860 (ADR-0015 §5.5): the identity rests only on synthesized decodes (present, possibly
+        // null).
+        "identity_synthesized",
     ] {
         assert!(
             row.get(field).is_some(),
@@ -2977,6 +2982,11 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
         "coverage is what was read: {job}"
     );
     assert_eq!(job["resolution"]["kind"], json!("not-searched"), "{job}");
+    // T-860 (MAUTO M-9): a job that searched nothing attached nothing — `decodes` and `confirm`
+    // are present and null; only a `done` job states a confirm outcome.
+    for key in ["decodes", "confirm"] {
+        assert!(job.get(key).is_some_and(Value::is_null), "{key}: {job}");
+    }
     assert!(
         job["channel"]["center_hz"]
             .as_f64()

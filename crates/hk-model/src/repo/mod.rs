@@ -387,6 +387,15 @@ impl Repository {
         Ok(())
     }
 
+    /// Rolls back the batch [`Self::begin_write_batch`] opened: none of its writes land. A no-op
+    /// when no batch is open (SQLite may already have rolled it back on an error).
+    pub fn rollback_write_batch(&mut self) -> Result<(), RepoError> {
+        if !self.conn.is_autocommit() {
+            self.conn.execute_batch("ROLLBACK")?;
+        }
+        Ok(())
+    }
+
     /// A write transaction that holds the write lock from its first statement, or a savepoint
     /// inside an open write batch.
     fn write_tx(&mut self) -> Result<Tx<'_>, RepoError> {
