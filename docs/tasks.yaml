@@ -26982,7 +26982,7 @@ tasks:
   - id: T-914
     milestone: MMAP
     title: app-surface.e2e.mjs layers-menu checks derive the overlay list from the registry, not a literal - every layer ticket (T-811/T-812/T-821/T-897) stops being blamed
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI-E2E
@@ -26998,6 +26998,9 @@ tasks:
 
       2026-09-24 coordinator: task-deflake-app-surface-overlays was skipped as a conflict at 20:27 (T-811/T-882/T-809 landed around it). It is carried by task-t821 (built on it); a worker is re-merging task-t821 onto main, so T-914 lands inside T-821.
     branch: task-deflake-app-surface-overlays
+    commit: "91363265"
+    result: |
+      DONE 2026-09-24: landed inside task-t821 (merge 91363265). ui/e2e/app-surface.e2e.mjs's layers-menu checks derive the expected overlay list from the app's own registry (.sf-stage[data-overlay-layers]: every drawn overlay/dom layer, plane then z, with its declared default) instead of a literal, equally strict (6 injected-mutation red proofs: dropped layer, reorder, wrong default, vacuous registry, split inheritance, cross-pane toggle leak), plus a fixed 'rules then detections first and on' assertion; T-882's hard-coded control counts derived from the registry too (main was red 5/9 on them). Derived list on main: rules(10,on) detections(20,on) paths(25,on) research(30,off) Bookmarks(40,on) artifacts(50,off) pins(dom 10,on). Layer tickets no longer edit this spec.
   - id: T-915
     milestone: MLIVE
     title: A band's last 5-7 s of recorded rows before a retune are never folded - they stay 'awaiting' forever (T-911 finding)
