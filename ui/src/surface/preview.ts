@@ -657,8 +657,28 @@ export interface PreviewOptions {
 export class SurfacePreview {
   readonly view: SurfaceView;
   readonly probe: SurfaceProbe;
-  /** The pane gestures apply to: the last one pointed at. */
-  activePane: string;
+  /** The pane the chrome acts on (T-1000): see [[activePane]]. */
+  private active: string;
+  private readonly activeListeners = new Set<(id: string) => void>();
+  /**
+   * **The pane gestures and chrome apply to: the last one pressed, right-clicked, wheeled or chosen
+   * by key.** An accessor rather than a field (T-1000) so that every writer — `input.ts`'s press and
+   * wheel, a split, a close, the app's pane keys — tells [[onActiveChange]]'s listeners in the same
+   * call, and the outline and the chrome that name the pane move in the same frame as the press. An
+   * id that is not a pane is refused: an active pane that does not exist would name nothing.
+   */
+  get activePane(): string { return this.active; }
+  set activePane(id: string) {
+    if (id === this.active || !this.view.panes.has(id)) return;
+    this.active = id;
+    for (const f of this.activeListeners) f(id);
+  }
+  /** Be told when the active pane changes. Returns a disposer. Presentation only: a listener is
+   * handed the new id and nothing else, and the change itself moved no view and reached no route. */
+  onActiveChange(f: (id: string) => void): () => void {
+    this.activeListeners.add(f);
+    return () => { this.activeListeners.delete(f); };
+  }
   lastFrame: SurfaceFrame | null = null;
   private readonly canvas: HTMLCanvasElement;
   private raf = 0;
@@ -731,7 +751,7 @@ export class SurfacePreview {
     // historical preview). `pause` is a coordinate change (T-347/T-442), so this costs no frame and
     // no jump. With a live edge the first pane stays following and the map follows too — "live" is
     // then just the finest growing edge of this same surface (docs/16 §8.1), not a second mode.
-    this.activePane = this.view.panes.list()[0].id;
+    this.active = this.view.panes.list()[0].id;
     if (!this.edgeFn) {
       this.view.panes.pause(this.activePane, probe.origin.edgeNs);
       this.view.panes.goTo(this.activePane, probe.opening.centerNs);
