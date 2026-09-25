@@ -28004,7 +28004,7 @@ tasks:
   - id: T-947
     milestone: MMAP
     title: Go-to-frequency retune offer takes its span from the view width (15.8 MHz -> 16 Msps)
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-GOTO
@@ -28022,6 +28022,7 @@ tasks:
       precheck exit 0
       Commits: a5e4658f
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: c215b514
   - id: T-948
     milestone: M2-hardening
     title: DC point listed as a candidate at the tuned centre; a steady -57.5 dB line at 161.984 MHz never detected or explained
