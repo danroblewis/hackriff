@@ -25181,6 +25181,8 @@ tasks:
       2026-09-23 (coordinator): code complete on task-t844 (ad29641b: sink, producer, three /api/ml routes, tests green except ml_shadow) but NOT queued - the ticket forbids landing a producer that never fires, and through the mock SDR the classifier calls every row unknown, so the C38 gate never admits one. Now todo behind T-852; when it lands, re-run crates/hk-pipeline/tests/ml_shadow.rs unchanged and queue.
 
       2026-09-24 (coordinator): T-852 landed a partial fix (5/16 above-gate device rows now fsk); T-844's ml_shadow scene (seed 844, 20 dB) is still held by the SNR gate and unknown at 25 dB. It now also waits on T-876 (burst-extent overrun) and T-877 (fsk density tail), per the T-852 worker's diagnosis.
+
+      Gate fail 1 (09-25 06:50): the real red was hk-cli temp_dir_hygiene every_temp_data_dir_call_site_is_guarded, flagging T-844's new api_contract ml test (temp_data_dir() without a TempDataDirGuard within 8 lines). Fixed in 616d3ed5 by guarding the dir at creation. The other two gate reds (hk-api analyze t884_the_analyze_read_withholds..., hk-pipeline departure_rows_folded a_replumbing_retune...) pass alone on the merged tree, in code T-844 does not touch; they are load flakes for the deflaker.
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
