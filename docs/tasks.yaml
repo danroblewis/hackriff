@@ -28887,7 +28887,7 @@ tasks:
   - id: T-993
     milestone: MMAP
     title: "Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-TOPBAR
@@ -28915,6 +28915,7 @@ tasks:
       Commits: c1b05d55
       Observed, not chased: app-phone.e2e.mjs's idle-fade step read opacity 1 for every element (dock, zoom and FAB too) when run in a 3-lane e2e batch, and passed alone. Under load it looks like the 800 ms transition wait or the idle timer gets starved. Deflaker candidate. | At 400 px the floating Go-to input is ~100 px wide beside the 8-button cluster, so its placeholder is cut off ('Go to f…'). Folding Annotate/Pin into a menu at phone width would win the space back. | Decode and History still use the framed shell's bar (as the ticket scoped it to the map). Retiring it there too would be a follow-up.
       Resources: 753 CPU-s, peak 6.8 GB
+    commit: a7f58d37
   - id: T-994
     milestone: MMAP
     title: "Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires"
