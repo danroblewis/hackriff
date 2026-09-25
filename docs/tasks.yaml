@@ -27671,7 +27671,7 @@ tasks:
   - id: T-928
     milestone: MAUTO
     title: Confirm-gate init-cancel guard misses spans with start_bit > 0 (must precede template seeding / floor 8); stale floor-8 doc text; CheckTally preallocates ~790 KB per check block (T-575 review)
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-575
@@ -27698,6 +27698,7 @@ tasks:
       Commits: d779b8ef
       Observed, not chased: The ticket's memory figure is wrong and the corrected one is in the commit: 100 352 bytes (98 KiB) per CheckTally, not ~790 KB - the review read MAX_TALLY_FRAME_BITS = 4096 bits as 4 KB per entry. The fix is still worth it (11 776 bytes now), but any Jetson budget line quoting 790 KB should be corrected. | hk-estimate/src/assist/codes.rs (the searched-generator path, T-577 2.5) still does not use the 4.3.1 count at all, so hole B's searched half reaches the gate whatever this guard does. That is the open re-measure ticket's item (2) on the board ('Re-measure the confirm false-positive rate with T-577's harness driving the REAL CheckTally'), not this one; T-577's harness still carries its own copy of the counting logic, so the start_bit = 8 model I added is a model, not the shipped code path. | crates/hk-pipeline/src/synth/attach.rs:1358 and :1396 set min_check_width to 8 and 24 in test fixtures of SynthesizedConfirm::effective; the shipped defaults (inventory.rs:407, hk-synth/src/engine.rs:340) are both 16 and the clamp keeps them there, so no drift - noted only because grepping for the stale 8 finds them.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 2ad63e83
   - id: T-929
     milestone: M2-hardening
     title: "hk-pipeline listen_lifecycle fifty_sessions_closed_cleanly: 504 probe-timeout before Session::run (1/3 alone pre-T-917; T-868 saw it too) - triage and fix"
