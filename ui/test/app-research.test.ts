@@ -10,7 +10,7 @@ import {
   researchMarkBoxes, researchRows, rowKey, selectResearch, setCollectionVisible, setResearchData, setResearchOpen, sortRows,
   type Annotation, type Collection, type Marker,
 } from "../src/app/map/research-slice";
-import { goRow, loadResearch, placeText, renameBody, rowPath, viewFilterWindow } from "../src/app/map/research";
+import { exportFilename, exportPath, exportText, goRow, loadResearch, placeText, renameBody, rowPath, viewFilterWindow } from "../src/app/map/research";
 import { markAt } from "../src/surface/marks";
 import { defaultPaneLayers, withLayer } from "../src/surface/layers";
 import { createStore } from "../src/app/store";
@@ -169,4 +169,16 @@ test("guard: the panel names no device route and no browser clock", () => {
       assert.ok(!src.includes(w), `${f} names ${w}`);
     }
   }
+});
+
+test("T-823 export: one read-only GET, optionally narrowed to a collection; the file is the server's bundle", () => {
+  assert.equal(exportPath(null), "/api/research/export");
+  assert.equal(exportPath("c 1"), "/api/research/export?collection=c%201");
+  assert.equal(exportFilename(null), "hackriff-research.json");
+  assert.equal(exportFilename("FM survey #2"), "hackriff-research-fm-survey-2.json");
+  const bundle = { format: "hackriff-research-export@1", sigmf: { annotations: [] } };
+  assert.deepEqual(JSON.parse(exportText(bundle)), bundle, "nothing recomputed or dropped");
+  // Thin client: the export button names only the export route, never a device route.
+  const src = readFileSync("src/app/map/research.ts", "utf8");
+  assert.ok(src.includes("/api/research/export"));
 });

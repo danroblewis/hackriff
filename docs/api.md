@@ -1556,7 +1556,19 @@ Durable, **human-authored** time–frequency notes — a text note, a box or a m
 - **Provenance is stamped by the server; the client sends only `view`** — `{center_hz, span_hz, t_capture: [t0_s, t1_s], tier, device_id?}`, the view context it was on (all but `device_id` required). The server adds `actor` and `author` (the token fingerprint `tok-…`, **never the token**), `authored_s` (wall clock — when the human acted, never compared with `t_capture`, which is when the air was), `authored: true`, and `sample_rate_hz` **only** when this run holds the device `device_id` names (otherwise `null`, never the primary radio standing in). A body carrying `provenance`, `author`, `actor`, `authored`, `authored_s`, `created_s` or `updated_s` — at the top level or inside `view` — is `400 invalid`: provenance is evidence, not input.
 - **Audited** as `annotation_create`, `annotation_update`, `annotation_delete` (token id, peer, request, old/new, status), with **no `device` key**: authoring is a view act and reaches no radio. Without an audit log every mutating route is `503 unavailable`; without a store, every route is.
 - **Never detection input.** An annotation mints no candidate, moves no threshold, confirms no emitter and never pre-populates the inventory; it is a different object from the §2.13 machine annotation and from a Confirmed emitter (docs/25 §5).
-- **SigMF-adjacent export shape** ([docs/sigmf-extension.md](sigmf-extension.md), `hk_model::AuthoredAnnotation::to_sigmf`): a SigMF `annotations` entry with `core:sample_start`/`core:sample_count` (from `t0_s`/`t1_s` against the recording's start and rate), `core:freq_lower_edge`/`core:freq_upper_edge`, `core:label`, `core:comment` (from `body`), plus a `hackriff:annotation` block (`authored: true`, `kind`, `id`, `author`, `collection_id`, `provenance`) — structurally distinct from `hackriff:truth`, so a researcher's notes can never contaminate a fixture's hidden truth list. The export route itself is MAP-23.
+- **SigMF-adjacent export shape** ([docs/sigmf-extension.md](sigmf-extension.md), `hk_model::AuthoredAnnotation::to_sigmf`): a SigMF `annotations` entry with `core:sample_start`/`core:sample_count` (from `t0_s`/`t1_s` against the recording's start and rate), `core:freq_lower_edge`/`core:freq_upper_edge`, `core:label`, `core:comment` (from `body`), plus a `hackriff:annotation` block (`authored: true`, `kind`, `id`, `author`, `collection_id`, `provenance`) — structurally distinct from `hackriff:truth`, so a researcher's notes can never contaminate a fixture's hidden truth list. The export route is [`GET /api/research/export`](#research-export-t-823-map-23).
+
+## Research export (T-823, MAP-23)
+
+The durable research objects — collections, their markers, annotations and saved measurements — out as **one JSON file**, so the artifact outlives the session and the device (offline-first: nothing here needs a network). Read-only, token-gated, never audited, never a device route; **no new signal logic** — every object is exactly what its own route serves.
+
+| Method | Path | Query | Response |
+|---|---|---|---|
+| GET | `/api/research/export` | `collection`? (UUID: only that collection's markers, annotations, measurements); `rate`? (Hz, default `1e6`, > 0) | the bundle below; `400 invalid` (bad `collection`/`rate`), `404 not_found` (unknown `collection`), `503 unavailable` (no store), `405` other methods |
+
+The bundle: `{format: "hackriff-research-export@1", collection, counts: {collections, markers, annotations, measurements}, truncated, collections: [Collection…], markers: [Marker…], annotations: [Annotation…], measurements: [Measurement…], sigmf}`. `truncated` is `true` when a store held more than 20 000 rows of one kind (read in pages of 2000, never dropped silently).
+
+`sigmf` is the **SigMF-adjacent** view of the annotations: `{global: {core:version, core:sample_rate (= rate), core:description}, captures: [{core:sample_start: 0}], annotations: [...], recording_start_s}`. The notional recording starts (sample 0) at `recording_start_s`, the earliest annotation start on the capture clock (`null` with no annotations), and each entry is `AuthoredAnnotation::to_sigmf` against it, carrying its `hackriff:annotation` block (structurally apart from `hackriff:truth`). It is a note file, not an IQ recording: it has no `.sigmf-data`.
 
 ## Output recordings (T-061)
 
@@ -2663,6 +2675,7 @@ four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023]
 |---|---|---|---|---|
 | GET | `/api/annotations` | MAP-16 | **served (T-816)** — see [Annotations](#annotations-t-816-map-16) | `{annotations, count, matched, next_cursor}` |
 | POST | `/api/annotations` | MAP-16 | **served (T-816)** — `{kind ("text"\|"box"\|"marker"), f_lo_hz, f_hi_hz, t0_s, t1_s, label, body?, collection_id?, view}` | `Annotation` (201, audited) |
+| GET | `/api/research/export` | MAP-23 | **served (T-823)** — see [Research export](#research-export-t-823-map-23); `collection`?, `rate`? | the export bundle |
 | GET/PUT/DELETE | `/api/annotations/{id}` | MAP-16 | **served (T-816)** — any create field on PUT | `Annotation` / `{deleted}` |
 | GET | `/api/collections` | MAP-17 (**served**, T-817) | `limit`? (500, max 2000), `cursor`? | `{collections, count, matched, next_cursor}` |
 | POST | `/api/collections` | MAP-17 (**served**) | `{name, note?, color?}` | `Collection` (201, audited) |

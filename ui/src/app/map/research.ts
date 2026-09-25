@@ -66,6 +66,29 @@ export async function loadResearch(get: Get): Promise<{ collections: Collection[
   return { collections: c.items, markers: m.items, annotations: a.items, truncated: c.truncated || m.truncated || a.truncated };
 }
 
+/** T-823 (MAP-23): the export route — one read-only GET; `collectionId` narrows it to that collection. */
+export const exportPath = (collectionId: string | null): string =>
+  `/api/research/export${collectionId ? `?collection=${encodeURIComponent(collectionId)}` : ""}`;
+
+/** The saved file's name: the collection's name when one collection is exported. Presentation only. */
+export function exportFilename(collectionName: string | null): string {
+  const slug = (collectionName ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `hackriff-research${slug ? `-${slug}` : ""}.json`;
+}
+
+/** The bundle as the file's text: the server's own JSON, pretty-printed, nothing recomputed. */
+export const exportText = (bundle: unknown): string => `${JSON.stringify(bundle, null, 2)}\n`;
+
+/** Hands `text` to the browser as a file download (the offline-first "export when online" path). */
+function saveFile(name: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  const a = h("a", { href: url, download: name }) as HTMLAnchorElement;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 /** What the small per-row "Go" button writes: view arithmetic only (P4), never a device route. A
  * timed mark also reviews its window; a frequency-only pin keeps the pane's time. */
 export const goRow = (r: ResearchRow) => (s: AppState): Partial<AppState> => ({
@@ -124,8 +147,10 @@ export const mountResearch: MountFn = (el, ctx: AppContext) => {
     h("h3", {}, "Research"), h("span", { class: "research-kbd" }, "every mark is also a row"), close);
   const collList = h("ul", { class: "research-colls", "aria-label": "Collections — each is a layer" });
   const newName = h("input", { type: "text", placeholder: "New collection name", "aria-label": "New collection name", maxlength: "120" }) as HTMLInputElement;
+  const exportBtn = h("button", { type: "button", class: "research-export",
+    title: "Download collections, markers, annotations and measurements as one file" }, "⤓ Export") as HTMLButtonElement;
   const newBtn = h("button", { type: "submit", class: "research-new" }, "＋ Collection");
-  const newForm = h("form", { class: "research-newform", autocomplete: "off" }, newName, newBtn);
+  const newForm = h("form", { class: "research-newform", autocomplete: "off" }, newName, newBtn, exportBtn);
   const tabs = h("div", { class: "research-tabs", role: "tablist", "aria-label": "Row kind" });
   const search = h("input", { type: "search", placeholder: "Filter rows", "aria-label": "Filter rows" }) as HTMLInputElement;
   const winBox = h("input", { type: "checkbox" }) as HTMLInputElement;
@@ -284,6 +309,17 @@ export const mountResearch: MountFn = (el, ctx: AppContext) => {
     if (!name) { store.set(toast("Name the collection first.")); return; }
     newName.value = "";
     void write("Create collection", () => client.post("/api/collections", { name }));
+  });
+  exportBtn.addEventListener("click", () => {
+    // One read-only GET, then a file: the bundle is the backend's, saved as received. With a
+    // collection filter on, only that collection goes.
+    const id = filter.collectionId;
+    const name = id ? (store.get().research.collections.find((c) => c.id === id)?.name ?? null) : null;
+    exportBtn.disabled = true;
+    void get<unknown>(exportPath(id))
+      .then((b) => { saveFile(exportFilename(name), exportText(b)); store.set(toast(`Exported ${name ?? "all research"}.`)); })
+      .catch((e) => store.set(toast(`Export failed: ${apiErrorText(e)}`)))
+      .finally(() => { exportBtn.disabled = false; });
   });
   search.addEventListener("input", () => { filter.text = search.value; render(); });
   winBox.addEventListener("change", () => { onlyWindow = winBox.checked; render(); });
