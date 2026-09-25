@@ -28647,6 +28647,8 @@ tasks:
       core_interface (detection/inventory). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): more overlap cases left standing: overlapping Confirmed boxes at 462.0076 / 462.0099 MHz (~100 kHz each), a stationary 12.5 kHz comb at 445.3-445.6 MHz Confirmed as ONE 105 kHz emitter with overlapping candidates, and triplicate candidates - none re-analysed.
+
+      2026-09-25 coordinator, evidence from T-974's triage (mock SDR, deterministic enough to reproduce): hk-cli api_contract inventory_and_analysis_strongest_find_the_blind_fm_station fails ALONE on main's code 3 of 6 runs - api_contract.rs:1719 'two boxes served stacked in time and frequency': two Candidates for one station, 99.8309-99.8517 MHz over 1790360024.517-027.598 s (count 7) and 99.8363-99.9161 MHz over 1790360024.389-026.650 s (count 4), both closed, both served by /api/inventory; the T-369 overlap re-analysis did not resolve the pair. Use it as this ticket's CI-visible failing-first test (it already exists and is red intermittently); when fixed it must pass alone 20/20.
     core_interface: true
   - id: T-979
     milestone: M3
