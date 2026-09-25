@@ -27937,7 +27937,7 @@ tasks:
   - id: T-944
     milestone: MAUTO
     title: "Decode: manual recipe choice as the entry point; /api/pipelines omits a just-created pipeline; no started confirmation"
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-DECODE
@@ -27958,6 +27958,7 @@ tasks:
       Commits: 373f07c2
       Observed, not chased: No Rust was changed, so clippy was not run; only cargo fmt --all --check (exit 0) and the UI typecheck ran. | Backend gap: no one-call auto-decode route. The UI chains GET /api/recipes/match then POST /api/pipelines. A server-side {auto:true} start would make the choice atomic and auditable as one pipeline_start. | The 'Decode RDS' label comes from identity_scheme, but the recipe actually started is whatever /api/recipes/match ranks first (the toast names it). If the match ranks WFM above RDS, the label and the action disagree.
       Resources: 59 CPU-s, peak 1.0 GB
+    commit: 981ee168
   - id: T-945
     milestone: M2-hardening
     title: Automatic front-end gain management closed-loop on decode quality (overload flagged at every clip, nothing reduces gain)
