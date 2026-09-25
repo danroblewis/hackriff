@@ -374,8 +374,17 @@ const UNTRACKED_ROLLUP_SQL: &str = "\
 struct Barriers {
     /// Track → its newest kept row's `t_end`.
     tracked: HashMap<[u8; 16], i64>,
-    /// Kept rows no track links: `(survey, provenance, f_lo, f_hi, t_end)`, oldest first.
-    untracked: Vec<([u8; 16], [u8; 16], f64, f64, i64)>,
+    /// Kept rows no track links, oldest first.
+    untracked: Vec<UntrackedBarrier>,
+}
+
+/// One kept row no track links: enough of it to tell whether a rollup would span it.
+struct UntrackedBarrier {
+    survey: [u8; 16],
+    provenance: [u8; 16],
+    f_lo: f64,
+    f_hi: f64,
+    t_end: i64,
 }
 
 /// How many untracked barriers one pass remembers.
@@ -388,8 +397,13 @@ impl Barriers {
             if self.untracked.len() >= MAX_UNTRACKED_BARRIERS {
                 self.untracked.remove(0);
             }
-            self.untracked
-                .push((c.survey, c.provenance, c.f_lo, c.f_hi, c.t_end));
+            self.untracked.push(UntrackedBarrier {
+                survey: c.survey,
+                provenance: c.provenance,
+                f_lo: c.f_lo,
+                f_hi: c.f_hi,
+                t_end: c.t_end,
+            });
             return;
         }
         for &t in &c.tracks {
@@ -407,12 +421,12 @@ impl Barriers {
         let inside = |t: i64| t > lo && t < hi;
         match acc.track {
             Some(track) => self.tracked.get(&track).is_some_and(|&t| inside(t)),
-            None => self.untracked.iter().any(|&(s, p, f_lo, f_hi, t)| {
-                s == acc.survey
-                    && p == acc.provenance
-                    && f_lo <= acc.f_hi.max(c.f_hi)
-                    && f_hi >= acc.f_lo.min(c.f_lo)
-                    && inside(t)
+            None => self.untracked.iter().any(|b| {
+                b.survey == acc.survey
+                    && b.provenance == acc.provenance
+                    && b.f_lo <= acc.f_hi.max(c.f_hi)
+                    && b.f_hi >= acc.f_lo.min(c.f_lo)
+                    && inside(b.t_end)
             }),
         }
     }

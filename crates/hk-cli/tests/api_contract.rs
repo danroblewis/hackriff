@@ -927,6 +927,7 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
             "keep_per_emitter": 256,
             "batch": 100,
             "interval_s": 600.0,
+            "count_rows_s": 600.0,
             "rollup_gap_s": 10.0,
             "rollup_span_s": 60.0,
         }),

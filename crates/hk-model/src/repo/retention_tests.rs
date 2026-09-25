@@ -1000,7 +1000,9 @@ fn links_to_missing_detections_are_counted_not_silent() {
     let ids: Vec<DetectionId> = dets.iter().map(|d| d.id).collect();
     // Re-linking what is already linked drops nothing: it is idempotent, not a loss.
     assert_eq!(
-        w.repo.link_detections_to_track(track, &ids, t(300)).unwrap(),
+        w.repo
+            .link_detections_to_track(track, &ids, t(300))
+            .unwrap(),
         0
     );
     // Two never-stored detections, one stored: two dropped.

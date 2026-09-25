@@ -1191,7 +1191,9 @@ impl Pipeline {
         match repo.abort_orphaned_surveys() {
             Ok(0) => {}
             Ok(n) => eprintln!("hk-pipeline: aborted {n} survey(s) left open by an earlier run"),
-            Err(e) => eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}"),
+            Err(e) => {
+                eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}")
+            }
         }
         repo.insert_survey(&survey)?;
         store_calibrations(&mut repo, &cfg.calibrations)?;
