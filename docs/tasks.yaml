@@ -23618,6 +23618,8 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): the canvas fills the whole window edge to edge (no app-shell frame or margins); the inventory and focus panels float over it; every toolbar button is clickable. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator: after staging review the user stated principle P1 (docs/23 §10.6): the left column kept its pre-redesign height, which is not minimal. The collapse-to-chip + dismiss is T-895 (high).
+
+      2026-09-25 coordinator (user via supervisor, 10:02): the 'app-shell frame retires' claim was PARTIAL. The side column went via T-882 and the chip tickets, but T-150's top bar (Explore/Decode/History, Review, Theme, tuning nudges) and the Outputs bottom dock were still on staging. They are retired by T-993 (top bar -> floating chrome) and T-994 (outputs on the map: active box state + badge, context menu with Listen, dock retires). MMAP's definition of done includes both.
     result: |
       Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
       siblings of `.centre` which is z-index:auto) painted above `.centre`
@@ -28862,6 +28864,51 @@ tasks:
       DELIVER: the ratio table per station (app vs oracle), PI and PS unprompted counts, written to T-926's result; if < 90 %, name the remaining cause per station and file it through the coordinator.
       TESTING PROTOCOL: live measurement only; no code changes expected. HAND BACK with the table.
     blocked_on: "a radio window: ~15 min of the HackRF under the radio lock in a scheduled explorer/nightly window (staging stays live in the daytime); T-926 + T-941 landed"
+  - id: T-993
+    milestone: MMAP
+    title: "Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-TOPBAR
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:02, via supervisor): "The top bar ... Explore/Decode/History tab buttons, the Review button, the Theme button, and the nudge buttons" are still there. T-801 ('the app-shell frame retires') did not retire T-150's top bar.
+      WHAT THE USER WILL SEE ON STAGING: no fixed-height bar above the map; the canvas's top row is the first pixel row of the page; the former bar's controls are small floating chrome that fades with the rest.
+      DELIVER (map principles docs/23 §10, P1 closeable / P4 small controls for big view changes):
+      - Explore / Decode / History mode -> a compact segmented control (three small buttons) docked top-centre, or folded into the Go-to cluster.
+      - Review -> a small icon button in the top-right cluster (beside layers/tools/Research).
+      - Theme -> inside a small settings/overflow menu (⋯) in that same cluster, not a bar button.
+      - Tuning nudge buttons (T-409; they command the radio through the one gated DeviceAction path) -> small buttons beside Go-to, the one place device commands live; fadeable with the rest. A pan/wheel still never commands the radio.
+      ACCEPTANCE: at 1280x800 and at 400 px width the canvas's top row is visible with no fixed-height bar above it (assert the canvas's bounding rect top == 0 and no element with the old bar's role spans the width); every former top-bar action reachable in <= 2 clicks (e2e clicks each); e2e specs that asserted the old bar are rewritten or retired per the rcfix rule (never loosened to pass); just test-ui green; screenshots at both widths in the handback.
+      OWNED FILES (so this runs beside the Outputs-on-the-map ticket): ui/src/app/index.html's HEADER/top-bar element only, ui/src/app/centre/nudge.ts, the mode/review/theme wiring, the top-right chrome cluster and base.css/phone.css rules for the bar. Do not touch ui/src/app/dock/*.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 10:02 via supervisor (staging): Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map
+  - id: T-994
+    milestone: MMAP
+    title: "Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-OUTPUTS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:02 + AMENDMENT 10:06, via supervisor): the OUTPUTS bottom dock (T-150) is still a fixed bar. The user: "the outputs could be a tab, but it might make more sense to enhance what's rendered on the waterfall map. We already have Detections drawn as boxes; if a box is actively being demodulated / listened / decoded, the box could show that it's active somehow, and there could be a right-click menu for it."
+      WHAT THE USER WILL SEE ON STAGING: no bottom bar; a box that is playing/decoding/recording says so on the map; right-click (long-press on touch) any box or pin gives its actions, Listen included.
+      DELIVER (docs/23 §10 P2: anything with coordinates is drawn on the map; GIS symbology by attribute - boxes, not pins):
+      - ACTIVE STATE ON THE BOX: a detection/emitter box with an active output - Listen (audio), demod stream, decode pipeline, recording - draws an 'active' outline state distinct from 'selected', plus a small corner badge naming the output kind(s) (audio / stream / decode / rec glyphs) and, for audio, a subtle level pulse driven by the server-reported level. The state comes from the backend's open-output records (listen/stream/decode/record sessions), never inferred client-side; laid out through the pane's capture-time mapping on every frame like every other overlay.
+      - CONTEXT MENU on any box/feature (right-click; long-press on touch), and the same menu on a pin (generalized box): Listen / Stop listening, Decode... (recipe picker), Record clip, Stream out, Analyze, Promote / Delete, Go to. This is where Listen lives from now on (the explorer found Listen unreachable from Candidate rows). Reuse T-192's context-menu component and T-943's action wiring rather than a second implementation; the Selected tab keeps the detail view.
+      - The Outputs dock RETIRES (its pixels return to the map). Optional, secondary: a small closeable 'Active outputs' chips strip in the bottom sheet's peek (T-803), each chip with a working stop.
+      ACCEPTANCE: e2e through the mock SDR: start Listen on a station from the context menu -> its box shows active + the audio badge within a frame; stop from the same menu -> both drop; a decoding box shows the decode badge while its pipeline runs and drops it when done; long-press opens the same menu at 400 px; no fixed-height bar at the bottom at 1280x800 or 400 px; every former dock action reachable; specs that asserted the dock rewritten/retired per the rcfix rule (never loosened); just test-ui green; screenshots in the handback. If a needed output-state field is missing from the API, add it to docs/api.md + api_contract.rs together (T-079). Interplay: T-987 (Listen opens squelched on a bursty channel) changes what Listen does, not where it is invoked.
+      OWNED FILES: ui/src/app/dock/*, the box/pin overlay symbology in ui/src/surface/, the context-menu component, index.html's DOCK element only. Do not touch the top bar (sibling ticket).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone; a targeted nextest binary if the API changes), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 10:02 + amendment 10:06 via supervisor (staging): Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
