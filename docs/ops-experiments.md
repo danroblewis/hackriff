@@ -52,3 +52,25 @@ Baseline for the first week: 2026-09-23 00:00–13:00 (alone mode): landings 49 
 - **Rollback:** `just knobs set FLAKE_SOLO_ONE=0 && restart ops/merge-runner.sh between gates`
 - **Status:** open
 - **Result:** —
+
+
+**E-002 closed 2026-09-24 19:56 — INCONCLUSIVE.** flake_solo_saved_min_24h: None → None over 25 gates / 5.5 h; real reds 6/25; full-gate p50 47 min; blocked 64.2 min; guards: real_reds_24h 6 <= 17.5 ok; full_gate_p50_min 47 <= 33.75 BROKEN; blocked_minutes 64.2 < 30.0 BROKEN. Closed early for E-004 (user: GATE_TIERS=check tonight). Both broken guards are the disk incident, not the knob: blocked_minutes 64 = the WORK_CAP=1 incident cap 18:23-19:27; full-gate p50 47 = contended gates during the clone-divergence rebuilds. flake_solo_saved not yet measurable (no qualifying solo accept counted). FLAKE_SOLO_ONE stays 1 as the user's 14:20 decision, part of E-004's baseline, not a result.
+
+
+---
+
+## E-004 — Gating merges with the check phase only (GATE_TIERS=check - CI's split: check on
+
+- **Opened:** 2026-09-24 19:57 · **owner:** pipeline-manager
+- **Hypothesis:** Gating merges with the check phase only (GATE_TIERS=check - CI's split: check on push, acceptance nightly) and draining the whole queue in one batch (BULK_MAX=30; one mechanism: the drain) takes the browser tier's serial reds off the merge path and raises landings/h. The acceptance phase still runs on main (idle, or between gates once 24 h overdue); HAND-CHECKED guards (not yet machine metrics): real-red rate of main's acceptance runs (ACCEPTANCE ... RED lines) and count of ACCEPTANCE_RED filed in merge-needs-attention (<= 2 per 24 h)
+- **Knob:** GATE_TIERS=check, BULK_MAX=30
+- **Baseline window:** 2026-09-24 00:00..2026-09-24 19:55 — landings/h 1.51, real reds 20/74, full-gate p50 28 min, dispatch-hours 15, blocked 64.2 min
+- **Primary metric:** landings/h (rolling 6h)
+- **Guards:** real_reds_24h <= baseline*1.25; full_gate_p50_min <= baseline*1.25; blocked_minutes < 30
+- **Duration:** 6 gates or 12.0 h
+- **Decision rule:** keep if landings/h >= +30%, no machine guard broken, and every acceptance red on main is attributed to one merge and filed; rollback at the first unattributed acceptance red or a 3rd ACCEPTANCE_RED in 24 h
+- **Rollback:** `just knobs set GATE_TIERS=full BULK_MAX=15 && echo E-004-rollback > $HACKRIFF_OPS/merge-runner-restart`
+- **Status:** open
+- **Result:** —
+
+**E-004 closed 2026-09-25 01:18 — KEEP.** landings/h: None → None over 28 gates / 5.4 h; real reds 1/28; full-gate p50 29 min; blocked 0.0 min; guards: real_reds_24h 1 <= 25.0 ok; full_gate_p50_min 29 <= 35.0 ok; blocked_minutes 0.0 < 30.0 ok. GATE_TIERS=check (+ BULK_MAX=30 for the drain): landings/h 1.51 (baseline 09-24 00:00-19:55) -> 5.5 (6h at 01:18 09-25); guards ok (real reds 1, full-gate p50 29 min <= 35, blocked 0). The one acceptance red on main since (RC 00:21 app-dismiss) was attributed to one merge and fixed by task-rcfix-app-dismiss (landed 01:16) - the rule's condition. Confounds, stated: node2 remote workers from 00:31 (0 remote landings by 01:18, so none of this gain), WORK_CAP 3->4->3 00:31-00:53 (incident). GATE_TIERS=check is also the user's rule (2026-09-24 20:00), so this keeps what the user decided; the acceptance phase lives in the daily RC.
