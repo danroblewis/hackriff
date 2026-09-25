@@ -156,6 +156,8 @@ clear_attempts(){ grep -vE "^$1 " "$ATTEMPTS" > "$ATTEMPTS.tmp" 2>/dev/null || t
 # reason `just cycle-time` could not report commit->merge for already-merged work until now.
 record_landed(){ # branch
   local b=$1 t merge_sha first now land
+  # A recorded no-culprit red subset member landed: that red subset can never recur.
+  grep -qE "(^| )$b=" "$S/bisect-no-culprit" 2>/dev/null && rm -f "$S/bisect-no-culprit"
   t=$(ticket_of "$b")
   # The merge commit NAMING THIS BRANCH, not HEAD: in a bulk batch HEAD is the last merge,
   # so HEAD^2 would attribute every branch's commits to the last one merged.
@@ -242,7 +244,8 @@ main_is_red(){
 # last candidate is red ALONE, and only then blame it. Everything else goes back as one batch and still
 # lands only through a full gate - nothing is excused. The candidates are persisted in isolate-remaining,
 # so a restart mid-bisect re-queues them (startup). A bisect that names NO culprit re-queues the batch first as
-# one batch (proven green, unprobed, then the red subset) and isolates only when the same batch does it again.
+# one batch (proven green, unprobed, then the last red subset) and isolates only when a later no-culprit red subset
+# shares a member (by tip) with the recorded one.
 bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
   # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
   # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
@@ -265,16 +268,16 @@ bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + th
   log "BISECT: base + $(printf '%s ' "${@%%=*}")-> $([ "$rc" = 0 ] && echo RED || echo green)"
   return $rc
 }
-# The probe verdicts, for the no-culprit re-queue: `green <names>` per green probe, `red <names>` per red one (the
-# last red line is the smallest red subset). A file, because bisect_culprit runs in a $( ) subshell.
+# The probe verdicts, for the no-culprit re-queue: `green <branch=sha...>` per green probe, `red <branch=sha...>` per
+# red one (the last red line is the smallest red subset). A file, because bisect_culprit runs in a $( ) subshell.
 bisect_fact(){ # rc branch=sha...
   local r=$1; shift
-  case "$r" in 0) echo "red ${*%%=*}" ;; 1) echo "green ${*%%=*}" ;; *) return 0 ;; esac >> "$S/bisect-facts"
+  case "$r" in 0) echo "red $*" ;; 1) echo "green $*" ;; *) return 0 ;; esac >> "$S/bisect-facts"
 }
 bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (twice), or nothing; leaves $S/bisect-facts
   local base=$1; shift; local cand=("$@") n r
   printf '%s ' "${@%%=*}" > "$S/isolate-remaining"
-  echo "red ${*%%=*}" > "$S/bisect-facts"   # the batch gate itself
+  echo "red $*" > "$S/bisect-facts"   # the batch gate itself
   while [ "${#cand[@]}" -gt 1 ]; do
     n=$(( ${#cand[@]} / 2 ))
     bisect_red "$base" "${cand[@]:0:$n}"; r=$?
@@ -985,7 +988,7 @@ try_bulk(){
       wt=$(worktree_of "$b")
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     done
-    rm -f "$BULKMARK" "$S/bisect-no-culprit"
+    rm -f "$BULKMARK"
     board_sync_now
     # Only now: while the bulk marker stood, a killed runner's startup still rewinds this batch (review, 2026-09-25).
     push_mirrors
@@ -1068,19 +1071,21 @@ try_bulk(){
       rm -f "$S/isolate-remaining"
       # NO CULPRIT (supervisor, 2026-09-25 10:44: a both-ways flake sent 12 branches, six of them proven green, through
       # serial gates - 0 landings for an hour). The first time, the batch goes back FIRST as one batch and gates in full
-      # again: proven green, then unprobed, then the red subset (each green alone). The same batch (gated_sig) doing it
-      # a second time isolates, as before. No attempt is charged: nothing was blamed.
-      if [ "$(cat "$S/bisect-no-culprit" 2>/dev/null)" != "$gated_sig" ]; then
-        local reds greens pg="" up="" rs=""
-        reds=$(sed -n 's/^red //p' "$S/bisect-facts" 2>/dev/null | tail -1); greens=$(sed -n 's/^green //p' "$S/bisect-facts" 2>/dev/null)
+      # again: proven green, then unprobed, then the last red subset. The record is that red subset BY TIP, not the
+      # batch: a re-queued batch picks up new branches, so a batch key would re-queue a real pair interaction forever.
+      # A later no-culprit red subset sharing any branch=sha with it isolates, as before. No attempt is charged.
+      local reds greens pg="" up="" rs="" t again=""
+      reds=$(sed -n 's/^red //p' "$S/bisect-facts" 2>/dev/null | tail -1); greens=$(sed -n 's/^green //p' "$S/bisect-facts" 2>/dev/null)
+      for t in $reds; do printf '%s\n' $(cat "$S/bisect-no-culprit" 2>/dev/null) | grep -qxF "$t" && again=1; done
+      if [ -z "$again" ]; then
         for b in "${branches[@]}"; do
-          if printf '%s\n' $reds | grep -qx "$b"; then rs="$rs $b"
-          elif printf '%s\n' $greens | grep -qx "$b"; then pg="$pg $b"
+          if printf '%s\n' ${reds} | grep -q "^$b="; then rs="$rs $b"
+          elif printf '%s\n' ${greens} | grep -q "^$b="; then pg="$pg $b"
           else up="$up $b"; fi
         done
         { printf '%s\n' $pg $up $rs; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
-        printf '%s' "$gated_sig" > "$S/bisect-no-culprit"
-        log "BISECT: no culprit (no single branch confirmed red alone) -> re-queued first as one batch (proven green:${pg:- none}, unprobed:${up:- none}, red subset each green alone:${rs:- none}); a second no-culprit red on this batch isolates"
+        printf '%s' "$reds" > "$S/bisect-no-culprit"
+        log "BISECT: no culprit (no single branch confirmed red alone) -> re-queued first as one batch (proven green:${pg:- none}, unprobed:${up:- none}, last red subset:${rs:- none}); a second no-culprit red sharing a member of that red subset isolates"
         rm -f "$BULKMARK"
         return 0
       fi

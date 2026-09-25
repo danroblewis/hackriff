@@ -610,13 +610,14 @@ probe
     assert run("log", "-1", "--format=%s", "HEAD") == "Merge task-t2 (task-t2): batch, gated together (automated, no AI)"
 
 
-def _no_culprit(tmp_path, branches, culprits, recorded_sig=None, sig="SIG-A"):
+
+def _no_culprit(tmp_path, branches, culprits, recorded=None):
     """bisect_culprit then try_bulk's NO CULPRIT block, over the stubs `_bisect` uses. culprits break it only together."""
     state, queue = tmp_path / "merged", tmp_path / "queue"
     state.write_text("")
     queue.write_text("task-later\n")
-    if recorded_sig is not None:
-        (tmp_path / "bisect-no-culprit").write_text(recorded_sig)
+    if recorded is not None:
+        (tmp_path / "bisect-no-culprit").write_text(recorded)
     (tmp_path / "bulk").write_text("base=base\n")
     text = RUNNER.read_text()
     i = text.index("\ntry_bulk(){")
@@ -640,7 +641,7 @@ TRIAGE_FILTER=t; TRIAGE_SPECS=""
 {_function("bisect_fact")}
 {_function("bisect_culprit")}
 nocul(){{
-local branches=({' '.join(branches)}) gated_sig={sig!r} b
+local branches=({' '.join(branches)}) b
 {block}
 echo ISOLATE
 }}
@@ -656,6 +657,7 @@ nocul
 
 #: The 2026-09-25 09:25 shape: 12 branches, first half green, base + b6 b7 b8 red, each of them green alone.
 INCIDENT = [f"b{i}" for i in range(12)]
+RED_SUBSET = "b6=sha-b6 b7=sha-b7 b8=sha-b8"
 
 
 def test_a_first_no_culprit_bisect_re_queues_the_batch_first_proven_green_then_unprobed_then_the_red_subset(tmp_path):
@@ -663,28 +665,40 @@ def test_a_first_no_culprit_bisect_re_queues_the_batch_first_proven_green_then_u
     out, queue, rec, bulk = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"])
     assert "CULPRIT=[]" in out and "ISOLATE" not in out
     assert queue == [f"b{i}" for i in range(6)] + ["b9", "b10", "b11"] + ["b6", "b7", "b8"] + ["task-later"]
-    assert rec == "SIG-A"                      # the batch signature, for the second-time check
+    assert rec == RED_SUBSET                   # the last red subset BY TIP, not the batch
     assert not bulk                            # main is back on base: the provisional window is closed
     line = next(ln for ln in out.splitlines() if "re-queued first as one batch" in ln)
     assert "proven green: b0 b1 b2 b3 b4 b5," in line and "unprobed: b9 b10 b11," in line
-    assert "red subset each green alone: b6 b7 b8)" in line and "a second no-culprit red on this batch isolates" in line
+    assert "last red subset: b6 b7 b8)" in line and "green alone" not in line
 
 
-def test_the_same_batch_reaching_a_no_culprit_bisect_twice_isolates(tmp_path):
-    out, queue, rec, bulk = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"], recorded_sig="SIG-A")
-    assert "ISOLATE" in out and "isolate by merging each individually" in out
+def test_the_same_red_members_in_a_bigger_batch_isolate_the_second_time(tmp_path):
+    """The loop the batch key had (coordinator, 2026-09-25): the re-queued batch picked up b12 b13, so its signature
+    changed and a real pair interaction (b7+b8) would gate -> bisect -> re-queue forever. A shared red member isolates."""
+    out, queue, rec, _ = _no_culprit(tmp_path, INCIDENT + ["b12", "b13"], ["b7", "b8"], recorded=RED_SUBSET)
+    assert "CULPRIT=[]" in out and "ISOLATE" in out and "isolate by merging each individually" in out
     assert queue == ["task-later"]             # nothing re-queued: the caller isolates what merged
     assert rec is None                         # the record is spent
 
 
-def test_a_changed_batch_signature_gets_the_first_time_re_queue_again(tmp_path):
-    """A branch dropped/added or a tip moved is a different batch: re-queue it once more, never isolate it on sight."""
-    out, queue, rec, _ = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"], recorded_sig="SIG-OLD", sig="SIG-A")
-    assert "ISOLATE" not in out and queue[:3] == ["b0", "b1", "b2"] and rec == "SIG-A"
+def test_a_red_member_with_a_moved_tip_is_re_queued_again(tmp_path):
+    """The branch changed (a fix pushed), so it is not the same red: first-time behaviour."""
+    moved = "b6=sha-old6 b7=sha-old7 b8=sha-old8"
+    out, queue, rec, _ = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"], recorded=moved)
+    assert "ISOLATE" not in out and queue[:3] == ["b0", "b1", "b2"] and rec == RED_SUBSET
 
 
-def test_the_no_culprit_record_is_cleared_when_the_batch_lands():
+def test_the_no_culprit_record_is_cleared_when_a_recorded_member_lands_not_when_any_branch_does(tmp_path):
     text = RUNNER.read_text()
-    i = text.index("\ntry_bulk(){")
-    merged = text[text.index('log "BULK MERGED', i):text.index("board_sync_now", i)]
-    assert '"$S/bisect-no-culprit"' in merged and "rm -f" in merged
+    body = _function("record_landed")
+    line = next(ln for ln in body.splitlines() if "bisect-no-culprit" in ln)
+    rec = tmp_path / "bisect-no-culprit"
+
+    def lands(b):
+        rec.write_text(RED_SUBSET)
+        subprocess.run(["bash", "-c", f"S={tmp_path}; b={b}\n{line}"], check=False, timeout=10)
+        return rec.exists()
+    assert lands("b0") is True                  # an unrelated landing keeps the record
+    assert lands("b1") is True                  # b1 is a prefix of nothing recorded
+    assert lands("b7") is False                 # a recorded member landed: that red can never recur
+    assert "rm -f \"$BULKMARK\" \"$S/bisect-no-culprit\"" not in text   # not merely on any batch landing
