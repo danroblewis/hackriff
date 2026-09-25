@@ -20,6 +20,13 @@ LAUNCH = OPS / "launch.sh"
 
 pytestmark = pytest.mark.skipif(platform.system() != "Darwin", reason="the explorer is Mac Studio only")
 
+# A hang detector, not a latency budget: nothing here asserts how fast a window runs (that would be the
+# `timing` tier). On a loaded box one fork+exec was measured taking ~15 s (2026-09-25, load 25-37), so a
+# budget of a few seconds failed healthy windows. Every stub agent that should be stopped sleeps far
+# longer than this, so a window that is really stuck still fails here instead of passing late.
+HANG_S = 120
+LONG_AGENT = "exec sleep 600"  # exec: the agent becomes one plain process, not a bash that forks
+
 
 def _stubs(tmp_path, claude_body="exit 0", take_rc=0, staging="replay (radio-lock: explorer until 05:00)"):
     ops = tmp_path / "ops"
@@ -37,6 +44,7 @@ def _stubs(tmp_path, claude_body="exit 0", take_rc=0, staging="replay (radio-loc
     claude.write_text(
         "#!/bin/bash\n"
         f'echo "$EXPLORER_DEADLINE $*" > "{tmp_path}/claude.args"\n'
+        f'echo $$ > "{tmp_path}/agent.pid"\n'
         f"{claude_body}\n"
     )
     for f in (radio, claude):
@@ -54,6 +62,58 @@ def _stubs(tmp_path, claude_body="exit 0", take_rc=0, staging="replay (radio-loc
         EXPLORER_PORT="65531",  # never a real explorer's server: cleanup pkills hk serve on this port
     )
     return env, ops, radio_log
+
+
+def _clean_signal_mask():
+    signal.pthread_sigmask(signal.SIG_SETMASK, [])
+
+
+def _start(args, env):
+    """The window as tmux starts a pane: its own session (a leftover can be found and killed as its
+    process group) and an empty signal mask. A mask is inherited across fork and exec, and this test
+    process is sometimes launched with SIGINT blocked (seen from the agent shells' zsh loops,
+    2026-09-25: pytest itself started with mask {SIGINT}); the window, its trap and its agent then
+    never see the SIGINT the pane-kill test sends, and that case hung for the whole run."""
+    return subprocess.Popen(args, env=env, start_new_session=True, text=True, preexec_fn=_clean_signal_mask,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _finish(p):
+    """Wait for the window AND every process holding its stdout/stderr - a timer or agent it leaked
+    keeps the pipes open, so a leak fails here. On a hang the group is killed, never left running
+    (its id cannot have been reused: the leader or a leftover member still holds it)."""
+    try:
+        return p.communicate(timeout=HANG_S)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.communicate()
+        raise
+
+
+def _run(args, env):
+    p = _start(args, env)
+    out, err = _finish(p)
+    return subprocess.CompletedProcess(args, p.returncode, out, err)
+
+
+def _agent_running(tmp_path, p):
+    """Wait until the stub agent has exec'd its sleep. Only then is it one plain process with default
+    signal dispositions; before that it is a bash (or a forked copy of the window's shell) on its way
+    to exec, and a signal landing there can be swallowed - under load that window is seconds wide."""
+    pidf = tmp_path / "agent.pid"
+    deadline = time.monotonic() + HANG_S
+    while time.monotonic() < deadline:
+        if p.poll() is not None:
+            pytest.fail(f"the window exited ({p.returncode}) before its agent was running")
+        pid = pidf.read_text().strip() if pidf.exists() else ""
+        if pid:
+            comm = subprocess.run(["ps", "-o", "comm=", "-p", pid], capture_output=True, text=True).stdout
+            if comm.strip().endswith("sleep"):
+                return
+        time.sleep(0.05)
+    os.killpg(p.pid, signal.SIGKILL)
+    p.communicate()
+    pytest.fail(f"the agent was not running after {HANG_S}s")
 
 
 def _radio_calls(log):
@@ -106,7 +166,7 @@ def test_a_stale_pidfile_does_not_block(tmp_path):
     dead = subprocess.Popen(["true"])
     dead.wait()
     (ops / "explorer" / "window.pid").write_text(str(dead.pid))
-    r = subprocess.run([str(WINDOW), "--window", "1m"], env=env, capture_output=True, text=True, timeout=30)
+    r = _run([str(WINDOW), "--window", "1m"], env)
     assert r.returncode == 0, r.stderr
     assert _radio_calls(radio_log) == ["take", "release"]
 
@@ -114,7 +174,7 @@ def test_a_stale_pidfile_does_not_block(tmp_path):
 def test_normal_exit_takes_then_releases_and_passes_the_deadline(tmp_path):
     env, ops, radio_log = _stubs(tmp_path)
     t0 = int(time.time())
-    r = subprocess.run([str(WINDOW), "--window", "1h"], env=env, capture_output=True, text=True, timeout=30)
+    r = _run([str(WINDOW), "--window", "1h"], env)
     assert r.returncode == 0, r.stderr
     assert _radio_calls(radio_log) == ["take", "release"]
     take = radio_log.read_text().splitlines()[0]
@@ -127,14 +187,14 @@ def test_normal_exit_takes_then_releases_and_passes_the_deadline(tmp_path):
 
 def test_an_agent_crash_still_releases_and_keeps_its_status(tmp_path):
     env, _, radio_log = _stubs(tmp_path, claude_body="exit 7")
-    r = subprocess.run([str(WINDOW), "--window", "1h"], env=env, capture_output=True, text=True, timeout=30)
+    r = _run([str(WINDOW), "--window", "1h"], env)
     assert r.returncode == 7
     assert _radio_calls(radio_log) == ["take", "release"]
 
 
 def test_a_refused_lock_never_starts_the_agent_and_releases_nothing(tmp_path):
     env, ops, radio_log = _stubs(tmp_path, take_rc=1)
-    r = subprocess.run([str(WINDOW), "--window", "1h"], env=env, capture_output=True, text=True, timeout=30)
+    r = _run([str(WINDOW), "--window", "1h"], env)
     assert r.returncode == 4
     assert _radio_calls(radio_log) == ["take"]
     assert not (tmp_path / "claude.args").exists()
@@ -143,7 +203,7 @@ def test_a_refused_lock_never_starts_the_agent_and_releases_nothing(tmp_path):
 
 def test_the_agent_waits_for_staging_to_let_go_and_a_stuck_staging_releases(tmp_path):
     env, ops, radio_log = _stubs(tmp_path, staging="live")
-    r = subprocess.run([str(WINDOW), "--window", "1h"], env=env, capture_output=True, text=True, timeout=30)
+    r = _run([str(WINDOW), "--window", "1h"], env)
     assert r.returncode == 5
     calls = [line.split()[0] for line in radio_log.read_text().splitlines()]
     assert calls[0] == "take" and calls[-1] == "release" and calls.count("status") >= 3
@@ -152,30 +212,27 @@ def test_the_agent_waits_for_staging_to_let_go_and_a_stuck_staging_releases(tmp_
 
 
 def test_window_end_stops_the_agent_and_releases(tmp_path):
-    env, ops, radio_log = _stubs(tmp_path, claude_body="sleep 60")
-    t0 = time.monotonic()
-    r = subprocess.run([str(WINDOW), "--window", "3s"], env=env, capture_output=True, text=True, timeout=30)
-    assert time.monotonic() - t0 < 15
-    assert r.returncode != 0  # the agent was TERMed
+    env, ops, radio_log = _stubs(tmp_path, claude_body=LONG_AGENT)  # would run 600 s if not stopped
+    r = _run([str(WINDOW), "--window", "3s"], env)
+    # Stopped by the window end - TERM, or KILL after the grace if the TERM met it mid-exec - and
+    # never by finishing on its own (that would be 0, and 600 s > HANG_S).
+    assert r.returncode in (128 + signal.SIGTERM, 128 + signal.SIGKILL), r.stderr
     assert _radio_calls(radio_log) == ["take", "release"]
     log = (ops / "explorer" / "window.log").read_text()
-    assert "wrap-up" in log and "window end" in log and "radio lock released" in log
+    wrap, end, released = (log.index(m) for m in ("wrap-up", "window end", "radio lock released"))
+    assert wrap < end < released, log
     assert not (ops / "explorer" / "wrap-up").exists()
 
 
 @pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGTERM, signal.SIGINT])
 def test_a_kill_of_the_pane_releases(tmp_path, sig):
     """tmux kill-session HUPs the pane's whole process group; the trap still releases."""
-    env, ops, radio_log = _stubs(tmp_path, claude_body="sleep 60")
-    p = subprocess.Popen([str(WINDOW), "--window", "1h"], env=env, start_new_session=True,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    for _ in range(100):
-        if (tmp_path / "claude.args").exists():
-            break
-        time.sleep(0.1)
-    assert (tmp_path / "claude.args").exists()
+    env, ops, radio_log = _stubs(tmp_path, claude_body=LONG_AGENT)
+    p = _start([str(WINDOW), "--window", "1h"], env)
+    _agent_running(tmp_path, p)
     os.killpg(p.pid, sig)
-    p.wait(timeout=15)
+    _finish(p)
+    assert p.returncode == 128 + sig  # the window's own trap for this signal ended it
     assert _radio_calls(radio_log) == ["take", "release"]
     assert not (ops / "explorer" / "window.pid").exists()
 

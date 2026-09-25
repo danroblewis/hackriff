@@ -109,11 +109,17 @@ TIMER=""
 cleanup(){
   local rc=$?
   trap - EXIT INT TERM HUP
-  if [ -n "$TIMER" ]; then  # the timer, then its sleep (collected first: it is orphaned once the timer dies)
-    local tk; tk="$(pgrep -P "$TIMER")"
-    kill "$TIMER" 2>/dev/null
+  # Only while it is still our child: after the window-end path it may have exited, been reaped,
+  # and its pid gone to a stranger.
+  if [ -n "$TIMER" ] && [ "$(ps -o ppid= -p "$TIMER" 2>/dev/null | tr -d ' ')" = "$$" ]; then
+    # STOP, collect, KILL - neither can be caught, ignored or deferred. A timer that outlives this
+    # shell sleeps on for the whole window holding the pane's stdout (five were found leaked,
+    # PPID 1 in `sleep 3599`, 2026-09-25), and at its deadline would pgrep -P a reused pid.
+    # Stopped, it cannot fork a sleep we would miss.
+    kill -STOP "$TIMER" 2>/dev/null
+    local tk; tk="$(tree "$TIMER")"
     # shellcheck disable=SC2086
-    [ -n "$tk" ] && kill $tk 2>/dev/null
+    kill -KILL "$TIMER" $tk 2>/dev/null
   fi
   # Whatever the agent left behind: its descendants, and its own `hk serve` (started with nohup, so
   # no longer in the tree) - the radio is not free until that server has closed the HackRF.
