@@ -150,6 +150,24 @@ const clamp01 = (v: number) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v))
 // ——— overlay geometry: computed every frame, from pane state, through the renderer's own mapping ———
 
 /** A quad in a pane's clip space, with the colour to fill it. Geometry; the GL is overlay.ts's. */
+/** T-910: a pattern the overlay pass cuts into one quad (`overlay.ts`'s `uPat`). `hatch` is a
+ * diagonal GIS hatch fill; `dash-x` / `dash-y` dash a stroke that runs along x / y. Lengths are
+ * device px; `origin` anchors the phase in the pane's clip space — the feature's own corner — so the
+ * pattern travels with the feature rather than crawling against the screen. */
+export interface OverlayPattern {
+  readonly mode: "hatch" | "dash-x" | "dash-y";
+  readonly periodPx: number;
+  readonly onPx: number;
+  readonly origin: readonly [number, number];
+}
+
+/** The fraction of a quad's rectangle it actually inks: 1 for a plain stroke, `onPx / periodPx`
+ * for a patterned one. The stroke-not-wash assertions weigh a quad's area by this. */
+export function inkFraction(q: { readonly pattern?: OverlayPattern }): number {
+  const p = q.pattern;
+  return p ? Math.min(1, Math.max(0, p.onPx) / Math.max(1, p.periodPx)) : 1;
+}
+
 export interface OverlayQuad {
   /** `[x0, y0, x1, y1]`, the renderer's clip convention (`toClip`). */
   readonly clip: readonly [number, number, number, number];
@@ -166,6 +184,14 @@ export interface OverlayQuad {
   readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "path-stroke" | "prior-band";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
+  /** T-910: a screen-door pattern the overlay shader cuts into this quad (a dashed outline, a hatch
+   * fill). Off-pattern pixels are discarded, so a patterned quad covers at most
+   * `onPx / periodPx` of its rectangle — [[inkFraction]] — and is still a stroke, never a wash. */
+  readonly pattern?: OverlayPattern;
+  /** T-910: which part of a feature's symbology this quad is — its outline (`edge`), its light
+   * `fill`, a selected feature's corner `handle`, or its generalized `symbol`. Absent on every
+   * other mark. Descriptive only: the pass draws every part the same way. */
+  readonly part?: "edge" | "fill" | "handle" | "symbol";
 }
 
 /** The mark for "a pane is looking here". Amber: nowhere near any cell mark or any ramp stop. */
