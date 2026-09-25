@@ -26891,7 +26891,7 @@ tasks:
   - id: T-912
     milestone: M2-hardening
     title: "CI matches the check-tier gate: 'check' on push/PR, 'acceptance' nightly + manual; rust-toolchain.toml pins 1.93.1; nextest installed in the acceptance job"
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: CI
@@ -26914,6 +26914,7 @@ tasks:
       precheck exit 0
       Commits: 7acf4b48
       Resources: 38 CPU-s, peak 0.3 GB
+    commit: 2c77f27f
   - id: T-913
     milestone: M2-hardening
     title: "Detection retention follow-ups: on_air double count, rollup f-extent vs per-frame OBW, startup index build, periodic count(*), writer lock-wait measurement, WAL peak, 20 Msps fixture metas (T-904 review)"
