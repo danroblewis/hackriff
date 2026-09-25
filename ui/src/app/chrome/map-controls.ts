@@ -1,5 +1,6 @@
 // T-802 (MAP-02): the floating control cluster — Go-to, the layers button, the follow-live
-// ("my location") FAB and the zoom stack — docked to the canvas's edges in SCREEN space (docs/23
+// ("my location") FAB and the zoom stack (T-882 adds Measure, the viewport menu and the colour scale,
+// rehomed from the retired toolbar row) — docked to the canvas's edges in SCREEN space (docs/23
 // §10.1 band 2), translucent, and fading after ~6 s idle (§10.2). Reference layout:
 // `ui/mockups/map-ui-v1.html`'s `#goto`, `.topright`, `.rightstack` and `#fab`.
 //
@@ -54,6 +55,9 @@ export interface LayerMenu {
   bases: LayerRow[];
   overlays: LayerRow[];
   viewWide: LayerRow[];
+  /** The colour scale (T-470/T-528, rehomed from the toolbar by T-882): exactly one of the surface's
+   * range modes, view-wide, plus the sentence stating the range it produces. Absent = not offered. */
+  scale?: { rows: LayerRow[]; note: string };
 }
 
 /** The menu's writes. Every one is presentation state; none can reach a route. */
@@ -62,12 +66,34 @@ export interface LayerMenuHost {
   setBase(id: string): void;
   toggleOverlay(id: string): void;
   toggleViewWide(id: string): void;
+  /** Choose the colour-scale mode (a display range, never a gain). Optional: a host with no scale. */
+  setScale?(id: string): void;
 }
 
-export interface MapControlHost extends LayerMenuHost {
+/**
+ * The viewport menu's actions (T-882): pane management — Split, Close, Whole surface — which the
+ * retired toolbar row carried and docs/26 gave no other home. All of it is pane arithmetic on the
+ * view; `extras` are host-built items (Record IQ) appended below, whose own code states their route.
+ */
+export interface PaneMenuHost {
+  split(): void;
+  closePane(): void;
+  wholeSurface(): void;
+  /** How many panes exist, so the menu can say the last one never closes. */
+  paneCount(): number;
+  paneMenuExtras?: HTMLElement[];
+}
+
+export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   zoom(factor: number): void;
   followLive(): void;
+  /** Freeze the active pane on the window it shows — the FAB's other half (the retired `Live`
+   * button's pause). A coordinate change on the pane; capture, the ring and detection never stop. */
+  pauseLive(): void;
   isFollowing(): boolean;
+  /** Measurement mode (T-822): whether a plain drag measures instead of panning. */
+  measuring(): boolean;
+  setMeasuring(on: boolean): void;
   /** Centre the active pane on `hz`, keeping its spans. A view move; never a retune. */
   goTo(hz: number): void;
   /** The tuned centre, for `+`/`-` relative entries (`parseFrequency`'s contract), or null. */
@@ -101,6 +127,14 @@ export function paneActions(panes: PaneControl, activePane: () => string | null,
       panes.setFollowing(id, true);
       onFollow?.(true);
     },
+    pauseLive(): void {
+      const id = activePane();
+      if (!id) return;
+      // T-442: freezing writes down the window the pane was already showing — the frame you pause
+      // on is identical to the one before it. The view stops; the capture does not.
+      panes.setFollowing(id, false);
+      onFollow?.(false);
+    },
     isFollowing(): boolean {
       const id = activePane();
       return !!id && panes.isFollowing(id);
@@ -111,7 +145,7 @@ export function paneActions(panes: PaneControl, activePane: () => string | null,
 /** The FAB's words for the active pane's state — what the VIEW is doing, never the radio. */
 export function fabState(following: boolean): { cls: "following" | "frozen"; title: string } {
   return following
-    ? { cls: "following", title: "Following the live edge. Capture never stops, paused or not." }
+    ? { cls: "following", title: "Following the live edge — press to freeze this viewport on what it shows. Capture never stops, paused or not." }
     : { cls: "frozen", title: "This viewport is frozen on a past window (capture continues) — press to follow the live edge again." };
 }
 
@@ -187,7 +221,9 @@ const svg = (...shapes: Shape[]): SVGSVGElement => {
  * host calls: `viewMoved()` when a gesture moved the view (a Go-to offer describes a window the pane
  * has now left, so it is withdrawn), and `syncFollow()` when the follow state may have changed.
  */
-export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void } {
+export function mountMapControls(host: MapControlHost): {
+  el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void;
+} {
   const input = h("input", {
     class: "mono", placeholder: "Go to frequency, e.g. 433.92M or 101.3", "aria-label": "Go to frequency",
     inputmode: "decimal", autocomplete: "off", spellcheck: "false",
@@ -210,7 +246,39 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-layers",
   }, svg(["path", "M12 3l9 5-9 5-9-5 9-5z"], ["path", "M3 12l9 5 9-5"], ["path", "M3 16l9 5 9-5"])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn);
+  // T-882: Measure (T-822) and the viewport menu join Layers top-right, as in the mockup's
+  // `.topright` (`#measure-btn`). Fixed positions, not draggable (the coordinator's note on T-882).
+  const measureBtn = h("button", {
+    type: "button", class: "map-ibtn map-measure-btn", "aria-label": "Measure", "aria-pressed": "false",
+    title: "Measure: drag on the surface to read Δf/Δt between two points and save it. Esc exits.",
+  }, svg(["path", "M3 17l14-14 4 4L7 21H3v-4z"], ["path", "M13 7l2 2M10 10l2 2M7 13l2 2"])) as HTMLButtonElement;
+  const paneBtn = h("button", {
+    type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, record",
+    "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
+  }, svg(["path", "M4 5h16v14H4z"], ["path", "M12 5v14"])) as HTMLButtonElement;
+  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, measureBtn, paneBtn);
+  const paneItem = (act: string, label: string, title: string, run: () => void) => {
+    const b = h("button", { type: "button", class: "map-pane-item", "data-pane-act": act, title }, label) as HTMLButtonElement;
+    // A menu item acts and closes the menu, like any menu; Record IQ (a host extra) keeps it open so
+    // its Stop is where the start was.
+    b.addEventListener("click", () => { run(); setPaneOpen(false); });
+    return b;
+  };
+  // T-900 (P1): the viewport menu is an overlay too — a visible dismiss, and Esc via the one stack.
+  const paneClose = h("button", {
+    type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
+  const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
+  const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
+    h("div", { class: "map-layers-head" }, h("span", {}, "Viewport"), paneClose),
+    paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
+    closeItem,
+    paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
+    ...(host.paneMenuExtras ?? []),
+    h("div", { class: "map-note" }, "View only: splitting, closing and zooming out never command the radio."));
+  // The mockup's `#mode` banner: while measuring, say so, and how to leave. Never faded.
+  const modeBanner = h("div", { class: "map-glass map-mode", role: "status", hidden: true },
+    "Measure: drag on the surface to read Δf · Δt. Release to keep it. Esc exits.");
   const layersList = h("div", { class: "map-layers-rows" });
   // T-900 (docs/23 §10.6 P1): an open menu is an overlay, so it has a visible dismiss, not just a fade.
   const layersClose = h("button", {
@@ -231,7 +299,7 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
     svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, offer, topright, layers, zoom, fab);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, offer, modeBanner, topright, layers, paneMenu, zoom, fab);
 
   const fade = new IdleFade((idle) => el.classList.toggle("is-idle", idle));
   const poke = () => fade.poke();
@@ -280,7 +348,8 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
     const act = document.activeElement as HTMLElement | null;
     const refocus = act && layersList.contains(act)
       ? (act.dataset.base ? `[data-base="${act.dataset.base}"]` : act.dataset.layer ? `[data-layer="${act.dataset.layer}"]`
-        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]` : null)
+        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]`
+          : act.dataset.scale ? `[data-scale="${act.dataset.scale}"]` : null)
       : null;
     const row = (l: LayerRow, input: HTMLInputElement, press: () => void) => {
       input.checked = l.on;
@@ -303,15 +372,38 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
         ...m.viewWide.map((l) => row(l,
           h("input", { type: "checkbox", "data-view-layer": l.id }) as HTMLInputElement,
           () => host.toggleViewWide(l.id))))] : []),
+      ...(m.scale && host.setScale ? [h("div", { class: "map-layers-axis", "data-axis": "scale", role: "radiogroup", "aria-label": "Colour scale, every pane" },
+        h("h4", {}, "Colour scale · every pane · one at a time"),
+        ...m.scale.rows.map((l) => row(l,
+          h("input", { type: "radio", name: "map-scale", value: l.id, "data-scale": l.id }) as HTMLInputElement,
+          () => host.setScale!(l.id))),
+        h("div", { class: "map-layers-note sf-range-note" }, m.scale.note))] : []),
       h("div", { class: "map-layers-note" }, "Unknowns are never hidden by default. Toggling a layer changes this pane's picture only — never what is captured or detected."),
     );
     if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
   };
   let layersOpen = false;
   const layersOverlay = trackOverlay("layers", () => { setLayersOpen(false); layersBtn.focus(); });
+  const paneOverlay = trackOverlay("pane-menu", () => { setPaneOpen(false); paneBtn.focus(); });
+  let paneOpen = false;
+  const syncPaneMenu = () => {
+    const last = host.paneCount() <= 1;
+    closeItem.disabled = last;
+    closeItem.title = last ? "The last viewport never closes." : "Close the active viewport. The last one never closes.";
+  };
+  const setPaneOpen = (open: boolean) => {
+    paneOpen = open;
+    paneOverlay.open(open);
+    paneMenu.hidden = !open;
+    paneBtn.setAttribute("aria-pressed", String(open));
+    paneBtn.setAttribute("aria-expanded", String(open));
+    if (open) { syncPaneMenu(); if (layersOpen) setLayersOpen(false); }
+    fade.hold("pane-menu", open); // an open menu never fades
+  };
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
     layersOverlay.open(open);
+    if (open && paneOpen) setPaneOpen(false);
     layers.hidden = !open;
     layersBtn.setAttribute("aria-pressed", String(open));
     layersBtn.setAttribute("aria-expanded", String(open));
@@ -320,14 +412,30 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   };
   layersBtn.addEventListener("click", () => setLayersOpen(!layersOpen));
   layersClose.addEventListener("click", () => { setLayersOpen(false); layersBtn.focus(); });
+  paneBtn.addEventListener("click", () => setPaneOpen(!paneOpen));
+  paneClose.addEventListener("click", () => { setPaneOpen(false); paneBtn.focus(); });
+
+  const syncMeasure = () => {
+    const on = host.measuring();
+    measureBtn.setAttribute("aria-pressed", String(on));
+    modeBanner.hidden = !on;
+  };
+  measureBtn.addEventListener("click", () => { host.setMeasuring(!host.measuring()); syncMeasure(); });
 
   const zoomBy = (k: number) => { host.zoom(k); hideOffer(); host.viewChanged(); };
   zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
-  fab.addEventListener("click", () => { host.followLive(); host.viewChanged(); syncFollow(); });
+  // The FAB is the retired `Live` button too (T-882): following → press freezes the view on what it
+  // shows; frozen → press re-pins it to the growing edge. Either way only the screen changes.
+  fab.addEventListener("click", () => {
+    if (host.isFollowing()) host.pauseLive(); else host.followLive();
+    host.viewChanged();
+    syncFollow();
+  });
 
   syncFollow();
-  /** Re-render an open menu — the active pane changed, or a toolbar button toggled a layer. */
-  const syncLayers = () => { if (layersOpen) renderLayers(); };
-  return { el, viewMoved: hideOffer, syncFollow, syncLayers };
+  syncMeasure();
+  /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
+  const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
+  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure };
 }

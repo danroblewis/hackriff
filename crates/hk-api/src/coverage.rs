@@ -473,8 +473,13 @@ pub(crate) struct Evidence {
     /// boundary is not a floor and every row before `oldest_record` is `"unknown"`. `Some(why)`.
     pub forgotten: Option<&'static str>,
     /// **How far forward this answer's evidence reaches** (T-532): the newest instant any consulted
-    /// span over *this band* ends at, clamped into the asked-for window; `None` when no record
-    /// touches the band at all.
+    /// tune record ends at, clamped into the asked-for window; `None` when no record reaches into
+    /// the window at all.
+    ///
+    /// Over **any** band since T-881, not only this one: a record of the radio somewhere else at an
+    /// instant is evidence that this band was unobserved then, so a departed band's answer reaches
+    /// as far as the radio's record does, not only to the moment it was left. (The observation log
+    /// is read for this band only — see [`Evidence::collect`].)
     ///
     /// # Why the young end needs its own horizon, and why its absence was a bug
     ///
@@ -515,7 +520,15 @@ impl Evidence {
             .map(|s| s.open_dwells())
             .unwrap_or_default();
         let memory = Memory::of(state, &open_dwells);
-        let mut spans = ring_spans(state, freq, window);
+        // T-881: the ring's segments over EVERY band, read once. The band's own spans are the
+        // subset `ring_spans` would have kept (the same `overlaps` test), and the rest are the
+        // evidence that the radio was somewhere else — which is what `newest_record` reads below.
+        let ring_all = ring_spans(state, ALL_FREQ, window);
+        let ring_reach = ring_all.iter().map(|s| s.time.end).max();
+        let mut spans: Vec<CoverageSpan> = ring_all
+            .into_iter()
+            .filter(|s| s.freq.overlaps(&freq))
+            .collect();
         let ring = spans.len();
         let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
         let mut log_named = 0;
@@ -550,9 +563,36 @@ impl Evidence {
         // were asked about: an answer cannot be evidence about time it did not look at. Taken from
         // the SAME `spans` the planes are rasterised from, so the horizon and the plane cannot
         // disagree - the failure mode of serving a summary beside a body.
+        //
+        // **Over ANY band, not only this one** (T-881). A record that reaches an instant somewhere
+        // else is evidence about this band at that instant too: the radio was elsewhere, so an
+        // `unobserved` cell here is the true answer, not "the record has not got here yet". Taking
+        // this band's spans alone stopped a DEPARTED band's horizon at the moment it was left —
+        // so a tile straddling the departure left every row after it as the pane's pending ground
+        // for good, and a tile wholly after it named no horizon at all and was drawn as served:
+        // THE grey, from a copy that could not speak about the rows recorded since it was built
+        // (the fog-of-war defect: the newest rows of a departed band, grey). The other bands'
+        // reach comes from the SAME snapshot the band's spans do — the ring status read once
+        // above, the dwells in flight read once at the top — so it can never run ahead of the
+        // plane beside it. The observation log is still read for this band only: a whole-band
+        // page would compete with this band's records for the page limit, and the dwells in
+        // flight already carry every band's live edge.
+        let open_reach = open_dwells
+            .iter()
+            .filter_map(|r| match r {
+                hk_model::attention::observation::ObservationRecord::Dwell(d)
+                    if d.observed.start < window.end && d.observed.end > window.start =>
+                {
+                    Some(d.observed.end)
+                }
+                _ => None,
+            })
+            .max();
         let newest_record = spans
             .iter()
             .map(|s| s.time.end)
+            .chain(ring_reach)
+            .chain(open_reach)
             .max()
             .map(|t| t.min(window.end));
         Evidence {
@@ -646,9 +686,9 @@ impl Evidence {
             "recording_began_s": secs(self.recording_began),
             // Why this server cannot bound what it forgot, or null when it can.
             "forgotten": self.forgotten,
-            // Unix s: how far FORWARD this answer's evidence reaches over this band (T-532), or
-            // null when no record touches the band at all. `oldest_record_s` pointing the other
-            // way — see [`Evidence::newest_record`] for why a held answer needs it.
+            // Unix s: how far FORWARD this answer's evidence reaches (T-532) — over any band since
+            // T-881 — or null when no record reaches into the window at all. `oldest_record_s`
+            // pointing the other way — see [`Evidence::newest_record`] for why a held answer needs it.
             "as_of_s": secs(self.newest_record),
             // The rows served as `"unknown"` are exactly `[unknown_from_row, unknown_from_row +
             // unknown_rows)` — a contiguous band, so a client can check the states it was sent.
@@ -669,9 +709,11 @@ impl Evidence {
                 \"nothing looked\" - a tune record is written as capture proceeds, so it always \
                 stops at the newest sample. A reader that KEEPS this answer (every tile cache does) \
                 must not draw grey past `as_of_s`: the rows there are being recorded while the copy \
-                ages, and grey is the one mark that may only mean the radio never looked. `null` \
-                means no record touches this band at all, and then nothing here was ever observed \
-                and the whole answer stands.",
+                ages, and grey is the one mark that may only mean the radio never looked. It is \
+                read over ANY band (T-881): the radio recorded somewhere else up to `as_of_s`, so \
+                an `\"unobserved\"` cell before it is the true answer even for a band the radio \
+                left. `null` means no record reaches into this window at all, and then the whole \
+                answer stands.",
         })
     }
 }
@@ -1456,6 +1498,31 @@ impl TileOverlay {
         {
             Some(i) => Selected::Plane(self.device_planes[i]),
             None => Selected::AbsentDevice,
+        }
+    }
+
+    /// How far forward this overlay's evidence reaches, Unix ns — the `as_of_s` it serves
+    /// ([`Evidence::newest_record`]).
+    pub(crate) fn as_of_ns(&self) -> Option<i64> {
+        self.evidence.newest_record.map(Timestamp::as_unix_nanos)
+    }
+
+    /// Per cell of the asked-for grid (row-major, `[t * nf + f]`), whether the **selected** plane
+    /// says `unobserved` — the cells a last-known value may be drawn over (T-881). `None` when the
+    /// plane is not laid cell-for-cell on the asked-for grid, so a caller never reads one grid's
+    /// cells through another's addressing. A named device with no plane here is unobserved
+    /// everywhere, as [`Self::uniform_state`] says.
+    pub(crate) fn unobserved_mask(&self, device: &str) -> Option<Vec<bool>> {
+        let (nt, nf) = (self.nt_asked, self.nf_asked);
+        if self.any.nt != nt || self.any.nf != nf {
+            return None;
+        }
+        match self.selected(device) {
+            Selected::AbsentDevice => Some(vec![true; nt * nf]),
+            Selected::Plane(i) => {
+                let codes = &self.planes[i];
+                (codes.len() == nt * nf).then(|| codes.iter().map(|&c| c == UNOBSERVED).collect())
+            }
         }
     }
 

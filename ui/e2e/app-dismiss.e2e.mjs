@@ -23,9 +23,14 @@ const OVERLAYS = [
     isOpen: "document.querySelector('.sheet').dataset.snap !== 'peek'" },
   { name: "the left column", open: ".side-chip", close: ".side-close", box: "#view-explore > .side",
     isOpen: "document.querySelector('#view-explore > .side').classList.contains('is-open')" },
-  { name: "the layers menu", open: ".map-layers-btn", close: ".map-layers-close", box: ".map-layers",
+  { name: "the layers menu", open: ".map-layers-btn", close: ".map-layers .map-layers-close", box: ".map-layers",
     isOpen: "!document.querySelector('.map-layers').hidden" },
+  // The viewport menu and the layers menu replace each other (one menu at a time), so it is checked
+  // alone, not in the Escape-order sequence below.
+  { name: "the viewport menu", open: ".map-pane-btn", close: ".map-pane-close", box: ".map-pane-menu",
+    isOpen: "!document.querySelector('.map-pane-menu').hidden", alone: true },
 ];
+const STACKED = OVERLAYS.filter((o) => !o.alone);
 
 for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes back to the map, and Escape closes the topmost`, async (t) => {
   const browser = await Browser.open();
@@ -51,8 +56,25 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     await page.frames(2);
     const box = await page.$rect(o.box);
     const canvas = await page.$rect(".sf-canvas");
-    // The canvas rows the open overlay covers.
-    const y0 = Math.max(box.y, canvas.y) + 1, y1 = Math.min(box.y + box.h, canvas.y + canvas.h) - 1;
+    // The canvas rows the open overlay covers — the tallest band of them that no OTHER fixed chrome
+    // crosses (Go-to, the range readout, the zoom stack sit in some of those rows whatever is open,
+    // and would otherwise count as covered both before and after).
+    const { y0, y1 } = await page.eval(`(() => {
+      const me = document.querySelector(${JSON.stringify(o.box)});
+      const lo = Math.max(${box.y}, ${canvas.y}) + 1, hi = Math.min(${box.y + box.h}, ${canvas.y + canvas.h}) - 1;
+      const cuts = [...document.querySelectorAll('[data-band="chrome"] > *')]
+        .filter((c) => !c.contains(me) && !me.contains(c))
+        .map((c) => c.getBoundingClientRect())
+        .filter((r) => r.width > 0 && r.height > 0 && r.right > ${box.x} && r.left < ${box.x + box.w})
+        .map((r) => [r.top - 1, r.bottom + 1]).sort((a, b) => a[0] - b[0]);
+      let best = { y0: lo, y1: lo }, at = lo;
+      for (const [t, b] of [...cuts, [hi, hi]]) {
+        const top = Math.min(t, hi);
+        if (top - at > best.y1 - best.y0) best = { y0: at, y1: top };
+        at = Math.max(at, b);
+      }
+      return best;
+    })()`);
     assert.ok(y1 > y0, `${o.name} covers no canvas rows (${JSON.stringify({ box, canvas })})`);
     const during = await page.unoccludedColumns(".sf-canvas", { y0, y1 });
     assert.equal(await page.eval(pressable(o.close)), true, `${o.name}'s close (×) is not visible and pressable`);
@@ -78,15 +100,15 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   assert.deepEqual(OVERLAYS.map(() => false), await Promise.all(OVERLAYS.map((o) => page.eval(o.isOpen))));
 
   // (2) Escape closes the topmost only — the one opened last — one per press.
-  for (const o of OVERLAYS) {
+  for (const o of STACKED) {
     await page.click(`document.querySelector(${JSON.stringify(o.open)})`);
     await page.waitFor(`${o.name} to open`, o.isOpen, { timeoutMs: 5000 });
   }
-  for (let i = OVERLAYS.length - 1; i >= 0; i--) {
+  for (let i = STACKED.length - 1; i >= 0; i--) {
     await page.key("Escape");
-    await page.waitFor(`Escape to close ${OVERLAYS[i].name}`, `!(${OVERLAYS[i].isOpen})`, { timeoutMs: 5000 });
+    await page.waitFor(`Escape to close ${STACKED[i].name}`, `!(${STACKED[i].isOpen})`, { timeoutMs: 5000 });
     for (let j = 0; j < i; j++) {
-      assert.equal(await page.eval(OVERLAYS[j].isOpen), true, `Escape closed ${OVERLAYS[j].name} as well as the topmost`);
+      assert.equal(await page.eval(STACKED[j].isOpen), true, `Escape closed ${STACKED[j].name} as well as the topmost`);
     }
   }
 

@@ -91,6 +91,68 @@ def _read(path: str) -> str:
         return ""
 
 
+QUEUE_DEPTH_JSONL = "queue-depth.jsonl"
+
+
+def queue_waiting(ops: str) -> dict:
+    """Branches NOT YET ON MAIN, as one number (user, 2026-09-24 17:02: the dashboard said 14 and the
+    queue file 8, because an isolation's remaining branches live in the runner's memory, not the file).
+    The union of merge-queue.txt, the bulk marker's branches=, the isolation's remainder
+    (isolate-remaining) and the branch being single-merged now (merging-now) - both written by
+    ops/merge-runner.sh."""
+    queued = {ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines()
+              if ln.strip() and not ln.strip().startswith("#")}
+    bulk = set()
+    for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+        if ln.startswith("branches="):
+            bulk = set(ln[len("branches="):].split())
+    isolating = set(_read(os.path.join(ops, "isolate-remaining")).split())
+    merging = set(_read(os.path.join(ops, "merging-now")).split())
+    waiting = queued | bulk | isolating | merging
+    return {"waiting": len(waiting), "queued": len(queued), "gating": len(bulk | merging),
+            "isolating": len(isolating), "branches": sorted(waiting)}
+
+
+def queue_depth_series(ops: str, since: datetime, until: datetime, points: int = 288) -> list[list]:
+    """[[epoch, waiting], ...] inside the window, thinned to at most `points` (a sparkline)."""
+    lo, hi = since.timestamp(), until.timestamp()
+    rows = [[float(o["ts"]), int(o.get("waiting") or 0)] for o in _jsonl(os.path.join(ops, QUEUE_DEPTH_JSONL))
+            if isinstance(o.get("ts"), (int, float)) and lo <= float(o["ts"]) <= hi]
+    step = max(1, -(-len(rows) // points))
+    return rows[::step]
+
+
+def queue_depth_hourly(ops: str, since: datetime, until: datetime) -> list[dict]:
+    """Per hour: min/max/mean of the sampled depth, out = branches landed (landed.jsonl), and
+    in = out + (depth at the hour's end - depth at its start), so growth reads straight off in > out."""
+    samples = []
+    for o in _jsonl(os.path.join(ops, QUEUE_DEPTH_JSONL)):
+        try:
+            t = datetime.fromtimestamp(float(o["ts"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if since <= t <= until:
+            samples.append((t, int(o.get("waiting") or 0)))
+    out_by = Counter()
+    for ld in _jsonl(os.path.join(ops, "landed.jsonl")):
+        t = datetime.fromtimestamp(float(ld.get("merge_ts", 0)))
+        if since <= t <= until:
+            out_by[_hour(t)] += 1
+    by = defaultdict(list)
+    for t, n in sorted(samples):
+        by[_hour(t)].append(n)
+    rows = []
+    for h in sorted(set(by) | set(out_by)):
+        vals = by.get(h, [])
+        out = out_by.get(h, 0)
+        row = {"hour": h, "out": out}
+        if vals:
+            row.update({"min": min(vals), "max": max(vals), "mean": round(sum(vals) / len(vals), 1),
+                        "in": out + vals[-1] - vals[0]})
+        rows.append(row)
+    return rows
+
+
 def _jsonl(path: str) -> list[dict]:
     out = []
     for line in _read(path).splitlines():

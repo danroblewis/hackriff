@@ -445,8 +445,37 @@ impl LastKnown {
         nt: usize,
         edge_ns: Option<i64>,
     ) -> Vec<ShadowRun> {
+        self.carry_forward_to(grid, t_cell_ns, nt, edge_ns, None)
+    }
+
+    /// [`Self::carry_forward`], carried on **past the store's data edge** where the caller's tune
+    /// record proves the radio was not looking (T-881).
+    ///
+    /// The data edge is the newest frame the store has *folded*, and the fold trails capture: the
+    /// rows between it and the newest instant the tune record reaches are real time the radio spent
+    /// **somewhere else** for a departed band — nothing will ever be measured there, so the value
+    /// last seen is exactly as true of them as of the rows below the edge. Stopping at the edge
+    /// left them with no run, and a cell the coverage map calls unobserved with no run over it is
+    /// THE grey: the newest rows of every departed band, drawn as never observed.
+    ///
+    /// `beyond` is `(reach_ns, unobserved)`: rows starting in `[edge_ns, reach_ns)` are covered
+    /// only at cells whose `unobserved[r * nf + f]` is true (the coverage plane, laid on this
+    /// grid). A column meets a cell past the edge that is **not** unobserved, and it stops there
+    /// for good: the radio looked at it, what it measured is not folded yet, and carrying an older
+    /// value over or past that would stand an old number in for a newer measurement. Rows at or
+    /// after `reach_ns` are the future and are never covered. A mask of the wrong length is no
+    /// extension at all.
+    pub fn carry_forward_to(
+        &self,
+        grid: Option<&Overview>,
+        t_cell_ns: f64,
+        nt: usize,
+        edge_ns: Option<i64>,
+        beyond: Option<(i64, &[bool])>,
+    ) -> Vec<ShadowRun> {
         let grid = grid.filter(|g| g.nt == nt && g.nf == self.nf && g.cells.len() == nt * g.nf);
         let edge = edge_ns.unwrap_or(i64::MAX);
+        let beyond = beyond.filter(|(reach, m)| *reach > edge && m.len() == nt * self.nf);
         let mut runs = Vec::new();
         for f in 0..self.nf {
             let seed = self.cells[f];
@@ -460,7 +489,9 @@ impl LastKnown {
             let mut head = cur.is_none();
             for r in 0..nt {
                 let row_start = self.before_ns + (r as f64 * t_cell_ns).round() as i64;
-                if row_start >= edge {
+                if row_start >= edge
+                    && !beyond.is_some_and(|(reach, m)| row_start < reach && m[r * self.nf + f])
+                {
                     break;
                 }
                 let here = grid.map(|g| &g.cells[r * g.nf + f]);

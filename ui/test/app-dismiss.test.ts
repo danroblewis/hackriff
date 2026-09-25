@@ -62,6 +62,8 @@ test("every map overlay registers on the stack and has a visible dismiss; no pri
   assert.match(src("side-chip.ts"), /class: "side-close"/);
   assert.match(src("map-controls.ts"), /class: "map-layers-close"/);
   assert.match(src("map-controls.ts"), /class: "map-offer-x"/);
+  assert.match(src("map-controls.ts"), /map-pane-close"/);
+  assert.match(src("map-controls.ts"), /trackOverlay\("pane-menu"/);
   // Fade is a courtesy on band-2 chrome only: no overlay panel carries the fade class.
   const ctl = src("map-controls.ts");
   assert.doesNotMatch(ctl, /class: "map-glass map-layers[^"]*map-fade/);

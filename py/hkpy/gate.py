@@ -832,7 +832,8 @@ def keep_junit(root: str, run_id: str, n: int, cmd: list[str], since: float) -> 
     kept: list[str] = []
     try:
         dest = os.path.join(gatelog.ops_dir(), "junit", run_id)
-        for src in sorted(glob.glob(os.path.join(root, "target", "nextest", "*", "junit.xml"))):
+        target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(root, "target")   # the runner's own gate target
+        for src in sorted(glob.glob(os.path.join(target, "nextest", "*", "junit.xml"))):
             if os.path.getmtime(src) < since:
                 continue
             profile = os.path.basename(os.path.dirname(src))

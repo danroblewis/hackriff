@@ -150,3 +150,42 @@ test("MAP-02: fade rules — idle chrome dims, the offer and focused controls ne
   assert.match(ts, /class: "map-glass map-offer", role/, "the retune offer must not carry map-fade");
   assert.match(ts, /fade\.hold\("layers", open\)/);
 });
+
+test("T-882: the FAB is the retired Live button too — it freezes a following pane and re-pins a frozen one, no route", () => {
+  const fetched: unknown[] = [];
+  const g = globalThis as { fetch?: unknown };
+  const real = g.fetch;
+  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("the FAB reached the network")); };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    const mapFollow: boolean[] = [];
+    const acts = paneActions(m, () => id, (on) => mapFollow.push(on));
+    assert.equal(acts.isFollowing(), true);
+    const before = m.get(id)!.time;
+    acts.pauseLive();
+    assert.equal(acts.isFollowing(), false, "the FAB did not freeze a following pane");
+    // T-442: freezing is a coordinate change — the frozen window is the one that was on screen.
+    assert.equal(m.get(id)!.time.spanNs, before.spanNs);
+    acts.followLive();
+    assert.equal(acts.isFollowing(), true);
+    assert.deepEqual(mapFollow, [false, true], "the map strip was not told to freeze and follow with the pane");
+    paneActions(m, () => null).pauseLive(); // no active pane: a no-op, not a throw
+  } finally { if (real) g.fetch = real; else delete g.fetch; }
+  assert.deepEqual(fetched, []);
+  assert.equal(fabState(true).title.includes("freeze"), true, "the following FAB does not say a press freezes");
+});
+
+test("T-882: the rehomed controls live in the cluster — Measure, the viewport menu, the colour scale — and no toolbar row remains", () => {
+  const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  assert.match(ts, /class: "map-ibtn map-measure-btn"/);
+  assert.match(ts, /class: "map-ibtn map-pane-btn"/);
+  for (const act of ["split", "close", "whole"]) assert.match(ts, new RegExp(`paneItem\\("${act}"`));
+  assert.match(ts, /"data-axis": "scale", role: "radiogroup"/);
+  assert.match(ts, /fade\.hold\("pane-menu", open\)/, "an open viewport menu must not fade");
+  const host = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.doesNotMatch(host, /sf-bar|sf-actions|sf-live|sf-tracebtn|sf-contrast|sf-vscale|sf-signalsbtn|sf-measurebtn/,
+    "a retired toolbar control is still built by the surface mount");
+  assert.match(host, /el\.replaceChildren\(stage, traceEl, ringEl, chrome, note\);/, "the stage is the first row: full-bleed, no bar above it");
+  assert.match(host, /paneMenuExtras: \[recordBtn\]/, "Record IQ has a home in the viewport menu");
+});

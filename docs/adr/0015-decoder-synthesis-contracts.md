@@ -128,6 +128,13 @@ pub struct Evidence { stage: Stage, metric: MetricId, raw: f32, n: u32, bits: f3
 
 Recipe `refine.objective` gains `{"evidence": "deepest"}`. That is a new optional key, so `schema_version` 3 (ADR-0011 §2.4 rule). A running synthesized pipeline then keeps tuning from the same evidence.
 
+**Proposed amendment (T-858 = M-7, 2026-09-24) — PENDING THE USER; not accepted, not implemented.** `hk_synth::objective` implements §2.3 as written (S0 counted in `quality`; any prefix accepted). One exception is proposed for the user to accept or reject (the coordinator raises it), with one reading of the text and one measured limit:
+- **Proposed exception (not in the code) — report S0 but do not count it in `quality` or the lock.** Every calibration null is white noise at the prefix's input rate fed to its own S0 filter, and the tables are tight (`lowpass@1` credits 6 bits at +0.1 dB, n = 16 384). Measured: a channeliser whose passband rolls off at the band edges made pure noise score 6 bits at S0 — so S0, a whiteness test of the objective's own channel output, is not evidence about the emission. The proposal would also refuse a prefix reaching only S0. Consequence of the code as accepted: S0's ~6 noise bits are added to every tuning's `quality` (roughly constant, so comparisons hold), and an S0-only prefix locks on S0's floor on pure noise; deeper prefixes lock on their deepest stage and are unaffected.
+- **Reading — the bandwidth axis is the S0 channel filter's width, behind a flat channeliser.** Measured: a channeliser narrower than the S0 filter's support coloured the noise the S1/S2 blocks saw, and noise locked at S2 **on hold-out**. So the down-converter is fixed at a flat 0.9 × the prefix rate and `ParameterSpace.bandwidth` moves the prefix's first `lowpass` node's `cutoff_hz` (width = 2 × cutoff), kept inside the flat passband — "maps the candidate's free parameters to centre and bandwidth", with the S0 cutoff as the bandwidth parameter. Recipe schema 3 accepts `bandwidth_hz` in `refine.tune` with the same meaning. (A filter cutoff other than the 6 kHz the tables were drawn at scores against a mismatched null, §2.2 — not measured here.)
+- **As written, no change:** `EvalDepth::{Acquire, Track, Validate}` read the short leading part of the search window, the whole search window, and the hold-out only; the objective enforces the split, so `locked` means locked on hold-out. "Deepest" is fixed at construction (the candidate's deepest stage, or the result's `stage_reached`; S6 locks on S5's floor, §16.2 C7). Calibrated supports are aligned per block (each measurement re-runs the prefix over leading sub-slices sized to land each calibrated block on a table support, ≤ 1 + 2 × blocks runs).
+
+**Measured limit, for the same decision.** Calibrated S1–S3 metrics saturate at 6 bits each, so for a strong unshaped 2-FSK the objective is flat as soon as one tone passes the S0 filter (and at low SNR the true centre scored *lower* than a one-tone tuning); a refinement at S2 finds the emission, not its centre — only analytic S4/S5 evidence ranks finer tunings. §3.1 step 6's "refine at the first S2 lock" should be weighed against that before M-3's engine calls it; the engine-side call (`refined_into`) needs an IQ-backed `Evaluator` and is not wired yet.
+
 ## 3. Search strategy
 
 ### 3.1 Loop
@@ -355,7 +362,7 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 
 **Why the vocabulary is in `hk-model`** (D1, found by T-848): `hk-blocks` must name `Evidence`/`EvidenceSet`/`Stage` for `Block::evidence`, and `hk-synth` depends on `hk-blocks`, so placing them in `hk-synth` as first written was a dependency cycle. Same pattern as ADR-0016's types in `hk_model::classify`.
 
-**Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`).
+**Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`; **done: T-858**, ADR-0011 §2.4).
 
 ## 10. MAUTO task graph (sketch; ids TBD; not in tasks.yaml)
 

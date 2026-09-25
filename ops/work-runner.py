@@ -107,6 +107,7 @@ QUEUE_PAUSE = int(os.environ.get("WORK_QUEUE_PAUSE", "6"))
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
+CLONE_TARGET = os.environ.get("WORK_CLONE_TARGET", "1") != "0"   # clone main's target/ into a new worktree
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 IDLE_TARGET_H = float(os.environ.get("WORK_IDLE_TARGET_H", "2"))     # a kept worktree's target/ untouched this long is reclaimed
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
@@ -383,13 +384,23 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "observed_but_not_chased": ["<an observed failure outside scope, with the exact evidence>", ...],
    "use_cases": ["<the use-case ids your tests assert on>", ...]}}
 The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
-"done" if any test exit is non-zero. A CANCEL is yours to propose with evidence in the repo; an Opus review
+"done" if any test exit is non-zero - unless that red is not yours: mark it "known_flake": true or
+"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A CANCEL is yours to propose with evidence in the repo; an Opus review
 confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
 TICKET:
 {body}
 """
+
+
+def clone_cmd(wt):
+    """The shell that seeds a new worktree's target/ as an APFS clone of main's - or nothing when
+    WORK_CLONE_TARGET=0 (the worker then builds from sccache). Each clone is a pin that turns exclusive as
+    gates rebuild main's target/ (2026-09-24 18:11: 83 GB still shared across three workers, 101 GB free)."""
+    if not CLONE_TARGET:
+        return ""
+    return f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
 
 
 def launch(t, dry):
@@ -422,7 +433,7 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
-    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     out = open(f"{d}/out.json", "w")
@@ -733,6 +744,30 @@ def alert(level, title, body, key):
         pass
 
 
+_SPEC = re.compile(r"([a-z0-9-]+)(?:\.e2e\.mjs)?")
+
+
+def not_own_red(t):
+    """A failing listed test the worker marks as not its own ("known_flake" / "reproduces_on_main"), or whose
+    browser specs are ALL ones the flake ledger has seen pass alone (hkpy.flakes) - not a branch defect."""
+    if t.get("known_flake") or t.get("reproduces_on_main"):
+        return True
+    cmd = str(t.get("cmd", ""))
+    if "run.mjs" not in cmd:
+        return False
+    specs = [m + ".e2e.mjs" for m in _SPEC.findall(cmd.split("run.mjs", 1)[1]) if m and not m.startswith("-")]
+    if not specs:
+        return False
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import flakes
+        led = flakes.ledger(S)
+    except Exception:
+        return False
+    return all(led.get(s) is not None and led[s].passed_alone > 0 for s in specs)
+
+
 def reap(claims, dry):
     changed = False
     killed = []
@@ -802,9 +837,17 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
-        if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-            bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+        red = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict) and int(t.get("exit", 0) or 0) != 0]
+        # A red the worker shows is NOT its own - a known flake, or one that reproduces on main - goes to the
+        # queue: the gate and its flake triage are the arbiter (supervisor, 2026-09-24 18:55: T-809 read as
+        # BLOCKED 'needs a person' for app-surface failing the same way on main's build at load 44).
+        own = [t for t in red if not not_own_red(t)]
+        if hb and outcome == "done" and own:
+            bad = own[0]
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        elif hb and outcome == "done" and red:
+            attention(tid, c["branch"], "NOTE", "queued with a red the worker marks not its own (the gate arbitrates): "
+                      + "; ".join(f"{t.get('cmd')} exit {t.get('exit')}" for t in red)[:300])
         # How the hand-back arrived is the contract's own reliability measure: `json` is the
         # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
         # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
@@ -1837,7 +1880,7 @@ def launch_deflake(slug, req, prior, dry):
     open(f"{d}/request.json", "w").write(json.dumps(req, indent=1))
     cmd = ["claude", "-p", "--agent", "deflaker", "--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
-    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     p = subprocess.Popen(bounded(["bash", "-c", script]), cwd=wt, stdin=subprocess.DEVNULL,
@@ -1935,6 +1978,24 @@ def reap_deflake(claims, key, c):
         claims[key] = dict(launch_review(c), state="running")
 
 
+_DEPTH_AT = [0.0]
+
+
+def record_queue_depth():
+    """One $HACKRIFF_OPS/queue-depth.jsonl line a minute: branches not yet on main (hkpy.flow's one
+    definition) - sampled here because this runner ticks through a gate, the merge runner does not
+    (user, 2026-09-24 17:02: 'merge queue is huge, is it growing? track its length on /flow')."""
+    if time.time() - _DEPTH_AT[0] < 60:
+        return
+    _DEPTH_AT[0] = time.time()
+    if f"{REPO}/py" not in sys.path:
+        sys.path.append(f"{REPO}/py")
+    from hkpy import flow
+    d = flow.queue_waiting(S)
+    with open(f"{S}/{flow.QUEUE_DEPTH_JSONL}", "a") as f:
+        f.write(json.dumps({"ts": round(time.time(), 1), **{k: d[k] for k in ("waiting", "queued", "gating", "isolating")}}) + "\n")
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
@@ -1973,6 +2034,10 @@ def tick(dry):
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:
         log(f"dispatch_deflakes error: {e}")
+    try:
+        record_queue_depth()
+    except Exception as e:
+        log(f"record_queue_depth error: {e}")
     changed |= dispatch(claims, dry)
     if not dry:
         save_claims(claims)

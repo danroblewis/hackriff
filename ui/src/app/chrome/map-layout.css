@@ -15,10 +15,10 @@
    the right, so it is clear of Go-to at the top, the sheet at the bottom and the FAB/zoom on the
    right), at most 56 px tall, stating the lists' counts. Open, it is a floating column with a
    header and a close (×); closed, the lists take NO pixels (display: none, not a fade).
-   The open column starts BELOW the top chrome — the bar, the surface's toolbar and the floating
-   Go-to, measured by the script into `--side-top` — so it claims no inset from the toolbar or the
-   floating cluster (an inset squeezed T-528's toolbar off-screen at 1000/920 px) and can never sit
-   over Go-to or a toolbar button. */
+   The open column starts BELOW the top chrome — the bar and the floating Go-to and top-right
+   cluster, measured by the script into `--side-top` — so it claims no inset from the floating
+   cluster (an inset squeezed T-528's old toolbar off-screen at 1000/920 px) and can never sit over
+   Go-to or a top-right control. */
 #view-explore > .side { position: absolute; z-index: 4; left: 8px; }
 #view-explore > .side.is-open { top: var(--side-top, 104px); bottom: 74px; width: min(var(--panel-w), calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); grid-template-rows: auto minmax(0,1fr) minmax(0,150px); }
 #view-explore > .side.is-collapsed { display: block; top: 50%; transform: translateY(-50%); bottom: auto; width: auto; border: 0; background: none; }
@@ -41,28 +41,13 @@
 /* T-803: the focus panel is no longer a right-hand column — it is the body of the bottom sheet
    (`chrome/sheet.css`), which is collapsed to its title strip rather than hidden when nothing is
    focused, so the old `.focus.is-empty { display: none }` column rule is gone with the column. */
-/* T-801 round 2 cleared the panels vertically (`top: 64px`, above) so they no longer sit under the
-   top `.bar`, but round 3's review caught what that left: the surface's OWN toolbar (`.sf-bar`,
-   T-528's wrapping button row, mounted inside `.centre`) still spans the full-bleed canvas's whole
-   width, so it paints its buttons (`.sf-actions`: Live/Trace/Signals/Measure/…) directly behind
-   these panels — the panels are two `z-index: 4` siblings of `.centre` (`z-index: auto`, so it
-   paints at the stacking level below any explicit z-index, whatever the DOM order), so
-   `elementFromPoint` at a button's centre lands on the panel and T-528's own hit test failed on the
-   very buttons that ticket had already fixed once, this time hidden by a sibling rather than a
-   neighbour in the same row.
-   The full-bleed CANVAS drawing stays edge-to-edge on purpose (that is the point of this ticket) —
-   only the toolbar's own chrome insets past the two columns it would otherwise render under. T-528's
-   own rule already covers the rest: the bar wraps rather than overflows when its row does not fit,
-   so narrowing it between the panels grows it down instead of hiding a button under a neighbour,
-   exactly as it already does on an ordinary narrow window. */
+/* T-882: the surface's toolbar row (`.sf-bar`, whose buttons T-801 round 3 found painted behind
+   these panels) is gone; its controls float in `.map-ctl` inside the stage, which the panels already
+   stay clear of (see the T-895 rules above). */
 /* T-802: in Explore, Go-to is the floating one docked over the canvas (`map-controls.ts`), which
    submits through the same `requestGoto`; the bar's copy stays for Decode/History, where it
    switches to Explore first. One Go-to on screen, not two. */
 .app:has(#view-explore:not([hidden])) > .bar #goto-form { display: none; }
-/* T-803 retired the right-hand column into the bottom sheet; T-895 moved the left one below this
-   toolbar (collapsed it is a chip at mid-height; open it starts under `--side-top`), so the toolbar
-   needs no inset from either column any more. */
-#view-explore > .centre .sf-bar { padding-left: 12px; padding-right: 12px; box-sizing: border-box; }
 @media (max-width: 900px) {
   body:has(#view-explore:not([hidden])) { overflow: hidden; }
   .app:has(#view-explore:not([hidden])) { height: 100dvh; }

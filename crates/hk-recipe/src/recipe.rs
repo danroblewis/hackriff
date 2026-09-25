@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::fields::{Display, FieldMap, is_field_path};
-use crate::param::{BlockDescriptor, Catalogue, ParamSchema, Params};
+use crate::param::{BlockDescriptor, Catalogue, ParamSchema, ParamType, Params};
 use crate::port::PortType;
 use crate::{RECIPE_SCHEMA, RECIPE_SCHEMA_VERSIONS, is_id};
 
@@ -414,22 +414,154 @@ pub struct OutputPolicy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefineSpec {
-    /// Objective read from a node's status.
+    /// What the refinement maximises ([`RefineObjective::form`]).
     pub objective: RefineObjective,
-    /// Channel parameters tuned: `center_hz`, `bandwidth_hz`.
+    /// What is tuned: the channel's `center_hz` and/or `bandwidth_hz`; with the `evidence`
+    /// objective (schema 3) also numeric node parameters by path,
+    /// `nodes[<id>].params.<name>` (ADR-0015 §2.3's `Tuning.mode` axes: deviation, symbol rate,
+    /// loop bandwidth).
     pub tune: Vec<String>,
 }
 
-/// A status metric to optimise.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+impl RefineSpec {
+    /// Whether the refinement may move the channel centre.
+    pub fn tunes_center(&self) -> bool {
+        self.tune.iter().any(|t| t == "center_hz")
+    }
+
+    /// Whether the refinement may change the channel bandwidth.
+    pub fn tunes_bandwidth(&self) -> bool {
+        self.tune.iter().any(|t| t == "bandwidth_hz")
+    }
+}
+
+/// The builtin refinement objectives a recipe may name in `refine.objective.builtin`
+/// (ADR-0011 §8.7). Each is a registered `hk_demod::refine::Objective` the runtime maps by name
+/// (`hk_pipeline::recipes::refine`); `wfm-pilot` is T-070's WFM objective (19 kHz pilot C/N₀,
+/// occupied-bandwidth floor, RDS validation over the channel IQ window).
+pub const REFINE_BUILTINS: &[&str] = &["wfm-pilot"];
+
+/// The refinement objective. Three forms, exactly one per document ([`Self::form`]):
+///
+/// - `{node, metric, goal}` — a node status metric (schema 2 and 3);
+/// - `{builtin}` — a registered objective measured over the **channel IQ window**, not over one
+///   node's port (ADR-0011 §8.7, **schema 3**; T-870): Listen's `wfm-pilot`
+///   ([`REFINE_BUILTINS`]);
+/// - `{evidence}` — the synthesis evidence ladder (ADR-0015 §2.3, **schema 3**): the pipeline is
+///   measured the way the synthesis search measured it, per-stage evidence in bits, and a
+///   tuning locks when the deepest stage clears its floor (`hk_synth::EvidenceObjective`).
+///
+/// The fields are flat options rather than an untagged enum so a malformed objective gets a
+/// path-precise validation error instead of serde's "did not match any variant".
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefineObjective {
-    /// Node id.
-    pub node: String,
-    /// Status key: `error_rate`, `quality`, `snr_db` or `lock`.
-    pub metric: String,
-    /// Direction.
-    pub goal: RefineGoal,
+    /// Node id (`{node, metric, goal}` form).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Status key: `error_rate`, `quality`, `snr_db` or `lock` (`{node, metric, goal}` form).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+    /// Direction (`{node, metric, goal}` form).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<RefineGoal>,
+    /// The evidence ladder (`{evidence}` form, schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceTarget>,
+    /// A registered builtin objective's name (`{builtin}` form, schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+}
+
+/// Which evidence a `{"evidence": …}` objective locks on (ADR-0015 §2.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceTarget {
+    /// Quality is the pipeline's capped evidence bits; a tuning locks when the deepest stage the
+    /// pipeline reached clears that stage's floor (`deepest b_k ≥ floor_k`).
+    Deepest,
+}
+
+/// A validated view of a [`RefineObjective`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectiveForm<'a> {
+    /// A node status metric.
+    NodeMetric {
+        /// Node id.
+        node: &'a str,
+        /// Status key.
+        metric: &'a str,
+        /// Direction.
+        goal: RefineGoal,
+    },
+    /// The synthesis evidence ladder.
+    Evidence(EvidenceTarget),
+    /// A registered builtin objective over the channel IQ window.
+    Builtin(&'a str),
+}
+
+impl RefineObjective {
+    /// The `{node, metric, goal}` form.
+    pub fn node_metric(node: &str, metric: &str, goal: RefineGoal) -> Self {
+        Self {
+            node: Some(node.to_owned()),
+            metric: Some(metric.to_owned()),
+            goal: Some(goal),
+            evidence: None,
+            builtin: None,
+        }
+    }
+
+    /// The `{evidence}` form (schema 3).
+    pub fn evidence(target: EvidenceTarget) -> Self {
+        Self {
+            evidence: Some(target),
+            ..Self::default()
+        }
+    }
+
+    /// The `{builtin}` form (schema 3).
+    pub fn builtin(name: &str) -> Self {
+        Self {
+            builtin: Some(name.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// The form this objective takes, or `None` when it mixes or half-fills them.
+    pub fn form(&self) -> Option<ObjectiveForm<'_>> {
+        match (
+            &self.node,
+            &self.metric,
+            self.goal,
+            self.evidence,
+            self.builtin.as_deref(),
+        ) {
+            (Some(node), Some(metric), Some(goal), None, None) => {
+                Some(ObjectiveForm::NodeMetric { node, metric, goal })
+            }
+            (None, None, None, Some(t), None) => Some(ObjectiveForm::Evidence(t)),
+            (None, None, None, None, Some(b)) => Some(ObjectiveForm::Builtin(b)),
+            _ => None,
+        }
+    }
+
+    /// The builtin's name, when this is the `{builtin}` form.
+    pub fn builtin_name(&self) -> Option<&str> {
+        match self.form() {
+            Some(ObjectiveForm::Builtin(b)) => Some(b),
+            _ => None,
+        }
+    }
+}
+
+/// Parses a node-parameter path, `nodes[<id>].params.<name>` → `(id, name)`: the path format of
+/// synthesis free parameters (ADR-0015 §1.2) and of schema-3 `refine.tune` entries.
+pub fn parse_param_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("nodes[")?;
+    let (id, rest) = rest.split_once(']')?;
+    let name = rest.strip_prefix(".params.")?;
+    (!id.is_empty() && !name.is_empty() && !name.contains('.')).then_some((id, name))
 }
 
 /// Optimisation direction.
@@ -861,21 +993,86 @@ impl Recipe {
             );
         }
         if let Some(r) = &self.refine {
-            if !index.contains_key(r.objective.node.as_str()) {
-                e.push("refine.objective.node", "unknown node");
-            }
-            if !["error_rate", "quality", "snr_db", "lock"].contains(&r.objective.metric.as_str()) {
-                e.push(
-                    "refine.objective.metric",
-                    "one of error_rate, quality, snr_db, lock",
-                );
-            }
-            if r.tune.is_empty()
-                || r.tune
-                    .iter()
-                    .any(|t| t != "center_hz" && t != "bandwidth_hz")
-            {
+            let evidence = match r.objective.form() {
+                None => {
+                    e.push(
+                        "refine.objective",
+                        "exactly one of {node, metric, goal}, {evidence} or {builtin}",
+                    );
+                    false
+                }
+                Some(ObjectiveForm::NodeMetric { node, metric, .. }) => {
+                    if !index.contains_key(node) {
+                        e.push("refine.objective.node", "unknown node");
+                    }
+                    if !["error_rate", "quality", "snr_db", "lock"].contains(&metric) {
+                        e.push(
+                            "refine.objective.metric",
+                            "one of error_rate, quality, snr_db, lock",
+                        );
+                    }
+                    false
+                }
+                Some(ObjectiveForm::Evidence(_)) => {
+                    if self.schema_version < 3 {
+                        e.push("refine.objective.evidence", "needs schema_version 3");
+                    }
+                    true
+                }
+                // ADR-0011 §8.7: a registered objective over the channel IQ window.
+                Some(ObjectiveForm::Builtin(b)) => {
+                    if !v3 {
+                        e.push(
+                            "refine.objective.builtin",
+                            "refine.objective.builtin needs schema_version 3",
+                        );
+                    }
+                    if !REFINE_BUILTINS.contains(&b) {
+                        e.push(
+                            "refine.objective.builtin",
+                            format!(
+                                "unknown builtin objective (one of {})",
+                                REFINE_BUILTINS.join(", ")
+                            ),
+                        );
+                    }
+                    if self.input.port != PortType::Iq {
+                        e.push(
+                            "refine.objective.builtin",
+                            "a builtin objective measures the channel IQ: the input must be iq",
+                        );
+                    }
+                    if !matches!(self.input.channels, ChannelsSpec::Single) {
+                        e.push(
+                            "refine.objective.builtin",
+                            "a builtin objective refines one channel, not follow-hops",
+                        );
+                    }
+                    false
+                }
+            };
+            if r.tune.is_empty() {
                 e.push("refine.tune", "center_hz and/or bandwidth_hz");
+            }
+            let mut seen = BTreeSet::new();
+            for (i, t) in r.tune.iter().enumerate() {
+                let channel = t == "center_hz" || t == "bandwidth_hz";
+                if !seen.insert(t.as_str()) {
+                    e.push(format!("refine.tune[{i}]"), "listed twice");
+                } else if channel {
+                    // The channel itself: every objective form tunes it.
+                } else if !evidence {
+                    e.push("refine.tune", "center_hz and/or bandwidth_hz");
+                } else {
+                    match parse_param_path(t) {
+                        Some((id, _)) if index.contains_key(id) => {}
+                        Some(_) => e.push(format!("refine.tune[{i}]"), "unknown node"),
+                        None => e.push(
+                            format!("refine.tune[{i}]"),
+                            "center_hz, bandwidth_hz or nodes[<id>].params.<name>",
+                        ),
+                    }
+                }
             }
         }
         order
@@ -917,6 +1114,26 @@ impl Recipe {
                 d
             })
             .collect();
+        // Schema 3: a tuned node parameter must be a numeric parameter of its block (the
+        // structural pass already checked the node exists).
+        if let Some(r) = &self.refine {
+            for (i, t) in r.tune.iter().enumerate() {
+                if let Some((id, name)) = parse_param_path(t)
+                    && let Some(k) = self.nodes.iter().position(|n| n.id == id)
+                    && let Some(d) = descriptors[k]
+                    && d.params_pinned
+                    && !d.params.iter().any(|p| {
+                        p.name == name
+                            && matches!(p.ty, ParamType::Int { .. } | ParamType::Float { .. })
+                    })
+                {
+                    e.push(
+                        format!("refine.tune[{i}]"),
+                        "a numeric parameter of the node's block",
+                    );
+                }
+            }
+        }
         let Some(order) = order else { return Err(e.0) };
         let index: BTreeMap<&str, usize> = self
             .nodes
@@ -1503,6 +1720,102 @@ mod tests {
         }
     }
 
+    /// ADR-0011 §8.7 (T-870, ADR-0015 LP-6): `refine.objective` has two forms, `{builtin}` and
+    /// `{node, metric, goal}`; each round-trips in its own shape, and a mixed or partial object
+    /// is refused at parse.
+    #[test]
+    fn refine_objective_has_a_builtin_form_beside_the_node_metric_form() {
+        let mut v = audio_doc();
+        v["refine"] =
+            json!({"objective": {"builtin": "wfm-pilot"}, "tune": ["center_hz", "bandwidth_hz"]});
+        let r: Recipe = serde_json::from_value(v.clone()).unwrap();
+        r.validate(&audio_catalogue()).expect("a builtin objective");
+        let spec = r.refine.as_ref().unwrap();
+        assert_eq!(spec.objective, RefineObjective::builtin("wfm-pilot"));
+        assert_eq!(
+            spec.objective.form(),
+            Some(ObjectiveForm::Builtin("wfm-pilot"))
+        );
+        assert_eq!(spec.objective.builtin_name(), Some("wfm-pilot"));
+        assert_eq!(spec.objective.node, None);
+        assert!(spec.tunes_center() && spec.tunes_bandwidth());
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["refine"],
+            v["refine"],
+            "round-trips as {{builtin}}"
+        );
+
+        let mut v = audio_doc();
+        v["refine"] = json!({"objective": {"node": "fm", "metric": "snr_db", "goal": "max"},
+                             "tune": ["center_hz"]});
+        let r: Recipe = serde_json::from_value(v.clone()).unwrap();
+        r.validate(&audio_catalogue())
+            .expect("a node metric objective");
+        let spec = r.refine.as_ref().unwrap();
+        assert_eq!(spec.objective.node.as_deref(), Some("fm"));
+        assert_eq!(spec.objective.builtin_name(), None);
+        assert!(spec.tunes_center() && !spec.tunes_bandwidth());
+        assert_eq!(serde_json::to_value(&r).unwrap()["refine"], v["refine"]);
+
+        // A mixed or partial objective is refused at validation, on the objective's path
+        // (T-858's flat form); an unknown key is a parse error.
+        for bad in [
+            json!({"builtin": "wfm-pilot", "goal": "max"}),
+            json!({"builtin": "wfm-pilot", "evidence": "deepest"}),
+            json!({"node": "fm", "metric": "snr_db"}),
+            json!({}),
+        ] {
+            let mut v = audio_doc();
+            v["refine"] = json!({"objective": bad, "tune": ["center_hz"]});
+            assert!(
+                error_paths(v).contains(&"refine.objective".to_owned()),
+                "{bad} is not an objective"
+            );
+        }
+        let mut v = audio_doc();
+        v["refine"] =
+            json!({"objective": {"builtin": "wfm-pilot", "extra": 1}, "tune": ["center_hz"]});
+        assert!(serde_json::from_value::<Recipe>(v).is_err());
+    }
+
+    /// ADR-0011 §8.6/§8.7: `builtin` is a schema-3 key, names a registered objective, and
+    /// measures one iq channel.
+    #[test]
+    fn a_builtin_objective_is_schema_3_registered_and_on_one_iq_channel() {
+        let with = |f: &dyn Fn(&mut Value), builtin: &str| {
+            let mut v = audio_doc();
+            v["refine"] = json!({"objective": {"builtin": builtin}, "tune": ["center_hz"]});
+            f(&mut v);
+            error_paths(v)
+        };
+        let path = "refine.objective.builtin".to_owned();
+        assert!(with(&|_| {}, "wfm-pilot").is_empty());
+        assert!(with(&|_| {}, "no-such-objective").contains(&path));
+        // A version-2 document: the builtin key is refused (and so is the audio output).
+        assert!(with(&|v| v["schema_version"] = 2.into(), "wfm-pilot").contains(&path));
+        assert!(
+            with(
+                &|v| v["input"]["channels"] = json!({"mode": "follow-hops", "channel_bandwidth_hz": 12500.0, "max_channels": 4}),
+                "wfm-pilot"
+            )
+            .contains(&path)
+        );
+        let mut v = minimal();
+        v["schema_version"] = 3.into();
+        v["refine"] = json!({"objective": {"builtin": "wfm-pilot"}, "tune": ["center_hz"]});
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        assert!(
+            r.validate_structure()
+                .unwrap_err()
+                .iter()
+                .any(|e| e.path == path),
+            "a bits-input recipe has no channel IQ to measure"
+        );
+        for name in REFINE_BUILTINS {
+            assert!(with(&|_| {}, name).is_empty(), "{name} validates");
+        }
+    }
+
     /// ADR-0011 §8.5: an explicit liveness wins over the audio default; a throughput reader has
     /// no backlog bound; the bound is positive and capped.
     #[test]
@@ -1566,5 +1879,199 @@ mod tests {
             round["nodes"][0]["doc"],
             json!("Demodulates the FSK deviation into soft symbols.")
         );
+    }
+
+    // --- Schema 3: `refine.objective.evidence` (T-858 = MAUTO M-7, ADR-0015 §2.3) ----------
+
+    /// A soft→bits chain with a `clock` node carrying a numeric and a non-numeric parameter.
+    fn refine_recipe(schema_version: u32, refine: Value) -> Recipe {
+        serde_json::from_value(json!({
+            "schema": "hackriff.recipe", "schema_version": schema_version, "id": "t",
+            "version": 1, "name": "T", "input": {"port": "soft"},
+            "nodes": [
+                {"id": "clock", "block": "clock", "params": {"symbol_rate_bd": 4800}},
+                {"id": "slice", "block": "slicer"}
+            ],
+            "outputs": [{"id": "s", "kind": "stage", "from": "slice"}],
+            "output_policy": {"content_class": "unrestricted"},
+            "refine": refine
+        }))
+        .expect("parses")
+    }
+
+    fn refine_catalogue() -> Vec<BlockDescriptor> {
+        let mut cat = catalogue();
+        cat.push(BlockDescriptor {
+            name: "clock".into(),
+            version: 1,
+            group: "symbol".into(),
+            doc: String::new(),
+            inputs: vec![PortSpec::new("in", PortType::Soft)],
+            outputs: vec![PortSpec::new("out", PortType::Soft)],
+            params: serde_json::from_value(json!([
+                {"name": "symbol_rate_bd", "type": "float", "min": 1.0},
+                {"name": "pulse", "type": "enum", "values": ["nrz", "rz"]}
+            ]))
+            .unwrap(),
+            params_pinned: true,
+        });
+        cat
+    }
+
+    fn paths(r: Result<Resolved, Vec<RecipeError>>) -> Vec<String> {
+        r.err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.path)
+            .collect()
+    }
+
+    #[test]
+    fn the_evidence_objective_is_schema_3_and_round_trips() {
+        let r = refine_recipe(
+            3,
+            json!({"objective": {"evidence": "deepest"},
+                   "tune": ["center_hz", "bandwidth_hz", "nodes[clock].params.symbol_rate_bd"]}),
+        );
+        r.validate(&refine_catalogue())
+            .expect("a schema-3 evidence objective validates");
+        let spec = r.refine.as_ref().unwrap();
+        assert_eq!(
+            spec.objective.form(),
+            Some(ObjectiveForm::Evidence(EvidenceTarget::Deepest))
+        );
+        assert_eq!(
+            spec.objective,
+            RefineObjective::evidence(EvidenceTarget::Deepest)
+        );
+        // Serialises back to exactly the ADR's shape: no null node/metric/goal keys.
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["refine"]["objective"], json!({"evidence": "deepest"}));
+        assert_eq!(serde_json::from_value::<Recipe>(v).unwrap(), r);
+    }
+
+    #[test]
+    fn a_schema_2_document_may_not_use_the_evidence_objective() {
+        let r = refine_recipe(
+            2,
+            json!({"objective": {"evidence": "deepest"}, "tune": ["center_hz"]}),
+        );
+        assert_eq!(
+            paths(r.validate(&refine_catalogue())),
+            ["refine.objective.evidence"]
+        );
+    }
+
+    #[test]
+    fn the_node_metric_objective_is_unchanged_in_schema_2_and_3() {
+        for v in [2, 3] {
+            let r = refine_recipe(
+                v,
+                json!({"objective": {"node": "slice", "metric": "error_rate", "goal": "min"},
+                       "tune": ["center_hz"]}),
+            );
+            r.validate(&refine_catalogue())
+                .expect("node-metric form validates");
+            assert_eq!(
+                r.refine.as_ref().unwrap().objective,
+                RefineObjective::node_metric("slice", "error_rate", RefineGoal::Min)
+            );
+            // …and serialises without an `evidence` key.
+            let o = serde_json::to_value(&r).unwrap()["refine"]["objective"].clone();
+            assert_eq!(
+                o,
+                json!({"node": "slice", "metric": "error_rate", "goal": "min"})
+            );
+        }
+        // Unknown versions are still refused.
+        for v in [1, 4] {
+            let r = refine_recipe(v, Value::Null);
+            assert_eq!(paths(r.validate(&refine_catalogue())), ["schema_version"]);
+        }
+    }
+
+    #[test]
+    fn an_objective_is_exactly_one_form() {
+        for bad in [
+            json!({"node": "slice", "metric": "error_rate", "goal": "min", "evidence": "deepest"}),
+            json!({"node": "slice", "metric": "error_rate"}),
+            json!({}),
+        ] {
+            let r = refine_recipe(3, json!({"objective": bad, "tune": ["center_hz"]}));
+            assert_eq!(
+                paths(r.validate(&refine_catalogue())),
+                ["refine.objective"],
+                "{bad}"
+            );
+        }
+        // An unknown target and an unknown key are parse errors (unknown fields are errors).
+        for bad in [
+            json!({"evidence": "shallowest"}),
+            json!({"builtin": "wfm-pilot", "extra": 1}),
+        ] {
+            let v = json!({
+                "schema": "hackriff.recipe", "schema_version": 3, "id": "t", "version": 1,
+                "name": "T", "input": {"port": "soft"},
+                "nodes": [{"id": "slice", "block": "slicer"}],
+                "outputs": [{"id": "s", "kind": "stage", "from": "slice"}],
+                "output_policy": {"content_class": "unrestricted"},
+                "refine": {"objective": bad, "tune": ["center_hz"]}
+            });
+            assert!(serde_json::from_value::<Recipe>(v).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_the_evidence_objective_tunes_numeric_node_parameters() {
+        let cat = refine_catalogue();
+        let tune = |objective: Value, t: &[&str]| {
+            paths(refine_recipe(3, json!({"objective": objective, "tune": t})).validate(&cat))
+        };
+        let ev = json!({"evidence": "deepest"});
+        let nm = json!({"node": "slice", "metric": "error_rate", "goal": "min"});
+        assert!(tune(ev.clone(), &["nodes[clock].params.symbol_rate_bd"]).is_empty());
+        // A node-metric objective tunes the channel only.
+        assert_eq!(
+            tune(nm, &["nodes[clock].params.symbol_rate_bd"]),
+            ["refine.tune"]
+        );
+        // An unknown node, a malformed path, a non-numeric or undeclared parameter, a repeat.
+        assert_eq!(
+            tune(ev.clone(), &["nodes[nope].params.symbol_rate_bd"]),
+            ["refine.tune[0]"]
+        );
+        assert_eq!(tune(ev.clone(), &["symbol_rate_bd"]), ["refine.tune[0]"]);
+        assert_eq!(
+            tune(ev.clone(), &["nodes[clock].params.pulse"]),
+            ["refine.tune[0]"]
+        );
+        assert_eq!(
+            tune(ev.clone(), &["nodes[clock].params.gain"]),
+            ["refine.tune[0]"]
+        );
+        assert_eq!(
+            tune(ev.clone(), &["center_hz", "center_hz"]),
+            ["refine.tune[1]"]
+        );
+        // The channel itself is tunable under both forms.
+        assert!(tune(ev.clone(), &["center_hz", "bandwidth_hz"]).is_empty());
+        assert_eq!(tune(ev, &[]), ["refine.tune"]);
+    }
+
+    #[test]
+    fn param_paths_parse_only_in_the_free_parameter_shape() {
+        assert_eq!(
+            parse_param_path("nodes[clock].params.symbol_rate_bd"),
+            Some(("clock", "symbol_rate_bd"))
+        );
+        for bad in [
+            "nodes[].params.x",
+            "nodes[a].params.",
+            "nodes[a].params.x.y",
+            "nodes[a].x",
+            "center_hz",
+        ] {
+            assert_eq!(parse_param_path(bad), None, "{bad}");
+        }
     }
 }

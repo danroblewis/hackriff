@@ -249,3 +249,35 @@ test("the survey request names what docs/api.md's GET /api/coverage takes", () =
   assert.deepEqual(Object.fromEntries(u.searchParams), { f_lo: "1000000", f_hi: "6000000000", cells: "2048", rows: "2", t0: "5", t1: "65" });
   assert.ok(2048 * 2 <= 4096, "within the route's cell cap");
 });
+
+// ——— T-905: every lane that starts a request consults the survey, not only the renderer ———
+//
+// The fog-of-war e2e saw the pane request a tile over never-swept band C about 1 run in 9. The
+// renderer's own misses were gated by T-580, but T-538's pan look-ahead (`prefetchAhead`) issues
+// a speculative read straight to the route — and it fires exactly when the cache is IDLE, which a
+// pane over never-sampled spectrum always is, because the survey answered every place it draws.
+// So a pan across grey spectrum (or any pan while the survey is still on its way) asked for the
+// tile one step ahead of the gesture, over spectrum the coverage map settles as never sampled.
+
+test("T-905: panning a frozen pane over never-sampled spectrum requests nothing — before the survey lands (delayed answer) or after", async () => {
+  const { preview, tiles, surveys, release } = hostHarness(coverage(12.8 * MHZ, 16, 2, () => "unobserved"));
+  const pane = preview.activePane;
+  preview.frame(); await flush();
+  preview.frame(); await flush();
+  assert.equal(surveys.length, 1);
+  // The coverage answer is still on its way: drag the pane frame by frame.
+  for (let i = 0; i < 6; i++) {
+    preview.view.panes.panFreq(pane, 0.4 * MHZ);
+    preview.frame(); await flush();
+  }
+  assert.equal(tiles.length, 0, `a tile left while the survey was still awaited: ${tiles.join(" ")}`);
+  release();
+  for (let i = 0; i < 3; i++) { preview.frame(); await flush(); }
+  // The survey has answered "never sampled, everywhere": a drag over it is still free.
+  for (let i = 0; i < 6; i++) {
+    preview.view.panes.panFreq(pane, -0.4 * MHZ);
+    preview.frame(); await flush();
+  }
+  assert.equal(tiles.length, 0, `the pan look-ahead asked for tiles over spectrum the survey settles as never sampled: ${tiles.join(" ")}`);
+  preview.dispose();
+});

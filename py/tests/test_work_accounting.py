@@ -21,6 +21,7 @@ import importlib.util
 import json
 import time
 import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -1102,3 +1103,66 @@ def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monke
     assert R.dispatch_cap() == 4                                          # the gap before the next gate
     clock[0] += 100
     assert R.dispatch_cap() == 6                                          # the pipeline went quiet
+
+
+def test_a_red_that_is_not_the_workers_own_queues_instead_of_blocking(monkeypatch):
+    """Supervisor, 2026-09-24 18:55: T-809 read BLOCKED 'needs a person' for app-surface failing the same
+    way on main's build at load 44 - the gate and its flake triage are the arbiter of such a red."""
+    class E:
+        def __init__(self, n): self.passed_alone = n
+    import types
+    fake = types.SimpleNamespace(ledger=lambda ops: {"app-surface.e2e.mjs": E(2), "app-sheet.e2e.mjs": E(1), "canvas.e2e.mjs": E(0)})
+    monkeypatch.setitem(__import__("sys").modules, "hkpy.flakes", fake)
+    monkeypatch.setattr(__import__("hkpy"), "flakes", fake, raising=False)
+    assert R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 1, "reproduces_on_main": True})
+    assert R.not_own_red({"cmd": "x", "exit": 1, "known_flake": True})
+    assert R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-sheet", "exit": 1})          # ledger-known flakers
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs app-surface app-detail", "exit": 1})     # app-detail unknown
+    assert not R.not_own_red({"cmd": "cd ui && node e2e/run.mjs canvas", "exit": 1})                     # never passed alone
+    assert not R.not_own_red({"cmd": "cargo nextest run -p hk-x", "exit": 101})                          # a plain red: blocked
+
+
+def test_work_clone_target_0_launches_without_a_target_clone(monkeypatch):
+    """2026-09-24 18:11: 83 GB of main's target/ still shared with three worker clones against 101 GB
+    free - WORK_CLONE_TARGET=0 stops new pins; the worker builds from sccache."""
+    monkeypatch.setattr(R, "CLONE_TARGET", True)
+    assert "cp -c -R -p" in R.clone_cmd("/w/t1")
+    monkeypatch.setattr(R, "CLONE_TARGET", False)
+    assert R.clone_cmd("/w/t1") == ""
+
+
+def test_the_queue_depth_is_sampled_once_a_minute(tmp_path, monkeypatch):
+    """User, 2026-09-24 17:02: track 'branches not yet on main' on /flow; the work runner samples it
+    (it ticks through a gate; the merge runner's loop does not)."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "_DEPTH_AT", [0.0])
+    (tmp_path / "merge-queue.txt").write_text("task-a\ntask-b\n")
+    (tmp_path / "isolate-remaining").write_text("task-c\n")
+    R.record_queue_depth()
+    R.record_queue_depth()                                               # inside the minute: nothing
+    (line,) = (tmp_path / "queue-depth.jsonl").read_text().splitlines()
+    rec = json.loads(line)
+    assert rec["waiting"] == 3 and rec["queued"] == 2 and rec["isolating"] == 1
+
+
+def test_the_merge_runner_writes_what_it_holds_in_memory():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert 'echo "$1" > "$S/merging-now"; process "$1"' in text and 'rm -f "$S/merging-now"' in text
+    loop = text[text.index('        rest="$isolate"'):]
+    assert '> "$S/isolate-remaining"' in loop[:400] and 'rm -f "$S/isolate-remaining"' in loop[:1200]
+
+
+def test_a_restart_requeues_what_a_killed_isolation_or_merge_was_holding(tmp_path):
+    """Review 2026-09-24: a runner killed mid-isolation or mid single merge left those branches in no
+    queue (the reason a restart during an isolation lost them) and now a stale depth file."""
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    i = text.index('for f in "$S/isolate-remaining" "$S/merging-now"; do')
+    block = text[i:text.index("\ndone\n", i) + 6]
+    (tmp_path / "isolate-remaining").write_text("task-b task-c task-d\n")
+    (tmp_path / "merging-now").write_text("task-a\n")
+    (tmp_path / "q").write_text("task-x\n")
+    script = f'set -u\nS={tmp_path}; QUEUE={tmp_path}/q\nlog(){{ echo "LOG $*"; }}\n{block}\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "q").read_text().split() == ["task-x", "task-b", "task-c", "task-d", "task-a"]
+    assert not (tmp_path / "isolate-remaining").exists() and not (tmp_path / "merging-now").exists()
