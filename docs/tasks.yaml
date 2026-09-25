@@ -28169,6 +28169,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): also: the page opened on 100-1100 MHz x 1.6 h with the tuned 101.7 MHz window drawn as a sliver - it does not open on the tuned window even without a stale offer.
+
+      Review attempt(s) on cdf2aa1f ended REVIEW_FAIL with no verdict line. Checked ops/work/T-955/{fix1,review}.json directly: both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one reviewer attempt made zero turns, the other got a Bash call denied (running the new e2e/app-reload-retune.e2e.mjs against a built hk binary) and then hit the spend limit after ~23 min. No actual defect was named. Triage: merged in fcb0dd43 (already an ancestor, no-op), re-ran just test-ui: 88/88 files pass, tsc --noEmit clean, same as before the review. No code change made; treating this as an infra/cost failure of the review step, not a finding against the diff.
   - id: T-956
     milestone: MAUTO
     title: Production Evaluator over acquired IQ for /api/analyze (every job ends no_evaluator) - next MAUTO tranche
