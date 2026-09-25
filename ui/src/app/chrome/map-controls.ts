@@ -22,6 +22,7 @@ import { parseFrequency } from "../../controls/freq";
 import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
+import { registerMapHome } from "./top-chrome";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
  * step. The pane's own `zoomBoth` holds the aspect lock and the bounds (T-472), so a press at a
@@ -38,6 +39,10 @@ export interface PaneControl {
   zoomBoth(id: string, factor: number, anchorF?: number, anchorT?: number): void;
   isFollowing(id: string): boolean;
   setFollowing(id: string, on: boolean): void;
+  /** Move the pane's frequency window (view arithmetic; never a device route). Used by
+   * `followLive` (T-955) to bring a pane's FREQUENCY back to the tuned window too, not only its
+   * time, when the caller supplies one. */
+  setFreq(id: string, centerHz: number, spanHz: number): void;
 }
 
 /** What the Go-to offer shows: the words and acceptability `retune.ts` computed, and the press. */
@@ -122,6 +127,14 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   toast(text: string): void;
   /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
   research?: { isOpen(): boolean; toggle(): void };
+  /**
+   * T-1000 (docs/23 §10.7): which pane the per-pane chrome acts on, as the user names it — its
+   * position in layout order ("pane 2 of 3") — or `null` when there is one pane and so nothing to
+   * disambiguate. Go-to, zoom, the layers button, the follow-live FAB and the viewport menu each
+   * state it; the colour scale and the outputs are global and do not. Optional: a host with one
+   * pane only names none.
+   */
+  activeName?(): { n: number; count: number; label: string } | null;
 }
 
 /** The tool-mode banner's words (the mockup's `#mode`), per mode (docs/23 §10.4). */
@@ -137,8 +150,21 @@ const MODE_TEXT = {
  *
  * Zoom anchors frequency at the pane's centre and time at the newest row when the pane follows
  * (so zooming never walks a live pane off the growing edge) and at the middle when it is frozen.
+ *
+ * `tunedWindow` (T-955) is the front end's OWN current centre/span (`frequency.current`, off the
+ * navigation poll the host already runs), asked only here and only on an explicit follow-live press — never at open
+ * (see `surface/bootstrap.ts`'s recency-narrowed opening) and never as a background correction. A
+ * pane can drift to spectrum the radio is no longer tuned to (a stale reload, a pan, a retune
+ * elsewhere) while still reading as "following" in TIME; pressing follow-live is the explicit ask to
+ * return to what the front end is doing now, in both axes, so it also resets the pane's frequency
+ * window when the caller has one to give. View arithmetic only — `setFreq` reaches no route.
  */
-export function paneActions(panes: PaneControl, activePane: () => string | null, onFollow?: (on: boolean) => void) {
+export function paneActions(
+  panes: PaneControl,
+  activePane: () => string | null,
+  onFollow?: (on: boolean) => void,
+  tunedWindow?: () => { centerHz: number; spanHz: number } | null,
+) {
   return {
     zoom(factor: number): void {
       const id = activePane();
@@ -151,6 +177,10 @@ export function paneActions(panes: PaneControl, activePane: () => string | null,
       // T-442: following is a coordinate change on the pane, nothing more — the SDR, the ring and
       // detection never paused, so there is nothing to resume anywhere but the screen.
       panes.setFollowing(id, true);
+      const w = tunedWindow?.();
+      if (w && Number.isFinite(w.centerHz) && Number.isFinite(w.spanHz) && w.spanHz > 0) {
+        panes.setFreq(id, w.centerHz, w.spanHz);
+      }
       onFollow?.(true);
     },
     pauseLive(): void {
@@ -269,13 +299,19 @@ function layerKey(entries: readonly LegendEntry[]): HTMLElement {
  */
 export function mountMapControls(host: MapControlHost): {
   el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void; syncResearch(): void;
+  /** T-1000: re-state which pane the per-pane chrome acts on (after an active-pane change, split or close). */
+  syncActive(): void;
+  /** T-1000: the FAB's press, for the `L` key — freeze a following active pane, re-pin a frozen one. */
+  toggleFollow(): void;
 } {
   const input = h("input", {
     class: "mono", placeholder: "Go to frequency, e.g. 433.92M or 101.3", "aria-label": "Go to frequency",
     inputmode: "decimal", autocomplete: "off", spellcheck: "false",
   }) as HTMLInputElement;
+  // T-1000: which pane a Go-to moves, stated beside the entry while there is more than one.
+  const gotoPane = h("span", { class: "map-goto-pane", hidden: true });
   const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off" },
-    svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input,
+    svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input, gotoPane,
     h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"));
 
   // The retune offer never fades (docs/23 §10.2), so it carries no `map-fade`.
@@ -321,7 +357,25 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, record",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
   }, svg(["path", "M4 5h16v14H4z"], ["path", "M12 5v14"])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn);
+  // T-993: the retired top bar's Review button is moved in here (`top-chrome.ts`), beside the other
+  // panels' buttons, and Theme into a small ⋯ menu — settings, not a bar button.
+  const reviewHome = h("span", { class: "map-review-home" });
+  const moreBtn = h("button", {
+    type: "button", class: "map-ibtn map-more-btn", "aria-label": "More: settings", title: "More: theme and settings",
+    "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-more-menu",
+  }, svg(["circle", 5, 12, 1.2], ["circle", 12, 12, 1.2], ["circle", 19, 12, 1.2])) as HTMLButtonElement;
+  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn, reviewHome, moreBtn);
+  const moreClose = h("button", {
+    type: "button", class: "map-layers-close map-more-close", "aria-label": "Close the settings menu — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
+  const moreBody = h("div", { class: "map-more-body" });
+  const moreMenu = h("div", { class: "map-glass map-pane-menu map-more-menu", id: "map-more-menu", role: "group", "aria-label": "Settings", hidden: true },
+    h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreBody);
+  // T-993: the retired bar's other homes. The mode switch and device/stream state float as one small
+  // pill; the tuning nudges (T-409, device commands through the one gated DeviceAction path) sit
+  // under Go-to, where the retune offer — the other device command on the map — already lives.
+  const statusHome = h("div", { class: "map-glass map-status map-fade", role: "group", "aria-label": "View and device", hidden: true });
+  const nudgeHome = h("div", { class: "map-glass map-nudge map-fade", hidden: true });
   const paneItem = (act: string, label: string, title: string, run: () => void) => {
     const b = h("button", { type: "button", class: "map-pane-item", "data-pane-act": act, title }, label) as HTMLButtonElement;
     // A menu item acts and closes the menu, like any menu; Record IQ (a host extra) keeps it open so
@@ -334,8 +388,9 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
+  const paneHead = h("span", {}, "Viewport");
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
-    h("div", { class: "map-layers-head" }, h("span", {}, "Viewport"), paneClose),
+    h("div", { class: "map-layers-head" }, paneHead, paneClose),
     paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
@@ -349,8 +404,9 @@ export function mountMapControls(host: MapControlHost): {
   const layersClose = h("button", {
     type: "button", class: "map-layers-close", "aria-label": "Close layers — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
+  const layersHead = h("span", {}, "Layers");
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
-    h("div", { class: "map-layers-head" }, h("span", {}, "Layers"), layersClose),
+    h("div", { class: "map-layers-head" }, layersHead, layersClose),
     layersList,
     h("div", { class: "map-note" }, "Display only: a layer changes what is drawn, never what is measured or detected."));
 
@@ -358,13 +414,18 @@ export function mountMapControls(host: MapControlHost): {
     svg(["path", "M12 5v14M5 12h14"]));
   const zoomOut = h("button", { type: "button", class: "map-ibtn map-zoom-out", "aria-label": "Zoom out", title: "Zoom out (both axes)" },
     svg(["path", "M5 12h14"]));
+  // T-1000: the number of the pane the zoom stack acts on, while there is more than one.
+  const zoomPane = h("div", { class: "map-pane-badge map-zoom-pane", "aria-hidden": "true", hidden: true });
   const zoom = h("div", { class: "map-glass map-zoom map-fade", role: "group", "aria-label": "Zoom" },
-    zoomIn, h("div", { class: "map-sep", "aria-hidden": "true" }), zoomOut);
+    zoomPane, zoomIn, h("div", { class: "map-sep", "aria-hidden": "true" }), zoomOut);
 
+  const fabPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
-    svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
+    svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8]), fabPane) as HTMLButtonElement;
+  const layersPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
+  layersBtn.append(layersPane);
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, offer, modeBanner, topright, layers, paneMenu, zoom, fab);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
@@ -389,7 +450,39 @@ export function mountMapControls(host: MapControlHost): {
     fab.classList.toggle("following", st.cls === "following");
     fab.classList.toggle("frozen", st.cls === "frozen");
     fab.setAttribute("aria-pressed", String(st.cls === "following"));
-    fab.title = st.title;
+    const name = host.activeName?.() ?? null;
+    fab.title = name ? `${st.title} (Acts on ${name.label}; L toggles it.)` : st.title;
+  };
+
+  // T-1000 (docs/23 §10.7): every control that acts on ONE pane says which, while there are two or
+  // more; with one pane it says nothing extra. The words are the host's (`activeName`), so the
+  // chrome and the outline on the canvas cannot name different panes. Set-if-changed: cheap enough
+  // to call on every active-pane change, split and close.
+  let namedAs = "";
+  const syncActive = () => {
+    const name = host.activeName?.() ?? null;
+    const key = name ? name.label : "";
+    if (key === namedAs) return;
+    namedAs = key;
+    const n = name ? String(name.n) : "";
+    const suffix = name ? ` · ${name.label}` : "";
+    for (const b of [zoomPane, fabPane, layersPane]) { b.hidden = !name; b.textContent = n; }
+    gotoPane.hidden = !name;
+    // "pane N", with the word droppable at a phone width (CSS) so the entry keeps its room.
+    gotoPane.replaceChildren(...(name ? [h("span", { class: "map-goto-word" }, "pane "), n] : []));
+    input.setAttribute("aria-label", `Go to frequency${suffix}`);
+    goto.dataset.pane = n;
+    layersBtn.setAttribute("aria-label", `Layers${suffix}`);
+    layersBtn.title = `Layers${suffix}`;
+    layersHead.textContent = name ? `Layers · ${name.label}` : "Layers";
+    zoom.setAttribute("aria-label", `Zoom${suffix}`);
+    zoom.dataset.pane = n;
+    zoomIn.setAttribute("title", `Zoom in (both axes)${suffix}`);
+    zoomOut.setAttribute("title", `Zoom out (both axes)${suffix}`);
+    fab.setAttribute("aria-label", `Follow live${suffix}`);
+    fab.dataset.pane = n;
+    paneHead.textContent = name ? `Viewport · ${name.label}` : "Viewport";
+    syncFollow();
   };
 
   goto.addEventListener("submit", (e) => {
@@ -475,13 +568,27 @@ export function mountMapControls(host: MapControlHost): {
     paneMenu.hidden = !open;
     paneBtn.setAttribute("aria-pressed", String(open));
     paneBtn.setAttribute("aria-expanded", String(open));
-    if (open) { syncPaneMenu(); if (layersOpen) setLayersOpen(false); }
+    if (open) { syncPaneMenu(); if (layersOpen) setLayersOpen(false); if (moreOpen) setMoreOpen(false); }
     fade.hold("pane-menu", open); // an open menu never fades
   };
+  let moreOpen = false;
+  const moreOverlay = trackOverlay("more-menu", () => { setMoreOpen(false); moreBtn.focus(); });
+  const setMoreOpen = (open: boolean) => {
+    moreOpen = open;
+    moreOverlay.open(open);
+    moreMenu.hidden = !open;
+    moreBtn.setAttribute("aria-pressed", String(open));
+    moreBtn.setAttribute("aria-expanded", String(open));
+    if (open) { if (layersOpen) setLayersOpen(false); if (paneOpen) setPaneOpen(false); }
+    fade.hold("more-menu", open); // an open menu never fades
+  };
+  moreBtn.addEventListener("click", () => setMoreOpen(!moreOpen));
+  moreClose.addEventListener("click", () => { setMoreOpen(false); moreBtn.focus(); });
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
     layersOverlay.open(open);
     if (open && paneOpen) setPaneOpen(false);
+    if (open && moreOpen) setMoreOpen(false);
     layers.hidden = !open;
     layersBtn.setAttribute("aria-pressed", String(open));
     layersBtn.setAttribute("aria-expanded", String(open));
@@ -516,19 +623,23 @@ export function mountMapControls(host: MapControlHost): {
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
   // The FAB is the retired `Live` button too (T-882): following → press freezes the view on what it
   // shows; frozen → press re-pins it to the growing edge. Either way only the screen changes.
-  fab.addEventListener("click", () => {
+  // The one toggle, shared by the FAB's press and the `L` key (T-1000), so the two cannot differ.
+  const toggleFollow = () => {
     if (host.isFollowing()) host.pauseLive(); else host.followLive();
     host.viewChanged();
     syncFollow();
-  });
+  };
+  fab.addEventListener("click", toggleFollow);
 
   const syncResearch = () => researchBtn.setAttribute("aria-pressed", String(!!host.research?.isOpen()));
   researchBtn.addEventListener("click", () => { host.research?.toggle(); syncResearch(); });
   syncResearch();
 
   syncFollow();
+  syncActive();
   syncMeasure();
+  registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
-  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch };
+  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch, syncActive, toggleFollow };
 }

@@ -12,10 +12,10 @@
 // docs/23 §10.6 P4 (size inversely proportional to influence): the drawer is a big panel, so a bare
 // click / Enter on a row only SELECTS it — highlights the row and, for an emitter, focuses its box on
 // the map (`focusSignal`, view state). It never pans, zooms or jumps the view. Jumping is the small,
-// explicit per-row "go to" button, which writes `requestGoto` (and `reviewAt` for a past window).
+// explicit per-row "go to" button, which writes `requestGoto` (carrying the time window too, for a
+// past survey row — T-999).
 import type { AppContext, MountFn } from "../context";
 import { requestGoto } from "../shell-slice";
-import { reviewAt } from "../centre/capture-slice";
 import { focusSignal } from "../explore/slice";
 import { bindContextTrigger, openSignalMenu } from "../menu";
 import type { AppState } from "../state";
@@ -44,11 +44,18 @@ export const itemKey = (it: DrawerItem): string => it.emitterId ?? `${it.group}:
 export const selectItem = (it: DrawerItem) => (s: AppState): Partial<AppState> =>
   it.emitterId !== undefined ? focusSignal(it.emitterId)(s) : {};
 
-/** What the small per-row "go to" button writes: view arithmetic only, never a device route. */
-export const gotoItem = (it: DrawerItem) => (s: AppState): Partial<AppState> => ({
-  ...(it.time ? reviewAt(it.time.t1, it.time.t1 - it.time.t0)() : {}),
-  ...requestGoto(it.hz, it.spanHz)(s),
-});
+/** What the small per-row "go to" button writes: view arithmetic only, never a device route.
+ *
+ * T-999: a past-survey row's time is carried on the SAME `requestGoto` write as its frequency, not
+ * written separately through `reviewAt`. `reviewAt` only ever set the store's OWN `time` field; it
+ * named nowhere for a pane to be moved to, so the active pane's time stayed exactly where it was and
+ * the very next `mirror()` (running every frame off the pane, `centre/surface.ts`) wrote the pane's
+ * unmoved time straight back over what this had just set — the jump was overwritten before a frame
+ * ever painted it. Folding the time into `nav` puts it through the one subscriber that actually
+ * moves a pane (`centre/surface.ts`'s `store.select((s) => s.nav, ...)`), so the pane freezes on the
+ * survey's window and `mirror()`'s next pass publishes THAT, instead of clobbering it. */
+export const gotoItem = (it: DrawerItem) => (s: AppState): Partial<AppState> =>
+  requestGoto(it.hz, it.spanHz, it.time ? { t0S: it.time.t0, t1S: it.time.t1 } : undefined)(s);
 export const GROUP_TITLE: Record<DrawerGroup, string> = {
   unknown: "Unknown & unexplained — the priority", strongest: "Strongest right now",
   quiet: "Quiet but active", surveys: "Past surveys — jump to a coverage window",
