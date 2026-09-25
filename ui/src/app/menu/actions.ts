@@ -13,7 +13,7 @@ import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row }
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
 import { watchAnalyzeJob } from "../explore/analyze-slice";
 import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setBandEdit } from "../explore/slice";
-import { toast } from "../state";
+import { setMode, toast } from "../state";
 import type { MenuItem } from "./model";
 
 const fmtMHz = (hz: number) => (hz / 1e6).toFixed(4);
