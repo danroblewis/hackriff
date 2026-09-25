@@ -44,7 +44,7 @@ use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_context::occupancy::channels::{DetectionExtent, dc_only_suspect};
 use hk_context::{Correlator, FeedCache, FloorAnomalies, FloorAnomalyConfig, Site};
@@ -66,7 +66,7 @@ use crate::dc_twin::{LiveDcTwins, Observed};
 use crate::events::{Candidate, ControlEvent, MemberBox};
 use crate::presence::PresenceStream;
 use crate::run::Shared;
-use crate::stats::{add, inc, set};
+use crate::stats::{add, inc, set, thread_cpu_ns};
 
 /// Boxes and links older than this (stream time) are forgotten.
 const MEMORY_NS: i64 = 120_000_000_000;
@@ -114,6 +114,60 @@ pub(crate) const CAPTURE_NAME_SAMPLES: usize = 16_384;
 const DENSE_MEMORY_FRAMES: u64 = 1 << 20;
 /// Longest end-of-stream wait for the writer.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+/// Ring chunks between samples of this reader's CPU clock (T-939; ~0.2 s at 20 Msps).
+const CPU_SAMPLE_CHUNKS: u64 = 64;
+
+/// **How far behind the live edge this reader may fall before it sheds** (T-939), stream seconds.
+///
+/// Measured, on a 20 Msps HackRF: the reader read at about 7 Msps and was therefore lapped by the
+/// 4 s ring every ~6 s — 39 overruns and 3.1 G lost samples in 4 minutes, each overrun a hole
+/// almost a whole ring wide, and detection up to 4 s stale in between. The shedding was already
+/// happening; what was missing was a bound on *when* and *how big*. With this budget the same
+/// deficit becomes many small holes at a bounded distance from the live edge: the detector's view
+/// of the band is sampled evenly instead of blacked out for seconds at a time, and what it skipped
+/// is counted as [`crate::stats::ReaderCounters::shed_samples`] — chosen — rather than hidden in
+/// the ring's `lost_samples`.
+///
+/// 0.25 s is a quarter of the ring's default 4 s and two orders above the 2.05 ms detection frame,
+/// so a reader that keeps up never reaches it (its natural lag is one or two ring chunks) and a
+/// reader that cannot sheds long before the ring would lap it. **It is a ceiling on detection
+/// latency, not a target:** nothing sheds while the reader keeps up, and every offline replay runs
+/// with the lossless gate on, where shedding is refused outright.
+const DETECT_MAX_LAG_S: f64 = 0.25;
+
+/// Holds the detection reader inside [`DETECT_MAX_LAG_S`] of the live edge (T-939).
+///
+/// `limit` of 0 disables it, which is what a lossless replay gets: there the flow gate holds
+/// capture behind this very cursor, so every sample is analysed however slow the machine is, and
+/// skipping would make a replay's detections depend on the box that ran it. Live, the ring cannot
+/// wait ([`crate::gate`]), so the only question is whether the samples this reader will not reach
+/// are skipped deliberately and counted, or suffered as an overrun.
+fn shed_to_edge(shared: &Shared, reader: &mut hk_core::RingReader<Complex<i8>>, limit: u64) {
+    if limit == 0 {
+        return;
+    }
+    let Some(head) = shared.ring.next_sample() else {
+        return;
+    };
+    if head.saturating_sub(reader.position()) <= limit {
+        return;
+    }
+    if reader.shed_to_latest() == 0 {
+        return;
+    }
+    let rc = &shared.counters.detect_reader;
+    set(&rc.shed_samples, reader.shed_samples());
+    set(&rc.shed_events, reader.sheds());
+    set(&rc.gap_samples, reader.gap_samples());
+    if reader.sheds() == 1 {
+        eprintln!(
+            "hk-pipeline: detection is behind the live edge at {:.1} Msps; shedding to stay \
+             within {DETECT_MAX_LAG_S} s of it (readers.detect.shed_samples, and the per-stage \
+             profile clip_ns/burst_ns/stft_ns/frame_ns, say how much and where the time goes)",
+            shared.fs / 1e6
+        );
+    }
+}
 
 /// How many inventory events [`Writer::file_inventory`] files under one hold of the repository and
 /// inventory locks before releasing them (T-941).
@@ -438,7 +492,9 @@ impl DetectNode {
         }
         let clipped = self.clips.partition_point(|&i| i < b) as u64;
         let mut floor_events = std::mem::take(&mut self.pending_floor);
+        let t_frame = Instant::now();
         let floor = self.floor.update(frame, |e| floor_events.push(e.clone()));
+        let t_floor = Instant::now();
         let mut evs: Vec<Owned> = Vec::new();
         self.det.process(
             frame,
@@ -450,6 +506,9 @@ impl DetectNode {
                 DetectorEvent::Integrated(_) => {}
             },
         );
+        let rc = &self.shared.counters.detect_reader;
+        add(&rc.floor_ns, (t_floor - t_frame).as_nanos() as u64);
+        add(&rc.detector_ns, t_floor.elapsed().as_nanos() as u64);
         self.pending_floor = floor_events;
         self.now_ns = frame.t.host_time.as_unix_nanos();
 
@@ -480,6 +539,7 @@ impl DetectNode {
         set(&dc.invalid_floor_frames, invalid);
         set(&dc.guarded_frames, guarded);
 
+        let t_track = Instant::now();
         let mut tev = Vec::new();
         self.handle_events(evs, &mut tev);
         self.tracker
@@ -493,6 +553,10 @@ impl DetectNode {
         if due {
             self.flush();
         }
+        add(
+            &self.shared.counters.detect_reader.track_ns,
+            t_track.elapsed().as_nanos() as u64,
+        );
     }
 
     /// A short-burst detection (T-075): stored untracked (never offered to the tracker).
@@ -1318,8 +1382,23 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
     let rc = &shared.counters.detect_reader;
+    // A reader that keeps up sits one or two chunks behind the writer, so the floor under the
+    // budget is a few chunks: a low sample rate must not make the ceiling smaller than the
+    // reader's own granularity.
+    let lag_limit = if shared.gate.enabled() {
+        0
+    } else {
+        ((DETECT_MAX_LAG_S * shared.fs) as u64).max(4 * buf.len() as u64)
+    };
+    let cpu0 = thread_cpu_ns();
+    let mut chunks: u64 = 0;
     loop {
-        match reader.read_timeout(&mut buf, Duration::from_millis(50)) {
+        shed_to_edge(&shared, &mut reader, lag_limit);
+        let t_wait = Instant::now();
+        let outcome = reader.read_timeout(&mut buf, Duration::from_millis(50));
+        let t_read = Instant::now();
+        add(&rc.wait_ns, (t_read - t_wait).as_nanos() as u64);
+        match outcome {
             ReadOutcome::Data(chunk) => {
                 let s = &buf[..chunk.len];
                 let first = chunk.first_sample();
@@ -1335,6 +1414,8 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
                         node.namer.finalize(shared.fs);
                     }
                 }
+                let t_clip = Instant::now();
+                add(&rc.clip_ns, (t_clip - t_read).as_nanos() as u64);
                 burst.push(
                     chunk.time,
                     chunk.discontinuity,
@@ -1342,9 +1423,16 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
                     s,
                     &mut |r| node.push_burst(r),
                 );
+                let t_burst = Instant::now();
+                add(&rc.burst_ns, (t_burst - t_clip).as_nanos() as u64);
+                let mut frame_ns = 0u64;
                 stft.push(InputInfo::from(&chunk), s, |frame| {
-                    node.process_frame(frame)
+                    let t = Instant::now();
+                    node.process_frame(frame);
+                    frame_ns += t.elapsed().as_nanos() as u64;
                 });
+                add(&rc.stft_ns, (Instant::now() - t_burst).as_nanos() as u64);
+                add(&rc.frame_ns, frame_ns);
                 cursor.set(chunk.end_sample());
                 add(&rc.samples, chunk.len as u64);
             }
@@ -1361,7 +1449,12 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
         let st = stft.stats();
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
+        chunks += 1;
+        if chunks % CPU_SAMPLE_CHUNKS == 0 {
+            set(&rc.cpu_ns, thread_cpu_ns().saturating_sub(cpu0));
+        }
     }
+    set(&rc.cpu_ns, thread_cpu_ns().saturating_sub(cpu0));
     // Stream end or detach (T-056): frames still in flight are detected and tracked before the
     // burst detector, the tracker and the writer finish.
     stft.flush(|frame| node.process_frame(frame));
