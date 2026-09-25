@@ -27110,6 +27110,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-915 worker 2026-09-24.
+  - id: T-918
+    milestone: MMAP
+    title: "RC red: app-dismiss.e2e.mjs - the canvas is no longer full-bleed (y=56, 567 px tall; the sheet covers no canvas rows) at main 528d2c2f"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RC_RED P1 (release candidate at main 528d2c2f, 2026-09-25 00:21; last green: none yet; first red tip 528d2c2f). Repro: `cd ui && node e2e/run.mjs app-dismiss`. Spec ui/e2e/app-dismiss.e2e.mjs (T-900, closeable overlays) fails: AssertionError "the bottom sheet covers no canvas rows" ({"box":{"x":856,"y":684.8,"w":520,"h":105.2},"canvas":{"x":0,"y":56,"w":1440,"h":567.1}}).
+      The measured canvas is NOT full-bleed: it starts at y=56 and is 567 px tall in a window whose sheet sits at y=684 - so the canvas ends ~623 px, well short of the viewport bottom. T-801's invariant (docs/23 §10.1): "the canvas is position: fixed; inset: 0 - 100 vw x 100 vh - and no chrome subtracts from it". Something that landed after T-900's gate (candidates: T-882 toolbar-row removal / rehome, T-821 research + collections panel, T-809 pins, T-807 fog, T-897 paths) likely re-introduced a layout row or a reserved band that shrinks the canvas, or the spec's premise is stale.
+      DELIVER: (1) bisect/identify the landing that changed the canvas rect (git log on ui/src/app/**, ui/src/app/chrome/*.css; compare the rect at each candidate merge); (2) if the canvas is no longer full-bleed, that is a PRODUCT regression of the T-801 invariant - fix the layout (canvas 100vw x 100vh, chrome floats over it), and the dismiss spec then passes unchanged; (3) only if the canvas is full-bleed and the spec mis-measures, fix the spec's measurement (deflake-triage rules: prove it red with the defect re-injected). Also check P1 (docs/23 §10.6): the sheet at peek must still cover canvas rows so dismiss has pixels to return.
+      WHAT THE USER WILL SEE ON STAGING: the waterfall fills the whole window behind the floating controls and sheet; closing the sheet gives its pixels back to the map.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; app-dismiss + app-surface + app-sheet e2e alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY rc-20260925.
+    branch: task-rcfix-app-dismiss
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
