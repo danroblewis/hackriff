@@ -141,8 +141,14 @@ pub enum DecodeProvenance {
         l_check: Option<f64>,
         /// Whether the check was searched (open search or a discovered template).
         check_searched: bool,
-        /// The template's provenance kind (`builtin`, `user`, `discovered`), or `None` for open
-        /// search.
+        /// How the template's **check** was priced (ADR-0022 §5.1), or `None` for an open search:
+        ///
+        /// - `template-fixed` — a builtin or user template fixed the whole check before the data
+        ///   was seen, so `L_check = 0`. The two author kinds are one value: the ADR prices them
+        ///   identically and the result does not record which authored the template.
+        /// - `discovered` — a template an earlier search found, inheriting that search's
+        ///   look-elsewhere as `L_check` (the laundering rule).
+        /// - `searched` — a template whose check was still searched in this job.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         template_provenance: Option<String>,
     },

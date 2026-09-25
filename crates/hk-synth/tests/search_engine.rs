@@ -1587,6 +1587,59 @@ fn m9_a_template_fixed_check_and_a_quick_job_run_no_null_control() {
     );
 }
 
+/// T-884 item 4, ADR-0022 §5.1: a **template-fixed** check tried zero hypotheses, so its
+/// `L_check` is **0** — not the S5 stage's job-wide count, which other roots' polynomial searching
+/// filled in. Red before the fix: the template-fixed root was charged `l5 > 0` because a second,
+/// searched root in the same job had tried three polynomials at S5.
+#[test]
+fn t884_a_template_fixed_check_pays_no_look_elsewhere_however_much_the_job_searched() {
+    let world = World::new(FSK);
+    let mut fixed = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &["0x8005"]),
+        0.0,
+        &["0x8005"],
+    );
+    fixed.check_origin = CheckOrigin::TemplateFixed;
+    // A second root that *does* search polynomials and reaches S5 in the same world, so the
+    // job-wide S5 count (item 5's conservatism) is > 1.
+    let searching = root(
+        skeleton("generic-fsk-framed", fsk_s1(), false, &POLYS),
+        -1.0,
+        &POLYS,
+    );
+    let o = run(
+        &spec(vec![fixed, searching], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let top = o
+        .results
+        .iter()
+        .find(|r| {
+            r.holdout
+                .as_ref()
+                .is_some_and(|h| h.check_origin == CheckOrigin::TemplateFixed)
+        })
+        .expect("the template-fixed root was evaluated on hold-out");
+    let h = top.holdout.as_ref().unwrap();
+    assert_eq!(
+        h.l_check,
+        Some(0.0),
+        "ADR-0022 §5.1: zero hypotheses were tried for this check"
+    );
+    // And the check bits it pays with are the undiscounted width x differences.
+    let check = h.check_bits.expect("the prefix carried a check");
+    assert!(
+        (check - f32::from(u16::try_from(h.check_width.unwrap()).unwrap()) * h.differences as f32)
+            .abs()
+            < 1e-3,
+        "check_bits {check} != width {:?} x differences {}",
+        h.check_width,
+        h.differences
+    );
+}
+
 /// ADR-0022 §4: the three constants that replaced 64 bits / 3 frames / width 16. A check under the
 /// 8-bit width floor never solves however many frames it passes; a single hold-out frame of a
 /// searched CRC-16 cannot carry 16 bits after its L; and a discovered template whose discovery

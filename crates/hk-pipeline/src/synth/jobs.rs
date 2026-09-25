@@ -269,23 +269,81 @@ pub trait Attacher: Send + Sync {
 pub struct RepoAttacher {
     db: std::path::PathBuf,
     policy: SynthesizedConfirm,
+    /// The `messages` publisher synthesized decodes are republished on (T-884 item 2), taken for
+    /// the duration of an attach and put back. One long-lived publisher per run, so a subscriber
+    /// that opened the stream before a job ran is still attached when one does.
+    republish: Mutex<Option<Publisher>>,
 }
 
+/// The stream synthesized decodes are republished on (T-884 item 2).
+pub const SYNTH_DECODES_STREAM_ID: &str = "decodes/synth";
+
 impl RepoAttacher {
-    /// Over the repository at `db`, under `policy`.
+    /// Over the repository at `db`, under `policy`, publishing nothing.
     pub fn new(db: impl Into<std::path::PathBuf>, policy: SynthesizedConfirm) -> Self {
         Self {
             db: db.into(),
             policy,
+            republish: Mutex::new(None),
         }
+    }
+
+    /// As [`Self::new`], additionally **republishing every stored decode** on a `messages` stream
+    /// offered through `sink` (ADR-0015 §5.5; the decode a job attaches is a decode like any
+    /// other, and a client watching `messages` must see it).
+    ///
+    /// `class` is the run's source class. Under a class that forbids content no stream is offered
+    /// at all — the same fail-closed choice `crate::chains::plugin` makes for a manifest with no
+    /// metadata policy: the rows are still stored (content already dropped by the job), but
+    /// nothing is republished rather than republished through a policy nobody wrote.
+    pub fn with_stream(
+        db: impl Into<std::path::PathBuf>,
+        policy: SynthesizedConfirm,
+        sink: Option<&crate::config::StreamSink>,
+        class: ContentClass,
+    ) -> Self {
+        let mut me = Self::new(db, policy);
+        if let (Some(sink), true) = (sink, class.permits_content()) {
+            let mut header = StreamHeader::new(
+                SYNTH_DECODES_STREAM_ID,
+                StreamKind::Messages,
+                class,
+                format!("hk-pipeline:synth-attach@{}", env!("CARGO_PKG_VERSION")),
+            );
+            header.message_schema = Some("hackriff.decode/1".into());
+            if let Ok(p) = Publisher::new(header.clone(), PublisherConfig::default()) {
+                sink(&header, p.handle());
+                *me.republish
+                    .get_mut()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(p);
+            }
+        }
+        me
+    }
+
+    /// The confirm rule this attacher runs (T-884 item 1: what `ConfirmPolicy.synthesized`
+    /// configured, not a default).
+    pub fn policy(&self) -> &SynthesizedConfirm {
+        &self.policy
     }
 }
 
 impl Attacher for RepoAttacher {
     fn attach(&self, input: &AttachInput<'_>) -> Result<Option<Attached>, String> {
         let repo = hk_model::Repository::open(&self.db).map_err(|e| e.to_string())?;
-        let mut ingest = hk_plugins::Ingest::new(repo);
-        attach(&mut ingest, &self.policy, input).map_err(|e| e.to_string())
+        // The publisher is lent to the `Ingest` for this attach and taken back, so the stream
+        // outlives the job: dropping the publisher would finish the stream for every subscriber.
+        let mut held = self
+            .republish
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut ingest = match held.take() {
+            Some(p) => hk_plugins::Ingest::with_republish(repo, p),
+            None => hk_plugins::Ingest::new(repo),
+        };
+        let out = attach(&mut ingest, &self.policy, input).map_err(|e| e.to_string());
+        *held = ingest.take_publisher();
+        out
     }
 }
 

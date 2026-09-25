@@ -3650,6 +3650,24 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
         json!(null),
         "an aborted-or-absent look rules nothing out: {v}"
     );
+    // T-884 item 6 (docs/api.md): this is also the shape a **withheld-identity** emitter gets,
+    // whatever storage holds for it — the same withholding `/api/inventory` applies to
+    // `synthesis` (T-159/T-163), and with no marker that anything was held back, since such a
+    // marker is itself an oracle. The withheld case is asserted where an identity can be gated
+    // without switching process-wide content gating under every other test in this binary
+    // (`hk_api::analyze`'s `t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity`);
+    // here the contract records that the two answers are **the same four fields and no others**.
+    assert_eq!(
+        v.as_object().map(|o| o.len()),
+        Some(5),
+        "the not-searched answer is exactly emitter_id, pipeline, evidence, trace, resolution: {v}"
+    );
+    for absent in ["job", "verdict", "stage_reached", "engine", "receiver"] {
+        assert!(
+            v.get(absent).is_none(),
+            "{absent} is not part of the not-searched answer: {v}"
+        );
+    }
     let (st, v) = post(
         addr,
         "/api/analyze",

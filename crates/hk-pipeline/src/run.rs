@@ -873,6 +873,12 @@ struct Replumb {
 
 /// Parts of a run that outlive segments.
 struct Common {
+    /// T-884: `ConfirmPolicy.synthesized` as the run's inventory holds it, read **once** at start
+    /// and kept as a value. MAUTO's attach step runs on its own repository connection outside the
+    /// inventory (`hk_cli::pipeline`), so it has to be handed the configured rule; reading it here
+    /// rather than through `Shared.inventory` keeps an API read off a mutex a capture worker may
+    /// hold. A re-plumb carries the inventory across unchanged, so the value stays true.
+    synthesized_confirm: crate::inventory::SynthesizedConfirm,
     data_dir: PathBuf,
     db_path: PathBuf,
     survey_id: SurveyId,
@@ -1314,6 +1320,7 @@ impl Pipeline {
             crate::retention::RetentionService::start(db_path.clone(), s, Arc::clone(&counters))
         });
         let common = Common {
+            synthesized_confirm: inventory.synthesized_confirm(),
             view,
             iq_buffer,
             receiver: Arc::default(),
@@ -3102,6 +3109,15 @@ impl PipelineHandle {
     /// The scheduler hub (T-127) for `/api/scheduler*`: empty when the run has no scheduler.
     pub fn scheduler_hub(&self) -> Arc<crate::control::SchedulerHub> {
         Arc::clone(&self.sup.common.scheduler)
+    }
+
+    /// The `ConfirmPolicy.synthesized` clause this run's inventory confirms under (T-884).
+    ///
+    /// The MAUTO attach step (`hk_pipeline::synth::attach`) is built outside the run's inventory
+    /// and must be given the configured rule rather than a fresh default — otherwise the
+    /// configuration field that gates an irreversible confirm is never read.
+    pub fn synthesized_confirm(&self) -> crate::inventory::SynthesizedConfirm {
+        self.sup.common.synthesized_confirm.clone()
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).

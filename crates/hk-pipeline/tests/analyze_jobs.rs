@@ -1406,6 +1406,110 @@ mod m9 {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// T-884 item 2 — **a synthesized decode reaches the `messages` stream.**
+    ///
+    /// Found by the T-860 Opus review. The known-emitter arm of the attach step inserted and
+    /// linked its decodes by hand, deliberately bypassing `Ingest::store_decode` so no identity
+    /// sighting would mint a ghost candidate per frame — and in doing so bypassed the republish
+    /// too, so twelve decodes landed in the database and none on the stream a client watches.
+    /// ADR-0015 §5.5: a decode a job attaches is a decode like any other.
+    ///
+    /// Red before the fix: `decodes/synth` is offered and stays empty.
+    #[test]
+    fn t884_synthesized_decodes_for_a_known_emitter_are_republished_on_the_messages_stream() {
+        use std::io::Write;
+
+        use hk_stream::{Declared, Record, StreamHeader, StreamReader};
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempdir("t884-republish");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let offered: Arc<Mutex<Vec<(StreamHeader, Buf)>>> = Arc::default();
+        let seen = Arc::clone(&offered);
+        let sink: hk_pipeline::StreamSink = Arc::new(move |h, handle| {
+            let buf = Buf::default();
+            handle
+                .subscribe("t884", Declared::local(buf.clone()), Box::new(|_| {}))
+                .expect("subscribe");
+            seen.lock().unwrap().push((h.clone(), buf));
+        });
+        let attacher = Arc::new(RepoAttacher::with_stream(
+            &db,
+            SynthesizedConfirm::default(),
+            Some(&sink),
+            ContentClass::Unrestricted,
+        )) as Arc<dyn Attacher>;
+        let ring = ring10();
+        let jobs = AnalyzeJobs::with_attacher(
+            Arc::new(Env::new(Arc::clone(&ring))),
+            Some(Arc::new(Backend::default()) as Arc<dyn SearchBackend>),
+            PowerPolicy::Mains,
+            Some(attacher),
+        );
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_eq!(done.emitter_id, Some(emitter.to_string()));
+        assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+
+        let offered = offered.lock().unwrap();
+        let (header, buf) = offered
+            .iter()
+            .find(|(h, _)| h.stream_id == hk_pipeline::synth::jobs::SYNTH_DECODES_STREAM_ID)
+            .expect("the attacher offers its decode stream through the run's sink");
+        assert_eq!(header.kind, hk_stream::StreamKind::Messages);
+        let bytes = buf.0.lock().unwrap().clone();
+        let mut reader = StreamReader::new(std::io::Cursor::new(bytes));
+        let mut messages = Vec::new();
+        while let Ok(Some(rec)) = reader.next_record() {
+            if let Record::Message(v) = rec {
+                messages.push(v.value);
+            }
+        }
+        assert_eq!(
+            messages.len(),
+            12,
+            "every stored decode is republished, not only the ones that made a candidate"
+        );
+        for m in &messages {
+            assert_eq!(m["emitter_id"], json!(emitter.to_string()));
+            assert_eq!(m["crc_status"], json!("valid"));
+            assert!(
+                m["decoder"]
+                    .as_str()
+                    .is_some_and(|d| d.starts_with("synth:")),
+                "{m}"
+            );
+        }
+        // The republish does not change what is stored: no ghost candidate per frame.
+        let repo = Repository::open(&db).unwrap();
+        let linked = repo
+            .emitter_links(emitter)
+            .unwrap()
+            .into_iter()
+            .filter(|l| matches!(l.target, LinkTarget::Decode(_)))
+            .count();
+        assert_eq!(linked, 12);
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Confirmed
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Review L2: a cancel observed at the end of the attach transaction rolls the whole attach
     /// back — no decodes, no row, no confirmation — because a cancelled job never attaches
     /// (docs/api.md). The attacher here runs the real attach over the real job's input with the
