@@ -1652,6 +1652,9 @@ def test_one_claim_that_raises_does_not_abort_the_tick(monkeypatch):
               "T-2": {"ticket": "T-2", "branch": "task-t2", "state": "running"}}
     assert R.reap(claims, dry=False) is True
     assert calls == ["T-1", "T-2"]                                              # the next claim is still reaped
+    assert claims["T-1"]["state"] == "running" and seen == []                  # review: a one-off is retried
+    R.reap(claims, dry=False)
+    R.reap(claims, dry=False)                                                   # the third in a row stops it
     assert claims["T-1"]["state"] == "reap-error" and "FileNotFoundError" in claims["T-1"]["reap_error"]
     assert [a[2] for a in seen] == ["REAP_ERROR"]
 

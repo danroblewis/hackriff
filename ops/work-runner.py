@@ -126,6 +126,7 @@ TIMEOUT_RESUMES = 1
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
 RELEASE_AFTER_H = float(os.environ.get("WORK_RELEASE_AFTER_H", "4"))
+REAP_ERRORS = 3   # consecutive reap exceptions before a claim is stopped as 'reap-error'
 MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
 MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
@@ -1401,11 +1402,18 @@ def reap(claims, dry):
             changed |= _reap_one(claims, tid, c, dry, killed)
         except Exception as e:
             # isolate it: the other claims are reaped and saved; this one stops, once, for a person
+            # a one-off (a git call timing out under load) is retried next tick; the third in a row stops it
             changed = True
-            claims[tid] = dict(claims.get(tid) or c, state="reap-error", reap_error=f"{type(e).__name__}: {e}"[:300])
-            log(f"REAP_ERROR {tid}: {type(e).__name__}: {e}")
-            attention(tid, c.get("branch", ""), "REAP_ERROR", f"reaping this claim raised {type(e).__name__}: {e} - claim set "
-                      f"'reap-error', the tick went on; see work-runner.log")
+            cur = claims.get(tid) or c
+            n = cur.get("reap_errors", 0) + 1
+            log(f"REAP_ERROR {tid} ({n}/{REAP_ERRORS}): {type(e).__name__}: {e}")
+            if n < REAP_ERRORS:
+                claims[tid] = dict(cur, reap_errors=n)
+                continue
+            claims[tid] = dict(cur, state="reap-error", reap_errors=n, reap_error=f"{type(e).__name__}: {e}"[:300])
+            attention(tid, c.get("branch", ""), "REAP_ERROR", f"reaping this claim raised {type(e).__name__}: {e} {n} ticks in a "
+                      f"row - claim set 'reap-error' (released like an error claim after {RELEASE_AFTER_H:.0f} h), the tick "
+                      f"went on; see work-runner.log")
     if killed:
         alert("amber", f"{len(killed)} worker(s) killed", ", ".join(killed) + " - worktrees kept", "wr:killed:" + ",".join(sorted(killed)))
     changed |= handle_gate_failures(claims, dry)
@@ -1623,7 +1631,7 @@ def release_stale_claims(claims, tasks_by_id):
                 f"(landed as a rebuilt branch) - claim closed")
             c["state"] = "merged"; c["ended"] = time.time(); changed = True
     for tid, c in list(claims.items()):
-        if c.get("state") in ("no-work", "error", "timeout", "killed") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
+        if c.get("state") in ("no-work", "error", "timeout", "killed", "reap-error") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
                 log(f"RELEASE {tid}: claim ended {c['state']} {RELEASE_AFTER_H:.0f}h+ ago and the ticket is still todo - eligible again")
                 del claims[tid]; changed = True
