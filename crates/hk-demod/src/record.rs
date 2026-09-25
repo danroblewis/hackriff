@@ -22,13 +22,17 @@
 //!
 //! **T-962: a provisional PI is written, and is not an identity.** `hk_demod::rds` reports a PI
 //! from `pi_min_votes` agreeing CRC-valid blocks but marks it
-//! [`provisional`](crate::rds::PiDecision::provisional) until it has `pi_commit_votes` of them
-//! (10 — see that field for why a vote count and not ADR-0022 §6's bits budget). A session whose
-//! PI is still provisional writes:
+//! [`provisional`](crate::rds::PiDecision::provisional) until it has `pi_commit_votes` of them,
+//! and this writer also refuses an identity below [`hk_model::RDS_PI_COMMIT_VOTES`] (10 — the one
+//! bar every RDS producer shares, the `rds` recipe included; see that constant, and
+//! `GroupConfig::pi_commit_votes` for why a vote count and not ADR-0022 §6's bits budget). A
+//! session whose PI is still provisional writes:
 //!
-//! - the `rds-pi` Decode row, with `pi`, `pi_votes`, `pi_total_votes`, `pi_share` and
-//!   `pi_provisional: true` in its metadata, and **no [`DecodedIdentity`]** — so the UI can show
-//!   "PI 1704 (3 groups, provisional)" from the row it already reads;
+//! - the `rds-pi` Decode row, with `pi`, `pi_votes`, `pi_total_votes`, `pi_share`,
+//!   `pi_provisional: true` and the scheme-generic `identity_provisional` / `identity_votes` /
+//!   `identity_votes_needed` in its metadata, and **no [`DecodedIdentity`]**. The row is linked to
+//!   the caller's emitter hint, and `GET /api/inventory/{id}/decode` serves an identity-less
+//!   emitter's linked rows, so the UI can show "PI 1704 (3 groups, provisional)";
 //! - **no identity-bearing sighting**, so the emitter is never created, merged or keyed by that
 //!   PI, and `Repository::identity_decode_evidence` finds nothing for it. A Confirmed state
 //!   therefore cannot rest on it: `ConfirmPolicy`'s route A (decoded identity) needs an identity,
@@ -104,6 +108,13 @@ pub fn rds_label(session: &AnalogSession) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Whether `pi` may be written as an identity (T-962): committed by its decoder **and** at or
+/// above the one bar every RDS producer shares, [`IdentityScheme::commit_votes`] — so a
+/// `GroupConfig` configured below [`hk_model::RDS_PI_COMMIT_VOTES`] cannot weaken it.
+fn pi_is_identity(pi: &crate::rds::PiDecision) -> bool {
+    pi.committed() && pi.votes >= IdentityScheme::RdsPi.commit_votes()
+}
+
 /// Builds the RDS Decode rows (no repository access).
 pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Decode> {
     let Some(rds) = session.rds() else {
@@ -114,7 +125,8 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
     };
     // T-962: a provisional PI is evidence, not a claim. The row carries it and its vote; the
     // identity column stays empty, which is what keeps the confirm gate's route A off it.
-    let identity = pi.committed().then(|| DecodedIdentity {
+    let committed = pi_is_identity(&pi);
+    let identity = committed.then(|| DecodedIdentity {
         scheme: IdentityScheme::RdsPi,
         value: pi.hex(),
     });
@@ -141,7 +153,12 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
             "pi_votes": pi.votes,
             "pi_total_votes": pi.total_votes,
             "pi_share": pi.share,
-            "pi_provisional": pi.provisional,
+            "pi_provisional": !committed,
+            // The scheme-generic provisional-identity fields every vote-gated producer writes
+            // (the `rds` recipe's rows carry the same keys), so one reader serves both.
+            "identity_provisional": !committed,
+            "identity_votes": pi.votes,
+            "identity_votes_needed": IdentityScheme::RdsPi.commit_votes(),
             "ps": rds.ps(),
             "ps_frames": rds.ps_frames,
             "pty": rds.pty,
@@ -224,7 +241,7 @@ pub fn write_session(
     let pi = session.rds().and_then(|r| r.pi);
     // T-962: only a committed PI is identity-bearing. A provisional one takes the no-identity
     // path below — recorded, shown, never resolved against or confirmed on.
-    let committed = pi.filter(|p| p.committed());
+    let committed = pi.filter(pi_is_identity);
     let demod_id = DemodulationId::new();
     let family = session.mode.mode.as_str();
     let classification = Classification {
@@ -329,7 +346,7 @@ pub fn write_session(
                     "pi": pi.hex(),
                     // T-962: a label is revisable where a confirm is not (ADR-0022 §1.3), so a
                     // provisional PI may still label — saying so.
-                    "pi_provisional": pi.provisional,
+                    "pi_provisional": !pi_is_identity(&pi),
                     "ps_frames": rds.ps_frames,
                     "decodes": decodes.iter().map(|d| d.id).collect::<Vec<_>>(),
                 }),

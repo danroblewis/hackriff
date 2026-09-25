@@ -37,7 +37,10 @@ pub struct GroupConfig {
     /// Share of all PI votes the reported PI must hold.
     pub pi_min_share: f64,
     /// **T-962: agreeing CRC-valid PI blocks needed before the PI is a *committed* identity**
-    /// rather than a provisional reading. Default 10.
+    /// rather than a provisional reading. Default [`hk_model::RDS_PI_COMMIT_VOTES`] (10) — the
+    /// one bar every RDS producer shares, the `rds` recipe's `messages` outputs included. The
+    /// record writer (`crate::record`) also refuses an identity below that constant, so a
+    /// config set lower here cannot weaken it.
     ///
     /// **Which bound applies, and the citation.** ADR-0022 §6's `analytic_holdout_bits` budget
     /// governs `ConfirmPolicy.synthesized` — the confirm route for a *synthesized* pipeline whose
@@ -96,7 +99,7 @@ impl Default for GroupConfig {
             sync: SyncConfig::default(),
             pi_min_votes: 3,
             pi_min_share: 0.6,
-            pi_commit_votes: 10,
+            pi_commit_votes: hk_model::RDS_PI_COMMIT_VOTES,
             ps_max_gap_s: 2.0,
         }
     }

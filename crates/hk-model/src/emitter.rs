@@ -28,6 +28,22 @@ use crate::time::Timestamp;
 /// not a transmitter ([`IdentityScheme::is_structural`]).
 pub const FRAMING_IDENTITY_SCHEME: &str = "hk-framing";
 
+/// **T-962: agreeing CRC-valid frames an RDS PI needs before any decoder may write it as an
+/// identity** — [`IdentityScheme::commit_votes`] for [`IdentityScheme::RdsPi`].
+///
+/// One bar for every producer: `hk-demod`'s always-on RDS decoder (`GroupConfig::pi_commit_votes`
+/// defaults to this) and every recipe `messages` output naming `rds-pi` (the writer counts
+/// agreeing frames per output, `hk_pipeline::recipes::messages`). A vote is one CRC-valid,
+/// PI-bearing group; a recipe frame is at least one group, so counting frames never counts more
+/// groups than there are. Why 10: a synchronised RDS stream carries 11.4 groups/s (1187.5 Bd /
+/// 104 bits), so 10 agreeing votes is under a second of genuine lock, while the observed false
+/// commit (98.085 MHz, PI 1704, an independent oracle finding no RDS on the same clip) reached
+/// about 3 in 45 s. RDS's block check is 10 bits and a mis-synchronised lattice re-reads
+/// correlated bits, so a handful of agreeing groups is not independent evidence. Below the bar the
+/// PI is a **provisional** reading — recorded and shown with its vote, never an identity, never a
+/// confirm (ADR-0022 §1.3: a confirm is a one-way door). Raising it is safe; lowering it is not.
+pub const RDS_PI_COMMIT_VOTES: u32 = 10;
+
 /// The namespace of a decoded identity.
 ///
 /// Serialised as a string: the kebab-case variant name, or `other:<name>` for [`Self::Other`].
@@ -84,6 +100,19 @@ impl IdentityScheme {
     /// first unit's emitter by this signature — one emitter over three appearances.
     pub fn is_structural(&self) -> bool {
         matches!(self, IdentityScheme::Other(name) if name == FRAMING_IDENTITY_SCHEME)
+    }
+
+    /// Agreeing CRC-valid frames (votes) a decoder must have seen before it may attach this
+    /// identity to a Decode row (T-962). `1` — a single CRC-valid frame — for every scheme whose
+    /// check is strong enough to carry an identity alone (ADS-B's 24-bit parity, …);
+    /// [`RDS_PI_COMMIT_VOTES`] for an RDS PI, whose 10-bit block check is not. Below it the
+    /// decoder writes the row **without** an identity and marks it provisional, so neither entity
+    /// resolution nor the confirm gate's decoded-identity route can rest on it.
+    pub fn commit_votes(&self) -> u32 {
+        match self {
+            IdentityScheme::RdsPi => RDS_PI_COMMIT_VOTES,
+            _ => 1,
+        }
     }
 
     /// The canonical value of an identity read from an unsigned field of `bits` bits (0 when the

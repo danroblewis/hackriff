@@ -34,6 +34,7 @@ use hk_demod::{AnalogMode, AnalogReceiver, AnalogSession, RecordContext, write_s
 use hk_estimate::SnippetRequest;
 use hk_model::{DecodedIdentity, IdentityScheme, Repository};
 use num_complex::Complex32;
+use serde_json::json;
 
 const T962: &str = "T-962";
 const FS: f64 = 500e3;
@@ -192,5 +193,103 @@ fn t962_a_second_of_a_real_station_commits_the_identity() {
     assert!(
         !repo.decodes_for_identity(&pi_c0de()).unwrap().is_empty(),
         "[{T962}] the identity evidence route A reads is back"
+    );
+}
+
+/// The decoder's report over `bits` (one bit per position), under `config`.
+fn report_bits(config: GroupConfig, bits: &[u8]) -> RdsReport {
+    let mut dec = RdsDecoder::new(config, RDS_BITRATE_BD);
+    for (i, &b) in bits.iter().enumerate() {
+        dec.push_bit(b, i as f64);
+    }
+    dec.report()
+}
+
+/// Uniform random bits: the demodulated output of a subcarrier with no RDS on it.
+fn random_bits(rng: &mut hk_dsp::synth::Rng, n: usize) -> Vec<u8> {
+    (0..n).map(|_| (rng.next_u64() & 1) as u8).collect()
+}
+
+/// The ticket's noisy slice: 45 s of structureless bits (what the oracle saw on 98.085 MHz — no
+/// RDS) with one short run of real-looking groups inside it, so the decoder gets exactly the
+/// "two or three chance CRC passes" the false commit rested on, surrounded by noise rather than
+/// cut out clean. The PI is reported, provisional, and never an identity.
+#[test]
+fn t962_a_noisy_slice_with_a_few_chance_passes_is_not_an_identity() {
+    let mut rng = hk_dsp::synth::Rng::new(98_085);
+    let half = (22.5 * RDS_BITRATE_BD) as usize;
+    let mut bits = random_bits(&mut rng, half);
+    for g in 0..5 {
+        bits.extend(group_0a_bits(0xC0DE, b"HACKRIFF", g % 4));
+    }
+    bits.extend(random_bits(&mut rng, half));
+    let rds = report_bits(GroupConfig::default(), &bits);
+    let pi = rds.pi.expect("[T-962] the reading is reported");
+    assert_eq!(pi.hex(), "C0DE", "[{T962}] {rds:?}");
+    assert!(
+        pi.votes < GroupConfig::default().pi_commit_votes && pi.provisional,
+        "[{T962}] {pi:?}"
+    );
+    let s = session_with(rds);
+    let mut repo = Repository::open_in_memory().unwrap();
+    write_session(&mut repo, &s, &RecordContext::default()).unwrap();
+    assert!(
+        repo.emitter_by_identity(&pi_c0de()).unwrap().is_none(),
+        "[{T962}] a few chance passes in 45 s of noise placed an identity"
+    );
+    assert!(repo.decodes_for_identity(&pi_c0de()).unwrap().is_empty());
+}
+
+/// One bar for every RDS producer: the decoder's default, the scheme's bar (which the `rds`
+/// recipe's `messages` writer applies) and the documented 10 are the same number — and a decoder
+/// configured *below* it cannot write an identity the scheme's bar refuses.
+#[test]
+fn t962_one_bar_and_a_weaker_config_cannot_lower_it() {
+    assert_eq!(
+        (
+            GroupConfig::default().pi_commit_votes,
+            IdentityScheme::RdsPi.commit_votes(),
+            hk_model::RDS_PI_COMMIT_VOTES,
+        ),
+        (10, 10, 10),
+        "[{T962}]"
+    );
+    let weak = GroupConfig {
+        pi_commit_votes: 3,
+        ..GroupConfig::default()
+    };
+    let mut bits = Vec::new();
+    for g in 0..5 {
+        bits.extend(group_0a_bits(0xC0DE, b"HACKRIFF", g % 4));
+    }
+    let rds = report_bits(weak, &bits);
+    let pi = rds.pi.expect("PI");
+    assert!(
+        pi.committed() && pi.votes == 3,
+        "[{T962}] the weak config commits: {pi:?}"
+    );
+    let s = session_with(rds);
+    let mut repo = Repository::open_in_memory().unwrap();
+    let w = write_session(&mut repo, &s, &RecordContext::default()).unwrap();
+    assert!(
+        repo.emitter_by_identity(&pi_c0de()).unwrap().is_none(),
+        "[{T962}] the record writer applied the decoder's weaker bar instead of the scheme's"
+    );
+    let row = w
+        .decode_ids
+        .iter()
+        .map(|d| repo.decode(*d).unwrap())
+        .find(|d| d.frame_model == "rds-pi")
+        .unwrap();
+    assert_eq!(
+        (
+            &row.metadata["pi_provisional"],
+            &row.metadata["identity_provisional"],
+            &row.metadata["identity_votes"],
+            &row.metadata["identity_votes_needed"],
+        ),
+        (&json!(true), &json!(true), &json!(3), &json!(10)),
+        "[{T962}] {:?}",
+        row.metadata
     );
 }

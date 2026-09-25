@@ -901,9 +901,12 @@ impl ConfirmPolicy {
     /// question only the decoder can answer — one ADS-B squitter's 24-bit CRC is strong where a
     /// handful of RDS blocks, whose check is 10 bits and whose lattice can mis-lock, is not. So
     /// **a decoder must not attach a [`hk_model::DecodedIdentity`] to evidence it has not
-    /// committed**, and the bound lives beside the decoder that states it: for RDS it is
-    /// `hk_demod::rds::GroupConfig::pi_commit_votes` (10 agreeing CRC-valid PI blocks, ≈ 0.9 s of
-    /// a real station at 11.4 groups/s), and a PI below it is written as provisional with its
+    /// committed**, and the bound is the scheme's, [`hk_model::IdentityScheme::commit_votes`]: for
+    /// an RDS PI [`hk_model::RDS_PI_COMMIT_VOTES`] (10 agreeing CRC-valid groups, ≈ 0.9 s of a real
+    /// station at 11.4 groups/s), applied by **both** producers — `hk-demod`'s record writer to
+    /// the always-on chain's PI vote, and the recipe `messages` writer
+    /// ([`crate::recipes::messages::IdentityTally`]) to every output naming `rds-pi` (the path the
+    /// 98.088 MHz false confirm actually took). A PI below it is written as provisional with its
     /// vote count and **no identity**, so this route never sees it. ADR-0022 §6's
     /// `analytic_holdout_bits` budget is not the bound that applies: it governs
     /// [`Self::synthesized`], the route for a *synthesized* pipeline whose searched check stage

@@ -52,10 +52,19 @@
 //!
 //! **Resolution.** Like `/api/inventory/<id>`: a merged id resolves to its live survivor
 //! ([`hk_model::Repository::live_emitter_id`]), 404 `not_found` for an unknown or unparsable id.
-//! **Never a lookup that confirms a withheld identity** (T-036): an emitter with no decoded
-//! identity, or whose identity is withheld from [`IdentityAccess::Standard`] (the access every
-//! unauthenticated-beyond-the-token caller gets here, matching every other inventory read),
-//! answers `{"decodes": []}` rather than naming the identity through its decodes.
+//! **Never a lookup that confirms a withheld identity** (T-036): an emitter whose identity is
+//! withheld from [`IdentityAccess::Standard`] (the access every unauthenticated-beyond-the-token
+//! caller gets here, matching every other inventory read) answers `{"decodes": []}` rather than
+//! naming the identity through its decodes.
+//!
+//! **A provisional identity is served (T-962).** An emitter with no decoded identity answers the
+//! rows linked to it that carry a *provisional* identity — a reading whose vote has not reached
+//! its scheme's bar (`hk_model::IdentityScheme::commit_votes`; RDS PI: 10 agreeing CRC-valid
+//! groups), written with no identity and `identity_provisional: true`, `identity_value`,
+//! `identity_votes`, `identity_votes_needed` in its fields — so the panel can say "PI 1704
+//! (3 groups, provisional)". There is no identity on such an emitter to confirm or withhold, and
+//! each row is gated at `Standard` like every other. Otherwise (nothing linked, or nothing
+//! provisional) it answers `{"decodes": []}`.
 //!
 //! **Evidence rule (T-185).** A CRC-invalid group never reaches a recipe `messages` output (the
 //! `fields` block's `skip_invalid` drops it before a row is built, and a recipe row is always
@@ -68,8 +77,8 @@ use std::collections::BTreeMap;
 use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::{
-    CrcStatus, Decode, EmitterId, IdentityAccess, InventoryIdentity, RepoError, Repository,
-    TimeRange,
+    CrcStatus, Decode, EmitterId, IdentityAccess, InventoryIdentity, LinkTarget, RepoError,
+    Repository, TimeRange,
 };
 use serde_json::{Map, Value, json};
 
@@ -135,13 +144,39 @@ fn read(state: &ApiState, id: EmitterId, q: &Params) -> Result<Value, Fail> {
         .map_err(repo_fail)?;
     let identity = match entry.identity {
         InventoryIdentity::Clear { identity, .. } => identity,
-        // No decoded identity, or withheld: never confirm it by naming its decodes.
-        InventoryIdentity::None | InventoryIdentity::Withheld { .. } => {
+        // No decoded identity yet: what it has is at most a provisional reading (T-962) — rows a
+        // decoder recorded and linked to this emitter while their identity's vote was below its
+        // scheme's bar. Served so "PI 1704 (3 groups, provisional)" is visible; there is no
+        // identity here to confirm or withhold.
+        InventoryIdentity::None => {
+            let decodes = provisional_decodes(&repo, live).map_err(repo_fail)?;
+            return Ok(json!({ "decodes": latest_per_frame(decodes, window) }));
+        }
+        // Withheld: never confirm it by naming its decodes.
+        InventoryIdentity::Withheld { .. } => {
             return Ok(json!({ "decodes": [] }));
         }
     };
     let decodes = repo.decodes_for_identity(&identity).map_err(repo_fail)?;
     Ok(json!({ "decodes": latest_per_frame(decodes, window) }))
+}
+
+/// The decodes linked to identity-less emitter `id` that carry a **provisional** identity
+/// (`identity_provisional: true` in their metadata, T-962), oldest first, gated at
+/// [`IdentityAccess::Standard`] like every other read here.
+fn provisional_decodes(repo: &Repository, id: EmitterId) -> Result<Vec<Decode>, RepoError> {
+    let mut out = Vec::new();
+    for link in repo.emitter_links(id)? {
+        let LinkTarget::Decode(d) = link.target else {
+            continue;
+        };
+        let d = repo.decode(d)?;
+        if d.identity.is_none() && d.metadata["identity_provisional"] == json!(true) {
+            out.push(d);
+        }
+    }
+    out.sort_by(|a, b| a.t.cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
+    Ok(out)
 }
 
 /// The latest decode per `(decoder_id, frame_model)` **within `window`**, newest first.

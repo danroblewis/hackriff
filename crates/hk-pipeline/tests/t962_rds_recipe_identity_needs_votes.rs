@@ -1,0 +1,259 @@
+//! T-962 (SIGNAL-062), the path the false commit actually took: the **`rds` recipe's**
+//! `messages` outputs may not make an RDS PI an identity on fewer agreeing groups than the
+//! always-on `hk-rds` decoder may.
+//!
+//! **The defect.** The explorer started `POST /api/pipelines {recipe_id: "rds"}` on every station
+//! (journal 2026-09-25), and 98.088 MHz read "PI committed 1704 (Confirmed, from about 3 groups
+//! earlier)" while an independent oracle found no RDS on the clip. `rds.recipe.json`'s consensus
+//! node passes a PI after two agreeing groups; every `messages` output declares
+//! `identity: {scheme: rds-pi}`, so each group became a Decode row **carrying the identity**, and
+//! `ConfirmPolicy`'s route A confirms on one such row.
+//!
+//! **The bar.** One for every producer: [`hk_model::RDS_PI_COMMIT_VOTES`] (10) agreeing CRC-valid
+//! frames per identity, applied by the recipe writer (`IdentityTally`) exactly as `hk-demod`'s
+//! record writer applies it to the chain's PI vote. Below it the row is written with no identity
+//! and `identity_provisional: true` plus its vote, linked to the pipeline's target emitter.
+//!
+//! Driven through the real `recipes/rds.recipe.json` and its `group-info` output's writer (the
+//! same `MessagesSink` a running pipeline uses), with the layer trees the consensus node emits.
+
+mod common;
+
+use std::sync::Arc;
+
+use common::TempDir;
+use hk_blocks::{FrameInfo, Output, PortInfo, PortVec};
+use hk_model::{
+    ContentClass, CrcStatus, DecodedIdentity, EmitterId, Fingerprint, IdentityScheme,
+    LifecycleState, LinkTarget, MeasurementKey, RDS_PI_COMMIT_VOTES, Repository, Sighting,
+    TimeRange, Timestamp,
+};
+use hk_pipeline::inventory::{ConfirmEvidence, ConfirmPolicy, ConfirmRoute};
+use hk_pipeline::recipes::messages::MessagesSink;
+use hk_pipeline::recipes::runtime::{PipelineStats, parse_recipe};
+use hk_pipeline::recipes::taps::FrameCtx;
+use hk_recipe::PortType;
+use hk_stream::inspector::{FitStatus, LayerNode, LayerTree, NodeType};
+use serde_json::{Value, json};
+
+const T962: &str = "T-962";
+const PI: u16 = 0x1704;
+const CENTER: f64 = 98.085e6;
+const T0_NS: i64 = 1_789_000_000_000_000_000;
+
+fn rds_recipe() -> hk_recipe::Recipe {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../recipes/rds.recipe.json");
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    parse_recipe(doc).unwrap()
+}
+
+/// One CRC-valid 0A group as the consensus node (`agree`) passes it: PI committed, group fields.
+fn group_tree(pi: u16) -> Arc<LayerTree> {
+    let node = |id: u32, path: &str, bits: u32, value: u64| LayerNode {
+        id,
+        parent: None,
+        name: path.into(),
+        path: path.into(),
+        ty: NodeType::Uint,
+        bits: [0, bits],
+        bytes: [0, bits.div_ceil(8)],
+        value: Some(json!(value)),
+        text: None,
+        label: None,
+        error: false,
+    };
+    Arc::new(LayerTree {
+        nodes: vec![
+            node(0, "pi", 16, u64::from(pi)),
+            node(1, "group_type", 4, 0),
+            node(2, "version", 1, 0),
+            node(3, "tp", 1, 0),
+            node(4, "pty", 5, 10),
+        ],
+        byte_index: Vec::new(),
+        fit: FitStatus::Ok,
+        errors: Vec::new(),
+    })
+}
+
+/// The station's inventory entry, placed by occupancy with no identity: the `{emitter_id}` the
+/// explorer started the recipe on.
+fn seed_station(repo: &mut Repository) -> EmitterId {
+    let t = Timestamp::from_unix_nanos(T0_NS);
+    let sighting = Sighting {
+        source: LinkTarget::Detection(hk_model::DetectionId::new()),
+        seen: TimeRange::new(t, t),
+        count: 1,
+        f_center_hz: CENTER,
+        bandwidth_hz: 180e3,
+        fingerprint: Some(Fingerprint::new(CENTER, 180e3)),
+        identity: None,
+        context: None,
+        classification: None,
+        tags: Vec::new(),
+    };
+    repo.record_sighting_measured(&sighting, &MeasurementKey::new("t962-recipe"), None)
+        .unwrap()
+        .emitter_id
+}
+
+/// Runs the `group-info` writer targeting `station` over `groups` agreeing groups (frames
+/// `first..first + groups`), and waits for it to store them (dropping the sink joins it).
+fn feed(db: &std::path::Path, station: EmitterId, first: usize, groups: usize) {
+    let recipe = rds_recipe();
+    let sink = MessagesSink::spawn_standalone_targeting(
+        db,
+        &recipe,
+        "group-info",
+        ContentClass::Unrestricted,
+        Some(station),
+        16,
+        Arc::new(PipelineStats::default()),
+        |_, _| {},
+    );
+    let mut sink = sink.unwrap();
+    let mut out = Output::for_port(&PortInfo {
+        ty: PortType::Frames,
+        rate_hz: 1187.5,
+        max_items: 64,
+        hold_items: 0,
+    });
+    let PortVec::Frames(buf) = &mut out.data else {
+        unreachable!("a frames port")
+    };
+    for i in first..first + groups {
+        // One group every 104 bits at 1187.5 Bd.
+        let mut info = FrameInfo::new(i as u64, 104 * i as u64, 0);
+        info.bit_len = 104;
+        info.check = CrcStatus::Valid;
+        info.layers = Some(group_tree(PI));
+        buf.push(&[0u8; 13], info);
+    }
+    let ctx = FrameCtx {
+        decoder: "recipe:rds@1",
+        frame_model: "rds",
+        emitter_id: Some(station),
+        channel_hz: CENTER,
+        channels_hz: &[],
+        recipe_version: 1,
+        edit_rev: 0,
+    };
+    let t_of = |bit: f64| Timestamp::from_unix_nanos(T0_NS + (bit / 1187.5 * 1e9) as i64);
+    assert_eq!(sink.publish(&out, &ctx, &t_of), groups as u64);
+    drop(sink);
+}
+
+fn pi_1704() -> DecodedIdentity {
+    DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: "1704".into(),
+    }
+}
+
+/// Route A alone: the evidence `ConfirmInventory::review` builds, other routes empty.
+fn identity_decision(repo: &Repository, id: EmitterId) -> Option<(ConfirmRoute, String)> {
+    let ev = ConfirmEvidence {
+        identity: repo.identity_decode_evidence(id).unwrap(),
+        track: None,
+        verified: None,
+    };
+    ConfirmPolicy::default().decide_route(&ev)
+}
+
+/// The rows linked to `station`, oldest first.
+fn linked_rows(repo: &Repository, station: EmitterId) -> Vec<hk_model::Decode> {
+    let mut rows: Vec<_> = repo
+        .emitter_links(repo.live_emitter_id(station).unwrap())
+        .unwrap()
+        .into_iter()
+        .filter_map(|l| match l.target {
+            LinkTarget::Decode(d) => repo.decode(d).ok(),
+            _ => None,
+        })
+        .collect();
+    rows.sort_by_key(|d| d.t);
+    rows
+}
+
+#[test]
+fn t962_three_recipe_groups_do_not_confirm_and_ten_do() {
+    let dir = TempDir::new("t962-recipe");
+    let db = dir.0.join("hk.sqlite");
+    let station = {
+        let mut repo = Repository::open(&db).unwrap();
+        seed_station(&mut repo)
+    };
+
+    // The 98.088 MHz evidence: three agreeing CRC-valid groups through the recipe.
+    feed(&db, station, 0, 3);
+    let repo = Repository::open(&db).unwrap();
+    let placed = repo.emitter_by_identity(&pi_1704()).unwrap();
+    assert!(
+        placed.is_none(),
+        "[{T962}] three rds-recipe groups placed an Emitter under rds-pi:1704 ({:?}) — the \
+         98.088 MHz 'PI committed 1704 (Confirmed, from about 3 groups)'. An RDS PI needs \
+         {RDS_PI_COMMIT_VOTES} agreeing CRC-valid groups whichever decoder heard it; route A \
+         would confirm on this: {:?}",
+        placed.as_ref().map(|e| e.id),
+        placed.as_ref().map(|e| identity_decision(&repo, e.id)),
+    );
+    assert_eq!(identity_decision(&repo, station), None, "[{T962}]");
+    assert!(repo.decodes_for_identity(&pi_1704()).unwrap().is_empty());
+    assert_eq!(
+        repo.emitter_lifecycle_state(station).unwrap(),
+        LifecycleState::Candidate,
+        "[{T962}] the station stays a Candidate"
+    );
+    // The reading is kept: three rows linked to the station, no identity, each with its vote —
+    // what "PI 1704 (3 groups, provisional)" is read from.
+    let rows = linked_rows(&repo, station);
+    let votes: Vec<_> = rows
+        .iter()
+        .map(|d| {
+            assert!(d.identity.is_none(), "[{T962}] {d:?}");
+            assert_eq!(d.metadata["identity_provisional"], json!(true), "{d:?}");
+            assert_eq!(d.metadata["identity_value"], json!("1704"), "{d:?}");
+            assert_eq!(d.metadata["identity_scheme"], json!("rds-pi"), "{d:?}");
+            assert_eq!(
+                d.metadata["identity_votes_needed"],
+                json!(RDS_PI_COMMIT_VOTES),
+                "{d:?}"
+            );
+            d.metadata["identity_votes"].as_u64().unwrap()
+        })
+        .collect();
+    assert_eq!(votes, [1, 2, 3], "[{T962}] one vote per agreeing group");
+    drop(repo);
+
+    // The same station keeps transmitting: one writer (one pipeline run) reaches the bar at its
+    // tenth agreeing group — under a second of real lock at 11.4 groups/s.
+    let dir2 = TempDir::new("t962-recipe-strong");
+    let db2 = dir2.0.join("hk.sqlite");
+    let station2 = {
+        let mut repo = Repository::open(&db2).unwrap();
+        seed_station(&mut repo)
+    };
+    feed(&db2, station2, 0, RDS_PI_COMMIT_VOTES as usize);
+    let repo = Repository::open(&db2).unwrap();
+    let e = repo
+        .emitter_by_identity(&pi_1704())
+        .unwrap()
+        .expect("[T-962] ten agreeing groups make the PI an identity");
+    let (route, reason) =
+        identity_decision(&repo, e.id).expect("[T-962] and route A confirms, exactly as before");
+    assert_eq!(route, ConfirmRoute::Identity, "[{T962}] {reason}");
+    let with_identity = repo.decodes_for_identity(&pi_1704()).unwrap();
+    assert_eq!(
+        with_identity.len(),
+        1,
+        "[{T962}] only the tenth row carries the identity"
+    );
+    assert_eq!(
+        with_identity[0].metadata["identity_provisional"],
+        json!(false)
+    );
+    assert_eq!(
+        with_identity[0].metadata["identity_votes"],
+        json!(RDS_PI_COMMIT_VOTES)
+    );
+}

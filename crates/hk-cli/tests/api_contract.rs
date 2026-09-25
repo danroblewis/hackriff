@@ -2890,6 +2890,22 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
             row["source_session"].is_null() || row["source_session"].is_string(),
             "{row}"
         );
+        // T-962: every vote-gated identity row states its vote and the bar, and `provisional`
+        // is exactly "below the bar" (docs/api.md, "Provisional identity").
+        let f = &row["fields"];
+        if row["frame_model"] == json!("rds-pi") {
+            assert!(f["pi_provisional"].is_boolean(), "{row}");
+            assert_eq!(f["pi_provisional"], f["identity_provisional"], "{row}");
+        }
+        if let Some(provisional) = f.get("identity_provisional") {
+            let votes = f["identity_votes"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let needed = f["identity_votes_needed"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            assert_eq!(provisional, &json!(votes < needed), "{row}");
+        }
     }
     let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
     assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
