@@ -28409,6 +28409,8 @@ tasks:
       FOUND 2026-09-25 by the explorer (UI, Confirmed list, shots/0503-fm-lists.png): decoded station identity is not shown in the inventory lists - no PI or PS in any Confirmed row; rows with a CRC-valid PI (98.08 PI 1704, 106.11 PI 1323) read 'unknown' '100% unk'. The decoded identity is the most useful thing a user scans for and it is invisible. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, 03:43-05:16, live HackRF in SF) - sections named below; fm-gap.json, shots/, hk-serve-run*.log beside it. (section 'FM: Listen, the UI decode path ...').
       DELIVER: list rows show the backend's decoded identity (PI/PS, callsign, MMSI - whatever the emitter's decode record carries, with its provisional/vote state) next to the family; thin client, fields from docs/api.md (add them to the inventory response if absent - api.md + api_contract.rs together). The 'unknown 100%' contradiction itself is backend (T-953 / the split-row ticket). Assert the request and the rendered row in ui/test; red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      Fix round (aa87c394): F1 label = latest hk-rds rds-pi session summary's voted PS + its own frame share (identity_label_share, renamed from identity_confidence); real-writer test t967_identity_label red on fd17a915 (T NAME/null) green now. N1 key-guessing removed (rds-pi only). N2 chip 'KROQ · 1694 · 75% of frames'. N3 class computed once; /api/inventory 5k rows 33.3->11.6 ms, 20k 113.2->25.4 ms.
   - id: T-968
     milestone: M2-hardening
     title: hk-store a_disk_stall_longer_than_the_disconnect_policy test fails alone (600 ms wall-clock loop decides whether drops happened)
