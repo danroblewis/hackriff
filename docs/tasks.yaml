@@ -26050,7 +26050,7 @@ tasks:
   - id: T-869
     milestone: MAUTO
     title: "LP-5: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-868
@@ -26087,6 +26087,7 @@ tasks:
       Observed, not chased: The audio clock on the recipe path is still the one real gap before stage 5's default flip (ADR-0015 section 12.9's stage-4 note): sample_index counts frames the sink published, so a closed squelch is not LP-1 section 5's flagged jump and the status identity does not hold. Deriving the index from capture time was tried and rejected with evidence: it fixes the conformance identity but injects a 20 ms splice into continuous audio, dropping T-868's parity correlation 0.96 -> 0.6234. | An ephemeral audio pipeline is charged to the CPU budget twice (the opener holds a ChainKind::Listen slot, the pipeline claims its own ChainKind::Recipe one), so a near-full budget could refuse a pipeline start 503 busy where the legacy chain would have been admitted. Flag-on only; folding the two is LP-8's listener-budget mapping. | Attaching matches on the target (emitter, or a channel containing the chosen centre), not on which recipe the chooser picked. Harmless while analog-wfm is the only audio recipe, and documented as a deliberate choice in recipes/session.rs; a second audio recipe forces the decision (attach to a differently-recipe'd pipeline, or replace it). | recipes/analog-wfm.recipe.json still declares refine {node: crc, metric: error_rate}, which the runtime validates but never runs (T-870 runs only {builtin}), so the ephemeral pipeline is refined at open (the chooser's probe refinement, stored on the emitter and in the header) but never re-refined while it runs, unlike the legacy chain. | listen?pipeline=<id> (ADR-0015 section 12.4's additive row) is still not implemented; attaching is by target, which covers the two-tabs case.
       Use cases: SIGNAL-062
       Resources: 6 CPU-s, peak 0.3 GB
+    commit: fff63356
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
