@@ -483,8 +483,10 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // T-904: nor the 0019 retention objects — the rollup table, and five indexes on tables
         // 0001 creates (so DROP INDEX, like 0012's; 0019's own DROP of the survey-only index is
         // IF EXISTS, so replaying it is harmless).
+        // T-913: nor the 0020 explanation↔detection pin table (its index goes with it).
         conn.execute_batch(
-            "DROP TABLE IF EXISTS detection_rollup; \
+            "DROP TABLE IF EXISTS explanation_detection; \
+             DROP TABLE IF EXISTS detection_rollup; \
              DROP INDEX IF EXISTS idx_detection_t_end; \
              DROP INDEX IF EXISTS idx_detection_survey_t_end; \
              DROP INDEX IF EXISTS idx_demodulation_detection; \

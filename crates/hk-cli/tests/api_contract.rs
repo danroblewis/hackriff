@@ -893,6 +893,11 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         storage["wal_bytes"].is_u64(),
         "a file database in WAL mode has a -wal file: {storage}"
     );
+    // T-913: the row counts carry the time they were taken; the sizes beside them are current.
+    assert!(
+        storage["detection_rows_counted_s"].is_f64(),
+        "storage.detection_rows_counted_s: {storage}"
+    );
     for field in ["oldest_detection_s", "newest_detection_s"] {
         assert!(
             storage[field].is_null() || storage[field].is_f64(),

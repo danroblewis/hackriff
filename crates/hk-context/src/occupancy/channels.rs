@@ -100,19 +100,35 @@ impl DetectionExtent {
 }
 
 impl DetectionExtent {
-    /// From a T-904 rollup of pruned detections: its time hull and frequency envelope, the mean
-    /// OBW and mean SNR, and suspect only when every member carried a common §2.6 suspect flag
-    /// (`flags_all`) — a rollup cannot say more than that, and the DC-twin refutation, which needs
-    /// each member's own tuning, is not applied to it.
+    /// From a T-904 rollup of pruned detections: its time hull, the mean OBW and mean SNR, and
+    /// suspect only when every member carried a common §2.6 suspect flag (`flags_all`) — a rollup
+    /// cannot say more than that, and the DC-twin refutation, which needs each member's own
+    /// tuning, is not applied to it.
+    ///
+    /// T-913: the extent is `centered(f_center_mean, obw_mean)`, **the same construction as
+    /// [`Self::of`]**, not the rollup's `f_lo..f_hi` envelope. The envelope is the union of every
+    /// member's band — over a drifting or hopping run it is far wider than any one detection ever
+    /// was — so an extent built from it masked, matched and learned differently from the per-frame
+    /// rows it stands in for: crossing the retention age would visibly change the answer. The
+    /// envelope is still on [`hk_model::DetectionRollup`] for a reader that wants the hull.
     pub fn of_rollup(r: &hk_model::DetectionRollup) -> Self {
         let obw = if r.obw_mean_hz.is_finite() && r.obw_mean_hz > 0.0 {
             r.obw_mean_hz
         } else {
             0.0
         };
+        let centre = if r.f_center_mean_hz.is_finite() {
+            r.f_center_mean_hz
+        } else {
+            0.5 * (r.freq.lo_hz + r.freq.hi_hz)
+        };
         Self {
             time: r.time,
-            freq: r.freq,
+            freq: if obw > 0.0 {
+                FreqRange::centered(centre, obw)
+            } else {
+                r.freq
+            },
             obw_hz: obw,
             snr_db: if r.snr_mean_db.is_finite() {
                 r.snr_mean_db
@@ -1056,7 +1072,21 @@ mod tests {
         };
         let e = DetectionExtent::of_rollup(&r);
         assert_eq!(e.time, r.time);
-        assert_eq!(e.freq, r.freq);
+        // T-913: the same construction as a per-frame detection's — centre ± half the OBW — not
+        // the 40 kHz envelope the run's members drifted over. A rollup must mask, match and be
+        // learned from exactly as the rows it stands in for did; here that is the 12 kHz band the
+        // signal actually occupied, so crossing the retention age does not widen it.
+        assert_eq!(e.freq, FreqRange::centered(433.92e6, 12e3));
+        assert!(
+            e.freq.hi_hz - e.freq.lo_hz < r.freq.hi_hz - r.freq.lo_hz,
+            "the envelope {:?} is the union of every member's band, not any one detection's",
+            r.freq
+        );
+        assert_eq!(
+            e.freq,
+            DetectionExtent::of(&detection_like(&r)).freq,
+            "a rollup and the detections it replaces must read as the same kind of extent"
+        );
         assert_eq!((e.obw_hz, e.snr_db), (12e3, 14.0));
         assert!(
             !e.suspect,
@@ -1064,6 +1094,28 @@ mod tests {
         );
         r.flags_all = clipped;
         assert!(DetectionExtent::of_rollup(&r).suspect);
+    }
+
+    /// A per-frame detection with the rollup's mean centre and OBW: what the rollup stands in for.
+    fn detection_like(r: &hk_model::DetectionRollup) -> Detection {
+        Detection {
+            id: hk_model::DetectionId::new(),
+            survey_id: r.survey_id,
+            time: r.time,
+            f_center_hz: r.f_center_mean_hz,
+            obw_hz: r.obw_mean_hz,
+            xdb_bandwidth_hz: None,
+            xdb_level_db: None,
+            snr_peak_db: r.snr_peak_max_db,
+            snr_mean_db: r.snr_mean_db,
+            peak_level_dbfs: r.peak_level_dbfs_max as f32,
+            peak_level_dbm: None,
+            sk: None,
+            clip_count: 0,
+            detector_version: "test@1".into(),
+            provenance_ref: r.provenance_ref,
+            flags: DetectionFlags::default(),
+        }
     }
 
     fn det_snr(center: f64, obw: f64, snr_db: f64, suspect: bool) -> DetectionExtent {

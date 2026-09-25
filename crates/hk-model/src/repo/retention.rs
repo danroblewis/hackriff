@@ -19,13 +19,22 @@
 //! 2. **A row referenced by id** — decode provenance (`demodulation.detection_id`), a recording's
 //!    trigger, a retune verdict, a direct emitter link, an annotation, an anomaly subject, a
 //!    classification's input, an observation-ledger source. These are **pinned**: never pruned.
-//! 3. **A time-windowed region read** — occupancy (`/api/occupancy` spans, the channel plan) and
-//!    the multipath relation. Past the retention age these read the [`DetectionRollup`]s instead:
-//!    one row per contiguous run of one track's detections (same survey and provenance, no gap
-//!    over [`DetectionRetention::rollup_gap_ns`], no longer than
+//! 3. **A time-windowed region read** — occupancy (`/api/occupancy` spans, the channel plan).
+//!    Past the retention age it reads the [`DetectionRollup`]s instead: one row per contiguous run
+//!    of one track's detections (same survey and provenance, no gap over
+//!    [`DetectionRetention::rollup_gap_ns`], no longer than
 //!    [`DetectionRetention::rollup_span_ns`]) carrying the time hull, the frequency envelope,
 //!    means/maxima, the count and the flags. Coarser than the rows, and honest about it: a rollup
-//!    is a summary, never presented as a detection.
+//!    is a summary, never presented as a detection. A rollup covers only rows that were
+//!    **deleted**: a row the pass kept closes the run it falls in (T-913 [`Barriers`]), so the two
+//!    never count the same air twice — nor does a rollup itself, whose `on_air_ns` is the union of
+//!    its members' intervals, not their sum.
+//!
+//!    The multipath relation (`hk-context::multipath`) is **not** in this class: it reads
+//!    per-frame rows only inside its own window (60 s by default, far inside the run's
+//!    `MIN_RETENTION_S` floor of 10 min) and never reads rollups — a rollup has no per-frame
+//!    arrival time, which is the whole of what it measures. If that window is ever widened past
+//!    the retention age it will simply see fewer rows, never rollups.
 //!
 //! Tracks, emitters, presence intervals, the observation ledger and every link are **durable**
 //! and untouched: they are the history catalogue (workflow #3), and a one-off burst stays a track
@@ -179,10 +188,14 @@ pub struct DetectionStorage {
     pub free_bytes: u64,
     /// The `-wal` file's bytes (`None`: in-memory database or no WAL file).
     pub wal_bytes: Option<u64>,
-    /// Detection rows.
+    /// Detection rows (0 when [`Self::rows_counted`] is false).
     pub detection_rows: u64,
-    /// Rollup rows.
+    /// Rollup rows (0 when [`Self::rows_counted`] is false).
     pub rollup_rows: u64,
+    /// Whether the two row counts were actually counted on this call (T-913: a `count(*)` is a
+    /// full scan of the smallest index and holds a read snapshot for its duration, so the run's
+    /// status refresh does not pay it every time).
+    pub rows_counted: bool,
     /// The oldest-ending stored detection's extent (the key the policy ages by).
     pub oldest_detection: Option<TimeRange>,
     /// The newest stored `t_end` (the policy's watermark).
@@ -202,7 +215,9 @@ pub struct DetectionRollup {
     pub provenance_ref: ProvenanceId,
     /// Time hull — **not** the time on air (that is [`Self::on_air_ns`]).
     pub time: TimeRange,
-    /// Summed duration of the members, ns: the time on air inside the hull.
+    /// Time on air inside the hull, ns: the **union** of the members' intervals (T-913), never
+    /// their sum — co-timed members (an FSK signal's two lobes in one frame) are one span of air,
+    /// and the figure never exceeds `t_end - t_start`.
     pub on_air_ns: i64,
     /// Frequency envelope (min `f_lo` .. max `f_hi`).
     pub freq: FreqRange,
@@ -309,7 +324,9 @@ const EMITTER_TAIL_CUT_SQL: &str = "\
        WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
      ) ORDER BY t_start DESC LIMIT 1 OFFSET ?2";
 
-/// Anything that names this detection by id (class 2). Every lookup is indexed.
+/// Anything that names this detection by id (class 2). Every lookup is indexed — including an
+/// explanation's [`crate::Evidence::Detection`], which lives in an opaque JSON body and is written
+/// out to `explanation_detection` for exactly this check (T-913, migration 0020).
 const PINNED_SQL: &str = "\
      SELECT EXISTS (SELECT 1 FROM emitter_link WHERE target_kind = 'detection' AND target_id = ?1) \
          OR EXISTS (SELECT 1 FROM recording WHERE trigger_detection_id = ?1) \
@@ -320,7 +337,8 @@ const PINNED_SQL: &str = "\
          OR EXISTS (SELECT 1 FROM emitter_classification \
                     WHERE input_kind = 'detection' AND input_id = ?1) \
          OR EXISTS (SELECT 1 FROM emitter_observation \
-                    WHERE source_kind = 'detection' AND source_id = ?1)";
+                    WHERE source_kind = 'detection' AND source_id = ?1) \
+         OR EXISTS (SELECT 1 FROM explanation_detection WHERE detection_id = ?1)";
 
 /// The rollup a track's next pruned row may extend: its newest.
 const LAST_ROLLUP_SQL: &str = "\
@@ -341,6 +359,86 @@ const UNTRACKED_ROLLUP_SQL: &str = "\
        AND f_lo <= ?4 AND f_hi >= ?5 \
      ORDER BY t_start DESC, rollup_id DESC LIMIT 1";
 
+/// T-913: the **kept** rows a rollup must not span. A rollup summarises rows that were
+/// *deleted*; a row that survived inside its hull would be counted twice by a region read (once
+/// as itself, once inside the summary), contradicting "never count the same air twice". So a kept
+/// row is a barrier: the run it falls in is closed, and the next pruned row of that track — or,
+/// untracked, of that emission — starts a new rollup after it.
+///
+/// Kept in memory for the pass (candidates arrive in `t_end` order, so a barrier is seen before
+/// any row that could span it) and bounded: only the newest barrier per track is needed, and the
+/// untracked list is capped at [`MAX_UNTRACKED_BARRIERS`] — dropping the oldest can only restore
+/// the old, harmless over-count, never delete a row that should have been kept. A rollup stored
+/// by an *earlier pass* is checked against the table itself ([`survives_between`]).
+#[derive(Default)]
+struct Barriers {
+    /// Track → its newest kept row's `t_end`.
+    tracked: HashMap<[u8; 16], i64>,
+    /// Kept rows no track links: `(survey, provenance, f_lo, f_hi, t_end)`, oldest first.
+    untracked: Vec<([u8; 16], [u8; 16], f64, f64, i64)>,
+}
+
+/// How many untracked barriers one pass remembers.
+const MAX_UNTRACKED_BARRIERS: usize = 512;
+
+impl Barriers {
+    /// Records a row the pass kept.
+    fn note(&mut self, c: &Candidate) {
+        if c.tracks.is_empty() {
+            if self.untracked.len() >= MAX_UNTRACKED_BARRIERS {
+                self.untracked.remove(0);
+            }
+            self.untracked
+                .push((c.survey, c.provenance, c.f_lo, c.f_hi, c.t_end));
+            return;
+        }
+        for &t in &c.tracks {
+            let e = self.tracked.entry(t).or_insert(c.t_end);
+            *e = (*e).max(c.t_end);
+        }
+    }
+
+    /// Whether folding `c` into `acc` would put a kept row inside the resulting hull.
+    fn blocks(&self, acc: &Acc, c: &Candidate) -> bool {
+        let lo = acc.t_start.min(c.t_start);
+        let hi = acc.t_end.max(c.t_end);
+        // Strictly inside: a barrier at the very edge of the hull is not *within* it — the row
+        // after a kept row starts where the kept row ended, and must be free to open a new run.
+        let inside = |t: i64| t > lo && t < hi;
+        match acc.track {
+            Some(track) => self.tracked.get(&track).is_some_and(|&t| inside(t)),
+            None => self.untracked.iter().any(|&(s, p, f_lo, f_hi, t)| {
+                s == acc.survey
+                    && p == acc.provenance
+                    && f_lo <= acc.f_hi.max(c.f_hi)
+                    && f_hi >= acc.f_lo.min(c.f_lo)
+                    && inside(t)
+            }),
+        }
+    }
+}
+
+/// Whether any `detection` row of `survey` survives between two times (inclusive of both) — the cross-pass
+/// form of a [`Barriers`] check, run once per stored rollup rather than per row. Every row older
+/// than the candidate being placed has already been examined by this or an earlier pass, so a row
+/// still in the table there is one that was kept.
+fn survives_between(
+    conn: &Connection,
+    survey: [u8; 16],
+    after: i64,
+    before: i64,
+) -> Result<bool, RepoError> {
+    if before <= after {
+        return Ok(false);
+    }
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM detection \
+             WHERE survey_id = ?1 AND t_end >= ?2 AND t_end <= ?3)",
+        )?
+        .query_row(params![survey, after, before], |r| r.get(0))?)
+}
+
 /// The rollups one batch builds or extends: per track, and — for rows no track links (T-075
 /// short bursts stored untracked, members of tentative tracks that never confirmed) — per
 /// emission, by frequency ([`Acc::same_emission`]), never one bucket for the whole window.
@@ -356,22 +454,28 @@ impl Rollups {
         conn: &Connection,
         c: &Candidate,
         p: &DetectionRetention,
+        barriers: &Barriers,
         report: &mut PruneReport,
     ) -> Result<(), RepoError> {
         let Some(&track) = c.tracks.first() else {
-            return self.add_untracked(conn, c, p);
+            return self.add_untracked(conn, c, p, barriers);
         };
         if let std::collections::hash_map::Entry::Vacant(slot) = self.tracked.entry(track) {
             let stored = conn
                 .prepare_cached(LAST_ROLLUP_SQL)?
                 .query_row([track], Acc::stored)
                 .optional()?;
+            // T-913: not across a row an earlier pass kept.
+            let stored = match stored {
+                Some(st) if survives_between(conn, c.survey, st.t_end, c.t_start)? => None,
+                other => other,
+            };
             if let Some(s) = stored {
                 slot.insert(s);
             }
         }
         match self.tracked.get_mut(&track) {
-            Some(acc) if acc.continues(c, p) => acc.add(c),
+            Some(acc) if acc.continues(c, p) && !barriers.blocks(acc, c) => acc.add(c),
             Some(acc) => {
                 acc.flush_counted(conn, report)?;
                 *acc = Acc::of(Some(track), c);
@@ -388,8 +492,9 @@ impl Rollups {
         conn: &Connection,
         c: &Candidate,
         p: &DetectionRetention,
+        barriers: &Barriers,
     ) -> Result<(), RepoError> {
-        let fits = |a: &Acc| a.continues(c, p) && a.same_emission(c);
+        let fits = |a: &Acc| a.continues(c, p) && a.same_emission(c) && !barriers.blocks(a, c);
         if let Some(acc) = self.untracked.iter_mut().rev().find(|a| fits(a)) {
             acc.add(c);
             return Ok(());
@@ -406,6 +511,11 @@ impl Rollups {
             )
             .optional()?
             .filter(|s| fits(s) && !self.untracked.iter().any(|a| a.id == s.id));
+        // T-913: not across a row an earlier pass kept.
+        let stored = match stored {
+            Some(st) if survives_between(conn, c.survey, st.t_end, c.t_start)? => None,
+            other => other,
+        };
         let mut acc = match stored {
             Some(mut s) => {
                 s.add(c);
@@ -527,9 +637,19 @@ impl Acc {
     fn add(&mut self, c: &Candidate) {
         let n = self.n as f64;
         let mean = |m: f64, x: f64| (m * n + x) / (n + 1.0);
+        // T-913: the **union** of the members' intervals, not their sum. Co-timed rows — the two
+        // lobes of an FSK signal in one frame, both linked to one track — otherwise count the
+        // same air twice and can make `on_air_ns` exceed the hull. Candidates arrive in `t_end`
+        // order, so everything already folded in is covered up to `self.t_end`: only the part of
+        // `c` past that watermark is new. Exact for rows in time order; for an out-of-order row
+        // it under-counts rather than double-counts, and the result is clamped to the hull.
+        let covered_to = self.t_end;
+        self.on_air_ns = self
+            .on_air_ns
+            .saturating_add((c.t_end - c.t_start.max(covered_to)).max(0));
         self.t_start = self.t_start.min(c.t_start);
         self.t_end = self.t_end.max(c.t_end);
-        self.on_air_ns += c.t_end - c.t_start;
+        self.on_air_ns = self.on_air_ns.min(self.t_end - self.t_start);
         self.f_lo = self.f_lo.min(c.f_lo);
         self.f_hi = self.f_hi.max(c.f_hi);
         self.f_center_mean = mean(self.f_center_mean, c.f_center);
@@ -814,6 +934,8 @@ impl Repository {
         for (survey, watermark) in watermarks {
             let cutoff = watermark.saturating_sub(age);
             let mut cursor = (i64::MIN, [0u8; 16]);
+            // T-913: rows this pass kept, so no rollup hull spans one of them.
+            let mut barriers = Barriers::default();
             loop {
                 if !first && !between() {
                     return Ok(report);
@@ -840,16 +962,19 @@ impl Repository {
                 for (c, protected) in batch.iter().zip(tail) {
                     if protected {
                         report.kept_tail += 1;
+                        barriers.note(c);
                         continue;
                     }
                     if tracks_of(&tx, c.id)? != c.tracks {
                         report.kept_moved += 1;
+                        barriers.note(c);
                         continue;
                     }
                     let tracked = cuts.track.len();
                     if !cuts.still_current(&tx, c)? {
                         report.relinks += (tracked - cuts.track.len()) as u64;
                         report.kept_moved += 1;
+                        barriers.note(c);
                         continue;
                     }
                     let pinned: bool = tx
@@ -857,10 +982,11 @@ impl Repository {
                         .query_row([c.id], |r| r.get(0))?;
                     if pinned {
                         report.kept_pinned += 1;
+                        barriers.note(c);
                         continue;
                     }
                     if policy.rollup {
-                        rollups.add(&tx, c, policy, &mut report)?;
+                        rollups.add(&tx, c, policy, &barriers, &mut report)?;
                     }
                     tx.prepare_cached("DELETE FROM track_detection WHERE detection_id = ?1")?
                         .execute([c.id])?;
@@ -905,8 +1031,20 @@ impl Repository {
         Ok(())
     }
 
-    /// Sizes and extents of the detection store (`/api/status` `storage`).
+    /// Sizes and extents of the detection store (`/api/status` `storage`), **including** the two
+    /// row counts.
     pub fn detection_storage(&self) -> Result<DetectionStorage, RepoError> {
+        self.detection_storage_rows(true)
+    }
+
+    /// T-913: [`Self::detection_storage`], counting the rows only if asked.
+    ///
+    /// `count(*)` over `detection` is a full scan of its smallest index — seconds on a store that
+    /// ran unpruned for days — and it holds a read snapshot while it runs, which is exactly what
+    /// keeps a WAL checkpoint from completing. The sizes, the oldest row and the watermark are all
+    /// O(1) or one index seek, so the run's status refresh takes them often and the counts rarely
+    /// (`hk-pipeline::retention`), saying when it last counted.
+    pub fn detection_storage_rows(&self, count_rows: bool) -> Result<DetectionStorage, RepoError> {
         let pragma = |name: &str| -> Result<u64, RepoError> {
             Ok(self
                 .conn
@@ -943,8 +1081,17 @@ impl Repository {
             db_bytes: pragma("page_count")? * page,
             free_bytes: pragma("freelist_count")? * page,
             wal_bytes,
-            detection_rows: count("SELECT count(*) FROM detection")?,
-            rollup_rows: count("SELECT count(*) FROM detection_rollup")?,
+            detection_rows: if count_rows {
+                count("SELECT count(*) FROM detection")?
+            } else {
+                0
+            },
+            rollup_rows: if count_rows {
+                count("SELECT count(*) FROM detection_rollup")?
+            } else {
+                0
+            },
+            rows_counted: count_rows,
             oldest_detection: oldest,
             newest_detection_end: newest.map(Timestamp::from_unix_nanos),
         })

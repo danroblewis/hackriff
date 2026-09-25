@@ -46,13 +46,20 @@ pub struct RetentionSettings {
     pub pause: Duration,
     /// Time between two refreshes of the storage figures.
     pub refresh: Duration,
+    /// T-913: time between two **row counts** inside that refresh. The sizes, the oldest row and
+    /// the watermark are O(1) or one index seek and are taken every [`Self::refresh`]; `count(*)`
+    /// over `detection` is a full index scan holding a read snapshot (which is what delays a WAL
+    /// checkpoint), so it is taken on this longer cadence — and always immediately after a prune
+    /// pass, when its result is both freshest and cheapest. The reported figures say when they
+    /// were last counted (`detection_rows_counted_s`).
+    pub count_rows: Duration,
     /// The age asked for, ns, when it was below [`MIN_RETENTION_S`] and was clamped up to it.
     pub clamped_from_ns: Option<i64>,
 }
 
 impl Default for RetentionSettings {
     /// Pruning off (the library default); the policy's defaults; 10 min passes, the first after
-    /// 1 min; 20 ms between batches; storage figures every 60 s.
+    /// 1 min; 20 ms between batches; storage figures every 60 s, row counts every 10 min.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -61,6 +68,7 @@ impl Default for RetentionSettings {
             first_after: Duration::from_secs(60),
             pause: Duration::from_millis(20),
             refresh: Duration::from_secs(60),
+            count_rows: Duration::from_secs(600),
             clamped_from_ns: None,
         }
     }
@@ -141,6 +149,7 @@ impl RetentionSettings {
             "keep_per_emitter": self.policy.keep_per_emitter,
             "batch": self.policy.batch,
             "interval_s": self.interval.as_secs_f64(),
+            "count_rows_s": self.count_rows.as_secs_f64(),
             "rollup_gap_s": s(self.policy.rollup_gap_ns),
             "rollup_span_s": s(self.policy.rollup_span_ns),
         })
@@ -202,6 +211,9 @@ struct State {
     deleted_total: u64,
     errors: u64,
     next_prune: Option<Timestamp>,
+    /// T-913: the last actual row counts — `(detection rows, rollup rows, when)` — carried
+    /// between the refreshes that do not count.
+    counted: Option<(u64, u64, Timestamp)>,
 }
 
 /// The run's retention thread ([`Self::start`], [`Self::finish`]).
@@ -295,6 +307,9 @@ impl RetentionService {
             .enabled
             .then(|| Instant::now() + self.settings.first_after.min(self.settings.interval));
         let mut next_refresh = Instant::now();
+        // T-913: `None` = count the rows at the next refresh (the first one, and the one after
+        // every prune pass).
+        let mut next_count: Option<Instant> = None;
         loop {
             self.lock().next_prune = next_prune.map(|at| {
                 Timestamp::now().saturating_add_nanos(
@@ -342,26 +357,40 @@ impl RetentionService {
                 drop(st);
                 next_prune = Some(Instant::now() + self.settings.interval);
                 next_refresh = Instant::now(); // show the pass's effect now
+                next_count = None; // and count the rows it changed
                 continue;
             }
             if Instant::now() >= next_refresh {
-                self.refresh(r);
+                let count = next_count.is_none_or(|at| Instant::now() >= at);
+                self.refresh(r, count);
+                if count {
+                    next_count = Some(Instant::now() + self.settings.count_rows);
+                }
                 next_refresh = Instant::now() + self.settings.refresh;
             }
         }
     }
 
-    fn refresh(&self, repo: &Repository) {
+    /// One refresh of the storage figures; `count_rows` decides whether this one pays for the two
+    /// `count(*)`s or reports the last ones with the time they were taken (T-913).
+    fn refresh(&self, repo: &Repository, count_rows: bool) {
         let measured = Timestamp::now();
-        let storage = repo.detection_storage();
-        let st = self.lock();
+        let storage = repo.detection_storage_rows(count_rows);
+        let mut st = self.lock();
+        if let Ok(s) = &storage {
+            if s.rows_counted {
+                st.counted = Some((s.detection_rows, s.rollup_rows, measured));
+            }
+        }
+        let counted = st.counted;
         let figures = match &storage {
             Ok(s) => json!({
                 "db_bytes": s.db_bytes,
                 "free_bytes": s.free_bytes,
                 "wal_bytes": s.wal_bytes,
-                "detection_rows": s.detection_rows,
-                "rollup_rows": s.rollup_rows,
+                "detection_rows": counted.map(|c| c.0),
+                "rollup_rows": counted.map(|c| c.1),
+                "detection_rows_counted_s": counted.map(|c| unix_s(c.2)),
                 "oldest_detection_s": s.oldest_detection.map(|t| unix_s(t.end)),
                 "newest_detection_s": s.newest_detection_end.map(unix_s),
                 "error": Value::Null,

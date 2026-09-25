@@ -527,7 +527,9 @@ impl Repository {
     /// Appends an explanation. Its region/time columns are copied from the anomaly. Every
     /// [`Evidence::ExternalEvent`] must pin the payload hash currently cached for that event
     /// ([`RepoError::StaleEvidence`] otherwise), so evidence never silently refers to a revised
-    /// payload.
+    /// payload. Every [`Evidence::Detection`] is recorded in `explanation_detection` (T-913), which
+    /// is what pins that detection against the retention pass — the JSON body itself is invisible
+    /// to any index.
     pub fn insert_explanation(&mut self, e: &Explanation) -> Result<(), RepoError> {
         finite(e.score, "score")?;
         let tx = self.write_tx()?;
@@ -592,6 +594,20 @@ impl Repository {
                 serde_json::to_string(e)?
             ],
         )?;
+        // T-913: the detections the body cites, written out so the retention pass can pin them
+        // with an index (migration 0020). A cited row that is already gone cannot be pinned and is
+        // skipped, exactly as a track link to a pruned detection is.
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO explanation_detection (explanation_id, detection_id) \
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM detection WHERE detection_id = ?2)",
+            )?;
+            for evidence in &e.evidence {
+                if let Evidence::Detection { id } = evidence {
+                    stmt.execute(params![blob(e.id), blob(*id)])?;
+                }
+            }
+        }
         bump_extent(&tx, "explanation", f_hi - f_lo, t_end - t_start)?;
         tx.commit()?;
         Ok(())

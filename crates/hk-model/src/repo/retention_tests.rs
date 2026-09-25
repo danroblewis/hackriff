@@ -772,3 +772,426 @@ fn untracked_bursts_at_different_frequencies_roll_up_separately() {
     );
     assert!(a.track_id.is_none() && b.track_id.is_none());
 }
+
+// ---- T-913: follow-ups from T-904's review ----
+
+/// A Track over `time` at `f_hz` (the fields the rollup path reads).
+fn track_over(f_hz: f64, time: TimeRange, frames: u64) -> Track {
+    Track {
+        id: TrackId::new(),
+        state: TrackState::Open,
+        split_from: None,
+        time,
+        f_center_hz: f_hz,
+        bandwidth_hz: 12e3,
+        detection_count: frames,
+        timing: TimingFeatures::default(),
+        updated_at: time.end,
+    }
+}
+
+/// T-913 (1): a rollup's time on air is the **union** of its members' intervals, never their sum.
+/// Two co-timed rows — an FSK signal's two lobes in one frame, both linked to one track — are one
+/// span of air, and the figure can never exceed the hull.
+#[test]
+fn co_timed_members_are_one_span_of_air_in_a_rollup() {
+    let mut w = world();
+    let dets = vec![
+        w.det(433.92e6, tr(0, 100), 10.0),
+        w.det(433.92e6, tr(100, 200), 10.0),
+        // The other lobe of the same emission, in the same frame.
+        w.det(433.93e6, tr(100, 200), 9.0),
+        w.det(433.92e6, tr(200, 300), 10.0),
+    ];
+    w.repo.insert_detections(&dets).unwrap();
+    let track = track_over(433.92e6, tr(0, 300), 4);
+    w.repo.upsert_track(&track).unwrap();
+    let ids: Vec<DetectionId> = dets.iter().map(|d| d.id).collect();
+    w.repo
+        .link_detections_to_track(track.id, &ids, t(300))
+        .unwrap();
+    // Move the watermark past the age.
+    let _young = w.track(434.5e6, 3_600 * S, 1);
+    w.repo
+        .prune_detections(&policy(60, 0, 100), || true)
+        .unwrap();
+
+    let r = w.repo.track_rollups(track.id).unwrap();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!((r[0].time, r[0].detections), (tr(0, 300), 4));
+    // 300 ms of air from four 100 ms rows, not 400.
+    assert_eq!(r[0].on_air_ns, 300 * NS, "{r:?}");
+    assert!(r[0].on_air_ns <= r[0].time.duration_ns(), "{r:?}");
+}
+
+/// T-913 (3): a rollup summarises only rows that were **deleted** — a row the pass kept closes the
+/// run it falls in, so no window is counted both as a surviving detection and inside a summary.
+#[test]
+fn a_kept_row_splits_the_rollup_it_would_have_fallen_inside() {
+    let mut w = world();
+    let (track, dets) = w.track(433.92e6, 0, 9);
+    // Pin the middle row by linking it to an emitter directly (class 2).
+    w.repo
+        .record_sighting(
+            &Sighting {
+                source: LinkTarget::Detection(dets[4].id),
+                seen: dets[4].time,
+                count: 1,
+                f_center_hz: 433.92e6,
+                bandwidth_hz: 12e3,
+                fingerprint: None,
+                identity: None,
+                context: None,
+                classification: None,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+    let _young = w.track(434.5e6, 3_600 * S, 1);
+    let report = w
+        .repo
+        .prune_detections(&policy(60, 0, 100), || true)
+        .unwrap();
+    assert_eq!((report.kept_pinned, report.deleted), (1, 8));
+
+    let r = w.repo.track_rollups(track).unwrap();
+    let kept = dets[4].time;
+    assert_eq!(
+        r.iter().map(|r| r.time).collect::<Vec<_>>(),
+        vec![tr(0, 400), tr(500, 900)],
+        "the kept row {kept:?} must fall between two rollups, not inside one"
+    );
+    assert!(
+        r.iter()
+            .all(|r| r.time.end <= kept.start || r.time.start >= kept.end),
+        "{r:?} spans the surviving row {kept:?}"
+    );
+    assert_eq!(r.iter().map(|r| r.detections).sum::<u64>(), 8);
+}
+
+/// T-913 (3), across passes: the same holds when the earlier rollup was written by a previous
+/// pass, which the in-memory barriers of *this* pass know nothing about.
+#[test]
+fn a_kept_row_splits_a_rollup_stored_by_an_earlier_pass() {
+    let mut w = world();
+    let (track, dets) = w.track(433.92e6, 0, 9);
+    w.repo
+        .record_sighting(
+            &Sighting {
+                source: LinkTarget::Detection(dets[4].id),
+                seen: dets[4].time,
+                count: 1,
+                f_center_hz: 433.92e6,
+                bandwidth_hz: 12e3,
+                fingerprint: None,
+                identity: None,
+                context: None,
+                classification: None,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+    let _young = w.track(434.5e6, 3_600 * S, 1);
+    // Two passes: the first stops after one batch of five rows — the pinned row is the last of
+    // them, so the second pass starts with no memory of it and must read the table to find it.
+    let first = w
+        .repo
+        .prune_detections(&policy(60, 0, 5), || false)
+        .unwrap();
+    assert!(!first.complete, "{first:?}");
+    assert_eq!((first.deleted, first.kept_pinned), (4, 1), "{first:?}");
+    w.repo
+        .prune_detections(&policy(60, 0, 100), || true)
+        .unwrap();
+
+    let r = w.repo.track_rollups(track).unwrap();
+    let kept = dets[4].time;
+    assert!(
+        r.iter()
+            .all(|r| r.time.end <= kept.start || r.time.start >= kept.end),
+        "{r:?} spans the surviving row {kept:?}"
+    );
+    assert_eq!(r.iter().map(|r| r.detections).sum::<u64>(), 8);
+}
+
+/// T-913 (5): an explanation that cites a detection pins it, like any other reference by id. The
+/// citation lives in an opaque JSON body, so it is written out to `explanation_detection`
+/// (migration 0020) and the pin check reads that.
+#[test]
+fn a_detection_cited_by_an_explanation_is_pinned() {
+    let mut w = world();
+    let (_, dets) = w.track(433.92e6, 0, 6);
+    let anomaly = Anomaly {
+        id: AnomalyId::new(),
+        kind: AnomalyKind::NoiseFloorRise,
+        // Not the detection: that subject would pin it by itself.
+        subject: AnomalySubject::Region,
+        region: Region::new(FreqRange::new(433.9e6, 433.95e6), tr(0, 600)),
+        score: 4.0,
+        baseline_ref: None,
+        t: t(600),
+        detector_version: "test@1".into(),
+    };
+    w.repo.insert_anomaly(&anomaly).unwrap();
+    w.repo
+        .insert_explanation(&Explanation {
+            id: ExplanationId::new(),
+            anomaly_ref: anomaly.id,
+            cause: Cause::Unexplained,
+            correlation_type: CorrelationType::TimeCoincidence,
+            score: 0.5,
+            evidence: vec![Evidence::Detection { id: dets[2].id }],
+            supersedes: None,
+            provisional: false,
+            rule_version: "test@1".into(),
+            t: t(600),
+        })
+        .unwrap();
+
+    let _young = w.track(434.5e6, 3_600 * S, 1);
+    let report = w
+        .repo
+        .prune_detections(&policy(60, 0, 100), || true)
+        .unwrap();
+    assert_eq!(report.kept_pinned, 1, "{report:?}");
+    assert_eq!(w.remaining(&dets), vec![dets[2].id]);
+}
+
+/// T-913 (11): a run that crashed left its survey open, and an open survey ages from its own
+/// newest row — so its last hour is never aged out. The next run over the store aborts it at
+/// start-up, and those rows then age from the store's watermark like any other closed survey's.
+#[test]
+fn a_survey_left_open_by_a_crashed_run_is_aborted_and_then_ages() {
+    let dir = std::env::temp_dir().join(format!("hk-t913-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hackriff.db");
+    let mut w = world_in(Repository::open(&path).unwrap());
+    let crashed = w.survey;
+    let (_, dets) = w.track(433.92e6, 0, 20);
+    drop(w);
+
+    // A second survey, hours later, in the same store: the next run.
+    let mut next = world_in(Repository::open(&path).unwrap());
+    assert_eq!(next.repo.abort_orphaned_surveys().unwrap(), 2);
+    assert_eq!(
+        next.repo.survey(crashed).unwrap().state,
+        SurveyState::Aborted
+    );
+    // The aborted survey's own t_end is its newest detection, not a wall-clock instant.
+    assert_eq!(next.repo.survey(crashed).unwrap().t_end, Some(t(2_000)));
+    let (_, young) = next.track(434.5e6, 7_200 * S, 1);
+    let report = next
+        .repo
+        .prune_detections(&policy(60, 0, 100), || true)
+        .unwrap();
+    assert_eq!(report.deleted, 20, "{report:?}");
+    assert!(next.remaining(&dets).is_empty());
+    assert_eq!(next.remaining(&young).len(), 1);
+}
+
+/// T-913 (12): a link whose detection is not stored is skipped — and counted, so a
+/// drain-before-flush regression is visible instead of silently losing track membership.
+#[test]
+fn links_to_missing_detections_are_counted_not_silent() {
+    let mut w = world();
+    let (track, dets) = w.track(433.92e6, 0, 3);
+    let ids: Vec<DetectionId> = dets.iter().map(|d| d.id).collect();
+    // Re-linking what is already linked drops nothing: it is idempotent, not a loss.
+    assert_eq!(
+        w.repo.link_detections_to_track(track, &ids, t(300)).unwrap(),
+        0
+    );
+    // Two never-stored detections, one stored: two dropped.
+    let missing = [DetectionId::new(), ids[0], DetectionId::new()];
+    assert_eq!(
+        w.repo
+            .link_detections_to_track(track, &missing, t(300))
+            .unwrap(),
+        2
+    );
+    assert_eq!(w.repo.track_detections(track).unwrap().len(), 3);
+}
+
+/// T-913 (8) / T-453, **timing tier** (`.config/nextest.toml`, `just timing`): what the DETECT
+/// WRITER pays while a prune pass runs. The pass measures its *own* worst lock hold
+/// ([`PruneReport::lock_ns_max`]) and its own wait behind the writer ([`PruneReport::wait_ns_max`]),
+/// but neither says how long the writer waits behind *it* — and that is the figure that matters,
+/// because the detection writer is what gates the capture thread's drain.
+///
+/// So: a second connection writes a frame of detections every 20 ms, exactly as the run's writer
+/// does, while a pass prunes an hour of rows on the same file; each write's whole latency (the
+/// `BEGIN IMMEDIATE` wait plus the insert itself) is recorded and the distribution printed.
+///
+/// **Measured 2026-09-25** on the dev box at load ~15 (four agents building), 24 000 rows pruned
+/// in 240 batches while the writer wrote 8 rows every 20 ms: **354 writes, p50 3.08 ms, p95
+/// 20.9 ms, worst 22.9 ms**, against the pass's own worst lock hold of 13.5 ms. So the writer
+/// waits behind **one batch**, not behind the pass — which is what the batching is for — and the
+/// 0.5–1.95 s outliers T-904 saw at 20 Msps are not this queue: nothing here approaches them even
+/// on a loaded box. The bound asserted below is well above the measurement; the tier's point is
+/// the number, not the threshold.
+#[test]
+fn a_detect_writer_waits_at_most_one_batch_behind_a_prune_pass() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let dir = std::env::temp_dir().join(format!("hk-t913-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hackriff.db");
+    let mut w = world_in(Repository::open(&path).unwrap());
+    // 20 minutes of the 2.4 Msps replay's rate (~20 rows/s), all past the age.
+    for m in 0..20 {
+        for k in 0..12 {
+            let start = m * 60 * S + (k % 6) * 10 * S;
+            w.track(433.1e6 + k as f64 * 100e3, start, 100);
+        }
+    }
+    // One row an hour in, so every seeded row is past the age when the pass reads the watermark
+    // (the writer's own live rows are younger than the age and are never candidates).
+    w.track(434.9e6, 3_600 * S, 1);
+    let (survey, prov) = (w.survey, w.prov);
+    let stop = Arc::new(AtomicBool::new(false));
+    let waits: Arc<Mutex<Vec<f64>>> = Arc::default();
+    let writer = {
+        let (stop, waits, path) = (Arc::clone(&stop), Arc::clone(&waits), path.clone());
+        std::thread::spawn(move || {
+            let mut repo = Repository::open(&path).unwrap();
+            let mut frame = 0i64;
+            while !stop.load(Ordering::Relaxed) {
+                // A frame of live rows at the growing edge (well inside the age, so the pass
+                // never looks at them).
+                let at = 3_600 * S + frame * 100;
+                let rows: Vec<Detection> = (0..8)
+                    .map(|k| Detection {
+                        id: DetectionId::new(),
+                        survey_id: survey,
+                        time: TimeRange::new(t(at), t(at + 100)),
+                        f_center_hz: 433.1e6 + k as f64 * 100e3,
+                        obw_hz: 12e3,
+                        xdb_bandwidth_hz: None,
+                        xdb_level_db: None,
+                        snr_peak_db: 10.0,
+                        snr_mean_db: 7.0,
+                        peak_level_dbfs: -40.0,
+                        peak_level_dbm: None,
+                        sk: None,
+                        clip_count: 0,
+                        detector_version: "test@1".into(),
+                        provenance_ref: prov,
+                        flags: DetectionFlags::default(),
+                    })
+                    .collect();
+                let asked = std::time::Instant::now();
+                repo.insert_detections(&rows).unwrap();
+                waits
+                    .lock()
+                    .unwrap()
+                    .push(asked.elapsed().as_secs_f64() * 1e3);
+                frame += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        })
+    };
+
+    let report = w
+        .repo
+        .prune_detections(&policy(20 * 60, 256, 100), || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            true
+        })
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    let mut ms = waits.lock().unwrap().clone();
+    assert!(ms.len() > 20, "the writer barely ran: {} writes", ms.len());
+    ms.sort_by(f64::total_cmp);
+    let at = |q: f64| ms[((ms.len() as f64 - 1.0) * q) as usize];
+    let (p50, p95, worst) = (at(0.5), at(0.95), ms[ms.len() - 1]);
+    eprintln!(
+        "detect writer behind a prune pass: {n} writes, p50 {p50:.2} ms, p95 {p95:.2} ms, \
+         worst {worst:.1} ms; the pass's own worst lock hold {hold:.1} ms over {batches} batches",
+        n = ms.len(),
+        hold = report.lock_ns_max as f64 / 1e6,
+        batches = report.batches
+    );
+    assert!(report.deleted > 10_000, "{report:?}");
+    assert!(
+        p95 < 250.0,
+        "the detect writer's p95 write latency behind a prune pass was {p95:.1} ms \
+         (worst {worst:.1} ms): {report:?}"
+    );
+}
+
+/// T-913 (6), **timing tier**: what `CREATE INDEX idx_detection_t_end` (migration 0019) costs at
+/// start-up on a store that ran unpruned, measured per row so the answer extrapolates.
+///
+/// The migration runs inside the transaction that opens the database, so the index build is on
+/// the start-up path of the first run after the upgrade, and every page it writes goes through
+/// the WAL. The question T-904's review asked was whether that is a problem worth moving off the
+/// start-up path.
+///
+/// **Measured 2026-09-25** on the dev box at load ~15, 60 000 rows on a file database:
+/// **41 ms, 0.68 µs/row, 1.8 MB of WAL (31 B/row)** — the WAL holds the index's own pages, not the
+/// table's. Extrapolating at the staging device's measured 65–90 rows/s (T-904: ~7.8 M rows/day
+/// unpruned): **≈ 5 s and ≈ 240 MB of WAL for a day, ≈ 37 s and ≈ 1.7 GB for a week** — slow, bounded,
+/// paid exactly once per store, and the same work any later query would pay as a scan. That is
+/// inside what a start-up may take, so the index stays on the start-up path deliberately, with
+/// the number recorded rather than assumed; if it ever needs moving, this test is what says by
+/// how much.
+#[test]
+fn the_retention_index_build_is_measured_per_row() {
+    let dir = std::env::temp_dir().join(format!("hk-t913-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hackriff.db");
+    let mut w = world_in(Repository::open(&path).unwrap());
+    const ROWS: usize = 60_000;
+    for chunk in 0..(ROWS / 500) {
+        let rows: Vec<Detection> = (0..500)
+            .map(|k| {
+                let at = (chunk * 500 + k) as i64 * 20;
+                w.det(433.1e6 + (k % 12) as f64 * 100e3, tr(at, at + 20), 10.0)
+            })
+            .collect();
+        w.repo.insert_detections(&rows).unwrap();
+    }
+    w.repo
+        .conn
+        .execute_batch("DROP INDEX idx_detection_t_end")
+        .unwrap();
+    // TRUNCATE, not PASSIVE: the file is reset to zero, so what it holds afterwards is exactly
+    // what the index build wrote.
+    w.repo
+        .conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let wal_of = || {
+        std::fs::metadata(format!("{}-wal", path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    let wal_before = wal_of();
+    let started = std::time::Instant::now();
+    w.repo
+        .conn
+        .execute_batch("CREATE INDEX idx_detection_t_end ON detection (t_end)")
+        .unwrap();
+    let took = started.elapsed();
+    let wal = wal_of().saturating_sub(wal_before);
+    eprintln!(
+        "idx_detection_t_end over {ROWS} rows: {:.0} ms ({:.2} µs/row), WAL grew {} kB \
+         ({:.0} B/row)",
+        took.as_secs_f64() * 1e3,
+        took.as_secs_f64() * 1e6 / (ROWS as f64),
+        wal / 1024,
+        wal as f64 / (ROWS as f64)
+    );
+    // Well above the measurement: the number is the deliverable, the bound only catches an
+    // order-of-magnitude regression (an index build that started scanning something else).
+    assert!(
+        took.as_secs_f64() * 1e6 / (ROWS as f64) < 50.0,
+        "index build {:.0} ms over {ROWS} rows",
+        took.as_secs_f64() * 1e3
+    );
+}
