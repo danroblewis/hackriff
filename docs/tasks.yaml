@@ -27140,7 +27140,7 @@ tasks:
   - id: T-918
     milestone: MMAP
     title: "RC red: app-dismiss.e2e.mjs - the canvas is no longer full-bleed (y=56, 567 px tall; the sheet covers no canvas rows) at main 528d2c2f"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-CHROME
@@ -27158,6 +27158,9 @@ tasks:
 
       2026-09-25 coordinator: fixed on task-rcfix-app-dismiss 9cd28e19 (queued) - root cause: map-layout.css padding 56/70 px left from T-801 round 3 after T-882 removed the toolbar it served, plus the surface status rows stacked under the canvas; the canvas was never full-window (T-900 passed its own gate by ~6 px). Now 1440x860 at y=0; status rows float; drawing insets published as data-inset-top/bottom. app-dismiss asserts full-bleed (red on the RC-tip UI). Worker also saw fog-of-war red once alone on the RC-tip UI ('shadow plane carries NO run over band A'), green on the branch - watch for recurrence. Status-box size: T-919.
     branch: task-rcfix-app-dismiss
+    commit: 46252e97
+    result: |
+      DONE 2026-09-25: landed as 46252e97 (branch task-rcfix-app-dismiss, 9cd28e19), clearing RC red rc-20260925 (app-dismiss.e2e.mjs). Root cause: map-layout.css padding 56px 0 70px (T-801 round 3, kept after T-882 removed its toolbar) plus the surface status rows stacked as grid rows under the canvas - the canvas was never full-window. Now the canvas is the surface's only row, 100vw x 100vh (1440x860 at y=0; was 1440x583 at y=56); status rows float bottom-left (compacting: T-919); drawing insets below the fixed top bar / above the dock published as data-inset-top/bottom; overlays still cover canvas and give it back on close (P1). app-dismiss now waits for the sheet animation and asserts full-bleed (red on the RC-tip UI at all three widths); app-trace, canvas-journey, fog-of-war, live-edge read the insets via harness canvasInsets. test-ui 77/77; all 15 app specs pass alone.
   - id: T-919
     milestone: MMAP
     title: The floating status box (up to 560x184 px over the map since T-918) should be a compact, closeable status line - honesty statements always visible (P1/P4)
