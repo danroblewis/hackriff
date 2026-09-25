@@ -1180,11 +1180,11 @@ def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a
         (base / "debug" / "deps").mkdir(parents=True)
         return base / "debug"
 
-    def exe(prof, pkg, kind, stem, h, mtime, mode=0o755):
+    def exe(prof, pkg, kind, stem, h, mtime, mode=0o755, profile=1):
         fp = prof / ".fingerprint" / f"{pkg}-{h}"
         fp.mkdir(parents=True)
         (fp / kind).write_text("")
-        (fp / f"{kind}.json").write_text("{}")
+        (fp / f"{kind}.json").write_text(json.dumps({"profile": profile, "features": "[]", "rustflags": []}))
         (fp / "invoked.timestamp").write_text("")
         p = prof / "deps" / f"{stem}-{h}"
         p.write_text("x")
@@ -1200,6 +1200,8 @@ def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a
             "harness": exe(prof, "hk-cli", "test-bin-hk", "hk", "00000000000000b2", 100),   # different units
             "rf1": exe(prof, "hk-plugins", "test-integration-test-review_fixes", "review_fixes", "00000000000000c1", 50),
             "rf2": exe(prof, "hk-stream", "test-integration-test-review_fixes", "review_fixes", "00000000000000c2", 90),
+            # the same unit in the workers' line-tables-only profile: current too, never "superseded"
+            "lt": exe(prof, "hk-cli", "test-integration-test-api_contract", "api_contract", "00000000000000e1", 50, profile=2),
         }
     main_p, gate_p = profile(repo / "target"), profile(ops / "gate-target")
     busy_p, idle_p = profile(repo / ".claude/worktrees/t1/target"), profile(repo / ".claude/worktrees/t2/target")
@@ -1214,6 +1216,18 @@ def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a
     monkeypatch.setattr(R, "BULKMARK", str(ops / "bulk-in-progress"))
     monkeypatch.setattr(R, "disk_free_gb", lambda: 0.0)
     wt1 = str(repo / ".claude/worktrees/t1")
+    obj = gate_p / "deps" / "api_contract-00000000000000a1.api_contract.abc123-cgu.0.rcgu.o"   # split debuginfo
+    obj.write_text("o")
+    lsof = {"stderr": ""}
+
+    class Run:
+        def __init__(self, stdout, stderr):
+            self.stdout, self.stderr = stdout, stderr
+
+    def run(args, **kw):
+        assert args[:2] == ["lsof", "-Fn"]
+        return Run(f"p9\nn{held}\n" if str(held.parent) in args else "", lsof["stderr"])
+    monkeypatch.setattr(R.subprocess, "run", run)
 
     def sh(args, cwd=None, timeout=120, check=False):
         if args[:2] == ["git", "-C"]:
@@ -1222,19 +1236,24 @@ def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a
             return f"p1\nn{wt1}/crates/hk-core\np2\nn{repo}\n"
         if args[:2] == ["ps", "eww"]:
             return f"cargo build CARGO_TARGET_DIR={ops}/target-serve" if args[-1] == "2" else "cargo test"
-        if "+d" in args:
-            return f"p9\nn{held}\n" if str(held.parent) in args else ""
         return ""
     monkeypatch.setattr(R, "sh", sh)
     (ops / "bulk-in-progress").write_text("base=x\n")
     R.sweep_superseded(dry=False)
     assert all(p.exists() for u in made.values() for p in u.values())            # never during a gate
     (ops / "bulk-in-progress").unlink()
+    lsof["stderr"] = "lsof: WARNING: can't stat() directory"                     # lsof failed: nothing deleted
+    R.sweep_superseded(dry=False)
+    assert all(p.exists() for u in made.values() for p in u.values())
+    assert not (ops / "sweep-last").exists()
+    lsof["stderr"] = ""
     R.sweep_superseded(dry=False)
     for prof in (main_p, gate_p):                    # main swept: stage's cargo writes to target-serve
         u = made[prof]
         assert not u["old"].exists() and u["new"].exists()
         assert u["bin"].exists() and u["harness"].exists() and u["rf1"].exists() and u["rf2"].exists()
+        assert u["lt"].exists()                      # the other profile's build of the same unit is current
+    assert not obj.exists()                          # the swept executable's .rcgu.o go with it
     assert held.exists() and made[idle_p]["new"].exists()                        # open in a process: kept
     assert all(p.exists() for p in made[busy_p].values())                        # a cargo works there: skipped
     assert orphan.exists()

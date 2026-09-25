@@ -1647,17 +1647,23 @@ def _units(profile_dir):
     package plus the target kind files it holds (`bin-hk`, `test-bin-hk`, `test-integration-test-api_contract`).
     A file stem is NOT a unit: `hk` is both hk-cli's bin and its unit-test harness, and four integration-test
     names exist in two crates each (review, 2026-09-24 - the stem-keyed first pass deleted current twins)."""
+    # ...and the configuration: cargo gives the same unit a new hash per profile, and two are live at once -
+    # workers build line-tables-only, gates the default dev profile (re-review, 2026-09-24: 1211 of 2344
+    # "superseded" executables differed from the newest only in profile, and both were rebuilt daily).
     out, fp = {}, os.path.join(profile_dir, ".fingerprint")
     for d in os.listdir(fp) if os.path.isdir(fp) else []:
         m = _HASHED.match(d)
         if not m:
             continue
         try:
-            kinds = sorted({re.sub(r"^(dep|output)-", "", f) for f in os.listdir(os.path.join(fp, d))
+            files = os.listdir(os.path.join(fp, d))
+            kinds = sorted({re.sub(r"^(dep|output)-", "", f) for f in files
                             if f != "invoked.timestamp" and not f.endswith(".json")})
-        except OSError:
+            with open(os.path.join(fp, d, next(f for f in files if f.endswith(".json")))) as fh:
+                j = json.load(fh)
+        except (OSError, StopIteration, ValueError):
             continue
-        out[m.group(2)] = (m.group(1), tuple(kinds))
+        out[m.group(2)] = (m.group(1), tuple(kinds), j.get("profile"), j.get("features"), str(j.get("rustflags")))
     return out
 
 
@@ -1739,14 +1745,24 @@ def sweep_superseded(dry):
         todo += superseded_executables(prof)
     held = set()
     if todo:
-        dirs = sorted({os.path.dirname(p) for p in todo})
-        held = {l[1:] for l in sh(["lsof", "-Fn"] + [a for d in dirs for a in ("+d", d)], timeout=120).splitlines()
-                if l.startswith("n")}
+        dirs = sorted({os.path.dirname(p) for p in todo if os.path.isdir(os.path.dirname(p))})
+        # lsof exits 1 whether or not it found holders; a dir that vanished makes it print usage and
+        # NOTHING - which would read as "nothing held". Anything on stderr aborts the sweep.
+        r = subprocess.run(["lsof", "-Fn"] + [a for d in dirs for a in ("+d", d)], capture_output=True, text=True, timeout=120)
+        if r.stderr.strip():
+            log(f"SWEEP aborted: lsof over the deps dirs said {r.stderr.strip()[:160]!r}")
+            return
+        held = {l[1:] for l in r.stdout.splitlines() if l.startswith("n")}
+    objs = {}
     for p in todo:
         if p in held:
             continue
         if not dry:
-            for q in (p, p + ".d"):
+            d, base = os.path.dirname(p), os.path.basename(p)
+            if d not in objs:
+                objs[d] = [n for n in os.listdir(d) if n.endswith(".rcgu.o")]
+            # split-debuginfo=unpacked leaves <exe>.<cgu>.rcgu.o beside it: orphans once the executable goes.
+            for q in [p, p + ".d"] + [os.path.join(d, n) for n in objs[d] if n.startswith(base + ".")]:
                 try:
                     os.remove(q)
                 except FileNotFoundError:
