@@ -27484,7 +27484,7 @@ tasks:
   - id: T-925
     milestone: M2-hardening
     title: "Dashboard: explorer row (target, phase, journal tail) + radio-owner tile (holder, until, staging live/replay)"
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-922
@@ -27506,6 +27506,7 @@ tasks:
       Commits: dd35f3b8
       Observed, not chased: py/tests/test_monitor_flow.py::test_heavy_builds_run_in_a_child_and_errors_surface fails on unmodified main too (FileNotFoundError: /Users/daniellewis/hackriff, a hardcoded macOS path) - reproduces identically before my change (verified via git stash), so not mine; pre-existing environment mismatch on this Linux worktree, not scoped to T-925.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 0fc5503b
   - id: T-926
     milestone: MAUTO
     title: "P1: RDS decodes across the whole FM band unprompted - measure the live 88-108 MHz ratio (present / pilot+RDS / PI-PS decoded), fix detection->WFM->RDS across ALL detections to >= 90 %, per-station capture set as the guard"
