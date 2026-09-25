@@ -159,6 +159,16 @@ impl FlowGate {
     pub fn waits(&self) -> u64 {
         self.waits.load(Ordering::Relaxed)
     }
+
+    /// **How far a block may extend past the slowest cursor**: half the ring, in samples.
+    ///
+    /// The bound a caller needs to state what the gate guarantees — a stalled reader stops the
+    /// capture thread after *at most* this many samples, whatever the relative speed of the two.
+    /// T-920 uses it to demonstrate the backpressure path deterministically instead of waiting to
+    /// observe [`Self::waits`] grow, which is a race between threads rather than a property.
+    pub fn slack(&self) -> u64 {
+        self.slack
+    }
 }
 
 #[cfg(test)]
