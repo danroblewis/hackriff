@@ -33,6 +33,10 @@ to two axes.
 | Alt / Option + wheel | Zooms **time (Y)** only |
 | Ctrl + wheel, Cmd + wheel, trackpad pinch | Uniform zoom, same as a plain wheel |
 | Double-click the map | Sends the active pane there |
+| Press, right-click, wheel or pinch on a pane | Makes it the **active pane** — outlined on the canvas, and named by the chrome that acts on it (T-1000, docs/23 §10.7) |
+| `]` / `[` | Next / previous pane becomes active |
+| `1`–`9` | Pane N becomes active |
+| `L` | Toggles Live on the active pane (the follow-live FAB's press) |
 
 **Why Alt/Option and not Ctrl for the time axis.** Ctrl+scroll is macOS's own zoom gesture
 (Accessibility → Zoom, *"Use scroll gesture with modifier keys to zoom"*, whose default modifier is

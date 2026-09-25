@@ -33,7 +33,7 @@
 
 import { ControlError } from "../controls/client";
 import {
-  coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
+  coverageUrl, observedExtent, openingWindow, orientationNote, recentObservedExtent, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { batchedTileSource } from "./tilebatch";
@@ -248,24 +248,36 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   }
 
   const census = observedExtent(cov);
+  // T-955: the box the refinement pass narrows is the RECENTLY active one, not the lifetime union.
+  // A session that tuned to one band for an hour and retuned five minutes ago has both bands inside
+  // one record horizon, and `observedExtent`'s box is a bounding rectangle over every observed cell
+  // ever — measured live as a reload opening on a box still centred near the band the radio had just
+  // left, and a separate session opening on "100–1100 MHz × 1.6 h" with the actually-tuned band drawn
+  // as a sliver inside it. `recent` falls back to the whole-history box only when the recent rows
+  // hold nothing at all, so a server with no live front end still opens on whatever it has.
+  const recent = recentObservedExtent(cov);
+  const coarse = recent.box ? recent : census;
   // **One refinement pass, measured rather than assumed.** A 128-cell map of a 6.5 GHz surface has
   // 51.2 MHz cells, so the coarse box around a 2.4 MHz capture is ~20x too wide — measured on a
   // replay: 0.78 % observed, and the observed box came back as 51.2–102.4 MHz for a recording that
   // spans 99.6–102 MHz. Opening there would put the capture in a twentieth of the pane's width and
   // read as "still nothing here". Asking the *same route* again over the box it just returned costs
-  // one request and is the same question at the resolution the answer made available.
-  let refined = census;
-  if (census.box) {
+  // one request and is the same question at the resolution the answer made available — over a MUCH
+  // smaller extent, so this second pass is also what resolves a retune boundary the coarse recency
+  // narrowing above was still too coarse to see.
+  let refined = coarse;
+  if (coarse.box) {
     try {
-      fine = (await ask(coverageUrl(census.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
-      refined = observedExtent(fine);
+      fine = (await ask(coverageUrl(coarse.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
+      const fineRecent = recentObservedExtent(fine);
+      refined = fineRecent.box ? fineRecent : observedExtent(fine);
     } catch (e) {
       degraded.push(`the coverage refinement pass failed (${describe(e)}): the view opens on the coarse observed box, which may be much wider than what was actually sampled.`);
-      refined = census;
+      refined = coarse;
     }
     // A refinement that found nothing is not evidence against the coarse answer — the coarse cell
     // was observed, so something is in there. Keep the wider box rather than opening on nowhere.
-    if (refined.observed === 0) refined = census;
+    if (refined.observed === 0) refined = coarse;
   }
   // The note's share is the SURFACE-wide census: it is a statement about the whole surface, and
   // quoting the refined pass's share (measured inside coverage, so near 100 %) would invert it.
@@ -642,8 +654,28 @@ export interface PreviewOptions {
 export class SurfacePreview {
   readonly view: SurfaceView;
   readonly probe: SurfaceProbe;
-  /** The pane gestures apply to: the last one pointed at. */
-  activePane: string;
+  /** The pane the chrome acts on (T-1000): see [[activePane]]. */
+  private active: string;
+  private readonly activeListeners = new Set<(id: string) => void>();
+  /**
+   * **The pane gestures and chrome apply to: the last one pressed, right-clicked, wheeled or chosen
+   * by key.** An accessor rather than a field (T-1000) so that every writer — `input.ts`'s press and
+   * wheel, a split, a close, the app's pane keys — tells [[onActiveChange]]'s listeners in the same
+   * call, and the outline and the chrome that name the pane move in the same frame as the press. An
+   * id that is not a pane is refused: an active pane that does not exist would name nothing.
+   */
+  get activePane(): string { return this.active; }
+  set activePane(id: string) {
+    if (id === this.active || !this.view.panes.has(id)) return;
+    this.active = id;
+    for (const f of this.activeListeners) f(id);
+  }
+  /** Be told when the active pane changes. Returns a disposer. Presentation only: a listener is
+   * handed the new id and nothing else, and the change itself moved no view and reached no route. */
+  onActiveChange(f: (id: string) => void): () => void {
+    this.activeListeners.add(f);
+    return () => { this.activeListeners.delete(f); };
+  }
   lastFrame: SurfaceFrame | null = null;
   private readonly canvas: HTMLCanvasElement;
   private raf = 0;
@@ -715,7 +747,7 @@ export class SurfacePreview {
     // historical preview). `pause` is a coordinate change (T-347/T-442), so this costs no frame and
     // no jump. With a live edge the first pane stays following and the map follows too — "live" is
     // then just the finest growing edge of this same surface (docs/16 §8.1), not a second mode.
-    this.activePane = this.view.panes.list()[0].id;
+    this.active = this.view.panes.list()[0].id;
     if (!this.edgeFn) {
       this.view.panes.pause(this.activePane, probe.origin.edgeNs);
       this.view.panes.goTo(this.activePane, probe.opening.centerNs);
