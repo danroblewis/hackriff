@@ -27689,6 +27689,8 @@ tasks:
     notes: |
       FOUND BY rc-20260925.
     branch: task-rcfix-surface-nav
+    result: |
+      DONE 2026-09-25 on task-rcfix-surface-nav (9aab332e, queued): a LOAD FLAKE, not a product defect - surface-nav passed alone 3/3 at 92d0f6f1 (load 25-32). The steady window opened when the gestures' requests were answered on the wire, but an aborted read is 'answered' (canceled) while /api/tiles still builds it and holds the slot; the refusal ~4 s in was over the page's own leftover reads (cap at AIMD floor 1, not a cap that failed to react). Fix (spec only, no assertion loosened): after the wire drain, poll a serial probe until the route reports it holds no slot but the probe's (cost.in_flight - cost.in_flight_held == 0); a slot held > 31.2 s while the page is idle fails as the T-454 leak with the server's numbers. Red proof with a fault-injected hk: the RC case red 3/3 on the old spec, green 3/3 on the new; a never-released slot green on the old, red on the new. Spec 4/4 alone, just test-ui 81/81, tsc clean. Product follow-up: T-959 (client uses in_flight_held, not an average charge).
   - id: T-935
     milestone: MAUTO
     title: "Explorer FM captures into fixtures/ (LFS) with hidden truth: 101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot"
@@ -27948,7 +27950,10 @@ tasks:
       FOUND 2026-09-25 by the explorer: FLEX is the dominant 929-932 MHz paging protocol in SF tonight (oracle: FLEX sync at 1600 bps on 3 channels, 0 POCSAG) and the app has NO FLEX path - the only pager recipe is POCSAG, which got 0 frames on 11 channels in 75 s. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
       DELIVER: FLEX decode (2/4-FSK, 1600/3200/6400 bps, sync 0xA6C6AAAA + frame info word, BCH(31,21) + interleave) as a recipe over existing hk-blocks where possible (mlevel_slicer T-612, BCH) or a plugin behind the process boundary if reusing a GPL decoder (ADR-0010, e.g. multimon-ng's FLEX) - decide and say why; rate/levels estimated from the signal, never hard-coded. Test through the mock SDR on the FLEX fixture (the FLEX fixture ticket): frames sync and BCH-validate; the blind 'all captured signals decode' member for it goes green.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: the FLEX capture is an EXTERNAL fixture (57.6 MB > the 25 MB LFS cap; T-949 indexed it in fixtures/manifest.json as status: external, store path store/explorer-2026-09-25/). The original stays in ~/.hackriff-ops/explorer/captures/20260925/ on the Mac: in your worktree run `just fixtures-fetch --from ~/.hackriff-ops/explorer/captures/20260925` (never copy into the main checkout). Oracle: py/fixtures/flex_ref.py (T-949) agrees on sync counts 3/1/2; it DISAGREES with the explorer's truth on the FSK level count at 2 of 3 channels (recorded in the fixture README) - settle it from your decoder's evidence. Use case SIGNAL-088 (paging); T-952 APRS uses SIGNAL-089. Mac-only while the fixture is external.
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
+    dispatch: manual
   - id: T-951
     milestone: MAUTO
     title: POCSAG recipe hard-codes 1200 Bd; follow-hops fills its slots with DC/spur detections
@@ -27977,6 +27982,8 @@ tasks:
       FOUND 2026-09-25 by the explorer: there is no AFSK1200/AX.25 (APRS) recipe or decoder in the app's list (ACARS, ADS-B, Analog WFM, POCSAG, RDS) - with a burst on the air the app has no APRS path except blind decoder synthesis, which has no evaluator yet. (No APRS energy reached this antenna tonight, so no capture.) Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, live HackRF in SF).
       DELIVER: an APRS recipe (NFM discriminator -> Bell 202 AFSK 1200/2200 Hz demod -> NRZI -> HDLC bitstuff/flags (T-613's block) -> AX.25 frame + FCS) with the tone/baud estimated or verified from the signal, decoded frames as a stream output; a synthetic AX.25 AFSK scene (py synth or hk-sim) through the mock SDR with hidden truth: FCS-valid frames decode, blind (no frequency passed). Use case: the terrestrial APRS id added by the FLEX fixture ticket (or SIGNAL-036 until it lands).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: use case SIGNAL-089 (terrestrial APRS) was added by T-949.
   - id: T-953
     milestone: M3
     title: "Burst emitters get no family/params: burst-tap symbol rates never reach estimated_params; unknown at 0.999 confidence; no paging band-plan prior"
@@ -28034,6 +28041,35 @@ tasks:
     notes: |
       FOUND 2026-09-25 by the explorer (pagers, ISM): /api/analyze ends every job failed / no_evaluator ("stage evaluation over IQ (MAUTO M-2) is not built on this server"; docs/api.md: nothing implements hk_synth::engine's Evaluator over acquired IQ, server_backend() is None). So blind symbol/bit recovery -> decoder synthesis on an unknown burst (e.g. the 916.094 MHz 100 kBd FSK emitter with a consistent sync 0x0C5F and no CRC model - a blind CRC poly/init/xorout search over recovered payloads is exactly the synthesis step) is unavailable - the product's north star for unknown signals.
       DEFERRED: this is the next MAUTO tranche (the production Evaluator over acquired IQ, ADR-0015), not a follow-up - held for the supervisor's milestone planning once the pool clears (user rule 2026-09-25 01:45). Model: Fable/Opus xhigh; core_interface.
+  - id: T-957
+    milestone: MMAP
+    title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-SURFACE-RC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 04:56 by the T-933 worker: ui/e2e/app-surface.e2e.mjs has 2 failures on main's tree WITHOUT T-933's change (reproduced with surface.ts unmodified, base 0d0d7f70): (a) the layers-menu 'artifacts' toggle times out; (b) the fog symbology key list is off by one 'none' entry. The 03:53 RC at 92d0f6f1 had app-surface GREEN, so a landing between 92d0f6f1 and 0d0d7f70 broke it - browser e2e runs only in the daily RC now, so the merge gate could not see it. Suspects touching the layers menu / symbology key: T-916 (892d3edc, shadow follow-ups: auto/viewport contrast, ladder fallback), T-810 (1ce98bea, density refetch), T-898 (d4d4ce7d, retune paths layer), T-919 (37bf55ff, status box), T-886, T-913.
+      DELIVER (deflake-triage): run app-surface ALONE x3 on main (HK_E2E_PORT >= 9216); fails alone => bisect the first-parent merges 92d0f6f1..0d0d7f70 to the landing, then fix the PRODUCT (the menu toggle / the key list) so the spec passes UNCHANGED - change a spec assertion only if a deliberate product change made it provably wrong (say which, with the ticket). Passes alone => make it deterministic (wait on the menu's rendered state, never a timeout choice). Red-on-regression proof.
+      WHAT THE USER WILL SEE ON STAGING: the layers menu's artifacts toggle works and the fog key lists exactly the drawn states.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
+  - id: T-958
+    milestone: MMAP
+    title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-SHEET-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
+      DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
   - id: T-933
     milestone: MMAP
     title: Sheet peek strip covers the lower half of the lifted minimap at every width
@@ -28070,35 +28106,20 @@ tasks:
       3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
       DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
       TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
-  - id: T-957
-    milestone: MMAP
-    title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
-    status: todo
-    priority: P1
-    deps: []
-    parallel_group: UI-SURFACE-RC
-    needs: none
-    model: opus
-    effort: medium
-    notes: |
-      FOUND 2026-09-25 04:56 by the T-933 worker: ui/e2e/app-surface.e2e.mjs has 2 failures on main's tree WITHOUT T-933's change (reproduced with surface.ts unmodified, base 0d0d7f70): (a) the layers-menu 'artifacts' toggle times out; (b) the fog symbology key list is off by one 'none' entry. The 03:53 RC at 92d0f6f1 had app-surface GREEN, so a landing between 92d0f6f1 and 0d0d7f70 broke it - browser e2e runs only in the daily RC now, so the merge gate could not see it. Suspects touching the layers menu / symbology key: T-916 (892d3edc, shadow follow-ups: auto/viewport contrast, ladder fallback), T-810 (1ce98bea, density refetch), T-898 (d4d4ce7d, retune paths layer), T-919 (37bf55ff, status box), T-886, T-913.
-      DELIVER (deflake-triage): run app-surface ALONE x3 on main (HK_E2E_PORT >= 9216); fails alone => bisect the first-parent merges 92d0f6f1..0d0d7f70 to the landing, then fix the PRODUCT (the menu toggle / the key list) so the spec passes UNCHANGED - change a spec assertion only if a deliberate product change made it provably wrong (say which, with the ticket). Passes alone => make it deterministic (wait on the menu's rendered state, never a timeout choice). Red-on-regression proof.
-      WHAT THE USER WILL SEE ON STAGING: the layers menu's artifacts toggle works and the fog key lists exactly the drawn states.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
-  - id: T-958
-    milestone: MMAP
-    title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
+  - id: T-959
+    milestone: MLIVE
+    title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
     status: todo
     priority: P2
     deps: []
-    parallel_group: UI-SHEET-FLAKE
+    parallel_group: TILE-CLIENT
     needs: none
     model: opus
     effort: medium
     notes: |
-      FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
-      DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
+      FROM T-932's deflake (task-rcfix-surface-nav 9aab332e): the client (ui/src/surface/tilecache.ts AIMD) charges an abandoned tile read only the route's AVERAGE service time, but /api/tiles cannot see the abort and keeps building the tile and holding its slot until done - under load overview reads take 7-9 s and outlive the charge, so the page's next reads are refused over slots its own leftover reads still hold (the 03:53 RC red). The spec now waits for the route's own in_flight report; the product estimate is still a guess. Injected worst case (both share slots held ~27 s): 18 refusals over 9 gestures, red on the per-gesture bound.
+      DELIVER: the client stops guessing - it reads the per-client in_flight_held every tile answer already states and treats slots it still holds as its own (never as contention); the 503 body also states what THIS client holds beside share (docs/api.md + api_contract.rs together, T-079), so a refusal can be told apart as stale-charge vs contention. Thin client: the server reports, the client does arithmetic over it. Tests: ui/test asserts the client's cap/issue decision from a sequence of answers carrying in_flight_held (red on the average-charge logic); a contract test for the 503 field; surface-nav stays green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; api_contract; surface-nav alone), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
