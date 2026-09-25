@@ -26634,6 +26634,25 @@ tasks:
       FOUND BY T-815 Opus review 2026-09-24.
 
       2026-09-24 coordinator: item 2 (honest drawer text) is DONE in T-815's fix fa8ba25a ('the log records this band looked at X ago for Y'). Remaining: item 1 (restore the frequency span) and item 3 (sweep records - the route has no filter that excludes them without dropping dwells). ADDED item 4 (T-815 fix worker): if an older day's slice fails on first load (network), the 'not fully loaded' row sticks until that day ages out of the 7-day window - retry failed older slices on refresh.
+  - id: T-911
+    milestone: MLIVE
+    title: "Departed band's shadow must keep the colour of its last live row (within one ramp step, undimmed): blind e2e + fix in the carry-forward/shadow path (user, staging)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER REQUEST 2026-09-24 (~19:45, relayed; the first part of the message was cut off in transit - the coordinator asked for it). The received acceptance, verbatim: "(blind, user-grounded): sweep a band with a known emitter, retune away; the shadow's colour for that band must equal the colour of its last live row within one ramp step (e2e: compare the framebuffer column before/after departure). Priority high - the user sees it on staging. MLIVE/MMAP, opus (hk-store history is core)."
+      READING (state in the hand-back if the evidence says otherwise): the fog-of-war SHADOW (last-known) tier (T-485/T-519/T-520/T-527) is DESIGNED to render dimmer than live (T-520 "a dim last-known ramp, unmistakable from live"; T-526's user-set darkness). So "equal within one ramp step" is judged on the VALUE the shadow carries (its dB, mapped through the same ramp) with the documented shadow dimming undone - or with the shadow darkness set to none (Ctrl+Shift+wheel, T-526) if the harness can. The defect to find is the shadow showing a DIFFERENT level than the band's last live row: e.g. hk-store's carry-forward folding the wrong row (an older/coarser/averaged level, a max over cells, a different fold level than the live row), or the client mapping shadow through a different range/ramp than live.
+      DELIVER: (1) the blind e2e through the mock SDR exactly as the user specified - sweep a band with a known emitter, retune away, read the framebuffer column over that band at the last live row and in the shadow after departure, and assert the shadow's (undimmed) colour equals the last live row's within one ramp step, per column over the emitter and the noise floor; red on today's code if the defect is real; (2) root-cause it through the real serving path (crates/hk-store history carry_forward / LastKnown, the tile route's shadow plane, the client's shadow placement/ramp) and fix it; (3) keep the shadow visibly distinct from live exactly as T-520 intends (dimming stays), and keep grey = never-observed untouched.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band you were watching - its shadow keeps the same picture (same signals, same relative levels) as the moment you left, just dimmed, not a different-looking band.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the crate binaries you touch; the e2e alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~19:45 (relayed, message truncated).
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
