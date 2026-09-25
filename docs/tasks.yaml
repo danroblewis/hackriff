@@ -28258,7 +28258,7 @@ tasks:
   - id: T-958
     milestone: MMAP
     title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-SHEET-FLAKE
@@ -28269,6 +28269,7 @@ tasks:
       FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
       DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
+    commit: 5c0891d1
   - id: T-959
     milestone: MLIVE
     title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
