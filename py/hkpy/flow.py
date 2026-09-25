@@ -395,7 +395,7 @@ def ticket_rows(ops: str, since: datetime, until: datetime) -> list[dict]:
 HANDLED_WITHIN_S = 6 * 3600
 #: What the work runner hands to a person (work-needs-attention.txt) - its escalations, the
 #: coordinator's notes - which touchpoints() did not read at all before.
-_PERSON_KINDS = re.compile(r"^(BLOCKED|REVIEW_FAIL|ERROR|TIMEOUT|BOARD_UNREADABLE|NOTE|\w+_ESCALATE|\w+_NO_SESSION|"
+_PERSON_KINDS = re.compile(r"^(BLOCKED|REVIEW_FAIL|ERROR|TIMEOUT|BOARD_UNREADABLE|NOTE|SYNC_ERROR|\w+_ESCALATE|\w+_NO_SESSION|"
                            r"DEFLAKE_(?!REQUESTED)\w+)$")
 _ATT = re.compile(r"^(\d\d-\d\d \d\d:\d\d)\s+(\S+)\s+(\S+)\s+(\S+)")
 
@@ -593,7 +593,13 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
             probe = json.load(open(os.path.join(ops, "hosts", f"{h}.json")))      # the work runner's per-tick probe
         except (OSError, ValueError):
             probe = {}
+        # Invariant 29: the work runner's per-tick task-branch sync (hkpy.reposync), as its status file reports it.
+        try:
+            st = (json.load(open(os.path.join(ops, "work-runner-status.json"))).get("hosts") or {}).get(h) or {}
+        except (OSError, ValueError, AttributeError):
+            st = {}
         out.append({"name": h, "cap": (hosts[h] or {}).get("cap", 2), "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+                    "refs_in_sync": st.get("refs_in_sync"), "drifting": st.get("drifting"),
                     "landed_24h": sum(1 for t in sent if f"(task-{t.lower().replace('-', '')})" in recent), "probe": probe,
                     "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
                     "landed": len(landed)})
