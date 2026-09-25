@@ -630,7 +630,7 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
 | Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
 | Left inventory column (Candidate / Confirmed lists + selections), collapsed to a chip by default | T-895 (P1) | `explore` (existing `inventory` / `selections` slices; the chip's open/closed is presentation only) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the chip's counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening, closing and the counts reach no route) |
-| Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/history` | - |
+| Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/observations` (the past-surveys pages), `/api/history` (served; no client reads it since T-445 retired the spectrum-grid pane) | - |
 | Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
 | Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
@@ -638,11 +638,11 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Pins + clusters | MAP-09/10 | `map.pins` (ephemeral) | `GET /api/events`, `GET /api/tiles/events` | - |
 | Artifacts layer | MAP-11 | `explore` (existing rows) | `GET /api/inventory` (`relation`) | - |
 | Band-plan priors layer | MAP-12 | `priors` | **`GET /api/priors`** *(reserved - MAP-12)* | - |
-| Research slide-in - Markers | MAP-21 | `research.collections`, `research.markers` | **`GET /api/collections`, `/api/collections/{id}/markers`** *(reserved - MAP-17)* | **`POST`/`PUT`/`DELETE`** in the same family |
-| Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST`/`PUT`/`DELETE /api/measurements`** - cursors only, never a `value` |
-| Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST`/`PUT`/`DELETE /api/annotations`** |
-| Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST`/`PUT`/`DELETE /api/views`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
-| Export menu | MAP-23 | `research` | the four `GET`s above | - (client-composed file; a share link is a later addition) |
+| Research slide-in - Markers | MAP-21 | `research.collections`, `research.markers` | **`GET /api/collections`, `/api/collections/{id}/markers`**, and **`GET /api/markers`** (the same list over every collection - what the canvas layer actually asks for) *(reserved - MAP-17)* | **`POST /api/collections`, `POST /api/collections/{id}/markers`, `PUT`/`DELETE /api/markers/{id}`, `PUT`/`DELETE /api/collections/{id}`** |
+| Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST /api/measurements`, `PUT`/`DELETE /api/measurements/{id}`** - cursors only, never a `value` |
+| Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST /api/annotations`, `PUT`/`DELETE /api/annotations/{id}`** |
+| Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST /api/views`, `PUT`/`DELETE /api/views/{id}`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
+| Export menu | MAP-23 | `research` | **`GET /api/research/export`** (T-823: one read-only GET, optionally narrowed to a collection - the bundle is the server's) | - (the client only names and saves the file; a share link is a later addition) |
 
 **Three rules this table encodes.**
 
@@ -656,6 +656,12 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
    correctly; they cannot catch a client asking for the wrong thing (T-367 requested `/api/timeline`
    with no band and drew an empty canvas while every suite stayed green). Every row above owes a
    `ui/test` assertion on the request it constructs (MAP-25).
+
+   **Landed as `ui/test/map-request-shape.test.ts` (T-825).** It parses this table, drives each
+   client's own request builder, and asserts every built path against the table: a route the client
+   builds that this table does not declare is red, a declared route with neither an assertion here
+   nor a named assertion elsewhere is red, and a route pinned as "no client yet" is red the day a
+   client starts building it. That is why the table is normative rather than descriptive.
 
 ---
 
