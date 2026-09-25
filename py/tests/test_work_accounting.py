@@ -1400,6 +1400,46 @@ def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_h
     p.wait(timeout=10)
 
 
+def test_a_sync_back_with_no_local_worktree_moves_the_branch(remote_host, monkeypatch):
+    """2026-09-25 09:26: T-958's Mac worktree had been reaped; its resumed node2 run committed 08d76b41, the sync-back
+    fetched it, but task-t958 stayed at its base and the reap judged the run NO_WORK."""
+    local_ops, local_repo, far = remote_host
+    g = lambda *a: subprocess.run(["git", "-C", str(local_repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                  check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "base")
+    g("branch", "task-t9")
+    g("commit", "-q", "--allow-empty", "-m", "the resumed run's work")
+    work = g("rev-parse", "HEAD")
+    g("update-ref", "refs/remotes/node2/task-t9", work)            # what the fetch brings back
+    g("reset", "-q", "--hard", "HEAD~1")
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "" if args[:2] == ["git", "fetch"] else real_sh(args, cwd=cwd or str(local_repo), **k))
+
+    real_run = subprocess.run
+
+    def scp(args, **kw):                                            # the host's files arrive
+        if args[0] != "scp":
+            return real_run(args, **kw)
+        pathlib.Path(args[-1]).write_text("")
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+    monkeypatch.setattr(R.subprocess, "run", scp)
+    monkeypatch.setattr(R, "remote_sh", lambda host, cmd, timeout=120, input=None: (0, ""))
+    monkeypatch.setattr(R, "sync_transcript", lambda c: None)
+    (local_ops / "work" / "T-9").mkdir(parents=True, exist_ok=True)
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo / "gone")}
+    assert R.sync_back(c) is True
+    assert g("rev-parse", "task-t9") == work
+    # review: a local-only commit on the branch is never dropped - held for a person instead
+    g("checkout", "-q", "task-t9")
+    g("commit", "-q", "--allow-empty", "-m", "a person's local commit")
+    local = g("rev-parse", "HEAD")
+    g("checkout", "-q", "main")
+    seen = []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    assert R.sync_back(c) is False and g("rev-parse", "task-t9") == local and [a[2] for a in seen] == ["REMOTE_SYNC"]
+
+
 def test_the_host_unreachable_or_a_failed_sync_holds_the_claim(remote_host, monkeypatch):
     local_ops, local_repo, far = remote_host
     monkeypatch.setattr(R, "remote_sh", lambda host, cmd, timeout=120, input=None: (255, "ssh: connect timed out"))

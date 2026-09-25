@@ -645,6 +645,16 @@ def sync_back(c):
         sh(["git", "fetch", "-q", host, f"+refs/heads/{branch}:refs/remotes/{host}/{branch}"], check=True, timeout=300)
         if os.path.isdir(wt):
             sh(["git", "reset", "-q", "--hard", f"{host}/{branch}"], cwd=wt, check=True)
+        else:
+            # No worktree here (reaped while the claim waited): move the branch itself, or the reap counts no commits -
+            # 2026-09-25 T-958's resumed run committed 08d76b41 on node2 and was judged NO_WORK at its base.
+            # Fast-forward only, and never a branch checked out elsewhere (review: update-ref would drop local-only
+            # commits, or leave that worktree staging a reversal of the host's work) - a person decides those.
+            ff = subprocess.run(["git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", f"refs/remotes/{host}/{branch}"],
+                                cwd=REPO, capture_output=True).returncode == 0
+            if not ff or f"branch refs/heads/{branch}\n" in sh(["git", "worktree", "list", "--porcelain"]) + "\n":
+                raise RuntimeError(f"{branch} has local commits or is checked out elsewhere - not moved to {host}'s tip")
+            sh(["git", "update-ref", f"refs/heads/{branch}", f"refs/remotes/{host}/{branch}"], check=True)
         rc, dirty = remote_sh(host, f"git -C {shlex.quote(wt)} status --porcelain --untracked-files=no", timeout=60)
         if rc:
             raise RuntimeError(f"remote status: {dirty.strip()[:160]}")
