@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { colourDistance, cvdDistance, simulateCvd, worstCaseDistance } from "../src/surface/cvd";
 import {
-  ARTIFACT_MARK, CANDIDATE_MARK, CONFIRMED_MARK, MEASUREMENT_MARK, OPEN_EDGE_MARK, PENDING_MARK,
+  ACTIVE_MARK, ARTIFACT_MARK, CANDIDATE_MARK, CONFIRMED_MARK, MEASUREMENT_MARK, OPEN_EDGE_MARK, PENDING_MARK,
   SELECTION_MARK, SYMBOLOGY, type FeatureClass,
 } from "../src/surface/marks";
 import { markKeyEntries } from "../src/surface/legend";
@@ -42,6 +42,9 @@ const PALETTE: Record<string, readonly [number, number, number]> = {
   confirmed: rgb(CONFIRMED_MARK), candidate: rgb(CANDIDATE_MARK), artifact: rgb(ARTIFACT_MARK),
   selection: rgb(SELECTION_MARK), measurement: rgb(MEASUREMENT_MARK), openEdge: rgb(OPEN_EDGE_MARK),
   pending: rgb(PENDING_MARK), grey: GREY,
+  // T-994: a box with an open output (Listen / decode / record / stream) — its own claim, "something
+  // is being done with this", so it must read apart from every other ink.
+  active: rgb(ACTIVE_MARK),
 };
 
 // Redmean units on 0..255 channels; ~20 is the threshold commonly used for "just noticeable" — this

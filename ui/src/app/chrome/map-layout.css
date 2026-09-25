@@ -9,7 +9,9 @@
    lifts itself clear of the dock (`centre/surface.ts` fit), and nothing else subtracts. */
 #view-explore > .centre > .surface { min-height: 0; height: 100%; }
 .app:has(#view-explore:not([hidden])) > .bar { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 5; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px); min-height: 40px; }
-.app:has(#view-explore:not([hidden])) > .dock { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 5; height: 54px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); }
+/* T-994: the floating Outputs dock bar is retired (its pixels return to the map); the small
+   Active-outputs strip that replaced it is `dock/dock.css`'s `.out-strip`, shown only while an
+   output is open. */
 /* T-801 round 3: `--panel-w`/`--panel-gap` are the one definition of the floating column's width
    and the chrome's gap (T-895: no longer an inset anything else must clear — see below). */
 #view-explore { --panel-w: 300px; --panel-gap: 8px; }
@@ -59,6 +61,5 @@
   /* T-895: open on a narrow screen, the lists span the width between the top chrome's measured
      bottom (`--side-top`) and the sheet's peek strip, stopping short of the right-edge column the
      zoom stack and the FAB live in (`sheet.css`'s 64 px gutter). */
-  #view-explore > .side.is-open { width: auto; right: 64px; bottom: calc(70px + 56px + 8px); }
-  .app:has(#view-explore:not([hidden])) > .dock { flex-wrap: nowrap; }
+  #view-explore > .side.is-open { width: auto; right: 64px; bottom: calc(var(--sheet-bottom, 8px) + 56px + 8px); }
 }

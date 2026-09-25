@@ -33,13 +33,14 @@ test("one idle signal: the cluster's IdleFade writes the <body> class the HUD an
   }
 });
 
-test("fade reaches the bar, the dock and the lists' chip — never what §10.2 exempts", () => {
+test("fade reaches the bar, the Active-outputs strip and the lists' chip — never what §10.2 exempts", () => {
   const rules = [...phoneCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
   const fading = rules.filter((r) => /opacity:\s*\.35/.test(r.body));
   assert.ok(fading.length > 0, "no fade rule at all, so this proves nothing");
   const sels = fading.flatMap((r) => r.sel.split(",").map((s) => s.trim()));
   for (const s of sels) assert.match(s, /^body\.chrome-idle /, `a fade not gated on idle: ${s}`);
-  for (const want of ["> .bar", "> .dock", ".side-chip"]) {
+  // T-994 retired the dock bar; the Active-outputs strip that replaced it is floating chrome too.
+  for (const want of ["> .bar", "> .out-strip", ".side-chip"]) {
     assert.ok(sels.some((s) => s.includes(want)), `${want} does not fade`);
   }
   const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side.is-open"];

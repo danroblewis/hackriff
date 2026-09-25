@@ -82,6 +82,7 @@ import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
+import { boxActivity, type BoxActivity } from "../dock/activity";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
@@ -468,13 +469,28 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // box and rect. `composeOverlays` concatenates the pane's VISIBLE ones in ascending z into the one
   // `marks` hook — still one place overlay geometry is produced and one pass (`overlay.ts`: no
   // sampler, no ramp) that draws it. MAP-07…MAP-13 each add one entry here.
+  // T-994: which boxes have an open output (Listen / stream-out / decode / recording), from the
+  // backend's open-output records the Active-outputs mount polls (`dock/activity.ts`). Re-derived
+  // only when those records change, and read INSIDE the frame like every other mark's state, so the
+  // halo and the badge are laid out through the pane's own mapping on every frame (never on the
+  // poll's cadence — T-388).
+  let activitySrc: readonly [unknown, unknown] = [null, null];
+  let activityMap: Map<string, BoxActivity> = new Map();
+  const activityNow = (): ReadonlyMap<string, BoxActivity> => {
+    const s = store.get();
+    if (activitySrc[0] !== s.outputs || activitySrc[1] !== s.servedOutputs) {
+      activitySrc = [s.outputs, s.servedOutputs];
+      activityMap = boxActivity(s.outputs, s.servedOutputs.pipelines, s.servedOutputs.recordings);
+    }
+    return activityMap;
+  };
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
     // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
     const rows = Object.values(s.inventory.rows);
-    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained, activityNow()), edge, pane.box, pane.rect,
       { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
@@ -602,6 +618,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
     onFocus: (p) => { focusedPin = p; },
     onSelect: selectPin,
   });
+  // T-994: the keyboard's menu key / Shift+F10 on a focused feature (the browser targets the focused
+  // button with `contextmenu`) opens the same menu, at the feature.
+  pinsEl.addEventListener("contextmenu", (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>(".sf-pin[data-pin]");
+    const row = btn ? store.get().inventory.rows[btn.dataset.pin ?? ""] : undefined;
+    if (!btn || !row) return;
+    e.preventDefault();
+    const r = btn.getBoundingClientRect();
+    openSignalMenu(ctx, row, e.clientX || r.left + Math.min(r.width, 24), e.clientY || r.top + Math.min(r.height, 24));
+  });
   /** The MapTip for whichever pin is focused (keyboard) or else hovered (pointer), re-placed on the
    * pin's position THIS frame so it moves with the pin. It reads loaded state only. */
   const placeTip = () => {
@@ -630,7 +656,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const layouts = panes
       .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
-    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
+    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null, activityNow());
     placeTip();
   };
   /** CSS px from the canvas's top-left — the coordinate the pins are laid out in. */
@@ -1318,9 +1344,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
         setMeasureMode(false);
       },
       onContext: (p, e) => {
+        const s = store.get();
+        // T-994: a feature on the map — a detection's box or its generalized symbol — is hit the way
+        // a click hits it (the pin layer's polygon/quadtree pick), so right-click / long-press on ANY
+        // box opens its menu. (The detections are the `detections` LAYER since T-806, so `hitAt`'s
+        // marks — the user's own selections and measurements — no longer contain them.)
+        const c = cssPoint(e);
+        const pin = pinLayer.pick(c.x, c.y);
+        if (pin && pin.pin.source === "detection") {
+          const row = s.inventory.rows[pin.pin.id];
+          if (row) { openSignalMenu(ctx, row, e.clientX, e.clientY); return; }
+        }
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
-        const s = store.get();
         if (hit.mark.kind === "signal-box") {
           const row = s.inventory.rows[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
@@ -1454,9 +1490,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
-      // T-918: the canvas runs under the floating dock at the bottom (full-bleed, docs/23 §10.1), so
-      // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
-      const dock = document.querySelector<HTMLElement>(".app > .dock");
+      // T-918: the canvas runs under the floating chrome at the bottom (full-bleed, docs/23 §10.1),
+      // so the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
+      // T-994: the dock bar is retired; what can sit there now is the Active-outputs strip, and only
+      // while an output is open (hidden — height 0, nothing to clear — otherwise).
+      const dock = document.querySelector<HTMLElement>(".app > .out-strip");
       const dr = dock?.getBoundingClientRect();
       const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
       // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
@@ -1507,6 +1545,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
+    // T-994: the Active-outputs strip appears and disappears with the outputs; its box changing size
+    // (0 while hidden) re-fits the map strip's clearance.
+    const outStrip = document.querySelector<HTMLElement>(".app > .out-strip");
+    if (outStrip) ro?.observe(outStrip);
     window.addEventListener("resize", fit);
     preview.start();
 

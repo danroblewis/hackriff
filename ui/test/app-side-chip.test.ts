@@ -145,7 +145,8 @@ test("layout: collapsed takes no map but the chip (≤ 56 px); open starts below
   assert.doesNotMatch(css.replace(/\/\*[\s\S]*?\*\//g, ""), /\.sf-bar/);
   assert.match(ctl, /left: var\(--panel-gap, 8px\);/);
   // Narrow open overlay: clear of the zoom/FAB gutter and above the sheet's peek strip.
-  assert.match(css, /\.side\.is-open \{ width: auto; right: 64px; bottom: calc\(70px \+ 56px \+ 8px\)/);
+  // T-994: clear of the sheet's peek strip, which now sits at `--sheet-bottom` (8 px, no dock under it).
+  assert.match(css, /\.side\.is-open \{ width: auto; right: 64px; bottom: calc\(var\(--sheet-bottom, 8px\) \+ 56px \+ 8px\)/);
   // Fixed, never draggable (P3): no drag wiring in the chip.
   const src = readFileSync("src/app/chrome/side-chip.ts", "utf8");
   assert.doesNotMatch(src, /"pointer(down|move)"|onpointer|draggable"/);

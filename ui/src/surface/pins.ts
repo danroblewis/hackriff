@@ -53,7 +53,8 @@
 
 import type { Box } from "./lattice";
 import type { PaneRect } from "./surface";
-import { isGeneralized, type FeatureClass } from "./marks";
+import { OUTPUT_KIND_GLYPH, OUTPUT_KIND_WORDS, activityWords, type FeatureActivity } from "./badges";
+import { SYMBOL_CSS_PX, isGeneralized, type FeatureClass } from "./marks";
 
 const S_TO_NS = 1e9;
 
@@ -533,6 +534,8 @@ export class PinLayer {
   /** Set while buttons are being re-ordered, so the blur/focus a move causes is not reported. */
   private reordering = false;
   private labelsNow: PlacedLabel[] = [];
+  private readonly badgesEl: HTMLElement;
+  private readonly badgeEls = new Map<string, HTMLElement>();
 
   constructor(private readonly root: HTMLElement, private readonly hooks: PinLayerHooks = {}) {
     this.overEl = root.ownerDocument.createElement("div");
@@ -546,10 +549,18 @@ export class PinLayer {
     this.labelsEl.className = "sf-flabels";
     this.labelsEl.setAttribute("aria-hidden", "true");
     root.appendChild(this.labelsEl);
+    // T-994: the active-output badges — text only (the button beside it names the outputs in its
+    // accessible name), laid out in the same per-frame pass as the buttons.
+    this.badgesEl = root.ownerDocument.createElement("div");
+    this.badgesEl.className = "sf-obadges";
+    this.badgesEl.setAttribute("aria-hidden", "true");
+    root.appendChild(this.badgesEl);
   }
 
-  /** Re-lay the layer out for this frame. `hoveredId`/`selectedId` style the states. */
-  update(layouts: readonly PaneLayout[], hoveredId: string | null, selectedId: string | null): void {
+  /** Re-lay the layer out for this frame. `hoveredId`/`selectedId` style the states; `activity`
+   * (T-994) is each feature's open outputs, by id — the backend's records, read by the caller. */
+  update(layouts: readonly PaneLayout[], hoveredId: string | null, selectedId: string | null,
+    activity?: ReadonlyMap<string, FeatureActivity>): void {
     const doc = this.root.ownerDocument;
     this.placed = layouts.flatMap((l) => l.placed);
     this.index = new PinIndex(this.placed.filter((p) => !p.area));
@@ -580,10 +591,11 @@ export class PinLayer {
       // T-910: a detection never draws a DOM glyph — the overlay pass draws its box or, generalized,
       // its symbol. `area` = a hit area over the box; `symbol` = the hit/focus point over the symbol.
       const form = p.area ? " area" : p.pin.source === "detection" ? " symbol" : "";
+      const act = activity?.get(p.pin.id);
       const cls = `sf-pin ${p.pin.kind} ${p.pin.source}${form}`
-        + (p.pin.id === hoveredId ? " hovered" : "") + (p.pin.id === selectedId ? " selected" : "");
+        + (p.pin.id === hoveredId ? " hovered" : "") + (p.pin.id === selectedId ? " selected" : "") + (act ? " active" : "");
       if (el.className !== cls) el.className = cls;
-      const label = pinLabel(p.pin);
+      const label = act ? `${pinLabel(p.pin)} · active: ${activityWords(act)}` : pinLabel(p.pin);
       if (el.getAttribute("aria-label") !== label) el.setAttribute("aria-label", label);
       const pressed = String(p.pin.id === selectedId);
       if (el.getAttribute("aria-pressed") !== pressed) el.setAttribute("aria-pressed", pressed);
@@ -605,6 +617,7 @@ export class PinLayer {
     }
     this.applyReadingOrder();
     this.updateLabels(layouts, selectedId);
+    this.updateBadges(activity);
     const over = layouts.reduce((n, l) => n + l.overCap, 0);
     const text = over > 0 ? `${over} more marker${over === 1 ? "" : "s"} in view than can be pinned — zoom in to resolve them` : "";
     if (this.overEl.textContent !== text) this.overEl.textContent = text;
@@ -654,6 +667,62 @@ export class PinLayer {
     }
   }
 
+  /**
+   * T-994: one badge per placed feature with an open output, at the TOP-RIGHT corner inside its
+   * drawn box (the newest edge — a live signal's top is the pane's live edge, so a badge above it
+   * would leave the pane), or beside a generalized symbol. One glyph per output kind; the audio
+   * glyph pulses with the server-reported level through `--lvl` (0..1).
+   */
+  private updateBadges(activity: ReadonlyMap<string, FeatureActivity> | undefined): void {
+    const doc = this.root.ownerDocument;
+    const seen = new Set<string>();
+    if (activity && activity.size > 0) {
+      for (const p of this.placed) {
+        const act = activity.get(p.pin.id);
+        if (!act || act.kinds.length === 0) continue;
+        const key = `${p.paneId}|${p.pin.id}`;
+        seen.add(key);
+        let el = this.badgeEls.get(key);
+        if (!el) {
+          el = doc.createElement("span");
+          el.dataset.pin = p.pin.id;
+          el.dataset.pane = p.paneId;
+          this.badgesEl.appendChild(el);
+          this.badgeEls.set(key, el);
+        }
+        const kinds = act.kinds.join(" ");
+        if (el.dataset.kinds !== kinds) {
+          el.dataset.kinds = kinds;
+          el.className = `sf-obadge ${p.area ? "box" : "symbol"}`;
+          el.title = activityWords(act);
+          el.replaceChildren(...act.kinds.map((k) => {
+            const g = doc.createElement("i");
+            g.className = `k-${k}`;
+            g.textContent = OUTPUT_KIND_GLYPH[k];
+            g.title = OUTPUT_KIND_WORDS[k];
+            return g;
+          }));
+        }
+        const lvl = act.level === null ? "0" : act.level.toFixed(2);
+        if (el.style.getPropertyValue("--lvl") !== lvl) el.style.setProperty("--lvl", lvl);
+        const x = p.drawn ? p.drawn.x1 - 2 : p.x + SYMBOL_CSS_PX + 2;
+        const y = p.drawn ? p.drawn.y0 + 2 : p.y - SYMBOL_CSS_PX;
+        // Right-aligned against the box's right edge (translateX(-100%)); beside a symbol, to its right.
+        el.style.transform = p.drawn
+          ? `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translateX(-100%)`
+          : `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+      }
+    }
+    for (const [key, el] of this.badgeEls) {
+      if (seen.has(key)) continue;
+      el.remove();
+      this.badgeEls.delete(key);
+    }
+  }
+
+  /** The active badges placed this frame, by `paneId|pinId` (tests). */
+  get badges(): ReadonlyMap<string, HTMLElement> { return this.badgeEls; }
+
   /** The labels placed this frame (tests). */
   get labels(): readonly PlacedLabel[] { return this.labelsNow; }
 
@@ -695,6 +764,8 @@ export class PinLayer {
     this.els.clear();
     this.labelEls.clear();
     this.labelsEl.remove();
+    this.badgeEls.clear();
+    this.badgesEl.remove();
     this.overEl.remove();
   }
 }

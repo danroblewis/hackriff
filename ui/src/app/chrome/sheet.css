@@ -3,7 +3,7 @@
    definition (`snapHeights`); only the width, dock position and look live here.
    NEVER MODAL: no backdrop, no overlay element, nothing outside `.sheet`'s own box — the canvas
    beneath keeps every pointer event that does not start on the sheet. Never faded (docs/23 §10.2). */
-.sheet { position: fixed; z-index: 6; bottom: var(--sheet-bottom, 70px); height: 56px; box-sizing: border-box;
+.sheet { position: fixed; z-index: 6; bottom: var(--sheet-bottom, 8px); height: 56px; box-sizing: border-box;
   display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(8px);
   border: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 30px var(--shadow);
