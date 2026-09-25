@@ -88,6 +88,7 @@ import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { trackOverlay } from "../chrome/dismiss";
+import { PEEK_PX } from "../chrome/sheet";
 import {
   BASE_STYLES, COLLECTION_Z, PLANE_ORDER, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
@@ -1371,15 +1372,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
       // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
       // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
-      // clear the peek strip too, not just the dock. Measured only while the sheet IS at peek
-      // (`dataset.snap`): the peek strip's box is a fixed, width-independent clearance (56 px above
-      // the dock, `sheet.css`), but the sheet OPEN (half/full) is a deliberate context switch onto
-      // the sheet's own content, and lifting the minimap (hence shrinking every pane) to chase the
-      // opened sheet's height would move the whole surface's layout on every open/close rather than
-      // fixing the one thing this ticket found wrong with the collapsed default.
+      // clear the peek strip too, not just the dock.
+      //
+      // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
+      // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
+      // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
+      // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
+      // height transition). Reading the live top/height, as an earlier version of this fix did,
+      // made the minimap — and so every pane, which packs above it — follow the sheet up and down
+      // on every drag and close (review finding on this ticket). The peek clearance itself is a
+      // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
+      // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
       const sheet = document.querySelector<HTMLElement>(".sheet");
-      const sr = sheet?.dataset.snap === "peek" ? sheet.getBoundingClientRect() : null;
-      const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - sr.top)) : 0;
+      const sr = sheet?.getBoundingClientRect();
+      const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - (sr.bottom - PEEK_PX))) : 0;
       const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
@@ -1404,9 +1410,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
-    // T-933: the sheet's own height changes with its snap state (peek/half/full — `sheet.css`'s
-    // transition), never the stage's size, so it needs its own observer to keep the minimap's lift
-    // correct as it opens and closes rather than only at first paint.
+    // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
+    // height, see above), so this observer is not about tracking drag/snap changes — it exists so
+    // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
+    // is still picked up once it appears, rather than the minimap staying un-lifted until the next
+    // stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
     window.addEventListener("resize", fit);
