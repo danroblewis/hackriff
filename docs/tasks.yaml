@@ -28980,6 +28980,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired
+
+      2026-09-25 AMENDMENT (user feedback ~14:05, item 3 - re-affirmed): 'I still don't want the whole spectrum view underneath the waterfall display.' Acceptance adds: no full-width strip under the canvas at any size; the canvas's bottom row is the page's last pixel (e2e at 1280x800 and 400 px). If the branch already queued leaves any strip, the follow-up is this ticket's.
   - id: T-996
     milestone: MMAP
     title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
@@ -29124,6 +29126,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes
+
+      2026-09-25 AMENDMENT (user feedback ~14:05 via supervisor, item 2): 'The info side bar on the bottom left with the Retune button looks out of place.' The pane's status words + Retune live INSIDE the pane as ONE small translucent chip next to the scale bar (bottom-right, T-996), or appear only as the Retune offer when the view is un-tuned (T-376 rule). No permanent bottom-left panel.
   - id: T-1004
     milestone: MMAP
     title: "Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost"
@@ -29484,6 +29488,86 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, the round-trip test, just precheck hk-store), then HAND BACK with the table. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile storage ruling): Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)
+  - id: T-1025
+    milestone: MMAP
+    title: "Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them"
+    status: todo
+    priority: high
+    deps:
+    - T-993
+    parallel_group: MAP-TOPCHIPS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~14:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1410-map-chrome-feedback.md): "I really want that bottom bar gone in the UI. The top bar *looks* like it's an overlay, but the background is opaque, so it's still effectively a top bar. ... The bottom 'Selected — nothing yet: click a signal or drag a region' bar also has an opaque background ... The bottom right accordion panel is kind of dumb to show all the time, it should be hidden all the time until someone clicks on something, like on Google Maps how someone clicks something and it opens the detailed view, and if they click on the back of the map it goes away, or if they click on another interest point it changes." Principle (docs/23 §10 P1): overlays are minimal, closeable, translucent; the map is the page; NOTHING OPAQUE SPANS AN EDGE.
+      ITEM 1 (follow-up to T-993, done): the top-centre status pill and the top-right cluster read as a bar because their background is opaque / shared. DELIVER: separate translucent chips (backdrop blur, no full-width background, no shared container), fading with the rest.
+      ACCEPTANCE: no element wider than ~1/3 of the pane spans the top edge; canvas pixels are visible between the chips (e2e samples the canvas between them); at 1280x800 and 400 px.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them
+  - id: T-1026
+    milestone: MMAP
+    title: "Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-CARD
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~14:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1410-map-chrome-feedback.md): "I really want that bottom bar gone in the UI. The top bar *looks* like it's an overlay, but the background is opaque, so it's still effectively a top bar. ... The bottom 'Selected — nothing yet: click a signal or drag a region' bar also has an opaque background ... The bottom right accordion panel is kind of dumb to show all the time, it should be hidden all the time until someone clicks on something, like on Google Maps how someone clicks something and it opens the detailed view, and if they click on the back of the map it goes away, or if they click on another interest point it changes." Principle (docs/23 §10 P1): overlays are minimal, closeable, translucent; the map is the page; NOTHING OPAQUE SPANS AN EDGE.
+      ITEM 5: the bottom-right sheet/accordion (T-803) is always shown. DELIVER: the detail card is HIDDEN by default; it opens when a feature (box, pin, marker, path) is clicked, closes on a click on bare map, switches content when another feature is clicked, Esc closes it; the inventory pills (T-997) open it on the list view. Hit-test the feature's polygon (boxes, not pins - user rule), not its centre. Selection state is view state (no device call).
+      ACCEPTANCE (ui/e2e): default paint has no card; click a box -> card with that box's identity/fields; click bare canvas -> card gone; click another box -> content swapped; Esc -> gone; T-997's pill -> card on its list. Works at 400 px (touch: tap/long-press per T-994).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list
+    high_effort_reason: the bottom sheet/accordion's open-state model is replaced by a selection-driven card that every map feature, the inventory pills (T-997) and the Selected strip retirement build on; hit-testing on boxes/pins/paths
+  - id: T-1027
+    milestone: MMAP
+    title: "Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge"
+    status: todo
+    priority: high
+    deps:
+    - T-1026
+    parallel_group: MAP-CARD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~14:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1410-map-chrome-feedback.md): "I really want that bottom bar gone in the UI. The top bar *looks* like it's an overlay, but the background is opaque, so it's still effectively a top bar. ... The bottom 'Selected — nothing yet: click a signal or drag a region' bar also has an opaque background ... The bottom right accordion panel is kind of dumb to show all the time, it should be hidden all the time until someone clicks on something, like on Google Maps how someone clicks something and it opens the detailed view, and if they click on the back of the map it goes away, or if they click on another interest point it changes." Principle (docs/23 §10 P1): overlays are minimal, closeable, translucent; the map is the page; NOTHING OPAQUE SPANS AN EDGE.
+      ITEM 4: the bottom 'Selected — nothing yet: click a signal or drag a region' bar is opaque and permanent (T-994 retires only the Outputs dock). DELIVER: retire the Selected strip; selection state lives in the click-opened detail card (the sibling card ticket); the empty-state hint is a one-time translucent toast or the Go-to tooltip, never a bar.
+      ACCEPTANCE: no element spans the bottom edge; e2e asserts the canvas's last row is the page's last pixel at 1280x800 and 400 px; every action the strip offered is reachable from the card or the box context menu (T-994).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge
+  - id: T-1028
+    milestone: MMAP
+    title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
+    status: todo
+    priority: high
+    deps:
+    - T-1000
+    parallel_group: MAP-RETUNE-MODE
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER DIRECTIVE (2026-09-25 ~14:15, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1420-retune-mode.md): "I think the 'retune' functionality would be cool as a mode, like they can turn on 'retune' mode and whenever they zoom or pan it retunes to that. For areas that are too large and can't be tuned, use the largest possible size instead of denying them. This mode gets turned off. Maybe it's a keyboard thing, hold down a certain key while panning to retune."
+      INVARIANT AMENDMENT (this ticket edits the text): CLAUDE.md 'Navigation is view arithmetic in time and a device command in frequency' + the ADR that states it (grep 'never commands the radio') + docs/23 §10 + docs/api.md if the retune route gains a 'largest achievable' snap option (with api_contract.rs, T-079).
+      - DEFAULT (mode off) UNCHANGED: pan/zoom never command the radio; the spy-client tests keep asserting an empty call list.
+      - RETUNE MODE (explicit, visible, off by default): while ON, the view's frequency window is the tune request. A pan/zoom that SETTLES (gesture end, or ~150 ms still) issues ONE retune through the same gated DeviceAction path (one capture at a time, settle gap, device_id recorded, snapped to the nearest achievable config). Latest settled view wins; a retune in flight is not cancelled - the next waits for the settle gap.
+      - TOO WIDE IS NOT AN ERROR IN THE MODE: a span wider than the instantaneous bandwidth tunes the LARGEST achievable span centred on the view's centre (clamped to the tunable range at the edges). Panes still say honestly what is tuned (coverage/fog shows the tuned window inside the wider view; honesty tier unchanged). The 'no achievable configuration' error remains only for a view entirely outside the tunable range or a replay's extent.
+      - MOMENTARY FORM: holding a key while panning/zooming = retune mode for that gesture; release = off. Must not clash with T-456's one-axis-zoom modifier (ui/src/surface/input.ts); suggested: hold R, tap R toggles the sticky mode; the chip highlights while active.
+      - PANES/DEVICES: per ACTIVE pane (T-1000) and that pane's device (T-1006 when it lands; the global device until then); a FROZEN pane in retune mode retunes frequency only and stays frozen in time. Never touches time, the ring or detection (pause/scrub invariants stand).
+      - UI: a small toggle chip in the map controls (beside Live/layers), highlighted when on; a one-line status word in the pane while a retune is pending/settling.
+      TESTS (spy client, ui/test + ui/e2e): (1) mode off: pan/zoom -> zero device calls; (2) mode on: one gesture -> exactly one snapped retune after settle; three quick pans -> one call with the last view; (3) mode on, view 40 MHz wide at 100 MHz on a 20 MHz device -> one call for the max span centred at 100 MHz, no error surfaced; (4) held-key form: calls only while held, release restores mode-off behaviour; (5) frozen pane + mode on -> frequency retune, time window unchanged; (6) the docs above.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216; api_contract if the route changes), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule
+    high_effort_reason: "amends a stated invariant (navigation never commands the radio) and drives the gated DeviceAction path from gestures: settle/debounce, one-in-flight, largest-achievable snapping and per-pane device routing must all stay honest"
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
