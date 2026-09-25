@@ -28315,7 +28315,8 @@ tasks:
   - id: T-962
     milestone: MAUTO
     title: RDS PI committed and Confirmed from ~3 CRC-valid groups (98.085 PI 1704; oracle saw no RDS) - identity needs vote counts and a provisional state
-    status: todo
+    status: in-progress
+    branch: task-t962
     priority: P1
     deps: []
     parallel_group: RDS-EVIDENCE
@@ -28399,7 +28400,8 @@ tasks:
   - id: T-967
     milestone: MMAP
     title: Decoded identity (PI/PS etc.) is not shown in the inventory list rows
-    status: todo
+    status: in-progress
+    branch: task-t967
     priority: P2
     deps: []
     parallel_group: UI-LIST-IDENT
@@ -28919,7 +28921,8 @@ tasks:
   - id: T-994
     milestone: MMAP
     title: "Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires"
-    status: todo
+    status: in-progress
+    branch: task-t994
     priority: high
     deps: []
     parallel_group: MAP-OUTPUTS
