@@ -284,3 +284,6 @@ def test_remote_hosts_report_running_landed_and_the_mirrors_drift(tmp_path):
     assert h["name"] == "node2" and h["running"] == ["T-11"] and h["dispatched"] == 4 and h["landed"] == 2   # T-11: not landed
     assert h["behind"] == 4 and h["mirror"]                              # t9 + its merge, t099 + its merge
     assert flow.remote_hosts(str(tmp_path / "nowhere"), str(repo)) == []
+    # a batch gating on main: its provisional merges are not drift - measured against the bulk marker's base
+    (ops / "bulk-in-progress").write_text(f"base={g('rev-parse', 'refs/remotes/node2/main')}\n")
+    assert flow.remote_hosts(str(ops), str(repo))[0]["behind"] == 0
