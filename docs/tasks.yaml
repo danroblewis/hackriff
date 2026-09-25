@@ -27402,6 +27402,13 @@ tasks:
       FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
 
       Review FAIL: NOAA SAME tones wrong (said 1050 Hz mark/2083 Hz space; correct is mark 2083.3 Hz / space 1562.5 Hz per 47 CFR §11.31, 1050 Hz is the separate Warning Alarm Tone). Fixed the table cell + added §11.31 citation; also fixed a malformed AIS table separator row (4 cols vs 5-col header) and loosened 'CQPSK (P25 Phase 2)' to H-DQPSK/CQPSK-is-Phase-1 per the reviewer's nits. Commit 85389315.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:11).
+      Gate found an uncommitted file: the docs/tasks.yaml note appended by `just task note T-924` during the prior review-fix attempt (recording the reviewer's SAME-tone finding and the fix) had not been committed. Committed it now (66a32bc8) - it is legitimate ticket work (the note the previous handback instructions explicitly required), not stray state, so nothing was discarded. Working tree is clean, main (9f502902...) remains an ancestor of task-t924, no re-merge needed. Docs-only change overall; no tests apply.
+      precheck exit 0
+      Commits: 4ea24538, 85389315, 66a32bc8
+      Observed, not chased: Could not read ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md from this worktree (not present/accessible) - relied on the ticket's acceptance text, which quotes it, for the design requirements.
+      Resources: 3 CPU-s, peak 0.3 GB
   - id: T-925
     milestone: M2-hardening
     title: "Dashboard: explorer row (target, phase, journal tail) + radio-owner tile (holder, until, staging live/replay)"
