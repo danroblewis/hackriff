@@ -27840,6 +27840,8 @@ tasks:
       Real-time path. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: this is a named sub-ticket of the FM/RDS P1 T-926 (supervisor 05:50 baseline: unprompted PI on 2 of 19 stations); see T-926's notes for the five root causes.
+
+      Gate fix 1/2: the gate bisected to hk-cli::api_contract every_serialized_time_declares_its_unit (red alone on base+branch, green on base). Reproduced: /api/status.readers.detect.wait_ns = 2.73e9 flagged as 'named _ns but carries Unix SECONDS'. It is a false positive of the sweep's only evidence - magnitude cannot tell an instant from an elapsed-time accumulator; its Unix-seconds band (1e9..1e10) is 1-10 s of accumulated ns, and wait_ns crosses it within a second of any run. Fixed through the test's own designed hatch, NOT_A_TIME ('a count that can reach 10^9', beside bytes): the eight T-939 stage counters plus cpu_ns, which has been latent since T-510 and only survives because no reader in the 5 s replay spends a CPU-second. No product code changed. Main merged in (T-929 FlowGate::holding, additive). Re-ran: the contract test green, hk-core 192 passed, hk-pipeline waterfall_survives_drops + scheduler_history + lossless_gate + departure_rows_folded green.
     branch: task-t939
   - id: T-940
     milestone: M2-hardening
