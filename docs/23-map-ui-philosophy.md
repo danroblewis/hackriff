@@ -175,7 +175,11 @@ inside the mode the view's frequency window *is* the tune request:
   line on the pane), and `R` **held** is the momentary form — release and the old rule is back.
 - **A gesture commands once, when it SETTLES** (pointer release / pinch end, or ~150 ms of stillness
   for a wheel, which has no release), through the same gated `DeviceAction` path. The latest settled
-  view wins; a request already in flight is never cancelled and the next waits the settle gap.
+  view wins; a request already in flight is never cancelled and the next waits the settle gap. **A
+  press that never moved the view is not a gesture** — a click to focus a signal, a tap, a
+  long-press, a Pin-mode tap and a cancelled press reach nothing, in the mode or out of it. (T-486's
+  follow/pause commit runs at every release and is a different statement from "a gesture happened";
+  conflating the two is what let a click retune in T-1028's first cut.)
 - **Too wide is not an error here.** A view wider than one capture window tunes the **largest
   achievable span centred on it**, clamped into the tunable range at the band edges. The pane keeps
   showing the wider view and the coverage fog shows which part of it the radio took — the honesty

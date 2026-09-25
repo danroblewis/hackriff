@@ -453,7 +453,7 @@ test("every call this mode can make is a RETUNE: no pause, no ring, no detection
 // ---------------------------------------------------------------------------
 
 /** A spy canvas + preview: `input.ts` is arithmetic over `PaneModel`, and reaches nothing itself. */
-function inputHarness(opts: Parameters<typeof attachSurfaceInput>[2] = {}) {
+function inputHarness(opts: Parameters<typeof attachSurfaceInput>[2] = {}, paneId = "p0") {
   const W = 1000, H = 600;
   const listeners = new Map<string, (e: unknown) => void>();
   const canvas = {
@@ -464,9 +464,9 @@ function inputHarness(opts: Parameters<typeof attachSurfaceInput>[2] = {}) {
     removeEventListener: (t: string) => listeners.delete(t),
   };
   const preview = {
-    activePane: "p0",
+    activePane: paneId,
     onMap: (p: { y: number }) => p.y < 50, // the map strip, in GL coords (origin bottom-left)
-    paneAt: () => "p0",
+    paneAt: () => paneId,
     drag: () => {}, dragMap: () => {}, wheel: () => {}, wheelMap: () => {},
     goToOnMap: () => {}, endDrag: () => {}, endDragMap: () => {},
   };
@@ -550,4 +550,137 @@ test("the surface host WIRES the mode: the gesture hook, both key edges, the chi
   // And the mode is never turned on by the mount: off by default is a property of the code, not of
   // a test's setup.
   assert.ok(!/retuneMode\.setSticky\(true\)|sticky\s*=\s*true/.test(src), "the mount turns retune mode ON");
+});
+
+// ---------------------------------------------------------------------------
+// 9. T-1028 REVIEW FIX: a CLICK is not a gesture, and must not command the radio
+// ---------------------------------------------------------------------------
+//
+// Found by review of the first cut: `settle()` ran for every primary press on a pane — it is
+// T-486's follow/pause commit, and a click legitimately reaches it — and the first cut reported the
+// gesture END from there unconditionally. So with retune mode on, clicking a signal box to FOCUS it
+// posted `/api/control/window`, dropped the growing edge's tiles and toasted "Retuning …". That is
+// the exact class of defect T-407 is about — a pointer stream read as a committing act — reopened
+// one surface over by the mode.
+//
+// The rule, and what these tests pin: **a gesture END is reported only when the stroke actually
+// MOVED the view.** T-486's commit is unchanged (it still runs for a click, because whether the pane
+// ends up following is decided at every release); what a click no longer does is *say a gesture
+// happened*. Every tap-shaped input is covered, because each reaches `settle` by its own path:
+// mouse click, touch tap, touch long-press, a Pin-mode tap, and a stroke the browser cancelled.
+
+/** The host's own wiring, verbatim (`app/centre/surface.ts`'s `onGesture`), over the real input
+ * layer and the real controller — so these tests exercise the composed path the review traced. */
+function wiredRig(m: PaneModel) {
+  const r = rig(m);
+  // The spy preview names the MODEL's own pane, so a commit resolves a real target: a harness whose
+  // pane id did not exist would answer `no_target` and every assertion below would pass vacuously.
+  const h = inputHarness({
+    onGesture: ({ pane, ended }) => { if (ended) r.mode.settled(pane); else r.mode.moved(pane); },
+    onRegion: () => {}, onMeasure: () => {}, onAnnotateBox: () => {}, onAnnotatePoint: () => {},
+  }, m.list()[0].id);
+  return { ...r, fire: h.fire };
+}
+
+test("RETUNE MODE + a plain CLICK on a pane: no gesture, no retune", async () => {
+  const m = model();
+  const r = wiredRig(m);
+  r.mode.setSticky(true);
+  // Press and release with no movement at all — focusing a signal box, which is what a click on this
+  // surface means (`onClick` → `focusSignal`).
+  r.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+  r.fire("pointerup", { clientX: 400, clientY: 300, pointerId: 1 });
+  r.timers.run();
+  await flush();
+  assert.deepEqual(deviceCalls(r.calls), [], "a click commanded the radio: clicking a signal must never retune");
+  assert.equal(r.mode.pendingPane, null, "a click left a retune pending");
+});
+
+test("RETUNE MODE + a TOUCH TAP, a LONG-PRESS and a PIN-mode tap: still no retune", async () => {
+  const m = model();
+  const r = wiredRig(m);
+  r.mode.setSticky(true);
+  // A finger down and up where it started: `undecided` never resolves, and `settle` still runs.
+  r.fire("pointerdown", { button: 0, pointerType: "touch", clientX: 400, clientY: 300, pointerId: 1, timeStamp: 0 });
+  r.fire("pointerup", { pointerType: "touch", clientX: 400, clientY: 300, pointerId: 1, timeStamp: 80 });
+  // The same finger held long enough to be the touch context menu (docs/23 §10.5).
+  r.fire("pointerdown", { button: 0, pointerType: "touch", clientX: 400, clientY: 300, pointerId: 2, timeStamp: 0 });
+  r.fire("pointerup", { pointerType: "touch", clientX: 400, clientY: 300, pointerId: 2, timeStamp: 900 });
+  r.timers.run();
+  await flush();
+  assert.deepEqual(deviceCalls(r.calls), [], "a tap or long-press commanded the radio");
+
+  // A Pin-mode tap drops a marker; it is not a pan, so it is not a tune request either.
+  const pin = rig(m);
+  pin.mode.setSticky(true);
+  const ph = inputHarness({
+    annotateMode: "pin",
+    onAnnotatePoint: () => {},
+    onGesture: ({ pane, ended }) => { if (ended) pin.mode.settled(pane); else pin.mode.moved(pane); },
+  }, m.list()[0].id);
+  ph.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 3 });
+  ph.fire("pointerup", { clientX: 400, clientY: 300, pointerId: 3 });
+  pin.timers.run();
+  await flush();
+  assert.deepEqual(deviceCalls(pin.calls), [], "a Pin-mode tap commanded the radio");
+});
+
+test("RETUNE MODE + a CANCELLED stroke that never moved: no retune (a cancel is still an end)", async () => {
+  const m = model();
+  const r = wiredRig(m);
+  r.mode.setSticky(true);
+  r.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+  r.fire("pointercancel", { clientX: 400, clientY: 300, pointerId: 1 });
+  r.timers.run();
+  await flush();
+  assert.deepEqual(deviceCalls(r.calls), [], "a cancelled press that never panned commanded the radio");
+});
+
+test("THE CONTROL for all of the above: a stroke that DID move the view still retunes, once", async () => {
+  const m = model();
+  const r = wiredRig(m);
+  r.mode.setSticky(true);
+  r.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+  r.fire("pointermove", { buttons: 1, clientX: 440, clientY: 300 });
+  r.fire("pointerup", { clientX: 440, clientY: 300, pointerId: 1 });
+  await flush();
+  assert.equal(deviceCalls(r.calls).length, 1, "a real pan in the mode must still command exactly one retune");
+});
+
+test("a click reports NO gesture at all, while a drag reports its moves and one end", () => {
+  const seen: { pane: string; ended: boolean }[] = [];
+  const h = inputHarness({ onGesture: (g) => seen.push(g), onAnnotatePoint: () => {} });
+  h.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+  h.fire("pointerup", { clientX: 400, clientY: 300, pointerId: 1 });
+  assert.deepEqual(seen, [], "a click is not a gesture: nothing moved");
+  // A pointermove that did not actually move (a coalesced jitter event at the same coordinates) is
+  // not a pan either — the view moved by zero, so there is nothing to tune to.
+  h.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 2 });
+  h.fire("pointermove", { buttons: 1, clientX: 400, clientY: 300 });
+  h.fire("pointerup", { clientX: 400, clientY: 300, pointerId: 2 });
+  assert.deepEqual(seen, [], "a zero-distance move was reported as a pan");
+});
+
+test("a HELD key lost to a window switch drops the hold and never LATCHES the mode", async () => {
+  const m = model();
+  const r = wiredRig(m);
+  const id = m.list()[0].id;
+  r.mode.keyDown();
+  assert.equal(r.mode.on, true);
+  // The window lost focus with `R` down: the keyup goes to whatever took the focus, so the host
+  // calls `releaseHeld` instead. A release we never saw is not a tap — latching here would turn the
+  // radio-moving mode ON by alt-tabbing away from the page.
+  r.mode.releaseHeld();
+  assert.equal(r.mode.on, false, "the hold stuck: the mode outlived the key");
+  assert.equal(r.mode.latched, false, "a lost keyup latched the mode");
+  m.panFreq(id, 2e6);
+  r.mode.moved(id);
+  r.mode.settled(id);
+  r.timers.run();
+  await flush();
+  assert.deepEqual(deviceCalls(r.calls), [], "a gesture after the lost keyup still commanded the radio");
+  // And the host wires it: a source guard, since focus loss is not reachable headless.
+  const src = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(src, /addEventListener\("blur", \(\) => retuneMode\.releaseHeld\(\)\)/, "blur does not drop the hold");
+  assert.match(src, /visibilitychange[\s\S]{0,120}releaseHeld\(\)/, "a hidden tab does not drop the hold");
 });

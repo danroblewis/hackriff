@@ -179,6 +179,16 @@ export function attachSurfaceInput(
        * It moves nothing until it has travelled `DRAG_PX` from the press; then `touchIntent` decides,
        * once. `t0` is the press's own `timeStamp`, so the hold is read off the events, not a clock. */
       undecided: boolean; t0: number; press: GlPoint;
+      /**
+       * **Did this stroke actually MOVE the view?** (T-1028, found by review.)
+       *
+       * `settle` runs for every primary press on a pane — it is T-486's follow/pause commit, and a
+       * click legitimately reaches it — so "the stroke ended" is not the same statement as "a
+       * gesture happened". Retune mode acts on the second, and the first cut reported the first:
+       * with the mode on, clicking a signal box to focus it posted a window to the radio. A click is
+       * not a pan, and this flag is the difference, set only where a viewport was really moved.
+       */
+      panned: boolean;
     }
     | null = null;
 
@@ -188,7 +198,7 @@ export function attachSurfaceInput(
   // finger is ignored. When a pinch ends, the finger left down does nothing until it lifts: carrying
   // it on as a pan would move the view by however far the fingers drifted apart.
   const fingers = new Map<number, { x: number; y: number }>();
-  let pinch: { map: boolean; pane: string | null; spread: number; mid: { x: number; y: number } } | null = null;
+  let pinch: { map: boolean; pane: string | null; spread: number; mid: { x: number; y: number }; panned: boolean } | null = null;
   const spreadMid = () => {
     const [a, b] = [...fingers.values()];
     return { spread: Math.hypot(a.x - b.x, a.y - b.y), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
@@ -238,7 +248,7 @@ export function attachSurfaceInput(
         const map = d ? d.map : preview.onMap(p);
         const pane = map ? null : d?.pane ?? preview.paneAt(p);
         if (pane) preview.activePane = pane;
-        pinch = { map, pane, spread, mid };
+        pinch = { map, pane, spread, mid, panned: false };
         canvas.setPointerCapture(e.pointerId);
         return;
       }
@@ -263,7 +273,7 @@ export function attachSurfaceInput(
     const undecided = isTouch(e) && !region && !measuring && !tool;
     dragging = {
       x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region, measuring, annotating, tool,
-      undecided, t0: e.timeStamp, press: p,
+      undecided, t0: e.timeStamp, press: p, panned: false,
     };
     if (region) opts.onRegionDrag?.(region);
     if (measuring) opts.onMeasureDrag?.(measuring);
@@ -284,7 +294,11 @@ export function attachSurfaceInput(
       else if (pinch.pane) { preview.wheel(pinch.pane, at, factor, axes); preview.drag(pinch.pane, dx, dy); }
       pinch.spread = spread;
       pinch.mid = mid;
-      moved(pinch.map ? null : pinch.pane);
+      // Two fingers that have not separated or travelled have moved nothing (T-1028): the view is
+      // where it was, so there is no gesture to report and nothing for a mode to act on.
+      const moving = factor !== 1 || dx !== 0 || dy !== 0;
+      if (moving) pinch.panned = true;
+      moved(moving && !pinch.map ? pinch.pane : null);
       return;
     }
     if (!dragging || !e.buttons) { opts.onHover?.(point(e), e); return; }
@@ -306,7 +320,8 @@ export function attachSurfaceInput(
       const dx = (e.clientX - dragging.x0) * scale, dy = -(e.clientY - dragging.y0) * scale;
       if (dragging.map) preview.dragMap(dx, dy);
       else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-      moved(dragging.map ? null : dragging.pane);
+      if (dx !== 0 || dy !== 0) dragging.panned = true;
+      moved(dragging.panned && !dragging.map ? dragging.pane : null);
       return;
     }
     const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
@@ -331,7 +346,10 @@ export function attachSurfaceInput(
     }
     if (dragging.map) preview.dragMap(dx, dy);
     else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-    moved(dragging.map ? null : dragging.pane);
+    // The view moved by the distance travelled, so a zero-distance move (a coalesced jitter event at
+    // the same coordinates) moved it by zero — not a pan, and not a gesture to report (T-1028).
+    if (dx !== 0 || dy !== 0) dragging.panned = true;
+    moved(dragging.panned && !dragging.map ? dragging.pane : null);
   };
 
   // **The gesture ended, so the pane's follow/pause decision is committed now** (T-486).
@@ -343,14 +361,19 @@ export function attachSurfaceInput(
   // cause. A region stroke never panned, so there is nothing to commit for one.
   const settle = (d: {
     map: boolean; pane: string | null; region: SurfaceRegion | null; measuring: SurfaceRegion | null; annotating: SurfaceRegion | null;
+    panned: boolean;
   }) => {
     if (d.region || d.measuring || d.annotating) return;
     if (d.map) preview.endDragMap();
     else if (d.pane) preview.endDrag(d.pane);
     else return;
-    // T-1028: the gesture ENDED. Reported here, with T-486's own commit point, so a host in retune
-    // mode acts on the view the user came to rest on rather than on one of the moves along the way.
-    moved(d.map ? null : d.pane, true);
+    // **T-486's commit always runs; T-1028's gesture END is reported only if the view actually
+    // MOVED.** The two are different statements and the first cut of retune mode conflated them: a
+    // click reaches here (every release decides whether the pane ends up following), so reporting
+    // the end unconditionally made clicking a signal box post a window to the radio. `d.panned` is
+    // set only where a viewport was really moved, so a click, a tap, a long-press, a Pin-mode tap
+    // and a cancelled press all end a stroke without ever claiming a gesture happened.
+    moved(d.panned && !d.map ? d.pane : null, true);
   };
 
   // A pinch ends when either finger lifts: its target commits its follow/pause decision exactly as
@@ -358,7 +381,7 @@ export function attachSurfaceInput(
   const endPinch = () => {
     const p = pinch;
     pinch = null;
-    if (p) { settle({ map: p.map, pane: p.pane, region: null, measuring: null, annotating: null }); }
+    if (p) { settle({ map: p.map, pane: p.pane, region: null, measuring: null, annotating: null, panned: p.panned }); }
   };
 
   const onUp = (e: PointerEvent) => {

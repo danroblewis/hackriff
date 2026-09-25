@@ -1662,6 +1662,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // pane keys beside them, and refused for a key going into a text field or carrying a modifier.
     document.addEventListener("keydown", onRetuneKeyDown);
     document.addEventListener("keyup", onRetuneKeyUp);
+    // A window that loses focus with `R` down never delivers the keyup, and the momentary mode would
+    // stay on until `R` was pressed again — a mode that tunes the radio, left on by alt-tabbing away
+    // from it. Dropping the hold is not the same act as a release (see `releaseHeld`): it must not
+    // latch the mode, which is what a tap does.
+    window.addEventListener("blur", () => retuneMode.releaseHeld());
+    document.addEventListener("visibilitychange", () => { if (document.hidden) retuneMode.releaseHeld(); });
     // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
     // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
     store.select((s) => {

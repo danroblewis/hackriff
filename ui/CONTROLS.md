@@ -45,7 +45,9 @@ off means the rule above exactly: every gesture in this table is view arithmetic
 call list stays empty. Turned on — deliberately, and visibly (a lit chip, a banner, a status line on
 the pane) — the view's frequency window *is* the tune request: a pan or zoom that **settles** (the
 pointer released, a pinch ended, or ~150 ms of stillness for a wheel) issues **one** retune through
-the one gated `DeviceAction` path. The latest settled view wins, a request already in flight is never
+the one gated `DeviceAction` path. **A click is not a gesture**: a press that never moved the view —
+a click to focus a signal, a touch tap, a long-press, a Pin-mode tap, a cancelled press — reaches
+nothing, mode or no mode. The latest settled view wins, a request already in flight is never
 cancelled, and the next one waits the settle gap. A view **wider than one capture window** tunes the
 largest achievable span centred on it (clamped into the tunable range at the band edges) rather than
 refusing — the pane keeps showing the wider view, and the coverage fog shows which part of it the

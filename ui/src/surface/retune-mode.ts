@@ -372,6 +372,24 @@ export class RetuneModeController {
   }
 
   /**
+   * **The key is not held any more, and we never saw it come up** — the window lost focus with `R`
+   * down (alt-tab, a dialog, a platform shortcut), so the `keyup` went somewhere else.
+   *
+   * Deliberately NOT [[keyUp]]: a release we did not observe is not a tap, and treating it as one
+   * would *latch* the mode on a window switch — a mode that tunes the radio, turned on by leaving.
+   * So this drops the hold and nothing else, and abandons a settle that was still waiting: the same
+   * rule as a real release, minus the meaning a real release carries. (Found by review of the first
+   * cut, which could leave `held` stuck true until `R` was pressed again.)
+   */
+  releaseHeld(): void {
+    if (!this.held) return;
+    this.held = false;
+    this.usedHeld = false;
+    if (!this.on) this.abandon();
+    this.announce();
+  }
+
+  /**
    * A gesture moved a pane's view. With the mode off this is the whole of the work: nothing is
    * recorded and nothing is scheduled, so the default rule holds byte for byte.
    */
