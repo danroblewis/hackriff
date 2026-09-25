@@ -29095,7 +29095,7 @@ tasks:
   - id: T-990
     milestone: M2-hardening
     title: Noise-only band yields ~6 candidates/min, each given a band-plan explanation with no measured support (airband, spurs as AIS)
-    status: in-progress
+    status: done
     branch: task-t990
     priority: P1
     deps: []
@@ -29121,6 +29121,7 @@ tasks:
       Observed, not chased: FOR THE COORDINATOR -- the stronger half of this ticket's acceptance depends on T-948. 'A DC spike in the aviation band -> receiver artefact' can only be decided where the detection is ADMITTED, not where it is explained: hk-detect's dc_hit marks any detection within 15 kHz of the tuned centre and at most 40 kHz wide, which a real emission the radio is dwelled on satisfies exactly as well as LO leakage does (measured: AWARE-042's synthetic 12.5 kHz raster at 446 MHz has every real channel flagged dc on 100 % of its detections). And the retune test that would settle it is unreachable per emitter, because a DC line under a wider retune lands at a different frequency and is a different emitter. T-948's per-device, per-rate DC + spur mask is the mechanism that settles it, and this branch already honours its output: a row the mask lists carries spur-map, which reaches the 'Receiver artefact' verdict here. Until T-948 lands, an unmasked DC coincidence is disclosed by name on the rank-1 row and not asserted. | The noise-band guard is GREEN on current code (0 candidates, 0 boxes over 8 minutes of synthetic noise-only band through the full real chain, at two noise levels, with retunes). The field's ~6.5 candidates/min in an empty airband is therefore NOT a white-noise CFAR false alarm; reproducing it needs a recorded quiet-airband SigMF capture from the same indoor HackRF rig, replayed through the mock SDR. That capture does not exist. The guard bounds regressions; it does not reproduce the defect. Reported in every hand-back and confirmed by both reviewers. | docs/api.md lines ~232 and ~442 still show `"service": "band-plan"` in the /api/inventory and /api/events sample bodies. `band-plan` has never been a value hk_pipeline::family emits. Stale samples, left alone; the prose beside them is correct.
       Use cases: AWARE-042, AWARE-053, SIGNAL-087
       Resources: 6 CPU-s, peak 0.4 GB — LEAKED 1 processes (killed at reap)
+    commit: 6cefa6e9
   - id: T-991
     milestone: M2-hardening
     title: Content class computed for the whole window from one sub-band (152-162 MHz reads restricted-paging)
