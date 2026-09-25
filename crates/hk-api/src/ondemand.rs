@@ -200,6 +200,23 @@ fn close_frame_for_reason(reason: hk_stream::CloseReason) -> (CloseCode, &'stati
 
 /// Subscribes the connection as a remote consumer, like [`bridge::attach`], through a writer
 /// [`watch`] can ping between messages.
+///
+/// **The subscribe closer must never block a thread it cannot afford to (T-954, review
+/// attempt 2).** hk-stream's own contract for it (`publisher.rs`) is to unblock a writer thread
+/// that may be stuck inside [`ConnSink::write`] holding `conn`'s lock, by shutting the raw socket
+/// down — and two of its five [`hk_stream::CloseReason`]s run on threads that must never wait on a
+/// peer: `SlowConsumer` fires straight out of `Publisher::publish_binary`/`publish_status`, on the
+/// *producer's own real-time thread* ("the producer never waits on a browser", [`bridge`]'s module
+/// docs), and `DrainTimeout` fires from a watchdog thread shared by every consumer draining after
+/// the publisher finished. Attempt 1 took `conn`'s lock before shutting down for every reason,
+/// which is exactly backwards for these two: that lock is the one a writer thread stuck mid-write
+/// already holds, so the closer can't get it, `shutdown` never runs, and the caller — the producer
+/// itself, for `SlowConsumer` — blocks for up to the peer's own write timeout, starving every
+/// other consumer of the stream. So those two only ever shut down, unconditionally, no lock taken.
+/// The other three — `PublisherFinished` and `PeerGone` (both called by the *per-consumer* writer
+/// thread itself, only once its own last write has already returned, so `conn` is never held when
+/// they run) and `Detached` (only ever `serve`'s own explicit close, on `serve`'s own thread, after
+/// it has already sent its own frame and dropped the lock) — are safe to close with a frame here.
 fn attach(
     handle: &PublisherHandle,
     stream: &TcpStream,
@@ -216,16 +233,26 @@ fn attach(
     let id = handle.subscribe(
         label,
         Declared::remote(ConnSink(Arc::clone(&conn))),
-        Box::new(move |reason| {
-            let (code, msg) = close_frame_for_reason(reason);
-            conn_for_closer
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .send_close(code, msg);
-            let _ = closer.shutdown(Shutdown::Both);
-        }),
+        Box::new(move |reason| on_close(reason, &conn_for_closer, &closer)),
     )?;
     Ok((id, conn))
+}
+
+/// The subscribe closer's actual work, factored out of [`attach`] so review attempt 2's exact
+/// concern — `SlowConsumer`/`DrainTimeout` must never wait on `conn`'s lock — has a direct,
+/// deterministic test (below) instead of one that hopes to stall a real TCP write.
+fn on_close(reason: hk_stream::CloseReason, conn: &Mutex<Conn>, closer: &TcpStream) {
+    use hk_stream::CloseReason;
+    if !matches!(
+        reason,
+        CloseReason::SlowConsumer | CloseReason::DrainTimeout
+    ) {
+        let (code, msg) = close_frame_for_reason(reason);
+        conn.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .send_close(code, msg);
+    }
+    let _ = closer.shutdown(Shutdown::Both);
 }
 
 /// How the peer went away.
@@ -425,9 +452,11 @@ pub(crate) fn serve(
             // `watch` already returned, so this thread holds `conn` uncontended: send *this*
             // reason (the one `watch` actually observed) if nobody has already, i.e. the
             // producer did not close this consumer first — see [`Conn::send_close`] and
-            // [`close_frame_for_reason`] for that race. Must happen **before** `handle.close(id)`:
-            // that call runs the subscribe callback, which shuts the raw socket down (T-633's
-            // `closer.shutdown`) and would otherwise race ahead of this write.
+            // [`close_frame_for_reason`] for that race. Sending here, before `handle.close(id)`,
+            // is what makes this side usually win it: that call's subscribe callback (`attach`)
+            // hands its own shutdown-then-close-attempt to a short-lived thread rather than doing
+            // it inline (review attempt 2 — that closer must never block *its* caller, which can
+            // be the producer's own real-time thread), so it is rarely faster than this line.
             let (code, reason) = close_frame_for(end);
             let mut c = conn.lock().unwrap_or_else(PoisonError::into_inner);
             if end == PeerEnd::Unresponsive {
@@ -469,5 +498,80 @@ mod tests {
         );
         assert_eq!(control_frames(&mut vec![0x81]), Err(PeerEnd::Message));
         assert_eq!(control_frames(&mut vec![0x8a, 0x7e]), Err(PeerEnd::Message));
+    }
+
+    fn loopback_conn() -> (Arc<Mutex<Conn>>, TcpStream, TcpStream) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let closer = server.try_clone().unwrap();
+        let conn = Arc::new(Mutex::new(Conn {
+            sink: bridge::WsSink::new(
+                server.try_clone().unwrap(),
+                hk_stream::StreamKind::Audio,
+                Vec::new(),
+            ),
+            started: true,
+            close_sent: false,
+        }));
+        (conn, closer, client)
+    }
+
+    /// T-954, review attempt 2: this is the regression itself, made deterministic instead of
+    /// depending on actually stalling a TCP write. `conn`'s lock stands in for a writer thread
+    /// stuck mid-write holding it; `on_close(SlowConsumer, ...)` — the call a producer's own
+    /// real-time publish thread makes — must return long before that lock is ever released.
+    #[test]
+    fn slow_consumer_and_drain_timeout_never_wait_on_conns_lock() {
+        for reason in [
+            hk_stream::CloseReason::SlowConsumer,
+            hk_stream::CloseReason::DrainTimeout,
+        ] {
+            let (conn, closer, client) = loopback_conn();
+            let held = Arc::clone(&conn);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _g = held.lock().unwrap_or_else(PoisonError::into_inner);
+                tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(2));
+            });
+            rx.recv().unwrap(); // the lock is now held, simulating a stuck writer_loop write.
+
+            let t0 = Instant::now();
+            on_close(reason, &conn, &closer);
+            let elapsed = t0.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(200),
+                "{reason:?} waited {elapsed:?} on a lock a stuck writer holds \
+                 (the producer's own real-time thread must never do this)"
+            );
+
+            holder.join().unwrap();
+            drop(client);
+        }
+    }
+
+    /// The other three reasons run only where `conn`'s lock is never contended (see [`attach`]'s
+    /// doc comment), so they close with a real frame, not just a hang-up.
+    #[test]
+    fn the_other_reasons_still_send_a_close_frame() {
+        for reason in [
+            hk_stream::CloseReason::PublisherFinished,
+            hk_stream::CloseReason::PeerGone,
+            hk_stream::CloseReason::Detached,
+        ] {
+            let (conn, closer, client) = loopback_conn();
+            on_close(reason, &conn, &closer);
+            let mut ws = WebSocket::from_raw_socket(client, Role::Client, None);
+            let code = loop {
+                match ws.read() {
+                    Ok(Message::Close(f)) => break f.map(|f| u16::from(f.code)),
+                    Ok(_) => {}
+                    Err(_) => break None,
+                }
+            };
+            assert!(code.is_some(), "{reason:?} must still send a close frame");
+        }
     }
 }
