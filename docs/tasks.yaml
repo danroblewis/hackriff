@@ -29853,6 +29853,23 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-demod -E 'kind(lib) & test(/audio/)'; the listen status binary in hk-pipeline; just precheck hk-demod hk-pipeline), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY review of T-966 2026-09-25: Listen level_dbfs while squelch is closed reads the dropped demod audio (docs say 'delivered'); stereo halves its time constant; docs + WFM/AGC and squelch-closed tests
+  - id: T-1030
+    milestone: MMAP
+    title: "Selected-region drawer asks /api/coverage for a stale scope (0-9.8 GHz instead of the selected region) when the selection lands mid-flight: send the current scope, drop superseded responses"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: UI-DRAWER-SCOPE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the T-1026 and T-997 workers (2026-09-25): ui/e2e/app-selected-region.e2e.mjs at 3 e2e lanes sees the drawer ask /api/coverage about 0-9 830 400 000 Hz instead of the selected region 100 290 000-100 800 000 Hz - the drawer's pre-selection scope request racing the region focus. Passes alone (2/2). Classed 'load flake' by the workers, but the wire shows the CLIENT building the wrong request (CLAUDE.md: 'assert the request the client builds'): a request issued for a stale scope after the selection changed is a product race, not only a test timing issue.
+      DELIVER (deflake-triage rules): reproduce deterministically (a unit test over the drawer's request builder with the selection arriving between scope computation and send, or the e2e at 3 lanes x 5); fix the client so a coverage request always carries the scope current at SEND time and a response for a superseded scope is dropped, not rendered (sequence/abort by scope key); prove red on the old code. Never loosen the spec's scope assertion.
+      ACCEPTANCE: app-selected-region green 10/10 at 3 lanes; a ui/test asserting the request the drawer builds for a region selected mid-flight.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the spec alone and at 3 lanes on ports >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1026 and T-997 workers 2026-09-25: Selected-region drawer asks /api/coverage for a stale scope (0-9.8 GHz instead of the selected region) when the selection lands mid-flight: send the current scope, drop superseded responses
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
