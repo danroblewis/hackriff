@@ -27240,7 +27240,8 @@ tasks:
   - id: T-920
     milestone: M2-hardening
     title: "IQ ring unavailable / lossless-gate test red on Linux (node2) but green on the Mac: view_pause_keeps_capture + api_contract coverage iq-ring available:false - Jetson portability"
-    status: todo
+    status: in-progress
+    branch: task-t920
     priority: high
     deps: []
     parallel_group: SDR
