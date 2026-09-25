@@ -436,7 +436,9 @@ def hosts():
 # cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
 # Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
 REMOTE_DEFAULT_CAP = 2
-_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+# Only the Mac-first GPU paths: a ticket that needs the radio says so with `needs: hardware` (never dispatched at all);
+# matching 'hackrf' in the text kept a docs ticket and a dashboard ticket off an idle node2 (2026-09-25 04:05).
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon)\b", re.I)
 PROBE_FRESH_S = 180
 
 
@@ -2630,6 +2632,10 @@ def tick(dry):
                 frontier["dispatchable"] = frontier.get("dispatchable", 0) + 1
                 frontier.setdefault("dispatchable_ids", []).append(t["id"])
         frontier["held_groups"] = held
+        # Always present, empty when none (supervisor 04:27: a missing key read as a broken status, not as zero).
+        frontier.setdefault("dispatchable", 0)
+        frontier.setdefault("dispatchable_ids", [])
+        frontier.setdefault("held_by_branch", [])
     except Exception:
         pass
     status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "budget": {"cores": CORES, "gate_reserve": GATE_RESERVE, "worker_cores": WORKER_CORES, "worker_jobs": WORKER_JOBS, "worker_test_threads": WORKER_TEST_THREADS}, "cap": CAP,
