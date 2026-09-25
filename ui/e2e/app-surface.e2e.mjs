@@ -261,7 +261,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
   const one = JSON.parse(await page.eval(menu));
   assert.deepEqual(one.bases, [["ramp", true], ["phosphor", false]], "base style: exactly one, ramp by default");
-  assert.deepEqual(one.overlays, [["rules", true], ["detections", true]], "overlays in paint order, defaults on");
+  assert.deepEqual(one.overlays, [["rules", true], ["detections", true], ["artifacts", false]], "overlays in paint order, defaults on");
   assert.match(one.head[0], /Base style · this pane/);
   assert.match(one.head[1], /Overlays · this pane/);
   assert.equal(one.signals, "true");
@@ -271,7 +271,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   await paneAct(page, "split");
   await page.click("document.querySelector('.map-layers-btn')");
   await page.waitFor("the menu to act on pane 2", `/pane 2 of 2/.test(document.querySelector('#map-layers h4')?.textContent ?? '')`, { timeoutMs: 10000 });
-  assert.deepEqual(JSON.parse(await page.eval(menu)).overlays, [["rules", true], ["detections", true]], "a split must inherit the registry");
+  assert.deepEqual(JSON.parse(await page.eval(menu)).overlays, [["rules", true], ["detections", true], ["artifacts", false]], "a split must inherit the registry");
   await page.click(`document.querySelector('#map-layers input[data-base="phosphor"]')`);
   await page.click(`document.querySelector('#map-layers input[data-layer="detections"]')`);
   await page.click(`document.querySelector('#map-layers input[data-layer="rules"]')`);
@@ -281,7 +281,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
      document.querySelector('#map-layers input[data-layer="detections"]').checked === false`, { timeoutMs: 10000 });
   const two = JSON.parse(await page.eval(menu));
   assert.deepEqual(two.bases, [["ramp", false], ["phosphor", true]]);
-  assert.deepEqual(two.overlays, [["rules", false], ["detections", false]]);
+  assert.deepEqual(two.overlays, [["rules", false], ["detections", false], ["artifacts", false]]);
 
   // Close pane 2: pane 1 is active again, and none of pane 2's toggles reached it.
   await paneAct(page, "close");

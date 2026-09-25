@@ -23931,7 +23931,6 @@ tasks:
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
     status: in-progress
-    branch: task-t811
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -23959,6 +23958,18 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): image/harmonic/IMD relationships drawn as lines linking the related signals on the canvas, switchable as a layer. Say in your handback exactly what to open on staging to see it.
+
+      Gate failed app-surface.e2e T-806 layers menu: it asserted the overlay list without the new artifacts layer; updated expectations (artifacts, off). app-dismiss.e2e failure (bottom sheet) is not in this tree, not from this change.
+    branch: task-t811
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 19:44).
+      Gate failure was ui/e2e/app-surface.e2e.mjs (T-806 layers menu) asserting the overlay list [rules, detections]; the new Artifacts layer adds [artifacts, false] third, so the expectations were updated (three spots). Not run in a browser here (no hk binary built); the order and default match the gate's reported actual. The app-dismiss.e2e bottom-sheet failure in the same gate log is a spec absent from this tree and unrelated. Artifacts layer itself unchanged: dashed links from artifact-of rows to their source, Layers menu > Artifacts. Attempt 2: the only leftover was the ticket note written by just task note; committed, and merged the last gated main cleanly.
+      Tests: node test/run.mjs surface-layers surface-artifacts -> exit 0 (9 passed (earlier run; unit code unchanged))
+      precheck exit 0
+      Commits: cd244181, b4d0feb9
+      Observed, not chased: app-dismiss.e2e.mjs 'bottom sheet covers no canvas rows' failed in the same gate batch; file not in this branch
+      Use cases: AWARE-042
+      Resources: 52 CPU-s, peak 0.6 GB
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
