@@ -121,12 +121,16 @@ fn read(state: &ApiState, id: EmitterId) -> Result<Value, Fail> {
     }
 
     let current = repo.current_classification(live).map_err(repo_fail)?;
-    let latest = repo.latest_classification(live).map_err(repo_fail)?;
-    let differs = matches!((&current, &latest), (Some(c), Some(l)) if c != l);
+    // T-886: the latest row **unlike** the current one. On the rank-3 tie the newest row restates
+    // the chain's label (T-878), so reading the newest alone answered `latest: null` for exactly
+    // the emitters whose posterior this route exists to serve.
+    let latest = repo
+        .latest_classification_beside(live, current.as_ref())
+        .map_err(repo_fail)?;
     Ok(json!({
         "emitter": live.to_string(),
         "classification": detail(current.as_ref()),
-        "latest": if differs { detail(latest.as_ref()) } else { None },
+        "latest": detail(latest.as_ref()),
     }))
 }
 
