@@ -28,8 +28,9 @@ since 2026-09-25, when a `cargo build | grep | head` wrapper in worktrees/t901 r
 and no claim, and the nextest runs of the sessions killed at 09:34 kept going in four worktrees -
 none hot enough for rule (a) even to alarm: an unowned cargo / cargo-nextest / non-sccache rustc /
 `hk serve` / ui/e2e node / worktree target binary (or a shell wrapping one) whose worktree, from
-its command line or its cwd, has no running or fix-held claim on any host and no owned process in
-it, for >10 minutes: SIGTERM, then SIGKILL on a later tick, re-checked against a fresh ps and
+its command line or its cwd, is under this repo's .claude/worktrees and has no running, fix-held or
+limited claim on any host, no owned process in it and no git activity in it (index/HEAD/logs/HEAD of
+its admin dir), for >30 minutes: SIGTERM, then SIGKILL on a later tick, re-checked against a fresh ps and
 claims file before each signal. Everything else is an alert. A watchdog that kills on a guess is worse than the contention it
 is watching for, and the alert path (ops/alert.py, deduped 30 min per key) is enough to get a
 person or a coordinator to look.
@@ -676,13 +677,23 @@ def kill_now(rows: list[dict]) -> list[int]:
 # .claude/worktrees/t901 ran 15 h with ppid 1 and no claim, and the cargo-nextest runs of the
 # sessions killed at 09:34 kept going in t926/t940/t950-red/t953. None was over 90 % CPU, so rule
 # (a) never even alarmed, and nothing but a person with `ps` could stop them.
-ORPHAN_FOR = 600
+#: 30 min: t901 ran 15 h and the 09:34 orphans 20+ min, while a live claim-less agent's detached
+#: `cmd &` in a worktree looks the same from ps - the hold, plus git activity below, is what tells them apart.
+ORPHAN_FOR = 1800
 #: The work runner's live claim states (ops/work-runner.py): a review runs as "running" too, and a
 #: "fix-held" claim resumes in its worktree. Host does not matter: a node2 claim's `wt` is the Mac path.
 ORPHAN_STATES = ("running", "fix-held", "limited")   # limited: task-pm-usage-limit, a run waiting out the account limit
 #: Fallback labels, not owners: an orphan cargo's sccache rustc must not protect its own worktree.
 NOT_AN_OWNER = ("sccache", "system", "apps", "tunnel", "limiter")
-WT_RE = re.compile(r"/[^\s'\";&|()]*?/\.claude/worktrees/[^/\s'\";&|()]+")
+REPO = "/Users/daniellewis/hackriff"       # the same constant ops/work-runner.py uses
+
+
+def _wt_re(repo: str) -> re.Pattern:
+    """THIS repo's worktrees only: another checkout's .claude/worktrees is not ours to stop."""
+    return re.compile(r"(?<![\w./-])" + re.escape(repo.rstrip("/") + "/.claude/worktrees/") + r"[^/\s'\";&|()]+")
+
+
+WT_RE = _wt_re(REPO)
 BUILD_RE = re.compile(r"^(\S*/)?(cargo|cargo-nextest|rustc)(\s|$)|^(\S*/)?hk\s+serve(\s|$)"
                       r"|^(\S*/)?node\s+\S*e2e/\S+\.mjs|^/\S*/\.claude/worktrees/[^/\s]+/target/")
 SHELL_RE = re.compile(r"^(\S*/)?(zsh|bash|sh)\s(.*\s)?-c\s")
@@ -692,6 +703,27 @@ WRAPS_BUILD_RE = re.compile(r"(^|[\s;&|('\"])(\S*/)?(cargo|cargo-nextest|rustc)(
 
 def worktrees_in(text: str) -> list[str]:
     return WT_RE.findall(text or "")
+
+
+def worktree_active(wt: str, now: float) -> bool:
+    """Git activity in the worktree within ORPHAN_FOR: the mtime of its admin dir's index, HEAD or
+    logs/HEAD (a live agent runs git status/diff/commit constantly; a dead one does not). The
+    admin dir comes from the worktree's `.git` file (`gitdir:`); missing or unreadable is no
+    evidence, never protection."""
+    try:
+        line = open(os.path.join(wt, ".git")).readline().strip()
+    except OSError:
+        return False
+    if not line.startswith("gitdir:"):
+        return False
+    admin = os.path.join(wt, line.split(":", 1)[1].strip())
+    for f in ("index", "HEAD", os.path.join("logs", "HEAD")):
+        try:
+            if os.path.getmtime(os.path.join(admin, f)) >= now - ORPHAN_FOR:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _build_kind(row: dict, by_pid: dict[int, dict]) -> bool:
@@ -720,15 +752,15 @@ def orphan_pool(rows: list[dict], attr: dict[int, str]) -> list[dict]:
 
 
 def cwd_pids(rows: list[dict], attr: dict[int, str], pool: list[dict]) -> list[int]:
-    """Whose cwd the one lsof asks for: the pool rows whose command names no worktree, plus the
-    OWNED build, shell and claude rows that name none (an agent's shell there protects it). None
-    at all when the pool is empty, so a quiet box never runs lsof."""
+    """Whose cwd the one lsof asks for: every pool row (its cwd's worktree counts as well as its
+    command line's), plus the OWNED build, shell and claude rows that name no worktree (an agent's
+    shell there protects it). None at all when the pool is empty, so a quiet box never runs lsof."""
     if not pool:
         return []
     by_pid = {r["pid"]: r for r in rows}
     owned = [r for r in rows if attr.get(r["pid"]) not in (None, *NOT_AN_OWNER)
              and (_build_kind(r, by_pid) or SHELL_RE.match(r["cmd"]) or CLAUDE_RE.match(r["cmd"]))]
-    return sorted({r["pid"] for r in pool + owned if not worktrees_in(r["cmd"])})
+    return sorted({r["pid"] for r in pool} | {r["pid"] for r in owned if not worktrees_in(r["cmd"])})
 
 
 def read_cwds(pids: list[int]) -> dict[int, str]:
@@ -775,7 +807,7 @@ def kill_orphans(due: list[dict], since: dict, now: float, cwds: dict[int, str])
     for r in due:
         now_row = by_pid.get(r["pid"])
         if (now_row is None or now_row["cmd"] != r["cmd"] or r["pid"] not in pool
-                or any(w in protected for w in r["wts"])):
+                or any(w in protected or worktree_active(w, now) for w in r["wts"])):
             logline(f"KILL-ORPHAN-REFUSED pid={r['pid']} wt={r['wt']}: no longer an unowned orphan "
                     f"in an unprotected worktree")
             continue
@@ -804,8 +836,8 @@ def wt_orphans(rows: list[dict], claims: dict, since: dict, now: float,
     protected = protected_worktrees(rows, attr, claims, cwds)
     live, due = set(), []
     for r in pool:
-        wts = worktrees_in(r["cmd"]) or worktrees_in(cwds.get(r["pid"], ""))
-        if not wts or any(w in protected for w in wts):
+        wts = list(dict.fromkeys(worktrees_in(r["cmd"]) + worktrees_in(cwds.get(r["pid"], ""))))
+        if not wts or any(w in protected or worktree_active(w, now) for w in wts):
             continue
         k = f"orphan:{r['pid']}"
         live.add(k)
@@ -814,6 +846,8 @@ def wt_orphans(rows: list[dict], claims: dict, since: dict, now: float,
     for k in [k for k in since if k.startswith(("orphan:", "orphan-term:"))
               and "orphan:" + k.split(":", 1)[1] not in live]:
         since.pop(k, None)
+    if not due:
+        return [], []
     acted = due if dry else kill_orphans(due, since, now, cwds)
     if not acted:
         return [], []
@@ -821,7 +855,8 @@ def wt_orphans(rows: list[dict], claims: dict, since: dict, now: float,
     verb = "would stop" if dry else "stopped"
     return [{"rule": "wt-orphan", "level": "red", "key": "watchdog:wt-orphan",
              "title": f"{verb} {len(acted)} worktree orphan(s) in {', '.join(w.rsplit('/', 1)[-1] for w in wts)}",
-             "body": "No running claim on any host, no owned process there, unowned 10 min (2026-09-25: "
+             "body": "No running/fix-held/limited claim on any host, no owned process there, no git activity "
+                     "there, unowned 30 min (2026-09-25: "
                      "t901's 15-h cargo wrapper; the 09:34 killed sessions' nextest runs):\n"
                      + "\n".join(f"pid {r['pid']} {r.get('sig', 'dry-run')} {r['wt']} up {r['etime']}s "
                                  f"`{r['cmd'][:160]}`" for r in acted[:10]),
