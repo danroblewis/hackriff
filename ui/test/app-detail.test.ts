@@ -115,7 +115,7 @@ test("the action row is the context menu's own actions, in the mockup's order", 
   const spy = spyCtx();
   try {
     const cand = detailActions(signalMenuItems(spy.ctx, row({ state: "candidate" })));
-    assert.deepEqual(cand.map((a) => a.label), ["Listen", "Open in Decode", "Record clip", "Stream out", "Analyze", "Promote", "Delete"]);
+    assert.deepEqual(cand.map((a) => a.label), ["Listen", "Decode", "Record clip", "Stream out", "Analyze", "Promote", "Delete"]);
     assert.equal(cand[0].primary, true, "Listen is the primary action");
     assert.equal(cand.find((a) => a.id === "delete")?.danger, true);
     const conf = detailActions(signalMenuItems(spy.ctx, row({ identity_scheme: "rds-pi" })));
