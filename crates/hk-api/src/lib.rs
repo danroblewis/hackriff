@@ -56,6 +56,7 @@ pub mod priors; // T-812 (MAP-12): band-plan priors over a viewport, suggestions
 pub mod query;
 pub mod recipes;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod research_export; // T-823 (MAP-23): the research objects out as one file
 pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of the tile lattice
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;

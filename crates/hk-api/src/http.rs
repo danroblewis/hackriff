@@ -184,6 +184,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/measurements/{id}"),
     ("PUT", "/api/measurements/{id}"),
     ("DELETE", "/api/measurements/{id}"),
+    // T-823 MAP-23 research export
+    ("GET", "/api/research/export"),
     // T-816 MAP-16 human-authored annotations
     ("GET", "/api/annotations"),
     ("POST", "/api/annotations"),
@@ -1289,6 +1291,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::measurements::route(state, &ctl)) // T-818
         .or_else(|| crate::annotations::route(state, &ctl)) // T-816
         .or_else(|| crate::views::route(state, &ctl)) // T-819
+        .or_else(|| crate::research_export::route(state, &ctl)) // T-823 (MAP-23)
         .or_else(|| crate::collections::route(state, &ctl)) // T-817 (MAP-17)
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route

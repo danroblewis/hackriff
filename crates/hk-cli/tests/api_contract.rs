@@ -12572,6 +12572,116 @@ fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
     stop_server(serving);
 }
 
+/// T-823 (MAP-23, RESEARCH-003): `/api/research/export` as `docs/api.md` documents it — one bundle
+/// holding the collections, markers, annotations and measurements as their own routes serve them,
+/// a SigMF-adjacent annotation block with the authored marker, a per-collection filter, and the
+/// usual errors.
+#[test]
+fn research_export_bundles_the_durable_objects_as_documented() {
+    let (_dir_guard, _serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let (st, c) = post(
+        addr,
+        "/api/collections",
+        &json!({"name": "t823-export"}).to_string(),
+    );
+    assert_eq!(st, 201, "{c}");
+    let cid = c["id"].as_str().unwrap().to_owned();
+    let (st, a) = post(
+        addr,
+        "/api/annotations",
+        &json!({
+            "kind": "box", "f_lo_hz": f - 1e5, "f_hi_hz": f + 1e5, "t0_s": 1000.0, "t1_s": 1002.0,
+            "label": "t823-note", "body": "off raster", "collection_id": cid, "view": view,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201, "{a}");
+    let (st, _) = post(
+        addr,
+        "/api/annotations",
+        &json!({
+            "kind": "text", "f_lo_hz": f, "f_hi_hz": f, "t0_s": 1005.0, "t1_s": 1005.0,
+            "label": "t823-unfiled", "view": view,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201);
+    let (st, m) = post(addr, "/api/measurements", &json!({
+        "kind": "bandwidth", "collection_id": cid,
+        "cursors": [{"f_hz": f - 1e5, "t_s": 1000.0}, {"f_hz": f + 1e5, "t_s": 1001.0}], "view": view,
+    }).to_string());
+    assert_eq!(st, 201, "{m}");
+    let (st, mk) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &json!({"name": "t823-marker", "f_center_hz": f, "view": view}).to_string(),
+    );
+    assert_eq!(st, 201, "{mk}");
+
+    let (st, all) = get(addr, "/api/research/export");
+    assert_eq!(st, 200, "{all}");
+    assert_eq!(all["format"], "hackriff-research-export@1");
+    assert_eq!(all["truncated"], false);
+    assert_eq!(all["counts"]["annotations"], 2);
+    assert_eq!(all["counts"]["measurements"], 1);
+    assert_eq!(all["counts"]["markers"], 1);
+    assert!(
+        all["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == cid.as_str())
+    );
+    // The objects are the routes' own JSON, carrying their server-stamped provenance.
+    assert_eq!(all["measurements"][0]["id"], m["id"]);
+    assert_eq!(all["measurements"][0]["value"], m["value"]);
+    assert_eq!(all["annotations"].as_array().unwrap().len(), 2);
+    // SigMF-adjacent: a standard annotation with the authored block, anchored at the earliest start.
+    let sg = &all["sigmf"];
+    assert_eq!(sg["global"]["core:sample_rate"].as_f64(), Some(1e6));
+    assert_eq!(sg["recording_start_s"].as_f64(), Some(1000.0));
+    let ann = sg["annotations"].as_array().unwrap();
+    assert_eq!(ann.len(), 2);
+    let boxed = ann
+        .iter()
+        .find(|x| x["core:label"] == "t823-note")
+        .expect("the box note");
+    assert_eq!(boxed["core:sample_start"], 0);
+    assert_eq!(boxed["core:sample_count"], 2_000_000);
+    assert_eq!(boxed["core:comment"], "off raster");
+    assert_eq!(boxed["hackriff:annotation"]["authored"], true);
+    assert!(boxed.get("hackriff:truth").is_none());
+
+    // One collection: only its own members.
+    let (st, one) = get(
+        addr,
+        &format!("/api/research/export?collection={cid}&rate=2e6"),
+    );
+    assert_eq!(st, 200, "{one}");
+    assert_eq!(one["counts"]["annotations"], 1);
+    assert_eq!(one["collections"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        one["sigmf"]["annotations"][0]["core:sample_count"],
+        4_000_000
+    );
+
+    for bad in ["collection=nope", "rate=0", "rate=x"] {
+        let (st, e) = get(addr, &format!("/api/research/export?{bad}"));
+        assert_eq!(
+            (st, e["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {e}"
+        );
+    }
+    let (st, e) = get(
+        addr,
+        "/api/research/export?collection=00000000-0000-7000-8000-00000000dead",
+    );
+    assert_eq!((st, e["code"].as_str()), (404, Some("not_found")), "{e}");
+}
+
 /// T-818 (MAP-18, RESEARCH-003): `/api/measurements` as `docs/api.md` documents it — the
 /// `Measurement` shape with its server-computed value/unit/place and server-stamped provenance,
 /// cursors in and never a value, the durable-but-paged list, re-measure on PUT, delete, and that a

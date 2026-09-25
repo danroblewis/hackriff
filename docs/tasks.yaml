@@ -24543,6 +24543,15 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): an Export action that downloads collections, measurements and annotations as a file (or copies a link). Say in your handback exactly what to open on staging to see it.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 00:41).
+      Added GET /api/research/export (crates/hk-api/src/research_export.rs): a read-only, token-gated, offline bundle of collections, markers, annotations and saved measurements (each exactly as its own route serves it), optional ?collection= filter, plus a SigMF-adjacent block (global/captures/annotations via AuthoredAnnotation::to_sigmf with the hackriff:annotation marker, anchored at the earliest annotation start, ?rate= default 1e6). No signal logic, no device route. UI: an Export button in the Research slide-in fetches that one GET and downloads hackriff-research[-<collection>].json (narrowed to the collection when the collection filter is on). docs/api.md updated (new section, reserved-routes table, route-table entry) with a contract test in api_contract.rs. STAGING: open Explore, press the Research icon (top-right, next to Layers), click '⤓ Export' beside '+ Collection' to download the file; click a collection name first to export only that collection. A copy-link was not added (docs/23 defers share links).
+      Tests: just test-ui -> exit 0 (77/77 test files passed); cargo nextest run -p hk-cli -E 'binary(api_contract) & (test(research_export) | test(mmap_research) | test(every_route_in_the_route_table_is_documented))' -> exit 0 (3 passed)
+      precheck exit 0
+      Commits: 947250c8
+      Observed, not chased: An earlier over-broad filter run of api_contract was killed by my timeout in open_iq_answers_as_documented (SIGTERM at 45s, slow test, not a failure of mine).
+      Use cases: RESEARCH-003
+      Resources: 172 CPU-s, peak 2.0 GB
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
