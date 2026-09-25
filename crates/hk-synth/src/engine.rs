@@ -812,8 +812,10 @@ fn stage_bits(ev: &[NodeEvidence], stage: Stage) -> f32 {
         .sum()
 }
 
-/// The analytic-null part of `b_k` (ADR-0022 §2.1): §13.1's combination over only the metrics
-/// whose null is a closed-form tail. `None` when the stage emitted no analytic evidence.
+/// The part of `b_k` that may pay for a confirmation (ADR-0022 §2.1): §13.1's combination over
+/// only the metrics in ADR-0022's "contributes: yes" rows ([`MetricId::pays_for_confirm`] —
+/// `check_distinct_valid`, `sync_excess`, `field_fit`, `identity_recurrence`). `None` when the
+/// stage emitted none of them.
 fn analytic_stage_bits(ev: &[NodeEvidence], stage: Stage) -> Option<f32> {
     let mut any = false;
     let b = ev
@@ -822,13 +824,37 @@ fn analytic_stage_bits(ev: &[NodeEvidence], stage: Stage) -> Option<f32> {
             let it = n
                 .evidence
                 .iter()
-                .filter(|e| e.stage == stage && e.metric.is_analytic());
+                .filter(|e| e.stage == stage && e.metric.pays_for_confirm());
             let v: Vec<&Evidence> = it.collect();
             any |= !v.is_empty();
             combine_stage_bits(v)
         })
         .sum();
     any.then_some(b)
+}
+
+/// ADR-0022 §4.2's `differences` of one `check_distinct_valid` record: its **`raw`** — the
+/// chance-corrected count a check block reports (frames valid *without* FEC correction, each
+/// payload counted once however often it repeats, short-period payloads not counted; T-210) —
+/// never its `n`, which is the support: every unit **tested**, valid or not, repeated or not.
+/// Reading `n` credited a beacon repeating one payload twelve times with twelve differences.
+/// Clamped to `n` (a block cannot have more differences than units it tested) and to 0 for a
+/// non-finite or negative report: an unreadable count is no count.
+fn differences_of(e: &Evidence) -> u32 {
+    if !(e.raw.is_finite() && e.raw >= 0.0) {
+        return 0;
+    }
+    (e.raw.floor() as u32).min(e.n)
+}
+
+/// The S5 differences of one evaluation: the largest over the blocks that reported a check.
+fn differences(ev: &[NodeEvidence]) -> u32 {
+    ev.iter()
+        .flat_map(|n| n.evidence.iter())
+        .filter(|e| e.metric == MetricId::CheckDistinctValid)
+        .map(differences_of)
+        .max()
+        .unwrap_or(0)
 }
 
 fn capped(stage: Stage, b: f32) -> f32 {
@@ -2516,7 +2542,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
                     primary = Some((ne.node.clone(), *e));
                 }
                 if e.metric == MetricId::CheckDistinctValid {
-                    n.frames = n.frames.max(e.n);
+                    n.frames = n.frames.max(differences_of(e));
                 }
             }
         }
@@ -2718,14 +2744,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
                 );
             }
             if stage == Stage::S5 {
-                run.differences = ev
-                    .evidence
-                    .iter()
-                    .flat_map(|n| n.evidence.iter())
-                    .filter(|e| e.metric == MetricId::CheckDistinctValid)
-                    .map(|e| e.n)
-                    .max()
-                    .unwrap_or(0);
+                run.differences = differences(&ev.evidence);
             }
             if ev.check.is_some() {
                 run.check = ev.check;
@@ -2758,24 +2777,39 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         // bounds — and `l_check` is `None`, which the solve rule and the confirm gate refuse.
         let extra = inherited.unwrap_or(0.0);
         let l_check = inherited.map(|i| l5 + i);
-        let check_bits = run
+        let width = run.check.as_ref().map(|c| c.width);
+        let reported = run
             .analytic
             .iter()
             .find(|(s, _)| *s == Stage::S5)
             .map(|(_, b)| b - l5 - extra);
+        // ADR-0022 §4.2: a check is worth at most `width × differences − L_check`, whatever the
+        // block reports — the same clamp `ConfirmPolicy.synthesized` applies to the stored row, so
+        // the solve rule and the confirm gate read one number. The excess comes off the analytic
+        // total too, since the S5 bits are part of it. No width: the clamp cannot be computed, and
+        // the solve rule refuses a check with no width anyway.
+        let check_bits = reported.map(|b| match width {
+            Some(w) => b.min(w as f32 * run.differences as f32 - l5 - extra),
+            None => b,
+        });
+        let excess = match (reported, check_bits) {
+            (Some(r), Some(c)) => (r - c).max(0.0),
+            _ => 0.0,
+        };
         // Each analytic stage pays its own `L_j`; the inherited `L_check` is charged once more.
         let analytic_bits = run
             .analytic
             .iter()
             .map(|(s, b)| b - self.l(*s))
             .sum::<f32>()
-            - extra;
+            - extra
+            - excess;
         HoldoutEvidence {
             evidence_bits: run.capped_sum - self.l_of(run.mask),
             analytic_bits,
             check_bits,
             l_check,
-            check_width: run.check.as_ref().map(|c| c.width),
+            check_width: width,
             differences: run.differences,
             check_origin: origin,
             stages: run.ladder.clone(),
@@ -3292,6 +3326,74 @@ impl<'a, E: Evaluator> Engine<'a, E> {
 mod tests {
     use super::*;
     use crate::candidate::{EnumDomain, FloatDomain, IntDomain};
+    use crate::evidence::GroupId;
+
+    fn node(entries: &[Evidence]) -> NodeEvidence {
+        let mut set = EvidenceSet::new();
+        for e in entries {
+            set.push(*e).unwrap();
+        }
+        NodeEvidence {
+            node: "n".into(),
+            evidence: set,
+        }
+    }
+
+    /// ADR-0022 §4.2 (T-575): `differences` is the check block's chance-corrected `raw`, never
+    /// its `n` (every unit tested). A beacon repeating one payload twelve times is one difference.
+    #[test]
+    fn differences_are_the_chance_corrected_raw_never_the_tested_support() {
+        let beacon = Evidence::new(
+            Stage::S5,
+            MetricId::CheckDistinctValid,
+            GroupId::Undeclared,
+            1.0,
+            12,
+            13.0,
+        );
+        assert_eq!(differences_of(&beacon), 1);
+        assert_eq!(differences(&[node(&[beacon])]), 1);
+        // Never more than was tested, and nothing from an unreadable count.
+        let mut e = beacon;
+        e.raw = 40.0;
+        assert_eq!(differences_of(&e), 12);
+        e.raw = f32::NAN;
+        assert_eq!(differences_of(&e), 0);
+        e.raw = -3.0;
+        assert_eq!(differences_of(&e), 0);
+        // The largest over the blocks that reported a check; other metrics are not counted.
+        let sync = Evidence::new(
+            Stage::S5,
+            MetricId::SyncExcess,
+            GroupId::Undeclared,
+            30.0,
+            30,
+            20.0,
+        );
+        let mut three = beacon;
+        three.raw = 3.0;
+        assert_eq!(differences(&[node(&[sync, beacon]), node(&[three])]), 3);
+        assert_eq!(differences(&[node(&[sync])]), 0);
+    }
+
+    /// ADR-0022 §2.1 (T-575): only the four "contributes: yes" metrics pay for a confirmation.
+    /// `sync_regularity` and `plausibility` are analytic but rank only; calibrated metrics never pay.
+    #[test]
+    fn only_paying_metrics_reach_the_confirm_key() {
+        let mk =
+            |stage, metric, bits| Evidence::new(stage, metric, GroupId::Undeclared, 1.0, 10, bits);
+        let s4 = [node(&[
+            mk(Stage::S4, MetricId::SyncExcess, 12.0),
+            mk(Stage::S4, MetricId::SyncRegularity, 30.0),
+        ])];
+        // §13.1 takes the max within a group: without the restriction, the 30 bits of
+        // sync_regularity would have been the stage's analytic bits.
+        assert_eq!(analytic_stage_bits(&s4, Stage::S4), Some(12.0));
+        let s6 = [node(&[mk(Stage::S6, MetricId::Plausibility, 40.0)])];
+        assert_eq!(analytic_stage_bits(&s6, Stage::S6), None);
+        let s2 = [node(&[mk(Stage::S2, MetricId::EyeOpen, 40.0)])];
+        assert_eq!(analytic_stage_bits(&s2, Stage::S2), None);
+    }
 
     #[test]
     fn paths_parse_only_in_the_adr_shape() {

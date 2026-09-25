@@ -348,9 +348,11 @@ pub struct ConfirmPolicy {
 ///    in the analysed window. **No detection in the window refuses** — zero suspect detections out
 ///    of zero is not a measurement — and so does an unknown overload state.
 ///
-/// Not here: ADR-0022 §8's rolling decision-rate counter against `assumed_decisions_per_week`
-/// (T-575). The field is carried so the configuration states the denominator the thresholds
-/// assume.
+/// Beside the gate, ADR-0022 §8's **decision-rate counter** ([`Self::decision_rate`]): every
+/// evaluation is counted over a rolling seven days, and above `assumed_decisions_per_week` the
+/// budget claim is **void** and every decision says so. It is a surfaced state, not a clause —
+/// the threshold does not drift with the count, because the same evidence must not be worth less
+/// on a device that has been on longer (the rejected per-session look-elsewhere term).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SynthesizedConfirm {
@@ -433,9 +435,63 @@ pub struct SynthConfirmDecision {
     pub evidence_bits: Option<f64>,
     /// Why — on a confirm, the lifecycle reason itself.
     pub reason: String,
+    /// ADR-0022 §8: the rule's evaluations over the last seven days, including this one, against
+    /// the rate the threshold was derived for. `None` when the rule was never evaluated (nothing
+    /// was attached).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_rate: Option<DecisionRate>,
+}
+
+/// Whether the false-confirm budget's statement still applies (ADR-0022 §8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetClaim {
+    /// At or under the assumed rate: "at most one wrong Confirmed emitter per unattended week"
+    /// is what the threshold was derived to deliver.
+    Holds,
+    /// Over it: the threshold is unchanged, but the rate it was derived to deliver no longer
+    /// bounds this device's false confirms, and the device says so.
+    Void,
+}
+
+/// The rolling confirm-decision rate (ADR-0022 §8), as served on every decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionRate {
+    /// Evaluations of the rule in the seven days ending now, this one included.
+    pub decisions_7d: u64,
+    /// `assumed_decisions_per_week`: the budget's denominator.
+    pub assumed_per_week: u32,
+    /// `void` above the assumed rate.
+    pub budget_claim: BudgetClaim,
+}
+
+impl DecisionRate {
+    /// The sentence a void claim adds to a decision's reason; `None` while it holds.
+    pub fn void_text(&self) -> Option<String> {
+        (self.budget_claim == BudgetClaim::Void).then(|| {
+            format!(
+                "false-confirm budget claim void: {} decisions in 7 days > {} assumed (ADR-0022 §8)",
+                self.decisions_7d, self.assumed_per_week
+            )
+        })
+    }
 }
 
 impl SynthesizedConfirm {
+    /// ADR-0022 §8: the budget claim at `decisions_7d` evaluations in the last seven days. Void
+    /// strictly above `assumed_decisions_per_week`; the gate's thresholds do not move either way.
+    pub fn decision_rate(&self, decisions_7d: u64) -> DecisionRate {
+        DecisionRate {
+            decisions_7d,
+            assumed_per_week: self.assumed_decisions_per_week,
+            budget_claim: if decisions_7d > u64::from(self.assumed_decisions_per_week) {
+                BudgetClaim::Void
+            } else {
+                BudgetClaim::Holds
+            },
+        }
+    }
+
     /// ADR-0022 §4.2: the differences a check of `width` bits must show for its own bits alone to
     /// reach the threshold, `max(1, ⌈(min_analytic + L_check) / width⌉)`. Derived per job; never
     /// stored as a constant.
@@ -488,6 +544,26 @@ impl SynthesizedConfirm {
                     .into(),
             );
         };
+        // ADR-0022 §5.1, the laundering rule: a check from a template an earlier search
+        // discovered carries that search's look-elsewhere, and the L_check the gate charges must
+        // include it. A stored row whose L_check falls short of its own inherited charge (or
+        // whose inherited charge is unknown) is not evidence the charge was paid.
+        match h.check_origin.inherited_bits() {
+            None => {
+                return Err(
+                    "the look-elsewhere of the search that discovered this check was not \
+                     recorded; an unknown charge is not a zero one"
+                        .into(),
+                );
+            }
+            Some(i) if l_check < f64::from(i) => {
+                return Err(format!(
+                    "L_check {l_check:.1} does not include the {i:.1} bits inherited from the \
+                     search that discovered this template"
+                ));
+            }
+            Some(_) => {}
+        }
         // ADR-0022 §4.2: a check can be worth no more than `width × differences − L_check`,
         // whatever the evaluator reports — `differences` counts a repeated payload once, so a
         // beacon repeating one frame earns one frame's bits. The excess is taken off the analytic

@@ -26,6 +26,7 @@
 //!    runs [`SynthesizedConfirm::decide`]. A pass confirms the emitter (author `auto`, actor
 //!    [`CONFIRM_SYNTH_RULE`]) — never demotes, and a user delete wins.
 
+use hk_model::repo::LIFECYCLE_TEXT_MAX;
 use hk_model::repo::synthesis::{
     EmitterSynthesis, Resolution as RowResolution, ResolutionKind as RowKind,
     ResolutionReason as RowReason, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage as RowStage,
@@ -364,6 +365,7 @@ fn attach_in(
             outcome: SynthConfirmOutcome::NotAttached,
             evidence_bits,
             reason: reason.to_owned(),
+            decision_rate: None,
         },
     };
 
@@ -449,6 +451,19 @@ fn attach_in(
         suspect_fraction: (trust.detections > 0).then(|| trust.suspect_fraction()),
         overload: input.overload,
     });
+    // ADR-0022 §8: every evaluation counts toward the rolling decision rate, in this transaction
+    // (a rolled-back attach decided nothing), on the device's clock — decisions per device-week
+    // is the budget's unit, whatever capture time the analysed window has.
+    let rate = policy.decision_rate(
+        ingest
+            .repo_mut()
+            .record_confirm_decision(CONFIRM_SYNTH_RULE, Timestamp::now())?,
+    );
+    let decision = match (decision, rate.void_text()) {
+        (Ok(reason), Some(void)) => Ok(format!("{reason}; {void}")),
+        (Err(why), Some(void)) => Err(format!("{why}; {void}")),
+        (d, None) => d,
+    };
     let state = ingest.repo().emitter_lifecycle_state(emitter)?;
     if state == LifecycleState::Deleted {
         // Deleted since it was chosen: a user delete wins, and the rule never resurrects.
@@ -464,18 +479,21 @@ fn attach_in(
             outcome: SynthConfirmOutcome::Confirmed,
             evidence_bits,
             reason: reason.clone(),
+            decision_rate: Some(rate),
         },
         Ok(reason) => SynthConfirmDecision {
             rule: CONFIRM_SYNTH_RULE,
             outcome: SynthConfirmOutcome::Already,
             evidence_bits,
             reason: format!("already confirmed; this analysis would have: {reason}"),
+            decision_rate: Some(rate),
         },
         Err(why) => SynthConfirmDecision {
             rule: CONFIRM_SYNTH_RULE,
             outcome: SynthConfirmOutcome::Insufficient,
             evidence_bits,
             reason: why.clone(),
+            decision_rate: Some(rate),
         },
     };
 
@@ -560,7 +578,7 @@ fn attach_in(
             LifecycleState::Confirmed,
             LifecycleAuthor::Auto,
             CONFIRM_SYNTH_RULE,
-            &confirm.reason,
+            lifecycle_text(&confirm.reason),
             input.window.end,
         )?;
     }
@@ -571,6 +589,21 @@ fn attach_in(
         synthesis_written: true,
         confirm,
     }))
+}
+
+/// The lifecycle store refuses a reason over [`LIFECYCLE_TEXT_MAX`] bytes, and a long template
+/// id plus the arithmetic plus a void budget note can reach it: the event keeps the head of the
+/// sentence (cut on a character boundary), and the `emitter_synthesis` row's `confirm` keeps it
+/// whole.
+fn lifecycle_text(reason: &str) -> &str {
+    if reason.len() <= LIFECYCLE_TEXT_MAX {
+        return reason;
+    }
+    let mut n = LIFECYCLE_TEXT_MAX;
+    while !reason.is_char_boundary(n) {
+        n -= 1;
+    }
+    &reason[..n]
 }
 
 #[cfg(test)]
@@ -831,5 +864,175 @@ mod tests {
             })
             .unwrap_err();
         assert!(e.contains("disabled"), "{e}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-575: the ticket's named cases, ADR-0022 §2, §4.2, §5.1, §8
+    // -----------------------------------------------------------------------------------------
+
+    /// One ADS-B-like squitter: a CRC-24 frame and an 8-pulse preamble's sync excess.
+    fn crc24_single_frame(origin: CheckOrigin, l_check: f32) -> PipelineResult {
+        let mut r = solved();
+        let c = r.check.as_mut().unwrap();
+        c.model = "CRC-24".into();
+        c.width = 24;
+        c.distinct_valid = 1;
+        c.tested = 1;
+        let h = r.holdout.as_mut().unwrap();
+        h.check_width = Some(24);
+        h.differences = 1;
+        h.l_check = Some(l_check);
+        h.check_bits = Some(24.0 - l_check);
+        h.analytic_bits = 24.0 - l_check + 6.0;
+        h.check_origin = origin;
+        if !origin.searched() {
+            h.null_control = None;
+        }
+        r
+    }
+
+    /// ADR-0022 §4.2's first row: a template-fixed CRC-24 needs one difference, so one clean
+    /// squitter confirms; the same frame with its generator searched (L_check ≈ 24 + 5) does not.
+    #[test]
+    fn t575_a_template_fixed_crc24_single_frame_confirms_and_the_same_frame_searched_does_not() {
+        let reason = ok(&crc24_single_frame(CheckOrigin::TemplateFixed, 0.0)).unwrap();
+        assert!(
+            reason.contains("CRC-24 (template-fixed), 1 differing frame"),
+            "{reason}"
+        );
+        assert!(reason.contains("24.0 − 0.0 = 24.0 check bits"), "{reason}");
+        let e = ok(&crc24_single_frame(CheckOrigin::Searched, 29.0)).unwrap_err();
+        assert!(e.contains("hard check floor"), "{e}");
+        assert!(e.contains("3 needed"), "{e}");
+    }
+
+    /// ADR-0022 §4.2: `differences`, not `distinct_valid`. A template-fixed CRC-8 beacon repeating
+    /// one payload eight times has eight valid frames and one difference; whatever its check
+    /// reports, it is worth one frame's 8 bits, and the repeat count confirms nothing.
+    #[test]
+    fn t575_a_repeated_payload_beacon_does_not_confirm_on_its_repeat_count() {
+        let mut r = crc24_single_frame(CheckOrigin::TemplateFixed, 0.0);
+        let c = r.check.as_mut().unwrap();
+        c.model = "CRC-8".into();
+        c.width = 8;
+        c.distinct_valid = 8;
+        c.tested = 8;
+        let h = r.holdout.as_mut().unwrap();
+        h.check_width = Some(8);
+        h.differences = 1;
+        h.check_bits = Some(64.0);
+        h.analytic_bits = 70.0;
+        let e = ok(&r).unwrap_err();
+        assert!(e.contains("8.0 bits after L_check 0.0"), "{e}");
+        assert!(e.contains("1 differing frames of 8 bits; 3 needed"), "{e}");
+        // With eight *different* payloads the same frames carry 64 check bits, and confirm.
+        let h = r.holdout.as_mut().unwrap();
+        h.differences = 8;
+        assert!(ok(&r).is_ok());
+    }
+
+    /// ADR-0022 §4.1: the rank currency does not pay. 70 `evidence_bits`, 22 of them analytic.
+    #[test]
+    fn t575_seventy_evidence_bits_of_which_22_are_analytic_do_not_confirm() {
+        let mut r = solved();
+        r.evidence_bits = 70.0;
+        r.analytic_holdout_bits = Some(22.0);
+        let h = r.holdout.as_mut().unwrap();
+        h.evidence_bits = 70.0;
+        h.analytic_bits = 22.0;
+        h.check_bits = Some(22.0);
+        let e = ok(&r).unwrap_err();
+        assert!(
+            e.contains("22.0 analytic hold-out bits against a 24-bit threshold"),
+            "{e}"
+        );
+    }
+
+    /// ADR-0022 §2.3: the gate's whole input is the hold-out evidence of the hypothesis being
+    /// confirmed plus the window's trust. The job-total `coverage.look_elsewhere_bits` is not a
+    /// field of [`SynthesizedEvidence`] or of [`PipelineResult`], so it cannot reach the gate;
+    /// what can move the decision is only this hypothesis's own numbers. (The engine side — a
+    /// job total larger than the analytic ladder, and the result still solving — is
+    /// `hk-synth`'s `t575_the_job_total_look_elsewhere_never_reaches_the_solve_or_confirm_key`.)
+    #[test]
+    fn t575_the_job_total_look_elsewhere_never_reaches_the_gate() {
+        let r = solved();
+        let ev = SynthesizedEvidence {
+            profile: Profile::Standard,
+            result: &r,
+            pipeline: "generic-fsk-framed".into(),
+            suspect_fraction: Some(0.0),
+            overload: Some(false),
+        };
+        // Exhaustive destructuring: a field added here must be argued for.
+        let SynthesizedEvidence {
+            profile: _,
+            result: _,
+            pipeline: _,
+            suspect_fraction: _,
+            overload: _,
+        } = &ev;
+        assert!(SynthesizedConfirm::default().decide(&ev).is_ok());
+    }
+
+    /// ADR-0022 §5.1: a discovered template's check confirms only when its `L_check` includes
+    /// the inherited discovery charge. A row claiming less than it inherited is refused.
+    #[test]
+    fn t575_a_discovered_template_confirms_only_with_its_inherited_l_charged() {
+        let discovered = CheckOrigin::Discovered {
+            look_elsewhere_bits: Some(20.0),
+        };
+        // S5's own count 1 bit + 20 inherited = 21: 48 − 21 = 27 check bits, and it confirms.
+        let reason = ok(&with(|h| h.check_origin = discovered)).unwrap();
+        assert!(reason.contains("48.0 − 21.0 = 27.0 check bits"), "{reason}");
+        // The same row with the inherited charge left out of L_check.
+        let e = ok(&with(|h| {
+            h.check_origin = discovered;
+            h.l_check = Some(1.0);
+            h.check_bits = Some(47.0);
+        }))
+        .unwrap_err();
+        assert!(e.contains("inherited"), "{e}");
+        // And an unknown inherited charge with an L_check that pretends to know it.
+        let e = ok(&with(|h| {
+            h.check_origin = CheckOrigin::Discovered {
+                look_elsewhere_bits: None,
+            };
+        }))
+        .unwrap_err();
+        assert!(e.contains("not recorded"), "{e}");
+    }
+
+    /// ADR-0022 §8: the budget claim holds up to the assumed rate and is void strictly above it;
+    /// the thresholds do not move either way.
+    #[test]
+    fn t575_the_decision_rate_voids_the_budget_claim_above_the_assumed_rate() {
+        let p = SynthesizedConfirm::default();
+        let at = p.decision_rate(20_000);
+        assert_eq!(at.budget_claim, crate::inventory::BudgetClaim::Holds);
+        assert_eq!(at.void_text(), None);
+        let over = p.decision_rate(20_001);
+        assert_eq!(over.budget_claim, crate::inventory::BudgetClaim::Void);
+        assert_eq!(over.assumed_per_week, 20_000);
+        let text = over.void_text().unwrap();
+        assert!(
+            text.contains("20001 decisions in 7 days > 20000 assumed"),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(over).unwrap(),
+            json!({"decisions_7d": 20001, "assumed_per_week": 20000, "budget_claim": "void"})
+        );
+        // The same evidence decides the same way at any count: no uptime-dependent charge.
+        assert!(ok(&solved()).is_ok());
+    }
+
+    #[test]
+    fn t575_a_long_reason_is_cut_to_the_lifecycle_limit_on_a_char_boundary() {
+        let long = "−".repeat(LIFECYCLE_TEXT_MAX);
+        let cut = lifecycle_text(&long);
+        assert!(cut.len() <= LIFECYCLE_TEXT_MAX && !cut.is_empty());
+        assert!(long.starts_with(cut));
+        assert_eq!(lifecycle_text("short"), "short");
     }
 }

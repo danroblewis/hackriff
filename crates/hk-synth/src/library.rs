@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::candidate::{Domain, SeedSource};
 use crate::evidence::prior_bits;
+use crate::result::CheckOrigin;
 use crate::skeleton::Skeleton;
 use crate::stage::Stage;
 use crate::template::{
@@ -104,6 +105,9 @@ pub enum TemplateErrorCode {
     Duplicate,
     /// A skeleton is empty or repeats an alternative id.
     Skeleton,
+    /// A `discovered` template without a finite, non-negative `discovery_look_elsewhere_bits`,
+    /// or a `builtin` / `user` one carrying it (ADR-0022 §5.1: the laundering rule).
+    DiscoveryUnpriced,
 }
 
 /// One load or validation failure.
@@ -184,6 +188,10 @@ pub struct TemplateSeed {
     pub deferred: bool,
     /// A `full` signature match named this template's recipe: try first, at the signature's values.
     pub fast_path: bool,
+    /// Where the check it reaches comes from ([`Template::check_origin`], ADR-0022 §5.1): the
+    /// root built from this seed must carry it, so a discovered template's inherited
+    /// look-elsewhere is charged at every use.
+    pub check_origin: CheckOrigin,
 }
 
 /// What seeding produced.
@@ -367,6 +375,26 @@ pub fn validate(
                 ));
             }
         }
+    }
+    // ADR-0022 §5.1: a discovered template carries the look-elsewhere its discovering search
+    // spent, and inherits it at every use; only a discovered template may carry one.
+    let bits = t.provenance.discovery_look_elsewhere_bits;
+    match t.provenance.kind {
+        AuthorKind::Discovered if !bits.is_some_and(|b| b.is_finite() && b >= 0.0) => {
+            return Err(err(
+                origin,
+                TemplateErrorCode::DiscoveryUnpriced,
+                format!("discovered template without its discovery look-elsewhere ({bits:?})"),
+            ));
+        }
+        AuthorKind::Builtin | AuthorKind::User if bits.is_some() => {
+            return Err(err(
+                origin,
+                TemplateErrorCode::DiscoveryUnpriced,
+                "only a discovered template carries discovery_look_elsewhere_bits",
+            ));
+        }
+        _ => {}
     }
     if t.provenance.kind == AuthorKind::Builtin {
         let covered: BTreeSet<&str> = t
@@ -572,6 +600,7 @@ impl TemplateLibrary {
                     prior_bits: prior_bits(pi),
                     deferred: h.prune,
                     fast_path: fast_path(h, t),
+                    check_origin: t.check_origin(),
                 });
             }
         }

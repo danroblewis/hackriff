@@ -70,6 +70,7 @@ mod cluster;
 mod cluster_tests;
 mod clusters; // T-202 C18 clusters of unknown emissions
 mod collections; // T-817 (MAP-17): marker collections; bookmarks are a facade over one
+mod confirm_rate; // T-575 ADR-0022 §8 confirm-decision counter
 mod gating;
 mod harmonic; // T-374 (C40): harmonic families
 #[cfg(test)]
@@ -133,6 +134,7 @@ pub use collections::{
     Collection, CollectionSummary, MARKERS_PER_COLLECTION_MAX, Marker, MarkerWindow,
     PROVENANCE_TEXT_MAX, StorePage, ViewTier,
 };
+pub use confirm_rate::CONFIRM_DECISION_WINDOW_NS;
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;

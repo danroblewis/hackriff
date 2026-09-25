@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::candidate::FreeParam;
+use crate::result::CheckOrigin;
 use crate::skeleton::{Skeleton, SkeletonSlots};
 use crate::stage::Stage;
 
@@ -57,6 +58,13 @@ pub struct TemplateProvenance {
     /// `discovered` only: when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t: Option<String>,
+    /// `discovered` only, and **required** there: the look-elsewhere the discovering search spent
+    /// finding the check (its `L_check`), recorded at save-as-template time (ADR-0022 §5.1). Every
+    /// later use **inherits** it as `L_check`, so a search cannot launder its own multiplicity by
+    /// saving the winner and confirming free forever. The loader refuses a discovered template
+    /// without it (`discovery_unpriced`) and a builtin or user template with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_look_elsewhere_bits: Option<f32>,
     /// Where each fact-bearing field came from. Every such field of a **builtin** must be covered
     /// (the loader refuses `fact_unsourced`); a user template's uncovered fields default to
     /// `{kind: user}`.
@@ -353,6 +361,37 @@ impl Template {
             (Some(r), None) => Ok(TemplateStructure::Recipe(r)),
             (None, Some(s)) => Ok(TemplateStructure::Skeleton(s)),
             _ => Err(AmbiguousStructure),
+        }
+    }
+
+    /// Where the check a search seeded from this template reaches comes from (ADR-0022 §5.1),
+    /// which decides its `L_check` and whether ADR-0021 §8.2's null control gates it.
+    ///
+    /// - A template **discovered** by an earlier search inherits that search's look-elsewhere —
+    ///   [`CheckOrigin::Discovered`] with `discovery_look_elsewhere_bits` — and counts as searched,
+    ///   whatever else it fixes. This is the laundering rule; no other input can make a
+    ///   discovered template template-fixed.
+    /// - A `builtin` or `user` template is [`CheckOrigin::TemplateFixed`] only when it is
+    ///   recipe-backed and leaves **no** parameter free: generator, width, start bit, tail, bit
+    ///   order and class count were then all fixed before the data was seen. A free parameter
+    ///   anywhere is read as a possibly-searched check ([`CheckOrigin::Searched`]) — this build
+    ///   cannot yet tell a check slot's parameter from a clock's, and the conservative reading
+    ///   costs recall (the null control must pass), never soundness.
+    /// - A skeleton is an open search: [`CheckOrigin::Searched`].
+    pub fn check_origin(&self) -> CheckOrigin {
+        match self.provenance.kind {
+            AuthorKind::Discovered => CheckOrigin::Discovered {
+                look_elsewhere_bits: self
+                    .provenance
+                    .discovery_look_elsewhere_bits
+                    .filter(|b| b.is_finite() && *b >= 0.0),
+            },
+            AuthorKind::Builtin | AuthorKind::User
+                if self.recipe.is_some() && self.skeleton.is_none() && self.free.is_empty() =>
+            {
+                CheckOrigin::TemplateFixed
+            }
+            AuthorKind::Builtin | AuthorKind::User => CheckOrigin::Searched,
         }
     }
 

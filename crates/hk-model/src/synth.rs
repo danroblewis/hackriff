@@ -161,6 +161,24 @@ impl MetricId {
         )
     }
 
+    /// Whether the metric's bits may **pay for a confirmation** (ADR-0022 §2.1's table, the
+    /// "contributes: yes" rows): `check_distinct_valid`, `sync_excess`, `field_fit` and
+    /// `identity_recurrence` — the analytic nulls whose scale is a theorem about the data, not a
+    /// property of the front end. A strict subset of [`Self::is_analytic`]: `sync_regularity` and
+    /// `plausibility` have closed-form nulls too, but ADR-0022 does not list them as paying, and
+    /// `plausibility` is template ranking evidence that can never confirm on its own (ADR-0015
+    /// §4.1). Every other metric still ranks, prunes and is reported; it pays for nothing
+    /// irreversible.
+    pub const fn pays_for_confirm(self) -> bool {
+        matches!(
+            self,
+            MetricId::SyncExcess
+                | MetricId::CheckDistinctValid
+                | MetricId::FieldFit
+                | MetricId::IdentityRecurrence
+        )
+    }
+
     /// The wire name.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -390,6 +408,29 @@ mod tests {
         // The S4–S6 metrics, and only those, have analytic nulls.
         let analytic: Vec<_> = MetricId::ALL.iter().filter(|m| m.is_analytic()).collect();
         assert_eq!(analytic.len(), 6);
+    }
+
+    /// ADR-0022 §2.1: exactly four metrics pay for a confirm, all of them analytic; the
+    /// calibrated ones and the two analytic ranking-only ones do not.
+    #[test]
+    fn only_adr_0022s_four_analytic_metrics_pay_for_a_confirm() {
+        let paying: Vec<_> = MetricId::ALL
+            .iter()
+            .copied()
+            .filter(|m| m.pays_for_confirm())
+            .collect();
+        assert_eq!(
+            paying,
+            vec![
+                MetricId::SyncExcess,
+                MetricId::CheckDistinctValid,
+                MetricId::FieldFit,
+                MetricId::IdentityRecurrence,
+            ]
+        );
+        assert!(paying.iter().all(|m| m.is_analytic()));
+        assert!(!MetricId::SyncRegularity.pays_for_confirm());
+        assert!(!MetricId::Plausibility.pays_for_confirm());
     }
 
     #[test]
