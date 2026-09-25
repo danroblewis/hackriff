@@ -26049,6 +26049,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      2026-09-25 coordinator, from T-868's parity harness (task-t868, listen_recipe_parity): the LEGACY Listen chain's audio is stamped -1020 ms off the capture time it was demodulated from, while the recipe path is right. Before retiring ChainKind::Listen for cut-over modes, confirm the recipe path's stamps are the reference and that nothing downstream (recordings, stream-out, the shared time axis) still consumes legacy-stamped audio; if the legacy chain survives for any mode, fix its stamp.
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
@@ -27195,6 +27197,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-915 worker 2026-09-24.
+
+      2026-09-25 coordinator: T-868's worker also saw hk-pipeline listen_lifecycle fail with a 504 probe-timeout at load ~30 - 3/3 with main's chains/listen.rs, 2/3 with its change; the probe runs before Session::run. Same binary/family as this ticket; include it in the triage.
   - id: T-918
     milestone: MMAP
     title: "RC red: app-dismiss.e2e.mjs - the canvas is no longer full-bleed (y=56, 567 px tall; the sheet covers no canvas rows) at main 528d2c2f"
