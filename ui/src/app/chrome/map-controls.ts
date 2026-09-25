@@ -140,6 +140,14 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   toast(text: string): void;
   /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
   research?: { isOpen(): boolean; toggle(): void };
+  /**
+   * T-1000 (docs/23 §10.7): which pane the per-pane chrome acts on, as the user names it — its
+   * position in layout order ("pane 2 of 3") — or `null` when there is one pane and so nothing to
+   * disambiguate. Go-to, zoom, the layers button, the follow-live FAB and the viewport menu each
+   * state it; the colour scale and the outputs are global and do not. Optional: a host with one
+   * pane only names none.
+   */
+  activeName?(): { n: number; count: number; label: string } | null;
 }
 
 /** The tool-mode banner's words (the mockup's `#mode`), per mode (docs/23 §10.4). */
@@ -307,13 +315,19 @@ export function mountMapControls(host: MapControlHost): {
   syncResearch(): void;
   /** T-996: re-read the active viewport's Retune / width offers. Called per RENDER FRAME. */
   syncRetune(): void;
+  /** T-1000: re-state which pane the per-pane chrome acts on (after an active-pane change, split or close). */
+  syncActive(): void;
+  /** T-1000: the FAB's press, for the `L` key — freeze a following active pane, re-pin a frozen one. */
+  toggleFollow(): void;
 } {
   const input = h("input", {
     class: "mono", placeholder: "Go to frequency, e.g. 433.92M or 101.3", "aria-label": "Go to frequency",
     inputmode: "decimal", autocomplete: "off", spellcheck: "false",
   }) as HTMLInputElement;
+  // T-1000: which pane a Go-to moves, stated beside the entry while there is more than one.
+  const gotoPane = h("span", { class: "map-goto-pane", hidden: true });
   const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off" },
-    svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input,
+    svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input, gotoPane,
     h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"));
 
   // The retune offer never fades (docs/23 §10.2), so it carries no `map-fade`.
@@ -400,8 +414,9 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
+  const paneHead = h("span", {}, "Viewport");
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
-    h("div", { class: "map-layers-head" }, h("span", {}, "Viewport"), paneClose),
+    h("div", { class: "map-layers-head" }, paneHead, paneClose),
     paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
@@ -415,8 +430,9 @@ export function mountMapControls(host: MapControlHost): {
   const layersClose = h("button", {
     type: "button", class: "map-layers-close", "aria-label": "Close layers — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
+  const layersHead = h("span", {}, "Layers");
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
-    h("div", { class: "map-layers-head" }, h("span", {}, "Layers"), layersClose),
+    h("div", { class: "map-layers-head" }, layersHead, layersClose),
     layersList,
     h("div", { class: "map-note" }, "Display only: a layer changes what is drawn, never what is measured or detected."));
 
@@ -424,11 +440,16 @@ export function mountMapControls(host: MapControlHost): {
     svg(["path", "M12 5v14M5 12h14"]));
   const zoomOut = h("button", { type: "button", class: "map-ibtn map-zoom-out", "aria-label": "Zoom out", title: "Zoom out (both axes)" },
     svg(["path", "M5 12h14"]));
+  // T-1000: the number of the pane the zoom stack acts on, while there is more than one.
+  const zoomPane = h("div", { class: "map-pane-badge map-zoom-pane", "aria-hidden": "true", hidden: true });
   const zoom = h("div", { class: "map-glass map-zoom map-fade", role: "group", "aria-label": "Zoom" },
-    zoomIn, h("div", { class: "map-sep", "aria-hidden": "true" }), zoomOut);
+    zoomPane, zoomIn, h("div", { class: "map-sep", "aria-hidden": "true" }), zoomOut);
 
+  const fabPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
   const fab = h("button", { type: "button", class: "map-fab map-fade", "aria-label": "Follow live" },
-    svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8])) as HTMLButtonElement;
+    svg(["circle", 12, 12, 3], ["path", "M12 2v4M12 18v4M2 12h4M18 12h4"], ["circle", 12, 12, 8]), fabPane) as HTMLButtonElement;
+  const layersPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
+  layersBtn.append(layersPane);
 
   // T-996: the left column under the nudges is a STACK, not a set of fixed `top:` constants — the
   // persistent capture block, the transient Go-to offer and (below 1180 px) the tool-mode banner
@@ -460,7 +481,39 @@ export function mountMapControls(host: MapControlHost): {
     fab.classList.toggle("following", st.cls === "following");
     fab.classList.toggle("frozen", st.cls === "frozen");
     fab.setAttribute("aria-pressed", String(st.cls === "following"));
-    fab.title = st.title;
+    const name = host.activeName?.() ?? null;
+    fab.title = name ? `${st.title} (Acts on ${name.label}; L toggles it.)` : st.title;
+  };
+
+  // T-1000 (docs/23 §10.7): every control that acts on ONE pane says which, while there are two or
+  // more; with one pane it says nothing extra. The words are the host's (`activeName`), so the
+  // chrome and the outline on the canvas cannot name different panes. Set-if-changed: cheap enough
+  // to call on every active-pane change, split and close.
+  let namedAs = "";
+  const syncActive = () => {
+    const name = host.activeName?.() ?? null;
+    const key = name ? name.label : "";
+    if (key === namedAs) return;
+    namedAs = key;
+    const n = name ? String(name.n) : "";
+    const suffix = name ? ` · ${name.label}` : "";
+    for (const b of [zoomPane, fabPane, layersPane]) { b.hidden = !name; b.textContent = n; }
+    gotoPane.hidden = !name;
+    // "pane N", with the word droppable at a phone width (CSS) so the entry keeps its room.
+    gotoPane.replaceChildren(...(name ? [h("span", { class: "map-goto-word" }, "pane "), n] : []));
+    input.setAttribute("aria-label", `Go to frequency${suffix}`);
+    goto.dataset.pane = n;
+    layersBtn.setAttribute("aria-label", `Layers${suffix}`);
+    layersBtn.title = `Layers${suffix}`;
+    layersHead.textContent = name ? `Layers · ${name.label}` : "Layers";
+    zoom.setAttribute("aria-label", `Zoom${suffix}`);
+    zoom.dataset.pane = n;
+    zoomIn.setAttribute("title", `Zoom in (both axes)${suffix}`);
+    zoomOut.setAttribute("title", `Zoom out (both axes)${suffix}`);
+    fab.setAttribute("aria-label", `Follow live${suffix}`);
+    fab.dataset.pane = n;
+    paneHead.textContent = name ? `Viewport · ${name.label}` : "Viewport";
+    syncFollow();
   };
 
   goto.addEventListener("submit", (e) => {
@@ -601,11 +654,13 @@ export function mountMapControls(host: MapControlHost): {
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
   // The FAB is the retired `Live` button too (T-882): following → press freezes the view on what it
   // shows; frozen → press re-pins it to the growing edge. Either way only the screen changes.
-  fab.addEventListener("click", () => {
+  // The one toggle, shared by the FAB's press and the `L` key (T-1000), so the two cannot differ.
+  const toggleFollow = () => {
     if (host.isFollowing()) host.pauseLive(); else host.followLive();
     host.viewChanged();
     syncFollow();
-  });
+  };
+  fab.addEventListener("click", toggleFollow);
 
   // ---- T-996: the active viewport's Retune and width presets, re-asked every frame ----
   //
@@ -646,10 +701,11 @@ export function mountMapControls(host: MapControlHost): {
   syncResearch();
 
   syncFollow();
+  syncActive();
   syncMeasure();
   syncRetune();
   registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
-  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch, syncRetune };
+  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch, syncRetune, syncActive, toggleFollow };
 }

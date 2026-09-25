@@ -906,6 +906,7 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     (root / "linked" / "target").symlink_to(root / "idle" / "target")
     monkeypatch.setattr(R, "_target_written", lambda t: time.time() if "/fresh/" in t else old)
     monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 500.0)                    # plenty: the 2 h wait applies
     procs = f"node {root}/inuse/ui/e2e/run.mjs\n"                 # a process in inuse; none in t87 (t870 is a prefix trap)
     lsof = f"p1\nn{root}/t870\n"
     monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
@@ -921,6 +922,25 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
     assert len([m for m in said if m.startswith("RECLAIM")]) == 2
     assert (root / "linked").is_symlink() is False and os.path.islink(root / "linked" / "target")
+
+
+def test_short_of_disk_an_idle_target_goes_after_minutes_not_hours(tmp_path, monkeypatch):
+    """Supervisor 2026-09-25 13:31: free disk hit 22 GB (floor 20) and idle targets were reaped by hand."""
+    root = tmp_path / ".claude" / "worktrees"
+    ages = {"half-hour": 30 * 60, "five-min": 5 * 60}
+    for name in ages:
+        (root / name / "target" / "debug").mkdir(parents=True)
+    monkeypatch.setattr(R, "_target_written", lambda t: time.time() - next(a for n, a in ages.items() if f"/{n}/" in t))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "" if args[0] == "ps" else "p1\nn/elsewhere\n")
+    monkeypatch.setattr(R, "log", lambda m: None)
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 500.0)
+    R.reclaim_idle_targets({}, dry=False)
+    assert (root / "half-hour" / "target").exists()                         # plenty of disk: 2 h wait
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 40.0)
+    R.reclaim_idle_targets({}, dry=False)
+    assert not (root / "half-hour" / "target").exists()                     # short: 15 min is enough
+    assert (root / "five-min" / "target").exists()                          # a build that just paused is kept
 
 
 def test_an_idle_target_is_kept_when_lsof_says_nothing(tmp_path, monkeypatch):
@@ -1618,6 +1638,47 @@ def _finished_remote_claim(git_node2, monkeypatch):
                     "state": "running", "model": "opus", "host": "node2", "session_id": "s"}}, seen
 
 
+def test_a_remote_run_whose_mac_worktree_was_reaped_gets_it_back_before_its_review(git_node2, monkeypatch):
+    """2026-09-25 13:33: T-977 ran on node2 while its Mac worktree was reaped; the branch was synced, then
+    launch_review started in a directory that did not exist and the whole tick raised, every tick."""
+    import os
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker's commit")
+    assert not os.path.isdir(wt)
+    claims, seen = _finished_remote_claim(git_node2, monkeypatch)
+    claims["T-9"]["review"] = True
+    reviewed = []
+    monkeypatch.setattr(R, "launch_review", lambda c: reviewed.append(os.path.isdir(c["wt"])) or dict(c, pid=2, kind="review"))
+    R.reap(claims, dry=False)
+    assert reviewed == [True] and claims["T-9"]["kind"] == "review" and claims["T-9"]["state"] == "running"
+    assert git(wt, "rev-parse", "HEAD") == git(hwt, "rev-parse", "HEAD")
+
+
+def test_one_claim_that_raises_does_not_abort_the_tick(monkeypatch):
+    """The same incident: the exception escaped reap(), so save_claims never ran and T-970's reap (a result commit
+    and a review launch) was thrown away and redone 47 times; claims after the raising one were never reaped."""
+    calls, seen = [], []
+
+    def one(claims, tid, c, dry, killed):
+        calls.append(tid)
+        if tid == "T-1":
+            raise FileNotFoundError("[Errno 2] No such file or directory: '/wt/t1'")
+        return True
+    monkeypatch.setattr(R, "_reap_one", one)
+    monkeypatch.setattr(R, "handle_gate_failures", lambda claims, dry: False)
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "running"},
+              "T-2": {"ticket": "T-2", "branch": "task-t2", "state": "running"}}
+    assert R.reap(claims, dry=False) is True
+    assert calls == ["T-1", "T-2"]                                              # the next claim is still reaped
+    assert claims["T-1"]["state"] == "running" and seen == []                  # review: a one-off is retried
+    R.reap(claims, dry=False)
+    R.reap(claims, dry=False)                                                   # the third in a row stops it
+    assert claims["T-1"]["state"] == "reap-error" and "FileNotFoundError" in claims["T-1"]["reap_error"]
+    assert [a[2] for a in seen] == ["REAP_ERROR"]
+
+
 def test_a_withheld_push_is_a_sync_error_never_no_work(git_node2, monkeypatch):
     """The 2026-09-25 shape: the worker committed on node2, the commit never reached this Mac. Held and said - and
     judged, with its commits, the tick the refs agree."""
@@ -1824,6 +1885,7 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
     assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
     # invariant 29 on the dashboard: per host whether its refs agree, and per branch mirror / local / behind / ahead
+    assert st["hosts"]["node2"].pop("stats")["reachable"]                  # the probe's stats (test_host_stats.py)
     assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0, "refs_in_sync": False,
                                     "drifting": 1, "branches": {"task-t9": {"mirror": "b" * 40, "local": "a" * 40, "behind": 1,
                                                                             "ahead": 1, "state": "diverged"}}}

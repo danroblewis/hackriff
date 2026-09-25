@@ -24,21 +24,39 @@ const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
 /** The controls T-882's hit test must find, so an empty result cannot come from matching nothing.
- * The fixed ones are literal: closed = Go-to input, Layers, Research (T-821), Measure, Annotate and
- * Pin (T-820), Viewport, zoom in/out, FAB (10); the viewport menu = its × (T-900), Split, Close, Whole surface, Record IQ
+ * The closed cluster is asserted BY NAME (T-1022), never by a bare count: T-993 moved the retired top
+ * bar's Review into the top-right cluster and added a ⋯ settings menu (Theme), and a count of 10
+ * could not say whether 12 meant those two or a doubled Zoom button. The set: Go-to input, Layers,
+ * Research (T-821), Measure, Annotate and Pin (T-820), Viewport, Review and ⋯ More (T-993), zoom
+ * in/out, FAB. The mode switch, device state and nudges T-993 floated are not in `CLOSED` —
+ * `app-top-chrome.e2e.mjs` owns them. The viewport menu = its × (T-900), Split, Close, Whole
+ * surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
  * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
  * rows outside it: the coverage-fog row (T-807), the trace strip and the three colour-scale rows
  * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
+const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Viewport",
+  "Review", "More: settings", "Zoom in", "Zoom out", "Follow live"];
+
+/** The rehomed controls are exactly the named set: none missing, none extra, none twice, and no two
+ * drawn over each other. */
+function assertClosedSet(hits, where = "") {
+  const extra = hits.names.filter((n, i) => !CLOSED_NAMES.includes(n) || hits.names.indexOf(n) !== i);
+  const missing = CLOSED_NAMES.filter((n) => !hits.names.includes(n));
+  assert.deepEqual({ missing, extra }, { missing: [], extra: [] },
+    `the floating cluster's controls are not the documented set${where}: ${JSON.stringify(hits.names)}`);
+  assert.deepEqual(hits.overlaps, [], `floating controls drawn over each other${where}`);
+}
+
 async function rehomedCounts(page) {
   await page.waitFor("the registry to state the reserved Bookmarks collection",
     `(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '').includes('"collection:00000000-0000-7000-8000-000000000b00"')`,
     { timeoutMs: 30000 });
   const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
   assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
-  return { closed: 10, pane: 5, layers: registry.length + 1 + 1 + 3 };
+  return { closed: CLOSED_NAMES.length, pane: 5, layers: registry.length + 1 + 1 + 3 };
 }
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {
@@ -155,6 +173,7 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   const want = await rehomedCounts(page);
   const hits = await rehomedHitTest(page);
   t.diagnostic(`rehomed controls tested: ${JSON.stringify(hits.counts)}`);
+  assertClosedSet(hits);
   assert.deepEqual(hits.counts, want, "a rehomed control is missing from the cluster");
   assert.deepEqual([...hits.closed, ...hits.pane, ...hits.layers], [],
     "a rehomed control is not clickable at its own centre — something is drawn over it, or it is "
@@ -608,6 +627,7 @@ for (const width of [1000, 920, 420]) test(`T-882: at ${width} px every rehomed 
   const want = await rehomedCounts(page);
   const hits = await rehomedHitTest(page);
   t.diagnostic(`at ${width} px: ${JSON.stringify(hits)}`);
+  assertClosedSet(hits, ` at ${width} px`);
   assert.deepEqual(hits.counts, want, "a rehomed control is missing");
   assert.deepEqual([...hits.closed, ...hits.pane, ...hits.layers], [], `a rehomed control is not pressable at ${width} px`);
   // The viewport menu open, kept as an artifact: the proposed home for pane management (T-882's

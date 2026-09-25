@@ -139,6 +139,20 @@
 .map-fab.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 4px var(--teal-soft), 0 4px 18px var(--shadow); }
 .map-fab.frozen { color: var(--amber); border-color: var(--amber); }
 
+/* T-1000 (docs/23 §10.7): the number of the pane a per-pane control acts on, shown only while there
+   are two or more — the same number the outline on the canvas carries (`.sf-active-pane[data-pane]`). */
+.map-layers-btn { position: relative; }
+.map-pane-badge[hidden], .map-goto-pane[hidden] { display: none; }
+.map-pane-badge {
+  min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px;
+  background: var(--text); color: var(--panel); font: 600 10px/14px var(--mono); text-align: center;
+  pointer-events: none;
+}
+.map-layers-btn .map-pane-badge, .map-fab .map-pane-badge { position: absolute; right: 1px; top: 1px; }
+.map-zoom-pane { align-self: center; margin: 2px 0; }
+@media (max-width: 600px) { .map-goto-pane .map-goto-word { display: none; } }
+.map-goto-pane { flex: none; font: 600 11px var(--mono); color: var(--text); padding: 1px 6px; border-radius: 7px; background: var(--raise); white-space: nowrap; }
+
 /* Below the breakpoint the side/focus columns drop to the bottom of the screen (`map-layout.css`),
    so the cluster uses the canvas's whole width. */
 @media (max-width: 900px) {
