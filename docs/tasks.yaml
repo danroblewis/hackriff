@@ -18832,7 +18832,7 @@ tasks:
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M-E
     model: opus
@@ -18891,6 +18891,7 @@ tasks:
       Observed, not chased: No ticket owns the production SearchBackend (T-568 observed the same). hk_pipeline::synth::jobs::server_backend() returns None; nothing wires hk_synth::engine::search to hk_blocks::run_window over acquired IQ (the only Evaluator impls are crates/hk-pipeline/tests/analyze_jobs.rs:221 and crates/hk-synth/tests/search_engine.rs:114). Evidence from this run: all 44 negative region jobs across N1/N2/N4 x {standard, deep} ended failed/no_evaluator. Until it exists A2 has no tail to locate, A3's engine side cannot be measured, and the n~60000 run is meaningless. This is the single blocker on MAUTO's acceptance evidence and deserves a ticket. | ADR-0022 §10.2's illustrative failure block is internally inconsistent: '~2.4 wrong Confirmed emitters per week' beside 'missed by ~137x'. The threshold is set to deliver one wrong row per week, so 2^(M - realised margin) IS the wrong rows per week (137), and the nominal 1-per-840-weeks times the total optimism 2^16.8 gives 137 as well. I implemented the derived factor and added a note to §10.2 rather than reproducing 2.4. | The n~60000 run and the docs/22 full-n negative run now have no owner on the board: the two corpus declarations that cited T-576 are UNFILED (the corpus test requires an OPEN owner, so they could not keep citing this ticket). Both want a ticket once the search backend exists: (a) a milestone/nightly full-n negative batch (docs/22's n = 400/200 per population, and ADR-0022's n ~ 60 000 for the rate claim), timing-tier, never CI; (b) the over-IQ check-axis rows (2fsk A1xA7: CRC-8 / off-catalogue polynomial / constant payload on fsk_burst_train, T-622's generator) as the fixture-level half of A3. | ADR-0022 §10.1's A3(b) ('a template-fixed CRC-8 confirms at 3 differing frames') is contradicted by the landed T-577 measurement, which moved min_check_width UP to 16 and clamps a configured 8 back (SynthesizedConfirm::effective). The test asserts the honest pair instead: the §4.2 arithmetic holds (min_differences(8,0)==3, 24 bits clear both the hard floor and the threshold) and the only clause refusing it is the measured width floor, named in the refusal. It flips automatically if §4.3.1's count returns the floor to 8.
       Use cases: SIGNAL-001, SIGNAL-062, RESEARCH-009
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: e25ad2c7
   - id: T-568
     milestone: MAUTO
     title: "MAUTO: the negative-control guard suite - four populations, a stated false-label budget, and zero labels on input with nothing to find"
