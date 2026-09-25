@@ -26914,6 +26914,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-904 Opus review + worker 2026-09-24.
+
+      2026-09-24 coordinator, ADDED from T-904's fix round (a2ee94ff): (11) CRASHED RUNS KEEP THEIR LAST HOUR - a survey switches to DB-wide ageing only once closed; after a crash the open survey's newest hour stays until something closes it - close/age orphaned open surveys at startup. (12) DROPPED LINKS ARE SILENT - with the WHERE EXISTS guard a link to a pruned detection is skipped without an error, and TrackBatch::write reports links ATTEMPTED not INSERTED - count and report skipped links (a counter in storage/last_pass or the track stats) so a drain-before-flush regression is visible.
   - id: T-914
     milestone: MMAP
     title: app-surface.e2e.mjs layers-menu checks derive the overlay list from the registry, not a literal - every layer ticket (T-811/T-812/T-821/T-897) stops being blamed
@@ -26931,6 +26933,44 @@ tasks:
     notes: |
       FOUND BY coordinator + supervisor 2026-09-24 20:10.
     branch: task-deflake-app-surface-overlays
+  - id: T-915
+    milestone: MLIVE
+    title: A band's last 5-7 s of recorded rows before a retune are never folded - they stay 'awaiting' forever (T-911 finding)
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-911 worker (task-t911 45ed0691; handback ~/.hackriff-ops/work/T-911/handback.json; screenshot ui/e2e/artifacts/shadow-level.png, left pane): when the radio retunes away from a band, the band's LAST 4.7-6.8 s of rows before the retune are never folded into the history - they keep the dotted "awaiting" (observed-but-not-yet-measured) mark forever instead of filling in with the rows that were recorded. The recorded rows exist (the capture ran to the retune), so "show all data that exists" requires them on screen: the in-progress downsample row/tile at the moment of departure is apparently dropped or never committed when the tune changes.
+      DELIVER: root-cause (hk-pipeline ingest / hk-store history fold at a retune: is the in-progress tile or the pending downsample row flushed when the capture window moves?) and fix so every recorded row up to the retune instant is folded and served; the awaiting mark then resolves to data (or to the shadow once departed). Regression test through the mock SDR with a scripted retune: the band's rows up to the retune instant are all present in the served tiles; red on today's code. Mind T-453: per-arriving-row work on the capture thread must be measured, not assumed.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band and its waterfall runs all the way to the moment you left - no dotted strip of never-filled rows at the top.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-911 worker 2026-09-24.
+    effort_reason: root cause on the capture/ingest fold path at a retune (T-453 real-time constraint)
+  - id: T-916
+    milestone: MLIVE
+    title: "Shadow follow-ups: ladder-fallback departures read hotter, auto/viewport contrast re-ranges the shadow, re-measure tile cost after the own-level search (T-911 residue)"
+    status: todo
+    priority: normal
+    deps:
+    - T-911
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-911 worker (task-t911 45ed0691), residue of the shadow own-level fix:
+      1. OLD DEPARTURES STILL READ HOTTER: a band left longer ago than the tile's own level still holds falls back to the spectrum-history ladder search (labelled `ladder` per run) and will read hotter than its live row did (max over coarser cells). State it more visibly to the user (e.g. the pane readout names the shadow's source/level) and/or keep the own-level data longer for departed bands - decide with the level-retention budget.
+      2. OPT-IN CONTRAST MODES: in auto and viewport contrast (T-528), the display range re-scales after departure, so a shadow's colour can still move relative to its live row. Decide whether shadow cells should be excluded from / pinned in the range those modes compute (the anchored default is correct).
+      3. COST NOT RE-MEASURED: the own-level search can add up to one more search budget per tile; re-measure T-523's tile-cost numbers (hk-api tile_cost) before/after and record them (T-453: measure, don't assume).
+      DELIVER each with a test or a measurement as appropriate.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-911 worker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
