@@ -26040,6 +26040,8 @@ tasks:
       2026-09-25 coordinator, explorer finding for the chooser: at 162.4008 MHz (NOAA WX, SNR ~5 dB) Listen was refused 4422 no-analog-mode ('no occupied band: C13 OBW99 abstained (LowSnr) and no dominant carrier line'; FillsBand/LowSnr for drag regions). The refusal is honest, but for a weak NFM carrier the chooser could demodulate with the squelch closed rather than refuse outright - decide it here with the chooser (evidence: ~/.hackriff-ops/explorer/journal-20260925.md, NOAA section).
 
       2026-09-25 coordinator, explorer APRS/pager/ISM: Listen probes once at open and refuses if nothing is present at that instant (144.37-144.41 refused LowSnr) - a user cannot open a squelched listener on a packet channel and wait for the next burst; APRS, pagers and ISM all need that. Decide with the chooser: open squelched on a burst channel vs refuse.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): the burst-channel Listen (open squelched and wait) is now its own P1 ticket, T-987 - the main blocker for LMR/GMRS/airband voice across all three windows; coordinate (T-987 reads your branch first).
     core_interface: true
     branch: task-t869
   - id: T-870
@@ -27583,6 +27585,8 @@ tasks:
         5. 98.085 was Confirmed with PI 1704 from ~3 groups while the oracle saw no RDS -> sub-ticket: RDS confirm needs a minimum group count / CRC-valid ratio.
       - The 4 FM/RDS fixtures (88.5 / 98.9 / 101.3 / 106.1) join the 'all captured signals decode' set (T-936).
       SUB-TICKETS (coordinator): (1) T-970 classifier classes pilot+RDS as WFM; (2) T-971 continuous RDS accumulation on the detection row (after this ticket's auto-attach lands); (3) T-961; (4) T-937 (WFM-width merge) + T-939 (overrun accounting); (5) T-962. Set: T-936 (101.3, 98.9) + T-969 (88.5, 106.1); fixtures T-935 + T-960. THIS ticket keeps: auto-attach of the RDS probe to every WFM-shaped detection, and the ratio measurement against the four fixtures + live.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): SECOND DATA POINT (supervisor 07:17), FM/RDS unprompted re-measure 06:48 with the same 10 x 2.4 Msps windows as window 1's second pass (one server, retuned): 19 present / 12 with a WFM-width row / 1 PI unprompted (101.3, PI 1694) / 0 PS - vs the window-1 baseline 2/19 PI unprompted, 0 PS. CAVEAT: this run is INVALIDATED by T-941's new variant (marine -> FM retune: emitters_created 23 -> 24 while tracks_confirmed ~128 -> 494 - tracks confirm but no emitters are created, so no rows carry RDS). Re-measure after T-941 lands; the ratio target stays >= 90 %.
     core_interface: true
     branch: task-t926
   - id: T-927
@@ -27882,6 +27886,13 @@ tasks:
       2026-09-25 coordinator: related, filed as T-973 (waits on you): replumb_never_pays_for_the_ring fails ALONE on main - a re-plumb stalls the always-on readers 1.8 s (bound 1 s). If your straggler fix is the cause, say so in your handback and T-973 can close with your evidence.
 
       2026-09-25 coordinator, from explorer window 2 (journal-20260925.md, 05:52-06:23): the freeze is NOT retune-only - a FRESH start directly at 162.2 MHz (metadata-only class, NO retune) wrote ~8 000 detections and opened 0 tracks in 2 min (inventory total 0); after a gain change one track opened (the DC point). A fresh start at 144.8 MHz opened 4 tracks from ~11 000 detections. So the content class itself (or detections too weak to link in that class) may be the trigger: check the metadata-only path in the tracker/inventory before closing this as retune-only.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md, window 3 summary finding 1) - three more occurrences and a NEW VARIANT:
+      - airband -> 2 m: newest_detection_s and tracks_opened frozen, writer_queue_full rising;
+      - GMRS -> marine (restricted-paging class): newest_detection_s frozen, plus 'hk-detect did not stop within 8s';
+      - marine -> FM (NEW VARIANT): tracks open AND confirm, but EMITTER CREATION stops - emitters_created 23 -> 24 over 13 min against ~366 new confirmed tracks (tracks_confirmed ~128 -> 494). This is what empties FM of Confirmed rows and RDS, and it invalidated window 3's FM/RDS re-measure.
+      - Same-class retunes (2 m -> 2 m, 460 -> 461 MHz) were fine.
+      So the defect has at least three faces after a class change: detection frozen (writer queue full), tracks frozen, and emitters frozen with tracks flowing. Cover all three in the repro. Note T-991: the content class is currently computed for the whole window from one sub-band, which makes class changes (and this freeze) more frequent than they should be.
     branch: task-t941
   - id: T-942
     milestone: M2-hardening
@@ -28136,6 +28147,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): the unknown-at-0.999 defect is not only bursts: WFM stations with a LOCKED 19 kHz PILOT and a CRC-valid RDS decode (106.1 PI 1323, 98.085 PI 1704) are classified unknown 0.999 ('100% unk' in the UI). Include WFM in the tests. (The decode-confirms-the-emitter half is T-961.)
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): classification is NULL (not even unknown) on NBFM voice bursts (461.125 / 462.225 / 464.700 MHz, oracle: NBFM with CTCSS tones) and on DMR 4FSK bursts (464.6125, +24 dB) - include both in the tests; an emission always gets a classification row (unknown with an honest score is fine, null is not).
   - id: T-954
     milestone: M2-hardening
     title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
@@ -28169,6 +28182,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): also: the page opened on 100-1100 MHz x 1.6 h with the tuned 101.7 MHz window drawn as a sliver - it does not open on the tuned window even without a stale offer.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): repeat: the page opens on a 0-520 MHz overview with the tuned window a sliver. Also (possibly a harness artefact): the first /#token= load after a refused navigation stayed on 'token needed' - reproduce with a real browser before fixing.
   - id: T-956
     milestone: MAUTO
     title: Production Evaluator over acquired IQ for /api/analyze (every job ends no_evaluator) - next MAUTO tranche
@@ -28598,6 +28613,8 @@ tasks:
       FOUND 2026-09-25 by explorer window 2: overlapping Candidate boxes for ONE emission are never re-analysed - 852.8586 MHz (9.3 kHz) and 852.8591 MHz (26.2 kHz) coexisted as two candidates for one P25 emission; at 861.4346 MHz a 557 kHz merged candidate sat beside 20-80 kHz fragments at 861.32-861.35; window 1 had the 4.81 MHz merge at 914.84 and FM fragments (T-937, root-caused there as the T-316 guard deleting stations). CLAUDE.md: overlapping Confirmed/Candidate boxes are proof the analysis is wrong and the system must DETECT the overlap and AUTOMATICALLY RE-ANALYSE that region. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 2 (05:52-06:23; live HackRF in SF) (06:16 and 06:18 addenda).
       DELIVER: an overlap detector over the live candidate/confirmed set in the view window that triggers a re-analysis of the union region (re-estimate OBW/centre at a suitable resolution, keep the real emission(s), retire the rest) and records why; measured cost on the pipeline thread (T-453). Tests through the mock SDR: a synthetic emission detected as a narrow + a wide overlapping box resolves to one; a merged box over two separated emitters splits; red on current code. Check T-937's landed fix first - say what it already covers.
       core_interface (detection/inventory). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): more overlap cases left standing: overlapping Confirmed boxes at 462.0076 / 462.0099 MHz (~100 kHz each), a stationary 12.5 kHz comb at 445.3-445.6 MHz Confirmed as ONE 105 kHz emitter with overlapping candidates, and triplicate candidates - none re-analysed.
     core_interface: true
   - id: T-979
     milestone: M3
@@ -28628,6 +28645,8 @@ tasks:
       FOUND 2026-09-25 by explorer window 2 (TPMS 315 MHz): the app's only Confirmed row was 314.9997 MHz, 55.2 kHz wide, SNR 14.9, unknown 0.999, on air 119.6 s - the oracle shows a steady CW carrier at 314.988 MHz, 53 dB over the median FFT bin, with NO bursts; the burst chains still minted 169-186 'fsk bursts' (0 framed, symbol-rate guesses 1200-9600 Bd) at 314.99-315.07 MHz from the quiet band / carrier. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 2 (05:52-06:23; live HackRF in SF) (TPMS entry).
       DELIVER: (1) an unmodulated carrier is estimated as a CW line (bandwidth ~ one bin, centre within a bin of the peak) and explained 'unmodulated carrier (possible spur/LO)', ranked - never a 55 kHz unknown 12 kHz off; (2) the fsk-burst chain does not emit bursts from a steady carrier or noise - a burst needs an on/off energy contrast above a stated threshold. Tests through the mock SDR: a CW line -> one narrow CW row; a quiet band + CW -> 0 bursts; red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): another carrier case: 146.561 MHz is a continuous UNMODULATED carrier with mains hum; the app detected it blind and Listen chose nbfm 0.75, but it is never classed as a carrier. Include it: an unmodulated carrier (with or without hum) is classified CW/carrier.
     model_reason: "opus/medium: estimator and burst-chain changes on the detection path"
   - id: T-981
     milestone: M2-hardening
@@ -28643,6 +28662,8 @@ tasks:
       FOUND 2026-09-25 by explorer window 2: full-span (~4.2 MHz at 930 MHz; ~10 MHz at 568 MHz) one-row horizontal stripes across the whole window are drawn on the live canvas as signal, with no inventory row and NO overload flag (shots/w2-0601-pager-app.png, w2-0617-uhf-app.png) - most likely front-end overload when 25-30 dB pager bursts key up with amp on (window 1: every FM clip flagged overload: true). /api/status has no overload field the explorer could find. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 2 (05:52-06:23; live HackRF in SF) (POCSAG entry, UHF entry).
       DELIVER: the front end's overload/clip state (ADC fill, clip counts per frame - the provenance CLAUDE.md requires) is measured per spectrum row, reported in /api/status and the frame metadata (docs/api.md + api_contract.rs, T-079), and a whole-span energy step coinciding with overload is marked on the canvas as a front-end event (a distinct mark, never drawn as signal), and suppressed as a detection. Tests: a synthetic overload burst through the mock SDR (clipping for one row) -> the row is flagged, no detection, status counts it; red on current code. Coordinate with T-945 (closed-loop gain).
       core_interface (provenance). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer window 3 (journal-20260925.md): UI evidence: a saturated full-scale block in the waterfall after start-up (shots/w3-0633-airband.png) - likely the front end's start-up transient/overload; mark it as a front-end event, never as signal.
     core_interface: true
   - id: T-982
     milestone: MMAP
@@ -28690,6 +28711,117 @@ tasks:
       From T-820's conflict-fix handback (task-t820 624fbe16), observed not chased: (1) with the Research layer on (off by default) an annotation is drawn TWICE - T-820's dashed rose box plus T-821's research box; (2) a newly saved annotation appears in the Research data only after that panel's 15 s refresh. Also: no e2e spec covers annotation authoring (unit tests only).
       DELIVER: one drawing per annotation whichever layers are on (one owner of the annotation overlay in the registry-driven overlay table, T-821/T-914); a saved annotation shows in the Research panel from the create response, not the next poll; an app e2e that draws an annotation box and a pin and finds each drawn once. Thin client. Red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the new spec alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
+  - id: T-985
+    milestone: MAUTO
+    title: Explorer window-3 captures into fixtures/ (NBFM+CTCSS 461.125, DMR BS 464.6125) with hidden truth, CTCSS + DMR sync oracles, 4 new use cases
+    status: in-progress
+    priority: P1
+    deps: []
+    parallel_group: FIXTURE-EXPLORER
+    needs: none
+    model: sonnet
+    effort: high
+    notes: |
+      FILED 2026-09-25 from explorer window 3 (supervisor 07:17). Two captures recorded through the app's POST /api/outputs/record/start (full provenance in the SigMF: device serial, gains, bias-tee, clock, overload), annotations [], hidden truth in <slug>.truth.json:
+      - ~/.hackriff-ops/explorer/captures/20260925/lmr-461p125-nbfm-ctcss.sigmf-{meta,data} + .truth.json - 15 s, 2.4 Msps at 461.675 MHz, 72 MB. Truth: NBFM burst (8.1 s) at 461.125 MHz with a 233.6 Hz CTCSS tone (the window also saw 462.225 MHz with 233.6 Hz and 464.700 MHz with 100 Hz).
+      - ~/.hackriff-ops/explorer/captures/20260925/dmr-464p6125-bs.sigmf-{meta,data} + .truth.json - 10 s, 2.4 Msps at 464.3 MHz, 48 MB. Truth: conventional DMR base-station 4FSK at 464.6125 MHz, BS data sync x42.
+      DELIVER: (1) append use cases (never renumber; docs/05 + docs/use-cases.yaml together, CLAUDE.md 'Adding a use case', sources cited): NBFM land-mobile/GMRS voice with blind CTCSS/DCS identification; conventional DMR (Tier II) blind 4FSK detection + sync identification; airband AM voice / ATIS (no SIGNAL id exists for VHF airband voice); marine VHF voice. (2) Both captures into fixtures/hackrf/explorer-2026-09-25/ as T-949 did for FLEX: each exceeds the 25 MB LFS cap, so EXTERNAL store per fixtures/README.md (status external in manifest.json, fetched with just fixtures-fetch) - unless a trimmed subclip <= 25 MB keeps the whole truth (the 8.1 s NBFM burst + tone; >= 20 DMR syncs) - decide and say which; hackriff:truth via py/fixtures/annotate.py so the mock SDR cannot read it; py/fixtures/build_explorer_2026_09_25.py extended; new use-case ids. (3) Independent oracles under py/fixtures (like rds_ref.py / p25_ref.py): a CTCSS tone estimator (NBFM discriminator -> low-pass < 300 Hz -> tone frequency to 0.1 Hz, matched to the standard EIA table) and a DMR sync reference (4FSK 4800 sym/s, BS/MS data+voice sync patterns); unit tests on synthetic signals; run both on the captures and record results; report disagreements, never edit truth silently.
+      MAC ONLY (captures in ~/.hackriff-ops). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    dispatch: manual
+    model_reason: "sonnet/high: two oracles (CTCSS, DMR sync) plus fixtures and four use cases"
+    branch: task-t985
+  - id: T-986
+    milestone: MAUTO
+    title: "All captured signals decode: CTCSS tone decode (461.125, 233.6 Hz) and DMR identification/header (464.6125) members - failing-first blind tests"
+    status: todo
+    priority: P1
+    deps:
+    - T-936
+    - T-985
+    parallel_group: FIXTURE-EXPLORER-TESTS
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      User 2026-09-25 (supervisor 07:17): window 3's two captures join the 'all captured signals decode' set with failing blind tests - CTCSS tone decode and DMR header decode. Fixtures: the window-3 fixture ticket this depends on (lmr-461p125-nbfm-ctcss, dmr-464p6125-bs).
+      DELIVER: two members, T-545 pattern exactly as T-936 set it up (mock SDR replaying the fixture, BLIND, nothing passed in). (a) NBFM + CTCSS: one (t,f) region at 461.125 MHz with its time extent (the 8.1 s burst), classified NBFM voice (not null), Listen/demod auto-chosen nbfm, and the CTCSS tone IDENTIFIED as 233.6 Hz (standard table) from the signal - the tone value is the decoded output checked against hidden truth; a 'land mobile' explanation in the top-k. (b) DMR: one region at 464.6125 MHz, estimated 4FSK 4800 sym/s, identified DMR from sync evidence (BS data sync seen n/m), and header decode: the decoded slot type / colour code / data-header fields asserted against the hidden truth where the oracle/truth provides them (if the truth only has sync counts, assert identification + sync count and name the header as the next member). Red for the right reason, each red naming the ticket that turns it green (the CTCSS ticket, the DMR identification ticket, the burst-Listen ticket); registered in the same milestone target, never the per-merge gate.
+      core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    core_interface: true
+  - id: T-987
+    milestone: MAUTO
+    title: Listen opens squelched on a bursty channel and waits for the carrier (today refused 422 unless keyed at that instant - blocks all LMR/GMRS/airband voice)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: LISTEN-BURSTY
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      FOUND by all three explorer windows, now THE MAIN BLOCKER (window 3 summary finding 2): Listen cannot open on a bursty/intermittent channel and wait for a carrier - it probes once at open and refuses 422 no-analog-mode (LowSnr / FillsBand) if nothing is keyed at that instant. This blocks all land-mobile, GMRS and airband voice: every bursty channel in window 3 was refused (461.125 / 462.225 / 464.700 NBFM with tones; airband); earlier NOAA (weak, continuous) and APRS. When a channel WAS keyed (146.561 carrier), Listen auto-chose nbfm 0.75 and worked. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (GMRS/FRS entry, window 3 summary); earlier notes on T-869 (LP-5 chooser).
+      DELIVER: Listen on an emitter or region whose history shows intermittent keying opens SQUELCHED and waits: the mode is chosen from the emitter's accumulated evidence (its past bursts' estimates - T-953's params), not only the instant of opening; audio flows when the carrier returns; the header states 'waiting for carrier (last seen t, mode from n bursts)'; a region with no evidence at all is still refused honestly. docs/api.md + api_contract.rs if the listen header/refusal shape changes (T-079). Tests through the mock SDR: a burst train with gaps -> Listen opened in a gap waits and then delivers audio for the next burst with the right mode; red on current code. Coordinate with T-869 (the chooser, in progress) - read its branch first.
+      core_interface (demod/stream contract). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    core_interface: true
+  - id: T-988
+    milestone: MAUTO
+    title: Blind CTCSS/DCS tone identification on NBFM (row field + Listen header)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: DECODE-CTCSS
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND by explorer window 3 (finding 3): no CTCSS/DCS tone identification anywhere - no Listen header field, no row field, no recipe - while the oracle found 233.6 Hz on 461.125 and 462.225 MHz and 100 Hz on 464.700 MHz; 2 m repeaters are tone-accessed too. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (GMRS/FRS entry).
+      DELIVER: blind sub-audible tone identification on NBFM: CTCSS (the EIA/TIA 50-tone table, 67.0-254.1 Hz, estimated to 0.1 Hz and snapped with a stated tolerance) and DCS (23-bit Golay code words at 134.4 bps, inverted or normal) measured from the discriminator output; the result lands on the emitter row (estimated_params / decode record) and in the Listen status/header; an NBFM emission without a tone reports 'no tone' (not absent). docs/api.md + api_contract.rs for the new fields (T-079). Tests: synthetic NBFM with each of 3 CTCSS tones and 2 DCS codes through the mock SDR -> identified; noise-only -> no tone; red on current code; the window-3 CTCSS blind member goes green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    model_reason: "opus/medium: new DSP (tone estimator, DCS Golay) on the demod path"
+  - id: T-989
+    milestone: MAUTO
+    title: Conventional DMR (Tier II) identification + header decode on any 4FSK 4800 sym/s emission
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: DECODE-DMR
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      FOUND by explorer window 3 (finding 5): no DMR recognition or sync search on a +24 dB DMR repeater at 464.6125 MHz (oracle: BS data sync x42 in 10 s); DMR 4FSK bursts get classification: null. The always-on control-channel chain claims DMR Tier III CSBK decode (window 2), but conventional DMR (Tier II) is never identified. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (GMRS/FRS + DMR entries).
+      DELIVER: DMR identification on any 4FSK 4800 sym/s emission: sync search (BS/MS voice+data syncs), slot/colour-code/data-type from the CACH/slot type, and the verdict on the row ('DMR Tier II, CC n, sync n/m'); decoded headers (voice LC / data header) as a stream output where CRC-valid. Reuse hk-blocks (4FSK slicer T-612, Golay/Hamming/BPTC) or a plugin behind the process boundary (ADR-0010) - decide and say why. Tests: synthetic DMR bursts through the mock SDR; the window-3 DMR blind member goes green (identification + header where the truth provides it); red on current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    model_reason: novel decoder (DMR sync/slot/BPTC) and a GPL plugin-boundary decision (ADR-0010)
+  - id: T-990
+    milestone: M2-hardening
+    title: Noise-only band yields ~6 candidates/min, each given a band-plan explanation with no measured support (airband, spurs as AIS)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: DETECT-FALSEALARM
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      FOUND by explorer window 3 (finding 6 + 7): in an EMPTY band (airband 118-128.7 MHz, oracle: nothing on the air, not even SFO ATIS) the app made 52 noise candidates in 8 min (~6/min at 4.5-8 dB), none suppressed, each explained 'Aviation voice (VHF AM)'; band-plan-only explanations are attached to noise, DC and integer-MHz spurs ('Aviation voice', 'Amateur radio', 'AIS') with nothing measured behind them; in 460-470 MHz no explanation appears at all. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (Airband entry; summary findings 6-7).
+      DELIVER: (1) the detector's false-alarm rate on a noise-only band is measured and bounded (a CFAR Pfa stated per ADR/C-card and verified on a synthetic noise band through the mock SDR: <= N candidates per minute at the default threshold), and short sub-threshold blips expire without becoming candidates (self-cleaning, CLAUDE.md); (2) an explanation needs measured evidence consistent with it (occupied bandwidth, modulation estimate, duty) - a band-plan allocation alone never explains a candidate whose measurements contradict or do not support it; DC/spur-masked rows get the artefact explanation instead (T-948). Tests: noise band -> <= bound; a DC spike in the aviation band -> 'receiver artefact', not 'Aviation voice'; red on current code.
+      core_interface (detection thresholds). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    core_interface: true
+  - id: T-991
+    milestone: M2-hardening
+    title: Content class computed for the whole window from one sub-band (152-162 MHz reads restricted-paging)
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: CONTENT-CLASS
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND by explorer window 2/3: the gating content class for a 152-162 MHz window reads 'restricted-paging' although it spans marine VHF, AIS and NOAA WX (the paging allocation is 929-932 MHz; 152-158 has some Part 22 paging, but the window's class is taken from one sub-band). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (Marine VHF entry). Note: content-class boundaries also trigger T-941's freeze, so a wrong class widens that defect.
+      DELIVER: a window's content class is computed per sub-band (the class map at the resolution of its allocations), the most-restrictive class applied only to the sub-band it covers (metadata-only there), never to the whole window; /api/status reports the per-sub-band classes. Test: a 152-162 window -> marine/AIS/NOAA sub-bands unrestricted, only the paging sub-bands restricted; red on current code.
+      core_interface (content gating). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
