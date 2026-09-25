@@ -40,6 +40,12 @@ ATTEMPTS=$S/merge-attempts.txt
 # from staged-but-ungated main that silently absorbed three other tickets' work.
 # So the bulk declares itself. The file exists ONLY while main is provisional.
 BULKMARK=$S/bulk-in-progress
+# THE GATE BUILDS IN ITS OWN TARGET DIR (supervisor for the user, 2026-09-24 17:20, disk 303 -> 179 GB in
+# 70 min): every gate rebuild of main's target/ in place turned the shared blocks of every worker worktree
+# target - each a `cp -c` clone of main's - exclusive, ~2 GB/min. Every cargo this runner starts (gates,
+# flake re-runs, main-red rebuilds) builds here instead, so main's target/ stays a stable clone source.
+# Seeded as a clone of main's target/ at startup, so the first gate is warm. CI and hand gates unaffected.
+export CARGO_TARGET_DIR="$S/gate-target"
 # T-543: one JSON line per LANDED ticket - {ticket, branch, first_commit_ts, merge_ts,
 # land_minutes, gate_attempts}. `merge-done.txt` records THAT a branch merged; this records
 # what it COST, which is the number T-543 exists to watch. Written next to the gate's own
@@ -873,6 +879,16 @@ self_version(){
 # that must never be tripped by a setup step nobody ran.
 ( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
 
+if [ ! -d "$CARGO_TARGET_DIR" ] && [ -d "$REPO/target" ]; then
+  # Cloned to .tmp and moved into place: a half-copied dir would otherwise never be reseeded (review).
+  rm -rf "$CARGO_TARGET_DIR.tmp"
+  if cp -c -R -p "$REPO/target" "$CARGO_TARGET_DIR.tmp" 2>>"$LOG" && mv "$CARGO_TARGET_DIR.tmp" "$CARGO_TARGET_DIR"; then
+    log "STARTUP: seeded the gate's target dir $CARGO_TARGET_DIR as a clone of $REPO/target"
+  else
+    rm -rf "$CARGO_TARGET_DIR.tmp"; log "STARTUP: WARN could not seed $CARGO_TARGET_DIR - the first gate builds cold"
+  fi
+fi
+log "GATE TARGET: $CARGO_TARGET_DIR (main's target/ is the workers' clone source and is not rebuilt by gates)"
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 # What this process is actually running with - `just knobs show` reads it back as "effective".
 log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0}"
@@ -912,6 +928,13 @@ if [ -e "$REPO/.git/MERGE_HEAD" ]; then
   git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
     || log "STARTUP: could not abort the staged merge ($stale) - a person must look"
 fi
+# An isolation or a single merge this runner was killed in: those branches were in no queue - put them
+# back, so a restart never loses them (and the queue-depth count never shows them as phantoms).
+for f in "$S/isolate-remaining" "$S/merging-now"; do
+  [ -s "$f" ] || { rm -f "$f"; continue; }
+  sleft=$(tr -s ' \n' ' ' < "$f"); for b in $sleft; do echo "$b" >> "$QUEUE"; done
+  rm -f "$f"; log "STARTUP: re-queued what a killed run was still holding ($(basename "$f")): $sleft"
+done
 if [ -f "$BULKMARK" ]; then
   sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
   if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
@@ -1040,7 +1063,7 @@ while true; do
       set -- "${@:1:$BULK_MAX}"
     fi
     if [ "$#" -eq 1 ]; then
-      process "$1" || echo "$1" >> "$QUEUE"
+      echo "$1" > "$S/merging-now"; process "$1" || echo "$1" >> "$QUEUE"; rm -f "$S/merging-now"
     elif [ "$#" -ge 2 ]; then
       BULK_MERGED_LIST=""
       if ! try_bulk "$@"; then
@@ -1050,12 +1073,17 @@ while true; do
         isolate="${BULK_MERGED_LIST:-$*}"
         log "falling back to individual gates for: $isolate"
         MAIN_RED_STOP=""
+        # The isolation's remainder lives only in this loop; written out so "branches not yet on
+        # main" (hkpy.flow.queue_waiting, /flow's queue depth) counts it (user, 2026-09-24 17:02).
+        rest="$isolate"
         for b in $isolate; do
+          rest=$(printf '%s\n' $rest | grep -vx "$b" | tr '\n' ' '); printf '%s %s\n' "$b" "$rest" > "$S/isolate-remaining"
           # Main is red: the rest would each fail the same way - back to the queue, whose next batch
           # meets the batch path's MAIN IS RED hold.
           if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi
           process "$b" || echo "$b" >> "$QUEUE"
         done
+        rm -f "$S/isolate-remaining"
       fi
     fi
   fi

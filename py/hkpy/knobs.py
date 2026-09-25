@@ -40,6 +40,7 @@ KNOBS: dict[str, tuple[str, str, str]] = {
     "WORK_WORKER_CORES": ("3", "work-runner", "cores one worker may occupy at peak"),
     "WORK_GROUP_CAP": ("2", "work-runner", "workers per parallel_group"),
     "WORK_MAX_MINUTES": ("180", "work-runner", "a worker older than this is reaped"),
+    "WORK_CLONE_TARGET": ("1", "work-runner", "1 = a new worker's worktree clones main's target/; 0 = it builds from sccache (no new clone pin)"),
     "WORKER_DRAIN_MAX": ("0", "merge-runner", "0 = overlap mode; seconds to wait for claimed workers before gating"),
     "FOREIGN_DRAIN_MAX": ("300", "merge-runner", "seconds to wait for a foreign spec run / contention"),
     "BULK_MAX": ("15", "merge-runner", "most branches in one batch"),

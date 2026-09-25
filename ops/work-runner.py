@@ -107,6 +107,7 @@ QUEUE_PAUSE = int(os.environ.get("WORK_QUEUE_PAUSE", "6"))
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
+CLONE_TARGET = os.environ.get("WORK_CLONE_TARGET", "1") != "0"   # clone main's target/ into a new worktree
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 IDLE_TARGET_H = float(os.environ.get("WORK_IDLE_TARGET_H", "2"))     # a kept worktree's target/ untouched this long is reclaimed
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
@@ -392,6 +393,15 @@ TICKET:
 """
 
 
+def clone_cmd(wt):
+    """The shell that seeds a new worktree's target/ as an APFS clone of main's - or nothing when
+    WORK_CLONE_TARGET=0 (the worker then builds from sccache). Each clone is a pin that turns exclusive as
+    gates rebuild main's target/ (2026-09-24 18:11: 83 GB still shared across three workers, 101 GB free)."""
+    if not CLONE_TARGET:
+        return ""
+    return f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+
+
 def launch(t, dry):
     tid, branch, wt = t["id"], branch_of(t["id"]), worktree_of(t["id"])
     model = MODEL_ALIAS.get((t.get("model") or "sonnet").lower(), "sonnet")
@@ -422,7 +432,7 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
-    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     out = open(f"{d}/out.json", "w")
@@ -1837,7 +1847,7 @@ def launch_deflake(slug, req, prior, dry):
     open(f"{d}/request.json", "w").write(json.dumps(req, indent=1))
     cmd = ["claude", "-p", "--agent", "deflaker", "--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
-    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     p = subprocess.Popen(bounded(["bash", "-c", script]), cwd=wt, stdin=subprocess.DEVNULL,
@@ -1935,6 +1945,24 @@ def reap_deflake(claims, key, c):
         claims[key] = dict(launch_review(c), state="running")
 
 
+_DEPTH_AT = [0.0]
+
+
+def record_queue_depth():
+    """One $HACKRIFF_OPS/queue-depth.jsonl line a minute: branches not yet on main (hkpy.flow's one
+    definition) - sampled here because this runner ticks through a gate, the merge runner does not
+    (user, 2026-09-24 17:02: 'merge queue is huge, is it growing? track its length on /flow')."""
+    if time.time() - _DEPTH_AT[0] < 60:
+        return
+    _DEPTH_AT[0] = time.time()
+    if f"{REPO}/py" not in sys.path:
+        sys.path.append(f"{REPO}/py")
+    from hkpy import flow
+    d = flow.queue_waiting(S)
+    with open(f"{S}/{flow.QUEUE_DEPTH_JSONL}", "a") as f:
+        f.write(json.dumps({"ts": round(time.time(), 1), **{k: d[k] for k in ("waiting", "queued", "gating", "isolating")}}) + "\n")
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
@@ -1973,6 +2001,10 @@ def tick(dry):
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:
         log(f"dispatch_deflakes error: {e}")
+    try:
+        record_queue_depth()
+    except Exception as e:
+        log(f"record_queue_depth error: {e}")
     changed |= dispatch(claims, dry)
     if not dry:
         save_claims(claims)
