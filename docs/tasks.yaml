@@ -19025,7 +19025,7 @@ tasks:
     status: todo
     priority: normal
     parallel_group: MUI-X1
-    model: sonnet
+    model: opus
     depends_on: [T-566]
     use_cases: [RESEARCH-001, RESEARCH-003]
     core_interface: false
@@ -19060,6 +19060,8 @@ tasks:
     notes: |
       Filed 2026-09-21 with ADR-0021 (T-549). Sonnet with an Opus review: the panel is
       well-specified but the tried/not-tried register is an honesty invariant, not styling.
+    effort: high
+    effort_reason: two sonnet rounds failed review on the trace-panel resolution headline race (supervisor 2026-09-25 03:22)
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
