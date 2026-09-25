@@ -943,6 +943,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on));
+    // A read-only statement of the overlay layers this build draws, each as its REGISTRY def
+    // (plane, z, default) — never the menu's rendering of them — so a check can derive what the
+    // layers menu must offer from the registry itself rather than a literal every new renderer
+    // breaks. Presentation metadata only: static for the page's life, commands nothing.
+    stage.dataset.overlayLayers = JSON.stringify([...drawnLayers].map((id) => layerDef(id)!)
+      .map((d) => ({ id: d.id, plane: d.plane, z: d.z, visibleByDefault: d.visibleByDefault })));
     const host: MapControlHost = {
       ...acts,
       goTo: (hz) => store.set(requestGoto(hz)),

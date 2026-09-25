@@ -260,17 +260,39 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-layers-btn') && /^IQ ring/.test(document.querySelector('.sf-ring')?.textContent ?? '')`,
     { timeoutMs: 60000 });
+  // What the menu must offer is DERIVED from the app's own registry, not written here as a literal:
+  // every overlay layer the build draws, in the registry's paint order (ascending `z` within the
+  // overlay plane), each at its declared default. A literal broke on every branch that wired one
+  // more renderer (T-811 artifacts, T-812 priors, T-821 research) and made their edits conflict.
+  // The registry statement is the page's own (`.sf-stage[data-overlay-layers]`: the defs, not the
+  // menu), and the order is computed here from `z`, so the menu dropping a drawn layer, reordering
+  // one or showing a wrong default is still red. It is read in the SAME eval as the menu, so a
+  // layer that arrives asynchronously (a collection loaded by a poll) cannot race the expectation.
   const menu = `JSON.stringify({
     head: [...document.querySelectorAll('#map-layers h4')].map((e) => e.textContent),
     bases: [...document.querySelectorAll('#map-layers input[type=radio]')].map((i) => [i.value, i.checked]),
     overlays: [...document.querySelectorAll('#map-layers input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
     signals: document.querySelector('.sf-signalsbtn').getAttribute('aria-pressed'),
+    registry: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? 'null'),
   })`;
+  /** The menu's expected overlay rows for one snapshot: `[id, visibleByDefault]` in paint order. */
+  const expectedOf = (snap) => {
+    assert.ok(Array.isArray(snap.registry), "the surface states no overlay registry (.sf-stage[data-overlay-layers])");
+    for (const d of snap.registry) assert.equal(d.plane, "overlay", `${d.id} is drawn as an overlay but registered on the ${d.plane} plane`);
+    const rows = snap.registry.slice().sort((a, b) => a.z - b.z).map((d) => [d.id, d.visibleByDefault]);
+    // Fixed, so the derivation cannot pass on an empty or gutted registry: the two core overlays
+    // are drawn, they paint first, and they are on by default (unknowns are never hidden by default).
+    assert.deepEqual(rows.slice(0, 2), [["rules", true], ["detections", true]],
+      "the registry must draw capture rules then detections first, both on by default");
+    return rows;
+  };
+
   await page.click("document.querySelector('.map-layers-btn')");
   await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
   const one = JSON.parse(await page.eval(menu));
+  t.diagnostic(`overlay registry drawn by this build: ${JSON.stringify(expectedOf(one))}`);
   assert.deepEqual(one.bases, [["ramp", true], ["phosphor", false]], "base style: exactly one, ramp by default");
-  assert.deepEqual(one.overlays, [["rules", true], ["detections", true], ["artifacts", false]], "overlays in paint order, defaults on");
+  assert.deepEqual(one.overlays, expectedOf(one), "overlays in paint order, defaults on");
   assert.match(one.head[0], /Base style · this pane/);
   assert.match(one.head[1], /Overlays · this pane/);
   assert.equal(one.signals, "true");
@@ -278,17 +300,28 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   // Split: the new pane is active, inherits pane 1's registry, and the menu says which pane it is.
   await page.eval(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent.startsWith('Split')).click()`);
   await page.waitFor("the menu to act on pane 2", `/pane 2 of 2/.test(document.querySelector('#map-layers h4')?.textContent ?? '')`, { timeoutMs: 10000 });
-  assert.deepEqual(JSON.parse(await page.eval(menu)).overlays, [["rules", true], ["detections", true], ["artifacts", false]], "a split must inherit the registry");
+  const split = JSON.parse(await page.eval(menu));
+  const expected = expectedOf(split);
+  assert.deepEqual(split.overlays, expected, "a split must inherit the registry");
   await page.click(`document.querySelector('#map-layers input[data-base="phosphor"]')`);
-  await page.click(`document.querySelector('#map-layers input[data-layer="detections"]')`);
-  await page.click(`document.querySelector('#map-layers input[data-layer="rules"]')`);
+  // Flip EVERY overlay on pane 2 away from its default — the core two off, and each layer any later
+  // renderer adds to the opposite of its default — so the toggle and the no-leak check below cover
+  // every drawn layer, not only the ones known today (a default-off layer toggled on and back off
+  // again would leave nothing for a leak into pane 1 to show).
+  for (const [id, on] of expected) {
+    const input = `document.querySelector('#map-layers input[data-layer="${id}"]')`;
+    await page.click(input);
+    await page.waitFor(`pane 2's ${id} toggle to flip to ${!on}`, `${input}?.checked === ${!on}`, { timeoutMs: 5000 });
+  }
   await page.waitFor("pane 2's readouts to state its layers",
     `/hidden on this pane/.test(document.querySelector('.sf-ring').textContent) &&
      /phosphor style/.test(document.querySelector('.sf-trace').textContent) &&
      document.querySelector('.sf-signalsbtn').getAttribute('aria-pressed') === 'false'`, { timeoutMs: 10000 });
   const two = JSON.parse(await page.eval(menu));
   assert.deepEqual(two.bases, [["ramp", false], ["phosphor", true]]);
-  assert.deepEqual(two.overlays, [["rules", false], ["detections", false], ["artifacts", false]]);
+  const flipped = new Set(expected.map(([id]) => id));
+  assert.deepEqual(two.overlays, expectedOf(two).map(([id, on]) => [id, flipped.has(id) ? !on : on]),
+    "pane 2's toggles must flip every drawn overlay, in paint order");
 
   // Close pane 2: pane 1 is active again, and none of pane 2's toggles reached it.
   await page.eval(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent === 'Close').click()`);
@@ -302,7 +335,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   } catch (e) { t.diagnostic(`page said: ${await page.eval(said)}`); throw e; }
   const back = JSON.parse(await page.eval(menu));
   assert.deepEqual(back.bases, one.bases, "pane 2's base style leaked into pane 1");
-  assert.deepEqual(back.overlays, one.overlays, "pane 2's overlay toggles leaked into pane 1");
+  assert.deepEqual(back.overlays, expectedOf(back), "pane 2's overlay toggles leaked into pane 1");
   assert.equal(back.signals, "true");
 
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
