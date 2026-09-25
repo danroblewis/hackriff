@@ -432,11 +432,43 @@ def hosts():
         return {}
 
 
-def host_for(t):
-    """Stage 1: a ticket goes remote only when named by hand (WORK_REMOTE_TICKETS=T-nnn,...)."""
+# Stage 2: a host takes work by itself while it is reachable and below its own cap (hosts.json `cap`); the Mac's
+# cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
+# Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
+REMOTE_DEFAULT_CAP = 2
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+PROBE_FRESH_S = 180
+
+
+def remote_eligible(t):
+    text = " ".join(str(t.get(k) or "") for k in ("title", "notes", "acceptance", "parallel_group"))
+    return t.get("needs") in (None, "", "none") and not _MAC_ONLY.search(text)
+
+
+def host_ready(h):
+    """The host's last per-tick probe is fresh and says reachable."""
+    try:
+        p = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        return False
+    return bool(p.get("reachable")) and time.time() - p.get("at", 0) < PROBE_FRESH_S
+
+
+def host_for(t, claims=None):
+    """The remote host a ticket goes to, or None for this Mac. WORK_REMOTE_TICKETS=T-nnn,... still names tickets
+    by hand (they go to the first host whatever its cap)."""
     named = {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
-    h = hosts()
-    return next(iter(h), None) if h and t.get("id") in named else None
+    hs = hosts()
+    if not hs:
+        return None
+    if t.get("id") in named:
+        return next(iter(hs))
+    if claims is None or not remote_eligible(t):
+        return None
+    for h, cfg in hs.items():
+        if host_ready(h) and busy_workers(claims, h) < int(cfg.get("cap", REMOTE_DEFAULT_CAP)):
+            return h
+    return None
 
 
 def to_remote(host, text):
@@ -616,7 +648,7 @@ def sync_transcript(c):
         log(f"REMOTE {c['ticket']}: transcript copy from {h} failed (rsync {r.returncode}): {(r.stderr or b'')[-160:]!r}")
 
 
-def launch(t, dry):
+def launch(t, dry, host=None):
     tid, branch, wt = t["id"], branch_of(t["id"]), worktree_of(t["id"])
     model = MODEL_ALIAS.get((t.get("model") or "sonnet").lower(), "sonnet")
     effort = (t.get("effort") or "medium").lower()
@@ -646,7 +678,6 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
-    host = host_for(t)
     if host:
         try:
             remote_prepare(host, wt, branch, d)
@@ -1782,24 +1813,52 @@ def dispatch_cap():
     return min(CAP, RESERVE_CAP) if time.time() - _GATE_SEEN[0] < RESERVE_GRACE_S else CAP
 
 
-def busy_workers(claims):
-    """Running work, fix AND deflake runs: each is a worker on the box (dispatch counted only `work`)."""
-    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake"))
+def busy_workers(claims, host=None):
+    """Running work, fix AND deflake runs on one host (None = this Mac): each is a worker there (dispatch counted
+    only `work`). A remote claim holds a slot on its host, not on this Mac (remote workers stage 2)."""
+    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake")
+               and c.get("host") == host)
+
+
+def dispatch_remote(claims, dry):
+    """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
+    (dispatch-paused) does. One launch per host per tick."""
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused"):
+        return False
+    try:
+        tasks = board()
+    except Exception:
+        return False
+    changed, launched = False, set()
+    for t in candidates(tasks, claims):
+        h = host_for(t, claims)
+        if not h or h in launched:
+            continue
+        g = t.get("parallel_group")
+        if g and sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
+            continue
+        c = launch(t, dry, host=h)
+        if c:
+            claims[t["id"]] = dict(c, state="running")
+            changed = True
+            launched.add(h)
+    return changed
 
 
 def dispatch(claims, dry):
-    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
+    changed_remote = dispatch_remote(claims, dry)
+    running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work" and not c.get("host")]
     cap = dispatch_cap()
-    free = cap - busy_workers(claims)          # fix runs are workers on the box too
+    free = cap - busy_workers(claims)          # this Mac's: fix runs are workers on the box too
     if free <= 0:
-        return False
+        return changed_remote
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
-        return False
+        return changed_remote
     load1 = os.getloadavg()[0]
     if load1 > LOAD_MAX:
         log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
-        return False
+        return changed_remote
     # THE GATE GETS THE BOX TO ITSELF (user, 2026-09-22). Two rules, one cycle:
     #   1. no dispatch while a gate runs (the merge runner only starts one once no worker is
     #      running - see merge-runner.sh workers_running) - so a gate never shares the box;
@@ -1812,31 +1871,31 @@ def dispatch(claims, dry):
     # to stop all dispatch; delete it to resume. Reaping, results and queueing carry on.
     if os.path.exists(f"{S}/dispatch-paused"):
         log(f"HOLD: dispatch-paused file present ({len(running)} running)")
-        return False
+        return changed_remote
     # The three holds below are the alone-mode cycle (WORK_GATE_ALONE=1, see gate_holds_dispatch).
     # In the default overlap mode a gate only lowers the cap to the reserve (above) and the queue
     # never pauses dispatch: the merge runner gates whatever is queued as soon as the previous
     # gate ends, so the batch is "what handed back during the last gate".
     if gate_holds_dispatch():
         log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
-        return False
+        return changed_remote
     depth = queue_depth()
     if GATE_ALONE and depth >= QUEUE_PAUSE:
         log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
-        return False
+        return changed_remote
     # The gate is IMMINENT when something is queued and no worker is running: the merge runner
     # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
     # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
     # dispatch into that window; the gate takes the batch, then dispatch resumes.
     if GATE_ALONE and depth > 0 and not running:
         log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
-        return False
+        return changed_remote
     free = min(free, PER_TICK)
     try:
         tasks = board()
     except Exception as e:
         attention("board", "main", "BOARD_UNREADABLE", str(e)[:200])
-        return False
+        return changed_remote
     changed = False
     taken = {}   # launches per parallel_group this tick, on top of the running-claim count
     for t in candidates(tasks, claims):
@@ -1853,7 +1912,7 @@ def dispatch(claims, dry):
             if g:
                 taken[g] = taken.get(g, 0) + 1
             free -= 1
-    return changed
+    return changed or changed_remote
 
 
 #: Untracked paths a worktree regenerates on its own - build output, installed hooks, envs. A

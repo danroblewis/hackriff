@@ -1433,3 +1433,45 @@ def test_a_remote_worker_is_shown_like_a_local_one(tmp_path, monkeypatch):
     runs.clear()
     R.sync_remote_view(claims, dry=False)
     assert not json.load(open(tmp_path / "hosts" / "node2.json"))["reachable"] and runs == []
+
+
+def test_a_reachable_host_below_its_cap_takes_eligible_work_and_the_macs_cap_counts_only_the_mac(tmp_path, monkeypatch):
+    """Remote workers stage 2 (supervisor 2026-09-25 00:31: keep node2 going): the remote pass dispatches an eligible
+    ticket to a reachable host below its own cap; never the Mac-first GPU paths; the Mac's cap counts only its own."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o", "cap": 2}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    remote_claims = {"T-1": {"state": "running", "kind": "work", "host": "node2"}}
+    local_claims = {"T-2": {"state": "running", "kind": "work"}, "T-3": {"state": "running", "kind": "fix"}}
+    claims = {**remote_claims, **local_claims}
+    assert R.busy_workers(claims) == 2 and R.busy_workers(claims, "node2") == 1
+    t = {"id": "T-9", "title": "hk-store retention follow-ups", "needs": "none"}
+    assert R.host_for(t, claims) == "node2"
+    assert R.host_for({"id": "T-10", "title": "wgpu provider for the FFT", "needs": "none"}, claims) is None
+    assert R.host_for(t, dict(claims, **{"T-4": {"state": "running", "kind": "work", "host": "node2"}})) is None   # at cap
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time() - 600, "reachable": True}))
+    assert R.host_for(t, claims) is None                                          # stale probe: not ready
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": False}))
+    assert R.host_for(t, claims) is None
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-10")
+    assert R.host_for({"id": "T-10", "title": "wgpu"}, claims) == "node2"         # named by hand: always
+
+
+def test_the_remote_pass_launches_one_per_host_per_tick_and_its_claims_are_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.delenv("WORK_REMOTE_TICKETS", raising=False)
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 3}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    tasks = [{"id": f"T-{i}", "title": "x", "needs": "none", "status": "todo"} for i in (21, 22)]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "candidates", lambda ts, cl: [t for t in ts if t["id"] not in cl])
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append((t["id"], host)) or {"ticket": t["id"], "host": host, "kind": "work"})
+    claims = {}
+    assert R.dispatch_remote(claims, dry=False) is True
+    assert launched == [("T-21", "node2")] and claims["T-21"]["state"] == "running"
