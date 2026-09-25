@@ -137,6 +137,25 @@
 //! link the body was not what a refetch was waiting for. It is what a tunnel, a phone or a second
 //! machine waits for, and it is what the browser parses.
 //!
+//! # `?planes=compact`: the other three planes, and the one that was sent twice (T-1019)
+//!
+//! T-533 left three JSON number arrays of 65 536 cells behind, and they are what a hot-cache hit
+//! still spends its milliseconds writing: measured on the staging backend against a live HackRF, a
+//! `?planes=f16` tile body is **826–925 kB**, of which `max_db` packed is 174 764 B and the rest is
+//! `grid.coverage`, `grid.occupancy_max` and `grid.frames`. Even a hit whose `cost.build_ms` is 0.6
+//! took ~12 ms of wall clock, and the review this ticket came from established what it was NOT:
+//! transport, gzip and JSON-versus-binary on the wire were all excluded — wall ≈ build everywhere.
+//! What is left is producing the body.
+//!
+//! `compact` is that, negotiated exactly as `f16` is (a new **name**, never a redefinition):
+//! `occupancy_max` becomes a binary16 plane with the same `absent: nan` rule as `max_db`, `frames`
+//! becomes an unsigned-integer plane at the narrowest width that holds this tile's own counts
+//! (which is why it pays where T-533's fixed `u32` did not), and **`grid.coverage` is not sent**,
+//! because `coverage.planes[].runs` beside the grid already carries per-cell coverage compactly —
+//! the duplication T-467 removed between two coverage planes, still present between the coverage
+//! plane and the grid. A caller that wants the per-cell observed *fraction* asks `planes=json` or
+//! `planes=f16`, where every field is unchanged.
+//!
 //! # What a tile never carries
 //!
 //! Emitters (§5.3). Identity gating is per-caller and a tile is not; a sealed tile is immutable and
@@ -1734,11 +1753,34 @@ pub enum Planes {
     Json,
     /// `max_db` as base64 of little-endian IEEE binary16; the other three planes unchanged.
     ///
-    /// Only `max_db`, because only `max_db` wins: on a full 256 × 256 live tile its JSON text is
-    /// 1 197 118 B against 174 764 B packed, while `frames` is 131 073 B as text against 349 528 B
-    /// as base64 `u32`, and `occupancy_max`/`coverage` lose by a similar factor. Packing them too
-    /// would grow the body by 394 kB to save nothing.
+    /// The plane that wins on its own: on a full 256 × 256 live tile `max_db`'s JSON text is
+    /// 1 197 118 B against 174 764 B packed. `frames` as base64 `u32` (349 528 B against 131 073 B
+    /// of text) loses, which is why this spelling leaves it alone — see [`Planes::Compact`] for
+    /// what *does* pay once the width is chosen from the data rather than fixed at 32 bits.
     F16,
+    /// Every per-cell plane typed and packed, and `grid.coverage` **omitted** (T-1019).
+    ///
+    /// What was left after [`Planes::F16`] was the other three planes, and they are most of the
+    /// body: measured on a live 256 × 256 tile, `?planes=f16` is 826–925 kB of which `max_db` is
+    /// 174 764 B. The rest is `grid.coverage` — 65 536 `f32` fractions spelled as decimal text,
+    /// each one of which `coverage.planes[].runs` already carries, compactly and per *state*, for
+    /// the same cells — plus `occupancy_max` (a null or a decimal a cell) and `frames`.
+    ///
+    /// So this spelling:
+    ///
+    /// - packs `max_db` and `occupancy_max` as binary16, the same [`f16_plane`] with the same
+    ///   `absent: nan` rule — `occupancy_max` is a fraction in `[0, 1]` and binary16 holds it to
+    ///   about three decimal digits, and it is `NaN` when nothing was observed exactly as `null`
+    ///   is in the JSON spelling;
+    /// - packs `frames` as base64 unsigned integers of the **narrowest width that holds this
+    ///   tile's own maximum** (`u8`/`u16`/`u32`/`u64`, stated in the plane's `type`), which is
+    ///   what makes it pay: the fixed `u32` T-533 measured cost 349 528 B, `u8` over the same
+    ///   65 536 cells is 87 384 B against 131 073 B of text, and nothing is lost at any width
+    ///   because the width is chosen from the values;
+    /// - **omits `grid.coverage`** — not a smaller spelling of it but a refusal to send it twice.
+    ///   It is stated in `grid.encoding.rule`, and a caller that wants the per-cell observed
+    ///   fraction asks `planes=json` or `planes=f16`, where it is unchanged.
+    Compact,
 }
 
 impl Planes {
@@ -1746,11 +1788,13 @@ impl Planes {
         match self {
             Planes::Json => "json",
             Planes::F16 => "f16",
+            Planes::Compact => "compact",
         }
     }
 }
 
-/// `?planes=`: `json` (the default) or `f16`. An unrecognised spelling is a **400 naming it**,
+/// `?planes=`: `json` (the default), `f16` or `compact`. An unrecognised spelling is a **400
+/// naming it**,
 /// never a silent fall back to JSON — a client that asked for a representation it can decode and
 /// was quietly given another one would mis-read every cell.
 fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
@@ -1761,8 +1805,9 @@ fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
     {
         None | Some("json") => Ok(Planes::Json),
         Some("f16") => Ok(Planes::F16),
+        Some("compact") => Ok(Planes::Compact),
         Some(other) => Err(bad(&format!(
-            "planes={other:?} is not a plane encoding this server serves (json, f16)"
+            "planes={other:?} is not a plane encoding this server serves (json, f16, compact)"
         ))),
     }
 }
@@ -1828,6 +1873,48 @@ fn f16_plane(values: impl Iterator<Item = f32>, cells: usize, scale: &str) -> Va
     })
 }
 
+/// What `grid.planes` says about itself, in every spelling that carries one.
+const PLANES_RULE: &str = "the typed spelling of the planes it names; every plane NOT named here \
+    is beside it as a JSON array — except `coverage` under `planes=compact`, which is not sent at \
+    all because `coverage.planes[].runs` beside this grid already carries it. \
+    `grid.encoding.planes` says which spelling this answer used.";
+
+/// One integer plane, packed at the **narrowest unsigned width that holds this tile's values**
+/// (T-1019): `u8`, `u16`, `u32` or `u64`, stated in `type`, little-endian, base64.
+///
+/// **The width is measured, never assumed, so the packing is lossless at every width.** That is
+/// the whole reason this plane pays where T-533's fixed `u32` did not: `frames` over a rendered
+/// tile is a handful of counts, so it packs to one byte a cell (87 384 B base64 over 65 536 cells)
+/// against 131 073 B of JSON text and 349 528 B as base64 `u32`. A tile whose counts are large
+/// widens instead of truncating — a saturated count would be an invented measurement.
+///
+/// There is no absent value: `frames` is a count, and a cell nothing was folded into has **0**
+/// frames, which is what the JSON spelling says too (`query::UNOBSERVED_RULE`). `absent: "none"`
+/// states that rather than leaving a reader to wonder which code means nothing.
+fn uint_plane(values: &[u64], scale: &str) -> Value {
+    let max = values.iter().copied().max().unwrap_or(0);
+    let (ty, width) = match max {
+        0..=0xff => ("u8", 1usize),
+        0x100..=0xffff => ("u16", 2),
+        0x1_0000..=0xffff_ffff => ("u32", 4),
+        _ => ("u64", 8),
+    };
+    let mut bytes = Vec::with_capacity(values.len() * width);
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes()[..width]);
+    }
+    json!({
+        "type": ty,
+        "byte_order": "little-endian",
+        "transfer": "base64",
+        "cells": values.len(),
+        "bytes": bytes.len(),
+        "scale": scale,
+        "absent": "none",
+        "data": base64(&bytes),
+    })
+}
+
 /// Standard base64, no line breaks — the alphabet `atob` reads.
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1863,9 +1950,14 @@ fn encoding_json(planes: Planes) -> Value {
             inferred: `json` is one number or `null` per cell; `f16` moves `max_db` into \
             `grid.planes.max_db` as base64 of little-endian IEEE binary16 (its destination is an \
             R16F texture, so nothing that reaches a screen is lost) and leaves `occupancy_max`, \
-            `coverage` and `frames` as JSON arrays, because for those three JSON is the SMALLER \
-            spelling (T-533). A reader that does not know the name served must refuse the tile, \
-            not guess: a plane decoded against the wrong type is a measurement invented.",
+            `coverage` and `frames` as JSON arrays (T-533); `compact` additionally moves \
+            `occupancy_max` into a binary16 plane and `frames` into an unsigned-integer plane \
+            whose width is the narrowest that holds this tile's own counts, and OMITS \
+            `grid.coverage` entirely, because `coverage.planes[].runs` beside this grid already \
+            carries per-cell coverage compactly — a caller that wants the per-cell observed \
+            FRACTION asks `planes=json` or `planes=f16` (T-1019). A reader that does not know the \
+            name served must refuse the tile, not guess: a plane decoded against the wrong type \
+            is a measurement invented.",
     })
 }
 
@@ -1953,9 +2045,6 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
         "f_lo_hz": o.f_lo_hz,
         "f_cell_hz": o.f_cell_hz,
         "encoding": encoding_json(planes),
-        "occupancy_max": Value::Array(o.cells.iter().map(|c| num(c.occupancy_max)).collect()),
-        "coverage": Value::Array(o.cells.iter().map(|c| json!(c.coverage)).collect()),
-        "frames": Value::Array(o.cells.iter().map(|c| json!(c.frames)).collect()),
         "cells": o.cells.len(),
         "observed_cells": o.observed_cells,
         "range_db": o.range_db.map(|(lo, hi)| json!({"lo": lo, "hi": hi})),
@@ -1969,15 +2058,30 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
         "semantics": crate::query::overview_semantics_json(o),
     });
     let g = v.as_object_mut().expect("object");
+    // Row-major, time then frequency, in every spelling. `null` is **not observed**, never quiet
+    // (C26), and its binary16 form is `NaN`.
+    let json_array = |f: &dyn Fn(&hk_store::OverviewCell) -> Value| {
+        Value::Array(o.cells.iter().map(f).collect())
+    };
     match planes {
-        // Row-major, time then frequency. `null` is **not observed**, never quiet (C26).
         Planes::Json => {
+            g.insert("max_db".into(), json_array(&|c| num(c.max_db)));
             g.insert(
-                "max_db".into(),
-                Value::Array(o.cells.iter().map(|c| num(c.max_db)).collect()),
+                "occupancy_max".into(),
+                json_array(&|c| num(c.occupancy_max)),
             );
+            g.insert("coverage".into(), json_array(&|c| json!(c.coverage)));
+            g.insert("frames".into(), json_array(&|c| json!(c.frames)));
         }
         Planes::F16 => {
+            // T-533: the one plane binary16 beats JSON on, and no other — the other three are
+            // still the JSON arrays, unchanged, byte for byte.
+            g.insert(
+                "occupancy_max".into(),
+                json_array(&|c| num(c.occupancy_max)),
+            );
+            g.insert("coverage".into(), json_array(&|c| json!(c.coverage)));
+            g.insert("frames".into(), json_array(&|c| json!(c.frames)));
             g.insert(
                 "planes".into(),
                 json!({
@@ -1986,9 +2090,29 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
                         o.cells.len(),
                         crate::query::scale_str(o.unit),
                     ),
-                    "rule": "the typed spelling of the planes it names; every plane NOT named here \
-                        is beside it as a JSON array, and `grid.encoding.planes` says which \
-                        spelling this answer used.",
+                    "rule": PLANES_RULE,
+                }),
+            );
+        }
+        Planes::Compact => {
+            // T-1019: every per-cell plane typed, and `coverage` NOT sent — `coverage.planes[]`
+            // beside this grid already carries what it says, per state and run-length encoded.
+            let frames: Vec<u64> = o.cells.iter().map(|c| c.frames).collect();
+            g.insert(
+                "planes".into(),
+                json!({
+                    "max_db": f16_plane(
+                        o.cells.iter().map(|c| c.max_db),
+                        o.cells.len(),
+                        crate::query::scale_str(o.unit),
+                    ),
+                    "occupancy_max": f16_plane(
+                        o.cells.iter().map(|c| c.occupancy_max),
+                        o.cells.len(),
+                        "fraction",
+                    ),
+                    "frames": uint_plane(&frames, "count"),
+                    "rule": PLANES_RULE,
                 }),
             );
         }
@@ -6811,7 +6935,121 @@ mod tests {
         let e = tiles_json(&state, &q).unwrap_err();
         assert_eq!(e.status, 400);
         assert!(e.message.contains("f8"), "{}", e.message);
-        assert!(e.message.contains("json, f16"), "{}", e.message);
+        assert!(e.message.contains("json, f16, compact"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The narrowest width that holds the values, and nothing truncated at any of them**
+    /// (T-1019). The width is what makes an integer plane pay at all — T-533 measured a fixed
+    /// `u32` costing 349 528 B against 131 073 B of JSON text — so it is chosen from the data,
+    /// and a count that does not fit widens rather than saturating.
+    #[test]
+    fn an_integer_plane_picks_the_narrowest_width_that_holds_its_counts() {
+        let cases: [(&[u64], &str, usize); 5] = [
+            (&[0, 1, 255], "u8", 1),
+            (&[0, 256], "u16", 2),
+            (&[0xffff], "u16", 2),
+            (&[0x1_0000, 7], "u32", 4),
+            (&[0x1_0000_0000], "u64", 8),
+        ];
+        for (values, ty, width) in cases {
+            let p = uint_plane(values, "count");
+            assert_eq!(p["type"], json!(ty), "{values:?}");
+            assert_eq!(p["cells"], json!(values.len()));
+            assert_eq!(p["bytes"], json!(values.len() * width));
+            assert_eq!(p["absent"], json!("none"));
+            let bytes = decode_base64(p["data"].as_str().expect("data"));
+            assert_eq!(bytes.len(), values.len() * width);
+            for (i, want) in values.iter().enumerate() {
+                let mut got = [0u8; 8];
+                got[..width].copy_from_slice(&bytes[i * width..(i + 1) * width]);
+                assert_eq!(u64::from_le_bytes(got), *want, "cell {i} of {values:?}");
+            }
+        }
+        // An empty plane is a width, not a panic: no values, no maximum, the narrowest width.
+        assert_eq!(uint_plane(&[], "count")["type"], json!("u8"));
+    }
+
+    /// **`compact` is the same grid**, cell for cell, in three typed planes — and one plane fewer,
+    /// because `grid.coverage` is what `coverage.planes[].runs` beside it already says (T-1019).
+    #[test]
+    fn the_compact_spelling_carries_the_same_grid_and_drops_the_plane_sent_twice() {
+        let dir = temp_dir("planes-compact");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let q = tile_params(F_INDEX, T_INDEX);
+        let plain = tiles_json(&state, &q).unwrap();
+        let mut f16_q = q.clone();
+        f16_q.push(("planes".into(), "f16".into()));
+        let f16 = tiles_json(&state, &f16_q).unwrap();
+        let mut compact_q = q.clone();
+        compact_q.push(("planes".into(), "compact".into()));
+        let compact = tiles_json(&state, &compact_q).unwrap();
+
+        assert_eq!(compact["grid"]["encoding"]["planes"], json!("compact"));
+        // Every per-cell array is ABSENT, not empty — including `coverage`, which is not spelled
+        // anywhere in this answer's grid.
+        for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+            assert!(
+                compact["grid"][k].is_null(),
+                "grid.{k} is still spelled per cell: {}",
+                compact["grid"][k]
+            );
+        }
+        // …and the grey authority is untouched: the coverage plane is still served, which is the
+        // whole premise of dropping the grid's copy.
+        assert!(
+            !compact["coverage"]["planes"].as_array().unwrap().is_empty(),
+            "{}",
+            compact["coverage"]
+        );
+
+        // `max_db` is the same plane `f16` serves, byte for byte: one spelling, not two.
+        assert_eq!(
+            compact["grid"]["planes"]["max_db"],
+            f16["grid"]["planes"]["max_db"]
+        );
+
+        // `occupancy_max`: binary16, absence for absence against the JSON array.
+        let want_occ = plain["grid"]["occupancy_max"].as_array().unwrap();
+        let occ = &compact["grid"]["planes"]["occupancy_max"];
+        assert_eq!(occ["type"], json!("f16"));
+        assert_eq!(occ["scale"], json!("fraction"));
+        assert_eq!(occ["absent"], json!("nan"));
+        assert_eq!(occ["cells"], json!(want_occ.len()));
+        let bytes = decode_base64(occ["data"].as_str().expect("data"));
+        assert_eq!(bytes.len(), want_occ.len() * 2);
+        for (i, cell) in want_occ.iter().enumerate() {
+            let v = f16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]));
+            match cell.as_f64() {
+                None => assert!(!v.is_finite(), "cell {i}: null in JSON, {v} packed"),
+                Some(w) => assert!(
+                    (v as f64 - w).abs() <= 1e-3 + w.abs() * 1e-3,
+                    "cell {i}: {w} in JSON, {v} packed"
+                ),
+            }
+        }
+
+        // `frames`: exact, at whatever width this tile's counts need.
+        let want_frames = plain["grid"]["frames"].as_array().unwrap();
+        let fr = &compact["grid"]["planes"]["frames"];
+        let width = fr["bytes"].as_u64().unwrap() as usize / want_frames.len();
+        let bytes = decode_base64(fr["data"].as_str().expect("data"));
+        let mut counted = 0usize;
+        for (i, cell) in want_frames.iter().enumerate() {
+            let mut got = [0u8; 8];
+            got[..width].copy_from_slice(&bytes[i * width..(i + 1) * width]);
+            let want = cell.as_u64().expect("frames is a count, never null");
+            assert_eq!(u64::from_le_bytes(got), want, "frames cell {i}");
+            counted += usize::from(want > 0);
+        }
+        assert!(
+            counted > 0,
+            "the fixture folded no frame anywhere, so this comparison would pass on an empty grid"
+        );
+
+        // Smaller than the spelling it succeeds, on this very answer.
+        let (c, f) = (compact.to_string().len(), f16.to_string().len());
+        assert!(c < f, "compact body {c} B against f16 {f} B");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
