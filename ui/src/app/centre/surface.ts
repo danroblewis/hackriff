@@ -67,6 +67,8 @@ import {
   afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
+import { boxOf } from "../../surface/panes";
+import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
 import { liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -388,7 +390,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
   const artifactQuads: OverlayLayerFn = (pane, edge) =>
     artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
-  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads };
+  // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
+  // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
+  // other layer. The poll below only refreshes the records; it never positions anything (T-388).
+  let paths: MarkPath[] = [];
+  const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
+  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. */
   const drawnLayers = new Set<LayerId>([...Object.keys(overlayFns) as LayerId[], "pins"]);
@@ -1093,6 +1100,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
     startPoll(async () => { mirror(); }, 1000);
+
+    // T-897: the `paths` layer's records, for every pane that shows the layer — one read over the
+    // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane
+    // with the layer off costs nothing; with it off everywhere there is no request at all. Read
+    // only: a path is a view over stored detections and reaches no device.
+    startPoll(async () => {
+      const url = pathsRequest(pv.view.panes.list()
+        .filter((x) => isLayerVisible(layersFor(x.id), "paths"))
+        .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
+      if (!url) { paths = []; return; }
+      const body = await client.get<unknown>(url).catch(() => null);
+      if (body) paths = parsePaths(body);
+    }, 2000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
     // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a
