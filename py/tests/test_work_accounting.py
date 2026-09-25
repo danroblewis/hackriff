@@ -1451,6 +1451,8 @@ def test_a_reachable_host_below_its_cap_takes_eligible_work_and_the_macs_cap_cou
     t = {"id": "T-9", "title": "hk-store retention follow-ups", "needs": "none"}
     assert R.host_for(t, claims) == "node2"
     assert R.host_for({"id": "T-10", "title": "wgpu provider for the FFT", "needs": "none"}, claims) is None
+    # mentioning the HackRF is not needing it (04:05: a docs ticket and a dashboard ticket were kept off an idle node2)
+    assert R.host_for({"id": "T-11", "title": "Dashboard: explorer row + radio owner (HackRF lock)", "needs": "none"}, claims) == "node2"
     assert R.host_for(t, dict(claims, **{"T-4": {"state": "running", "kind": "work", "host": "node2"}})) is None   # at cap
     (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time() - 600, "reachable": True}))
     assert R.host_for(t, claims) is None                                          # stale probe: not ready

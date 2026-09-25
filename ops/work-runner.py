@@ -436,7 +436,9 @@ def hosts():
 # cap counts only the Mac's claims. Never remote: what needs hardware or the user (never dispatched at all), and the
 # Mac-first GPU paths (docs: GPU work is Mac-first - Metal/wgpu/Accelerate; the box has no Apple GPU).
 REMOTE_DEFAULT_CAP = 2
-_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon|hackrf|hil|capture-agent)\b", re.I)
+# Only the Mac-first GPU paths: a ticket that needs the radio says so with `needs: hardware` (never dispatched at all);
+# matching 'hackrf' in the text kept a docs ticket and a dashboard ticket off an idle node2 (2026-09-25 04:05).
+_MAC_ONLY = re.compile(r"\b(metal|wgpu|accelerate|gpu|cuda|coreml|apple silicon)\b", re.I)
 PROBE_FRESH_S = 180
 
 
