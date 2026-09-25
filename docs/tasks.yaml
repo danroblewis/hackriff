@@ -26790,7 +26790,8 @@ tasks:
   - id: T-908
     milestone: M3
     title: The 2fsk/gfsk verifier prefers gfsk on a true 2fsk record and sharpens it to p 0.9; fix it, then re-land T-887's packet_window dev-grid fix for cyclic_db
-    status: todo
+    status: in-progress
+    branch: task-t908
     priority: high
     deps:
     - T-887
@@ -26939,7 +26940,8 @@ tasks:
   - id: T-915
     milestone: MLIVE
     title: A band's last 5-7 s of recorded rows before a retune are never folded - they stay 'awaiting' forever (T-911 finding)
-    status: todo
+    status: in-progress
+    branch: task-t915
     priority: high
     deps: []
     parallel_group: PIPE-tiles
