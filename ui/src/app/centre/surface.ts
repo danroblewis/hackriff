@@ -58,7 +58,7 @@ import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../..
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
-  acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  acceptPaneRetune, acceptPaneWidth, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
@@ -116,6 +116,12 @@ const TRACE_PX = 96;
  * (`ui/test/surface-retune.test.ts` asserts that), so which spans to offer as buttons lives here,
  * beside "Retune"'s own label text. An unachievable one is still offered, stated and disabled. */
 const WIDTH_PRESETS_HZ: readonly number[] = [500e3, 2e6, 5e6, 10e6, 20e6];
+/** T-947: the Go-to offer's span when nothing is currently tuned — the device's default working
+ * span, never the pane's view width. `gotoOffer` below prefers the front end's OWN current window
+ * (`grid.current.span_hz`, T-947's "or keeps the current tuned span") when one exists; this is only
+ * the fallback for a pane that has never been tuned. Picked from `WIDTH_PRESETS_HZ` rather than a
+ * new RF constant, for the same reason `retune.ts` names none of its own. */
+const GOTO_DEFAULT_SPAN_HZ = WIDTH_PRESETS_HZ[1];
 /** T-522: the found-signal overlay's shown/hidden preference, kept in `localStorage` the same way
  * `shell.ts`'s `PREFS_KEY` is — a per-viewer convenience, wrapped in try/catch so the page works
  * with storage unavailable, and never anything the backend needs to know about. */
@@ -887,9 +893,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const o = lastPainted.get(paneId);
     if (o) pressOffer(o);
   };
-  /** Press a painted offer: the pane row's (above) or the floating Go-to's (T-802), which shows
-   * the offer it derived after the move and passes that same object here — so both reach the one
-   * gate with the destination the user actually read, and both refuse if the view moved since. */
+  /** Press a painted offer — the pane row's viewport-covering retune (T-802's floating Go-to has
+   * had its own path since T-947, `pressGotoOffer` below, because it plans a named span rather than
+   * the viewport). Takes the SAME object the row derived after the move, so this reaches the one
+   * gate with the destination the user actually read, and refuses if the view moved since. */
   const pressOffer = (o: PaneRetuneOffer): void => {
     const p = preview;
     if (!p) return;
@@ -951,6 +958,35 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // has just ended.
       invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
     }, o).then((r) => {
+      if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
+    });
+  };
+
+  // ---- the floating Go-to's offer (T-802, corrected by T-947) ----
+  //
+  // T-947: the offer used to be `offerNow`'s — the SAME retune control the pane row paints, whose
+  // plan covers the pane's whole VIEWPORT. That is right for the row (the viewport is the region the
+  // user is looking at and wants sharpened) and wrong here: a Go-to only names a CENTRE, and the
+  // viewport it lands in is whatever the pane happened to be zoomed to before the jump — so a pane
+  // left zoomed out proposed a multi-megahertz capture nobody asked for (a 15.8 MHz view spanned a
+  // 15.819 MHz plan; found live 2026-09-25). What Go-to should plan for is a SPAN: the front end's own
+  // current window when it has one (`grid.current.span_hz` — "keep the current tuned span"), else
+  // `GOTO_DEFAULT_SPAN_HZ`. Built through `paneWidthOffer`/`acceptPaneWidth`, the exact path T-496
+  // already uses to plan a NAMED span at a pane's own centre rather than its viewport — so this reuses
+  // the width control's arithmetic instead of adding a second way to derive one.
+  let lastPaintedGoto: PaneWidthOffer | null = null;
+  const gotoSpanHz = (): number => goToSpanHz(store.get().navGrid.grid?.frequency ?? null, GOTO_DEFAULT_SPAN_HZ);
+  const pressGotoOffer = (): void => {
+    const p = preview;
+    if (!p || !lastPaintedGoto) return;
+    void acceptPaneWidth(ctx, {
+      // Re-derive at the SAME asked span the offer was painted for — `acceptPaneWidth` passes it
+      // back in, exactly as T-407's guard requires (comparing a fresh offer to itself proves
+      // nothing); if the current/default span has since changed that is `sameWidthTarget`'s job to
+      // catch, not this function's.
+      offerNow: widthOfferNow,
+      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+    }, lastPaintedGoto).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
   };
@@ -1252,11 +1288,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
       goTo: (hz) => store.set(requestGoto(hz)),
       centreHz: () => store.get().device.centerHz,
       gotoOffer: () => {
+        // T-947: the viewport-covered check still reads the VIEW's own box (what is on screen right
+        // now), but the plan offered is `paneWidthOffer`'s — a NAMED span at the pane's centre, never
+        // the viewport's width. See the block above `pressGotoOffer` for why.
         const o = offerNow(pv.activePane);
         // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
         // reaches it and the pane row's persistent control is where a finer capture is offered.
-        if (!o || o.covered) return null;
-        return { why: offerLabel(o), enabled: offerAcceptable(o), press: () => pressOffer(o) };
+        if (!o || o.covered) { lastPaintedGoto = null; return null; }
+        const wo = widthOfferNow(pv.activePane, gotoSpanHz());
+        if (!wo) { lastPaintedGoto = null; return null; }
+        lastPaintedGoto = wo;
+        return { why: widthOfferLabel(wo), enabled: widthOfferAcceptable(wo), press: pressGotoOffer };
       },
       layerMenu: (): LayerMenu => {
         const reg = layersFor(pv.activePane);
