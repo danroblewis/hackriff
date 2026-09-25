@@ -231,6 +231,50 @@ main_is_red(){
   return 1
 }
 
+# BISECT, NOT ISOLATE (supervisor for the user, 2026-09-24 19:37: four 1-by-1 isolations that day, 5-9 h of
+# serial full gates each). When a batch's triaged test/spec fails alone and main is green on it, find the
+# branch that breaks it with THAT TEST ALONE over halves of the batch (log2(n) targeted runs), confirm the
+# last candidate is red ALONE, and only then blame it. Everything else goes back as one batch and still
+# lands only through a full gate - nothing is excused. The candidates are persisted in isolate-remaining,
+# so a restart mid-bisect re-queues them (startup).
+bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
+  # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
+  # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
+  local base=$1; shift; local t rc=1
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ] || { log "BISECT: main moved off $base during the bisect - giving up, nothing reset"; return 2; }
+  for t in "$@"; do
+    if ! git -C "$REPO" merge -q --no-ff -m "Merge $(ticket_of "${t%%=*}") (${t%%=*}): bisect probe (automated, never kept)" "${t#*=}" >>"$LOG" 2>&1; then
+      git -C "$REPO" merge --abort 2>/dev/null; git -C "$REPO" reset -q --hard "$base"
+      log "BISECT: ${t%%=*} does not merge onto $base with the others - giving up"; return 2
+    fi
+  done
+  if [ -n "${TRIAGE_FILTER:-}" ]; then
+    ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1 || rc=0
+  else
+    ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
+      || { git -C "$REPO" reset -q --hard "$base"; log "BISECT: rebuild failed on ${*%%=*} - giving up"; return 2; }
+    ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1 || rc=0
+  fi
+  git -C "$REPO" reset -q --hard "$base"
+  log "BISECT: base + $(printf '%s ' "${@%%=*}")-> $([ "$rc" = 0 ] && echo RED || echo green)"
+  return $rc
+}
+bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (twice), or nothing
+  local base=$1; shift; local cand=("$@") n r
+  printf '%s ' "${@%%=*}" > "$S/isolate-remaining"
+  while [ "${#cand[@]}" -gt 1 ]; do
+    n=$(( ${#cand[@]} / 2 ))
+    bisect_red "$base" "${cand[@]:0:$n}"; r=$?
+    [ "$r" = 2 ] && return 0
+    if [ "$r" = 0 ]; then cand=("${cand[@]:0:$n}"); else cand=("${cand[@]:$n}"); fi
+  done
+  # Blame needs the red on base + it ALONE twice: a halving that ended on the green side rests on
+  # nothing else, and one red run cannot tell a defect from a test that is flaky even alone.
+  bisect_red "$base" "${cand[0]}" || return 0
+  bisect_red "$base" "${cand[0]}" && echo "${cand[0]}"
+  return 0
+}
+
 process(){
   local branch=$1 ticket; ticket=$(ticket_of "$branch")
   cd "$REPO" || return 1
@@ -622,7 +666,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   TRIAGE_KIND="test"
   # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
   # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
-  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; FLAKE_PASSES=2; FLAKE_SOLO_S=0
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; TRIAGE_ALONE_FIRST=0; FLAKE_PASSES=2; FLAKE_SOLO_S=0
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -646,7 +690,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
       return 1
     fi
     log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
-    return 1
+    TRIAGE_ALONE_FIRST=1; return 1
   fi
   # pytest (the `py` suites inside `just test`) prints `FAILED tests/x.py::name` - not a nextest line,
   # so it takes the suite path (hold for a fix), but the alarm names it: at 09:42 and 09:44 on
@@ -676,7 +720,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
     return 1
   fi
   log "TRIAGE: a test FAILS alone -> a real defect in this merge"
-  return 1
+  TRIAGE_ALONE_FIRST=1; return 1
 }
 
 # The suite that stopped the gate passes on the isolation evidence; run what it never reached.
@@ -843,7 +887,36 @@ try_bulk(){
       rm -f "$BULKMARK"
       return 0
     fi
-    log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+    # Only for a red that failed alone on its FIRST isolated run: one that passed alone and then
+    # failed is flaky even alone, and a bisection over it would blame whichever branch it ended on.
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ "${TRIAGE_ALONE_FIRST:-0}" = 1 ] \
+       && { [ -n "${TRIAGE_FILTER:-}" ] || [ -n "${TRIAGE_SPECS:-}" ]; } && [ "${#branches[@]}" -ge 2 ]; then
+      # The bulk gate's own end line first, so hkpy.flow / cycletime close THIS gate here; the probes
+      # below are not gates and print no `gate: … took` lines.
+      log "BULK gate FAILED -> rewound to $base; the batch introduced it - bisecting before any isolate. BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS}) alone (instead of ${#branches[@]} serial gates)"
+      local tips=() b culprit tip side=""
+      for b in "${branches[@]}"; do tips+=("$b=$(git -C "$REPO" rev-parse "$b")"); done
+      culprit=$(bisect_culprit "$base" "${tips[@]}"); tip=${culprit#*=}; culprit=${culprit%%=*}
+      # The single-branch path's main-side question (process): a spec failing alone on 2+ other
+      # branches within a day is main's intermittent defect - then no blame here; isolation decides.
+      [ -n "$culprit" ] && side=$(main_side_of "$culprit" | sed 's/^main-side //')
+      [ -n "$side" ] && { log "BISECT: $culprit is red alone, but $(echo $side) is main-side -> no blame here"; culprit=""; }
+      if [ -n "$culprit" ]; then
+        local others=(); for b in "${branches[@]}"; do [ "$b" != "$culprit" ] && others+=("$b"); done
+        { printf '%s\n' "${others[@]}"; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+        rm -f "$S/isolate-remaining"
+        record_attempt "$culprit" "$tip"
+        log "GATE FAILED $culprit (bisected: red ALONE twice on base + it, green on base: $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS})) -> abort + flag for AI; ${#others[@]} other(s) re-queued first as one batch"
+        echo "$(date '+%m-%d %H:%M')  $culprit  $(ticket_of "$culprit")  GATE_FAIL" >> "$NEEDS"
+        notify_coordinator "$(ticket_of "$culprit") ($culprit) FAILED the merge gate (bisected from the batch): $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} | cut -c1-200)" "gate failed - fix run"
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      rm -f "$S/isolate-remaining"
+      log "BISECT: no single branch confirmed red alone -> isolate by merging each individually"
+    else
+      log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+    fi
   else
     log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  BULK_FAIL_HEAD_MOVED" >> "$NEEDS"
