@@ -1102,3 +1102,12 @@ def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monke
     assert R.dispatch_cap() == 4                                          # the gap before the next gate
     clock[0] += 100
     assert R.dispatch_cap() == 6                                          # the pipeline went quiet
+
+
+def test_work_clone_target_0_launches_without_a_target_clone(monkeypatch):
+    """2026-09-24 18:11: 83 GB of main's target/ still shared with three worker clones against 101 GB
+    free - WORK_CLONE_TARGET=0 stops new pins; the worker builds from sccache."""
+    monkeypatch.setattr(R, "CLONE_TARGET", True)
+    assert "cp -c -R -p" in R.clone_cmd("/w/t1")
+    monkeypatch.setattr(R, "CLONE_TARGET", False)
+    assert R.clone_cmd("/w/t1") == ""
