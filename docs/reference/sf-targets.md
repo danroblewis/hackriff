@@ -28,12 +28,15 @@ in MHz.
 
 | Freq (MHz) | Callsign/site | Expected modulation | "Decoded" means | Status |
 |---|---|---|---|---|
-| 162.400 / 162.425 / 162.450 / 162.475 / 162.500 / 162.525 / 162.550 | 7 NWR channels, one active per region | NFM, ~5 kHz deviation voice + SAME digital header (1050 Hz mark/2083 Hz space AFSK, 520.83 baud) | Audio with intelligible synthesized voice, and/or a CRC-valid SAME header (originator, event code, FIPS codes) | unverified |
+| 162.400 / 162.425 / 162.450 / 162.475 / 162.500 / 162.525 / 162.550 | 7 NWR channels, one active per region | NFM, ~5 kHz deviation voice + SAME digital header (AFSK, mark 2083.3 Hz / space 1562.5 Hz, 520.83 baud), followed by a 1050 Hz Warning Alarm Tone before voice | Audio with intelligible synthesized voice, and/or a CRC-valid SAME header (originator, event code, FIPS codes) | unverified |
 
 Bay Area transmitter is commonly cited at **162.400 MHz** (San Bruno Mountain, KEC66 or similar
 call). **[unverified — RadioReference NOAA Weather Radio pages, not independently confirmed]**
+SAME tones per 47 CFR §11.31: mark 2083.3 Hz, space 1562.5 Hz, 520.83 baud; the 1050 Hz tone is the
+separate Warning Alarm Tone that follows the header, not a data tone.
 Source: [NOAA NWR station list](https://www.weather.gov/nwr/), [RadioReference NWR frequency
-table](https://www.radioreference.com/db/browse/ctid/191).
+table](https://www.radioreference.com/db/browse/ctid/191), [47 CFR
+§11.31](https://www.ecfr.gov/current/title-47/section-11.31) (SAME encoder/header specification).
 
 ## ADS-B (1090 MHz Extended Squitter)
 
@@ -63,7 +66,7 @@ Source: [APRS.org frequency reference](http://www.aprs.org/doc/APRS101.PDF),
 ## Marine AIS
 
 | Freq (MHz) | Channel | Expected modulation | "Decoded" means | Status |
-|---|---|---|---|
+|---|---|---|---|---|
 | 161.975 | AIS 1 (87B) | GMSK, 9600 baud, HDLC framing | CRC-valid AIS message (Type 1/3 position report: MMSI, lat/lon, SOG/COG, or Type 5 static/voyage data) | unverified |
 | 162.025 | AIS 2 (88B) | GMSK, 9600 baud, HDLC framing | Same as above | unverified |
 
@@ -117,7 +120,7 @@ list](https://github.com/merbanan/rtl_433/blob/master/docs/DEVICES.md) (used as 
 
 | Freq range | Expected modulation | "Decoded" means | Status |
 |---|---|---|---|
-| SF public-safety trunked systems (typically 470–512 MHz UHF T-Band and/or 800 MHz; specific SFPD/SFFD system IDs not verified here) | C4FM (P25 Phase 1) or CQPSK (P25 Phase 2), or 4FSK (DMR, 12.5 kHz, 2-slot TDMA) | P25: NAC + CRC-valid TSBK/voice frame with identity fields; DMR: CRC-valid burst with colour code + talkgroup/radio ID | unverified |
+| SF public-safety trunked systems (typically 470–512 MHz UHF T-Band and/or 800 MHz; specific SFPD/SFFD system IDs not verified here) | C4FM (P25 Phase 1) or H-DQPSK (P25 Phase 2 downlink; CQPSK is the Phase 1 simulcast variant), or 4FSK (DMR, 12.5 kHz, 2-slot TDMA) | P25: NAC + CRC-valid TSBK/voice frame with identity fields; DMR: CRC-valid burst with colour code + talkgroup/radio ID | unverified |
 
 `docs/19-bart-800mhz-trunked.md` (T-544) is the closest existing research to this row and should be
 read before attempting SF public-safety decode — it documents that this repo's C4FM demod and sync
