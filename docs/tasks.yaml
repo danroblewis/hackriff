@@ -28211,6 +28211,20 @@ tasks:
       DELIVER: continuous RDS accumulation on the DETECTION row - once a WFM emitter has RDS, the chain keeps decoding it incrementally (CLAUDE.md: decode extends with the region, never re-decoding what is done) and accumulates PS (segment-assembled, stable-until-changed, dynamic PS tracked as a sequence), RT (A/B flag), PTY, AF, CT into the emitter's decode record as an accumulated field view (the user's 'RDS as accumulated field view, not packets'); bounded CPU per station (listener-budget, T-872) and it stops when the emitter ends. Tests through the mock SDR on the FM fixtures: PS/RT/PTY accumulate on the station's own row matching the hidden truth / the rds_ref oracle; red on current code. Depends on T-926 (auto-attach, touching the same chains) to avoid two workers in chains/.
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     core_interface: true
+  - id: T-972
+    milestone: M2-hardening
+    title: "api_contract inventory_entry_promote_and_delete: by-id fetch returns a different id than the listed row under load"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: DEFLAKE-API-INV
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      Seen 2026-09-25 by the T-567 conflict-fix worker: hk-cli tests/api_contract.rs inventory_entry_promote_and_delete_answer_as_documented failed once at api_contract.rs:2826 under load ~23 - fetching the entry BY ID returned a different id than the list row it was taken from; passed alone 3/3 and the whole binary then 71/71. The diff (T-567) does not touch it. Shape: a live inventory under the mock SDR can merge/re-key an emitter between the list call and the by-id call (the self-cleaning, near-duplicate merge the invariants require), so the test picks a row that is renamed under it - a race in the TEST's choice, not necessarily a product bug; but if by-id for a merged-away id should redirect (docs/api.md), it may be a product gap.
+      DELIVER (deflake-triage): reproduce under load; decide from docs/api.md whether a merged-away id must answer (redirect / 410 with the survivor's id) - if the contract says so and it does not, that is the fix (api.md + api_contract.rs together, T-079); otherwise make the test choose a row that cannot be merged during the call (a settled Confirmed row, or read the id the server reports for the promote) - never a retry or a loosened assertion. Red-on-regression proof.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-cli -E 'binary(api_contract)'), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
