@@ -13,11 +13,14 @@
 // click / Enter on a row only SELECTS it — highlights the row and, for an emitter, focuses its box on
 // the map (`focusSignal`, view state). It never pans, zooms or jumps the view. Jumping is the small,
 // explicit per-row "go to" button, which writes `requestGoto` (and `reviewAt` for a past window).
-import type { MountFn } from "../context";
+import type { AppContext, MountFn } from "../context";
 import { requestGoto } from "../shell-slice";
 import { reviewAt } from "../centre/capture-slice";
 import { focusSignal } from "../explore/slice";
+import { bindContextTrigger, openSignalMenu } from "../menu";
 import type { AppState } from "../state";
+import { toast } from "../state";
+import type { Selection } from "../../selections";
 import { schedulerQuery, type SchedulerResponse } from "../../scheduler";
 
 export type DrawerGroup = "unknown" | "strongest" | "quiet" | "surveys";
@@ -55,6 +58,95 @@ export const GROUP_ORDER: readonly DrawerGroup[] = ["unknown", "strongest", "qui
 export const fmtHz = (hz: number): string =>
   hz >= 1e9 ? `${(hz / 1e9).toFixed(3)} GHz` : hz >= 1e6 ? `${(hz / 1e6).toFixed(3)} MHz` : `${(hz / 1e3).toFixed(1)} kHz`;
 
+// ---- T-943: the window the drawer's questions are about ------------------------------------
+//
+// THE DEFECT THIS EXISTS FOR. The drawer sits in the SAME sheet as the focus panel, so with a
+// region selected the sheet titled "Selected region" listed the whole viewed span's unknowns and
+// its strongest signal: a region at 98.8226–99.0407 MHz was headed by 107.816, 106.997, 106.159
+// and 107.662 MHz, and "Strongest" was 106.166 MHz (explorer, 2026-09-25). That is the
+// whole-UI-scoped-to-one-window rule broken in the widening direction — the same shape as T-386's
+// sidebar and T-389's inventory — and the fix is the same: ONE derived scope, used to build the
+// requests AND to filter what is rendered, so the list and its questions cannot drift apart.
+//
+// A selected region is a narrower window INSIDE the view, so scoping to it is view arithmetic over
+// state the page already holds: no device route, no new signal logic (the figures stay the
+// backend's own).
+
+/** The (time × frequency) window the drawer asks about: the selected region when one is focused,
+ * otherwise the pane's own view over the recent history. */
+export interface DrawerScope {
+  loHz: number; hiHz: number; t0: number; t1: number;
+  /** The region this scope came from, when it came from one (null = the pane's view). */
+  region: { id: string; f_lo: number; f_hi: number } | null;
+}
+
+/** How far back the drawer's own questions reach when the scope is the pane's view. */
+export const HISTORY_S = 1800;
+
+/** The device's whole tunable range, for the two "where have I looked at all" questions (the
+ * coverage plane of an unscoped view, and the past-surveys observations pages). Hz. */
+export const WHOLE_RANGE_LO_HZ = 1_000_000;
+export const WHOLE_RANGE_HI_HZ = 6_000_000_000;
+
+/**
+ * The drawer's scope for `s`, or null when nothing places it yet (no live edge, and no region).
+ *
+ * The region wins over the view whenever one is focused: the panel it shares a sheet with is about
+ * that region, so its questions are too. A region's TIME extent is used when it has one (a stroke
+ * over the canvas carries one); a region with no time extent keeps the view's recent window.
+ */
+export function drawerScope(s: AppState, historyS = HISTORY_S): DrawerScope | null {
+  const edge = s.live.edgeTS;
+  const focus = s.focus;
+  const sel: Selection | undefined = focus.kind === "selection"
+    ? s.selections.list.find((x) => x.id === focus.id) : undefined;
+  const v = s.live.view;
+  if (sel) {
+    const t1 = sel.t_hi ?? edge;
+    const t0 = sel.t_lo ?? (t1 === null ? null : t1 - historyS);
+    if (t0 === null || t1 === null) return null;
+    return { loHz: sel.f_lo, hiHz: sel.f_hi, t0, t1, region: { id: sel.id, f_lo: sel.f_lo, f_hi: sel.f_hi } };
+  }
+  if (edge === null || !v) return null;
+  return { loHz: v.loHz, hiHz: v.hiHz, t0: edge - historyS, t1: edge, region: null };
+}
+
+/** What a re-scope is: a change of this string re-asks the drawer's questions. */
+export const scopeKey = (sc: DrawerScope | null): string =>
+  sc === null ? "" : `${sc.region?.id ?? "view"}:${sc.loHz}:${sc.hiHz}`;
+
+/** The one sentence saying which window the rows below are about — never left implied, because the
+ * rows look identical either way (P4: the drawer states what it is a view of). */
+export function scopeLine(sc: DrawerScope | null): string {
+  if (sc === null) return "";
+  return sc.region === null
+    ? `In the viewed span ${fmtHz(sc.loHz)} – ${fmtHz(sc.hiHz)}`
+    : `In the selected region ${fmtHz(sc.loHz)} – ${fmtHz(sc.hiHz)} only`;
+}
+
+/**
+ * The items that are actually inside `sc`, by their own stated extent.
+ *
+ * Belt and braces to the scoped requests above, deliberately: a row for a signal outside the
+ * selected region is the visible fault, so it is refused HERE too, whatever a route answers. A
+ * `note` row (a statement, e.g. "older surveys not loaded") has no place and is always kept.
+ *
+ * **Only a REGION scope filters.** With no region selected the drawer is "places to go" (docs/23
+ * §5): a past survey or a never-looked gap in another band is the whole point of those rows, and
+ * dropping them would be the opposite fault — a navigator that can only offer where you already
+ * are. A selected region is a subject, not a starting point, so there everything listed is inside
+ * it and the line above says so.
+ */
+export function itemsInScope(items: readonly DrawerItem[], sc: DrawerScope | null): DrawerItem[] {
+  if (sc === null || sc.region === null) return [...items];
+  return items.filter((it) => {
+    if (it.note) return true;
+    if (!Number.isFinite(it.hz)) return false;
+    const half = (it.spanHz ?? 0) / 2;
+    return it.hz + half >= sc.loHz && it.hz - half <= sc.hiHz;
+  });
+}
+
 // ---- wire shapes (docs/api.md), only the fields read ----
 export interface EventsResp {
   events: { emitter_id: string; t_start_s: number; t_end_s: number | null; open: boolean; count: number; f_center_hz?: number | null }[];
@@ -65,6 +157,37 @@ export interface CoverageResp {
   window: { t0_s: number; t1_s: number };
   grid: { cells: number; f_lo_hz: number; f_cell_hz: number };
   any?: { cells: { state: string }[] };
+}
+
+/**
+ * The four windowed GETs the drawer asks per refresh, as paths (T-825/MAP-25: docs/23 §11 rule 3 —
+ * the guard is the request the client BUILDS, so the paths are built by a named function a test can
+ * call, not inline in the poll). Every one is scoped to `sc`, the drawer's own (time x frequency)
+ * window, region first when one is selected (T-943).
+ *
+ * The coverage plane alone stays the device's whole range for an unscoped view (the surveys group is
+ * "where have I looked at all"); scoped to a region it is that region, like every other question.
+ */
+export function drawerRequests(sc: DrawerScope): { events: string; strongest: string; scheduler: string; coverage: string } {
+  const { t0, t1 } = sc;
+  const band = `f_lo=${sc.loHz}&f_hi=${sc.hiHz}`;
+  const covBand = sc.region ? band : `f_lo=${WHOLE_RANGE_LO_HZ}&f_hi=${WHOLE_RANGE_HI_HZ}`;
+  return {
+    events: `/api/events?${band}&t0=${t0}&t1=${t1}&limit=200`,
+    strongest: `/api/analysis/strongest?${band}&window_s=30`,
+    // `schedulerQuery` returns the whole path. Until T-825 this read `/api/scheduler${…}` and so
+    // asked for `/api/scheduler/api/scheduler?…`: a well-formed request for a route that does not
+    // exist, which the drawer swallowed (`get` returns null on a failure), silently emptying the
+    // "quiet but active" group. Exactly the T-367 shape the request-shape guard exists to catch.
+    scheduler: schedulerQuery({ fLoHz: sc.loHz, fHiHz: sc.hiHz, t0, t1 }),
+    coverage: `/api/coverage?${covBand}&cells=64&t0=${t0}&t1=${t1}`,
+  };
+}
+
+/** The past-surveys page the drawer asks for, over the whole tunable range (T-825: a named builder,
+ * so the request a test sees is the request the client sends). */
+export function observationsRequest(t0: number, t1: number, limit: number, cursor: number | string): string {
+  return `/api/observations?f_lo=${WHOLE_RANGE_LO_HZ}&f_hi=${WHOLE_RANGE_HI_HZ}&t0=${t0}&t1=${t1}&limit=${limit}&cursor=${cursor}`;
 }
 
 export function unknownItems(r: EventsResp | null, max = 4): DrawerItem[] {
@@ -254,7 +377,7 @@ export class SurveyLog {
       while (cursor !== null && cursor !== undefined) {
         const overBudget = budget.pages >= this.maxPages;
         const r: ObservationsResp | null = overBudget ? null : await get<ObservationsResp>(
-          `/api/observations?f_lo=1000000&f_hi=6000000000&t0=${t0}&t1=${t1}&limit=${this.pageLimit}&cursor=${cursor}`);
+          observationsRequest(t0, t1, this.pageLimit, cursor));
         if (!r) {
           // The newest slice failed outright: keep what we had and read it again next refresh.
           if (newest && t1 === to && budget.pages === 0) return false;
@@ -330,20 +453,40 @@ export function peekLine(items: DrawerItem[]): string {
 
 export const REFRESH_MS = 30_000;
 
+/** Opens the signal menu for a drawer row's emitter (T-943: a right-click on a list row opened
+ * nothing). The menu is built from the loaded inventory row — the same row the lists and the focus
+ * panel show — so its items are the ones the rest of the UI offers, never a reconstruction from the
+ * drawer's own summary. An emitter the window's inventory does not hold says so. */
+export function openDrawerRowMenu(ctx: AppContext, emitterId: string, x: number, y: number): void {
+  const row = ctx.store.get().inventory.rows[emitterId];
+  if (row) openSignalMenu(ctx, row, x, y);
+  else ctx.store.set(toast("No actions yet: this signal is not in the inventory loaded for this window."));
+}
+
 export const mountExploreDrawer: MountFn = (el, ctx) => {
   el.classList.add("explore-drawer");
   el.setAttribute("aria-label", "Explore: places to go");
   const listEl = document.createElement("div");
   const peek = document.createElement("p");
   peek.className = "drawer-peek";
-  el.append(peek, listEl);
+  const scopeEl = document.createElement("p");
+  scopeEl.className = "drawer-scope";
+  el.append(peek, scopeEl, listEl);
   let items: DrawerItem[] = [];
+  let scope: DrawerScope | null = null;
   let selected: string | null = null;
   let seq = 0;
   const surveys = new SurveyLog();
 
+  // T-943: right-click / long-press a row for the same actions the sheet and the surface offer.
+  bindContextTrigger(listEl, (x, y, target) => {
+    const id = target.closest<HTMLElement>("[data-emitter]")?.getAttribute("data-emitter");
+    if (id) openDrawerRowMenu(ctx, id, x, y);
+  });
+
   const render = () => {
     listEl.replaceChildren();
+    scopeEl.textContent = scopeLine(scope);
     for (const g of groupItems(items)) {
       const h = document.createElement("h4"); h.textContent = GROUP_TITLE[g.group];
       const ul = document.createElement("ul");
@@ -353,6 +496,7 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
         b.type = "button";
         b.className = "row";
         b.setAttribute("aria-pressed", String(key === selected));
+        if (it.emitterId !== undefined) b.setAttribute("data-emitter", it.emitterId);
         if (key === selected) li.classList.add("selected");
         for (const [cls, text] of [["tag", it.tag], ["f", it.title], ["why", it.why]] as const) {
           const s = document.createElement("span"); s.className = cls; s.textContent = text; b.append(s);
@@ -390,22 +534,27 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
     const my = ++seq;
     const s = ctx.store.get();
     const edge = s.live.edgeTS;
-    const v = s.live.view;
-    if (edge === null || !v) return;
-    const t0 = edge - 1800;
-    const band = `f_lo=${v.loHz}&f_hi=${v.hiHz}`;
+    // T-943: every question below is asked about THIS window, region first when one is selected.
+    const sc = drawerScope(s);
+    if (sc === null || edge === null) return;
+    const req = drawerRequests(sc);
     const [ev, st, sch, cov] = await Promise.all([
-      get<EventsResp>(`/api/events?${band}&t0=${t0}&t1=${edge}&limit=200`),
-      get<StrongestResp>(`/api/analysis/strongest?${band}&window_s=30`),
-      get<SchedulerResponse>(`/api/scheduler${schedulerQuery({ fLoHz: v.loHz, fHiHz: v.hiHz, t0, t1: edge })}`),
-      get<CoverageResp>(`/api/coverage?f_lo=1000000&f_hi=6000000000&cells=64&t0=${t0}&t1=${edge}`),
+      get<EventsResp>(req.events),
+      get<StrongestResp>(req.strongest),
+      get<SchedulerResponse>(req.scheduler),
+      get<CoverageResp>(req.coverage),
       surveys.refresh(get, edge),
     ]);
     if (my !== seq) return;
-    items = [...unknownItems(ev), ...strongestItem(st), ...quietItems(sch), ...surveyWindowItems(surveys.wins, edge, 4, surveys.truncatedBefore), ...surveyItems(cov, 2), ...neverLookedItems(cov)];
+    scope = sc;
+    items = itemsInScope([...unknownItems(ev), ...strongestItem(st), ...quietItems(sch),
+      ...surveyWindowItems(surveys.wins, edge, 4, surveys.truncatedBefore), ...surveyItems(cov, 2), ...neverLookedItems(cov)], sc);
     render();
   };
   render();
   void refresh();
+  // A new scope (a region selected, deselected, or the view moved to another band) re-asks at once:
+  // the 30 s poll would otherwise leave the previous window's rows under a "Selected region" title.
+  ctx.store.select((s) => scopeKey(drawerScope(s)), function rescope() { void refresh(); });
   setInterval(() => { void refresh(); }, REFRESH_MS);
 };

@@ -12,8 +12,8 @@ import { mountSideChip } from "../chrome/side-chip";
 import { mountResearch } from "../map/research";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
-import { bindContextTrigger, openSelectionMenu, openSignalMenu, signalMenuItems } from "../menu";
-import { detailActions, detailFreq, livenessLine, measuredBlock, type DetailRow } from "./detail";
+import { bindContextTrigger, openSelectionMenu, openSignalMenu, selectionMenuItems, signalMenuItems } from "../menu";
+import { detailActions, detailFreq, livenessLine, measuredBlock, SELECTION_DETAIL_ACTIONS, type DetailRow } from "./detail";
 import { startPoll } from "../net";
 import {
   apiErrorText, classificationDistribution, explanationWhy, fmtBandwidth, fmtMHz, rasterText,
@@ -356,14 +356,34 @@ export function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement
   }, h("div", { class: "f" }, fmtMHz(r.f_center_hz), h("small", {}, " MHz")), h("div", {}),
      h("div", { class: "meta" }, stateBadge(r.state), h("span", {}, rowSeenText(r))))) : [h("div", { class: "empty" }, "No detections here yet.")]));
 
-  // Actions (Listen to all, Analyze, Export clip, Delete) moved to the right-click/long-press
-  // context menu (T-192); see renderSignalFocus's comment.
-  return h("div", {},
+  // T-943: a right-click on one of these rows used to open nothing — the trigger was bound on the
+  // sidebar's list and the surface, but not on the rows inside this panel, which for a region is the
+  // only place the signals it contains are listed.
+  bindContextTrigger(inside, (x, y, target) => {
+    const id = target.closest<HTMLElement>(".row[data-id]")?.getAttribute("data-id");
+    const r = id ? ctx.store.get().inventory.rows[id] : undefined;
+    if (r) openSignalMenu(ctx, r, x, y);
+  });
+
+  // T-943 (docs/23 §10.6 P4, the same cluster renderSignalFocus builds): the region's own
+  // actions, built from `selectionMenuItems` so a button calls exactly what the menu item calls.
+  // Before this the panel carried no control at all — Listen and Decode on a selected region existed
+  // only in a context menu, i.e. nowhere a viewer could see (explorer, 2026-09-25).
+  const actions = h("div", { class: "actions", role: "toolbar", "aria-label": "Region actions" },
+    ...detailActions(selectionMenuItems(ctx, s, rows), SELECTION_DETAIL_ACTIONS).map((a) => h("button", {
+      type: "button", "data-action": a.id, title: a.hint ? `${a.label} — ${a.hint}` : a.label, "aria-label": a.label,
+      class: [a.primary ? "primary" : "", a.danger ? "danger" : ""].filter(Boolean).join(" ") || undefined,
+      disabled: a.disabled ? "" : undefined,
+      onclick: () => a.onSelect(),
+    }, a.label)));
+
+  return h("div", { class: "detail" },
     h("div", {}, h("div", { class: "eyebrow" }, stateBadge("selection"), h("span", { class: "chip" }, s.name)),
       h("div", { class: "bigf" }, `${fmtMHz(s.f_lo, 2)}–${fmtMHz(s.f_hi, 2)}`, h("small", {}, " MHz")),
       h("div", { class: "sub" }, selectionSummary(s, rows.length))),
+    actions,
     h("div", {}, h("div", { class: "section-h" }, "Found inside ", h("em", {}, "strongest first")), inside),
-    h("div", { class: "hint" }, "Right-click or long-press the selection for actions: Listen to all, Analyze, Export clip, Delete."),
+    h("div", { class: "hint" }, "Right-click or long-press a row above for its own actions (Listen, Decode, Adjust band)."),
   );
 }
 

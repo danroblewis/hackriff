@@ -10,8 +10,8 @@ import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
 import {
-  findBlock, findNode, pipelineChannelText, pipelineStatusChip, primaryOutput, resolveTarget,
-  type BlockDescriptor, type Pipeline,
+  autoDecode, findBlock, findNode, mergeCreated, pipelineChannelText, pipelineStatusChip, primaryOutput, publishPipeline,
+  resolveTarget, startPipeline, subscribeDecodeFeed, type BlockDescriptor, type DecodeFeed, type Pipeline,
 } from "../src/app/decode/pipelines";
 import { nodeChip } from "../src/app/decode/stages";
 import {
@@ -74,6 +74,97 @@ test("findNode / findBlock / primaryOutput", () => {
   assert.equal(findBlock(blocks, "nope"), null);
   assert.equal(primaryOutput(p)?.id, "insp");
   assert.equal(primaryOutput(mkPipeline({ outputs: [] })), null);
+});
+
+// ---- T-944: a created pipeline is listed from the moment the create returns ----
+
+type Call = { method: string; url: string; body: unknown };
+/** A fetch double: `routes` answers by "METHOD path"; a route mapped to a deferred promise holds its
+ * answer until the test resolves it (a poll in flight across the create). */
+function routedCtx(routes: Record<string, () => Promise<unknown> | unknown>): { ctx: AppContext; calls: Call[] } {
+  const calls: Call[] = [];
+  const fetchFn: FetchFn = async (url, init) => {
+    const method = String(init.method);
+    calls.push({ method, url, body: init.body ? JSON.parse(String(init.body)) : undefined });
+    const r = routes[`${method} ${url}`];
+    if (!r) return { ok: false, status: 404, statusText: "", json: () => Promise.resolve({ error: "no route", code: "not_found" }) };
+    const v = await r();
+    return { ok: true, status: method === "POST" ? 201 : 200, statusText: "", json: () => Promise.resolve(v) };
+  };
+  return { ctx: { store: createStore(initialState()), client: new ControlClient("tok", fetchFn), token: "tok" }, calls };
+}
+function deferred<T>() { let resolve!: (v: T) => void; const p = new Promise<T>((r) => { resolve = r; }); return { p, resolve }; }
+const tick = () => new Promise((r) => setTimeout(r, 0));
+function installWindow() { (globalThis as unknown as { window: unknown }).window = globalThis; }
+
+test("mergeCreated keeps a pipeline created after the poll was asked, and defers to a poll asked after it", () => {
+  const p1 = mkPipeline({ id: "p1" });
+  const created = new Map([["p1", { p: p1, seq: 2 }]]);
+  assert.deepEqual(mergeCreated([], created, 1).map((p) => p.id), ["p1"], "a stale poll does not drop it");
+  assert.deepEqual(mergeCreated([], created, 3), [], "a poll asked after the create is authoritative (a stop)");
+  const server = mkPipeline({ id: "p1", state: "ended", end_reason: "stopped" });
+  assert.equal(mergeCreated([server], created, 1)[0].state, "ended", "the server's copy wins");
+});
+
+test("THE T-944 RACE: a poll in flight across the create cannot hide the created pipeline", async () => {
+  installWindow();
+  const poll = deferred<unknown>();
+  const created = mkPipeline({ id: "p1", state: "running" });
+  let firstPoll = true;
+  const { ctx } = routedCtx({
+    "GET /api/pipelines": () => (firstPoll ? (firstPoll = false, poll.p) : { pipelines: [created] }),
+    "GET /api/recipes": () => ({ recipes: {} }),
+    "GET /api/blocks": () => ({ blocks: [] }),
+    "POST /api/pipelines": () => created,
+  });
+  const seen: DecodeFeed[] = [];
+  const stop = subscribeDecodeFeed(ctx, (f) => seen.push(f));
+  try {
+    await tick(); // the first poll is now in flight, asked before the create
+    const p = await startPipeline(ctx, { recipe_id: "rds", target: { emitter_id: "e1" } });
+    assert.equal(p.id, "p1");
+    assert.deepEqual(seen.at(-1)!.pipelines.map((x) => [x.id, x.state]), [["p1", "running"]], "listed the moment the create returns");
+    assert.equal(ctx.store.get().decode.pipelineId, "p1", "and selected in the workbench");
+    poll.resolve({ pipelines: [] }); // the stale answer, asked before the create
+    await tick(); await tick();
+    assert.deepEqual(seen.at(-1)!.pipelines.map((x) => x.id), ["p1"], "the stale [] does not hide it");
+  } finally { stop(); }
+});
+
+test("a pipeline created with no decode panel mounted seeds the feed the panel opens with", async () => {
+  installWindow();
+  const created = mkPipeline({ id: "p7" });
+  const { ctx } = routedCtx({ "GET /api/pipelines": () => new Promise(() => {}), "GET /api/recipes": () => ({ recipes: {} }), "GET /api/blocks": () => ({ blocks: [] }) });
+  publishPipeline(ctx, created);
+  let feed: DecodeFeed | null = null;
+  const stop = subscribeDecodeFeed(ctx, (f) => { feed = f; });
+  assert.deepEqual(feed!.pipelines.map((x) => x.id), ["p7"], "not 'no pipelines running' while the first poll is out");
+  stop();
+});
+
+test("autoDecode starts the backend's best-ranked recipe on the emitter, and asks for exactly that", async () => {
+  installWindow();
+  const created = mkPipeline({ id: "p2", recipe_id: "rds" });
+  const { ctx, calls } = routedCtx({
+    "GET /api/recipes/match?emitter=e%201": () => ({ recipes: [
+      { id: "rds", version: 3, name: "RDS: data on FM", score: 0.9, outcome: "fit" },
+      { id: "wfm", version: 1, name: "Analog WFM", score: 0.7, outcome: "partial" },
+    ] }),
+    "POST /api/pipelines": () => created,
+  });
+  const res = await autoDecode(ctx, "e 1");
+  assert.ok(res.ok);
+  assert.equal(res.pipeline.id, "p2");
+  const post = calls.find((c) => c.method === "POST")!;
+  assert.deepEqual(post.body, { recipe_id: "rds", version: 3, target: { emitter_id: "e 1" } }, "the first choice, on the emitter");
+  assert.equal(ctx.store.get().decode.pipelineId, "p2");
+});
+
+test("autoDecode with nothing offered starts nothing and says to pick from the list", async () => {
+  const { ctx, calls } = routedCtx({ "GET /api/recipes/match?emitter=e1": () => ({ recipes: [], outcome: "none" }) });
+  const res = await autoDecode(ctx, "e1");
+  assert.deepEqual(res.ok ? null : res.reason, "no_match");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0);
 });
 
 // ---- stages.ts ----

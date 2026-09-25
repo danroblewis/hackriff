@@ -486,6 +486,36 @@ def slot_cap(host):
     return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
 
 
+def host_room(claims, h, exclude=None):
+    """None when host `h` takes one more worker now, else why not. Fix runs count against its cap like dispatches
+    (2026-09-25 05:40: a REVIEW_FAIL fix resumed on node2 at 6/6 made 7), and `max_load1` in hosts.json bounds its
+    1-min load (supervisor 05:52: node2 at 42 on 24 cores - no new node2 work until it is under 24). `h` None is this
+    Mac: its dispatch cap (the gate's reserve included) and WORK_LOAD_MAX, the bounds dispatch() uses (supervisor 07:17:
+    the Mac ran 4 at cap 3 - local fix runs bypassed the cap the same way)."""
+    if h is None:
+        n = busy_workers({k: v for k, v in claims.items() if k != exclude})
+        if n >= dispatch_cap():
+            return f"{n}/{dispatch_cap()} running"
+        load = os.getloadavg()[0]
+        return f"1-min load {load:.0f} > {LOAD_MAX:.0f}" if load > LOAD_MAX else None
+    if not host_ready(h):
+        return "probe stale or unreachable"
+    n = busy_workers({k: v for k, v in claims.items() if k != exclude}, h)
+    if n >= slot_cap(h):
+        return f"{n}/{slot_cap(h)} running"
+    bound = (hosts().get(h) or {}).get("max_load1")
+    if bound is not None:
+        try:
+            load = json.load(open(f"{S}/hosts/{h}.json")).get("load1")
+        except (OSError, ValueError):
+            load = None
+        if load is None:
+            return f"no 1-min load reading (bound {bound})"
+        if load >= bound:
+            return f"1-min load {load} >= {bound}"
+    return None
+
+
 def host_for(t, claims=None):
     """The remote host a ticket goes to, or None for this Mac. WORK_REMOTE_TICKETS=T-nnn,... still names tickets
     by hand (they go to the first host whatever its cap)."""
@@ -498,7 +528,7 @@ def host_for(t, claims=None):
     if claims is None or not remote_eligible(t):
         return None
     for h, cfg in hs.items():
-        if host_ready(h) and busy_workers(claims, h) < slot_cap(h):
+        if host_room(claims, h) is None:
             return h
     return None
 
@@ -1098,7 +1128,7 @@ def reap(claims, dry):
                 changed = True
                 if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
                         and os.path.isdir(c.get("wt", "")) and _gone(pid)):
-                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped")
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped", claims=claims)
                     log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
                 else:
                     attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
@@ -1152,7 +1182,7 @@ def reap(claims, dry):
                 # A review FAIL names a concrete defect; the worker that wrote the code fixes it with
                 # its context intact, same path as a gate failure, same attempt cap.
                 if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
-                    claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {d}/review.json)")
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {d}/review.json)", claims=claims)
                 else:
                     c["state"] = "review-failed"
                     attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
@@ -1195,7 +1225,7 @@ def reap(claims, dry):
             if c.get("session_id") and c.get("kill_resumes", 0) < KILL_RESUMES and os.path.isdir(c.get("wt", "")):
                 claims[tid] = launch_fix(dict(c, kind="work"), f"KILLED your run ended after {age_min:.0f} min with no result - "
                                          f"it was killed by a signal, not failed; {len(dirty)} modified files and {ahead} commits "
-                                         f"are in {c['wt']}: check them and continue the ticket from there")
+                                         f"are in {c['wt']}: check them and continue the ticket from there", claims=claims)
                 killed.append(f"{tid} ({'fix held' if claims[tid].get('state') == 'fix-held' else 'resumed'})")
             else:
                 c["state"] = "killed"
@@ -1224,7 +1254,7 @@ def reap(claims, dry):
         elif dirty:
             record_done(c, "uncommitted", res)
             if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS:
-                claims[tid] = launch_fix(dict(c, kind="work"), f"UNCOMMITTED {len(dirty)} modified files left uncommitted in {c['wt']} (ahead={ahead}): finish and COMMIT them if they are the ticket's work and tests pass, otherwise `git checkout -- .` and hand back BLOCKED with why")
+                claims[tid] = launch_fix(dict(c, kind="work"), f"UNCOMMITTED {len(dirty)} modified files left uncommitted in {c['wt']} (ahead={ahead}): finish and COMMIT them if they are the ticket's work and tests pass, otherwise `git checkout -- .` and hand back BLOCKED with why", claims=claims)
             else:
                 c["state"] = "uncommitted"
                 attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
@@ -1286,7 +1316,7 @@ def _gone(pid, wait_s=30):
     return False
 
 
-def launch_fix(c, fail_line):
+def launch_fix(c, fail_line, claims=None):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
@@ -1298,6 +1328,15 @@ def launch_fix(c, fail_line):
     if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
+    # A fix run is a worker where its session lives (a remote host, or this Mac): it waits for room there (the cap, the
+    # load bound) and is relaunched by tick()'s held-fix pass, before any new dispatch.
+    why = host_room(claims, c.get("host"), exclude=tid) if claims is not None else None
+    if why:
+        where = c.get("host") or "this Mac"
+        if not c.get("held_warned"):
+            log(f"FIX {tid} on {where} held: {why}")
+            attention(tid, branch, "FIX_HELD", f"fix attempt {n} on {where} held: {why} ({fail_line[:120]})")
+        return dict(c, state="fix-held", fail_line=fail_line[:300], held_warned=True)
     if fail_line.startswith("KILLED"):
         k = c.get("kill_resumes", 0) + 1
         prompt = f"""Your run on {tid} was KILLED from outside (a signal - not a failure of yours, not a gate result);
@@ -1396,7 +1435,8 @@ def _run_fix(c, n, prompt, out_name=None, fail_line=""):
     p.stdin.close()
     log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] {c.get('fix_reason', '')[:120]}: "
         f"resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
-    return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
+    return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n,
+                held_warned=False)
 
 
 def branches_waiting():
@@ -1567,7 +1607,7 @@ def handle_gate_failures(claims, dry):
             except Exception:
                 fail = "VERDICT: FAIL (see review.json)"
             if not dry:
-                claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {WORKDIR}/{tid}/review.json)")
+                claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {WORKDIR}/{tid}/review.json)", claims=claims)
     try:
         lines = [l.rstrip("\n") for l in open(MERGE_NEEDS) if "GATE_FAIL" in l or is_conflict(l)]
     except FileNotFoundError:
@@ -1629,7 +1669,7 @@ def handle_gate_failures(claims, dry):
                 attention(tid, branch, "CONFLICT_ESCALATE", f"{FIX_ATTEMPTS} fix attempts spent; needs a person")
             else:
                 conflict_runs += 1
-                claims[tid] = launch_fix(c, line)
+                claims[tid] = launch_fix(c, line, claims=claims)
             continue
         c.setdefault("gate_fails_seen", []).append(line)
         changed = True
@@ -1643,7 +1683,7 @@ def handle_gate_failures(claims, dry):
             c["state"] = "gate-failed"
             attention(tid, branch, "GATE_FAIL_ESCALATE", f"{FIX_ATTEMPTS} fix attempts spent; needs a person")
         else:
-            claims[tid] = launch_fix(c, line)
+            claims[tid] = launch_fix(c, line, claims=claims)
     return changed
 
 
@@ -1975,7 +2015,7 @@ def reap_worktrees(claims, dry):
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
-    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}   # a held fix resumes there
     if not dry:
         sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
@@ -2201,7 +2241,7 @@ def reclaim_idle_targets(claims, dry):
     (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
     process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
     root = os.path.join(REPO, ".claude", "worktrees")
-    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held")}
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
@@ -2550,6 +2590,26 @@ def record_queue_depth():
         f.write(json.dumps({"ts": round(time.time(), 1), **{k: d[k] for k in ("waiting", "queued", "gating", "isolating")}}) + "\n")
 
 
+def relaunch_held_fixes(claims):
+    """tick()'s held-fix pass: each `fix-held` claim relaunches once its holds clear - before any new dispatch."""
+    changed = False
+    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+        return False
+    for tid, c in list(claims.items()):
+        if c.get("state") == "fix-held":
+            if host_room(claims, c.get("host"), exclude=tid):
+                continue                  # no room where its session lives yet: stays held, said once when held
+            if not c.get("host") and not os.path.isdir(c.get("wt", "")):
+                claims[tid] = dict(c, state="gate-failed")
+                attention(tid, c.get("branch", ""), "GATE_FAIL_NO_SESSION", f"held fix not relaunched: its worktree {c.get('wt')} is gone")
+                changed = True
+                continue
+            log(f"FIX {tid}: hold cleared - relaunching the held fix ({(c.get('fail_line') or '')[:80]})")
+            claims[tid] = launch_fix(dict(c, kind="work"), c.get("fail_line") or "held fix", claims=claims)
+            changed = True
+    return changed
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
@@ -2557,12 +2617,8 @@ def tick(dry):
     # relaunched once those clear - otherwise the claim sits as `fix-held`, the map shows the
     # ticket FAILED, and nothing ever moves it (T-513 sat that way from 20:20 to 00:20 on
     # 2026-09-22/23). Same holds as dispatch, checked here rather than trusted to be past.
-    if not dry and not (os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
-        for tid, c in list(claims.items()):
-            if c.get("state") == "fix-held":
-                log(f"FIX {tid}: hold cleared - relaunching the held fix ({(c.get('fail_line') or '')[:80]})")
-                claims[tid] = launch_fix(dict(c, kind="work"), c.get("fail_line") or "held fix")
-                changed = True
+    if not dry:
+        changed |= relaunch_held_fixes(claims)
 
     try:
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
@@ -2644,9 +2700,9 @@ def tick(dry):
               "queue_depth": queue_depth(), "queue_pause": QUEUE_PAUSE,
               # Per host (supervisor 2026-09-25 03:56: the host dimension was missing from the status): this Mac and each
               # remote host's running workers against its own cap, and whether its probe says it can take work.
-              "hosts": {"mac": {"running": busy_workers(claims), "cap": dispatch_cap()},
+              "hosts": {"mac": {"running": busy_workers(claims), "cap": dispatch_cap(), "held": host_room(claims, None)},
                         **{h: {"running": busy_workers(claims, h), "cap": slot_cap(h), "ready": host_ready(h),
-                               "probe_age_s": _probe_age(h)} for h in hosts()}}}
+                               "held": host_room(claims, h), "probe_age_s": _probe_age(h)} for h in hosts()}}}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 

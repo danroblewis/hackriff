@@ -916,10 +916,14 @@ try_bulk(){
   # same way an individual CONFLICT is flagged. It is still flagged and never silently dropped,
   # and it is NOT re-queued here - a conflict needs a fix, not a retry (the unchanged-since-fail
   # rule).
-  local merged=() skipped=""
+  # Each branch is merged BY ITS TIP, and `gated` keeps name=tip: a branch pushed while the batch gates must not be
+  # what the hold, the bisect or the pytest probe name (2026-09-25 06:51: task-t943 moved 820bd656 -> 09d0a797 at
+  # 06:51:40, mid-gate; the hold recorded the fixed tip it never gated and would have held the fix).
+  local merged=() gated=() skipped="" tip
   for b in "${branches[@]}"; do
-    if git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch, gated together (automated, no AI)" "$b" >>"$LOG" 2>&1; then
-      merged+=("$b")
+    tip=$(git -C "$REPO" rev-parse "$b")
+    if git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch, gated together (automated, no AI)" "$tip" >>"$LOG" 2>&1; then
+      merged+=("$b"); gated+=("$b=$tip")
     else
       git -C "$REPO" merge --abort 2>/dev/null || true
       skipped="$skipped $b"
@@ -938,6 +942,7 @@ try_bulk(){
   # the worktree removals below all speak about the same set.
   branches=("${merged[@]}")
   BULK_MERGED_LIST="${merged[*]}"
+  local gated_sig; gated_sig=$(for b in "${gated[@]}"; do printf '%s@%s\n' "${b%%=*}" "$(git -C "$REPO" rev-parse --short "${b#*=}")"; done | sort | tr '\n' ' ')
   tickets=""
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
   tickets="${tickets# }"
@@ -989,8 +994,7 @@ try_bulk(){
     # A pytest red names its tests: find the branch that breaks them ALONE (seconds per branch) instead of holding
     # the whole batch for a person to find it - twice by hand (2026-09-24 18:12-18:15, 2026-09-25 04:43).
     if [ "${TRIAGE_KIND:-test}" = "suite" ] && [ "${TRIAGE_WHAT#pytest red: }" != "${TRIAGE_WHAT:-}" ] && [ "${#branches[@]}" -ge 2 ]; then
-      local culprits=() rest=() tips=() b kind
-      for b in "${branches[@]}"; do tips+=("$b=$(git -C "$REPO" rev-parse "$b")"); done   # the gated tips, as bisect
+      local culprits=() rest=() tips=("${gated[@]}") b kind
       while read -r kind b; do
         [ "$kind" = RED ] && culprits+=("$b"); [ "$kind" = GREEN ] && rest+=("${b%%=*}")
       done < <(suite_split "$base" "${TRIAGE_WHAT#pytest red: }" "${tips[@]}")
@@ -1011,7 +1015,7 @@ try_bulk(){
     fi
     if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
       for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-      batch_sig "${branches[@]}" > "$S/suite-broken"
+      printf '%s' "$gated_sig" > "$S/suite-broken"
       log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
       echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
       notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued." "main+batch broken - fix needed"
@@ -1021,7 +1025,7 @@ try_bulk(){
     # IS MAIN ITSELF RED? Costs one scoped re-run on the rewound main; saves a gate per branch.
     if main_is_red; then
       for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-      batch_sig "${branches[@]}" > "$S/suite-broken"
+      printf '%s' "$gated_sig" > "$S/suite-broken"
       log "TRIAGE: MAIN IS RED on: $MAIN_RED_WHAT -> batch re-queued in order, NOT isolated; queue the fix"
       echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - $MAIN_RED_WHAT fail(s) on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
       notify_coordinator "main itself fails $MAIN_RED_WHAT - the batch ($tickets) is re-queued and held; queue a fix for main." "main is red - fix for main needed"
@@ -1035,8 +1039,7 @@ try_bulk(){
       # The bulk gate's own end line first, so hkpy.flow / cycletime close THIS gate here; the probes
       # below are not gates and print no `gate: … took` lines.
       log "BULK gate FAILED -> rewound to $base; the batch introduced it - bisecting before any isolate. BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS}) alone (instead of ${#branches[@]} serial gates)"
-      local tips=() b culprit tip side=""
-      for b in "${branches[@]}"; do tips+=("$b=$(git -C "$REPO" rev-parse "$b")"); done
+      local tips=("${gated[@]}") b culprit tip side=""
       culprit=$(bisect_culprit "$base" "${tips[@]}"); tip=${culprit#*=}; culprit=${culprit%%=*}
       # The single-branch path's main-side question (process): a spec failing alone on 2+ other
       # branches within a day is main's intermittent defect - then no blame here; isolation decides.
