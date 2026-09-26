@@ -950,7 +950,8 @@ async function scrubOntoCell(page, lagS, tries = 8) {
  */
 async function zoomTimeTo(page, maxS, { tries = 16 } = {}) {
   const spanS = async () => Number(await page.eval(`(() => {
-    const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    // T-996 retired the per-viewport row; the pane's own scale block carries the same window.
+    const row = document.querySelector('.sf-scale[data-pane]');
     return row ? (Number(row.dataset.t1Ns) - Number(row.dataset.t0Ns)) / 1e9 : NaN; })()`));
   let s = await spanS();
   for (let i = 0; i < tries && !(s <= maxS); i++) {
