@@ -157,11 +157,17 @@ export function recordIqButton(ctx: AppContext, at: () => RecordPane | null = ()
     const run = async () => {
       if (stopped || !session) return;
       clearTimeout(timer);
-      const r = await client.get<{ recordings: RecordSession[] }>("/api/outputs");
-      const found = r.recordings.find((s) => s.id === session!.id) ?? null;
-      session = found;
-      render();
-      if (!found || !found.active) { store.set(toast("IQ recording finished.")); stop(); return; }
+      try {
+        const r = await client.get<{ recordings: RecordSession[] }>("/api/outputs");
+        const found = r.recordings.find((s) => s.id === session!.id) ?? null;
+        session = found;
+        render();
+        if (!found || !found.active) { store.set(toast("IQ recording finished.")); stop(); return; }
+      } catch {
+        // A failed read must not strand the button on "recording" forever with no more attempts
+        // (review finding on this ticket): `session` and the label are left as last known, and the
+        // loop below still reschedules, exactly as `startPoll` — what this replaced — always did.
+      }
       if (!stopped) timer = window.setTimeout(() => void run(), 2000);
     };
     const stop = () => { stopped = true; clearTimeout(timer); un(); };
