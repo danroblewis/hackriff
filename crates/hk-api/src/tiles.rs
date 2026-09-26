@@ -68,20 +68,24 @@
 //!    *is* the budget, so `level_f` and `level_t` are structurally independent — changing one
 //!    cannot move the other's cell size by so much as a rounding (asserted in
 //!    `changing_one_axis_level_never_moves_the_other_axis_cell`).
-//! 2. The store level is chosen **finest-affordable-first**, never coarsest-adequate. Folding a
-//!    finer level onto the tile's grid can never grey a cell the finer level holds — a fold is a
-//!    max and a sum, so an output cell is observed if *any* source cell in it was. Only the
-//!    opposite direction (a source coarser than the tile's cell, which **replicates** a measured
-//!    value) is a claim, and it is stated per axis in `resolution.fold` and downgrades the honesty
-//!    tier to `survey-overview`.
+//! 2. The store level **never replicates while a level that only folds can answer**. Folding a
+//!    level whose cells are no larger than the tile's can never grey a cell that level holds — a
+//!    fold is a max and a sum, so an output cell is observed if *any* source cell in it was. Only
+//!    the opposite direction (a source coarser than the tile's cell, which **replicates** a
+//!    measured value) is a claim, and it is stated per axis in `resolution.fold` and downgrades the
+//!    honesty tier to `survey-overview`. Among the levels that fold, a store with **live** coarse
+//!    nodes answers from the tile's **exact node**, else the one with the **fewest source cells**
+//!    (T-1018, [`read_order`]): max-hold composes, so the answer is the same grid for a fraction of
+//!    the read. A store without live coarse nodes keeps the finest-first order, because its open
+//!    coarse tiles trail the live edge.
 //! 3. Candidates are ordered by **cell area**, explicitly, never by level index. T-434's warning:
 //!    index order is a coarseness order only for a ladder — in a lattice node (1, 0) outranks
 //!    (0, 3) in index while being *finer* in time.
-//! 4. When the finest affordable level holds nothing, the read walks **coarser** through the
-//!    remaining candidates (T-426's rule, in the direction this route's preference makes
-//!    meaningful: the byte budget evicts the finest tiles first, §5.5). `resolution.answered`
-//!    reports the level that **actually answered**, and `resolution.tried` every level consulted —
-//!    a silent fallback would trade one lie for another.
+//! 4. When the level read first holds nothing, the read walks on through the remaining candidates
+//!    (T-426's rule; the byte budget evicts the finest tiles first, §5.5, so a coarser level holds
+//!    at least what a finer one does). `resolution.answered` reports the level that **actually
+//!    answered**, and `resolution.tried` every level consulted — a silent fallback would trade one
+//!    lie for another.
 //!
 //! # Cost, and the two caps
 //!
@@ -1132,6 +1136,88 @@ pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
     out
 }
 
+/// **The order [`tile_read`] walks the candidates in** — and so the level that answers (T-1018).
+///
+/// # The exact node first, else the fewest source cells that still fold
+///
+/// On a store whose coarse nodes are maintained **live** ([`hk_store::PyramidConfig::coarse_live`],
+/// T-571/T-585) every node is current up to the fold edge (below) — its committed rows are folded as they
+/// arrive and its in-progress row is folded at read time (T-583) — and retention evicts finer
+/// tiles before coarser ones, so a coarser node holds everything a finer one does over any extent.
+/// Max-hold, frame counts and observed seconds compose under folding, so reading a coarser level
+/// whose cells are **no larger than the tile's own on either axis** gives the same grid as folding
+/// level 0 onto it, for a fraction of the source cells. The finest-first walk this replaced read a
+/// `(3, 1)` tile as 16 × 65 536 level-0 cells in four lock holds while node `(3, 1)` sat unread on
+/// disk (the user's tile-latency review, 2026-09-25: 135–152 ms against ~20 ms).
+///
+/// So the order is:
+///
+/// 1. the tile's **exact node** (`key.store_node`), when it is a candidate — `cells²` source cells;
+/// 2. every other candidate that only **folds** (both cells ≤ the tile's), **fewest source cells
+///    first** — the coarsest such level;
+/// 3. the candidates that would **replicate** (a cell coarser than the tile's on some axis), in the
+///    finest-first area order [`read_affordable_levels`] gives, so the least-replicating comes
+///    first. These are reached only when every folding level held nothing, exactly as before.
+///
+/// Honesty is untouched: a level in (1) or (2) never replicates, so the tier and
+/// `resolution.fold` state the same thing a finest-first read would have.
+///
+/// # Where it is NOT applied
+///
+/// **A tile that reaches past [`hk_store::Pyramid::coarse_lag_start`]** keeps the finest-first
+/// order: a closed level-0 row folds into the coarse nodes only once the ingest clock has left it
+/// by `seal_lag` (2 s shipped), and the read-time preview covers level 0's open column and each
+/// node's in-progress row but not those held-back rows. So "current to the live edge" above holds
+/// only before that instant, and a live-edge tile — or a `/ws/tiles/rows` block, which is pushed
+/// once and never re-sent — would otherwise lose its newest rows to a node that has not got them
+/// yet (T-1018 review). Once the rows fold, the next read of the same address takes the node.
+///
+/// A store without live coarse nodes keeps the finest-first order. Scheme 1's eager ladder rolls a
+/// child into its parent only when the child **seals**, so its open coarse tiles trail level 0 by a
+/// whole producer block at the live edge — preferring them there would stop the live edge
+/// appending, which the live-rendering invariant forbids. `coarse_on_demand` would fold the node
+/// inside the request, which is the batch work T-571 removed.
+pub(crate) fn read_order(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
+    read_order_until(p, key, key.region.t1_ns)
+}
+
+/// [`read_order`] for a read that ends at `end_ns` rather than at the tile's own end — a
+/// `/ws/tiles/rows` block is a few rows of one tile, and whether the coarse nodes are complete is a
+/// question about THOSE rows, asked when the block is read (a row is pushed once and never again).
+pub(crate) fn read_order_until(p: &hk_store::Pyramid, key: &TileKey, end_ns: i64) -> Vec<usize> {
+    let mut out = affordable_levels(p, key);
+    if !p.config().coarse_live {
+        return out;
+    }
+    // Only where the coarse nodes are complete: a closed level-0 row folds up `seal_lag` after
+    // the clock leaves it, and the read-time preview does not cover those held-back rows. A tile
+    // reaching into them keeps finest-first, so the live edge never loses its newest rows.
+    if p.coarse_lag_start()
+        .is_some_and(|t| end_ns > t.as_unix_nanos())
+    {
+        return out;
+    }
+    let geom = p.geometry();
+    let rank = |l: usize| {
+        let g = &geom.levels[l];
+        let folds = g.f_cell_hz <= key.f_cell_hz && g.t_cell_ns <= key.t_cell_ns;
+        let (nt, nf) = dims(geom, l, &key.region);
+        (
+            key.store_node != Some(l),
+            !folds,
+            if folds { nt * nf } else { 0.0 },
+        )
+    };
+    // Stable, so ties (every replicating level) keep the finest-first area order.
+    out.sort_by(|&a, &b| {
+        let (ra, rb) = (rank(a), rank(b));
+        ra.0.cmp(&rb.0)
+            .then(ra.1.cmp(&rb.1))
+            .then(ra.2.total_cmp(&rb.2))
+    });
+    out
+}
+
 /// Output rows one chunk of a read at `level` covers — **one history lock hold each**.
 ///
 /// Shared by the read and by [`servable`] on purpose: the readable ceiling is a claim about what
@@ -1374,7 +1460,7 @@ pub struct TileRead {
     /// Every level consulted, in order. More than one means a finer level held nothing and the
     /// read walked coarser.
     pub tried: Vec<u8>,
-    /// Affordable levels, finest first.
+    /// Affordable levels, in the order the read walks them ([`read_order`]).
     pub candidates: Vec<u8>,
     /// Source cells actually read.
     pub source_cells: usize,
@@ -1470,16 +1556,14 @@ fn read_level(
     })
 }
 
-/// Reads one tile: the finest affordable level, walking **coarser** only when a level holds nothing.
+/// Reads one tile from the candidates in [`read_order`] — the exact node, else the cheapest level
+/// that folds (T-1018) — walking on only when a level holds nothing.
 pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<TileRead, ApiError> {
     let (candidates, read_only) = with_tile_history(state, store, |p| {
-        let read = read_affordable_levels(p.geometry(), key);
-        let both: Vec<usize> = read
-            .iter()
-            .copied()
-            .filter(|&l| fold_affordable(p, key, l))
-            .collect();
-        Ok((both, read))
+        Ok((
+            read_order(p, key),
+            read_affordable_levels(p.geometry(), key),
+        ))
     })?;
     if candidates.is_empty() {
         // Which half emptied it is the difference between "this tile is too wide for the history's
@@ -2209,7 +2293,7 @@ fn shadow_store(state: &ApiState, tile: TileStore) -> TileStore {
     }
 }
 
-/// The level [`tile_read`] would answer `key` from first — the finest affordable one — or `None`
+/// The level [`tile_read`] would answer `key` from first — the head of [`read_order`] — or `None`
 /// when none is (T-911). A tile the coverage map answers on its own is never read, so this is how
 /// its shadow finds the level its neighbours' live rows were drawn at.
 fn answering_level(
@@ -2218,9 +2302,9 @@ fn answering_level(
     key: &TileKey,
 ) -> Result<Option<u8>, ApiError> {
     with_tile_history(state, store, |p| {
-        Ok(read_affordable_levels(p.geometry(), key)
+        Ok(read_order(p, key)
             .into_iter()
-            .find(|&l| fold_affordable(p, key, l))
+            .next()
             .and_then(|l| u8::try_from(l).ok()))
     })
 }
@@ -2853,8 +2937,9 @@ fn tile_body(
             "budget": {
                 "max_source_cells_per_lock": TILE_MAX_SOURCE_CELLS,
                 "max_source_cells_per_tile": TILE_MAX_TOTAL_SOURCE_CELLS,
-                "statement": "these bound WORK, never resolution: the level is chosen \
-                    finest-affordable-first, so a budget can only ever move the answer toward a \
+                "statement": "these bound WORK, never resolution: the level is the tile's \
+                    exact node, else the affordable level with the fewest source cells that still \
+                    only FOLDS (T-1018), so a budget can only ever move the answer toward a \
                     COARSER source, which replicates and says so — it can never grey a cell a \
                     finer level holds. There is no caller-supplied per-axis cell budget on this \
                     route at all, which is why /api/history's max_f defect (T-437 F2: a 1.5x \

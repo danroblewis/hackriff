@@ -9553,20 +9553,27 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!(2),
         "(level_f 0, level_t 2) is node 0*8+2 of the 8x8 view lattice: {coarse_t}"
     );
-    // The node existing does not mean the read uses it: the rule is **finest affordable first**
-    // (T-438), and node (0, 0) is affordable here and finer in time, so it answers and its cells
-    // fold onto the tile's. Folding a finer source invents nothing and greys nothing — it is the
-    // only direction that is free. `exact_node: false` alongside a non-null `store_node` is that
-    // preference showing, not a missing node.
-    assert_eq!(
-        coarse_t["resolution"]["answered"]["exact_node"],
-        json!(false),
-        "{coarse_t}"
+    // **T-1018: the node answers once it holds every row level 0 does.** The view lattice's
+    // coarse nodes are maintained live, so node (0, 2) is read (`exact_node: true`, cells² source
+    // cells) for any tile whose rows have all folded up. But a closed level-0 row folds up only
+    // `seal_lag` after the clock leaves it, and this tile was pinned at the DATA EDGE of a server
+    // that is still capturing — so whether it still reaches into those held-back rows depends on
+    // how far capture has moved on since, and while it does the read keeps finest-first (node
+    // (0, 0), `exact_node: false`) rather than drop the newest rows. Either is right; nothing else
+    // is, and neither replicates.
+    let answered = coarse_t["resolution"]["answered"]["level"].as_u64();
+    let exact = coarse_t["resolution"]["answered"]["exact_node"].as_bool();
+    assert!(
+        matches!(
+            (answered, exact),
+            (Some(2), Some(true)) | (Some(0), Some(false))
+        ),
+        "node (0, 2) once folded, else finest-first at the live edge: {coarse_t}"
     );
-    assert_eq!(
+    assert_ne!(
         coarse_t["resolution"]["fold"]["time"]["direction"],
-        json!("folded"),
-        "a finer source folded onto a coarser tile invents nothing: {coarse_t}"
+        json!("replicated"),
+        "{coarse_t}"
     );
     assert!(
         coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,
