@@ -78,6 +78,10 @@ use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::protocol::{Role, WebSocket};
 use tungstenite::{Bytes, Message, Utf8Bytes};
 
+use crate::wsclose::{
+    CLOSE_LOCK_WAIT, Conn, ConnSink, MAX_CLOSE_REASON, lock_within, send_close_for_reason,
+};
+
 /// What `/api/streams` reports about a stream: header metadata only, never content.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamInfo {
@@ -607,10 +611,16 @@ impl WsSink {
     pub fn set_write_timeout(&mut self, timeout: Duration) {
         let _ = self.ws.get_mut().set_write_timeout(Some(timeout));
     }
-}
 
-/// Longest close reason (the WebSocket limit is 123 bytes).
-const MAX_CLOSE_REASON: usize = 120;
+    /// Puts the underlying socket in (or out of) non-blocking mode, best-effort (T-1010). For a
+    /// close frame written from a thread that must not wait on a browser — the producer's own
+    /// real-time thread, the drain watchdog — where a full send buffer must cost a `WouldBlock`
+    /// rather than a wait. The caller holds the connection's lock across the pair, so the writer
+    /// thread (which shares this file description) never sees the mode change.
+    pub fn set_nonblocking(&mut self, on: bool) {
+        let _ = self.ws.get_mut().set_nonblocking(on);
+    }
+}
 
 fn ws_io(e: tungstenite::Error) -> io::Error {
     match e {
@@ -690,6 +700,7 @@ const GAP_PEER_POLL: Duration = Duration::from_millis(1);
 pub struct Attached {
     id: ConsumerId,
     end: Arc<Mutex<Option<CloseReason>>>,
+    conn: Arc<Mutex<Conn>>,
 }
 
 impl Attached {
@@ -700,6 +711,14 @@ impl Attached {
 
     fn reason(&self) -> Option<CloseReason> {
         *self.end.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Sends this connection's close frame, at most once, if the writer is not stuck (T-1010).
+    /// Call it **before** [`PublisherHandle::close`], whose closer shuts the socket down.
+    fn send_close(&self, code: CloseCode, reason: &str) {
+        if let Some(mut c) = lock_within(&self.conn, CLOSE_LOCK_WAIT) {
+            c.send_close(code, reason);
+        }
     }
 }
 
@@ -716,25 +735,34 @@ pub fn attach(
     label: String,
     handshake_response: Vec<u8>,
 ) -> Result<Attached, StreamError> {
-    let sink = WsSink::new(stream.try_clone()?, handle.kind(), handshake_response);
+    let conn = Arc::new(Mutex::new(Conn::new(WsSink::new(
+        stream.try_clone()?,
+        handle.kind(),
+        handshake_response,
+    ))));
     let closer_stream = stream.try_clone()?;
+    let conn_for_closer = Arc::clone(&conn);
     let end = Arc::new(Mutex::new(None));
     let closed = Arc::clone(&end);
     let id = handle.subscribe(
         label,
-        Declared::remote(sink),
+        Declared::remote(ConnSink(Arc::clone(&conn))),
         Box::new(move |reason| {
             *closed.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason);
             // T-417: a finished publisher is not the end of the *connection* — the stream id
             // outlives its publishers and the watcher re-attaches to the next offer on this same
-            // socket. Every other reason, the slow-consumer drop included (§7, T-388), shuts it
-            // down here exactly as before.
+            // socket, so nothing is said on the wire. Every other reason, the slow-consumer drop
+            // included (§7, T-388), ends the connection: T-1010 gives it the close frame
+            // `docs/api.md` promises (`1008` for a consumer dropped as too slow or not drained in
+            // time) before the shutdown, under the same never-block discipline as
+            // `/ws/open/<name>` — see [`crate::wsclose`].
             if reason != CloseReason::PublisherFinished {
+                send_close_for_reason(&conn_for_closer, reason);
                 let _ = closer_stream.shutdown(Shutdown::Both);
             }
         }),
     )?;
-    Ok(Attached { id, end })
+    Ok(Attached { id, end, conn })
 }
 
 /// Blocks until the browser goes away, carrying the connection across publisher changes under the
@@ -830,6 +858,12 @@ pub fn watch_peer(
             Some(_) => {}
         }
     }
+    // T-1010: this side ends the connection (the peer hung up or sent something, the producer
+    // withdrew the id, or a carry-over found no successor), so it says so with a real close frame
+    // before the shutdown, exactly like `/ws/open/<name>`. `handle.close` runs the closer above,
+    // whose shutdown would make the frame unsendable, so the frame goes first; both paths are
+    // idempotent, so a producer-initiated close that already sent `1008` keeps its own reason.
+    attached.send_close(CloseCode::Normal, "closed");
     offer.handle.close(attached.id);
     let _ = stream.shutdown(Shutdown::Both);
 }

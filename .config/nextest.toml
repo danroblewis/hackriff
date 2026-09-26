@@ -223,6 +223,14 @@ fail-fast = false
 # deterministic half, the ring's allocation paid by its own thread and a re-plumb completing
 # with that allocation still outstanding, gates normally
 # (hk-pipeline::replumb_never_pays_for_the_ring::a_re_plumb_never_pays_for_the_iq_ring).
+# T-1010 added hk-api::ondemand's vanished-peer release bound (T-954's regression test): how long
+# a session outlives the reap when its writer is stuck mid-write is a 0.8 s budget against a 0.4 s
+# scheduling margin, which a loaded gate cannot honestly measure. It was SPLIT, not moved: its
+# structural half gates
+# (hk-api::ondemand::a_vanished_peers_writer_is_really_stuck_when_the_reap_releases_the_session -
+# the writer really was blocked, with bytes queued, when the reap released the session), which is
+# also the guard the T-954 review asked for, since the old single test would have passed on the
+# defect had the reap ever moved ahead of the flood.
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
@@ -236,6 +244,7 @@ not (
   or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
   or test(the_detection_write_rate_clears_its_floor)
   or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
+  or test(a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck)
 )
 '''
 
@@ -517,4 +526,5 @@ or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 or test(the_detection_write_rate_clears_its_floor)
 or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
+or test(a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck)
 '''

@@ -72,6 +72,7 @@ pub mod trunk_cc; // T-977: the control-channel hunt's last pass, with per-chann
 pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
 pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
+mod wsclose; // T-954/T-1010: one never-blocking WebSocket close path for every bridged consumer
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122

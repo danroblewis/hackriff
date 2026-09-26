@@ -5717,6 +5717,84 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     stop_server(serving);
 }
 
+/// **The documented close codes of `/ws/open/<name>`, on the wire** (T-1010; `docs/api.md`, "An
+/// open session ends with a real close frame"). T-079 says a route's documentation and its
+/// contract test move together, and this route had none: every code was asserted only inside
+/// `hk-api`, so a change in `http.rs`'s dispatch could have left the promise true in a unit test
+/// and false to a browser.
+///
+/// The three codes a *client* can provoke against a real server are asserted here end to end: the
+/// `4000 + status` refusal, `1002` for a consumer that writes (consumers never write, §2), and
+/// `1000` for a clean close. The remaining documented codes are producer-initiated — `1000`
+/// (`producer finished`), `1008` (`too slow to keep up`), `1008` (`did not drain in time`) and the
+/// best-effort `1011` (`transport reset`) — and no client action forces them on a live pipeline
+/// within a test's budget; they are asserted, frame bytes and all, by
+/// `hk_api::ondemand::tests::every_close_reason_sends_its_documented_code` over a real socket.
+#[test]
+fn ws_open_close_codes_match_the_documented_contract() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // A refusal closes with `4000 + status` after its one JSON message, and attaches nothing.
+    let mut refused = connect_ws(addr, &format!("/ws/open/listen?token={TOKEN}")).unwrap();
+    let msg = loop {
+        match refused.read().unwrap() {
+            Message::Text(t) => break t,
+            _ => continue,
+        }
+    };
+    let v: Value = serde_json::from_str(msg.as_str()).unwrap();
+    assert_eq!(v["type"], json!("refused"), "{v}");
+    let status = v["status"].as_u64().unwrap();
+    let code = loop {
+        match refused.read() {
+            Ok(Message::Close(f)) => break f.map(|f| u16::from(f.code)),
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    assert_eq!(
+        code,
+        Some(u16::try_from(4000 + status).unwrap()),
+        "a refusal closes with 4000 + status, never a bare hang-up"
+    );
+
+    let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
+
+    // A consumer that writes anything but a close or a ping breaks the contract: 1002.
+    let (mut ws, _) = wait_for_listen(addr, f_lo, f_hi, "");
+    ws.send(Message::Text("hello".into())).unwrap();
+    let frame = loop {
+        match ws.read() {
+            Ok(Message::Close(f)) => break f,
+            Ok(_) => {}
+            Err(e) => panic!("a consumer that wrote got a bare hang-up, not 1002: {e}"),
+        }
+    };
+    let frame = frame.expect("a close frame, not an empty close");
+    assert_eq!(u16::from(frame.code), 1002, "{frame:?}");
+    assert_eq!(
+        frame.reason.as_str(),
+        "unexpected message from a consumer",
+        "{frame:?}"
+    );
+
+    // A clean close from the peer is echoed as 1000 `closed`, not left to read as 1006.
+    let (mut ws, _) = wait_for_listen(addr, f_lo, f_hi, "");
+    ws.close(None).unwrap();
+    let frame = loop {
+        match ws.read() {
+            Ok(Message::Close(f)) => break f,
+            Ok(_) => {}
+            Err(e) => panic!("a clean close was answered with a hang-up: {e}"),
+        }
+    };
+    let frame = frame.expect("a close frame, not an empty close");
+    assert_eq!(u16::from(frame.code), 1000, "{frame:?}");
+    assert_eq!(frame.reason.as_str(), "closed", "{frame:?}");
+
+    stop_server(serving);
+}
+
 /// Retries the `/ws/open/listen` handshake: the run may be mid-replumb (503 `replumbing`) right
 /// after start, before the mock's power-on window settles. Returns the connection *after* its
 /// header message, plus the parsed header (the caller's next read is the first data/status record).

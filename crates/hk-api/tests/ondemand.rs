@@ -13,7 +13,8 @@ use hk_api::stream::audio::{AUDIO_DATATYPE, AUDIO_MAX_FRAME_LEN, AUDIO_SAMPLE_RA
 use hk_api::stream::record::parse_status_record;
 use hk_api::stream::{
     BinaryRecord, BinaryRecordHeader, OpenRefusal, OpenRequest, OpenedStream, OpenerRegistry,
-    Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind, StreamOpener,
+    Publisher, PublisherConfig, PublisherHandle, RecordFlags, StreamHeader, StreamKind,
+    StreamOpener,
 };
 use hk_api::{ApiState, Server, ServerConfig, Token};
 use hk_model::{ContentClass, Timestamp};
@@ -518,6 +519,9 @@ struct Flooding {
     quiet: Duration,
     end: hk_stream::SessionEndSlot,
     dropped: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// The publisher's handle, so the test can read the consumer's own counters (T-1010): what
+    /// was enqueued for it against what its writer thread has actually put on the socket.
+    handle: Arc<std::sync::Mutex<Option<PublisherHandle>>>,
 }
 
 struct FloodGuard(Arc<AtomicBool>, Arc<std::sync::Mutex<Option<Instant>>>);
@@ -547,6 +551,7 @@ impl StreamOpener for Flooding {
         });
         let mut p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
         let handle = p.handle();
+        *self.handle.lock().unwrap() = Some(handle.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let quiet = self.quiet;
@@ -588,19 +593,29 @@ impl StreamOpener for Flooding {
 /// session — that held the session guard, the producer chain and its budget slot for up to one
 /// extra peer timeout.
 ///
-/// The flood starts at 3/4 of the peer timeout, so the stuck write outlives the reap by about that
-/// much: before the fix the session outlived `watch`'s verdict by >= 0.75 x the peer timeout
-/// (1.5 s here). The bound asserted, 0.4 x the peer timeout (0.8 s), is the fix's own budget —
-/// one bounded lock wait plus one bounded close-frame write, 200 ms each — plus 400 ms of margin
-/// for a loaded machine. No pings are sent (their interval is longer than the test), so this
-/// measures only the writer-lock path.
-#[test]
-fn a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck() {
-    let peer_timeout = Duration::from_secs(2);
+/// **One scenario, two assertions (T-1010, the split of docs/10 §3.6 / T-1036).** The review of
+/// T-954 found the original single test would go green on the *defect* if the reap ever moved:
+/// it asserted only a duration, and never that the writer was blocked at all. So the scenario
+/// runs once here and reports what it saw, and the two tests below assert the two different
+/// things — the structural one gates, the latency bound is the `timing` tier's.
+struct VanishedPeer {
+    /// How long the session outlived `watch`'s verdict, from the server's own two instants.
+    held: Duration,
+    /// How long the consumer's writer had been stuck — `bytes_written` unmoved with bytes still
+    /// queued — at the moment the peer was reaped.
+    stuck_for: Duration,
+    /// What was still queued for that consumer then.
+    queued_bytes: u64,
+}
+
+/// Runs the vanished-peer scenario once: floods a peer that never reads, watches the consumer's
+/// own counters, and returns what the server did.
+fn vanished_peer(peer_timeout: Duration) -> VanishedPeer {
     let opener = Arc::new(Flooding {
         quiet: peer_timeout * 3 / 4,
         end: hk_stream::SessionEndSlot::default(),
         dropped: Arc::default(),
+        handle: Arc::default(),
     });
     let mut config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -617,13 +632,27 @@ fn a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck() {
     // Reads up to the header, then never reads or answers again: the socket stays open.
     let _vanished = raw_open(server.local_addr());
 
+    // Sample the consumer's counters until the reap. `bytes_written` is what its writer thread
+    // has actually handed to the socket; while it is stuck mid-write that number cannot move,
+    // and what the producer keeps publishing stays in `queued_bytes`.
     let deadline = Instant::now() + Duration::from_secs(20);
+    let mut flat_since: Option<Instant> = None;
+    let (mut written, mut queued) = (0u64, 0u64);
     let ended_at = loop {
         if opener.end.get() != hk_stream::SessionEnd::Unattributed {
             break Instant::now();
         }
         assert!(Instant::now() < deadline, "the peer was never reaped");
-        std::thread::sleep(Duration::from_millis(1));
+        if let Some(h) = opener.handle.lock().unwrap().as_ref()
+            && let Some(c) = h.consumer_stats().first()
+        {
+            if c.bytes_written != written || c.queued_bytes == 0 {
+                flat_since = Some(Instant::now());
+                written = c.bytes_written;
+            }
+            queued = c.queued_bytes;
+        }
+        std::thread::sleep(Duration::from_millis(2));
     };
     assert_eq!(
         opener.end.get(),
@@ -637,13 +666,61 @@ fn a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck() {
         assert!(Instant::now() < deadline, "the session was never dropped");
         std::thread::sleep(Duration::from_millis(1));
     };
-    let held = dropped_at.saturating_duration_since(ended_at);
+    VanishedPeer {
+        held: dropped_at.saturating_duration_since(ended_at),
+        stuck_for: flat_since.map_or(Duration::ZERO, |t| ended_at.saturating_duration_since(t)),
+        queued_bytes: queued,
+    }
+}
+
+/// **The structural half, which gates.** It asserts the scenario is the one the fix is about:
+/// when `watch` reaped the peer, the consumer's writer really was stuck inside a socket write —
+/// bytes queued for it, `bytes_written` unmoved for most of the flood — and the session was still
+/// released. Before T-1010 nothing checked that, so a change in reap timing (the flood beginning
+/// at 1.5 s, the reap at 2.0 s) could have made the old test pass with the defect in place, the
+/// writer never blocked and nothing measured.
+#[test]
+fn a_vanished_peers_writer_is_really_stuck_when_the_reap_releases_the_session() {
+    let peer_timeout = Duration::from_secs(2);
+    let seen = vanished_peer(peer_timeout);
     eprintln!(
-        "vanished peer: session dropped {:.0} ms after it was reaped",
-        held.as_secs_f64() * 1e3
+        "vanished peer: writer stuck {:.0} ms with {} bytes queued; session dropped {:.0} ms after the reap",
+        seen.stuck_for.as_secs_f64() * 1e3,
+        seen.queued_bytes,
+        seen.held.as_secs_f64() * 1e3
     );
     assert!(
-        held < peer_timeout * 2 / 5,
-        "the session outlived the reap by {held:?}: serve waited on a write stuck on a dead peer"
+        seen.queued_bytes > 0,
+        "the peer was reaped with nothing queued: its writer was never blocked, so this run \
+         proves nothing about a session waiting one out"
+    );
+    assert!(
+        seen.stuck_for >= Duration::from_millis(100),
+        "the writer was only stuck for {:?} at the reap: the flood did not fill the send buffer, \
+         so this run proves nothing",
+        seen.stuck_for
+    );
+}
+
+/// **The latency half, the `timing` tier's** (docs/10 §3.6: the assertion *is* a bound, and its
+/// margin is the box's headroom — `.config/nextest.toml` keeps it out of every gate run and
+/// `just timing` runs it alone). The flood starts at 3/4 of the peer timeout, so the stuck write
+/// outlives the reap by about that much: before the fix the session outlived `watch`'s verdict
+/// by at least 0.75 x the peer timeout (1.5 s here). The bound asserted, 0.4 x the peer timeout (0.8 s),
+/// is the fix's own budget — one bounded lock wait plus one bounded close-frame write, 200 ms
+/// each — plus 400 ms of margin. No pings are sent (their interval is longer than the test), so
+/// this measures only the writer-lock path.
+#[test]
+fn a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck() {
+    let peer_timeout = Duration::from_secs(2);
+    let seen = vanished_peer(peer_timeout);
+    eprintln!(
+        "vanished peer: session dropped {:.0} ms after it was reaped",
+        seen.held.as_secs_f64() * 1e3
+    );
+    assert!(
+        seen.held < peer_timeout * 2 / 5,
+        "the session outlived the reap by {:?}: serve waited on a write stuck on a dead peer",
+        seen.held
     );
 }
