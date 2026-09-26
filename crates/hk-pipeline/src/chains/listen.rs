@@ -49,7 +49,10 @@
 //! Processing latency (chunk read → record published) is tracked per record (`/listen/
 //! latency_us_*`). On a live source a chain more than `max_backlog_s` behind the writer skips to
 //! the live edge (counted, next record flagged `DISCONTINUITY`); ring overruns are counted as
-//! lost. In lossless replay the chain's gate cursor holds capture instead.
+//! lost. In lossless replay the chain's gate cursor holds capture instead. The chain reads nothing
+//! until its first consumer has attached (T-1085: the transport subscribes after `open` returns),
+//! and a record offered to no consumer leaves the next one flagged `DISCONTINUITY`, so a listener
+//! never sees an unflagged `sample_index` jump.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -350,6 +353,10 @@ pub struct ListenManager {
 }
 
 static STREAM_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// How often a chain that has not yet heard from its listener looks again (T-1085). The consumer
+/// subscribes a moment after `open` returns; until then the chain reads nothing.
+const ATTACH_POLL: Duration = Duration::from_millis(2);
 
 /// The session guard: dropping it (the client went away or stopped) stops the chain and frees
 /// its slot at once.
@@ -1295,6 +1302,8 @@ impl Session {
             .unwrap_or_else(Instant::now);
         let lost_before = counters.chains.lost_samples.load(Ordering::Relaxed);
         let mut last_audio = Instant::now();
+        // T-1085: whether the listener has attached yet ([`ATTACH_POLL`]).
+        let mut heard = false;
         // Readers re-created on this thread (skips to the live edge) account to the same stat.
         super::set_thread_stat(Some(self.stat.stat()));
         let end = loop {
@@ -1313,6 +1322,24 @@ impl Session {
                 .is_some_and(|t| last_audio.elapsed() > t)
             {
                 break End::Squelch;
+            }
+            // T-1085: the audio clock starts when the listener is there. The transport
+            // subscribes its consumer only after `open` has returned, so a chain that ran at once
+            // published its first frames to nobody and the listener's first record jumped (0 →
+            // 1920 under load) — an unflagged gap. Nothing is read until the first consumer has
+            // attached: the reader keeps its place, so the listener hears from where the open
+            // left it. Bounded by the idle timeout above; a segment that ends meanwhile is
+            // drained as usual so a re-plumb never waits on a listener that is not coming.
+            if !heard {
+                if self.handle.open_consumers() == 0
+                    && !self.shared.ring.is_closed()
+                    && !self.shared.stop.load(Ordering::SeqCst)
+                {
+                    thread::sleep(ATTACH_POLL);
+                    continue;
+                }
+                heard = true;
+                last_audio = Instant::now();
             }
             match self.reader.next() {
                 Next::Data(chunk) => {
@@ -1417,8 +1444,10 @@ impl Session {
                             flags,
                             payload: &payload,
                         }) {
-                            Ok(_) => {
-                                gap = false;
+                            Ok(o) => {
+                                // T-1085: a record offered to no consumer was heard by nobody,
+                                // so whoever attaches next sees a gap — flagged, like any other.
+                                gap = o.consumers == 0;
                                 last_audio = Instant::now();
                                 frames += 1;
                                 inc(&lc.frames);
