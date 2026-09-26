@@ -30936,7 +30936,7 @@ tasks:
   - id: T-1057
     milestone: MLIVE
     title: "Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)"
-    status: in-progress
+    status: done
     branch: task-t1057
     priority: high
     deps: []
@@ -30963,6 +30963,7 @@ tasks:
       Commits: 58c54dd2, d8113e40, 532a69e5
       Observed, not chased: The browser tier still cannot run in a worker worktree: there is no hk binary and nothing in the brief builds one, so every ui/e2e spec fails before its subject. Control evidence from the first pass: `HK_BIN=<main>/target/debug/hk node e2e/run.mjs surface-load` (port 9226) failed with 'the surface refused to mount: planes="compact" is not a plane encoding this server serves (json, f16)' and the lane warned 'no observed coverage in 60000 ms'. The ticket's browser acceptance (and T-1039's, which this ticket took over) is therefore written but parked as ui/e2e/tile-never-black.pending.mjs; enabling it needs only `cargo build -p hk-cli --bin hk` from this base, then `cd ui && node e2e/run.mjs tile-never-black` on a port >= 9216. | ui/src/surface/tilebatch.ts re-queues a `remaining` entry with no delay (a microtask), so a route that keeps truncating the same address spins at microtask rate. T-1039's landed review-fix 2 addresses the Service-Worker shape of that; the general case is still undelayed and is one line from the shared `jittered` helper now that it is importable from ./retry.ts. | `TileCache.invalidate(addr)` returns early for a non-resident place, so the retry-ladder clear there does not reach a REFUSED place at a retuned address; it keeps its (<= 30 s) wait across the retune. A delay, not an abandonment, and not worth widening invalidate's contract for.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 60d4f60c
   - id: T-1058
     milestone: MLIVE
     title: "Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it"
