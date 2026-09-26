@@ -93,6 +93,7 @@ fn measured_2fsk_params() -> EstimatedParams {
         roll_off: None,
         bandwidth_hz: Some(19174.5),
         pilot_hz: None,
+        subaudible: None,
     }
 }
 
@@ -154,6 +155,87 @@ fn estimated_params_is_null_then_serves_the_latest_measured_session() {
         json!(9587.25),
         "must not still read the first session's value: {v}"
     );
+}
+
+/// T-988 (SIGNAL-090): an NBFM session's blind sub-audible conclusion is served on the row —
+/// the CTCSS tone with its measurement and tolerance, and "none" as an object of its own, never
+/// confused with `null` (nobody looked).
+#[test]
+fn estimated_params_serves_the_subaudible_tone_and_an_explicit_none() {
+    use hk_model::{Subaudible, SubaudibleKind, SubaudibleTone};
+    let (server, seeded, repo) = serve_seeded();
+    let addr = server.local_addr();
+    let nbfm = |kind, tones: Vec<SubaudibleTone>, reason: Option<&str>| EstimatedParams {
+        bandwidth_hz: Some(12_500.0),
+        subaudible: Some(Subaudible {
+            kind,
+            analysed_s: 6.5,
+            tones,
+            dcs: None,
+            reason: reason.map(str::to_owned),
+            detector: "hk-demod/subaudible@0.1.0".into(),
+        }),
+        ..EstimatedParams::default()
+    };
+    let tone = SubaudibleTone {
+        measured_hz: 131.83,
+        snr_db: 28.4,
+        table_hz: Some(131.8),
+        delta_hz: Some(0.03),
+        tolerance_hz: 1.0,
+    };
+    repo.lock()
+        .unwrap()
+        .insert_demodulation(&session(
+            seeded.carrier,
+            "nbfm",
+            T0 + 1,
+            nbfm(SubaudibleKind::Ctcss, vec![tone], None),
+        ))
+        .unwrap();
+    let (status, v) = authed(addr, &format!("/api/inventory/{}", seeded.carrier));
+    assert_eq!(status, 200, "{v}");
+    let s = &v["estimated_params"]["subaudible"];
+    assert_eq!(s["kind"], json!("ctcss"), "{v}");
+    assert_eq!(s["tones"][0]["table_hz"], json!(131.8), "{v}");
+    assert_eq!(s["tones"][0]["measured_hz"], json!(131.83), "{v}");
+    assert_eq!(s["tones"][0]["tolerance_hz"], json!(1.0), "{v}");
+    assert_eq!(v["estimated_params"]["modulation"], json!("nbfm"), "{v}");
+
+    repo.lock()
+        .unwrap()
+        .insert_demodulation(&session(
+            seeded.carrier,
+            "nbfm",
+            T0 + 9,
+            nbfm(
+                SubaudibleKind::None,
+                Vec::new(),
+                Some("no line clears the guard"),
+            ),
+        ))
+        .unwrap();
+    let (_, v) = authed(addr, &format!("/api/inventory/{}", seeded.carrier));
+    let s = &v["estimated_params"]["subaudible"];
+    assert_eq!(
+        s["kind"],
+        json!("none"),
+        "'no tone' is an answer, not absent: {v}"
+    );
+    assert_eq!(s["tones"], json!([]), "{v}");
+
+    // A session that never looked (a 2FSK burst): `null`, distinct from `none`.
+    repo.lock()
+        .unwrap()
+        .insert_demodulation(&session(
+            seeded.carrier,
+            "2fsk",
+            T0 + 20,
+            measured_2fsk_params(),
+        ))
+        .unwrap();
+    let (_, v) = authed(addr, &format!("/api/inventory/{}", seeded.carrier));
+    assert_eq!(v["estimated_params"]["subaudible"], Value::Null, "{v}");
 }
 
 /// T-036 identity gating (content-class access control) is off by default and, per

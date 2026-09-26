@@ -91,14 +91,19 @@ test("non-modal by construction: no backdrop, fixed to its own box, content refl
   const css = readFileSync("src/app/chrome/sheet.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.doesNotMatch(css, /backdrop\b(?!-filter)|::backdrop|inset:\s*0|100vh|100vw\)/, "nothing may cover the canvas outside the sheet");
   assert.doesNotMatch(css, /pointer-events/, "the sheet never reroutes pointer events");
-  assert.match(css, /\.sheet \{ position: fixed;[^}]*bottom: var\(--sheet-bottom, 70px\)/, "docked above the dock");
+  // T-994: the dock bar under it is retired, so the sheet sits at the map's own bottom inset.
+  assert.match(css, /\.sheet \{ position: fixed;[^}]*bottom: var\(--sheet-bottom, 8px\)/, "docked to the map's bottom edge, no dock under it");
   assert.match(css, /\.sheet \.sheet-body \{ flex: 1; min-height: 0; overflow: auto; \}/, "the body reflows to the snap height");
   assert.match(css, /\.sheet \{ --sheet-gutter: 64px; right: var\(--sheet-gutter\); width: min\(520px/,
     "width-capped, docked right, clear of the zoom/FAB column (T-802)");
   assert.match(css, /@media \(max-width: 900px\) \{\s*\.sheet \{ left: 8px; width: auto; \}/, "full width on a phone");
   const html = readFileSync("src/app/index.html", "utf8");
-  assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">\s*<div class="drawer" data-slot="drawer"><\/div>\s*<aside class="focus" data-slot="focus"/,
-    "the focus panel is the sheet's body");
+  // T-997 added the inventory lists to the same body (ordered by `sheet.css`: focus, lists, drawer).
+  assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">/, "the sheet's body");
+  const body = html.slice(html.indexOf('<div class="sheet-body">'), html.indexOf("</section>", html.indexOf('<div class="sheet-body">')));
+  for (const slot of ["drawer", "focus", "side"]) {
+    assert.match(body, new RegExp(`data-slot="${slot}"`), `the ${slot} panel is not in the sheet's body`);
+  }
   assert.doesNotMatch(html, /<dialog|aria-modal/, "no modal anywhere in the shell");
   const src = readFileSync("src/app/chrome/sheet.ts", "utf8");
   assert.doesNotMatch(src, /showModal|aria-modal|\.focus\(\)/, "no modal, no focus trap");

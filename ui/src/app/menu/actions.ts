@@ -6,14 +6,14 @@
 import { ControlError } from "../../controls/client";
 import type { AppContext } from "../context";
 import { runAutoDecode } from "../decode/pipelines";
-import { startListen, stopOutput } from "../dock/api";
+import { refreshOutputs, startListen, stopOutput } from "../dock/api";
 import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
 import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row } from "../explore/inventory";
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
 import { watchAnalyzeJob } from "../explore/analyze-slice";
 import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setBandEdit } from "../explore/slice";
-import { setMode, toast } from "../state";
+import { requestGoto, setMode, toast } from "../state";
 import type { MenuItem } from "./model";
 
 const fmtMHz = (hz: number) => (hz / 1e6).toFixed(4);
@@ -52,35 +52,36 @@ export async function analyzeTarget(client: PostClient, target: AnalyzeTarget): 
   }
 }
 
-/** Menu items for a right-clicked/long-pressed signal (an inventory row or a waterfall bracket):
- * the same action set the old focus-bar buttons carried (§4.5), plus Analyze. */
+/** Menu items for a right-clicked/long-pressed signal — a box or its generalized symbol on the map
+ * (T-994), an inventory row, a drawer row: the action set the old focus-bar buttons carried (§4.5),
+ * plus Analyze and Go to. T-994 made this THE place Listen lives (the Outputs dock is retired): a
+ * box that is playing says so on the map, and this menu is where it is stopped. */
 export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
   const onId = listenIdFor(ctx, r.id);
   const reload = () => loadInventoryRows(ctx, () => {});
 
   const items: MenuItem[] = [
     {
-      id: "listen", label: onId ? "Stop listening" : "Listen", hint: onId ? "removes from Outputs" : "adds to Outputs",
+      id: "listen", label: onId ? "Stop listening" : "Listen", hint: onId ? "closes this audio stream" : "plays it; the box shows ♪ while it does",
       onSelect: () => { if (onId) stopOutput(ctx, onId); else startListen(ctx, { kind: "emitter", emitterId: r.id, label: `${fmtMHz(r.f_center_hz)} MHz` }); },
     },
     {
       // T-944: starts the backend's best-matching recipe on this emitter (`/api/recipes/match`),
-      // then opens the Decode tab on it; the recipe list there is the override.
-      id: "decode", label: decodeActionLabel(r), hint: "best-matching recipe",
-      onSelect: () => { void runAutoDecode(ctx, r.id); },
+      // then opens the Decode tab on it; the recipe list there is the override (the picker).
+      id: "decode", label: decodeActionLabel(r), hint: "best-matching recipe · pick another in Decode",
+      onSelect: () => { void runAutoDecode(ctx, r.id).then(() => refreshOutputs()); },
     },
     {
-      id: "analyze", label: "Analyze", hint: "synthesize decoder",
-      onSelect: () => { void analyzeTarget(ctx.client, { kind: "emitter", id: r.id }).then((res) => { if (res.ok && res.jobId) ctx.store.set(watchAnalyzeJob(res.jobId)); ctx.store.set(toast(res.message)); }); },
-    },
-    {
-      id: "export", label: "Export clip", hint: "from the buffer",
+      id: "export", label: "Record clip", hint: "from the buffer, onward",
       onSelect: () => {
-        void recordEmitterClip(ctx.client, r.id).then((res) => ctx.store.set(toast(res.ok ? `recording ${res.kinds.join(", ")}` : `export: ${res.message}`)));
+        void recordEmitterClip(ctx.client, r.id).then((res) => {
+          ctx.store.set(toast(res.ok ? `recording ${res.kinds.join(", ")}` : `record: ${res.message}`));
+          refreshOutputs();
+        });
       },
     },
     {
-      id: "stream", label: "Stream out", hint: "audio",
+      id: "stream", label: "Stream out", hint: "copies the audio stream's address",
       onSelect: () => {
         void emitterStreamAddress(ctx.client, r.id).then((addr) => {
           if (!addr) { ctx.store.set(toast("stream out: not offered by this server")); return; }
@@ -88,6 +89,10 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
           ctx.store.set(toast(`copied ${addr}`));
         });
       },
+    },
+    {
+      id: "analyze", label: "Analyze", hint: "synthesize decoder",
+      onSelect: () => { void analyzeTarget(ctx.client, { kind: "emitter", id: r.id }).then((res) => { if (res.ok && res.jobId) ctx.store.set(watchAnalyzeJob(res.jobId)); ctx.store.set(toast(res.message)); }); },
     },
   ];
 
@@ -110,6 +115,12 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
         }
       });
     },
+  });
+  // T-994: Go to — centre the active pane on the signal and select it. View arithmetic only (the
+  // `nav` request every Go-to uses); it never reaches a device route.
+  items.push({
+    id: "goto", label: "Go to", hint: `centre the view on ${fmtMHz(r.f_center_hz)} MHz`,
+    onSelect: () => { ctx.store.set(focusSignal(r.id)); ctx.store.set(requestGoto(r.f_center_hz)); },
   });
   // T-458: this ARMS the next region stroke rather than describing a gesture. The hint it used to
   // give — "drag the yellow box's left/right edges on the live view" — named edge handles that the

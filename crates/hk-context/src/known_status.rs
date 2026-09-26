@@ -56,6 +56,11 @@ fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
         // T-953: frequency hopping is a measured *behaviour*, and 47 CFR 15.247 is where it is
         // expressly authorised. The tag says "hopping is expected here", never "this hops".
         "fhss" => Some(&["fhss"]),
+        // T-979: UHF television and the Part 74 low power auxiliary (wireless microphone) use
+        // that shares its channels. `atsc` and `dtv` are the emission families the pipeline maps
+        // an 8VSB pilot to; `tv-broadcast` is the service.
+        "tv-broadcast" | "atsc" | "dtv" => Some(&["tv-broadcast"]),
+        "wireless-mic" | "low-power-auxiliary" => Some(&["wireless-mic"]),
         _ => None,
     }
 }

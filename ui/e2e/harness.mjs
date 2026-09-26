@@ -10,9 +10,9 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { connect, kill, launch } from "./cdp.mjs";
-import { census, decodePng } from "./png.mjs";
+import { census, decodePng, pixelDiff } from "./png.mjs";
 
-export { census };
+export { census, pixelDiff };
 
 /** CDP's modifier bitmask, from names: **Alt 1, Ctrl 2, Meta 4, Shift 8**. One definition, used by
  * both `wheel` and `drag`, so the two gestures cannot disagree about what "shift" is. */
@@ -305,6 +305,18 @@ export class Page {
     conn.on("Network.loadingFailed", (m, sid) => {
       if (sid === sessionId) p.#done(m.requestId, m.canceled ? "canceled" : m.errorText ?? "failed");
     });
+    // A native `window.prompt`/`confirm`/`alert` blocks page JS until CDP answers it — nothing
+    // answers by default, so a spec that triggers one (T-984: annotation authoring asks for a
+    // label) would hang forever. Always accepted, with `p.dialogText` (default `""`, settable per
+    // test) as the prompt's answer, which is the standard driver's way of supplying the "user
+    // typed this" a headless run has no hand for — the page still calls the real `window.prompt`
+    // and gets a string back, so this observes the same gesture a person would make, not a
+    // substitute code path. Every dialog is recorded in `p.dialogs` for diagnostics.
+    conn.on("Page.javascriptDialogOpening", (m, sid) => {
+      if (sid !== sessionId) return;
+      p.dialogs.push({ type: m.type, message: m.message });
+      void conn.send("Page.handleJavaScriptDialog", { accept: true, promptText: p.dialogText }, sessionId);
+    });
     await conn.send("Network.enable", {}, sessionId);
     await conn.send("Runtime.enable", {}, sessionId);
     await conn.send("Page.enable", {}, sessionId);
@@ -341,6 +353,10 @@ export class Page {
   constructor(conn, sessionId) {
     this.conn = conn; this.sessionId = sessionId;
     this.console = []; this.exceptions = [];
+    /** Every `window.prompt`/`confirm`/`alert` this page opened, in order: `{type, message}`. */
+    this.dialogs = [];
+    /** The text a `window.prompt` this page opens is answered with (every dialog is accepted). */
+    this.dialogText = "";
     /** Every request this page made, in order: `{url, status, error, startedMs, respondedMs, endedMs}`. */
     this.requests = [];
     /** Live and peak concurrency, per url predicate name — see `watchConcurrency`. */
@@ -671,10 +687,23 @@ export class Page {
   /**
    * Click an element named by an in-page expression that evaluates to it. A real click at the
    * element's own centre, not `el.click()`: the difference is whether anything is on top of it.
+   *
+   * **Scrolled into view first** (T-957), exactly as T-528's pressability hit test
+   * (`app-chrome.mjs`'s `unclickable`) already does, and for the same reason: a control inside a
+   * scrolling menu that the user would scroll to is reachable, and its centre is only a clickable
+   * point once it is on screen. Without this, an element clipped by its own scroll container still
+   * reports a rect — one *outside* that container — and the click lands on whatever is really
+   * there. That is what broke here: the layers menu (`.map-layers`, `overflow-y: auto`) grew past
+   * its `max-height` as MAP-10/MAP-13/MAP-21 added rows, and a click aimed at the `artifacts` row
+   * (rect 749…777, menu bottom 758) landed on `.sf-canvas`, so the toggle never flipped. The click
+   * is still a REAL click at a point, so anything genuinely painted on top of the control still
+   * takes it — `block: "nearest"` is a no-op for an element already fully visible.
    */
   async click(elementExpr) {
     const at = await this.eval(`(() => { const e = ${elementExpr};
-      if (!e) return null; const r = e.getBoundingClientRect();
+      if (!e) return null;
+      e.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const r = e.getBoundingClientRect();
       return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     if (!at) throw new Error(`nothing to click for: ${elementExpr}`);
     await this.mouse("mousePressed", at.x, at.y, { buttons: 1, clickCount: 1 });

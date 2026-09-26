@@ -102,8 +102,17 @@ impl Block for Parity {
             if checked {
                 let upstream_clean =
                     !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
-                self.ev
-                    .record(&self.bits, all && upstream_clean, units as f64, 1);
+                // Only the checked units, never the whole frame: the degenerate-frame guard
+                // applies to the covered span (T-928, ADR-0022 §4.3.1 hole A).
+                // The register is one bit per unit, but the prefix that can cancel an idle
+                // span is a whole unit, so that is the trim the degenerate guard needs
+                // (T-921 hole D, the same rule as `checksum`).
+                self.ev.record(
+                    &self.bits[start..pos],
+                    all && upstream_clean,
+                    units as f64,
+                    self.unit,
+                );
             }
             if !all && self.drop_invalid {
                 continue;

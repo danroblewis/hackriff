@@ -270,6 +270,13 @@ impl Detector {
         self.integrated.evaluation()
     }
 
+    /// T-978: the mean PSD and mean floor of the current segment's latest integrated evaluation,
+    /// for the overlap re-analysis (`hk_detect::overlap`). Allocates, and is called only when an
+    /// overlap the inventory could not resolve from the rows has asked for one.
+    pub fn integrated_snapshot(&self) -> Option<IntegratedSnapshot> {
+        self.integrated.snapshot(&self.seg.as_ref()?.geometry)
+    }
+
     /// Integrated spectra + emitters of the current segment's latest evaluation, for the
     /// cross-capture trust tests (allocates).
     pub fn capture_result(&self) -> Option<CaptureResult> {

@@ -59,32 +59,36 @@ pub const FEATURES_VERSION_INDETERMINATE: u32 = 1;
 /// Maximum reported confidence: no call is certain.
 pub const MAX_CONFIDENCE: f64 = 0.999;
 
-/// Maximum reported confidence of the **`unknown`** label (T-953).
+/// Maximum reported confidence of the **`unknown`** label — an abstention (T-953, T-970).
 ///
-/// `unknown` is not a measurement. Its posterior is `max(open_set_score, L[unknown])`
-/// ([`fuse`](fuse::fuse)), and `open_set_score` is `1 − max_c P(χ²_k ≥ d²_c)` over
-/// class-conditional densities fitted on the **synthetic dev grid** (ADR-0016 §4.4, §7). That tail
-/// underflows: any emission a few σ outside every fitted envelope scores a hard `1.0`, so an
-/// emission the shipped densities have simply never seen is indistinguishable from one that is
-/// genuinely out of taxonomy, and the row reads `unknown` at [`MAX_CONFIDENCE`] — the same number
-/// a CRC-valid decode would carry.
+/// `unknown` is a real outcome, not a measurement or a claim about the world, and the two must not
+/// be reported on the same scale. Two routes reached `unknown` at [`MAX_CONFIDENCE`] — the same
+/// number a CRC-valid decode would carry — and the explorer's 2026-09-25 windows measured both:
 ///
-/// That is what the explorer measured on live air on 2026-09-25: FLEX pager bursts came back
-/// `unknown` at 0.999 with the known families at exactly 0 — the UI's "100 % unk". Reporting
-/// near-certainty of novelty from an uncalibrated distance is the same overconfidence ADR-0016
-/// rejects softmax for ("Options considered").
+/// - **A saturated open set (T-953).** `unknown`'s fused posterior is
+///   `max(open_set_score, L[unknown])` ([`fuse`](fuse::fuse)), and `open_set_score` is
+///   `1 − max_c P(χ²_k ≥ d²_c)` over class-conditional densities fitted on the **synthetic dev
+///   grid** (ADR-0016 §4.4, §7). That tail underflows: any emission a few σ outside every fitted
+///   envelope scores a hard `1.0`, so an emission the shipped densities have never seen is
+///   indistinguishable from one that is genuinely out of taxonomy. FLEX pager bursts came back
+///   `unknown` at 0.999 with the known families at exactly 0 — the UI's "100 % unk".
+/// - **An abstention on what could not be measured (T-970).** Broadcast stations with a locked
+///   19 kHz pilot and a CRC-valid RDS decode read `unknown 0.999`, which says the system is *more*
+///   sure it cannot name the emission than it is ever allowed to be that it can.
 ///
-/// So the residual hypothesis is capped strictly below a family's cap. `0.9` is chosen, not
-/// measured: it is the largest round value that keeps `unknown` visibly separate from a confident
-/// family call. It bounds only the **reported number** — a saturated open set still wins the
-/// label, and [`Classification::open_set_score`] still carries the raw score, uncapped, which is
-/// the explicit open-set output.
+/// Reporting near-certainty of novelty from an uncalibrated distance is the overconfidence
+/// ADR-0016 rejects softmax for ("Options considered"). So `unknown` is capped strictly below a
+/// family's cap. `0.9` is chosen, not measured: it is the largest round value that keeps `unknown`
+/// visibly separate from a confident family call. It bounds only the **reported number** — a
+/// saturated open set still wins the label, ADR-0016 §4.4's abstention conditions are unchanged,
+/// nothing here turns an abstention into a family, and [`Classification::open_set_score`] still
+/// carries the raw score, uncapped, which is the explicit open-set output.
 ///
-/// **What it does not do:** recover a ranking. The classifier builds `L[unknown] = open_set` with
-/// the families sharing `1 − open_set`, so at `open_set = 1.0` every known likelihood is 0 and the
-/// residual tenth is spread **uniformly** over the families. Only for `open_set < 1` does the
-/// residual follow the likelihood's order. (Why a pilot-locked WFM station saturates the open set
-/// at all is a separate defect, T-970.)
+/// It is applied in two places, with one rule: [`fuse`](fuse::fuse) caps the fused posterior
+/// (the residual follows the likelihood's order, and is spread **uniformly** over the families at
+/// `open_set = 1.0`, where every known likelihood is 0 — the cap does **not** recover a ranking),
+/// and `hk_classify::classifier` holds any abstention the cascade builds outside the fusion at the
+/// same cap, moving the excess to the families its decision tree left admissible.
 pub const MAX_UNKNOWN_CONFIDENCE: f64 = 0.9;
 
 /// The confidence cap of `label`: [`MAX_UNKNOWN_CONFIDENCE`] for `unknown`, else

@@ -27,18 +27,20 @@ const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levels
 const MHZ = 1e6, S = 1e9;
 const W = 800, H = 600;
 
-/** A `GET /api/coverage` answer over `[0, fHi) × [0, 1024 s)`: `cells × rows`, each cell's state
- * from `stateAt(fHz, row)`. `recording_began_s: 0`, so the survey sees the whole past. */
+/** A `GET /api/coverage` answer over `[t0, t0 + 1024) s × [0, fHi)`: `cells × rows`, each cell's
+ * state from `stateAt(fHz, row)`. `recording_began_s: 0`, so the survey sees the whole past.
+ * `t0` defaults to 0 — every existing caller gets the same answer as before it existed (T-982). */
 function coverage(fHi: number, cells: number, rows: number,
   stateAt: (fHz: number, row: number) => string,
   horizon: SurveyResponse["horizon"] = { oldest_record_s: 0, recording_began_s: 0, forgotten: null, as_of_s: 1024 },
+  t0 = 0,
 ): SurveyResponse {
   const dt = 1024 / rows, df = fHi / cells;
   const list: { state: string }[] = [];
   for (let r = 0; r < rows; r++) for (let c = 0; c < cells; c++) list.push({ state: stateAt((c + 0.5) * df, r) });
   return {
-    window: { t0_s: 0, t1_s: 1024 },
-    grid: { cells, rows, f_lo_hz: 0, f_cell_hz: df, t0_s: 0, t_cell_s: dt },
+    window: { t0_s: t0, t1_s: t0 + 1024 },
+    grid: { cells, rows, f_lo_hz: 0, f_cell_hz: df, t0_s: t0, t_cell_s: dt },
     any: { cells: list },
     horizon,
   };
@@ -179,6 +181,33 @@ test("a survey that cannot see the whole past skips nothing; a row straddling LO
   assert.equal(whole.unobservedThrough({ f0Hz: 12 * MHZ, f1Hz: 14 * MHZ, t0Ns: 0, t1Ns: S }), null);
   // Unreadable is not an answer.
   assert.equal(decodeSurvey({ grid: { cells: 4, rows: 1, f_lo_hz: 0, f_cell_hz: 1, t0_s: 0, t_cell_s: 1 }, any: { cells: [] } }), null);
+});
+
+test("T-982: `complete` tolerates the float64-ns precision loss a real epoch-second `t0`/`began` pair carries, not just a textbook-exact match", () => {
+  // Measured live (a second tab opening /surface.html while / already ran against the same mock
+  // capture): the SAME instant, described by `t0` (this client's own survey floor, round-tripped
+  // through `SurfaceOrigin.edgeNs` as nanoseconds — a plain JS number, and ~1.79e18 ns already
+  // exceeds Number.MAX_SAFE_INTEGER, 2^53 ≈ 9.007e15, by ~200x) and by `began`
+  // (`horizon.recording_began_s`, echoed straight off the server's own record) came back ~200 ns
+  // apart — nowhere near equal by `Number.isEqual`, but the same second down to the precision the
+  // representation can carry at all. The pre-fix epsilon was a flat 1e-9 SECONDS (1 ns): three
+  // orders of magnitude too tight for this, and BLOCKING, not cosmetic — `complete: false` here is
+  // what freezes a historical surface's tile route forever (T-580's "coverage first" gate; see
+  // `surface-preview.test.ts`'s host-level case below for the frozen-forever half of the claim).
+  const began = 1790369204.4648728;
+  const t0 = 1790369204.464873; // ~200 ns later than `began` — exactly the measured drift.
+  const s = decodeSurvey(coverage(12.8 * MHZ, 16, 2, () => "unobserved",
+    { oldest_record_s: began, recording_began_s: began, forgotten: null, as_of_s: began + 1024 },
+    t0))!;
+  assert.equal(s.complete, true,
+    `t0 (${t0}) is only ~200 ns after began (${began}) — float64-ns round-trip noise, not a real gap; ` +
+    "complete must not read false over it");
+  // The control: a REAL gap — whole seconds, not float noise — must still read incomplete. The fix
+  // is a wider epsilon, not a broken one; this is what keeps rule 3a meaning something.
+  const real = decodeSurvey(coverage(12.8 * MHZ, 16, 2, () => "unobserved",
+    { oldest_record_s: began, recording_began_s: began, forgotten: null, as_of_s: began + 1024 },
+    began + 5))!;
+  assert.equal(real.complete, false, "a genuine 5 s gap between t0 and began must still read incomplete");
 });
 
 test("grey only up to the survey's horizon: above it the pane stays PENDING, not grey", async () => {

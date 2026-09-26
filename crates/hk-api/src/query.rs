@@ -1344,6 +1344,9 @@ fn estimated_params_json(d: &Demodulation) -> Value {
         "bandwidth_hz": p.bandwidth_hz,
         "roll_off": p.roll_off,
         "pilot_hz": p.pilot_hz,
+        // T-988: the CTCSS tone / DCS code / "none" measured on an FM channel; `null` when
+        // nobody looked (not the same as `kind: "none"`).
+        "subaudible": p.subaudible,
         "t_s": ts_s(d.time.end),
         "source_session": d.id.to_string(),
         "source_recording": d.recording_ref.map(|r| r.to_string()),
