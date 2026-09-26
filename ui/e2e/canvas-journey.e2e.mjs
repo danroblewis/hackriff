@@ -133,7 +133,7 @@ const GREY_RGB = [Math.round(0.155 * 255), Math.round(0.16 * 255), Math.round(0.
  * T-996 moved it out of the retired per-viewport panel into the floating cluster, under Go-to: same
  * offer, same painted-offer consent, same gated `DeviceAction` on the press — a different parent.
  */
-const PANE_ACTION = '.map-retune-go';
+const PANE_ACTION = '.sf-scale .sf-pane-retune-go';
 const ZOOM = { shift: true }; // a FREQUENCY zoom; T-472 stops a plain wheel at either axis's bound.
 
 // ---------------------------------------------------------------------------
@@ -289,7 +289,7 @@ async function open({ port = PORT_BASE, mockFault = null } = {}) {
  * is the cluster's. Same facts, same frame; a different set of elements to read them off.
  */
 const ROWS = `JSON.stringify([...document.querySelectorAll('.sf-scale')].map((v) => {
-  const b = document.querySelector('.map-retune-go');
+  const b = document.querySelector('.sf-scale .sf-pane-retune-go');
   return {
     id: v.dataset.pane ?? '',
     viewport: 'pane',
@@ -299,7 +299,7 @@ const ROWS = `JSON.stringify([...document.querySelectorAll('.sf-scale')].map((v)
     counts: v.dataset.counts ?? '',
     spanS: Number(v.dataset.spanS),
     disabled: b ? b.disabled : null,
-    why: document.querySelector('.map-retune-why')?.textContent ?? '',
+    why: document.querySelector('.sf-scale .sf-pane-retune-why')?.textContent ?? '',
   };
 }))`;
 

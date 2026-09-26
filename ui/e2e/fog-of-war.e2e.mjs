@@ -82,12 +82,12 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 // 8959 / 8991 in lanes 1 and 2 - none of them in backend.mjs's FORBIDDEN set at any lane base.
 const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 8;
 
-// T-996 retired the app's per-viewport rows: a pane states itself on its own scale block
-// (`.sf-scale`, the frame's own report in its dataset — `canvas-journey.e2e.mjs`'s reading), and its
-// persistent Retune is the floating cluster's, for the active pane (`.map-retune-go`). Same facts,
-// same frame; a different set of elements to read them off.
+// T-996 retired the app's per-viewport rows: a pane states itself on its own chip (`.sf-scale`, the
+// frame's own report in its dataset — `canvas-journey.e2e.mjs`'s reading), and since T-1003 its
+// persistent Retune is a button ON that chip, inside the pane it acts on. Same facts, same frame; a
+// different set of elements to read them off — and the button is now read per pane, not globally.
 const PANE_ROW = '.sf-scale:not([hidden])';
-const PANE_ACTION = '.map-retune:not([hidden]) .map-retune-go';
+const PANE_ACTION = '.sf-scale:not([hidden]) .sf-pane-retune:not([hidden]) .sf-pane-retune-go';
 // T-529 added `window`: a retune to a region is now ONE device action carrying centre and span
 // together (`POST /api/control/window`) instead of a `rate` post followed by a `center` one. It
 // belongs here for both of this file's uses. In `assertNoDeviceCalls` its absence silently WEAKENED
@@ -110,7 +110,7 @@ const C_HZ = 200.0e6, C_VIEW_SPAN_HZ = 250e3;
 // ---------------------------------------------------------------------------
 
 const ROWS = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((v) => {
-  const b = document.querySelector('${PANE_ACTION}');
+  const b = v.querySelector('.sf-pane-retune:not([hidden]) .sf-pane-retune-go');
   return {
     id: v.dataset.pane ?? '',
     viewport: 'pane',
@@ -118,7 +118,7 @@ const ROWS = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((
     counts: v.dataset.counts ?? '',
     hasButton: !!b,
     disabled: b ? b.disabled : null,
-    why: document.querySelector('.map-retune-why')?.textContent ?? '',
+    why: v.querySelector('.sf-pane-retune-why')?.textContent ?? '',
     // The pane's own time span in seconds (T-996: the scale block's \`data-span-s\`, the exact number
     // the frame laid the pane out with — it was inferred from the retired row's ruler sentence).
     ruler: v.dataset.spanS ?? '',

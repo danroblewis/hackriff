@@ -7,7 +7,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { fmtScaleHz, fmtScaleS, freqScaleBar, niceBar, paneScale, scaleBudgetPx, scaleMarkOf, timeScaleBar } from "../src/surface/scale";
+import {
+  CHIP_INSET_PX, ScaleBars, fmtScaleHz, fmtScaleS, freqScaleBar, niceBar, paneScale, scaleBudgetPx, scaleMarkOf, timeScaleBar,
+} from "../src/surface/scale";
 
 test("T-996: the bar's length times the pane's Hz/px IS the quantity it states", () => {
   for (const spanHz of [20e6, 2e6, 937e3, 125e3, 4e3, 300]) {
@@ -143,3 +145,145 @@ test("T-1006 x T-996: the pane's device pill rides its scale block, and the sele
   assert.equal(none.device, null, "a host that names no front end gets no pill, not an invented one");
   assert.equal(none.state.device, "");
 });
+
+// ---------------------------------------------------------------------------
+// T-1003 (MMAP split view): the chip — every word on it is about ITS pane
+// ---------------------------------------------------------------------------
+
+const PANE1 = { id: "p1", f0Hz: 100e6, f1Hz: 102e6, t0Ns: 0, t1Ns: 10e9, rect: { x: 0, y: 0, w: 800, h: 600 } };
+const REPORT = {
+  tier: "detail", following: true, tierLabel: "detail", levelLabel: "L0 (2 kHz x 0.5 s cells)",
+  freqLabel: "101.000 MHz +/- 1 MHz", timeLabel: "LIVE", counts: "",
+};
+
+test("T-1003: a chip states its OWN pane — where it looks, what backs its IQ, its trace, its Retune", () => {
+  const live = scaleMarkOf(PANE1, {
+    ...REPORT,
+    iq: "raw IQ for this instant is in the ring", backing: "ring",
+    trace: "slice 12:00:01 (live frame) - peak -62 dB at 101.3 MHz",
+    retune: { label: "Retune", why: "to 101.0 MHz +/- 1 MHz", enabled: true },
+    retuneStatus: null,
+  }, 600, 1)!;
+  assert.equal(live.where, "101.000 MHz +/- 1 MHz · LIVE", "the kept centre/span/LIVE readout is not on the chip");
+  assert.equal(live.iq, "raw IQ for this instant is in the ring");
+  assert.equal(live.state.backing, "ring", "the backing must be STATE, not only a sentence to parse");
+  assert.match(live.trace!, /peak -62 dB/);
+  assert.deepEqual(live.retune, { label: "Retune", why: "to 101.0 MHz +/- 1 MHz", enabled: true });
+
+  // The SECOND pane, frozen an hour back past the ring, on the same frame: different words, and the
+  // difference is exactly the pane's own time position. Nothing of pane 1's leaks into it.
+  const past = scaleMarkOf(
+    { ...PANE1, id: "p2", t0Ns: 3600e9, t1Ns: 3660e9, rect: { x: 800, y: 0, w: 800, h: 600 } },
+    { ...REPORT, following: false, timeLabel: "-1 h", iq: "past the IQ ring: waterfall only, no audio", backing: "outside-ring" },
+    600, 1,
+  )!;
+  assert.equal(past.paneId, "p2");
+  assert.equal(past.where, "101.000 MHz +/- 1 MHz · -1 h");
+  assert.equal(past.state.backing, "outside-ring");
+  assert.notEqual(past.iq, live.iq, "two panes at two instants were given one IQ sentence");
+  assert.equal(past.state.following, "false");
+  assert.equal(past.trace, null, "a pane whose trace layer is off must claim no trace readout");
+  assert.equal(past.retune, null);
+  assert.equal(past.state.t1Ns, "3660000000000", "the chip's window is the PANE's, unrounded");
+});
+
+test("T-1003: a chip is bounded by its own pane, so no line runs into the pane beside it", () => {
+  const wide = scaleMarkOf(PANE1, REPORT, 600, 1)!;
+  const narrow = scaleMarkOf({ ...PANE1, rect: { x: 0, y: 0, w: 260, h: 600 } }, REPORT, 600, 1)!;
+  assert.ok(wide.maxWidthPx <= 800 - CHIP_INSET_PX + 1e-9, `${wide.maxWidthPx} px inside an 800 px pane`);
+  assert.ok(narrow.maxWidthPx < wide.maxWidthPx, "a narrower pane must bound its chip more tightly");
+  assert.ok(narrow.maxWidthPx > 0, "a 260 px pane still gets a chip, not a zero-width one");
+  // A device-pixel-ratio 2 canvas: the bound is CSS px, like every other placement here.
+  const dpr2 = scaleMarkOf({ ...PANE1, rect: { x: 0, y: 0, w: 1600, h: 1200 } }, REPORT, 1200, 2)!;
+  assert.equal(dpr2.maxWidthPx, wide.maxWidthPx);
+});
+
+test("T-1003: the chip's Retune press names the pane the chip is placed on, never a stale one", () => {
+  const doc = fakeDoc();
+  const pressed: string[] = [];
+  const root = doc.createElement("div");
+  const bars = new ScaleBars(root as unknown as HTMLElement, { pressRetune: (id) => pressed.push(id) });
+  const mark = (id: string, enabled: boolean) => scaleMarkOf(
+    { ...PANE1, id },
+    { ...REPORT, retune: { label: "Retune", why: `to ${id}`, enabled } },
+    600, 1,
+  )!;
+  bars.update([mark("p1", true)]);
+  const chip = root.children[0];
+  const go = find(chip, "sf-pane-retune-go")!;
+  go.fire("click");
+  assert.deepEqual(pressed, ["p1"]);
+  // The pool is indexed by POSITION: the same element is re-used for another pane next frame, and
+  // the press must follow the words on it rather than the pane it was minted for.
+  bars.update([mark("p2", true)]);
+  go.fire("click");
+  assert.deepEqual(pressed, ["p1", "p2"]);
+  // A refused offer is stated and unpressable, never silently hidden.
+  bars.update([mark("p2", false)]);
+  assert.equal(go.disabled, true);
+  assert.equal(go.getAttribute("aria-disabled"), "true");
+  go.fire("click");
+  assert.deepEqual(pressed, ["p1", "p2"], "a disabled offer reached the host");
+});
+
+test("T-1003: a line with nothing to say is emptied AND hidden, never left holding last frame's words", () => {
+  const doc = fakeDoc();
+  const root = doc.createElement("div");
+  const bars = new ScaleBars(root as unknown as HTMLElement, { pressRetune: () => {} });
+  bars.update([scaleMarkOf(PANE1, {
+    ...REPORT, iq: "raw IQ for this instant is in the ring", backing: "ring",
+    trace: "slice 12:00:01", retuneStatus: "Retuning to 433.92 MHz (settling)",
+    retune: { label: "Retune", why: "to 433.92 MHz", enabled: true },
+  }, 600, 1)!]);
+  const chip = root.children[0];
+  for (const cls of ["sf-where", "sf-pane-iq", "sf-pane-trace", "sf-pane-retune-status"]) {
+    assert.equal(find(chip, cls)!.hidden, false, `${cls} was hidden while it had something to say`);
+  }
+  assert.equal(find(chip, "sf-pane-retune")!.hidden, false);
+  assert.equal(find(chip, "sf-pane-retune-status")!.getAttribute("role"), "status",
+    "a retune the user's own pan asked for must reach a screen reader");
+  // The trace layer goes off and the mode stops saying anything: both lines go, and neither keeps
+  // its old text where a reader (or a screen reader) could still find it.
+  bars.update([scaleMarkOf(PANE1, { ...REPORT, iq: "raw IQ for this instant is in the ring", backing: "ring" }, 600, 1)!]);
+  for (const cls of ["sf-pane-trace", "sf-pane-retune-status"]) {
+    assert.equal(find(chip, cls)!.hidden, true, `${cls} survived having nothing to say`);
+    assert.equal(find(chip, cls)!.textContent, "", `${cls} kept last frame's words`);
+  }
+  assert.equal(find(chip, "sf-pane-retune")!.hidden, true, "a Retune with no offer behind it was shown");
+  assert.equal(find(chip, "sf-where")!.hidden, false, "a pane always has somewhere it is looking");
+});
+
+// A minimal element stand-in: this layer touches `createElement`, `append`, `dataset`, `style`,
+// `hidden`, `title`, `textContent` and one listener, and nothing else.
+type Handler = (e: Record<string, unknown>) => void;
+class FakeEl {
+  children: FakeEl[] = [];
+  attrs: Record<string, string> = {};
+  dataset: Record<string, string> = {};
+  style: Record<string, string> = {};
+  className = "";
+  textContent = "";
+  title = "";
+  type = "";
+  hidden = false;
+  disabled = false;
+  handlers: Record<string, Handler[]> = {};
+  constructor(public tag: string) {}
+  get ownerDocument() { return fakeDocFor(this); }
+  append(...c: (FakeEl | string)[]) { for (const x of c) if (typeof x === "string") this.textContent += x; else this.children.push(x); }
+  remove() {}
+  setAttribute(k: string, v: string) { this.attrs[k] = v; }
+  getAttribute(k: string) { return this.attrs[k] ?? null; }
+  addEventListener(t: string, fn: Handler) { (this.handlers[t] ??= []).push(fn); }
+  fire(t: string) { for (const fn of this.handlers[t] ?? []) fn({}); }
+}
+function fakeDoc() { return { createElement: (t: string) => new FakeEl(t) }; }
+function fakeDocFor(_el: FakeEl) { return fakeDoc(); }
+function find(el: FakeEl, cls: string): FakeEl | undefined {
+  for (const c of el.children) {
+    if (c.className.split(" ").includes(cls)) return c;
+    const d = find(c, cls);
+    if (d) return d;
+  }
+  return undefined;
+}

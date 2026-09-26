@@ -97,22 +97,12 @@
 .map-offer-go:disabled { opacity: .5; cursor: not-allowed; }
 .map-offer-x { min-width: 28px; min-height: 28px; border: 0; background: none; color: var(--muted); cursor: pointer; }
 
-/* T-996: the active viewport's capture controls, under the nudges — "the Retune button stays where
-   Go-to lives". Two small rows: the persistent Retune with the destination it would take (the
-   painted-offer rule, T-476/T-407: a press lands where the row SAID, so the sentence is on screen
-   beside the button, never only in a tooltip), and the capture-width presets. Never faded: it is a
-   device command with a stated destination (§10.2). Hidden entirely when the host offers none. */
-.map-retune { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px; border-color: var(--amber); }
-.map-retune-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.map-retune-why { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.map-retune-go {
-  flex: none; min-height: 26px; border: 1px solid var(--amber); color: var(--amber);
-  background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; font: 12px var(--ui);
-}
-.map-retune-go:disabled { opacity: .5; cursor: not-allowed; }
-/* T-1028: retune mode's line about this viewport (pending / settling / asking / the result). */
-.map-retune-status { font-size: 11px; color: var(--text); overflow-wrap: anywhere; }
-.map-retune-row[hidden] { display: none; }
+/* T-996 put the active viewport's Retune here, under the nudges. T-1003 moved it INSIDE the pane it
+   acts on (`centre.css`'s `.sf-pane-retune`), with the retune-mode sentence beside it: one block
+   under Go-to could only ever name the hidden active pane, and the user's word for it was "out of
+   place". What stays in the cluster is the capture-width row, now a section of the viewport menu —
+   which already names the pane it acts on. Never faded: a device command with a stated
+   destination (§10.2). Hidden entirely when the host offers no preset. */
 .map-widths { display: flex; gap: 4px; flex-wrap: wrap; }
 .map-width {
   min-height: 24px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 6px;

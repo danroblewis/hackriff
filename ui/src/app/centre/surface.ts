@@ -286,11 +286,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // (T-996 retired the `.sf-chrome` per-viewport panel, so no `chrome` element is minted here.)
   const liveEl = h("div", { class: "sf-pane-live", role: "group", "aria-label": "Per-viewport Live / Freeze" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
-  // T-996: the KEPT one-line readout — where this pane is looking (centre ± span) and whether it is
-  // on the live edge or a past instant. Written per FRAME from the status the renderer just
-  // reported, never on the poll, for the same reason every other overlay is (docs/16 §8: one
-  // mapping, one frame).
-  const whereEl = h("span", { class: "sf-where", role: "status" });
+  // T-996's kept one-line readout — where this pane is looking (centre ± span), live or a past
+  // instant — is T-1003's, and it is no longer HERE: with two panes open there is no "this pane" to
+  // write one line about. It is a line of each pane's own chip (`surface/scale.ts`'s `.sf-where`),
+  // written per FRAME from that pane's own status, for the same reason every other overlay is
+  // (docs/16 §8: one mapping, one frame). What stays bottom-left is view-wide or transient: the
+  // colour scale, which is one ramp for the whole surface, and the hover readout, which follows one
+  // pointer.
   const note = h("div", { class: "sf-note", role: "status" });
   // T-1041: hidden until the trace layer is switched on (it is off by default).
   const traceEl = h("div", { class: "sf-trace", role: "status", hidden: true });
@@ -319,7 +321,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const rangeEl = h("span", { class: "sf-range", role: "status" });
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
-  const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, whereEl, rangeEl, hoverEl);
+  const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
   const stage = h("div", { class: "sf-stage" }, canvas, activeEl, splitEl, liveEl, pinsEl, hudEl, priorsLabelEl, annoEl, scaleEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
@@ -359,11 +361,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // small short section bottom-right that shows the distance measure … A sense of scale is what the
   // current centre freq and width is." So:
   //
-  //  - **bottom-right, per pane**: the scale bars (`scaleEl`, `surface/scale.ts`) with that pane's
-  //    honesty tier and cell size beside them — the three-tier rule, stated where it is read;
-  //  - **bottom-left, one line**: where the active pane is looking (`whereEl`), the colour scale
-  //    (`rangeEl`, T-470 — a fixed range that clips is honest only if it is quoted), and the hover
-  //    readout, which is where PEAK dB now lives: on demand, under the pointer, not permanently;
+  //  - **bottom-right, per pane**: T-1003's CHIP (`scaleEl`, `surface/scale.ts`) — the scale bars,
+  //    that pane's honesty tier and cell size (the three-tier rule, stated where it is read), where
+  //    THAT pane is looking, what raw IQ backs ITS time position, its trace readout, and its own
+  //    Retune. Everything that describes one viewport is inside that viewport's rectangle;
+  //  - **bottom-left, one line**: the colour scale (`rangeEl`, T-470 — a fixed range that clips is
+  //    honest only if it is quoted), and the hover readout, which is where PEAK dB now lives: on
+  //    demand, under the pointer, not permanently. Both are view-wide or follow the one pointer;
+  //    nothing here describes "the" viewport, because with a split open there is no such thing;
   //  - **conditional, above it**: the fog note and the ranked band-plan priors, each shown only
   //    while the viewer has asked for that state (fog hidden; the priors layer on).
   //
@@ -501,6 +506,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // address must not take their live edge down with it.
   startCaptureClock(ctx);
 
+  /** T-1003: each pane's own IQ backing, recorded in the frame that drew its rules (`ringQuads`)
+   * and said on that pane's chip in the same frame. Keyed by pane id; a closed pane's entry is
+   * dropped by `scaleFrame`, which sees exactly the panes the frame drew. */
+  const paneIq = new Map<string, { backing: string; words: string }>();
+  /** T-1003: each pane's own trace readout, recorded by `traceFor` in the same frame, and absent
+   * entirely for a pane whose trace layer is off — a chip says nothing about a layer not drawn. */
+  const paneTrace = new Map<string, string>();
+
   // ---- the IQ horizon and the retention bound (T-506) ----
   //
   // Two rules across every pane, from the ring window `GET /api/timeline` reports, laid out through
@@ -513,6 +526,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const s = store.get();
     const rules = ringRules(s.captureWindow, edge > 0 ? edge / S_TO_NS : null);
     const p = preview;
+    // T-1003: **every** pane's own answer, not the active one's. Which side of the ring's horizon a
+    // viewport sits on is a fact about ITS time position — a frozen pane an hour back and a live
+    // pane beside it have different answers, and one sentence for both would be false for one of
+    // them. Recorded here, in the frame that drew the rules, and read by the chip in the same frame
+    // (`scaleFrame` runs in the `dom` hook, after this overlay pass — never a frame behind).
+    if (p) {
+      const following = p.view.panes.isFollowing(pane.id);
+      const posS = pane.box.t1Ns / S_TO_NS;
+      const backing = iqBackingAt(posS, following, rules, s.iqAvailability);
+      paneIq.set(pane.id, { backing, words: iqNote(backing) });
+    }
     if (p && pane.id === p.activePane) {
       const following = p.view.panes.isFollowing(pane.id);
       const posS = pane.box.t1Ns / S_TO_NS;
@@ -813,10 +837,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // produced. A scale bar computed on the 1 s chrome poll would state last second's zoom beside this
   // second's pixels, which is the T-388 family exactly; and the readout beside it must not be a
   // second opinion about the same pane.
-  const scaleLayer = new ScaleBars(scaleEl);
+  // T-1003: the chip's one press. It names the pane it came from, so pressing Retune inside pane 1
+  // reaches `pressRetune("pane-1")` and cannot touch pane 2 — the same painted-offer discipline the
+  // retired cluster block had (`lastPainted`), now with the pane it belongs to on screen around it.
+  const scaleLayer = new ScaleBars(scaleEl, { pressRetune: (paneId) => pressRetune(paneId) });
   /** CSS px the floating chrome at the canvas's bottom reaches up (the card's peek strip, an open
    * output strip) — what bottom-anchored overlays clear. NOT a pane inset (see `fit`). */
   let floatLiftCss = 0;
+  /** T-1003: the bottom-left status line's box, in CSS px from the canvas's top-left, so a pane
+   * chip in the same corner is placed above it rather than under it. Measured when the layout
+   * changes (`fit`), like `floatLiftCss`; `null` until the first measurement. */
+  let statusBoxCss: { left: number; right: number; top: number } | null = null;
   const scaleFrame = (
     panes: readonly PaneView[], hPx: number, dpr: number, statuses: readonly PaneStatus[],
   ) => {
@@ -829,22 +860,34 @@ function mount(el: HTMLElement, ctx: AppContext) {
         { id: v.id, f0Hz: v.box.f0Hz, f1Hz: v.box.f1Hz, t0Ns: v.box.t0Ns, t1Ns: v.box.t1Ns, rect: v.rect },
         { tier: st.tier, tierLabel: st.tierLabel, levelLabel: st.levelLabel, freqLabel: st.freqLabel,
           timeLabel: st.timeLabel, counts: paneCountsText(st), following: st.following,
-          device: paneDevicePill(v.id) },
+          device: paneDevicePill(v.id),
+          // T-1003: this pane's own words, off this frame — the IQ backing its time position has
+          // (`ringQuads`, the overlay pass above), its trace readout while its layer is on, and its
+          // own Retune offer and retune-mode sentence, each asked for BY PANE id.
+          iq: paneIq.get(v.id)?.words ?? null,
+          backing: paneIq.get(v.id)?.backing ?? "",
+          trace: traceOn ? paneTrace.get(v.id) ?? null : null,
+          retune: chromeAction(v.id),
+          retuneStatus: retuneStatusFor(v.id) },
         hPx, dpr,
       );
       // T-996 (user 2026-09-25 20:20, full bleed): the panes run under the card's peek strip, so a
       // pane's bottom-right corner may be under it; the block is lifted clear of the floating chrome
       // at the bottom (`floatLiftCss`, measured in `fit`) rather than drawn under it.
-      if (m) marks.push(m.bottom > hPx / dpr - floatLiftCss ? { ...m, bottom: hPx / dpr - floatLiftCss } : m);
-      // The KEPT one-liner, for the pane gestures apply to: centre ± span, and LIVE or how far
-      // behind the edge this viewport is parked. The same two strings the retired panel showed —
-      // what changed is that they are one line on the picture instead of a panel over it.
-      if (v.id === preview?.activePane) {
-        // T-1006: whose coverage is the pane's own device pill (on its scale block), so the bare
-        // `device_id` the line used to append is not repeated here.
-        setText(whereEl, [st.freqLabel, st.timeLabel].filter(Boolean).join(" · "));
-      }
+      if (!m) continue;
+      let bottom = Math.min(m.bottom, hPx / dpr - floatLiftCss);
+      // T-1003: and clear of the bottom-LEFT status line where the two would meet. The line is
+      // view-wide (the colour ramp, the hover readout) and the chip is the pane's own words; at a
+      // phone width the bottom pane's corner is exactly where the line is, and a control drawn under
+      // it is not a control (the hit test in `app-pane-chip.e2e.mjs` is what caught it). Measured in
+      // `fit`, never assumed: how tall that line is, is CSS's answer and changes with width.
+      const sb = statusBoxCss;
+      if (sb && bottom > sb.top && m.right > sb.left && m.right - m.maxWidthPx < sb.right) bottom = sb.top - 6;
+      marks.push(bottom === m.bottom ? m : { ...m, bottom });
     }
+    // T-1003: a pane that closed between frames leaves no words behind — the chips are built from
+    // exactly the panes THIS frame drew, so the two maps are pruned to them here.
+    for (const m of [paneIq, paneTrace]) for (const id of [...m.keys()]) if (!byId.has(id)) m.delete(id);
     scaleLayer.update(marks);
     // The capture controls name the ACTIVE viewport's current window, so they are re-derived in the
     // frame beside the bars — never on the 1 s poll (T-476: a label from a poll names somewhere the
@@ -1173,6 +1216,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // reason the quads are: it describes the frame that was just drawn. It names the SOURCE, because
     // "a live frame" and "a 1.0 s cell" are different claims about the same picture and the coarser
     // one must not be passed off as an instant.
+    // T-1003: the SHORT readout, for every pane — the chip inside pane 2 states pane 2's slice.
+    // Computed from the same `slice`/`box` the pane was just drawn from, in the pane's own pass.
+    {
+      const pk = peakOf(slice, pane.box);
+      paneTrace.set(pane.id, pk
+        ? `slice ${at(sliceAtNs)} (${sliceSrc}) · peak ${fmtDb(pk.db)} at ${fmtHz(pk.hz)}`
+        : `slice ${at(tAtNs)} (${sliceSrc}) — ${report.tiles === 0 ? "no tile in hand yet" : "nothing observed"}`);
+    }
     if (pane.id === p.activePane) {
       const slicePk = peakOf(slice, pane.box);
       const holdPk = peakOf(hold, pane.box);
@@ -2128,19 +2179,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
       wholeSurface: () => { pv.fitToSurface(); lastMirror = ""; mirror(); renderLive(); },
       paneCount: () => pv.view.panes.list().length,
       paneMenuExtras: [recordBtn],
-      // T-996: T-476's persistent per-pane Retune and T-496's width presets, rehomed from the
-      // retired viewport panel to where Go-to and the nudges are. The ARITHMETIC is untouched — the
-      // same `chromeAction`/`widthActions` painted per frame, the same `lastPainted` consent record,
-      // the same `acceptPaneRetune`/`acceptPaneWidth` gate on the press — only the place changed.
-      paneRetune: () => chromeAction(pv.activePane),
-      pressPaneRetune: () => pressRetune(pv.activePane),
+      // T-496's width presets, in the viewport menu since T-1003 (it names the pane it acts on).
+      // T-476's persistent Retune and T-1028's retune-mode sentence are no longer cluster chrome at
+      // all: each pane paints its own in its own chip (`scaleFrame` above), off the same
+      // `chromeAction`/`retuneStatusFor` per frame and through the same `lastPainted` consent record
+      // and `acceptPaneRetune` gate. The arithmetic never moved; only who it is asked about did.
       paneWidths: () => widthActions(pv.activePane),
       pressPaneWidth: (key) => pressWidth(pv.activePane, key),
-      // T-1028's per-pane status line (it was the retired rows' `chromeStatus`), said on
-      // the same capture block. The active pane's own line first; else the pane the mode is acting on,
-      // because a retune in flight moves the ONE radio whichever pane asked, and must never be silent.
-      paneStatus: () => retuneStatusFor(pv.activePane)
-        ?? (retuneMode.pendingPane ? retuneStatusFor(retuneMode.pendingPane) : null),
       // T-1006: the front-end picker for the active pane, and the "one viewport per front end"
       // split. Every word comes from `surface/panedevice.ts`; every press is a view change.
       deviceMenu: () => {
@@ -2442,6 +2487,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // T-996: the scale blocks sit at their pane's bottom-right corner, which now runs under the
       // card's strip; they are lifted clear of the floating chrome by the same clearance.
       floatLiftCss = chromeLift;
+      // T-1003: and where the bottom-left status line actually is this layout — the pane chips in
+      // that corner clear it (`scaleFrame`). Read after the lift above, since the line is docked
+      // against the same clearance; a zero-height line (nothing to say) bounds nothing.
+      const st = statusEl.getBoundingClientRect();
+      statusBoxCss = st.height > 0 && st.width > 0
+        ? { left: st.left - r.left, right: st.right - r.left, top: st.top - r.top }
+        : null;
       stage.style.setProperty("--chrome-bottom", `${chromeUnder}px`);
       // The FAB and the readouts dock above the floating chrome's bottom clearance, in CSS px
       // (`--map-strip` keeps its name; with the minimap retired, T-995, it is that clearance alone).

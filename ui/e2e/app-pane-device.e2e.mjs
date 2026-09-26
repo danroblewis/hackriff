@@ -40,10 +40,11 @@ import { Browser } from "./harness.mjs";
 import { startBackend } from "./backend.mjs";
 
 const ART = path.join(path.dirname(fileURLToPath(import.meta.url)), "artifacts");
-// T-996 retired the per-viewport rows from the app: a pane states itself on its own scale block
+// T-996 retired the per-viewport rows from the app: a pane states itself on its own chip
 // (`.sf-scale`, one per pane, the frame's own report in its dataset), which is where T-1006's device
-// pill now rides; the capture controls (Retune, the width presets) are the floating cluster's, for
-// the ACTIVE pane (`.map-retune`). Same facts, read off the elements that now carry them.
+// pill now rides. T-1003 put the pane's own Retune ON that chip, inside the pane it acts on, and the
+// capture-width presets in the viewport menu, which names the pane it acts on. Same facts, read off
+// the elements that now carry them.
 const PANE_ROW = '.sf-scale:not([hidden])';
 
 /** Two DIFFERENT recordings, because a mock's `device_id` is the recording's own and `hk serve`
@@ -63,10 +64,17 @@ const PANES = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map(
   pill: r.querySelector('.sf-scale-device').hidden ? null : r.querySelector('.sf-scale-device').textContent,
   why: r.querySelector('.sf-scale-device').title,
 })))`;
-/** The ACTIVE pane's capture control, off the floating cluster (T-996: one block, for the active pane). */
-const ACTION = `JSON.stringify((() => { const b = document.querySelector('.map-retune'), go = document.querySelector('.map-retune-go');
-  return !b || b.hidden || go.closest('[hidden]') ? null
-    : { label: go.textContent, enabled: !go.disabled, why: document.querySelector('.map-retune-why').textContent }; })())`;
+/** The ACTIVE pane's capture control — T-1003: ON that pane's own chip, so it is read from the chip
+ * the active-pane outline names rather than from one block that could only mean "the" viewport. */
+const ACTION = `JSON.stringify((() => {
+  // The active-pane outline names the pane while there is more than one; with a single pane there is
+  // no "which one" to mark, and its chip is the only one on the surface.
+  const id = document.querySelector('.sf-active-pane')?.dataset.paneId;
+  const all = [...document.querySelectorAll('.sf-scale')].filter((c) => !c.hidden);
+  const chip = all.find((c) => c.dataset.pane === id) ?? (all.length === 1 ? all[0] : undefined);
+  const b = chip?.querySelector('.sf-pane-retune'), go = chip?.querySelector('.sf-pane-retune-go');
+  return !b || b.hidden || !go ? null
+    : { label: go.textContent, enabled: !go.disabled, why: chip.querySelector('.sf-pane-retune-why').textContent }; })())`;
 /** Make pane `n` (1-based) the active pane with the product's own key (T-1000), and wait for it. */
 async function activate(page, n, id) {
   await page.key(String(n));
@@ -186,13 +194,17 @@ test("two mock front ends: a device pill per pane, one pane per device, and each
     // at the pane's own centre, so it is achievable whatever the pane is zoomed to; it reaches the
     // SAME `applyDeviceAction` gate through `paneWidthAction`, and it is the same question: does the
     // press name this pane's radio?
-    // T-996: the width presets are the cluster's, for the ACTIVE pane — so each pane is made active
-    // with the product's own key (T-1000) and its preset pressed there, the way a user does it.
-    const width = `[...document.querySelectorAll('.map-retune .map-width')].find((b) => !b.disabled)`;
+    // T-1003: the width presets are a section of the VIEWPORT MENU, which names the pane it acts on
+    // — so each pane is made active with the product's own key (T-1000), the menu is opened, and its
+    // preset is pressed there, the way a user does it.
+    const width = `[...document.querySelectorAll('.map-pane-menu:not([hidden]) .map-pane-width .map-width')].find((b) => !b.disabled)`;
     const pressedIds = [];
     const rowActions = [];
     for (const i of [0, 1]) {
       await activate(page, i + 1, two[i].id);
+      // Open the viewport menu the presets now live in (closed again by the press below, as the
+      // menu's own items are — a press on a device control closes the menu it was read from).
+      await page.eval(`document.querySelector('.map-pane-menu').hidden && document.querySelector('.map-pane-btn').click()`);
       await page.waitFor(`pane ${i + 1} to offer an achievable capture width`, `!!${width}`, { timeoutMs: 30000 });
       t.diagnostic(`pane ${i + 1} width press: ${await page.eval(`JSON.stringify([${width}.textContent, ${width}.title])`)}`);
       // Pressable, then pressed: a control a user cannot reach is not a control (T-528's hit test).
