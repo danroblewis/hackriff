@@ -103,12 +103,24 @@ impl WordSearch {
             .ok_or_else(|| perr("sync-word needs frame_bits"))?;
         let length = FrameLength::from_params(p.0, max)?;
         let include_sync = p.bool_or("include_sync", false);
+        let lsb = p.str("bit_order") == Some("lsb");
+        if length.reopens() {
+            if include_sync {
+                return Err(perr("terminator.reopen needs include_sync false"));
+            }
+            if lsb && length.terminator_step_bits() % 8 != 0 {
+                return Err(perr(
+                    "terminator.reopen with bit_order lsb needs step_bits a multiple of 8 (the \
+                     closing word must end on a character boundary)",
+                ));
+            }
+        }
         let body_off = if include_sync { bits as usize } else { 0 };
         Ok(Self {
             corr,
             max_errors: p.uint_or("max_errors", 0)?,
             include_sync,
-            lsb: p.str("bit_order") == Some("lsb"),
+            lsb,
             either: p.str("polarity") == Some("either"),
             invert: 0,
             body: Vec::with_capacity(body_off + max as usize),
@@ -141,6 +153,31 @@ impl WordSearch {
         self.body.push(b);
         self.length
             .after_bit(&mut self.st, &self.body[self.body_off..])
+    }
+
+    /// Ends the frame whose last bit is `end_bit`; with `terminator.reopen` (T-1054) a frame
+    /// that ended on its terminator word opens the next frame on that same word (shared-flag
+    /// HDLC), with the polarity it synced on, instead of restarting the sync search.
+    fn end_frame(
+        &mut self,
+        out: &mut FrameBuf,
+        clock: &Clock,
+        index: &mut u64,
+        channel: u16,
+        end_bit: u64,
+    ) {
+        let reopen = self
+            .length
+            .ended_on_reopening_terminator(&self.st, self.body.len() - self.body_off);
+        let invert = self.invert;
+        self.emit(out, clock, index, channel, end_bit);
+        if reopen {
+            self.in_frame = true;
+            self.invert = invert;
+            self.errors = 0;
+            self.st = LengthState::default();
+            self.first_bit = end_bit + 1;
+        }
     }
 
     fn emit(
@@ -216,7 +253,7 @@ impl WordSearch {
         let b = b ^ self.invert;
         if !self.lsb {
             if self.append(b) {
-                self.emit(out, clock, index, channel, bit);
+                self.end_frame(out, clock, index, channel, bit);
             }
             return;
         }
@@ -227,7 +264,7 @@ impl WordSearch {
             let chr = self.chr;
             for &c in chr.iter().rev() {
                 if self.append(c) {
-                    self.emit(out, clock, index, channel, bit);
+                    self.end_frame(out, clock, index, channel, bit);
                     return;
                 }
             }

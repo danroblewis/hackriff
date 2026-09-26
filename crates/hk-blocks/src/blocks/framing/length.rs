@@ -31,6 +31,8 @@ struct Terminator {
     bits: usize,
     step_bits: usize,
     trailer_bits: u32,
+    /// `reopen` (T-1054, shared-flag HDLC): the word that closes a frame also opens the next.
+    reopen: bool,
 }
 
 /// Parsed frame-length rules.
@@ -45,6 +47,8 @@ pub struct FrameLength {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LengthState {
     target: Option<u32>,
+    /// Frame length at which the last terminator match ended.
+    term_end: Option<u32>,
 }
 
 impl FrameLength {
@@ -118,11 +122,19 @@ impl FrameLength {
                             .ok_or_else(|| perr("terminator word wider than bits"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let trailer_bits = t.uint_or("trailer_bits", 0)?;
+                let reopen = t.bool_or("reopen", false);
+                if reopen && trailer_bits != 0 {
+                    return Err(perr(
+                        "terminator.reopen needs trailer_bits 0 (the closing word must end the frame to open the next)",
+                    ));
+                }
                 Some(Terminator {
                     words,
                     bits,
                     step_bits: t.uint_or("step_bits", 1)?.max(1) as usize,
-                    trailer_bits: t.uint_or("trailer_bits", 0)?,
+                    trailer_bits,
+                    reopen,
                 })
             }
         };
@@ -131,6 +143,23 @@ impl FrameLength {
             length_from,
             terminator,
         })
+    }
+
+    /// Whether `terminator.reopen` is set (only `sync_search` honours it; other frame
+    /// producers refuse it).
+    pub fn reopens(&self) -> bool {
+        self.terminator.as_ref().is_some_and(|t| t.reopen)
+    }
+
+    /// The terminator's `step_bits` (1 without a terminator).
+    pub fn terminator_step_bits(&self) -> usize {
+        self.terminator.as_ref().map_or(1, |t| t.step_bits)
+    }
+
+    /// After [`Self::after_bit`] returned `true` for a frame of `n` bits: whether that frame
+    /// ended on a terminator word whose closing word also opens the next frame (`reopen`).
+    pub fn ended_on_reopening_terminator(&self, st: &LengthState, n: usize) -> bool {
+        self.reopens() && st.term_end == Some(n as u32)
     }
 
     /// The maximum (or fixed) length, bits.
@@ -189,6 +218,7 @@ impl FrameLength {
             && (n - term.bits) % term.step_bits == 0
             && term.words.contains(&read(n - term.bits, term.bits))
         {
+            st.term_end = Some(n as u32);
             let t = (n as u32)
                 .saturating_add(term.trailer_bits)
                 .min(self.max_bits);

@@ -29,6 +29,11 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
     }
     let max_bits = i64_or(p, "frame_bits", 0).clamp(0, i64::from(u32::MAX)) as u32;
     let length = FrameLength::from_params(p, max_bits)?;
+    if length.reopens() {
+        return Err(BlockError::Params(
+            "terminator.reopen is sync_search only (a shared flag re-opens a sync search)".into(),
+        ));
+    }
     Ok(Box::new(Ppm {
         params: p.clone(),
         bit_rate: require_f64(p, "bit_rate_bd")?,

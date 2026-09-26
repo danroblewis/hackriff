@@ -10,7 +10,7 @@ use hk_recipe::{FieldMap, Params, PortType, Recipe};
 use serde_json::{Value, json};
 
 use super::common::testutil::{
-    Owned, bits_of, build, bytes_bits, noise, run_bits, run_bits_to_bits, run_frames,
+    Owned, bits_of, build, bytes_bits, noise, run_bits, run_frames, try_build,
 };
 use crate::block::ParamUpdate;
 use crate::blocks::fec::tests::pocsag_word;
@@ -534,7 +534,13 @@ fn ais_hdlc_sync_destuff_and_crc16_x25() {
     for chunk in [1, 7, 1000] {
         // Flags are searched on the still-stuffed line, then each frame is destuffed on its own.
         let mut sync = build("sync_search", sync_params.clone(), PortType::Bits);
-        let stuffed = run_bits(sync.as_mut(), &stream, chunk, false);
+        // The recipe's `terminator.reopen` (T-1054): each closing flag opens a frame too, so the
+        // idle ones after a burst come out as short junk frames (destuff aborts them, the FCS
+        // refuses them); the two bursts are the long frames.
+        let stuffed: Vec<Owned> = run_bits(sync.as_mut(), &stream, chunk, false)
+            .into_iter()
+            .filter(|f| f.info.bit_len > 64)
+            .collect();
         assert_eq!(stuffed.len(), 2, "two independent bursts, chunk {chunk}");
         let mut destuff = build("bitstuff", destuff_params.clone(), PortType::Frames);
         let frames = run_frames(destuff.as_mut(), &stuffed, chunk.min(2), false);
@@ -578,6 +584,110 @@ fn ais_hdlc_sync_destuff_and_crc16_x25() {
             "corrupted, chunk {chunk}"
         );
     }
+}
+
+/// T-1054: on a continuously demodulated AIS channel the line between bursts is noise, which
+/// matches 0x7E about once per 256 bits and opens a junk frame that the next 0x7E closes. With a
+/// terminator that only closes, a real burst's opening flag arriving mid-junk-frame is spent
+/// closing the junk and the real frame is lost (about half of them). HDLC shares the flag: the
+/// recipe's `terminator.reopen` makes the closing flag open the next frame, so every real frame
+/// still decodes. Each burst carries the ITU-R M.1371 24-bit training sequence (alternating
+/// bits) before its opening flag, as on air.
+#[test]
+fn ais_every_real_frame_decodes_with_noise_between_bursts() {
+    let x25 = CATALOGUE
+        .iter()
+        .find(|e| e.name == "CRC-16/IBM-SDLC")
+        .unwrap()
+        .params;
+    let flag = bits_of(0x7E, 8);
+    let messages: Vec<Vec<u8>> = (0..40u64)
+        .map(|k| {
+            noise(168, 7_000 + k)
+                .chunks(8)
+                .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b))
+                .collect()
+        })
+        .collect();
+    let mut stream = noise(300, 1);
+    for (k, m) in messages.iter().enumerate() {
+        let fcs = x25.compute(m) as u16;
+        let mut on = m.clone();
+        on.extend(fcs.to_le_bytes());
+        stream.extend((0..24).map(|i| (i % 2) as u8)); // training sequence
+        stream.extend(&flag);
+        stream.extend(hdlc_stuff(&lsb_first_bits(&on)));
+        stream.extend(&flag);
+        // Noise between bursts, of varied length (so the junk-frame phase varies).
+        stream.extend(noise(200 + 37 * k, 50_000 + k as u64));
+    }
+
+    for chunk in [1, 13, 1000] {
+        let mut sync = build("sync_search", recipe_node("ais", "sync"), PortType::Bits);
+        let stuffed = run_bits(sync.as_mut(), &stream, chunk, false);
+        let mut destuff = build("bitstuff", recipe_node("ais", "destuff"), PortType::Frames);
+        let frames = run_frames(destuff.as_mut(), &stuffed, 3, false);
+        let mut crc = build("crc", recipe_node("ais", "crc"), PortType::Frames);
+        let out = run_frames(crc.as_mut(), &frames, 3, false);
+        let valid: Vec<&Vec<u8>> = out
+            .iter()
+            .filter(|f| f.info.check == CrcStatus::Valid)
+            .map(|f| &f.bits)
+            .collect();
+        let missed: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                let mut want = bytes_bits(m);
+                want.extend(&flag);
+                !valid.contains(&&want)
+            })
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            missed.is_empty(),
+            "chunk {chunk}: real frames lost {missed:?} of {}",
+            messages.len()
+        );
+    }
+}
+
+/// T-1054: `terminator.reopen` is refused where it cannot mean "the closing word opens the next
+/// frame": with trailer bits, with `include_sync`, with `bit_order: lsb` off character steps, and
+/// in the other frame producers.
+#[test]
+fn terminator_reopen_refuses_meaningless_combinations() {
+    let base = json!({"mode": "sync-word", "sync_word": "0x7E", "sync_bits": 8, "frame_bits": 256,
+        "terminator": {"words": ["0x7E"], "bits": 8, "reopen": true}});
+    let with = |patch: Value| {
+        let mut v = base.clone();
+        for (k, x) in patch.as_object().unwrap() {
+            if k == "terminator" {
+                for (tk, tx) in x.as_object().unwrap() {
+                    v["terminator"][tk] = tx.clone();
+                }
+            } else {
+                v[k] = x.clone();
+            }
+        }
+        v
+    };
+    let ok = |name: &str, v: Value| try_build(name, v, PortType::Bits).is_ok();
+    assert!(ok("sync_search", base.clone()));
+    assert!(!ok(
+        "sync_search",
+        with(json!({"terminator": {"trailer_bits": 16}}))
+    ));
+    assert!(!ok("sync_search", with(json!({"include_sync": true}))));
+    assert!(!ok("sync_search", with(json!({"bit_order": "lsb"}))));
+    assert!(ok(
+        "sync_search",
+        with(json!({"bit_order": "lsb", "terminator": {"step_bits": 8}}))
+    ));
+    assert!(!ok(
+        "deframe",
+        json!({"frame_bits": 64, "terminator": {"words": ["0x7E"], "bits": 8, "reopen": true}})
+    ));
 }
 
 // ---- length_from: ADS-B DF decides 56/112 ----
@@ -694,12 +804,10 @@ fn ax25_bit_stuff(bits: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The bug T-952 found and fixed: `bitstuff` must destuff the *whole continuous line* before
-/// `sync_search` cuts a frame, not the other way around. Flags pass through unstuffed (T-613),
-/// so a stuffed zero anywhere in the frame body shifts every later octet's alignment; destuffing
-/// after framing (bitstuff in `frames` mode on `sync_search`'s output) would feed `sync_search`'s
-/// `bit_order: lsb` a still-stuffed span and reverse the wrong 8-bit groups. Destuffing the line
-/// first means every downstream octet boundary is already correct by the time framing runs.
+/// The AX.25 chain (T-952, reshaped by T-1054 to the AIS shape of T-963): `sync_search` finds
+/// the flags on the still-stuffed line — the only place the flag is unique — and `bitstuff`
+/// destuffs each frame on its own, `bit_order: lsb` reassembling the LSB-first octets after the
+/// stuffed zeros are gone (so octet boundaries are right however many were stuffed).
 ///
 /// `sync_search`'s terminator match keeps the closing flag *in* the frame (as ACARS's ETX/ETB
 /// stays in its frame), so `crc`'s `span.end_trim_bits: 8` locates the FCS eight bits before the
@@ -735,26 +843,26 @@ fn known_aprs_ui_frame_destuffs_frames_and_fcs_validates_blind() {
     stream.extend(&flag); // closing flag
     stream.extend(&flag); // trailing flag, as a real transmitter would send
 
-    let destuff_params = recipe_node("aprs", "destuff");
-    let mut once = build("bitstuff", destuff_params.clone(), PortType::Bits);
-    let destuffed = run_bits_to_bits(once.as_mut(), &stream, stream.len());
+    let mut frames = Vec::new();
     for chunk in [1, 7, 64] {
-        let mut d = build("bitstuff", destuff_params.clone(), PortType::Bits);
+        let mut sync = build("sync_search", recipe_node("aprs", "sync"), PortType::Bits);
+        let stuffed_frames = run_bits(sync.as_mut(), &stream, chunk, false);
+        let mut d = build("bitstuff", recipe_node("aprs", "destuff"), PortType::Frames);
+        frames = run_frames(d.as_mut(), &stuffed_frames, 2, false);
+        // The closing flag also opens a frame (`terminator.reopen`), which the trailing flag
+        // closes: a flag-only frame the FCS refuses.
         assert_eq!(
-            run_bits_to_bits(d.as_mut(), &stream, chunk),
-            destuffed,
-            "chunk {chunk}"
+            frames.len(),
+            2,
+            "the HDLC frame, then a flag-only one, chunk {chunk}"
+        );
+        assert_eq!(frames[1].info.bit_len, 8, "chunk {chunk}");
+        assert_eq!(
+            frames[0].bits,
+            bytes_bits(&tx_with_flag),
+            "destuffed per frame, octets reversed to natural order (bit_order: lsb), chunk {chunk}"
         );
     }
-
-    let mut sync = build("sync_search", recipe_node("aprs", "sync"), PortType::Bits);
-    let frames = run_bits(sync.as_mut(), &destuffed, 17, false);
-    assert_eq!(frames.len(), 1, "one HDLC frame between flags");
-    assert_eq!(
-        frames[0].bits,
-        bytes_bits(&tx_with_flag),
-        "octets reversed to natural order (bit_order: lsb) on an already-destuffed line"
-    );
 
     let mut bad = frames[0].clone();
     bad.bits[8 * 20 + 2] ^= 1; // inside the info field
@@ -814,6 +922,49 @@ fn known_aprs_ui_frame_destuffs_frames_and_fcs_validates_blind() {
         info_text,
         "info, closing flag byte trimmed"
     );
+}
+
+/// T-1054: an AX.25 transmitter opens with a run of flags (TXDELAY), and the line between
+/// packets is noise. Without a shared flag the sync search alternates open/close over the flag
+/// run, so an even number of flags spends the last one closing an empty frame and the packet is
+/// lost; and a frame opened by a noise-born flag must see the real flag at any bit offset. The
+/// recipe's `terminator.reopen` on the stuffed line at every bit: the packet decodes whatever
+/// the flag count, and after noise.
+#[test]
+fn aprs_packet_decodes_after_any_flag_preamble_length_and_noise() {
+    let mut content = ax25_callsign_octets("APRS", 0, false);
+    content.extend(ax25_callsign_octets("N0CALL", 9, true));
+    content.extend([0x03, 0xF0]);
+    content.extend_from_slice(b">T-1054 shared flags");
+    let x25 = CATALOGUE
+        .iter()
+        .find(|e| e.name == "CRC-16/IBM-SDLC")
+        .unwrap()
+        .params;
+    let fcs = x25.compute(&content) as u16;
+    let mut tx = content.clone();
+    tx.extend(fcs.to_le_bytes());
+    let flag = bits_of(0x7E, 8);
+    let mut want = content.clone();
+    want.push(0x7E);
+    for flags in 1..=6usize {
+        let mut stream = noise(333, flags as u64);
+        stream.extend(flag.repeat(flags));
+        stream.extend(ax25_bit_stuff(&lsb_first_bits(&tx)));
+        stream.extend(&flag);
+        stream.extend(noise(200, 90 + flags as u64));
+        let mut sync = build("sync_search", recipe_node("aprs", "sync"), PortType::Bits);
+        let stuffed = run_bits(sync.as_mut(), &stream, 17, false);
+        let mut d = build("bitstuff", recipe_node("aprs", "destuff"), PortType::Frames);
+        let frames = run_frames(d.as_mut(), &stuffed, 2, false);
+        let mut crc = build("crc", recipe_node("aprs", "crc"), PortType::Frames);
+        let out = run_frames(crc.as_mut(), &frames, 2, false);
+        assert!(
+            out.iter()
+                .any(|f| f.info.check == CrcStatus::Valid && f.bits == bytes_bits(&want)),
+            "{flags} preamble flag(s): packet lost"
+        );
+    }
 }
 
 /// T-552 (ADR-0015 §3.3 measurement): S4 `sync_search` release timing over a long noise bit

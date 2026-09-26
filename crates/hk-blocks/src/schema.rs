@@ -154,6 +154,15 @@ pub fn frame_length() -> Vec<ParamSchema> {
                     "Bits kept after the terminator (ACARS: the 16-bit BCS).",
                 )
                 .default_value(0),
+                param(
+                    "reopen",
+                    boolean(),
+                    "sync_search only: the closing word also opens the next frame (shared-flag \
+                     HDLC, AIS/AX.25: one 0x7E ends a frame and starts the next); needs \
+                     trailer_bits 0, no include_sync, and step_bits a multiple of 8 with \
+                     bit_order lsb. Default false: after a terminator the sync search restarts.",
+                )
+                .default_value(false),
             ]),
             "Frame ends after a closing word; absent: none.",
         ),
