@@ -34,7 +34,10 @@ function events(ctx: AppContext): AudioSessionEvents {
   return {
     onHeader(id, header) {
       headers.set(id, header);
-      patch(id, (e) => ({ ...e, state: "live", sub: sub(header, null), message: null }));
+      patch(id, (e) => ({
+        ...e, state: "live", sub: sub(header, null), message: null,
+        pipelineId: header.audio?.pipeline_id ?? e.pipelineId, outputId: header.audio?.output_id ?? e.outputId,
+      }));
     },
     onRefused(id, status, reason) {
       patch(id, (e) => ({ ...e, state: "refused", message: refusalText(status, reason) }));
@@ -86,7 +89,7 @@ export function startListen(ctx: AppContext, target: ListenTarget): string | nul
   const entry: OutputEntry = {
     id, kind: "audio", label: target.label, sub: "estimating…", state: "opening",
     tcpTarget: listenTcpTarget(target), muted: false, levelDbfs: null, recordsPerS: null,
-    emitterId: target.kind === "emitter" ? target.emitterId : null, pipelineId: null, message: null,
+    emitterId: target.kind === "emitter" ? target.emitterId : null, pipelineId: null, outputId: null, message: null,
   };
   ctx.store.set(upsertOutput(entry));
   getAudioSession(ctx).start(id, target);
@@ -105,7 +108,7 @@ export function startRecordsOutput(ctx: AppContext, target: RecordsTarget): stri
   const entry: OutputEntry = {
     id, kind: "records", label: target.label, sub: "records → tcp", state: "live",
     tcpTarget: recordsTcpTarget(target.pipelineId, target.outputId), muted: false, levelDbfs: null,
-    recordsPerS: null, emitterId: null, pipelineId: target.pipelineId, message: null,
+    recordsPerS: null, emitterId: null, pipelineId: target.pipelineId, outputId: target.outputId, message: null,
   };
   ctx.store.set(upsertOutput(entry));
   return id;

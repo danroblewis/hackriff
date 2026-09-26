@@ -108,6 +108,34 @@ export interface PaneMenuHost {
   /** How many panes exist, so the menu can say the last one never closes. */
   paneCount(): number;
   paneMenuExtras?: HTMLElement[];
+  /**
+   * **Which front end the active pane's coverage comes from** (T-1006, docs/16 §8), as the rows of a
+   * radio group: the union first, then one per attached radio. Optional — a host that knows of no
+   * front ends offers no picker.
+   *
+   * Presentation state, like every other row in these menus: a pane's `device` decides whose grey it
+   * draws and which radio its own retune names, and setting it reaches no route (the spy test drives
+   * it and asserts the call list stays empty). The strings are the host's; nothing here learns what a
+   * `device_id` is.
+   */
+  deviceMenu?(): PaneDeviceMenu;
+  /** Pin the active pane to `id` (`"any"` or a `device_id`). A view change. */
+  setPaneDevice?(id: string): void;
+  /** Take the "one viewport per front end" offer: as many panes as radios, each pinned to one. Pane
+   * arithmetic plus one `setPaneDevice` each — no radio moves. */
+  splitPerDevice?(): void;
+}
+
+/** The device section of the viewport menu (T-1006). `pane` names the pane it acts on, exactly as
+ * [[LayerMenu.pane]] does; `offer` is the "one viewport per front end" split, stated even when it is
+ * refused (the [[RowAction]] rule: a control that vanishes teaches nothing). */
+export interface PaneDeviceMenu {
+  pane: string;
+  rows: readonly LayerRow[];
+  /** The sentence under the rows — whose coverage this pane draws, and what a retune here would
+   * move. Computed by `surface/panedevice.ts`, never here. */
+  note: string;
+  offer: { label: string; why: string; enabled: boolean };
 }
 
 export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
@@ -431,7 +459,7 @@ export function mountMapControls(host: MapControlHost): {
       + "then a pan never commands the radio. Tap R to latch it, or hold R for one gesture.",
   }, svg(["circle", 12, 12, 3], ["path", "M12 2v3M12 19v3M2 12h3M19 12h3"], ["path", "M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"])) as HTMLButtonElement;
   const paneBtn = h("button", {
-    type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, record",
+    type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, front end, record",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
   }, svg(["path", "M4 5h16v14H4z"], ["path", "M12 5v14"])) as HTMLButtonElement;
   // T-993: the retired top bar's Review button is moved in here (`top-chrome.ts`), beside the other
@@ -484,13 +512,26 @@ export function mountMapControls(host: MapControlHost): {
   }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
   const paneHead = h("span", {}, "Viewport");
+  // T-1006: the front-end picker for THIS viewport, and the "one viewport per front end" split.
+  // Rebuilt from `host.deviceMenu()` each time the menu opens (`syncPaneMenu`), hidden entirely when
+  // the host offers none — a picker with nothing to pick is chrome that says nothing. Pressing a row
+  // is a view change: it chooses whose coverage decides this pane's grey and which radio its own
+  // retune will name, and reaches no route.
+  const deviceRows = h("div", { class: "map-pane-devices" });
+  const deviceNote = h("div", { class: "map-note map-pane-device-note" });
+  const perDevice = h("button", { type: "button", class: "map-pane-item", "data-pane-act": "per-device" }) as HTMLButtonElement;
+  perDevice.addEventListener("click", () => { if (!perDevice.disabled) { host.splitPerDevice?.(); setPaneOpen(false); } });
+  const deviceHead = h("h4", {}, "Front end");
+  const deviceSection = h("div", { class: "map-layers-axis map-pane-device", "data-axis": "device", role: "radiogroup", "aria-label": "Front end", hidden: true },
+    deviceHead, deviceRows, deviceNote, perDevice);
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
     h("div", { class: "map-layers-head" }, paneHead, paneClose),
     paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
+    deviceSection,
     ...(host.paneMenuExtras ?? []),
-    h("div", { class: "map-note" }, "View only: splitting, closing and zooming out never command the radio."));
+    h("div", { class: "map-note" }, "View only: splitting, closing, zooming out and choosing a front end never command the radio."));
   // The mockup's `#mode` banner: while a tool mode is on (Measure, or T-820's Annotate / Pin), say
   // what a drag will do and how to leave. Never faded.
   const modeBanner = h("div", { class: "map-glass map-mode", role: "status", hidden: true }, MODE_TEXT.measure);
@@ -661,6 +702,26 @@ export function mountMapControls(host: MapControlHost): {
     const last = host.paneCount() <= 1;
     closeItem.disabled = last;
     closeItem.title = last ? "The last viewport never closes." : "Close the active viewport. The last one never closes.";
+    // T-1006: the front-end picker. Built on open rather than per frame — a menu the user is reading
+    // must not have its radio inputs replaced under the pointer — and only when the host offers one.
+    const dm = host.deviceMenu?.();
+    deviceSection.hidden = !dm;
+    if (!dm) return;
+    deviceSection.setAttribute("aria-label", `Front end, ${dm.pane}`);
+    deviceHead.textContent = `Front end · ${dm.pane} · one at a time`;
+    deviceRows.replaceChildren(...dm.rows.map((l) => {
+      const input = h("input", {
+        type: "radio", name: "map-pane-device", value: l.id, "data-pane-device": l.id,
+      }) as HTMLInputElement;
+      input.checked = l.on;
+      input.addEventListener("change", () => { host.setPaneDevice?.(l.id); syncPaneMenu(); });
+      return h("label", { class: "map-row" }, input, l.label, h("small", {}, l.hint));
+    }));
+    deviceNote.textContent = dm.note;
+    perDevice.textContent = dm.offer.label;
+    perDevice.title = dm.offer.why;
+    perDevice.disabled = !dm.offer.enabled;
+    perDevice.setAttribute("aria-disabled", String(!dm.offer.enabled));
   };
   const setPaneOpen = (open: boolean) => {
     paneOpen = open;
