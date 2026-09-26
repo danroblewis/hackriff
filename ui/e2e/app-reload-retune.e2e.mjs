@@ -85,7 +85,7 @@ async function pane0(page) {
     viewport: 'pane',
     following: v.dataset.following === 'true',
     where: v.dataset.where ?? '',
-    why: document.querySelector('.map-retune-why')?.textContent ?? '',
+    why: v.querySelector('.sf-pane-retune-why')?.textContent ?? '',
   })))`;
   const rows = JSON.parse(await page.eval(ROWS));
   const r = rows.filter((x) => x.viewport === "pane")[0];

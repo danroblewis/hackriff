@@ -16,10 +16,12 @@
    T-919 made that stack a collapsed line with a `More` expansion.
    T-996 (user, 2026-09-25) retires the expansion and the white per-viewport panel entirely. What is
    on the picture now:
-     - bottom-LEFT, one line: where the active viewport is looking, the colour scale, and the hover
-       readout (which carries peak dB, on demand). Above it, only when the viewer has asked for that
-       state: the fog note and the ranked band-plan priors.
-     - bottom-RIGHT, per pane: the scale bars and that pane's honesty tier (`.sf-scale`).
+     - bottom-LEFT, one line: the colour scale and the hover readout (which carries peak dB, on
+       demand). Above it, only when the viewer has asked for that state: the fog note and the ranked
+       band-plan priors.
+     - bottom-RIGHT, per pane: T-1003's CHIP — the scale bars, that pane's honesty tier and front
+       end, where IT is looking, what raw IQ backs ITS time position, its trace readout and its own
+       Retune (`.sf-scale`). Everything that describes one viewport is inside that viewport.
    Never faded: these are honesty statements (docs/23 §10.2). */
 .sf-status {
   position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 0px) + 30px); /* clear of the HUD's frequency labels */
@@ -61,9 +63,10 @@
   background: none;
   font: 11px var(--mono); color: var(--muted);
 }
-/* The kept centre/span/LIVE readout. Brighter than the rest of the line: it is the answer to "where
-   am I", which the retired panel used to own. */
-.sf-where { color: var(--text); white-space: nowrap; }
+/* T-1003: the centre/span/LIVE readout is no longer on this line — it is a line of each pane's own
+   chip (`.sf-scale > .sf-where`, above), because with a split open there is no "the" viewport for a
+   single line to describe. What is left here is view-wide (the one colour ramp) or transient (what
+   is under the one pointer). */
 .sf-range, .sf-hover { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .sf-hover:empty, .sf-where:empty { display: none; }
 
@@ -75,12 +78,44 @@
 .sf-scale {
   /* The inline transform is the pane's own bottom-right corner; this insets the block from it. The
      RIGHT inset clears the floating cluster's zoom stack, which docks against the same edge — a
-     legend that collided with a control would be neither readable nor pressable (docs/23 §10.6). */
+     legend that collided with a control would be neither readable nor pressable (docs/23 §10.6).
+     T-1003: the inset pair is `surface/scale.ts`'s `CHIP_INSET_PX`, which is also what bounds the
+     chip's width to its own pane. */
   position: absolute; left: 0; top: 0; translate: calc(-100% - 56px) calc(-100% - 12px);
   display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
   font: 11px var(--mono); color: #d5dee2;
   text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+  /* T-1003: with the pane's own words on it, it is a small translucent CHIP rather than floating
+     text — the user's shape for it ("ONE small translucent chip next to the scale bar"). Bounded by
+     its pane (`max-width` is written per frame), and its lines wrap inside that bound rather than
+     running across the split into the next pane's picture. */
+  padding: 4px 7px; border-radius: 7px; min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  text-align: right; overflow-wrap: anywhere;
 }
+/* T-1003's per-pane words, each its own line of the chip and each hidden when its pane has nothing
+   to say. Every one of them is about THE PANE THE CHIP IS ON: where it looks, what raw IQ backs its
+   own time position (the playback horizon, stated where the user is looking), its trace readout. */
+.sf-scale > .sf-where { color: var(--text); white-space: normal; }
+.sf-pane-iq, .sf-pane-trace { font-size: 10px; color: #9fb0ba; }
+.sf-pane-iq[hidden], .sf-pane-trace[hidden], .sf-where[hidden],
+.sf-pane-retune[hidden], .sf-pane-retune-status[hidden] { display: none; }
+/* The pane's own Retune: a device command, so it is amber and states its destination beside it
+   (the painted-offer rule, T-476/T-407 — a press lands where the words SAID). The chip's layer is
+   pointer-transparent; the button itself takes the pointer, because a button nobody can press is
+   not a control. */
+.sf-pane-retune { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.sf-pane-retune-go {
+  flex: none; min-height: 24px; pointer-events: auto; cursor: pointer;
+  border: 1px solid var(--amber); border-radius: 6px; padding: 1px 8px;
+  background: color-mix(in srgb, var(--amber-soft) 85%, transparent); color: var(--amber); font: 11px var(--ui);
+}
+.sf-pane-retune-go:disabled { opacity: .5; cursor: not-allowed; }
+.sf-pane-retune-go:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.sf-pane-retune-why { min-width: 0; font-size: 10px; color: #9fb0ba; overflow-wrap: anywhere; }
+/* T-1028's sentence, for this pane: what retune mode has pending, settling, in flight or refused. */
+.sf-pane-retune-status { font-size: 10px; color: var(--amber); overflow-wrap: anywhere; }
 .sf-scale-row { display: flex; align-items: center; gap: 6px; }
 .sf-scale-row b { font-weight: 600; }
 /* The bar itself. The FREQUENCY bar is horizontal with end caps, like a map's distance bar; the
