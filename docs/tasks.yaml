@@ -29953,7 +29953,7 @@ tasks:
   - id: T-1011
     milestone: M3
     title: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-953
@@ -29983,6 +29983,7 @@ tasks:
       Observed, not chased: Item 3 (FLEX 1600/3200/6400 Bd in STANDARD_RATES_BD): left to T-950 (the FLEX decoder, in progress), which owns rate estimation for FLEX. Until then, 1600 Bd FLEX abstains and does not store the 4800 harmonic (T-953 test). | Item 6 (NBFM voice / DMR 4FSK get classification: null): owned by T-986 (in progress; its member (a) asserts 'classified NBFM voice (not null)' and (b) DMR identification), with T-989 (done) supplying DMR Tier II identification. Not duplicated here. | Item 7 (a mock-SDR e2e over the FLEX fixture): the fixture is external (57.6 MB, Mac-only fetch). T-950's brief already requires the blind mock-SDR member over flex-pagers-930p8 with 'FSK params estimated'. That member should also assert the population's rate or an honest abstention, so the coordinator may want to add that to T-950's acceptance rather than a separate test here. | The 14400/3600 Bd cases show the receiver has no trial for non-table rates, so such emitters store nothing. That is honest, but it is a gap: the same class of case as item 3.
       Use cases: SIGNAL-088
       Resources: 44 CPU-s, peak 1.0 GB
+    commit: 4dee5a88
   - id: T-1012
     milestone: M2-hardening
     title: "Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix"
