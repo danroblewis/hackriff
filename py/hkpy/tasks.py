@@ -240,12 +240,20 @@ def _set_scalar_field(block: str, key: str, value: str) -> str:
     `boardmerge`'s validator watches for.
     """
     lines = block.split("\n")
-    pattern = re.compile(rf"^    {re.escape(key)}: (.*)$")
+    # `(?: (.*))?` (not `: (.*)`): a block-style list's key line is bare (`    deps:`, no trailing
+    # space) since nothing follows on that line — the original `: ` requirement never matched it,
+    # so `set` fell through to "append a new field" and wrote a SECOND `key:` line (T-1059/T-1055).
+    pattern = re.compile(rf"^    {re.escape(key)}:(?: (.*))?$")
     for i, line in enumerate(lines):
         m = pattern.match(line)
         if not m:
             continue
-        existing = m.group(1).strip()
+        existing = (m.group(1) or "").strip()
+        is_block_list = existing == "" and i + 1 < len(lines) and _LIST_ITEM_RE.match(lines[i + 1])
+        if is_block_list:
+            end = _block_list_end(lines, i)
+            lines[i:end] = [f"    {key}: {_field_value(value)}"]
+            return "\n".join(lines)
         continues = i + 1 < len(lines) and lines[i + 1].startswith("      ")
         if existing in _BLOCK_MARKERS or continues:
             raise ValueError(
@@ -257,6 +265,22 @@ def _set_scalar_field(block: str, key: str, value: str) -> str:
         return "\n".join(lines)
     lines.append(f"    {key}: {_field_value(value)}")
     return "\n".join(lines)
+
+
+# A block-style list item continuing a key with an empty value, at the SAME 4-space indentation
+# as the key itself (the shape `just task new --depends-on` writes: `deps:` then `    - T-964`).
+# This is NOT a nested-mapping continuation (six spaces, handled above as `continues`) — it is a
+# sibling YAML sequence item, and treating it as an unrelated field line is exactly what let
+# `set`'s append-a-new-`key:` path and `unset`'s key-removal both corrupt it (T-1059).
+_LIST_ITEM_RE = re.compile(r"^    - ")
+
+
+def _block_list_end(lines: list[str], key_index: int) -> int:
+    """Index just past the last `    - item` line continuing the key at `lines[key_index]`."""
+    j = key_index + 1
+    while j < len(lines) and _LIST_ITEM_RE.match(lines[j]):
+        j += 1
+    return j
 
 
 def _field_value(value: str) -> str:
@@ -285,10 +309,10 @@ def _unset_field(block: str, key: str) -> tuple[str, bool]:
             # line inside a `|` block belongs to the field only if the block continues after it.
             j = i + 1
             while j < len(lines):
-                if lines[j].startswith("      "):
+                if lines[j].startswith("      ") or _LIST_ITEM_RE.match(lines[j]):
                     j += 1
                 elif lines[j].strip() == "" and any(
-                    ln.startswith("      ") for ln in lines[j + 1:j + 2]
+                    ln.startswith("      ") or _LIST_ITEM_RE.match(ln) for ln in lines[j + 1:j + 2]
                 ):
                     j += 1
                 else:
@@ -584,6 +608,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
             problems.append(f"{tid}: blocked with no blocked_on")
         if t.get("blocked_on") and status != "blocked":
             problems.append(f"{tid}: blocked_on set but status is {status!r}")
+
+    # A key declared twice in one block is exactly what a lost `- id:` line looks like (the
+    # swallowed ticket's keys land inside its neighbour) — yaml.safe_load keeps the last value and
+    # says nothing, which is how T-1055's duplicated `deps:` passed this check while boardmerge's
+    # merge-time check (the same test, applied at merge) refused it. Checking here closes that gap
+    # instead of relying on a merge to ever happen.
+    _, blocks, order, _ = split(text)
+    for tid in order:
+        blk = blocks[tid]
+        seen: set[str] = set()
+        for key in re.findall(r"^    ([a-zA-Z_]+):", blk, re.M):
+            if key in seen:
+                problems.append(f"{tid}: declares {key!r} twice, which is a lost `- id:` line")
+            seen.add(key)
 
     if problems:
         print("\n".join(problems), file=sys.stderr)

@@ -149,6 +149,7 @@ use hk_e2e::{Fixture, TruthItem};
 use hk_model::{
     Demodulation, Detection, FreqRange, IdentityScheme, IdleGap, InventoryEntry, InventoryIdentity,
     InventoryQuery, LinkTarget, RDS_PI_COMMIT_VOTES, RDS_PI_COMMIT_WINDOW_NS, Region, Timestamp,
+    Watched,
 };
 use serde_json::Value;
 
@@ -316,8 +317,15 @@ impl Station {
     /// presence intervals.
     fn presence_s(&self, e: &InventoryEntry) -> f64 {
         let (a, b) = self.truth_window();
+        // T-940: silence as elapsed time, the reading this was written against (the served
+        // routes take the coverage-observed reading through `hk-api`'s coverage.rs).
         repo(&self.run.dir.0)
-            .presence_intervals(e.emitter.id, IdleGap::continuous(), ever().end)
+            .presence_intervals(
+                e.emitter.id,
+                IdleGap::continuous(),
+                ever().end,
+                &Watched::unrecorded(),
+            )
             .unwrap()
             .iter()
             .map(|p| {

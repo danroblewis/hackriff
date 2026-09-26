@@ -59,6 +59,7 @@ import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend"
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
+import { wsChangeOpener } from "../../surface/changefeed";
 import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, acceptGoLive, goLiveOfferLabel, isGoLiveOffer, GO_LIVE_LABEL,
@@ -90,6 +91,7 @@ import {
   frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
 } from "../../surface/frontend";
 import { flags } from "../../flags";
+import { fmtLiveMetrics, liveMetrics } from "../../surface/livemetrics";
 import { liveRing, liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -280,6 +282,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
+  // T-1048 (LSR-7): the CLIENT ring's own cost and freshness — ring-fold cost per row,
+  // arrival→paint latency (never the design's full sample-to-pixel budget, and never the
+  // server's per-subscription fold, which is `/api/status` `spectrum.fold_ns_*`) — shown only
+  // behind the same `?live-ring=1` flag as the lane it measures. Empty (no text node) with the
+  // flag off: `setText` is never called, so there is nothing to hide.
+  const metricsEl = h("div", { class: "sf-ring sf-ring-metrics", role: "status" });
   // T-807 (MAP-07): says so, in words, when the active pane's coverage fog is hidden — the bare
   // ground it then draws is a viewer's choice, and a choice about grey must never pass for a fact.
   const fogEl = h("div", { class: "sf-ring sf-fog", role: "status", hidden: true });
@@ -342,7 +350,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // The dismiss (×, and Escape through the one overlay stack, T-900) returns it to the collapsed
   // line, never to nothing — a viewer can put a paragraph away, not switch an honesty statement off.
   const statusBody = h("div", { class: "sf-status-body", id: "sf-status-body", hidden: true },
-    traceEl, ringEl, fogEl, priorsEl, note);
+    traceEl, ringEl, metricsEl, fogEl, priorsEl, note);
   const statusToggle = h("button", {
     class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded": "false",
     title: "The full status: spectrum trace, capture rules, coverage, priors and orientation",
@@ -930,13 +938,35 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * fires every frame regardless of the trace layer.
    */
   let ringDiag = "";
-  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number }>();
+  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number; latencyMs: number | null }>();
   const stateRing = (report: PaneReport) => {
-    ringReports.set(report.id, { rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10 });
+    ringReports.set(report.id, {
+      rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10,
+      latencyMs: report.ringLatencyMs === null ? null : Math.round(report.ringLatencyMs * 100) / 100,
+    });
     const next = JSON.stringify([...ringReports].map(([id, r]) => ({ id, ...r })));
     if (next === ringDiag) return;
     ringDiag = next;
     stage.dataset.liveRing = next;
+  };
+  /**
+   * **The LSR-7 dashboard tile** (T-1048): the client's own arrival→paint latency and ring-fold
+   * cost per row — named for exactly what each measures, never the design's full sample-to-pixel
+   * budget and never the server's per-subscription fold (`/api/status` `spectrum.fold_ns_*`,
+   * `docs/api.md`) — in words and as machine-readable numbers, behind the same flag as the lane it
+   * measures. Read by the person (`metricsEl`, in the status panel's "More" body beside the other
+   * capture-rule paragraphs) and by a spec (`.sf-stage[data-live-metrics]`, the same pattern
+   * `stateRing` above already keeps). Written once per frame the ring lane runs, and only when the
+   * numbers change.
+   */
+  let metricsDiag = "";
+  const stateMetrics = () => {
+    const snap = liveMetrics.snapshot();
+    const next = JSON.stringify(snap);
+    if (next === metricsDiag) return;
+    metricsDiag = next;
+    stage.dataset.liveMetrics = next;
+    setText(metricsEl, fmtLiveMetrics(snap));
   };
   /**
    * **The active pane's trace CORE, as the layer itself drew it** (T-1050): one sample per MEASURED
@@ -1289,7 +1319,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow,
       // T-437 §5.2: the growing edge's tiles were computed from the tuning that has just ended, so
       // a cached one is an observation claim about a tuning that no longer exists.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1341,7 +1371,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow: widthOfferNow,
       // T-437 §5.2, same as the retune control: the growing edge's tiles described the tuning that
       // has just ended.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1371,7 +1401,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (isGoLiveOffer(lastPaintedGoto)) {
       void acceptGoLive(ctx, {
         offerNow: widthOfferNow,
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, lastPaintedGoto, (paneId) => {
         p.view.panes.follow(paneId);
         lastMirror = ""; mirror(); renderLive(); viewMoved();
@@ -1386,7 +1416,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // nothing); if the current/default span has since changed that is `sameWidthTarget`'s job to
       // catch, not this function's.
       offerNow: widthOfferNow,
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, lastPaintedGoto).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1420,7 +1450,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = await commitRetuneMode(ctx, {
         targetNow: retuneTargetNow,
         // T-437 §5.2, as everywhere else: the growing edge's tiles describe the tuning that ended.
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, paneId);
       // What the pane says afterwards. A refusal is said too: in this mode the user did not press a
       // button, so silence would read as "my pan did nothing" rather than "the front end said no" —
@@ -1639,13 +1669,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
+        // T-1040: a front-end move re-lays the fog and re-fetches exactly the tiles it rewrote.
+        changes: wsChangeOpener(ctx.token),
         // T-1042 / LSR-1, behind `?live-ring=1` (`src/flags.ts`): the published spectrum rows every
         // FOLLOWING pane paints its live edge from, read in the render pass. Off, this is `null` and
         // the surface is drawn from tiles exactly as before — one flag, one lane, no second picture.
         liveRing: flags().liveRing ? () => liveRing.frame() : null,
         // T-1052: the ring diagnostic above, off every frame's reports regardless of the trace
         // layer's on/off state (see `stateRing`'s doc comment for why it moved here from `trace`).
-        onReports: flags().liveRing ? (reports) => { for (const r of reports) stateRing(r); } : null,
+        // T-1048 (LSR-7): the metrics dashboard tile rides the same every-frame hook.
+        onReports: flags().liveRing ? (reports) => { for (const r of reports) stateRing(r); stateMetrics(); } : null,
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,

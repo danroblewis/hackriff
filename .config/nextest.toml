@@ -222,6 +222,11 @@ fail-fast = false
 # 13.1 s during gates) with the ring's share zero, so on a shared box it measures the disk. Its
 # deterministic half, the ring's allocation paid by its own thread and a re-plumb completing
 # with that allocation still outstanding, gates normally
+# T-1048 (LSR-7) added the spectrum reader's per-row fold cost (dB conversion + wire serialize,
+# T-453): the tier's test collects one real sample per row (never a synthetic loop) and PRINTS
+# p50/p95/max with no bound asserted, because how fast this fold runs is the machine's headroom.
+# Its deterministic half (hk-pipeline::spectrum_fold_cost_is_measured_and_reported - the counters
+# are non-zero and mutually consistent after real rows publish) gates normally.
 # (hk-pipeline::replumb_never_pays_for_the_ring::a_re_plumb_never_pays_for_the_iq_ring).
 default-filter = '''
 not (
@@ -236,6 +241,7 @@ not (
   or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
   or test(the_detection_write_rate_clears_its_floor)
   or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
+  or test(the_spectrum_fold_cost_per_row_p50_and_p95_are_printed)
 )
 '''
 
@@ -517,4 +523,5 @@ or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 or test(the_detection_write_rate_clears_its_floor)
 or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
+or test(the_spectrum_fold_cost_per_row_p50_and_p95_are_printed)
 '''

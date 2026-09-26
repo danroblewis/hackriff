@@ -1301,6 +1301,7 @@ pub fn serve_api(
             // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
             ceiling_memo: Default::default(),
             coverage_raster: Default::default(),
+            change_feeds: Default::default(),
         };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
