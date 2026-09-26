@@ -29143,6 +29143,8 @@ tasks:
       FOUND by explorer window 2/3: the gating content class for a 152-162 MHz window reads 'restricted-paging' although it spans marine VHF, AIS and NOAA WX (the paging allocation is 929-932 MHz; 152-158 has some Part 22 paging, but the window's class is taken from one sub-band). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (Marine VHF entry). Note: content-class boundaries also trigger T-941's freeze, so a wrong class widens that defect.
       DELIVER: a window's content class is computed per sub-band (the class map at the resolution of its allocations), the most-restrictive class applied only to the sub-band it covers (metadata-only there), never to the whole window; /api/status reports the per-sub-band classes. Test: a 152-162 window -> marine/AIS/NOAA sub-bands unrestricted, only the paging sub-bands restricted; red on current code.
       core_interface (content gating). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      Review attempt 2 returned REVIEW_FAIL 'no verdict line' because the reviewer session itself failed (review.json: api_error_status 429, monthly spend limit) - no finding was produced. Merged main cleanly (d7f23cb7); targeted tests green, precheck clean; no code change. Needs a real review.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 17:03).
