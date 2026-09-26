@@ -33,7 +33,7 @@ use hk_model::attention::occupancy::OccupancySubject;
 use hk_model::{ContentClass, FreqRange, TimeRange, Timestamp};
 use hk_pipeline::class::window_class;
 use hk_pipeline::{
-    Pipeline, PipelineConfig, SourceInfo, TrackInventory, builtin_chains, replay_plan,
+    NodeSpec, Pipeline, PipelineConfig, SourceInfo, TrackInventory, builtin_chains, replay_plan,
 };
 use num_complex::Complex;
 
@@ -48,11 +48,11 @@ type Truth = Vec<(f64, f64)>;
 
 /// The dense scene quantised as the capture thread does, and its private station truth
 /// `(center_hz, bandwidth_hz)` from the synthesiser's annotations.
-fn scene_iq(scene: &[(f64, &str, u64)]) -> Option<(Vec<Complex<i8>>, Truth)> {
+fn scene_iq(scene: &[(f64, &str, u64)], duration_s: f64) -> Option<(Vec<Complex<i8>>, Truth)> {
     let mut sum: Vec<Complex<f32>> = Vec::new();
     let mut truth = Vec::new();
     for &(offset, pi, seed) in scene {
-        let (iq, t) = station(offset, pi, seed)?;
+        let (iq, t) = station(offset, pi, seed, duration_s)?;
         truth.extend(t);
         if sum.is_empty() {
             sum = iq;
@@ -69,13 +69,18 @@ fn scene_iq(scene: &[(f64, &str, u64)]) -> Option<(Vec<Complex<i8>>, Truth)> {
 
 /// One station's IQ (the synthesiser's float output, quantised later with the others) and its
 /// emission truth.
-fn station(offset_hz: f64, pi: &str, seed: u64) -> Option<(Vec<Complex<f32>>, Truth)> {
+fn station(
+    offset_hz: f64,
+    pi: &str,
+    seed: u64,
+    duration_s: f64,
+) -> Option<(Vec<Complex<f32>>, Truth)> {
     let req = SynthRequest::new("fm_broadcast_rds")
         .seed(seed)
         .param("sample_rate", FS)
         .param("center_hz", CENTER_HZ)
         .param("offset_hz", offset_hz)
-        .param("duration_s", 2.0)
+        .param("duration_s", duration_s)
         .param("pi_hex", pi)
         .param("noise_dbfs", -60.0);
     let out = match req.generate() {
@@ -102,6 +107,25 @@ fn station(offset_hz: f64, pi: &str, seed: u64) -> Option<(Vec<Complex<f32>>, Tr
     Some((iq, emission_truth(&fx.meta_path)))
 }
 
+/// Scene time before the `wfm-rds` window can open: detection, confirmation and the chain's
+/// `pre_s`/probe. Measured, the window opened well inside the first 2 s.
+const SCENE_LEAD_S: f64 = 2.0;
+
+/// The shipped `wfm-rds` chain's `pre_s + window_s`: how much contiguous scene one window reads.
+fn wfm_rds_window_s() -> f64 {
+    builtin_chains()
+        .into_iter()
+        .filter(|c| c.id == "wfm-rds")
+        .flat_map(|c| c.nodes)
+        .find_map(|n| match n {
+            NodeSpec::AnalogAuto {
+                pre_s, window_s, ..
+            } => Some(pre_s + window_s),
+            _ => None,
+        })
+        .expect("the shipped wfm-rds chain has an analog-auto node")
+}
+
 fn wait(what: &str, limit: Duration, f: impl Fn() -> bool) {
     let deadline = Instant::now() + limit;
     while !f() {
@@ -118,10 +142,18 @@ fn signal_062_dense_fm_wfm_chain_attaches_and_decodes_the_target_pi() {
         (100e3 - SPACING_HZ, "1A2B", 9_902),
         (100e3 + SPACING_HZ, "3C4D", 9_903),
     ];
-    let Some((iq, _)) = scene_iq(&scene) else {
+    // The scene is read ONCE, never looped: the radio's loop point splices the end of the scene
+    // onto its start, a phase and RDS-bitstream discontinuity no real station has. Before T-926
+    // the chain's window was cut to the probe (~0.5 s) and never reached it; a full `window_s`
+    // (4 s) window over the old 2 s scene looped three times always did, and its RDS decoder
+    // counted the splice as errored blocks — 2 of 29 for every station, identically, 0.069 —
+    // while the same scene 8 s long and read once decoded 43 groups with none. The block-error
+    // assertion below is about the pipeline, so the scene must be clean for the whole window.
+    let scene_s = wfm_rds_window_s() + SCENE_LEAD_S;
+    let Some((iq, _)) = scene_iq(&scene, scene_s) else {
         return;
     };
-    let total = 3 * iq.len() as u64;
+    let total = iq.len() as u64;
     assert_eq!(window_class(CENTER_HZ, FS), ContentClass::Unrestricted);
 
     let dir = TempDir::new("t099-dense-fm");
@@ -211,7 +243,7 @@ fn signal_062_dense_fm_wfm_chain_attaches_and_decodes_the_target_pi() {
         );
         assert!(
             *error < 1e-9,
-            "[{SIGNAL_062}] T-962: the clean scene's window is short, not damaged; PI {pi} block \
+            "[{SIGNAL_062}] T-962: a clean scene decodes without a damaged block; PI {pi} block \
              error rate {error}"
         );
     }
@@ -257,7 +289,7 @@ fn t129_dense_fm_learns_one_occupancy_channel_per_station() {
         (100e3 - SPACING_HZ, "1A2B", 9_902),
         (100e3 + SPACING_HZ, "3C4D", 9_903),
     ];
-    let Some((iq, stations)) = scene_iq(&scene) else {
+    let Some((iq, stations)) = scene_iq(&scene, 2.0) else {
         return;
     };
     assert_eq!(stations.len(), 3, "{stations:?}");
