@@ -1,8 +1,8 @@
 //! T-952 (SIGNAL-089 terrestrial APRS): the APRS recipe (`recipes/aprs.recipe.json`) decodes an
 //! AX.25 UI frame **blind, through the mock SDR and the API**: NBFM -> Bell 202 AFSK 1200 tone
-//! pair -> FSK discriminator -> 1200 Bd clock recovery -> NRZI decode -> zero-bit destuff (over
-//! the whole line, before framing) -> flag .. flag HDLC framing -> CRC-16/X-25 FCS -> address/
-//! control/PID/info fields. No APRS burst reached the explorer's antenna on 2026-09-25 (T-952's
+//! pair -> FSK discriminator -> 1200 Bd clock recovery -> NRZI decode -> flag .. flag HDLC
+//! framing on the still-stuffed line (shared flags, T-1054) -> zero-bit destuff per frame ->
+//! CRC-16/X-25 FCS -> address/control/PID/info fields. No APRS burst reached the explorer's antenna on 2026-09-25 (T-952's
 //! notes), so there is no real recording; the fixture is `py/hkpy/synth/ax25.py`'s
 //! `aprs_message` scenario.
 //!

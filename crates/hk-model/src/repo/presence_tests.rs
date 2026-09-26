@@ -100,7 +100,9 @@ fn the_station_that_stopped_and_came_back_revives_on_one_emitter() {
 
     // Even at the most conservative idle gap the 72 s silence closes the first interval.
     let gap = IdleGap::conservative();
-    let iv = r.presence_intervals(a.emitter_id, gap, t(530.0)).unwrap();
+    let iv = r
+        .presence_intervals(a.emitter_id, gap, t(530.0), &Watched::unrecorded())
+        .unwrap();
     assert_eq!(iv.len(), 2, "{iv:?}");
     assert_eq!(iv[0].time, tr(94.0, 399.0));
     assert_eq!(iv[1].time, tr(471.0, 530.0));
@@ -206,7 +208,12 @@ fn overlapping_source_rows_normalise_into_one_interval() {
 
     assert_eq!(r.observation_spans(id).unwrap().len(), 2, "two source rows");
     let iv = r
-        .presence_intervals(id, IdleGap::from_revisit_s(1.0), t(90.0))
+        .presence_intervals(
+            id,
+            IdleGap::from_revisit_s(1.0),
+            t(90.0),
+            &Watched::unrecorded(),
+        )
         .unwrap();
     assert_eq!(iv.len(), 1, "one interval: {iv:?}");
     assert_eq!(iv[0].time, tr(0.0, 90.0));
@@ -350,8 +357,107 @@ fn migration_0012_is_index_only() {
             "t_start",
             "t_end",
             "measurement",
-            "f_center"
+            "f_center",
+            // T-940 (migration 0021): the silence an open track's tracker has OBSERVED since the
+            // row's measured end — a measurement the fold compares against the idle gap, not a
+            // closure decision. No `closed_at` / `close_reason` / decay column exists.
+            "live_silence_ns",
         ],
         "0012 is index-only: closure stays derived, never stored"
+    );
+}
+
+/// T-940: the pipeline's live-follow report keeps an on-air emitter `live` between sightings, and
+/// ending the follow hands the row back to the closed-source reading — through the repository,
+/// so the column, the upsert and the fold are one path.
+#[test]
+fn a_followed_track_reads_live_between_reports_and_closes_on_its_own_silence() {
+    let mut r = repo();
+    let s = track_sighting(&mut r, fm_fp(101.3e6, 180e3, 1.0), tr(0.0, 10.0), 10);
+    let id = r.record_sighting(&s, None).unwrap().emitter_id;
+    let track = match s.source {
+        LinkTarget::Track(t) => t,
+        ref other => panic!("a track sighting names a track: {other:?}"),
+    };
+    let gap = IdleGap::continuous();
+    let read = |r: &Repository, now: f64, w: &Watched| {
+        let iv = r.presence_intervals(id, gap, t(now), w).unwrap();
+        presence_in_window(&iv, tr(0.0, now), gap).liveness
+    };
+    // The wall clock alone ends it 4 s after the sighting's row was written: the defect.
+    assert_eq!(read(&r, 14.0, &Watched::unrecorded()), Liveness::Ended);
+
+    // The pipeline follows the track: measured to 12 s, no silence observed.
+    r.follow_track(id, track, tr(0.0, 12.0), 0).unwrap();
+    assert_eq!(read(&r, 16.0, &Watched::unrecorded()), Liveness::Live);
+    let spans = r.observation_spans(id).unwrap();
+    assert_eq!(
+        spans.len(),
+        1,
+        "the report is the track's own row: {spans:?}"
+    );
+    assert_eq!(spans[0].time, tr(0.0, 12.0));
+    assert_eq!(spans[0].count, 10, "a report counts no sighting");
+
+    // The tracker observes 2 s of silence: ended at the measured end, not at the report.
+    r.follow_track(id, track, tr(0.0, 12.0), 2_000_000_000)
+        .unwrap();
+    let iv = r
+        .presence_intervals(id, gap, t(16.0), &Watched::unrecorded())
+        .unwrap();
+    assert!(!iv[0].open);
+    assert_eq!(iv[0].time.end, t(12.0));
+
+    // Stopping the follow returns the row to the closed reading: watched coverage decides.
+    r.follow_track(id, track, tr(0.0, 12.0), 0).unwrap();
+    r.stop_following_track(track).unwrap();
+    let tuned_away = Watched::recorded(t(0.0), &[tr(0.0, 12.5)]);
+    assert_eq!(
+        read(&r, 300.0, &tuned_away),
+        Liveness::Live,
+        "unobserved is not quiet"
+    );
+    assert_eq!(
+        read(&r, 300.0, &Watched::recorded(t(0.0), &[tr(0.0, 300.0)])),
+        Liveness::Ended
+    );
+}
+
+/// T-940: a report for a track with no ledger row yet (its entry came from a chain) files a
+/// `track-live` row on the entry it names, and a run start releases every report a killed run left
+/// behind.
+#[test]
+fn a_report_for_an_unrowed_track_files_a_live_row_and_a_run_start_releases_it() {
+    let mut r = repo();
+    let s = track_sighting(&mut r, fm_fp(101.3e6, 180e3, 1.0), tr(0.0, 10.0), 10);
+    let id = r.record_sighting(&s, None).unwrap().emitter_id;
+    let other = TrackId::new();
+    r.follow_track(id, other, tr(5.0, 20.0), 0).unwrap();
+    let spans = r.observation_spans(id).unwrap();
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    assert!(
+        spans
+            .iter()
+            .any(|s| s.time == tr(5.0, 20.0) && s.count == 0)
+    );
+    // Filed as a `track-live` row, never a `track` row: the track's own sightings must still
+    // resolve by clustering (with the same-emission discount), not replay onto this entry.
+    let kind: String = r
+        .conn
+        .query_row(
+            "SELECT source_kind FROM emitter_observation WHERE t_start = ?1",
+            [tr(5.0, 20.0).start.as_unix_nanos()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, super::presence::TRACK_LIVE_SOURCE);
+    // And recurrence does not count it as an appearance.
+    assert_eq!(r.emitter_recurrence(id, 5).unwrap().appearances, 1);
+    assert_eq!(r.stop_following_all().unwrap(), 1);
+    assert!(
+        r.observation_spans(id)
+            .unwrap()
+            .iter()
+            .all(|s| s.live_silence_ns.is_none())
     );
 }

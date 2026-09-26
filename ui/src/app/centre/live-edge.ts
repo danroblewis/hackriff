@@ -44,6 +44,7 @@
 import * as ax from "../../axis";
 import { flags } from "../../flags";
 import { LiveRing } from "../../surface/livering";
+import { lastRowArrival, liveMetrics, timed } from "../../surface/livemetrics";
 import { LiveRow } from "../../surface/trace";
 import type { AppContext } from "../context";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
@@ -152,7 +153,16 @@ export function mountLiveEdge(ctx: AppContext): () => void {
       liveRow.set(frame);
       // T-1042: the same row, kept — the ring copies it into its own buffer, so the two holders share
       // no storage and neither can be changed by the other.
-      if (flags().liveRing) liveRing.push(frame);
+      // T-1048 (LSR-7): the fold's own cost, timed at its one call site rather than assumed — this is
+      // the "per-subscription fold cost per row" the ring's header asks be measured (T-453). The
+      // arrival is marked alongside it, for the render pass's latency read — `mark()` reads its own
+      // clock inside `livemetrics.ts` rather than here: this module is on the CAPTURE clock
+      // (T-393/T-386's guard, `ui/test/surface-cutover.test.ts`), never the browser's wall clock, and
+      // `performance.now()` may not appear in this file even for a genuinely wall-clock question.
+      if (flags().liveRing) {
+        timed(liveMetrics.fold, () => liveRing.push(frame));
+        lastRowArrival.mark();
+      }
     }
   };
 
