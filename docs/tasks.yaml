@@ -29042,6 +29042,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): another carrier case: 146.561 MHz is a continuous UNMODULATED carrier with mains hum; the app detected it blind and Listen chose nbfm 0.75, but it is never classed as a carrier. Include it: an unmodulated carrier (with or without hum) is classified CW/carrier.
+
+      Recovery 2026-09-26: brought up to date with gated base 1090f468 (merges 771472da, 4a220f71, 83157fce). Conflict: family.rs service_label + test imports (union with T-990/T-979 labels). Compile fixes: T-990's rank_all Occupancy gets bin_hz: None (emitter row has no resolution, so the CW-line call is refused there); the T-980 TrackSummary fixture gets artifact_detections/artifact_reason. Semantic: cw_carrier_is_not_a_burst_train failed alone after the merge (0 rows) because T-948 now refuses an inventory entry to a CW-narrow all-DC-flagged track, and the scene's carrier sat at -12 kHz inside the 15 kHz DC tolerance; moved to -120 kHz, where it is one 3.0-bin row explained unmodulated-carrier, and the strong-carrier scene still mints 0 FSK bursts. Tests green: hk-pipeline/hk-demod libs, cw_carrier_is_not_a_burst_train, dc_point_never_a_candidate, device_fsk_classify, occupancy_dc_dither, aware_036_pipeline, data_path, signal_062_identify_latency, atsc_blind_device; precheck clean.
     model_reason: "opus/medium: estimator and burst-chain changes on the detection path"
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 13:38).
