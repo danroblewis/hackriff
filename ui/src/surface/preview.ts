@@ -328,40 +328,36 @@ const inRect = (r: PaneRect, p: GlPoint): boolean =>
   p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
 
 /**
- * **Which pane a pointer belongs to — and the rule that the trace strip is part of its pane.**
+ * **Which pane a pointer belongs to.**
  *
- * T-457 carves a strip off the top of each pane's rectangle for the spectrum trace. **The strip is a
- * readout, not a control: it passes every pointer event through to the pane it describes.** A point
- * in it resolves to that pane, and callers clamp it into the pane's own rectangle, so it reads as a
- * point on the pane's **top edge** — the same frequency, at the pane's newest instant, which is
- * exactly the instant the strip is a spectrum *of*. Nothing about a gesture changes because it
- * started a few pixels higher.
+ * A pure function of a frame, deliberately, and not two lines inside `paneAt`. T-457 and T-458 were
+ * each green alone and broke on merge: one changed the geometry the other's gestures are measured
+ * in, and the trace strip it had carved off the top of each pane became a hole that swallowed every
+ * drag starting in it — not only the new region stroke, but plain and alt drags that T-456 had
+ * settled. The invariant that catches that class is **"a layer being switched on may not shrink the
+ * set of points a gesture can start from"**, and it is only checkable if the resolution is a pure
+ * function of a frame. `ui/test/surface-trace.test.ts` asserts it over a grid of points, with the
+ * trace on and off, knowing nothing about any particular gesture.
  *
- * The alternative — the strip handling pointers itself with a meaning of its own — was rejected
- * twice over: the obvious meaning for a vertical drag on a dB axis is *set the display range by
- * hand*, which is the control T-457 deliberately did not restore; and a second gesture vocabulary on
- * one canvas is T-412's wheel-zoom mismatch waiting to happen.
+ * Since T-1041 the trace reserves no rectangle at all: it is a layer over the pane's own top rows,
+ * so those points were already this pane's and there is nothing extra to resolve. The invariant is
+ * now structural rather than restored by a second lookup — which is why the `frame.traces` pass
+ * this function used to make is gone, and why the test above still runs.
  *
- * **Why this is a function and not two lines inside `paneAt`.** T-457 and T-458 were each green
- * alone and broke on merge: one changed the geometry the other's gestures are measured in, and the
- * strip became a hole that swallowed every drag starting in it — not only the new region stroke, but
- * plain and alt drags that T-456 had settled. The invariant that catches that class is *"turning the
- * trace on may not shrink the set of points a gesture can start from"*, and it is only checkable if
- * the resolution is a pure function of a frame. `ui/test/surface-trace.test.ts` asserts it over a
- * grid of points, with and without the strip, knowing nothing about any particular gesture.
+ * The rejected alternative is unchanged: the trace handling pointers itself with a meaning of its
+ * own. The obvious meaning for a vertical drag on a dB axis is *set the display range by hand*,
+ * which is the control T-457 deliberately did not restore; and a second gesture vocabulary on one
+ * canvas is T-412's wheel-zoom mismatch waiting to happen.
  */
 export function paneAtPoint(frame: SurfaceFrame | null, minimapId: string, p: GlPoint): string | null {
   for (const v of frame?.views ?? []) {
     if (v.id === minimapId) continue;
     if (inRect(v.rect, p)) return v.id;
   }
-  for (const t of frame?.traces ?? []) {
-    if (inRect(t.rect, p)) return t.id;
-  }
   return null;
 }
 
-/** `p` clamped into `rect`. A point in a pane's trace strip becomes a point on its top edge. */
+/** `p` clamped into `rect` — a pointer just outside a pane reads as the nearest point in it. */
 export function clampToRect(rect: PaneRect, p: GlPoint): GlPoint {
   return {
     x: Math.min(Math.max(p.x, rect.x), rect.x + rect.w),

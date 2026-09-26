@@ -33,7 +33,7 @@ export type LayerPlane = "data" | "overlay" | "dom";
 
 export type LayerId =
   | "base" | "coverage" | "tier"
-  | "detections" | "density" | "paths" | "tune" | "frontend" | "artifacts" | "priors" | "rules" | "research"
+  | "detections" | "density" | "paths" | "tune" | "frontend" | "scan" | "artifacts" | "priors" | "rules" | "research"
   | `collection:${string}`
   | "pins";
 
@@ -78,6 +78,10 @@ export const LAYER_DEFS: readonly LayerDef[] = [
   // T-981: front-end events — rows where the ADC clipped and the whole window lifted — marked as the
   // radio's own energy, never a signal. On by default: hiding it would let the stripe read as signal.
   { id: "frontend", plane: "overlay", z: 27, visibleByDefault: true, label: "Front-end overload", hint: "clipped rows · the radio's energy, not a signal" },
+  // T-1008: a survey sweep's plan — its region, the steps the engine will take (as served by
+  // `GET /api/control/scan?windows=1`, never tiled here) and its progress — above the radio's past
+  // route and under the user's own marks. Drawn only while a plan is open or a sweep exists.
+  { id: "scan", plane: "overlay", z: 28, visibleByDefault: true, label: "Scan plan", hint: "sweep region · steps · progress" },
   { id: "research", plane: "overlay", z: 30, visibleByDefault: false, label: "Research", hint: "measurements · annotations" },
   { id: "artifacts", plane: "overlay", z: 50, visibleByDefault: false, label: "Artifacts", hint: "image · harmonic · IMD" },
   { id: "priors", plane: "overlay", z: 60, visibleByDefault: false, label: "Band-plan priors", hint: "suggestions, never truth" },

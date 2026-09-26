@@ -17,6 +17,7 @@
 //
 // Nothing here renders: the builders are pure or take a recording client, so the file needs no DOM
 // and states only what leaves the browser.
+import { SCAN_START_PATH, SCAN_STOP_PATH, SCAN_WINDOWS_REQUEST, scanPriceRequest, scanStartBody } from "../src/app/map/scan-overlay";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -217,6 +218,22 @@ const DRIVERS: readonly { panel: string; run: () => Promise<Built[]> }[] = [
         assert.ok(Array.isArray(b.cursors) && (b.cursors as unknown[]).length === 2, "two cursors");
       }
       return calls;
+    },
+  },
+  {
+    panel: "scan plan overlay (T-1008: price with steps, the running plan's steps, Start, Stop)",
+    run: async () => {
+      const r = { loHz: BAND.loHz, hiHz: BAND.hiHz };
+      const price = scanPriceRequest(r, 1, "fine");
+      assert.match(price, /[?&]windows=1(&|$)/, "the plan is priced WITH its steps, so the client never tiles");
+      assert.match(price, /f_lo_hz=/, "a plan names its range");
+      assert.match(price, /f_hi_hz=/, "a plan names its range — both ends, never half");
+      return [
+        { method: "GET", path: price },
+        { method: "GET", path: SCAN_WINDOWS_REQUEST },
+        { method: "POST", path: SCAN_START_PATH, body: scanStartBody(r, 1, "fine") },
+        { method: "POST", path: SCAN_STOP_PATH },
+      ];
     },
   },
   {

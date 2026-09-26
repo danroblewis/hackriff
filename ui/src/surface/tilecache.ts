@@ -224,6 +224,23 @@ export interface Viewport {
    * [[TileCache.setViewports]] was handed — which is what a single-tier caller has always passed.
    */
   readonly lat?: Lattice;
+  /**
+   * **The coarse stand-in level pair this viewport also asks for** (T-1037).
+   *
+   * A viewport wants its own level and one step coarser (the parent pin), and cancellation is what
+   * makes that bound real. The coarse stand-in enumeration is *several* levels up — that is what
+   * makes it one batch — so without being named here it would be cancelled at the end of the very
+   * frame that asked for it, and the black it exists to remove would come straight back. It is one
+   * exact pair, not a widened range: a stand-in is a specific level, and widening the predicate
+   * instead would stop cancellation cancelling, which is the T-443 defect.
+   */
+  readonly standIn?: { readonly levelF: number; readonly levelT: number };
+  /**
+   * **The child level for the centre third of the viewport** (T-1038): the finer level a one-step
+   * zoom-in lands on, held resident before the zoom so it draws without a PENDING quad. Matched
+   * exactly on level and against `box` (the centre third), so it keeps that set alive and nothing else.
+   */
+  readonly child?: { readonly levelF: number; readonly levelT: number; readonly box: Box };
 }
 
 /**
@@ -528,13 +545,22 @@ interface InFlight {
  *
  * `solo`: this request must not wait on any other — it is the live edge's revalidation, which the
  * product never gates on generating other tiles (T-460, T-573). A source that batches sends it alone.
+ *
+ * `lane`: which set this address belongs to, when the caller needs the set answered **together**
+ * (T-1037). A batching source keeps one lane's addresses out of another's request, so the coarse
+ * stand-in enumeration arrives as one picture instead of being cut up among a viewport's own tiles.
+ * Absent is the ordinary lane; it is a grouping key and nothing else reads it.
  */
 export interface TileSourceHint {
   readonly solo?: boolean;
+  readonly lane?: string;
 }
 
 export class TileCache<T> {
   readonly budgetBytes: number;
+  /** The lane each queued/in-flight address belongs to, when its caller named one (T-1037). Only
+   * ever read to build the hint the source gets; dropped the moment the request retires. */
+  private lanes = new Map<string, string>();
   private readonly maxQueue: number;
   private readonly busyBackoffMs: number;
   private readonly now: () => number;
@@ -892,10 +918,36 @@ export class TileCache<T> {
   setSettled(fn: ((addr: TileAddr) => boolean) | null): void { this.settled = fn; }
   private settled: ((addr: TileAddr) => boolean) | null = null;
 
-  /** Want this tile soon, but do not draw it: the parent-level pin, and pan prefetch. */
-  prefetch(addr: TileAddr): void {
+  /**
+   * Want this tile soon, but do not draw it: the parent-level pin, the coarse stand-in set, and pan
+   * prefetch.
+   *
+   * `lane` names a set that must be answered **together** (T-1037): a batching source keeps one
+   * lane's addresses out of another's request, so the coarse stand-in enumeration is one answer and
+   * not a few addresses riding in whichever chunk of a viewport's own tiles they landed in.
+   */
+  prefetch(addr: TileAddr, lane?: string, low = false): void {
     if (this.map.has(keyOf(addr))) { this.peek(addr, true); return; }
-    this.schedule(addr);
+    if (lane !== undefined) this.lanes.set(keyOf(addr), lane);
+    this.schedule(addr, low);
+  }
+
+  /**
+   * The `(levelF, levelT)` pairs this cache holds a tile of, on `scheme` — `"<levelF>|<levelT>"`.
+   *
+   * What makes an **unbounded** ancestor search cheap (T-1037). "PENDING only when no ancestor
+   * exists at any level" read as a search over every level pair would be `O(levels²)` map lookups
+   * per missing tile per frame; the resident set is at most a few hundred tiles across a handful of
+   * level pairs, so the search runs over the pairs that could possibly answer and over nothing else.
+   * Recomputed per call by the caller's frame, not cached: residency changes under it.
+   */
+  residentLevels(scheme?: string): Set<string> {
+    const out = new Set<string>();
+    for (const e of this.map.values()) {
+      if (scheme !== undefined && e.addr.scheme !== scheme) continue;
+      out.add(`${e.addr.levelF}|${e.addr.levelT}`);
+    }
+    return out;
   }
 
   /**
@@ -903,19 +955,21 @@ export class TileCache<T> {
    * viewports the user has already left, and under FIFO the ones that finally arrive are for the
    * wrong place. That is what makes map clients feel laggy (§5.5 cap (1)).
    */
-  private schedule(addr: TileAddr): void {
+  private schedule(addr: TileAddr, low = false): void {
     const key = keyOf(addr);
     if (this.map.has(key) || this.inflight.has(key) || this.queued.has(key)) return;
     // The route has already said this place is not askable. A renderer calls `acquire` for it on
     // every frame, so without this the refusal is re-issued at frame rate (T-479).
     if (this.terminal.has(key)) return;
     // A place whose silent probe just failed waits behind the others (T-903, [[silenced]]).
-    if (this.silenced.delete(key)) this.queue.unshift(addr);
+    // `low` (T-1038's child prefetch) goes to the back of the line too: a guess about the next zoom
+    // must never be served before something the pane is drawing now.
+    if (this.silenced.delete(key) || low) this.queue.unshift(addr);
     else this.queue.push(addr);
     this.queued.add(key);
     if (this.queue.length > this.maxQueue) {
       const dropped = this.queue.splice(0, this.queue.length - this.maxQueue);
-      for (const d of dropped) this.queued.delete(keyOf(d));
+      for (const d of dropped) { this.queued.delete(keyOf(d)); this.lanes.delete(keyOf(d)); }
       this.stats.cancelled += dropped.length;
     }
   }
@@ -952,7 +1006,7 @@ export class TileCache<T> {
     const keep: TileAddr[] = [];
     for (const a of this.queue) {
       if (wanted(a)) keep.push(a);
-      else { this.queued.delete(keyOf(a)); this.stats.cancelled++; }
+      else { this.queued.delete(keyOf(a)); this.lanes.delete(keyOf(a)); this.stats.cancelled++; }
     }
     this.queue = keep;
     for (const [key, f] of this.inflight) {
@@ -978,10 +1032,15 @@ export class TileCache<T> {
    * fix, one lattice up. */
   private wants(lat: Lattice, v: Viewport, a: TileAddr): boolean {
     const l = v.lat ?? lat;
-    return a.scheme === l.scheme &&
-      a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
-      a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
-      intersects(l, a, v.box);
+    if (a.scheme !== l.scheme || !intersects(l, a, v.box)) return false;
+    // The coarse stand-in set (T-1037): the one level pair above the pin this viewport also asked
+    // for. Matched exactly, so it keeps that set alive and nothing else.
+    const si = v.standIn;
+    if (si && a.levelF === si.levelF && a.levelT === si.levelT) return true;
+    const ch = v.child;
+    if (ch && a.levelF === ch.levelF && a.levelT === ch.levelT && intersects(l, a, ch.box)) return true;
+    return a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
+      a.levelT >= v.levelT && a.levelT <= v.levelT + 1;
   }
 
   /**
@@ -1718,6 +1777,7 @@ export class TileCache<T> {
     this.pushedAt.clear();
     this.standInFrame.clear();
     this.standInQueued.clear();
+    this.lanes.clear();
   }
 
   /**
@@ -1951,6 +2011,9 @@ export class TileCache<T> {
       this.inflight.delete(key);
       // A failed re-ask leaves the copy in hand; a later event, or the survey, asks again.
       if (this.changedInflight.delete(key)) requeue = false;
+      // The lane tag belongs to the request, not to the place: a re-ask from the ordinary miss path
+      // must not inherit the stand-in lane it once rode in.
+      this.lanes.delete(key);
       if (this.refreshing.delete(key)) {
         // **The lane's cadence is a share of the LANE'S OWN cost** — measured on its own requests
         // ([[refreshCostOf]]), which since T-491 is the minimum of its last few rather than the last
@@ -1995,7 +2058,8 @@ export class TileCache<T> {
     // A live-edge revalidation (`owner === -1`, [[refreshEdge]]) is asked for ON ITS OWN: the lane's
     // cadence is a share of what ITS request costs, and a source that coalesces requests (T-573's
     // batch) would otherwise charge it — and hold its rows — for every cold tile it rode beside.
-    void this.source(addr, ctrl?.signal, { solo: owner === -1 }).then(
+    const lane = this.lanes.get(key);
+    void this.source(addr, ctrl?.signal, { solo: owner === -1, lane }).then(
       (data) => {
         this.observe(started);
         this.succeeded();
