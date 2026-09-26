@@ -985,6 +985,9 @@ struct Common {
     /// the run, not the segment: a re-plumb landing back on the same device, tune and gain is the
     /// same receiver, and re-measuring it would pay twice for an unchanged answer.
     receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-979: the run's 8VSB television survey, measured once per capture state by every segment's
+    /// `hk-atsc` reader. A window narrower than one 6 MHz channel never reaches it.
+    atsc: Arc<crate::atsc::AtscSurvey>,
     /// T-439: the **view-scheme** pyramid (`docs/16` §6.2/§8.2), opened beside the floor product's
     /// scheme-1 pair and written by every segment's history reader. It is the surface the unified
     /// canvas addresses with independent `(level_f, level_t)`, and its finest node is the *live
@@ -1396,6 +1399,7 @@ impl Pipeline {
             view,
             iq_buffer,
             receiver: Arc::default(),
+            atsc: Arc::default(),
             gnss,
             data_dir: cfg.data_dir.clone(),
             db_path,
@@ -1821,6 +1825,13 @@ fn start_segment(
                 "hk-survey",
                 Box::new(move || crate::survey::run(s, r)),
             )?);
+        }
+        {
+            // T-979: the 8VSB television survey. One window per capture state, on its own thread.
+            // A tuned span narrower than one 6 MHz channel short-circuits in the reader, so a
+            // capture that cannot hold an ATSC emission pays one comparison per block.
+            let (s, a) = (Arc::clone(&shared), Arc::clone(&common.atsc));
+            workers.push(spawn("hk-atsc", Box::new(move || crate::atsc::run(s, a)))?);
         }
         {
             // T-322: the C36 L1 dwell reader. It holds nothing until C04 grants a scheduled L1 step,
@@ -3504,6 +3515,11 @@ impl PipelineHandle {
     /// classifications.
     pub fn receiver_survey(&self) -> Arc<crate::survey::ReceiverSurvey> {
         Arc::clone(&self.sup.common.receiver)
+    }
+
+    /// The run's 8VSB television survey (T-979): what it has measured, and how often.
+    pub fn atsc_survey(&self) -> Arc<crate::atsc::AtscSurvey> {
+        Arc::clone(&self.sup.common.atsc)
     }
 
     /// The run's C36 L1 dwell service (T-322): what C04 granted, what acquisition found, and how

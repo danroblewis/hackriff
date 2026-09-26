@@ -37,6 +37,7 @@
 //!   channel class; spectrum is gated by the publisher.
 //! - **Observability:** [`stats::Counters`], the [`RunSummary`] and `/api/status`.
 
+pub mod atsc; // T-979: the 8VSB television survey
 pub mod audio; // T-869 (ADR-0015 §12.2): the Listen chooser
 pub mod chains;
 pub mod characterise; // T-242
