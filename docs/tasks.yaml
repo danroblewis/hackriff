@@ -30866,8 +30866,6 @@ tasks:
     status: in-progress
     branch: task-t1055
     priority: high
-    deps:
-    - T-964
     parallel_group: SCAN-SHADOW
     needs: none
     model: opus
@@ -30885,6 +30883,89 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on your own ports >= 9216; the hk-cli scan_coverage binary; api_contract with docs/api.md together), then HAND BACK with screenshots. Never `just gate`.
     notes: |
       FOUND BY user feature (scan + fog of war) via explorer; review of T-964 2026-09-25 (re-filed: first filed as T-1014 on task-t964, lost in a board merge): After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation
+
+      2026-09-26 coordinator: T-1058 (the user's last-known LEDGER design) replaces the per-tile shadow search that also makes the swept range's shadow unreliable after a scan - build this ticket's canvas item on T-1058's ledger once it lands (the ledger gives every swept cell its last sample, no search); this ticket keeps its other items (contradictory coverage lines, un-timed /api/coverage window, record-limit truncation).
+    deps: [T-964, T-1058]
+  - id: T-1056
+    milestone: MMAP
+    title: "Black bar at the bottom of the map: fit() reserved the sheet peek strip under the panes (T-933); the sheet floats over the full-bleed canvas"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: MAP-SHEET-INSET
+    needs: none
+    model: fable
+    effort: medium
+    acceptance: |
+      USER (2026-09-25 ~20:15, via supervisor): "The bottom bar looks like it should be gone." The user asked the SUPERVISOR to fix it directly (a very small change): ui/src/app/centre/surface.ts fit() (~line 2142) lifted the panes above the sheet's PEEK_PX strip (T-933's clearance) - that reserved strip was the black bar. Dropped the sheet clearance, kept only the out-strip clearance: the sheet (and the hidden-until-clicked card, T-1026) floats over the full-bleed canvas.
+      SUPERVISOR-AUTHORED at the user's request: branch task-sup-sheet-inset, commit cbe32c84 (one commit off gate base e48d0eff); ui unit 106/106, app-dismiss + app-sheet e2e green. app-phone.e2e red on base e48d0eff ('covered: mono' at 400 px) is pre-existing (T-1053 owns it).
+      NOTES: contradicts T-803's 'the sheet is never hidden / never covers' rule - superseded by T-1026 (the card is hidden until a feature is clicked) and the user's full-bleed rulings (T-995, T-1041, T-1027).
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor: Black bar at the bottom of the map: fit() reserved the sheet peek strip under the panes (T-933); the sheet floats over the full-bleed canvas
+    branch: task-sup-sheet-inset
+    dispatch: manual
+    commit: 72ef7434
+    result: |
+      LANDED 2026-09-26 00:04 in the bulk with T-1047/T-1052/T-1050/T-1053 (merge 72ef7434). Supervisor-authored at the user's request: surface.ts fit() no longer lifts the panes above the sheet's PEEK_PX strip (T-933's clearance, the black bottom bar); only the out-strip clearance remains, so the sheet/card floats over the full-bleed canvas. Branch task-sup-sheet-inset, commit cbe32c84; ui unit 106/106; app-dismiss + app-sheet e2e green.
+  - id: T-1057
+    milestone: MLIVE
+    title: "Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: TILE-NEVER-ABANDON
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER (2026-09-25 ~23:55, via supervisor; ~/.hackriff-ops/handoffs/coordinator-0010-abandoned-tiles-and-fog-ledger.md section 1): "Sometimes there are black bars in the waterfall, representing tiles that haven't been loaded yet; sometimes those never load. If a tile fails to load at all it should be re-requested. It seems like they are getting abandoned. Left alone long enough, all tiles on the screen should load. I don't think we should ever see the black tiles."
+      PLACES (ui/src/surface/tilecache.ts): failed() at :2117 (which errors re-queue - T-479 made 400s stop retrying; a transient 5xx/timeout/network error must NOT be treated like a 400); the abandoned-slot accounting abandonedUntil (:564-839) that can leave a visible tile with no lane willing to re-issue it; the coverage-survey short-circuit (T-905) when the survey is stale after a retune; the batch path (tilebatch.ts:112-161) - a batch entry with status 503/truncated/`remaining` must be re-queued per address, not dropped.
+      INVARIANT (state it in code + docs/23): a visible tile is never abandoned - every pending visible address is re-requested with jittered backoff (share T-1035/T-1039's backoff) until served or the server states it does not exist; the survey can only turn a place GREY (unobserved), never leave it PENDING; a retune refreshes the survey before it may veto a request.
+      ACCEPTANCE (spy client + fault injection in ui/test): drop/503/timeout 30 % of tile responses at random -> every visible address is eventually served and no PENDING quad remains; a retune -> the survey refreshes before vetoing; batch `remaining` entries are re-issued. Plus an e2e with the harness failing the route intermittently: no PENDING quad after it recovers.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; e2e alone on ports >= 9216 against a FRESH hk), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor: Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)
+
+      2026-09-26 coordinator, from T-1039's merge (the worker traced where the tile cache still gives up on a VISIBLE tile permanently - this ticket's targets): any 4xx, 500 or 501 from the tile route; an unreadable answer; and the batch layer's 'batch answer named no entry' case in ui/src/surface/tilebatch.ts. T-1039 added none (its SW answers 502 offline, treated as silence and retried). ALSO take over T-1039's unmet browser-test acceptance: an e2e with the harness dropping/stalling the tile route (nothing drawn is cleared, no PENDING over drawn tiles, retries back off) and a reload with the server stopped painting the last viewport's sealed tiles from the Service Worker cache.
+    high_effort_reason: the tile client's request lifecycle (retry classes, abandoned-slot accounting, the survey veto, batch remainders) - the user-visible 'black forever' rule across every lane
+  - id: T-1058
+    milestone: MLIVE
+    title: "Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: FOG-LEDGER
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER DESIGN (2026-09-25 ~23:55, via supervisor; ~/.hackriff-ops/handoffs/coordinator-0010-abandoned-tiles-and-fog-ledger.md section 2): "The fog-of-war is also not working reliably. If I zoom in close enough that the most recent sample for a region is outside of the viewport, it does not render. If I pan down so that the last seen sample is in the viewport, SOME of the tiles resolve, but not all. What we really need is to render all of the fog-of-war tiles... Store some minimal set of data for the source of the 'last sample' for a given region. It should be incredibly fast and straightforward... the server doesn't need to re-render anything."
+      WHY TODAY FAILS: the tile `shadow` plane is computed per tile by a bounded newest-first ladder search (crates/hk-store/src/history/query.rs:1454 last_known_search, :1889 last_known, budgets per_step_cells/total_cells; tiles.rs calls it per tile). At a fine zoom the departed band's last row is many search steps away and the budget runs out -> shadow.runs = 0; panning closer brings some tiles within budget and not others. T-1034 fixed one instance (the band's last live rows), not the mechanism.
+      DELIVER: an incremental last-known LEDGER in the store - per device, per finest-level frequency cell: (last max-hold dB, last capture time, epoch/tune id), updated O(bins) on every ingested row (a row IS the newest sample for every cell it covers), persisted into the retention structure so it survives restarts and evictions (T-1023's budget accounts for it); coarser views fold it (max over cells, latest time). Serving: the tile route's shadow plane reads the ledger - no search, no budget, exact at any zoom/any distance in time; plus a small GET /api/lastknown?device&f_lo&f_hi&cols (or a plane in coverage/timeline) so a pane paints fog for its whole frequency window from one array and re-lays it per frame. Coverage/grey stays record-derived (T-368); the ledger supplies only the last-known tier (ADR-0020 - cite its section; amend it). docs/api.md + api_contract.rs (T-079). MEASURE the per-row update cost on the capture thread (T-453: a max + timestamp per bin; state the number). Retire last_known_search and its budgets (or keep only for a migration window, stated).
+      ACCEPTANCE (mock SDR, deterministic): tune A 10 s, retune B, zoom to the finest level so A's last row is far outside the viewport -> every column of A's band carries a shadow whose last_t_s is A's last row, at every tile of the viewport and at every level; search.unsearched == [] (or the field retires with the search); after a restart the ledger persists; ui/e2e: after a retune, zoom in 4 levels - no black or grey inside the departed band, fog everywhere.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, hk-api tiles, api_contract, the e2e alone on ports >= 9216 against a FRESH hk, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor: Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it
+    core_interface: true
+    high_effort_reason: the user's design replaces the shadow mechanism across hk-store ingest, the tile route and a new route; persisted state + capture-thread cost (T-453) + the ADR-0020 last-known tier contract
+  - id: T-1059
+    milestone: M2-hardening
+    title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: TASK-CLI
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      FOUND 2026-09-26 by the coordinator (board branch task-board-0926ax): py/hkpy/tasks.py has two defects on list-valued keys written in BLOCK style (`deps:` then `- T-964` lines at the SAME indentation as the key, which is how `just task new --depends-on` writes them):
+      1. `just task set T-1055 'deps=[T-964, T-1058]'` did not replace the block list - it appended a second `deps: [...]` key. yaml.safe_load keeps the last, so `just task validate` passed, but the block now declares `deps` twice (hkpy.boardmerge caught it: "T-1055: declares 'deps' twice, which is a lost `- id:` line") and every later board merge refuses.
+      2. `just task unset T-1055 deps` cannot remove a block list: _unset_field removes the key line but not its `- item` lines (same indentation, not recognised as continuation), producing invalid YAML - which the write-validator correctly refused and restored.
+      DELIVER: treat `- ` lines at the key's indentation directly after a key with an empty value as that key's continuation, in both set (replace the whole value) and unset (remove it); `validate` fails on any duplicate key within one ticket block (the check boardmerge already does). Tests in py/tests (test_tasks_cli or the existing task tests): set replaces a block list; unset removes it; validate rejects a duplicated key - each red on the current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q <the task-CLI tests>`, `just lint-py`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-26 (T-1055 duplicate deps): task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
