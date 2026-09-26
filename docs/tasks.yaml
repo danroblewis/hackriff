@@ -31917,7 +31917,7 @@ tasks:
   - id: T-1082
     milestone: MLIVE
     title: "RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-LSR-METRICS
@@ -31941,6 +31941,7 @@ tasks:
       Commits: 97f990f4
       Observed, not chased: ui/e2e/live-ring.e2e.mjs:73 waits for '.hk-surface-viewport[data-viewport="pane"]' on the app page ('/'). With that same wait, my first live-ring-metrics fix timed out at 30 s after app-status on one lane (/tmp/t1082 run: 'timed out after 30000 ms waiting for the chrome to report a viewport'). live-ring passed in the RC, so it may be order-dependent. Not verified. | The RC run's lane 1 also had live-edge.e2e.mjs (188 s) and app-pane-inventory.e2e.mjs red before live-ring-metrics (merge-runner.log around line 990000). Not examined.
       Resources: 391 CPU-s, peak 3.4 GB
+    commit: 73dec1be
   - id: T-1083
     milestone: M2-hardening
     title: "RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam"
