@@ -106,6 +106,12 @@
 /* The honesty tier and the cell size the pixels are made of (docs/16 §8.5a: "same ramp, same scale,
    STATED level"). Tiny, beside the bars, per pane — a wide or deep zoom says `overview` here. */
 .sf-scale-level { font-size: 10px; color: #9fb0ba; }
+/* T-1006's device pill (whose coverage decides this pane's grey), on the pane's own block since
+   T-996 retired the per-viewport row it was drawn on. A stale pin (a front end this run does not
+   hold) is marked, never silently reset. */
+.sf-scale-device { font-size: 10px; padding: 0 6px; border: 1px solid #6b7488; border-radius: 999px; white-space: nowrap; }
+.sf-scale-device[hidden] { display: none; }
+.sf-scale[data-device-stale="true"] .sf-scale-device { color: #e8a33d; border-color: #e8a33d; }
 
 .sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }
 /* T-508: capture recovering or ended, said over the picture. A frozen edge that looks live is the

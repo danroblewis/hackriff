@@ -5511,6 +5511,9 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     assert!(header["audio"]["mode"].is_string(), "{header}");
     // T-874: a client that does not ask gets mono.
     assert_eq!(header["audio"]["channels"], json!(1), "{header}");
+    // T-987: `audio.wait` is only for a stream that opened waiting for its carrier; a station
+    // the probe recognised carries none.
+    assert!(header["audio"].get("wait").is_none(), "{header}");
 
     // At least one binary data record (type 1: 32-byte header + i16 LE PCM payload) within a
     // bounded number of messages (status records, type 3, interleave).

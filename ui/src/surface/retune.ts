@@ -23,14 +23,21 @@
 // fact about the **view** rather than about the front end, so it is carried separately as
 // [[PaneRetuneOffer.block]] and never smuggled into a `RetunePlan` reason.
 //
-// **Where a per-SDR pick would go, when there is more than one front end (explicitly not now).**
-// One device, one control. The seam already exists and is not being widened: a pane carries a
-// `device` coverage selector, [[coveringWindow]] filters the reported windows by it, and
-// `retunePlan` takes one `FrequencyGrid`. A multi-SDR control would take the *grid of the chosen
-// device* rather than `navGrid.grid.frequency`, and `PaneRetuneOffer` would name the device it
-// planned against alongside the region — at which point [[sameTarget]] gains one more field, for
-// the same reason it already compares `device`. Nothing below assumes there is exactly one radio;
-// it assumes the caller has already decided which one, which is where that decision belongs.
+// **The per-SDR pick, T-1006.** The seam this file described and declined to widen is now widened
+// by exactly one field. A pane already carried a `device` coverage selector and [[coveringWindow]]
+// already filtered the reported windows by it; what is added is that the offer **names the front
+// end it planned against** ([[PaneRetuneOffer.retuneDeviceId]]) and that a pane whose front end
+// cannot be resolved is **stated and disabled** rather than posting a request the backend must
+// refuse. The two new blocks mirror the server's own rule (docs/api.md, "Which radio: the device
+// selector"): `"device_required"` for a pane on `any` with several radios attached — the case that
+// answers `400 device_required`, because *"where nothing was said, nothing is invented"* — and
+// `"device_gone"` for a pane pinned to a `device_id` this run does not hold (`404 unknown_device`).
+// The arithmetic is `./panedevice.ts`'s [[retuneDevice]]; nothing about it is decided here.
+//
+// What is still true: `retunePlan` takes one `FrequencyGrid`, which on a multi-SDR run is the
+// primary's. That is a narrower gap than it looks (the achievable grid is a property of the driver
+// class, not of which HackRF is plugged in) but it IS a gap, and it is the next ticket's, not a
+// silent assumption here.
 //
 // ## The control this file exists under, and why it is not negotiable
 //
@@ -76,6 +83,7 @@
 // hands the region to the planner.
 
 import { retunePlan, type FrequencyGrid, type RetunePlan, type RetuneRefusal } from "../navigation";
+import { retuneDevice, type AttachedDevice } from "./panedevice";
 import type { ActiveWindow } from "../navigators";
 import { applyDeviceAction, retuneAction, type DeviceAction } from "../app/centre/view";
 import type { AppContext } from "../app/context";
@@ -123,6 +131,15 @@ export interface PaneRetuneOffer {
   readonly hiHz: number;
   /** The pane's coverage selector at the time the offer was made. */
   readonly device: string;
+  /**
+   * **The `device_id` a taken offer must name** (T-1006), or `null` to send no selector at all.
+   *
+   * Null is *"this run holds no live front end"*, where the route's own `not_live` is the right
+   * answer and an invented id would only turn it into `unknown_device`. When the device could not be
+   * resolved, this is null AND [[block]] says which way it failed — the two cannot disagree,
+   * because both come from the one [[retuneDevice]] call below.
+   */
+  readonly retuneDeviceId: string | null;
   /** The capture configuration, or the reason none can capture the pane (T-392's three refusals). */
   readonly plan: RetunePlan;
   /**
@@ -159,8 +176,15 @@ export interface PaneRetuneOffer {
  * *from now on*, so a pane scrubbed ten minutes back has nothing to gain from one — and taking it
  * would imply the past could be re-observed, which is the same class of claim as manufacturing
  * grey. The control still appears, and says this.
+ *
+ * `"device_required"` (T-1006): the pane draws the union of several front ends, so there is no "the"
+ * radio for a retune to move. The user picks one in the viewport menu; the client does not pick for
+ * them, exactly as the route does not (`400 device_required`).
+ *
+ * `"device_gone"` (T-1006): the pane names a `device_id` this run does not hold. Its grey is that
+ * front end's grey and stays so — the pin is not silently reset — but nothing here can retune it.
  */
-export type PaneRetuneBlock = "past";
+export type PaneRetuneBlock = "past" | "device_required" | "device_gone";
 
 /** Whether an offer may be acted on. A refusal is shown, not clamped into something takeable. */
 export const offerAcceptable = (o: PaneRetuneOffer | null): boolean =>
@@ -192,17 +216,30 @@ export function paneRetuneOffer(
   grid: FrequencyGrid | null,
   edgeNs: number,
   edgeGraceNs = 0,
+  /** Every live front end this run holds (T-1006), `/api/control/state`'s `devices[]`. `[]` — the
+   * default, and every pre-T-1006 caller — is a replay or a run with none, and then the offer names
+   * no selector and the route's own `not_live` answers. */
+  attached: readonly AttachedDevice[] = [],
 ): PaneRetuneOffer {
   const box = boxOf(pane, edgeNs);
   const t = timeExtentOf(pane.time, edgeNs);
   const plan = retunePlan(grid, box.f0Hz, box.f1Hz);
+  const dev = retuneDevice(attached, pane.device);
+  // Precedence: a pane frozen in the past is blocked whichever radio it names, because the block is
+  // about the view and no pick changes it. A device block only reaches the label when the view
+  // itself permits a retune.
+  const past = t.t1Ns + edgeGraceNs < edgeNs;
+  const block: PaneRetuneBlock | null = past
+    ? "past"
+    : dev.kind === "ambiguous" ? "device_required" : dev.kind === "gone" ? "device_gone" : null;
   return {
     paneId: pane.id,
     loHz: box.f0Hz,
     hiHz: box.f1Hz,
     device: pane.device,
+    retuneDeviceId: dev.kind === "named" ? dev.deviceId : null,
     plan,
-    block: t.t1Ns + edgeGraceNs >= edgeNs ? null : "past",
+    block,
     covered: coveringWindow(windows, box.f0Hz, box.f1Hz, pane.device),
     shortfallHz: plan.ok ? shortfall(plan.centerHz, plan.spanHz, box.f0Hz, box.f1Hz) : 0,
   };
@@ -217,6 +254,8 @@ function shortfall(centerHz: number, spanHz: number, loHz: number, hiHz: number)
 /** The reason the pane's own view state blocks the retune. Stated, because vanishing states nothing. */
 const BLOCK_TEXT: Record<PaneRetuneBlock, string> = {
   past: "This viewport is frozen behind the growing edge: a retune changes only what is captured from now on, so there is nothing here for it to sharpen.",
+  device_required: "This viewport draws the union of every front end, so there is no one radio for a retune to move: pick a front end for it in the viewport menu first.",
+  device_gone: "This viewport is pinned to a front end this run does not hold, so nothing here can retune it: its grey is still that radio's coverage. Pick a front end for it in the viewport menu.",
 };
 
 /** The reason no capture configuration reaches this viewport at all. */
@@ -273,7 +312,12 @@ export function paneRetuneAction(o: PaneRetuneOffer | null): DeviceAction | null
   // a viewport that is frozen in the past is now a reachable state, and it must not become a device
   // action. The one predicate decides, so the button's `disabled` and this refusal cannot disagree.
   if (!o || !offerAcceptable(o) || !o.plan.ok) return null;
-  return retuneAction(o.plan.centerHz, "pane-offer", { loHz: o.loHz, hiHz: o.hiHz }, o.plan.spanHz);
+  // T-1006: WHICH radio, named from the pane's own selector. `offerAcceptable` already refused every
+  // unresolvable case above (`device_required` / `device_gone` are blocks), so a null here means
+  // this run holds no live front end — send no selector and let the route say `not_live`.
+  return retuneAction(
+    o.plan.centerHz, "pane-offer", { loHz: o.loHz, hiHz: o.hiHz }, o.plan.spanHz, o.retuneDeviceId,
+  );
 }
 
 /**
@@ -356,6 +400,11 @@ export async function acceptPaneRetune(
  */
 function sameTarget(a: PaneRetuneOffer, b: PaneRetuneOffer | null): boolean {
   if (!b || b.paneId !== a.paneId || b.device !== a.device) return false;
+  // T-1006: and the same RESOLVED front end. `device` alone is not enough — a pane on `any` with one
+  // radio attached resolves to that radio, and a second front end appearing between paint and press
+  // makes the same `any` mean the union. The press then must refuse, not move a radio the label
+  // never named.
+  if (b.retuneDeviceId !== a.retuneDeviceId) return false;
   if (b.block !== a.block) return false;
   if (!a.plan.ok || !b.plan.ok) return false;
   return a.plan.centerHz === b.plan.centerHz && a.plan.spanHz === b.plan.spanHz;
@@ -414,6 +463,10 @@ export function goToSpanHz(grid: FrequencyGrid | null, defaultSpanHz: number): n
 export interface PaneWidthOffer {
   readonly paneId: string;
   readonly device: string;
+  /** The `device_id` a taken offer must name (T-1006), or null for none — see
+   * [[PaneRetuneOffer.retuneDeviceId]]; this control reaches the same routes and obeys the same
+   * rule. */
+  readonly retuneDeviceId: string | null;
   /** The span this offer was asked for — a host-chosen preset, not necessarily what the plan
    * achieves; see [[widthOfferLabel]] for when the two differ and how that is said. */
   readonly askedSpanHz: number;
@@ -427,15 +480,20 @@ export interface PaneWidthOffer {
  */
 export function paneWidthOffer(
   pane: PaneState, askedSpanHz: number, grid: FrequencyGrid | null, edgeNs: number, edgeGraceNs = 0,
+  /** Every live front end this run holds (T-1006) — see [[paneRetuneOffer]]'s own parameter. */
+  attached: readonly AttachedDevice[] = [],
 ): PaneWidthOffer {
   const box = boxOf(pane, edgeNs);
   const centerHz = (box.f0Hz + box.f1Hz) / 2;
   const half = askedSpanHz / 2;
   const plan = retunePlan(grid, centerHz - half, centerHz + half);
   const t = timeExtentOf(pane.time, edgeNs);
+  const dev = retuneDevice(attached, pane.device);
+  const past = t.t1Ns + edgeGraceNs < edgeNs;
   return {
     paneId: pane.id, device: pane.device, askedSpanHz, plan,
-    block: t.t1Ns + edgeGraceNs >= edgeNs ? null : "past",
+    retuneDeviceId: dev.kind === "named" ? dev.deviceId : null,
+    block: past ? "past" : dev.kind === "ambiguous" ? "device_required" : dev.kind === "gone" ? "device_gone" : null,
   };
 }
 
@@ -469,7 +527,7 @@ export function widthOfferLabel(o: PaneWidthOffer): string {
  * so the two controls stay tellable apart after the fact. */
 export function paneWidthAction(o: PaneWidthOffer | null): DeviceAction | null {
   if (!o || !widthOfferAcceptable(o) || !o.plan.ok) return null;
-  return retuneAction(o.plan.centerHz, "pane-width", null, o.plan.spanHz);
+  return retuneAction(o.plan.centerHz, "pane-width", null, o.plan.spanHz, o.retuneDeviceId);
 }
 
 /** What [[acceptPaneWidth]] needs from the surface around it — the width-offer analogue of
@@ -503,6 +561,7 @@ export async function acceptPaneWidth(
  * span? See [[sameTarget]] — the same rationale, `askedSpanHz` standing in for the region. */
 function sameWidthTarget(a: PaneWidthOffer, b: PaneWidthOffer | null): boolean {
   if (!b || b.paneId !== a.paneId || b.device !== a.device || b.askedSpanHz !== a.askedSpanHz) return false;
+  if (b.retuneDeviceId !== a.retuneDeviceId) return false; // T-1006, as in `sameTarget`
   if (b.block !== a.block) return false;
   if (!a.plan.ok || !b.plan.ok) return false;
   return a.plan.centerHz === b.plan.centerHz && a.plan.spanHz === b.plan.spanHz;

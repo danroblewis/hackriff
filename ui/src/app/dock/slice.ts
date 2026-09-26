@@ -12,7 +12,9 @@ export interface OutputEntry {
   /** TCP handshake target for "Copy address" (`/api/streams` tcp.addr + this). */
   tcpTarget: string | null;
   muted: boolean; levelDbfs: number | null; recordsPerS: number | null;
-  emitterId: string | null; pipelineId: string | null; message: string | null;
+  emitterId: string | null; pipelineId: string | null;
+  /** The pipeline output this entry shows (`output_id`); null for a legacy Listen chain. */
+  outputId: string | null; message: string | null;
 }
 
 /** T-994: the latest `GET /api/pipelines` / `GET /api/outputs` answers, as the box badges read them. */
