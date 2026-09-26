@@ -30900,6 +30900,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; e2e alone on ports >= 9216 against a FRESH hk), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor: Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)
+
+      2026-09-26 coordinator, from T-1039's merge (the worker traced where the tile cache still gives up on a VISIBLE tile permanently - this ticket's targets): any 4xx, 500 or 501 from the tile route; an unreadable answer; and the batch layer's 'batch answer named no entry' case in ui/src/surface/tilebatch.ts. T-1039 added none (its SW answers 502 offline, treated as silence and retried). ALSO take over T-1039's unmet browser-test acceptance: an e2e with the harness dropping/stalling the tile route (nothing drawn is cleared, no PENDING over drawn tiles, retries back off) and a reload with the server stopped painting the last viewport's sealed tiles from the Service Worker cache.
     high_effort_reason: the tile client's request lifecycle (retry classes, abandoned-slot accounting, the survey veto, batch remainders) - the user-visible 'black forever' rule across every lane
   - id: T-1058
     milestone: MLIVE
