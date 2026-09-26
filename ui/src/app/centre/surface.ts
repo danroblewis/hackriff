@@ -59,6 +59,7 @@ import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend"
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
+import { wsChangeOpener } from "../../surface/changefeed";
 import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, acceptGoLive, goLiveOfferLabel, isGoLiveOffer, GO_LIVE_LABEL,
@@ -68,13 +69,14 @@ import {
   commitRetuneMode, isRetuneKey, retuneModeLabel, retuneModeTarget, RetuneModeController, type RetuneModeTarget,
 } from "../../surface/retune-mode";
 import {
-  ANY_DEVICE, devicePill, deviceRows, splitPerDeviceOffer, type AttachedDevice,
+  ANY_DEVICE, devicePill, deviceLabels, deviceRows, splitPerDeviceOffer, type AttachedDevice,
 } from "../../surface/panedevice";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
-  afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
+  afterglowAbsence, coreSamples, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
+import { ringMaxHoldColumns, ringRowAt, sampleRingRow } from "../../surface/livering";
 import type { OverlayQuad } from "../../surface/minimap";
 import { boxOf, type PaneState } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
@@ -89,13 +91,14 @@ import {
   frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
 } from "../../surface/frontend";
 import { flags } from "../../flags";
+import { fmtLiveMetrics, liveMetrics } from "../../surface/livemetrics";
 import { liveRing, liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
 import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
-import { openSelectionMenu, openSignalMenu } from "../menu";
+import { menuDevices, openMeasurementMenu, openSelectionMenu, openSignalMenu } from "../menu";
 import { boxActivity, type BoxActivity } from "../dock/activity";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
@@ -279,6 +282,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
+  // T-1048 (LSR-7): the CLIENT ring's own cost and freshness — ring-fold cost per row,
+  // arrival→paint latency (never the design's full sample-to-pixel budget, and never the
+  // server's per-subscription fold, which is `/api/status` `spectrum.fold_ns_*`) — shown only
+  // behind the same `?live-ring=1` flag as the lane it measures. Empty (no text node) with the
+  // flag off: `setText` is never called, so there is nothing to hide.
+  const metricsEl = h("div", { class: "sf-ring sf-ring-metrics", role: "status" });
   // T-807 (MAP-07): says so, in words, when the active pane's coverage fog is hidden — the bare
   // ground it then draws is a viewer's choice, and a choice about grey must never pass for a fact.
   const fogEl = h("div", { class: "sf-ring sf-fog", role: "status", hidden: true });
@@ -341,7 +350,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // The dismiss (×, and Escape through the one overlay stack, T-900) returns it to the collapsed
   // line, never to nothing — a viewer can put a paragraph away, not switch an honesty statement off.
   const statusBody = h("div", { class: "sf-status-body", id: "sf-status-body", hidden: true },
-    traceEl, ringEl, fogEl, priorsEl, note);
+    traceEl, ringEl, metricsEl, fogEl, priorsEl, note);
   const statusToggle = h("button", {
     class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded": "false",
     title: "The full status: spectrum trace, capture rules, coverage, priors and orientation",
@@ -709,7 +718,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     },
     toast: (text) => store.set(toast(text)),
   });
-  store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded), { immediate: true });
+  store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded, d.scans ?? []), { immediate: true });
   const scanQuadsFn: OverlayLayerFn = (pane) => {
     // Where the active pane is, stated beside the plan it draws (CSS px from the canvas's top-left,
     // and its frequency window), so a check can find a plan edge on screen without re-deriving the
@@ -921,20 +930,69 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * lane. Written from the `PaneReport` the data pass just produced, in the pass that produced it,
    * and only when the numbers change. Presentation metadata: commands nothing, and absent entirely
    * with the flag off.
+   *
+   * **Wired off `SurfacePreview`'s `onReports`, not off `trace`** (T-1052). It used to be the first
+   * line of `traceFor` below, which only runs when the trace LAYER is on (`tracePx > 0`) — so T-1041
+   * defaulting that layer off (2026-09-25) silently stopped this diagnostic from ever being written,
+   * an unrelated layer's toggle deciding a fact the ring lane, not the trace, reports. `onReports`
+   * fires every frame regardless of the trace layer.
    */
   let ringDiag = "";
-  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number }>();
+  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number; latencyMs: number | null }>();
   const stateRing = (report: PaneReport) => {
-    ringReports.set(report.id, { rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10 });
+    ringReports.set(report.id, {
+      rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10,
+      latencyMs: report.ringLatencyMs === null ? null : Math.round(report.ringLatencyMs * 100) / 100,
+    });
     const next = JSON.stringify([...ringReports].map(([id, r]) => ({ id, ...r })));
     if (next === ringDiag) return;
     ringDiag = next;
     stage.dataset.liveRing = next;
   };
+  /**
+   * **The LSR-7 dashboard tile** (T-1048): the client's own arrival→paint latency and ring-fold
+   * cost per row — named for exactly what each measures, never the design's full sample-to-pixel
+   * budget and never the server's per-subscription fold (`/api/status` `spectrum.fold_ns_*`,
+   * `docs/api.md`) — in words and as machine-readable numbers, behind the same flag as the lane it
+   * measures. Read by the person (`metricsEl`, in the status panel's "More" body beside the other
+   * capture-rule paragraphs) and by a spec (`.sf-stage[data-live-metrics]`, the same pattern
+   * `stateRing` above already keeps). Written once per frame the ring lane runs, and only when the
+   * numbers change.
+   */
+  let metricsDiag = "";
+  const stateMetrics = () => {
+    const snap = liveMetrics.snapshot();
+    const next = JSON.stringify(snap);
+    if (next === metricsDiag) return;
+    metricsDiag = next;
+    stage.dataset.liveMetrics = next;
+    setText(metricsEl, fmtLiveMetrics(snap));
+  };
+  /**
+   * **The active pane's trace CORE, as the layer itself drew it** (T-1050): one sample per MEASURED
+   * column — `{x, y}` the pixel centre from the canvas element's top-left, and the 0–255 ink of that
+   * vertex — from the `trace-slice` paths submitted this frame. See [[coreSamples]] for why a pixel read cannot find
+   * the core on its own now that the layer is drawn over the waterfall, and what the e2e check does
+   * with this. Written only while the layer is on (it is off by default) and only for the pane whose
+   * readout describes the slice, and removed the moment it is not: a stale statement about a stroke
+   * that is no longer drawn would be worse than none.
+   */
+  let traceCoreDiag = "";
+  const stateTraceCore = (core: readonly TracePath[], strip: PaneRect) => {
+    const dpr = window.devicePixelRatio || 1;
+    // `onlyMeasured`: this runs in the frame it describes, so the cost is paid whether or not anyone
+    // reads it — 0.28 ms and 6.0 kB a frame at a 1440 px pane, against 0.86 ms and 36.8 kB for every
+    // column (measured; see [[coreSamples]]). The measured columns are also the only ones whose
+    // colour a cell can be asked about, so nothing the reader needs is dropped to buy that.
+    const next = JSON.stringify(coreSamples(core, strip, canvas.height, dpr, { onlyMeasured: true })
+      .map((c) => [Math.round(c.xPx * 10) / 10, Math.round(c.yPx * 10) / 10, c.rgb[0], c.rgb[1], c.rgb[2]]));
+    if (next === traceCoreDiag) return;
+    traceCoreDiag = next;
+    stage.dataset.traceCore = next;
+  };
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
-    if (flags().liveRing) stateRing(report);
     const s = p.view.surface;
     const dev = pane.device ?? "any";
     // **The pane's OWN lattice, off the report the data pass just produced** (T-505). Since the
@@ -954,19 +1012,57 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // the max-hold answers a different question over a different interval than the slice, so giving
     // both the ramp would put two identically-coloured lines on one strip.
     const hold = maxHoldColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n);
+    // **LSR-6 (T-1047): fold in the ring-covered max-hold.** T-1042 tells the tile lane to stand
+    // aside over the ring's own extent (`report.ringCover`), so the pyramid has nothing requested
+    // there at all — the ring is the only source that can answer for it. Folding is a plain max,
+    // never a replacement: a max-hold is idempotent and associative, so taking the greater of the two
+    // sources over the same cell is still a max-hold over their union, and the pyramid still answers
+    // for the rest of the window exactly as before.
+    //
+    // **Column `c` must stay `hold`'s own column** — the pane's WHOLE frequency window divided into
+    // `n`, the same division `maxHoldColumns` just used — never `ringCover`'s narrower band. A pane
+    // zoomed out past the tuned span has `ringCover.f0Hz/f1Hz` inside `pane.box`'s own range, so
+    // asking `ringMaxHoldColumns` to divide THAT band into `n` columns would put the ring's answer at
+    // the wrong frequencies once resampled onto `hold`'s columns (review finding on this ticket). So
+    // the box handed to it keeps the PANE's frequency extent — which is what `n` was sized for — and
+    // narrows only the TIME axis to what `ringCover` actually vouches for continuously; a column
+    // outside the ring's own band still comes back `NaN` from `sampleRingRow`'s own band check.
+    if (report.ringFrame && report.ringCover) {
+      const ringWindow = { ...pane.box, t0Ns: report.ringCover.t0Ns, t1Ns: report.ringCover.t1Ns };
+      const ringHold = ringMaxHoldColumns(report.ringFrame, ringWindow, n);
+      for (let c = 0; c < n; c++) {
+        const v = ringHold[c];
+        if (Number.isFinite(v) && !(hold[c] >= v)) hold[c] = v;
+      }
+    }
     out.push(...tracePaths(hold, pane.box, strip, s.lo, s.hi, "trace-hold", pane.id,
       { ink: [HOLD_INK[0], HOLD_INK[1], HOLD_INK[2]], alpha: HOLD_INK[3], widthPx: HOLD_PX }));
 
-    // The slice, at this viewport's own time position. The live row is preferred only where it is
-    // genuinely finer — inside the cell the slice is asking about — and the pyramid answers
+    // The slice, at this viewport's own time position. The live RING is preferred first — a row that
+    // CONTAINS this instant is a strictly finer answer than any pyramid cell that merely spans it
+    // (T-1047 / LSR-6) — then the single held live row for a band with no ring, then the pyramid
     // everywhere else, which is what makes a scrubbed pane show the spectrum of *then*.
     const tAtNs = pane.box.t1Ns;
     const win = sliceWindow(lat, report.levelT, tAtNs);
+    const ringAt = report.ringFrame ? ringRowAt(report.ringFrame, tAtNs) : null;
     const fr = liveRow.get();
-    const live = liveFrameFits(fr, win);
-    const slice = live && fr
-      ? sampleFrame(fr, pane.box, n)
-      : sliceColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+    const live = !ringAt && liveFrameFits(fr, win);
+    let slice: Float32Array;
+    let sliceSrc: string;
+    let sliceAtNs: number;
+    if (ringAt && report.ringFrame) {
+      slice = sampleRingRow(report.ringFrame, ringAt.slot, pane.box, n);
+      sliceSrc = "live ring row";
+      sliceAtNs = ringAt.tNs;
+    } else if (live && fr) {
+      slice = sampleFrame(fr, pane.box, n);
+      sliceSrc = "live frame";
+      sliceAtNs = fr.tNs;
+    } else {
+      slice = sliceColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+      sliceSrc = `${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} cell`;
+      sliceAtNs = tAtNs;
+    }
 
     // **The afterglow** (T-475): the rows just before THIS pane's time position, oldest first so the
     // newest shadow sits on top of the older ones and the current slice on top of all of them. They
@@ -991,8 +1087,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // the strip (see `TraceStyle.shade`).
     out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-bloom", pane.id,
       { alpha: 0.18, widthPx: GLOW_PX, shade: "mono" }));
-    out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-slice", pane.id,
-      phosphor ? { alpha: 1, widthPx: SLICE_PX, ink: PHOSPHOR_INK } : { alpha: 1, widthPx: SLICE_PX }));
+    const core = tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-slice", pane.id,
+      phosphor ? { alpha: 1, widthPx: SLICE_PX, ink: PHOSPHOR_INK } : { alpha: 1, widthPx: SLICE_PX });
+    out.push(...core);
+    // **Where the core is on the screen and what ink it carries** (T-1050) — the layer's own
+    // statement of what it just handed the GPU, for the active pane only, off the very paths above.
+    // T-475's equality is checked against a real framebuffer, and since T-1041 the layer draws over
+    // the cells it is a spectrum of: a pixel read cannot tell the core from its own achromatic bloom
+    // blended over a coloured cell, and where the equality HOLDS the core pixel is identical to the
+    // cell, so a difference against a trace-off baseline keeps only the failures. So the page says
+    // where it stroked and in what colour, and `ui/e2e/app-trace.e2e.mjs` reads the COLOUR out of
+    // the framebuffer there — a wrong position fails "the pixel carries the stated ink", a diverged
+    // ramp fails "the cells carry it too". Presentation metadata read off the drawn vertices:
+    // commands nothing, recomputes no ramp, and absent entirely while the layer is off.
+    if (pane.id === p.activePane) stateTraceCore(core, strip);
 
     // The readout, for the pane gestures apply to. Written here rather than on the poll for the same
     // reason the quads are: it describes the frame that was just drawn. It names the SOURCE, because
@@ -1002,7 +1110,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const slicePk = peakOf(slice, pane.box);
       const holdPk = peakOf(hold, pane.box);
       const spanS = (pane.box.t1Ns - pane.box.t0Ns) / S_TO_NS;
-      const src = live ? "live frame" : `${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} cell`;
+      const src = sliceSrc;
       // **A gap is not evidence of quiet, and "not loaded" is not "never observed."** The trace draws
       // nothing in either case, which is the safe direction — absence claims nothing. But the
       // sentence beside it must not turn a memory-and-latency fact into a statement about the radio,
@@ -1013,7 +1121,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         : "nothing observed across this span";
       setText(traceEl, [
         slicePk
-          ? `slice ${at(live && fr ? fr.tNs : tAtNs)} (${src}) · peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}`
+          ? `slice ${at(sliceAtNs)} (${src}) · peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}`
           : `slice ${at(tAtNs)} (${src}) — ${empty}`,
         ...(phosphor ? ["phosphor style: trace in one green ink, not on the ramp"] : []),
         holdPk
@@ -1060,6 +1168,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (preview) preview.view.tracePx = traceOn ? TRACE_PX : 0;
     traceEl.hidden = !traceOn;
     if (!traceOn) traceEl.textContent = "";
+    // T-1050: the core statement describes a stroke that is drawn. With the layer off nothing is
+    // stroked and `traceFor` is not called at all, so the statement is withdrawn here rather than
+    // left to go stale — the same rule the readout above follows.
+    if (!traceOn) { delete stage.dataset.traceCore; traceCoreDiag = ""; }
     syncLayerControls();
   };
   // T-522: the found-signal boxes' switch is the ACTIVE pane's `detections` layer (T-806) — the
@@ -1207,7 +1319,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow,
       // T-437 §5.2: the growing edge's tiles were computed from the tuning that has just ended, so
       // a cached one is an observation claim about a tuning that no longer exists.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1259,7 +1371,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow: widthOfferNow,
       // T-437 §5.2, same as the retune control: the growing edge's tiles described the tuning that
       // has just ended.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1289,7 +1401,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (isGoLiveOffer(lastPaintedGoto)) {
       void acceptGoLive(ctx, {
         offerNow: widthOfferNow,
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, lastPaintedGoto, (paneId) => {
         p.view.panes.follow(paneId);
         lastMirror = ""; mirror(); renderLive(); viewMoved();
@@ -1304,7 +1416,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // nothing); if the current/default span has since changed that is `sameWidthTarget`'s job to
       // catch, not this function's.
       offerNow: widthOfferNow,
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, lastPaintedGoto).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1338,7 +1450,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = await commitRetuneMode(ctx, {
         targetNow: retuneTargetNow,
         // T-437 §5.2, as everywhere else: the growing edge's tiles describe the tuning that ended.
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, paneId);
       // What the pane says afterwards. A refusal is said too: in this mode the user did not press a
       // button, so silence would read as "my pan did nothing" rather than "the front end said no" —
@@ -1557,10 +1669,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
+        // T-1040: a front-end move re-lays the fog and re-fetches exactly the tiles it rewrote.
+        changes: wsChangeOpener(ctx.token),
         // T-1042 / LSR-1, behind `?live-ring=1` (`src/flags.ts`): the published spectrum rows every
         // FOLLOWING pane paints its live edge from, read in the render pass. Off, this is `null` and
         // the surface is drawn from tiles exactly as before — one flag, one lane, no second picture.
         liveRing: flags().liveRing ? () => liveRing.frame() : null,
+        // T-1052: the ring diagnostic above, off every frame's reports regardless of the trace
+        // layer's on/off state (see `stateRing`'s doc comment for why it moved here from `trace`).
+        // T-1048 (LSR-7): the metrics dashboard tile rides the same every-frame hook.
+        onReports: flags().liveRing ? (reports) => { for (const r of reports) stateRing(r); stateMetrics(); } : null,
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,
@@ -1802,6 +1920,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
           // T-1002: the row as THIS pane knows it — the box was drawn from that pane's answer.
           const row = paneRows(s.inventory, hit.pane.id)[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
+        } else if (hit.mark.kind === "measurement-box") {
+          // T-1009: a box the user DREW with the Measure tool carries its own acts — scan it with a
+          // chosen radio, record its IQ from that radio's ring, keep it as a marker. Same component
+          // and same trigger as a detection box's menu (T-994).
+          const m = measurements.find((x) => x.id === hit.mark!.id);
+          if (m) {
+            openMeasurementMenu(ctx, m, {
+              // The same words the pane's device menu uses, disambiguated the same way.
+              devices: menuDevices(s.device.devices, deviceLabels(s.device.devices)),
+              view: measureViewOf(hit.pane.id),
+              openScan: (region, deviceId) => scanCtl.openPlanOver(region, deviceId),
+              prompt: (message, initial) => window.prompt(message, initial),
+            }, e.clientX, e.clientY);
+          }
         } else if (hit.mark.kind === "selection-box") {
           const sel = s.selections.list.find((x) => x.id === hit.mark!.id);
           if (sel) openSelectionMenu(ctx, sel, e.clientX, e.clientY);
@@ -2124,29 +2256,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const dock = document.querySelector<HTMLElement>(".app > .out-strip");
       const dr = dock?.getBoundingClientRect();
       const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
-      // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
-      // it is never hidden (T-803's rule) — and the panes' bottom edge spans the WHOLE canvas width,
-      // so it always shares an x-range with the sheet: the panes must clear the peek strip too, not
-      // just the dock. (This was the minimap strip's clearance until T-995 retired the minimap.)
-      //
-      // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
-      // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
-      // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
-      // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
-      // height transition). Reading the live top/height, as an earlier version of this fix did,
-      // made the bottom edge — and so every pane — follow the sheet up and down
-      // on every drag and close (review finding on this ticket). The peek clearance itself is a
-      // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
-      // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
+      // The sheet (T-803) is a CLOSEABLE OVERLAY in the map model (docs/23 §10.1 P1; T-1026 hides it
+      // until a feature is clicked), so it never insets the panes: the canvas stays full-bleed under
+      // it. T-933 used to lift the panes clear of its peek strip, and that reserved strip read as a
+      // black bar along the bottom of the map (user, 2026-09-25) — an unpainted band that no CSS on
+      // the sheet could move, since it was this arithmetic and not the sheet's box. What the peek
+      // strip still arranges is the floating DOM chrome (`--chrome-bottom` / `--map-strip`: the
+      // status stack, layers, scan and zoom), anchored off the sheet's fixed BOTTOM edge and the
+      // constant `PEEK_PX` — never its live top/height, which made every pane follow a drag
+      // (T-933 review finding). The panes themselves clear only a full-width bar (the out-strip).
       const sheet = document.querySelector<HTMLElement>(".sheet");
       const sr = sheet?.getBoundingClientRect();
       const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - (sr.bottom - PEEK_PX))) : 0;
-      const under = Math.max(dockUnder, sheetUnder);
-      const lift = under > 0 ? under + 8 : 0;
-      stage.style.setProperty("--chrome-bottom", `${under}px`);
-      // The FAB and the readouts dock above the panes' bottom inset, in CSS px (`--map-strip` keeps
-      // its name; with the minimap retired, T-995, it is the lift alone).
-      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + lift}px`);
+      const chromeUnder = Math.max(dockUnder, sheetUnder);
+      const lift = dockUnder > 0 ? dockUnder + 8 : 0;
+      const chromeLift = chromeUnder > 0 ? chromeUnder + 8 : 0;
+      stage.style.setProperty("--chrome-bottom", `${chromeUnder}px`);
+      // The FAB and the readouts dock above the floating chrome's bottom clearance, in CSS px
+      // (`--map-strip` keeps its name; with the minimap retired, T-995, it is that clearance alone).
+      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + chromeLift}px`);
       // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
       // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
       // rather than under it. Layout arithmetic over two measured boxes; 0 where they do not meet.
@@ -2166,11 +2294,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
-    // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
-    // height, see above), so this observer is not about tracking drag/snap changes — it exists so
-    // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
-    // is still picked up once it appears, rather than the panes staying un-lifted until the next
-    // stage resize.
+    // The sheet's clearance (floating chrome only, see `fit`) is anchored to its fixed bottom edge,
+    // never its live height, so this observer is not about drag/snap changes — it exists so that a
+    // sheet mounted AFTER this first `fit()` call (a separate area mount, T-803) is still picked up
+    // once it appears, rather than the chrome staying un-lifted until the next stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
     // T-994: the Active-outputs strip appears and disappears with the outputs; its box changing size

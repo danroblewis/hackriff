@@ -408,6 +408,9 @@ proposal that fails any line is wrong, not a trade-off.
   the guard is a `ui/test` assertion of the *request the client builds* (the T-367 lesson).
 - [ ] **The view opens on the observed extent from the coverage map** (`surface/bootstrap.ts`), never
   on the whole 1 MHz–6 GHz midpoint and never derived from `frequency.current` (`docs/16 §8`, T-376).
+- [ ] **A visible tile is never abandoned** (§10.9, T-1057). Every pending visible address is re-requested
+  with jittered backoff until it is served or the route states it does not exist; the coverage survey may
+  turn a place grey and may never leave it pending; a retune refreshes the survey before it may veto.
 
 ---
 
@@ -740,6 +743,50 @@ pane 1 sits in the past, the lists named, at 1280 and 400 px).
 
 ---
 
+### 10.9 A visible tile is never abandoned (normative, T-1057, 2026-09-25)
+
+*The user, via the supervisor: "Sometimes there are black bars in the waterfall, representing tiles that
+haven't been loaded yet; sometimes those never load. If a tile fails to load at all it should be
+re-requested. It seems like they are getting abandoned. Left alone long enough, all tiles on the screen
+should load. I don't think we should ever see the black tiles."*
+
+**The invariant.** Every pending **visible** address is re-requested, with jittered backoff, **until it
+is served or the route states the place does not exist**. Nothing else ends the asking. Three corollaries,
+each of which was a live defect:
+
+1. **Only "there is no such node" is permanent.** `hk-api` says that with a **404** (`tiles.rs`: *"scheme
+   … has no node at (level_f …, level_t …)"*). Every other refusal — a `400`, a `500`, a `501`, an
+   unreadable body, a batch answer that named no entry for the address — is about **this place at this
+   moment**, and goes on a **per-address** jittered ladder (`ui/src/surface/retry.ts`: 500 ms doubling to
+   30 s, the same ladder shape as `controls/backoff.ts`, additive jitter so a herd cannot re-arrive on one
+   tick). T-479's rule that every status the route could emit is terminal was too wide by exactly one
+   notch: the route uses `400` both for an address that can never exist *and* for a tile whose level
+   cannot be folded **yet**, so one frame of the second meaning cost that place for the rest of the session.
+2. **The coverage survey may turn a place GREY; it may never leave it PENDING.** T-580/T-905's
+   short-circuit (never-swept spectrum costs no round trip) is granted only where the survey will
+   actually draw grey for the place. A survey that settles a place while having no evidence *inside* it
+   draws nothing and also stops every lane requesting it — neither grey nor a tile, which is the black bar
+   arrived at from the coverage side.
+3. **A retune refreshes the survey before it may veto a request.** A survey taken before the radio moved
+   cannot speak for any instant after it, so a place that **reaches past** the retune is owed a request
+   until a survey whose evidence reaches past it lands — and the retune asks for that survey at once,
+   because a surface with nothing following the live edge never asks for another one on its own
+   (`preview.ts`'s cadence is `POSITIVE_INFINITY` there). Places that end **before** the retune keep the
+   veto and the saving: the radio cannot retroactively have sampled a band it was not tuned to.
+
+**Never at frame rate, either.** The flood T-479 fixed (157 requests in 700 ms for one place) is
+prevented by the **wait**, not by permanence: a place is asked at most once per interval, and only while
+something draws it — the ladder issues nothing, so a place nobody is looking at is never re-asked. The
+cost of a permanently-refused visible place is therefore two requests a minute; the cost of the other
+mistake is a bar of the waterfall that stays black until the page is reloaded. Those are not symmetric.
+
+Guarded by `ui/test/surface-tile-never-abandoned.test.ts` (30 % of answers dropped/refused/unreadable at
+random on a seeded schedule, every visible address served in the end, no PENDING or REFUSED quad left in
+the final frame's draw list; the pacing bound; the ladder's arithmetic; the survey and retune rules; the
+batch layer's own entries) and `ui/test/surface-cache.test.ts` (the status enumeration, place by place).
+
+---
+
 ## 11. Panel -> state -> route: the frontend/API map (normative)
 
 *This is the ADR-0013 frontend-to-API-map discipline applied to every new MMAP surface. A panel not in
@@ -767,6 +814,7 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST /api/annotations`, `PUT`/`DELETE /api/annotations/{id}`** |
 | Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST /api/views`, `PUT`/`DELETE /api/views/{id}`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
 | Scan plan overlay (small Scan button in the Go-to cluster; plan panel; the `scan` layer) | T-1008 | `map.scan` (the controller's plan/draft; progress from the shell's existing control-state poll, `device.scan`) | `GET /api/control/scan?windows=1` (the price of the plan as drawn **and the steps the engine will take** — the client draws them, never tiles a range itself) | `POST /api/control/scan` **only on the panel's explicit Start/Resume press** (commissions retunes, T-452), `POST /api/control/scan/stop` (surrenders the radio; never refused) |
+| Measurement box menu (right-click / long-press a Measure box) | T-1009 | `map.scan` (the plan it opens) + `research` (the marker it writes) | `GET /api/collections` (which collection a marker is filed in), `GET /api/control/scan?windows=1&device_id=…` (the plan it opens, priced on the chosen radio) | `POST /api/iqbuffer/clip` (the box's time window, band-filtered, off the chosen radio's ring — a read of the ring, not a device route), `POST /api/collections` + `POST /api/collections/{id}/markers` (Save as marker). **Scan** only *opens* the plan overlay above — Start stays that panel's own explicit press |
 | Export menu | MAP-23 | `research` | **`GET /api/research/export`** (T-823: one read-only GET, optionally narrowed to a collection - the bundle is the server's) | - (the client only names and saves the file; a share link is a later addition) |
 
 **Three rules this table encodes.**
@@ -774,7 +822,9 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 1. **Only three rows in the whole table reach a device route**, and each needs an explicit press on a
    **small** control: Go-to, the Selected tab's compact action cluster (§10.6 rule 4), and the scan
    plan's Start (T-1008 — a *commission* of retunes, T-452, taken on its own press; opening, dragging
-   and pricing the plan are reads). A per-row
+   and pricing the plan are reads). The measurement-box menu (T-1009) is **not** a fourth: choosing
+   "Scan this region with <device>" opens that same plan overlay, bounded by the box and bound to the
+   radio the user named, and the commissioning press is still the panel's own Start. A per-row
    **Go** button in the Explore drawer or Research may *raise* the gated retune offer, which is itself
    the band-4 transient that needs its own press. Everything else is a view change or a durable-state write.
 2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client

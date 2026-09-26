@@ -146,6 +146,10 @@ export interface ControlState {
   /** T-452: the survey sweep, beside the tuning it moves. `null` when nothing can sweep this
    * source (a replay), so the panel disables the control with a reason rather than hiding it. */
   scan: ScanState | null;
+  /** T-1009: one sweep per live front end, each naming its own `device_id` — the enumeration a
+   * multi-SDR client picks from, as `devices` is beside `device`. `scan` above stays the run's
+   * DEFAULT front end's. `[]` on a replay, and absent from an older server. */
+  scans?: ScanState[];
   display_limits: DisplayLimits | null;
   transmit: { available: false; reason: string };
   audit: boolean;

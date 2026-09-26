@@ -204,7 +204,11 @@ export function readoutOf(
       // appended rather than folded into any of the others for the same reason `behind` was:
       // "never looked" is not "not arrived yet", and a readout that cannot say which is which is
       // the grey-vs-pending confusion one level up.
-      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge${s.surveyed ? ` · ${s.surveyed} never sampled` : ""}${s.blank ? ` · ${s.blank} drew nothing` : ""}${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`,
+      // T-1039: `stale` is appended for the same reason as `blank` — a network that keeps failing
+      // to revalidate must be readable from the pane's own status, not only inferable from a
+      // request log, and the last good tile stayed on screen precisely BECAUSE it is stale rather
+      // than cleared, so it needs its own word.
+      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge${s.surveyed ? ` · ${s.surveyed} never sampled` : ""}${s.blank ? ` · ${s.blank} drew nothing` : ""}${s.stale ? ` · ${s.stale} stale` : ""}${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`,
       // T-916: named beside the counts, because it is the same kind of statement as `level` — what
       // the pixels on this pane were actually measured at. Absent when every shadow here was read
       // at the pane's own level, which is the case the readout has nothing extra to say about.

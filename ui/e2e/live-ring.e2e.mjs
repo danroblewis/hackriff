@@ -77,6 +77,52 @@ test("LSR-1: with the live ring on, a following pane paints its live edge from s
     await page.$count('.hk-surface-viewport[data-viewport="pane"][data-following="true"]'), 1,
     "no pane is following the live edge, so there is no live view to test");
 
+  // **Establish this spec's own time zoom rather than trust whatever span the page opened on**
+  // (T-1052, found by T-1037's worker 2026-09-25: this file passed alone but failed after another
+  // spec drove the same lane's backend, because a following pane's opening span is derived from the
+  // OBSERVED extent — the capture clock, which grows — so a backend that has been running a while
+  // opens wider than one that just started, and wide enough pushes `rowPx` under `MIN_ROW_PX`
+  // (`ui/src/surface/livering.ts`), where the ring correctly stands aside for the pyramid). A young
+  // fixture already zooms in enough for THIS test alone; the loop below makes that true regardless
+  // of how long the backend has been running, by reading the fact (`rows > 0` on the following
+  // pane's own ring entry) rather than assuming a wall-clock age.
+  const at = async () => {
+    const r = await page.$rect(".sf-canvas");
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to zoom on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w / 2, y: r.y + r.h / 3 };
+  };
+  const laneRows = (rings) => Array.isArray(rings) ? Math.max(0, ...rings.map((r) => r.rows), 0) : 0;
+
+  // First, PIN the correct stand-aside behaviour this file's own premise depends on: zoomed out far
+  // enough, the ring draws nothing and the pyramid answers instead — worth asserting in its own
+  // right, not just worked around. `MIN_ROW_PX` is small (0.75 px/row, `livering.ts`), so a handful
+  // of coarse ticks reliably crosses it from any starting span.
+  const point = await at();
+  let out = await page.eval(LIVE_RING);
+  for (let i = 0; i < 12 && laneRows(out) > 0; i++) {
+    await page.wheel(point, 240, { alt: true });
+    await page.frames(3);
+    out = await page.eval(LIVE_RING);
+  }
+  t.diagnostic(`zoomed out: lane after ${JSON.stringify(out)}`);
+  assert.ok(Array.isArray(out) && out.length > 0,
+    `the ring diagnostic never reported for the following pane while zoomed out: ${JSON.stringify(out)}`);
+  assert.equal(laneRows(out), 0,
+    "zoomed out, the ring is still painting rows — either the zoom did not move the pane's span or " +
+    `MIN_ROW_PX's stand-aside rule regressed: ${JSON.stringify(out)}`);
+
+  // Now zoom back IN — this spec's own precondition — until the ring is painting again, bounded and
+  // read from the page's own statement rather than assumed from a fixed number of ticks.
+  let inState = out;
+  for (let i = 0; i < 40 && laneRows(inState) === 0; i++) {
+    await page.wheel(point, -240, { alt: true });
+    await page.frames(3);
+    inState = await page.eval(LIVE_RING);
+  }
+  t.diagnostic(`zoomed back in: lane after ${JSON.stringify(inState)}`);
+  assert.ok(laneRows(inState) > 0,
+    `zooming in 40 ticks never brought a pane's rowPx back over MIN_ROW_PX: ${JSON.stringify(inState)}`);
+
   // 1. **The lane ran.** Bounded by whether the page is still WORKING rather than by a wall-clock
   //    guess (the T-491/2026-09-22 rule): a backend whose first rows are slow under a loaded gate is
   //    a slow start, not a dead lane, and a page that has stopped asking reports faster than a

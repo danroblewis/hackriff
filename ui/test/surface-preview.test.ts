@@ -171,7 +171,7 @@ test("a nearly-empty first screen arrives already explained, with a number rathe
   // T-964: the *headline* share is the frequency axis — "ever sampled" is a question about where
   // the radio looked, not about when — and the cell share is stated beside it, because that is what
   // the surface draws. One band of 128 was sampled (0.8 %); 25 of 4096 cells are measurement (0.6 %).
-  assert.match(note, /0\.8 % of this surface was ever sampled/, "the share is stated, not rounded away");
+  assert.match(note, /0\.8 % of this frequency range was ever sampled/, "the share is stated, not rounded away");
   assert.match(note, /1 of 128 frequency cells ever sampled in this window/);
   assert.match(note, /0\.6 % of its 4096 time × frequency cells/, "what the surface draws is stated too");
   assert.match(note, /grey means nothing ever looked there/i);
@@ -210,7 +210,9 @@ test("T-964: a FINISHED full-range pass reads as the whole range sampled, not as
   assert.equal(c.observed, ORIENT_CELLS, "and only 128 of the 4096 (time x frequency) cells are measurement");
 
   const note = orientationNote(c, openingWindow(BOUNDS, c.box));
-  assert.match(note, /100 % of this surface was ever sampled/,
+  // T-1055: and the noun is the axis the number is of — "this surface" is the whole (time x
+  // frequency) canvas, whose share the very next clause gives as 3.1 %.
+  assert.match(note, /100 % of this frequency range was ever sampled/,
     "the survey's own share must be the headline: a completed pass that reads '3 %' is the T-964 defect");
   assert.match(note, /128 of 128 frequency cells ever sampled/);
   // The second number is not dropped: a user reading 100 % over a mostly-grey canvas needs to know
@@ -232,7 +234,7 @@ test("T-964: the route's own `bands` census is preferred over folding the grid h
     "`excluded` is sampled spectrum (T-595), so it counts as sampled; `unknown` is neither");
   assert.equal(c.observed, 8, "the per-cell census is unchanged — the two answer different questions");
   const note = orientationNote(c, openingWindow(BOUNDS, c.box));
-  assert.match(note, /75 % of this surface was ever sampled/);
+  assert.match(note, /75 % of this frequency range was ever sampled/);
   assert.match(note, /past the record horizon/, "the forgotten share is stated against the same axis");
 });
 

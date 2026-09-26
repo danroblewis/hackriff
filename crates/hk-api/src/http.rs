@@ -52,6 +52,7 @@
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
+//! | `/ws/tiles/changes` | GET | token | `coverage_changed` pushed on a retune (T-1040, [`crate::changes`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -253,6 +254,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/analyze/{id}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
     ("GET", "/ws/tiles/rows"),
+    // T-1040: `coverage_changed` pushed on a front-end move, so a retune re-lays the fog at once
+    ("GET", "/ws/tiles/changes"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -397,13 +400,16 @@ pub struct ApiState {
     /// through [`crate::LiveControls::select`], which may be omitted only when there is exactly
     /// one front end.
     pub live_controls: crate::live_control::LiveControls,
-    /// T-452: the in-app survey sweep over one of [`Self::live_controls`] ([`crate::scan`]). `None` leaves
-    /// `/api/control/scan*` answering 503 — the front end is there but nothing can sweep it.
+    /// T-452/T-1009: the in-app survey sweep, **one runner per front end** of
+    /// [`Self::live_controls`] ([`crate::scan`]). Empty leaves `/api/control/scan*` answering 503
+    /// — the front end is there but nothing can sweep it.
     ///
     /// It is a *driver over the interactive retune path*, not a scheduler: `hk serve` still does
     /// not drive the scheduler, and every step is the same gated [`crate::DeviceAction::Retune`] a
-    /// user's explicit tune is. See [`crate::scan`] for the decision and the arbitration rule.
-    pub scan: Option<Arc<crate::scan::ScanRunner>>,
+    /// user's explicit tune is. T-1009 made it a collection because the arbitration is per radio:
+    /// a sweep of B must not yield to a retune of A, and the user picks which radio sweeps a
+    /// region they drew. See [`crate::scan`] for the decision and the arbitration rule.
+    pub scans: crate::scan::ScanRunners,
     /// Display and recording control of the running pipeline (T-050).
     pub run_control: Option<Arc<dyn RunControl>>,
     /// Bookmark store (T-050), usually the run's database.
@@ -451,6 +457,11 @@ pub struct ApiState {
     /// T-157: the rolling IQ capture buffer for `/api/iqbuffer*` ([`crate::iqbuffer`]); `None`
     /// answers 503.
     pub iq_buffer: Option<Arc<dyn crate::iqbuffer::IqBufferControl>>,
+    /// T-1009: the **further** front ends' IQ capture rings, by `device_id` — what
+    /// `POST /api/iqbuffer/clip`'s `device_id` selector resolves against. [`Self::iq_buffer`]
+    /// above stays the run's default front end's ring, which is what an omitted selector means;
+    /// a ring listed here belongs to exactly one other radio. Empty on a single-SDR run.
+    pub iq_buffers: Vec<(String, Arc<dyn crate::iqbuffer::IqBufferControl>)>,
     /// T-859 (MAUTO M-8): the region-analyze job manager behind `/api/analyze` jobs
     /// ([`crate::analyze`]); `None` answers a job request `503 unavailable` (a bare
     /// `{emitter_id}` read still works).
@@ -489,6 +500,9 @@ pub struct ApiState {
     /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
     /// Per state for the same reason as `tile_admission`.
     pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
+    /// T-1040: `/ws/tiles/changes` subscriptions open now, capped at
+    /// [`crate::changes::MAX_CHANGE_FEEDS`].
+    pub change_feeds: Arc<std::sync::atomic::AtomicUsize>,
     /// T-579: the per-lattice readable ceiling, memoised — a pure function of the store's
     /// geometry and config, so it is computed once per lattice rather than probed per request.
     /// Shared by cloning, like [`Self::tile_admission`].
@@ -1251,6 +1265,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
         return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
+    }
+    if req.path == "/ws/tiles/changes" && req.method == "GET" {
+        return crate::changes::serve(stream, &shared.state, &req.query, &req.headers);
     }
     // T-859: `/ws/analyze/{id}` is the `analyze` on-demand opener with the id as its parameter.
     if let Some(id) = req.path.strip_prefix("/ws/analyze/")
