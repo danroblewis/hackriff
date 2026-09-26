@@ -340,13 +340,18 @@ fn scheduler_default_settings_feed_history_occupancy_baselines_and_alarms() {
 /// row per reset. (The main test above checks the consequence that matters: the median central
 /// floor still agrees with the scheduler-driven run within 0.5 dB, so the extra reduced-averaging
 /// rows do not bias the product.)
+///
+/// **T-1071:** a break is now either a reset or a *bridged* gap — the history STFT averages across
+/// a pure gap instead of resetting, and closes the row at the gap only when the stream resumes
+/// past the row's span (every one of these ~60 s breaks). So the breaks are counted as
+/// `stft_resets + gaps_bridged`, and the rule is unchanged: at most one partial row per break.
 #[test]
 fn scheduler_history_fixed_tune_emits_partial_rows_only_where_the_stream_breaks() {
     let Some(out) = scene() else { return };
     let r = run_scene(&out, false);
     let reader = &r.counters["readers"]["history"];
     let (frames, partial) = (n(&reader["frames"]), n(&reader["partial_frames"]));
-    let resets = n(&reader["stft_resets"]);
+    let breaks = n(&reader["stft_resets"]) + n(&reader["gaps_bridged"]);
     assert!(frames > 0, "[{T139}] {reader}");
     assert_eq!(
         n(&r.counters["scheduler"]["retunes_run"]),
@@ -355,11 +360,11 @@ fn scheduler_history_fixed_tune_emits_partial_rows_only_where_the_stream_breaks(
         r.counters["scheduler"]
     );
     assert!(
-        n(&reader["gap_samples"]) > 0 && resets > 0,
+        n(&reader["gap_samples"]) > 0 && breaks > 1,
         "[{T139}] the joined-window scene is a broken stream, or this proves nothing: {reader}"
     );
     assert!(
-        partial > 0 && partial <= resets,
+        partial > 0 && partial <= breaks,
         "[T-939] at most one partial row per stream break, and no other source of one: {reader}"
     );
     assert!(
