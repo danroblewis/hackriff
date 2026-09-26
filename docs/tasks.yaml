@@ -32021,6 +32021,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (ports >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1074 worker 2026-09-26: app-trace colour check (T-1050 picture guard) marginal: 0.53 vs <0.50 over only 154 clear columns since full bleed - re-derive the sampled region/bound with a measurement
+  - id: T-1093
+    milestone: M2-hardening
+    title: "hk-pipeline under load: data_path never-ready plugin chain hits its 120 s watchdog, and signal_001_readsb's unpaced replay DROPS (352) instead of waiting for readsb - both pass alone; deflake, and fix the drop if lossless back-pressure fails under load"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-LOAD-FLAKES
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      TWO hk-pipeline tests red under load in worker runs, both passing alone (reported twice on 2026-09-26: T-971's worker at load ~30, T-1086's at load ~20):
+      (1) data_path::a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait - a real-time-paced plugin chain at 1090 MHz; the run's 120 s watchdog stopped it. Seen red in a merge gate once before (log ~120112) and owned by earlier tickets (see board mentions of this test).
+      (2) signal_001_readsb::signal_001_long_unpaced_replay_waits_for_readsb_instead_of_dropping - an unpaced replay must WAIT for the readsb plugin rather than drop; under load it dropped 352 (samples/frames). That is a behavioural claim, not only a timing bound: if load makes the unpaced path drop instead of back-pressuring, that is a product defect (lossless replay is the contract for `hk replay` / cfg.lossless).
+      DELIVER (deflake-triage, per test): reproduce under load deterministically (a slow plugin/consumer in the test harness, never a CPU-spinner). (1) If the watchdog is a wall-clock budget that load exhausts, move the latency bound to the `timing` tier with its `just timing` home (docs/10 3.6) and keep a deterministic structural half in the gate; if the chain truly stalls, fix it. (2) Find where the unpaced path drops under a slow readsb and make it back-pressure (lossless means no drop, however slow the consumer); pin with a test that is red without the fix. Never loosen either assertion.
+      ACCEPTANCE: both green 10/10 alone and 5/5 inside `just test-crate hk-pipeline` under load; (2)'s drop path named and fixed or proven load-only with evidence.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-971 + T-1086 workers 2026-09-26: hk-pipeline under load: data_path never-ready plugin chain hits its 120 s watchdog, and signal_001_readsb's unpaced replay DROPS (352) instead of waiting for readsb - both pass alone; deflake, and fix the drop if lossless back-pressure fails under load
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
