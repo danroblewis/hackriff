@@ -538,9 +538,35 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
     let len = n as f64;
     let per_bit = fx.sample_rate / 1187.5;
     let wrap = |d: f64| (d + len / 2.0).rem_euclid(len) - len / 2.0;
+    //
+    // T-1083: every group decoded before the tutorial's own hot edit (below) counts, whatever its
+    // `edit_rev`. Since T-938 the RDS recipe refines its centre from the processed output
+    // (`refine.objective.builtin: wfm-pilot`), and each accepted refinement is applied as a hot
+    // edit that bumps `edit_rev` — the pipeline's own closed-loop tuning, not a user's change.
+    // Counting only `edit_rev == 0` kept just the groups decoded before the first refinement
+    // (9 of the oracle's 45 on the RC of 2026-09-26). What must hold instead is that no revision
+    // the frames carry came from anything but that refinement: the test has made no edit yet.
+    let refinement = s.pipeline(&id);
+    let rev_before_edit = refinement["edit_rev"].as_u64().unwrap();
+    let refined_rev = refinement["refinement"]["applied_edit_rev"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(
+        rev_before_edit, refined_rev,
+        "[{TAG}] a revision before the tutorial's edit that the refinement did not apply: {}",
+        refinement["refinement"]
+    );
+    assert!(
+        group_frames.iter().all(|f| f.edit_rev <= rev_before_edit),
+        "[{TAG}] frames from a revision newer than the pipeline's {rev_before_edit}"
+    );
+    eprintln!(
+        "[{TAG}] refinement before the edit: edit_rev {rev_before_edit}, {}",
+        refinement["refinement"]
+    );
     let recipe_at: Vec<(f64, GroupFields)> = group_frames
         .iter()
-        .filter(|f| f.valid && f.edit_rev == 0)
+        .filter(|f| f.valid)
         .filter_map(|f| Some(((f.sample_index as f64) % len, recipe_fields(f)?)))
         .collect();
     let oracle_ok: Vec<(f64, GroupFields)> = oracle_groups
@@ -593,7 +619,11 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
     rt_node["params"]["emit"] = json!("on-change");
     let (code, edit) = s.call("PUT", &format!("/api/pipelines/{id}/recipe"), Some(draft));
     assert_eq!(code, 200, "[{TAG}] edit: {edit}");
-    assert_eq!(edit["edit_rev"], json!(1), "[{TAG}] {edit}");
+    // The edit takes a new revision after the refinement's (T-1083: no longer necessarily 1).
+    assert!(
+        edit["edit_rev"].as_u64().unwrap() > rev_before_edit,
+        "[{TAG}] edit revision not after {rev_before_edit}: {edit}"
+    );
     let rt_plan = edit["plan"]["nodes"]
         .as_array()
         .unwrap()
