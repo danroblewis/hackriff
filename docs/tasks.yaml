@@ -27971,7 +27971,7 @@ tasks:
   - id: T-940
     milestone: M2-hardening
     title: "On-air FM stations (incl. Confirmed 101.3 while decoding) read liveness: ended; lists show Nothing on the air"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: INV-LIVENESS
@@ -27990,6 +27990,8 @@ tasks:
       Review fix 1: reviewer found observed (watched/reported) silence compared against the 2x-revisit gap double-discounts under a sweep (stopped burst live ~2P^2/d). Fold now judges observed silence against IdleGap::continuous (two silent visits), elapsed silence against the gap; regression test a_swept_band_closes_after_two_silent_visits_not_2p_squared_over_d (red on old threshold). e2e test window now from capture clock (/api/timeline window.t1_s). Merged main 72f9d76c. Commit b7f287ef.
 
       Recovery 2026-09-26: brought up to date with gated base 1090f468 (merges 749d8a43, db3d8cb0, f9cde926). Conflict: hk-pipeline/src/detect.rs - main (T-941) moved the inventory stage into the chunked Writer::file_inventory; T-940's live-extent follow_track report (after reviews, before closes, now chunked) and stop_following_track on Closed/Merged are carried into it. New main caller tests/e2e acceptance/captured_signals.rs presence_intervals gets &Watched::unrecorded(). Tests green: hk-model/hk-detect/hk-pipeline/hk-api libs, track, inventory_liveness, inventory_api, api_contract, hk-e2e acceptance_ism + acceptance_captured_signals; precheck clean.
+
+      2026-09-26 coordinator: landed as e88d6238 - a merge-runner bisect probe kept on main (03:07; incident resolved by the PM as keep: T-1057's green check-tier gate 03:10-03:14 ran on a tree containing it). task-pm-bisect-reset fixes the runner.
     branch: task-t940
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 10:38).
@@ -28000,6 +28002,7 @@ tasks:
       Observed, not chased: Provisional END blips remain after a discontinuity: after a retune or a dropped-sample STFT reset (mock under load: gap_samples 5-8 M, stft_resets 56-225), the detector re-acquires a continuing carrier 1-4 s later, so the tracker observes >1 s silence and ends the interval, then revokes it on the next record (ADR-0019 §6.2). Seen as 1-2 not-live reads in ~2.5 s streaks in the new test, which tolerates them (>=75 % live, max streak 5, last read live). The root is the tracker's awaiting-parts window (max_transition_gap_s 1 s) equalling the detector's split period (max_duration_s 1 s) plus STFT/floor warm-up after a reset. It matters on staging, where the explorer saw 39 overruns. | hk-api ondemand::silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails on main too (records>20 in 1.5 s throughput bound; 12-14 records on main's binary): a timing-tier candidate for the deflaker. | The time-scoped listing (presence_overlaps SQL) and presence_in_window still select by stored t_end, so an ongoing-by-assumption row whose band has been unobserved for longer than the query window drops out of a now-60..now list instead of reading live to the edge. | At shutdown, open tracks' rows kept live_silence_ns set (the final closes did not reach stop_following); the run-start release covers it, but the finishing path may skip inventory close handling. | The explorer's class-boundary re-plumb straggler ('inventory is locked by its straggler; continuing without inventory') is a separate defect: with no writer, followed rows keep their last report until the next run start. | Review findings 3-5 left as follow-ups: tracker band journal (BAND_EPOCHS=64) goes band-blind after 64 retunes within one silence; followed rows stay open if the writer stops without closes (released at run start); per-pass un-batched follow UPDATEs on the writer thread are unmeasured. | Pipeline presence stream (idle_gap_ns in hk-pipeline/src/presence.rs) still judges observed silence against 60 s when the receiver looked away; the same double-discount shape, pre-existing, not changed here.
       Use cases: SIGNAL-062
       Resources: 283 CPU-s, peak 4.5 GB — LEAKED 1 processes (killed at reap)
+    commit: e88d6238
   - id: T-941
     milestone: M2-hardening
     title: "Class-boundary retune leaves the run with no inventory: detect/control stragglers lock the old segment's inventory"
