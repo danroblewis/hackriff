@@ -31259,6 +31259,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY UI-stack integrator 2026-09-26: fog-of-war.e2e red ALONE on main: T-521's 'less than 200 px of the pane is uncovered by floating chrome' fails since full bleed/floating chrome - fix the chrome if it covers the map, else re-measure with the same intent
+
+      2026-09-26 coordinator: f4051bbb queued (the geometry measurement fix, e2e only - the chrome does not cover the map: 20/25 hit-test points reach the canvas). The two reads it unmasks (band-A live baseline, re-sweep brightness), red at load 34-37, are split to T-1077 for a quiet-box triage. T-1072 closes on f4051bbb.
   - id: T-1073
     milestone: MUI
     title: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
@@ -31330,6 +31332,27 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/accept_encoding/)'`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1021 + T-1058 workers 2026-09-26: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
+  - id: T-1077
+    milestone: MLIVE
+    title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
+    status: todo
+    priority: high
+    deps:
+    - T-1072
+    parallel_group: UI-FOG-SPEC
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      UNMASKED BY T-1072 (handback 2026-09-26 ~03:40, commit f4051bbb): with fog-of-war.e2e's geometry check fixed, the spec now reaches two reads that were masked on main since T-993, and both went red in a worker worktree at load 34-37 on 28 cores:
+        (1) band-A live baseline: 'band A at boot never showed a quarter of the pane as measurement' - 9.9 %, 3.4 %, 9.6 % in 3 of 4 runs. The pane lagged 3.5-9.3 s short of the top (a large dark ground at the top), 2 of 4 band-A tiles 'drew nothing', residency took 31-71 s, and 'awaiting' dots showed where the server reported 224/256 cells observed.
+        (2) re-sweep brightness: 're-swept band A (meanLuma 39.9) is not clearly brighter than in shadow (44.1)' in the 4th run.
+      Nobody knows yet whether these pass alone on a quiet box. The symptoms (tiles that 'drew nothing', a dark ground at the top, 'awaiting' where the server says observed) are the user-visible classes T-1057 (visible tiles never abandoned - LANDED 2026-09-26 03:14 as 60d4f60c), T-1037 (reveal per row) and T-1042 (the live ring paints the edge) own.
+      DELIVER (deflake-triage): run the spec ALONE on main (with T-1057 and T-1072 landed) on the quietest box available - node2 when its load is low, or wait for the runner's idle signal; never make a quiet box (pipeline invariant 8). Fails alone -> a real defect: find which of the three owners' mechanisms leaves band A undrawn (or dimmer when re-swept than in shadow) and fix the product. Passes alone, fails under load -> make the read deterministic (wait on the page's reported state, not wall-clock residency). Never loosen the quarter-of-the-pane or the brighter-than-shadow claims.
+      ACCEPTANCE: fog-of-war green alone 3/3 on a FRESH hk including the band-A live baseline, shadow, band-C grey, re-sweep and the scale-block/Retune reads.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1072 worker 2026-09-26: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
