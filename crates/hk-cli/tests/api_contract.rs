@@ -8066,6 +8066,14 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
         );
         assert!(named <= spans, "{src}");
         assert_eq!(src["device_known"], json!(named == spans), "{src}");
+        // T-1055: every row says whether THIS source answered with fewer records than it holds —
+        // present on every row, `false` included, because a key that appears only when true is one a
+        // reader takes for false when it is absent. Nothing here is near a bound, so it is false.
+        assert_eq!(
+            src["truncated"],
+            json!(false),
+            "a source row must state whether its read was cut (docs/api.md, /api/coverage): {src}"
+        );
     }
 
     // ---- device-local: the grid is one radio's, and it is named ----

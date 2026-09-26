@@ -434,7 +434,9 @@ export function fmtShare(n: number, d: number): string {
  * map having nothing to show after the one feature that fills it.
  *
  * So both numbers are stated, each against its own question: the frequency share is what the survey
- * achieved, the cell share is what the surface draws. Neither is dropped — a user who reads 100 %
+ * achieved, the cell share is what the surface draws. **T-1055 fixed the noun on the first one**:
+ * it said *"of this surface"*, which is this product's word for the whole (time x frequency) canvas
+ * — the very grid the second clause quotes a smaller share of. Neither is dropped — a user who reads 100 %
  * and then sees a mostly-grey canvas needs the second number to know why, which is the same honesty
  * rule the sentence exists for.
  */
@@ -444,7 +446,11 @@ export function orientationNote(c: CoverageCensus, opened: OpeningWindow): strin
       + "ever looked. The view opens on the whole surface; anything drawn came from the pyramid.";
   }
   const b = c.bands;
-  const sampled = `${fmtShare(b.observed, b.total)} of this surface was ever sampled`;
+  // **"of this frequency range", not "of this surface"** (T-1055). The number is a share of the
+  // FREQUENCY axis (`bands`), and "surface" is this product's word for the whole (time x frequency)
+  // canvas — so the headline named the grid the second clause then gives a different share of, and
+  // the two lines contradicted each other on screen.
+  const sampled = `${fmtShare(b.observed, b.total)} of this frequency range was ever sampled`;
   // What the survey achieved, then what the canvas draws — a sweep occupies one window at a time,
   // so the second share is always the smaller one and saying why is the point.
   const counts = `${b.observed} of ${b.total} frequency cells ever sampled in this window; `
