@@ -118,8 +118,13 @@ test("the Survey-sweep panel, and the one-click 'scan everything' beside it, are
   assert.equal(await page.$count('input[placeholder="from MHz"]'), 1);
   assert.equal(await page.$count('input[placeholder="to MHz"]'), 1);
   assert.equal(await page.$count('input[placeholder="dwell s"]'), 1);
+  // T-1080: scoped to the OPEN device panel, not the whole document — T-1008 gave the map its own
+  // scan-plan overlay with its own (hidden-until-opened, but still DOM-present) fine/coarse select,
+  // so an unscoped query now doubles up. The step control T-517 is asserting on is the one beside
+  // THIS sweep (the Survey-sweep fieldset's Start/Stop), not whichever select on the page happens
+  // to share its option values.
   const stepOptions = await page.eval(
-    `[...document.querySelectorAll('select option')].filter(o => o.value === 'fine' || o.value === 'coarse').map(o => o.value)`);
+    `[...document.querySelectorAll(".rv-tabpanel:not([hidden]) select option")].filter(o => o.value === 'fine' || o.value === 'coarse').map(o => o.value)`);
   assert.deepEqual([...stepOptions].sort(), ["coarse", "fine"], "T-517's step control is not beside the sweep");
 
   // Reachable also means USABLE: a control nobody can press is not a control (the T-409 rule) — on

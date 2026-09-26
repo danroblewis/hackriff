@@ -872,66 +872,182 @@ async function whileTilesArrive(page, what, expr) {
 }
 
 /**
- * **Park a viewport on an observed pyramid cell behind the live edge** — by RE-ESTABLISHING the
- * state, never by waiting for it.
+ * **Park a viewport on an observed pyramid cell behind the live edge** — by walking it BACK INTO
+ * SEALED HISTORY until the pane itself says it has one, never by freezing at the growing edge and
+ * waiting (T-1074).
  *
- * Pressing Live once and waiting looks like it should work and does not, and the way it fails is
- * worth writing down because it is the same shape as T-487's. A viewport freezes on the instant it
- * was following, which is the cell the pipeline is *still writing*; if the pyramid never ends up with
- * an observed cell there, the frozen window sits over a hole **for ever**, and every extra second of
- * waiting only widens the gap to the live edge without changing the cell being asked about. Measured:
- * a 90 s wait ended with the viewport 86 s in the past reading `nothing observed across this span`,
- * while the identical predicate in the test below was satisfied in 3 s — the difference being luck
- * about which second each one happened to freeze on.
+ * Freezing at the edge and waiting looks like it should work and does not. A viewport freezes on the
+ * instant it was following, which is the cell the pipeline is *still writing*; if the pyramid never
+ * ends up with an observed cell there, the frozen window sits over a hole **for ever**, and every
+ * extra second of waiting only widens the gap to the live edge without changing the cell being asked
+ * about. Measured on this file (2026-09-26, two lanes, the log this ticket asked for): a park attempt
+ * ran 32.4 s and gave up with **every tile it asked for answered** — `16 tile request(s), 16 ended;
+ * addresses by answer {"200":26}`, the pane fully filled at `12 tiles · 0 coarse stand-ins · 0
+ * pending` — and the readout saying `slice 11:12:14Z (40 ms cell) — nothing observed across this
+ * span`. Nothing was slow; the place simply had no cell, and re-freezing at the edge was another
+ * throw of the same die (1–7 attempts, one run 307 s, and past this spec's 600 s deadline three
+ * times in three at two lanes). It is NOT the tile route: T-1051's `/api/tiles/batch` observation
+ * (10–40 s per 2–4 addresses on a debug `hk` at load ~35, T-1021's tile-lock hold) makes a slow park
+ * dearer, but every address these attempts asked for was answered 200.
  *
- * So each attempt returns to the growing edge, waits for a live frame that HAS a peak (data is
- * arriving), freezes there, and waits while the pyramid is answering for that cell
- * ([[whileTilesArrive]] — as long as tiles are arriving, never a fixed number of seconds). A failed
- * attempt — the pane went still without a cell — freezes somewhere else rather than waiting longer
- * in the same hole.
+ * So the park pans back, the way the scrubbed-into-the-past check below does (it passes in 10–25 s
+ * at two lanes), and — the part that makes it deterministic — **it moves on when the PANE says the
+ * place is empty, not when a clock says so.** The product already distinguishes the two states this
+ * turns on, and says which in the readout: `no tile in hand for this span yet (N pending)` is
+ * latency, and `nothing observed across this span` **with the pane resident** (`N tiles · 0 coarse
+ * stand-ins · 0 pending`) is a settled fact about that place. So each step waits while the page is
+ * working ([[waitWhileWorking]], never a wall clock) for EITHER the state the caller asked for OR
+ * that settled emptiness, and the second answer makes it pan further back at once instead of
+ * spending [[whileTilesArrive]]'s stall bound learning it again. Measured cause of the depth needed:
+ * the pane's own `drawn to N s short of the top` — the drawing reached 6.1 s below a window top that
+ * was already 13.3 s behind the socket's newest row — so "behind the edge" has to be deeper than the
+ * pyramid's own write lag, which is a number this walk finds rather than assumes.
+ *
+ * A drag is view arithmetic (T-456), never a device route, and the surface clamps at the retained
+ * extent, so this cannot run off the end of the record; a window that stops moving is reported as
+ * clamped rather than dragged at again.
  */
-async function scrubOntoCell(page, lagS, tries = 8) {
+const DRAG_FLOOR_PX = 40;
+
+/**
+ * The pane's own time window and the newest row the socket delivered, in one evaluation — the two
+ * facts "how far behind the live edge is this pane" is arithmetic over, read from the same frame so
+ * they cannot be of different instants. `null` when either is not on the page yet.
+ *
+ * `t1Ns` is the pane's INSTANT, deliberately: the trace's slice is taken at `pane.box.t1Ns`
+ * (`ui/src/app/centre/surface.ts`), so this is the same number the readout states.
+ */
+async function paneLag(page) {
+  return JSON.parse(await page.eval(`(() => {
+    const row = document.querySelector('.sf-scale[data-pane]');
+    const r = window.__hkTap?.recent?.[window.__hkTap.recent.length - 1];
+    if (!row || !r) return "null";
+    const t0S = Number(row.dataset.t0Ns) / 1e9, t1S = Number(row.dataset.t1Ns) / 1e9;
+    return JSON.stringify({ t0S, t1S, newestS: r.tS, lagS: r.tS - t1S, spanS: t1S - t0S });
+  })()`));
+}
+
+/**
+ * Pan a FROZEN pane back until its instant is at least `backS` behind the socket's newest row, in
+ * drags sized from the pane's own scale (seconds ÷ seconds-per-pixel), floored at
+ * [[DRAG_FLOOR_PX]] so a wide pane's move is a pan and not a click and capped at 60 % of the pane so
+ * one drag cannot leap the whole window. Reports what it reached — including a window that stopped
+ * moving, which is the surface holding it at the retained extent and a fact about the record's
+ * length, not something to drag at again.
+ */
+async function dragBack(page, { behindEdgeS = null, byS = null, maxDrags = 8 } = {}) {
+  const rect = await page.$rect(".sf-canvas");
+  const w0 = await paneLag(page);
+  // The target as an INSTANT, so "further back" is measured against the pane's own window and not
+  // against the live edge, which keeps moving while a step waits: an edge-relative target the pane
+  // has already drifted past (a slow step, and capture never stops) asks for no drag at all, and the
+  // walk stands still where it is — measured, 5 steps in one run all at the same instant, "0 drag(s),
+  // 84.9 s behind the newest row" four times over.
+  const targetS = behindEdgeS !== null ? (w0 ? w0.newestS - behindEdgeS : NaN)
+    : (w0 ? w0.t1S - byS : NaN);
+  let drags = 0, clamped = false, w = w0;
+  for (; w && w.t1S > targetS && drags < maxDrags; drags++) {
+    const perPx = w.spanS / rect.h;
+    const px = Math.min(rect.h * 0.6, Math.max(DRAG_FLOOR_PX, (w.t1S - targetS) / perPx));
+    const y0 = rect.y + rect.h * 0.85;
+    await page.drag({ x: rect.x + rect.w * 0.5, y: y0 },
+      { x: rect.x + rect.w * 0.5, y: Math.max(rect.y + 4, y0 - px) });
+    await page.frames(3);
+    const after = await paneLag(page);
+    if (after && Math.abs(after.t1S - w.t1S) < 0.01) { w = after; clamped = true; break; }
+    w = after;
+  }
+  return { drags, clamped, lagS: w ? w.lagS : NaN, spanS: w ? w.spanS : NaN,
+    said: `${drags} drag(s), ${w ? w.lagS.toFixed(1) : "?"} s behind the newest row over a ` +
+      `${w ? w.spanS.toFixed(1) : "?"} s window${clamped ? ", the window clamped at the retained extent" : ""}` };
+}
+
+/**
+ * The park's own report: the state the caller asked for, and the pane's SETTLED statement that this
+ * place is empty — `nothing observed across this span` from a pane holding every tile it addresses.
+ * One rule in the page, like [[scrubbedExpr]]'s residency, so the walk and the assertion cannot be
+ * about different things.
+ */
+const PARK_REPORT = (lagS) => `JSON.stringify({
+  ok: ${scrubbedExpr(lagS)},
+  empty: (() => {
+    const txt = document.querySelector('.sf-trace')?.textContent ?? "";
+    const c = /(\\d+) tiles · (\\d+) coarse stand-ins? · (\\d+) pending/
+      .exec(document.querySelector('.sf-scale')?.dataset.counts ?? "");
+    return /nothing observed across this span/.test(txt)
+      && !!c && Number(c[1]) > 0 && Number(c[2]) === 0 && Number(c[3]) === 0;
+  })(),
+  counts: document.querySelector('.sf-scale')?.dataset.counts ?? "",
+  trace: document.querySelector('.sf-trace')?.textContent ?? "",
+})`;
+
+async function settleParked(page, lagS) {
+  const n0 = page.requests.length;
+  const r = await waitWhileWorking(page, async () => JSON.parse(await page.eval(PARK_REPORT(lagS))),
+    (v) => v.ok === true || v.empty === true, { openIsWork: true });
+  const tiles = page.requests.slice(n0).filter((q) => q.url.includes("/api/tiles"));
+  await page.settleBodies();
+  const answers = {};
+  for (const a of tileAsks(tiles)) answers[a.status ?? "unanswered"] = (answers[a.status ?? "unanswered"] ?? 0) + 1;
+  return { ...r, wire: `${tiles.length} tile request(s), ${tiles.filter((q) => q.endedMs !== null).length} ended; ` +
+    `addresses by answer ${JSON.stringify(answers)}` };
+}
+
+async function scrubOntoCell(page, lagS, steps = 8) {
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
   // T-1001: the follow/freeze control is the pane's OWN Live button, inside its rectangle, placed
   // by the first render frame (the retired `.sf-live` toolbar button existed from the first paint).
   await page.waitFor("the pane's Live button to be placed", "!!document.querySelector('.sf-pane-live-btn')", { timeoutMs: 60000 });
-  let last = "";
-  for (let i = 0; i < tries; i++) {
-    // Back to the growing edge. The pane's Live button (T-1001) toggles, so this presses until the
-    // pane says it is following rather than assuming one press means one direction.
-    //
-    // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
-    // T-501 is why it now matters here as well as in `surface-nav`. This used to press until the
-    // readout said `(live frame)`, which is a statement about which SOURCE answered the slice, not
-    // about where the pane is. At the old 1 s floor the socket's newest row always fell inside the
-    // cell at the pane's time position, so the two coincided; at the display floor the cell is
-    // 80 ms and the pane's live edge lags the socket by more than one of them, so a pane that is
-    // genuinely following is answered from the pyramid and `(live frame)` is a transient state this
-    // loop could wait out its whole timeout for. Measured: 0 of 6 attempts reached it, while the
-    // chrome said `LIVE` throughout. What this helper needs is the pane back at the growing edge,
-    // and that is a fact the chrome states.
-    for (let k = 0; k < 3; k++) {
-      // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
-      // clicked three times every attempt and left the viewport frozen.
-      if ((await page.eval(FOLLOWING_EXPR)) === true) break;
-      await page.click(`document.querySelector('.sf-pane-live-btn')`);
-      await page.frames(8);
-    }
-    await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR,
-      { timeoutMs: 30000 });
+  // Back to the growing edge, then freeze there. The pane's Live button (T-1001) toggles, so this
+  // presses until the pane says it is following rather than assuming one press means one direction.
+  //
+  // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
+  // T-501 is why it now matters here as well as in `surface-nav`. This used to press until the
+  // readout said `(live frame)`, which is a statement about which SOURCE answered the slice, not
+  // about where the pane is. At the old 1 s floor the socket's newest row always fell inside the
+  // cell at the pane's time position, so the two coincided; at the display floor the cell is
+  // 80 ms and the pane's live edge lags the socket by more than one of them, so a pane that is
+  // genuinely following is answered from the pyramid and `(live frame)` is a transient state this
+  // loop could wait out its whole timeout for. Measured: 0 of 6 attempts reached it, while the
+  // chrome said `LIVE` throughout. What this helper needs is the pane back at the growing edge,
+  // and that is a fact the chrome states.
+  for (let k = 0; k < 3; k++) {
+    // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
+    // clicked three times and left the viewport frozen.
+    if ((await page.eval(FOLLOWING_EXPR)) === true) break;
     await page.click(`document.querySelector('.sf-pane-live-btn')`);
-    try {
-      const w = await whileTilesArrive(page, `a pyramid-cell slice at least ${lagS} s behind the live edge`,
-        scrubbedExpr(lagS));
-      return `attempt ${i + 1} (the cell arrived ${w.ms} ms after the freeze; ${w.wire})`;
-    } catch (e) {
-      last = String((e && e.message) || e);
-      await page.frames(4);
-    }
+    await page.frames(8);
   }
-  throw new Error("could not park a viewport on an OBSERVED pyramid cell behind the live edge after " +
-    `${tries} attempts — the last freeze landed somewhere the history has no cell: ${last}`);
+  await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR, { timeoutMs: 30000 });
+  await page.click(`document.querySelector('.sf-pane-live-btn')`);
+  // The walk: deeper into sealed history on each step, by a tenth of the pane's own window (floored,
+  // so a zoomed-in pane still makes real ground) — how deep the pyramid's write lag reaches is a
+  // property of the run, not a constant this file can name.
+  const w0 = await paneLag(page);
+  const stepS = Math.max(2, (w0?.spanS ?? 10) * 0.1);
+  let said = "";
+  for (let i = 0; i < steps; i++) {
+    // The first target clears the live edge by the lag the caller asked for; every later one is a
+    // further `stepS` back from where the pane now is.
+    const back = await dragBack(page, i === 0 ? { behindEdgeS: lagS + 2 } : { byS: stepS });
+    const r = await settleParked(page, lagS);
+    if (r.value.ok === true) {
+      return `step ${i + 1} (${back.said}; the cell arrived ${r.ms} ms after the pan; ${r.wire})`;
+    }
+    said = `${back.said}; ${r.value.empty ? "the pane holds every tile it addresses and says " +
+      "'nothing observed across this span' — the pyramid has no cell there" :
+      `the page stopped working without a cell: after ${r.ms} ms, nothing changed for ${r.stalledMs} ms`}` +
+      ` (${r.wire})\n  pane: ${JSON.stringify(r.value.counts)}\n  trace: ${JSON.stringify(r.value.trace)}`;
+    // **Why each step failed, in the run's own output** (T-1074). Without it the only record of a
+    // slow park was the spec's wall clock, and the two causes — a hole in the pyramid, and a tile
+    // route that is merely slow — are told apart by the wire counts and the pane's own words here.
+    console.error(`scrubOntoCell: park step ${i + 1}/${steps} did not land — ${said}`);
+    if (back.clamped && r.value.empty === true) break;   // nowhere further back to go
+  }
+  throw new Error("could not park a viewport on an OBSERVED pyramid cell behind the live edge in " +
+    `${steps} step(s) back through the record — the last one landed where the history has no cell: ${said}\n` +
+    `  exceptions: ${JSON.stringify(page.exceptions.slice(0, 3))}`);
 }
 
 /**
@@ -1913,15 +2029,44 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   // ~18 s and its afterglow rows share the slice's tile; in the gate the lane's backend had served
   // other files first, the pane spanned minutes, and a freeze near a tile boundary put the rows
   // before the slice in a tile the pane did not yet hold.
-  const obs = await heldObservation(page, path.join(ART, "app-trace-afterglow.png"), {
-    what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge, with the ` +
-      "rows before it in hand",
-    expr: scrubbedExpr(LAG_S, { afterglowInHand: true }),
-    accept: (snap) => CELL_SLICE_RE.test(snap.trace) && !AFTERGLOW_NOT_IN_HAND_RE.test(snap.trace),
-    scrubbed: true,
-  });
+  // **One attempt is the OBSERVATION AND ITS BASELINE**, the pair the colour check above is already
+  // built as (T-1050) — because the pixel half of this claim is a difference against the same frozen
+  // frame with the layer off, and either shot can come back unusable. Measured at two lanes under
+  // load 60, twice in three runs: `the picture below the band moved between the two shots (65.2 % /
+  // 64.7 % of 21600 sampled pixels unchanged)`, with the park landed and the readout stating its
+  // slice and its four glowing rows — a frozen pane repainted between the shots (a tile landing; and
+  // a capture that loses the composited layer differs from one that has it in most of its pixels).
+  // That is a baseline that cannot be used, not a property failure, so the PAIR is retried and
+  // exhausting the attempts is still a red that says which half kept failing.
+  let obs = null, base = null, stillness = 0;
+  const rejected = [];
+  for (let attempt = 1; attempt <= 3 && !base; attempt++) {
+    obs = await heldObservation(page, path.join(ART, "app-trace-afterglow.png"), {
+      what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge, with the ` +
+        "rows before it in hand",
+      expr: scrubbedExpr(LAG_S, { afterglowInHand: true }),
+      accept: (snap) => CELL_SLICE_RE.test(snap.trace) && !AFTERGLOW_NOT_IN_HAND_RE.test(snap.trace),
+      // **And the observation can answer the question** — the surface's own pixels are in the capture
+      // ([[bandIsPicture]]), the rule the colour check above has carried since T-1050, here for the
+      // same measured reason (T-1074). Observed twice in six runs at two lanes: a held, box-checked
+      // frame whose readout stated `slice 11:11:33Z (40 ms cell) · peak -53.0 dB … · afterglow 4 ×
+      // 40 ms back to 11:11:33Z` and whose band came back with **0 px of ink of any kind** — no core,
+      // no glow, not even the max-hold line, and the trace-OFF baseline identical to it, which is the
+      // composited GL layer missing from the capture and not a pane that stopped drawing. The claim
+      // below is about pixels the surface drew, so a capture without them is a failed OBSERVATION and
+      // is retried like any other unreached state; exhausting the attempts is still a failure, and it
+      // reports the numbers (`distinct`, `dominantShare`) that say which it was.
+      acceptView: (o) => bandIsPicture(o.img, o.rect, visibleColumns(o.rect, o.unocc)),
+      scrubbed: true,
+    });
+    const shot = await traceOffBaseline(page, obs, path.join(ART, "app-trace-afterglow-off.png"), { soft: true });
+    if (shot.ok) ({ base, stillness } = shot);
+    else { rejected.push(`attempt ${attempt}: ${shot.why}`); t.diagnostic(`baseline rejected — ${shot.why}`); }
+  }
+  assert.ok(base, `no usable trace-off baseline in 3 attempts:\n  ${rejected.join("\n  ")}`);
   t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
-    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
+    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}` +
+    `${rejected.length ? ` (after ${rejected.length} rejected baseline(s): ${rejected.join("; ")})` : ""}`);
   const snap = obs.snap;
   const m = /slice ([\d:]+)Z \(([^)]+)\)/.exec(snap.trace);
   assert.ok(m, `the trace stated no slice: ${JSON.stringify(snap.trace)}`);
@@ -1971,7 +2116,6 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   // line: the bloom and the afterglow. Until T-1051 that set was named "achromatic", which held over
   // an empty strip and stopped holding when the band moved over the waterfall — a grey glow over a
   // blue cell is a blue-grey — and the count fell to 2 px on a frame whose readout claimed four rows.
-  const { base, stillness } = await traceOffBaseline(page, obs, path.join(ART, "app-trace-afterglow-off.png"));
   t.diagnostic(`trace-off baseline: ${(stillness * 100).toFixed(1)}% of the pane below the band unchanged`);
   const s = strip(obs.img, obs.rect, { base, sliceInk: isPhosphorInk, glow: true });
   t.diagnostic(`strip: ${s.slicePx} phosphor-core px (current slice), ${s.greyPx} px behind it ` +

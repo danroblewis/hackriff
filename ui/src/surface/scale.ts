@@ -20,6 +20,26 @@
 // view would be false on at least one of them. And a pane's Hz/px changes on every wheel and every
 // drag, so a bar computed on a poll would state last second's zoom against this frame's pixels —
 // the T-388 family (two derivations of one picture), which the canvas invariants forbid outright.
+//
+// **T-1003 (MMAP split view): the bars grew into the pane's STATUS CHIP.** The same argument that
+// made the bars per pane condemns everything else that described "the" viewport: with two panes
+// open, the bottom-left line said where ONE of them was looking (the hidden active pane), the IQ
+// sentence said which side of the ring's horizon THAT pane sat on, and the Retune button under
+// Go-to commanded a viewport nothing on screen named. The user's words for the result were "the
+// info side bar on the bottom left with the Retune button looks out of place" — so the pane's own
+// words live inside the pane, as one small translucent chip in the corner its bars already own:
+//
+//   ──────── 200 kHz          the two bars
+//   | 10 s
+//   detail · 2 kHz × 0.5 s    the honesty tier and the cells the pixels are made of
+//   hackrf-0                  whose coverage decides this pane's grey (T-1006)
+//   100.98 MHz ± 937 kHz · LIVE     where THIS pane is looking
+//   raw IQ in the ring here   what backs THIS pane's own time position (the playback horizon)
+//   slice … peak −62 dB       its trace readout, while its trace layer is on
+//   [Retune] 2 MHz at 101.3   its own offer, pressed for THIS pane
+//
+// Every line is optional and every line is that pane's: a chip states what its pane has to say and
+// nothing else, so pressing or freezing pane 1 cannot change a word inside pane 2.
 
 /** One bar: how long to draw it, what quantity that length spans, and how to say the quantity. */
 export interface ScaleBar {
@@ -164,7 +184,30 @@ export interface ScaleMark {
   readonly title: string;
   /** T-1006: whose coverage decides this pane's grey, or `null` when the host names none. */
   readonly device: ScaleDevice | null;
+  /** T-1003: where THIS pane is looking — centre ± span · LIVE, or how far behind the edge. */
+  readonly where: string;
+  /** T-1003: what raw IQ backs THIS pane's own time position, in words (`null`: nothing to say). */
+  readonly iq: string | null;
+  /** T-1003: this pane's trace readout, while its trace layer is on; `null` when it is off. */
+  readonly trace: string | null;
+  /** T-1003: this pane's own Retune offer, `null` when the host offers none for it. */
+  readonly retune: ScaleAction | null;
+  /** T-1003: one sentence about a retune happening to THIS pane now (T-1028's status line). */
+  readonly retuneStatus: string | null;
+  /** The widest the chip may be drawn, in CSS px — the pane's own width less its insets. */
+  readonly maxWidthPx: number;
   readonly state: Readonly<Record<string, string>>;
+}
+
+/**
+ * T-1003: a pressable offer on the chip — the same strings-and-a-bit shape as `chrome.ts`'s
+ * `RowAction`, for the same reason: this file never learns what a retune is, it paints the words it
+ * is handed and reports the press back to the host with the pane id on it.
+ */
+export interface ScaleAction {
+  readonly label: string;
+  readonly why: string;
+  readonly enabled: boolean;
 }
 
 /**
@@ -202,9 +245,29 @@ export interface ScaleReport {
   readonly counts: string;
   /** T-1006: the pane's device pill (optional: a host that names no front end passes none). */
   readonly device?: ScaleDevice | null;
+  /** T-1003: this pane's IQ backing in words, and the backing itself for the dataset. */
+  readonly iq?: string | null;
+  readonly backing?: string;
+  /** T-1003: this pane's trace readout while its layer is on. */
+  readonly trace?: string | null;
+  /** T-1003: this pane's own Retune offer and retune-mode sentence. */
+  readonly retune?: ScaleAction | null;
+  readonly retuneStatus?: string | null;
 }
 
 const NS_PER_S = 1e9;
+
+/** CSS px the chip is inset from its pane's right edge and left free of, together (`.sf-scale`). */
+export const CHIP_INSET_PX = 72;
+/**
+ * The widest a chip is ever drawn, however wide its pane is.
+ *
+ * It is a corner legend, not a panel: the user asked for "ONE small translucent chip next to the
+ * scale bar", and a chip allowed to grow with the pane would be a 1.2 kpx band across the bottom of
+ * a 1280 px window — the "info side bar" complaint again, moved to the other corner. Lines wrap
+ * inside this; a narrow pane bounds it further still.
+ */
+export const CHIP_MAX_W_PX = 280;
 
 /**
  * A pane's scale block, in CSS px from the canvas's top-left.
@@ -226,6 +289,9 @@ export function scaleMarkOf(
   // The tier, then the cells: "detail · 2.00 kHz × 0.5 s cells". `levelLabel` says the same thing
   // with the level indices, and is the tooltip — the tiny line is the part a glance needs.
   const level = `${report.tier} · ${report.levelLabel.replace(/\s*\(.*$/, "")}`;
+  // T-1003: the kept centre/span/LIVE readout, for THIS pane — the two strings the frame's own
+  // status already formatted, joined here rather than by a second reader of the pane's window.
+  const where = [report.freqLabel, report.timeLabel].filter(Boolean).join(" · ");
   return {
     paneId: pane.id,
     right,
@@ -235,6 +301,14 @@ export function scaleMarkOf(
     level,
     title: report.tierLabel,
     device: report.device ?? null,
+    where,
+    iq: report.iq ?? null,
+    trace: report.trace ?? null,
+    retune: report.retune ?? null,
+    retuneStatus: report.retuneStatus ?? null,
+    // The chip is the pane's, so it is bounded by the pane: a line that ran past the pane's own
+    // left edge would be describing a neighbour's picture. The insets match `.sf-scale`'s CSS.
+    maxWidthPx: Math.max(96, Math.min(CHIP_MAX_W_PX, wPx - CHIP_INSET_PX)),
     state: {
       pane: pane.id,
       following: report.following ? "true" : "false",
@@ -262,6 +336,10 @@ export function scaleMarkOf(
       // marked it — a `device_id` is exactly the kind of string a sentence mangles.
       device: report.device?.device ?? "",
       deviceStale: report.device?.stale ? "true" : "false",
+      // T-1003: what THIS pane's time position is backed by, as the `.sf-ring` dataset says it for
+      // the active one — a word a test compares against the pane's own `t1Ns` above, never a
+      // sentence it has to parse.
+      backing: report.backing ?? "",
     },
   };
 }
@@ -272,61 +350,143 @@ export function scaleMarkOf(
  * beside this frame's pixels is the same defect as a box drifting from its rows.
  */
 export class ScaleBars {
-  private readonly pool: HTMLElement[] = [];
+  private readonly pool: Chip[] = [];
 
-  constructor(private readonly root: HTMLElement) {}
+  /**
+   * `host` is how a press leaves this file: the chip paints the words it was handed and reports the
+   * press back **with the pane id on it**, so a Retune inside pane 1 can only ever name pane 1. A
+   * layer built without a host paints the same chip with its button disabled — the developer
+   * preview has no device path to offer.
+   */
+  constructor(private readonly root: HTMLElement, private readonly host?: ScaleHost) {}
 
   update(marks: readonly ScaleMark[]): void {
     const doc = this.root.ownerDocument;
     while (this.pool.length < marks.length) this.pool.push(this.mint(doc));
     for (let i = 0; i < this.pool.length; i++) {
-      const el = this.pool[i];
+      const c = this.pool[i];
       const m = marks[i];
-      if (!m) { if (!el.hidden) el.hidden = true; continue; }
-      if (el.hidden) el.hidden = false;
+      if (!m) { if (!c.el.hidden) c.el.hidden = true; continue; }
+      if (c.el.hidden) c.el.hidden = false;
       // Anchored at the pane's bottom-right corner, inset by the block's own margin (CSS).
-      el.style.transform = `translate(${m.right.toFixed(1)}px, ${m.bottom.toFixed(1)}px)`;
-      const [fRow, tRow, lvl] = [el.children[0] as HTMLElement, el.children[1] as HTMLElement, el.children[2] as HTMLElement];
-      bar(fRow, m.scale.freq, "width");
-      bar(tRow, m.scale.time, "height");
-      if (lvl.textContent !== m.level) lvl.textContent = m.level;
-      const dev = el.children[3] as HTMLElement;
-      if (dev.hidden !== !m.device) dev.hidden = !m.device;
+      c.el.style.transform = `translate(${m.right.toFixed(1)}px, ${m.bottom.toFixed(1)}px)`;
+      // T-1003: and bounded by the pane it belongs to, so a long sentence wraps inside its own
+      // rectangle instead of running across the split into the neighbouring picture.
+      const maxW = `${Math.round(m.maxWidthPx)}px`;
+      if (c.el.style.maxWidth !== maxW) c.el.style.maxWidth = maxW;
+      bar(c.freq, m.scale.freq, "width");
+      bar(c.time, m.scale.time, "height");
+      setText(c.level, m.level);
+      if (c.device.hidden !== !m.device) c.device.hidden = !m.device;
       if (m.device) {
-        if (dev.textContent !== m.device.label) dev.textContent = m.device.label;
-        if (dev.title !== m.device.why) dev.title = m.device.why;
+        setText(c.device, m.device.label);
+        if (c.device.title !== m.device.why) c.device.title = m.device.why;
       }
-      if (el.title !== m.title) el.title = m.title;
-      for (const [k, v] of Object.entries(m.state)) if (el.dataset[k] !== v) el.dataset[k] = v;
+      // T-1003's per-pane words. Each is hidden when its pane has nothing to say rather than left
+      // showing the last frame's sentence: an empty line claims nothing, a stale one claims wrong.
+      say(c.where, m.where);
+      say(c.iq, m.iq);
+      say(c.trace, m.trace);
+      say(c.retuneStatus, m.retuneStatus);
+      if (c.retune.hidden !== !m.retune) c.retune.hidden = !m.retune;
+      if (m.retune) {
+        setText(c.retuneGo, m.retune.label);
+        if (c.retuneGo.title !== m.retune.why) c.retuneGo.title = m.retune.why;
+        c.retuneGo.disabled = !m.retune.enabled || !this.host;
+        c.retuneGo.setAttribute("aria-disabled", m.retune.enabled && this.host ? "false" : "true");
+        say(c.retuneWhy, m.retune.why);
+      }
+      if (c.el.title !== m.title) c.el.title = m.title;
+      for (const [k, v] of Object.entries(m.state)) if (c.el.dataset[k] !== v) c.el.dataset[k] = v;
     }
   }
 
   dispose(): void {
-    for (const el of this.pool) el.remove();
+    for (const c of this.pool) c.el.remove();
     this.pool.length = 0;
   }
 
-  private mint(doc: Document): HTMLElement {
+  private mint(doc: Document): Chip {
     const el = doc.createElement("div");
     el.className = "sf-scale";
+    const rows: HTMLElement[] = [];
     for (const axis of ["freq", "time"]) {
       const row = doc.createElement("div");
       row.className = `sf-scale-row ${axis}`;
-      const line = doc.createElement("i");
-      const label = doc.createElement("b");
-      row.append(line, label);
+      row.append(doc.createElement("i"), doc.createElement("b"));
+      rows.push(row);
       el.append(row);
     }
-    const lvl = doc.createElement("span");
-    lvl.className = "sf-scale-level";
-    // T-1006: the device pill, last, hidden until the host names a front end.
-    const dev = doc.createElement("span");
-    dev.className = "sf-scale-device";
-    dev.hidden = true;
-    el.append(lvl, dev);
+    const level = span(doc, "sf-scale-level");
+    // T-1006: the device pill, hidden until the host names a front end.
+    const device = span(doc, "sf-scale-device");
+    device.hidden = true;
+    // T-1003. `.sf-where` keeps its name: it is the same centre/span/LIVE readout T-996 kept, moved
+    // out of the one bottom-left line into the pane it describes.
+    const where = span(doc, "sf-where");
+    const iq = span(doc, "sf-pane-iq");
+    const trace = span(doc, "sf-pane-trace");
+    const retuneGo = doc.createElement("button");
+    retuneGo.type = "button";
+    retuneGo.className = "sf-pane-retune-go";
+    // The press names the pane the chip is CURRENTLY placed on, read off the element the frame just
+    // wrote — never a pane id closed over at mint time, because the pool is indexed by position and
+    // a chip outlives the pane it was first minted for (the same rule the width buttons keep).
+    retuneGo.addEventListener("click", () => {
+      const id = el.dataset.pane;
+      if (id && !retuneGo.disabled) this.host?.pressRetune(id);
+    });
+    const retuneWhy = span(doc, "sf-pane-retune-why");
+    const retune = doc.createElement("div");
+    retune.className = "sf-pane-retune";
+    retune.hidden = true;
+    retune.append(retuneGo, retuneWhy);
+    // T-1028's sentence, for THIS pane: `role="status"` so a retune the user's own pan asked for is
+    // heard, not only seen.
+    const retuneStatus = span(doc, "sf-pane-retune-status");
+    retuneStatus.setAttribute("role", "status");
+    el.append(level, device, where, iq, trace, retune, retuneStatus);
     this.root.append(el);
-    return el;
+    return { el, freq: rows[0], time: rows[1], level, device, where, iq, trace, retune, retuneGo, retuneWhy, retuneStatus };
   }
+}
+
+/** One pooled chip's elements, named once at mint — a chip is read by name, never by child index. */
+interface Chip {
+  readonly el: HTMLElement;
+  readonly freq: HTMLElement;
+  readonly time: HTMLElement;
+  readonly level: HTMLElement;
+  readonly device: HTMLElement;
+  readonly where: HTMLElement;
+  readonly iq: HTMLElement;
+  readonly trace: HTMLElement;
+  readonly retune: HTMLElement;
+  readonly retuneGo: HTMLButtonElement;
+  readonly retuneWhy: HTMLElement;
+  readonly retuneStatus: HTMLElement;
+}
+
+/** What a chip asks of its host: exactly one press, and it names the pane it came from. */
+export interface ScaleHost {
+  pressRetune(paneId: string): void;
+}
+
+function span(doc: Document, cls: string): HTMLElement {
+  const el = doc.createElement("span");
+  el.className = cls;
+  return el;
+}
+
+function setText(el: HTMLElement, t: string): void {
+  if (el.textContent !== t) el.textContent = t;
+}
+
+/** A line with nothing to say is emptied AND hidden — never left holding the last frame's words. */
+function say(el: HTMLElement, t: string | null): void {
+  const on = !!t;
+  if (el.hidden === on) el.hidden = !on;
+  setText(el, t ?? "");
 }
 
 /** Draw one bar row: the line's length along its axis, and the quantity beside it. */

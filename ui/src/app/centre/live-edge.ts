@@ -43,7 +43,8 @@
 // "is this server producing".
 import * as ax from "../../axis";
 import { flags } from "../../flags";
-import { LiveRing } from "../../surface/livering";
+import { GapResume, LiveRing } from "../../surface/livering";
+import { decodePaneBlock, panePath, parsePaneHeader, type PaneHeader } from "../../surface/panerows";
 import { lastRowArrival, liveMetrics, timed } from "../../surface/livemetrics";
 import { LiveRow } from "../../surface/trace";
 import type { AppContext } from "../context";
@@ -76,6 +77,32 @@ export const liveRow = new LiveRow();
  */
 export const liveRing = new LiveRing();
 
+/**
+ * What the last resume did (T-1044 / LSR-3): the gap's range, the blocks the server walked for it, and
+ * how many carried `DISCONTINUITY` (parts the store had no frame for).
+ *
+ * The walked rows are **not** painted into the ring, and that is deliberate: a store row is a tile
+ * lattice cell (level 0 is ~1 s), coarser than the ring's ~40 ms display rows, so mixing them would
+ * put two cadences in one texture. The gap is the tile lane's. What the walk is *for* is the
+ * moment it ends: the store has answered for the gap, so the tiles resident over it are re-asked
+ * ([[setResumeSink]] → `TileCache.coverageChanged`), instead of waiting for the refresh lane to come
+ * round to a tile the ring had been standing in front of.
+ */
+export const resumeState = {
+  path: null as string | null, tFromNs: 0, tToNs: 0, blocks: 0, discontinuities: 0, done: false,
+  /** The subscription's answer: `"ok"`, a refusal's `<status> <code>`, or `null` before any. */
+  answer: null as string | null,
+  /** Blocks this build refused to read (an unknown code, a length that does not add up), and the last reason. */
+  unreadable: 0, lastError: null as string | null,
+};
+
+/** What a finished resume asks of the surface: re-ask the tiles meeting this region from `tNs`. */
+export interface ResumeChange { readonly fLoHz: number; readonly fHiHz: number; readonly tNs: number }
+let resumeSink: ((c: ResumeChange) => void) | null = null;
+
+/** The surface's hook (`app/centre/surface.ts`): where a finished resume's re-ask goes. */
+export function setResumeSink(fn: ((c: ResumeChange) => void) | null): void { resumeSink = fn; }
+
 /** The `/api/streams` fields this needs (docs/api.md discovery). */
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
 
@@ -84,6 +111,8 @@ export function mountLiveEdge(ctx: AppContext): () => void {
   const { store } = ctx;
   let sock: StreamSocket | null = null;
   let attempt = 0, timer = 0, stopped = false;
+  const gap = new GapResume();
+  let resumeSock: StreamSocket | null = null;
 
   const geom = () => {
     const l = store.get().live;
@@ -134,6 +163,39 @@ export function mountLiveEdge(ctx: AppContext): () => void {
   // and the newest frame keeps being the newest frame while the user inspects a past window. (What
   // a *paused* pane does with that row is the trace's decision, not this one's: see
   // `./surface.ts`'s `traceFor`, which refuses to draw a frame outside the window it would sit on.)
+  // T-1044 (LSR-3): the socket dropped and came back with rows missing between. Ask the row route for
+  // exactly that gap — `t_from` the ring's last `t1`, `t_to` this first row — so the server walks the
+  // store; the ring keeps the gap a gap and the tile lane fills it (its `DISCONTINUITY` parts too).
+  const resumeGap = (tNs: number) => {
+    const fr = liveRing.frame();
+    const range = gap.onRow(tNs, fr?.rowPeriodNs ?? 0, fr?.capacity);
+    if (!range || !fr) return;
+    // The RING's band, not the header's: the rows the gap continues are of the band the ring holds.
+    const win = { fLoHz: fr.f0Hz, fHiHz: fr.f1Hz };
+    const path = panePath({ ...win, nf: Math.min(4096, Math.max(8, fr.nf)) }, range);
+    resumeSock?.close();
+    Object.assign(resumeState, { path, tFromNs: range.tFromNs, tToNs: range.tToNs, blocks: 0, discontinuities: 0, done: false, answer: null, unreadable: 0, lastError: null });
+    let hd: PaneHeader | null = null;
+    resumeSock = openStream(path, ctx.token, {
+      onHeader: (h) => {
+        try { hd = parsePaneHeader(JSON.stringify(h)); resumeState.answer = "ok"; } catch (e) { hd = null; resumeState.answer = `unreadable: ${String(e)}`; }
+      },
+      onRefused: (r) => { resumeState.answer = `${r.status} ${r.code}`; },
+      onBinary: (b) => {
+        if (!hd) return;
+        try {
+          const m = decodePaneBlock(hd, b);
+          resumeState.blocks++;
+          if (m.discontinuity) resumeState.discontinuities++;
+        } catch (e) { resumeState.unreadable++; resumeState.lastError = String(e); /* never rendered with a guessed meaning */ }
+      },
+      onClose: () => {
+        resumeState.done = true;
+        resumeSink?.({ ...win, tNs: range.tFromNs });
+      },
+    });
+  };
+
   const onBinary = (buf: ArrayBuffer) => {
     const r = parseSpectrumRecord(buf);
     if (r?.type !== "data" || !Number.isFinite(r.tS)) return;
@@ -142,6 +204,7 @@ export function mountLiveEdge(ctx: AppContext): () => void {
     // spectrum, so the last real frame stands rather than being replaced by nothing.
     const g = geom();
     if (r.row && g && r.row.length > 0) {
+      if (flags().liveRing && gap.pending) resumeGap(r.tS * 1e9);
       const frame = {
         f0Hz: g.centerHz - g.bandwidthHz / 2,
         f1Hz: g.centerHz + g.bandwidthHz / 2,
@@ -186,10 +249,10 @@ export function mountLiveEdge(ctx: AppContext): () => void {
       onHeader, onBinary,
       // T-417: a retune or re-plumb no longer reaches here — the bridge keeps this socket and
       // delivers the new window's header on it. What is left is a stream that really ended.
-      onClose: (wasLive) => { if (wasLive) attempt = 0; retry(wasLive ? "stream ended; reconnecting" : "disconnected; retrying"); },
+      onClose: (wasLive) => { gap.noteClose(liveRing.frame()); if (wasLive) attempt = 0; retry(wasLive ? "stream ended; reconnecting" : "disconnected; retrying"); },
     });
   }
 
   void connect();
-  return () => { stopped = true; clearTimeout(timer); sock?.close(); sock = null; };
+  return () => { stopped = true; clearTimeout(timer); sock?.close(); sock = null; resumeSock?.close(); resumeSock = null; };
 }

@@ -63,10 +63,12 @@ async function rehomedCounts(page) {
   const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
   assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
   // The viewport menu: its ×, Split ⇔, Split ⇕ and the rows ⇄ columns flip (T-1005), Close,
-  // Whole surface, Record IQ, and T-1006's per-device capture offer. T-1007 moved the three
+  // Whole surface, Record IQ, and T-1006's per-device capture offer — plus T-1003's five
+  // capture-width presets, which moved here from the retired block under Go-to (the menu is the one
+  // piece of cluster chrome that already names the viewport it acts on). T-1007 moved the three
   // colour-scale rows out of the layers menu into the ⋯ settings menu, so they are no longer among
   // the layers; `app-settings.e2e.mjs` presses them where they now live.
-  return { closed: CLOSED_NAMES.length, pane: 8, layers: registry.length + 1 + 1 };
+  return { closed: CLOSED_NAMES.length, pane: 8 + 5, layers: registry.length + 1 + 1 };
 }
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {
@@ -598,13 +600,33 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   const near = (d, c) => Math.abs(img.data[d] - c[0]) <= 8 && Math.abs(img.data[d + 1] - c[1]) <= 8 && Math.abs(img.data[d + 2] - c[2]) <= 8;
   const IQ = [51, 242, 89], RET = [255, 64, 217];
   const x0 = Math.round((canvas.x + st.left) * scale), x1 = Math.round((canvas.x + st.left + st.w) * scale);
+  // T-1003: the band-2 DOM chrome that floats OVER the canvas — the bottom-left status line and each
+  // pane's chip (which since T-1003 carries that pane's status words, its IQ backing and its Retune,
+  // and so is a translucent block rather than two hairlines). A screenshot reads what is on the
+  // SCREEN, so the pixels under that chrome are chrome's, not the canvas's; counting them as "the
+  // rule is not drawn here" would make this measure the chrome's opacity instead of the rule. The
+  // share below is unchanged and is taken over the columns the canvas is actually visible in — the
+  // rule must still run across essentially the whole of what can be seen of it.
+  const chrome = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.sf-scale:not([hidden]), .sf-status')]
+    .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0)
+    .map((r) => ({ x: r.x, y: r.y, r: r.right, b: r.bottom })))`));
+  t.diagnostic(`band-2 chrome over the canvas: ${JSON.stringify(chrome)}`);
+  const underChrome = (x, y) => chrome.some((c) => x >= c.x * scale && x < c.r * scale && y >= c.y * scale && y < c.b * scale);
   const rowsWith = (ink, share) => {
     const out = [];
     const y0 = Math.round((canvas.y + st.top) * scale), y1 = Math.round((canvas.y + st.top + st.h) * scale);
     for (let y = y0; y < y1; y++) {
-      let n = 0;
-      for (let x = x0; x < x1; x++) if (near((y * img.width + x) * 4, ink)) n++;
-      if (n >= share * (x1 - x0)) out.push(y);
+      let n = 0, seen = 0;
+      for (let x = x0; x < x1; x++) {
+        if (underChrome(x, y)) continue;
+        seen++;
+        if (near((y * img.width + x) * 4, ink)) n++;
+      }
+      // A row where the chrome leaves too little of the canvas to read is skipped, not judged: the
+      // rules run the pane's full width, so a third of it visible is a fair sample, and less than
+      // that would be measuring the chrome. (Measured at 1440 px: the status line covers 39 % of the
+      // row it sits on and a pane chip 19 % of its own band.)
+      if (seen > 0.3 * (x1 - x0) && n >= share * seen) out.push(y);
     }
     return out;
   };

@@ -204,29 +204,43 @@ test("T-996: no white centre/span panel and no `More` expansion — a scale bar 
 
   // There: the per-pane scale layer, placed inside the render frame from that frame's own statuses.
   assert.match(host, /class: "sf-scales"/, "no scale-bar layer over the canvas");
-  assert.match(host, /new ScaleBars\(scaleEl\)/);
+  // T-1003: the layer is given the press its chips report back — with the pane id on it.
+  assert.match(host, /new ScaleBars\(scaleEl, \{ pressRetune: \(paneId\) => pressRetune\(paneId\) \}\)/);
   assert.match(host, /const scaleFrame = \([^]*?statuses: readonly PaneStatus\[\],[^]*?\) => \{/,
     "the scale bars are not built from the frame's own per-viewport statuses");
   assert.match(host, /scaleFrame\(panes, hPx, dpr, statuses\);/,
     "the scale bars are not laid out in the render frame (a poll would state last second's zoom)");
   assert.match(host, /scaleMarkOf\(/);
-  // The KEPT readout: where the viewport is looking, and peak dB only under the pointer.
-  assert.match(host, /class: "sf-where"/, "the centre/span/LIVE readout was dropped, not kept");
-  assert.match(host, /setText\(whereEl, \[st\.freqLabel, st\.timeLabel/,
-    "the kept readout is not written from the frame's own status");
+  // The KEPT readout: where the viewport is looking — T-1003 moved it INSIDE the pane it describes
+  // (`surface/scale.ts` mints the `.sf-where` line and composes it from that pane's own status), so
+  // the app must no longer write one line about "the" viewport at all. Peak dB stays under the
+  // pointer, because there is one pointer.
+  const scale = readFileSync("src/surface/scale.ts", "utf8");
+  assert.match(scale, /class(Name)? = "sf-where"|el\.className = cls/, "the pane chip mints no `.sf-where` line");
+  assert.match(scale, /"sf-where"/, "the centre/span/LIVE readout was dropped, not kept");
+  assert.match(scale, /const where = \[report\.freqLabel, report\.timeLabel\]/,
+    "the kept readout is not composed from the frame's own per-pane status");
+  assert.doesNotMatch(host, /whereEl/, "the app still writes one bottom-left line about `the` viewport");
   assert.match(host, /hoverPeak = slicePk \?/, "peak dB is not carried to the hover readout");
   assert.match(host, /const peak = hoverPeak && hit && hit\.pane\.id === preview\?\.activePane/,
     "peak dB is not scoped to the pane under the pointer");
 
-  // T-476/T-496's device controls kept their arithmetic and moved to where Go-to lives.
-  assert.match(host, /paneRetune: \(\) => chromeAction\(pv\.activePane\)/);
-  assert.match(host, /pressPaneRetune: \(\) => pressRetune\(pv\.activePane\)/);
+  // T-476/T-496's device controls kept their arithmetic. T-1003 asks for it PER PANE, in the frame,
+  // and paints it on that pane's own chip; the presets went to the viewport menu, which names the
+  // pane it acts on. Nothing under Go-to describes a viewport any more.
+  assert.match(host, /retune: chromeAction\(v\.id\)/, "the chip's Retune is not asked for by pane id");
+  assert.match(host, /retuneStatus: retuneStatusFor\(v\.id\)/, "retune mode's sentence is not per pane");
   assert.match(host, /paneWidths: \(\) => widthActions\(pv\.activePane\)/);
-  assert.match(host, /renderRetune\(\);/, "the cluster's Retune is not re-derived per render frame");
+  assert.match(host, /renderRetune\(\);/, "the width presets are not re-derived per render frame");
   const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
-  assert.match(ts, /class: "map-glass map-retune"/, "the capture controls have no home under Go-to");
-  assert.match(ts, /retuneGo\.addEventListener\("click", \(\) => \{ if \(!retuneGo\.disabled\) host\.pressPaneRetune\?\.\(\); \}\)/,
+  assert.doesNotMatch(ts, /class: "map-glass map-retune"/, "the retired capture block still sits under Go-to");
+  assert.doesNotMatch(ts, /paneRetune\?|pressPaneRetune\?|paneStatus\?/,
+    "the cluster still asks the host about `the` viewport's retune");
+  assert.match(ts, /class: "map-layers-axis map-pane-width"/, "the width presets have no home in the viewport menu");
+  assert.match(scale, /retuneGo\.addEventListener\("click", \(\) => \{[\s\S]*?this\.host\?\.pressRetune\(id\)/,
     "the Retune press is not a plain click on a persistent button (T-407: never a gesture threshold)");
+  assert.match(scale, /const id = el\.dataset\.pane;/,
+    "the chip's press does not name the pane it is placed on");
   // A width preset crosses as an OPAQUE key: the cluster routes the press back by the key it was
   // handed and never parses what it means (the host does, on the other side of the boundary).
   assert.match(ts, /host\.pressPaneWidth\?\.\(rec\.key\)/);
@@ -239,6 +253,9 @@ test("T-996: no white centre/span panel and no `More` expansion — a scale bar 
     "the scale block is not anchored inside its pane's bottom-right corner");
   assert.match(css, /\.sf-scales \{[^}]*pointer-events: none/,
     "the scale layer can take a pan from the surface under it");
+  // …and the one control ON a chip takes the pointer itself, else nobody could press it.
+  assert.match(css, /\.sf-pane-retune-go \{[^}]*pointer-events: auto/,
+    "the pane's own Retune cannot be pressed");
   assert.doesNotMatch(css, /\.sf-status:not\(\[data-open="true"\]\)/, "the collapse rules survive the retired panel");
 });
 
@@ -522,64 +539,28 @@ test("T-1028: the retune-mode chip states the mode, toggles it, and still reache
   assert.deepEqual(fetched, [], "the chip itself must reach nothing: it changes what a GESTURE means");
 });
 
-test("T-1028 x T-996: retune mode's pane status is SAID on the capture block beside Retune", () => {
-  // T-1028 put this line on the per-viewport row; T-996 retired those rows from the app, so the
-  // line moved to the floating capture block. A retune the user's own pan asked for must never be
-  // silent: shown while the host says something, hidden (not emptied) when it says nothing, and
-  // shown even when the viewport offers no Retune of its own.
-  const g = globalThis as Record<string, unknown>;
-  const saved = { document: g.document, window: g.window };
-  g.document = {
-    createElement: (t: string) => new FakeEl(t),
-    createElementNS: (_ns: string, t: string) => new FakeEl(t),
-    createComment: () => new FakeEl("#comment"),
-    querySelector: () => null,
-    body: new FakeEl("body"),
-    activeElement: null,
-  };
-  g.window = { addEventListener() {}, removeEventListener() {} };
-  try {
-    const m = model();
-    const id = m.list()[0].id;
-    let said: string | null = null;
-    let offer: { label: string; why: string; enabled: boolean } | null = null;
-    const host = {
-      ...paneActions(m, () => id),
-      measuring: () => false, setMeasuring() {},
-      paneRetune: () => offer, pressPaneRetune() {},
-      paneStatus: () => said,
-      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
-      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
-      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
-      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
-    } as unknown as Parameters<typeof mountMapControls>[0];
-    const c = mountMapControls(host);
-    const root = c.el as unknown as FakeEl;
-    const block = root.find("map-retune")!;
-    const line = root.find("map-retune-status")!;
-    const row = root.find("map-retune-row")!;
-    assert.equal(block.hidden, true, "nothing to offer and nothing to say: no block");
-    assert.equal(line.getAttribute("role"), "status", "a retune the pan asked for must reach a screen reader");
-
-    said = "Retuning to 433.92 MHz (settling…)";
-    c.syncRetune();
-    assert.equal(block.hidden, false, "retune mode is acting on the viewport and the map says nothing");
-    assert.equal(line.hidden, false);
-    assert.equal(line.textContent, said);
-    assert.equal(row.hidden, true, "a Retune button with no offer behind it was shown");
-
-    offer = { label: "Retune", why: "to 433.92 MHz", enabled: true };
-    c.syncRetune();
-    assert.equal(row.hidden, false, "the viewport's own Retune was hidden by the status line");
-    assert.equal(line.hidden, false);
-
-    said = null;
-    c.syncRetune();
-    assert.equal(line.hidden, true, "the line claims a retune after the mode stopped saying one");
-    assert.equal(block.hidden, false, "the persistent Retune went with the status line");
-  } finally {
-    g.document = saved.document; g.window = saved.window;
-  }
+test("T-1003 x T-1028: the capture block under Go-to is gone — Retune and its status are per pane", () => {
+  // T-1028 put the retune-mode line on the per-viewport row; T-996 retired those rows and moved the
+  // line, with Retune itself, to a floating block under Go-to. Both named "the" viewport, which with
+  // a split open is the hidden active pane — and the user's word for the block was "out of place".
+  // T-1003 retires it: the words are lines of each PANE's chip (`surface/scale.ts`, exercised in
+  // `surface-scale.test.ts`), and what is left in the cluster is the width row, in the viewport
+  // menu that already names the pane it acts on. This test holds the cluster to that.
+  const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  for (const [re, why] of [
+    [/class: "map-glass map-retune"/, "the retired capture block is still built"],
+    [/map-retune-row|map-retune-why|map-retune-go|map-retune-status/, "its rows and its button are still built"],
+    [/paneRetune\?|pressPaneRetune\?|paneStatus\?/, "the cluster still asks the host about `the` viewport"],
+  ] as const) assert.doesNotMatch(ts, re, why);
+  const css = readFileSync("src/app/chrome/map-controls.css", "utf8");
+  assert.doesNotMatch(css.replace(/\/\*[\s\S]*?\*\//g, ""), /\.map-retune\s*\{|\.map-retune-(go|why|row|status)/,
+    "the retired block is still styled (only the MODE chip and banner keep that prefix)");
+  // The presets are a section of the viewport menu, and the cluster still learns nothing about what
+  // a width means: it routes the press back by the opaque key it was handed.
+  assert.match(ts, /class: "map-layers-axis map-pane-width"/);
+  assert.match(ts, /widthSection,\n/, "the width section is not in the viewport menu");
+  assert.match(ts, /host\.pressPaneWidth\?\.\(rec\.key\)/);
+  assert.doesNotMatch(ts, /WIDTH_PRESETS|Number\(rec\.key\)/, "the cluster learned what a width preset means");
 });
 
 // T-1053: nine chips reached 80 % of a 400 px pane — a bar by another name (T-1025) — and squeezed

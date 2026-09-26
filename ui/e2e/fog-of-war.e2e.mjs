@@ -69,7 +69,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, clipToUnoccluded, tileAsks } from "./harness.mjs";
+import { Browser, census, paneGeometry, tileAsks } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
@@ -82,12 +82,12 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 // 8959 / 8991 in lanes 1 and 2 - none of them in backend.mjs's FORBIDDEN set at any lane base.
 const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 8;
 
-// T-996 retired the app's per-viewport rows: a pane states itself on its own scale block
-// (`.sf-scale`, the frame's own report in its dataset — `canvas-journey.e2e.mjs`'s reading), and its
-// persistent Retune is the floating cluster's, for the active pane (`.map-retune-go`). Same facts,
-// same frame; a different set of elements to read them off.
+// T-996 retired the app's per-viewport rows: a pane states itself on its own chip (`.sf-scale`, the
+// frame's own report in its dataset — `canvas-journey.e2e.mjs`'s reading), and since T-1003 its
+// persistent Retune is a button ON that chip, inside the pane it acts on. Same facts, same frame; a
+// different set of elements to read them off — and the button is now read per pane, not globally.
 const PANE_ROW = '.sf-scale:not([hidden])';
-const PANE_ACTION = '.map-retune:not([hidden]) .map-retune-go';
+const PANE_ACTION = '.sf-scale:not([hidden]) .sf-pane-retune:not([hidden]) .sf-pane-retune-go';
 // T-529 added `window`: a retune to a region is now ONE device action carrying centre and span
 // together (`POST /api/control/window`) instead of a `rate` post followed by a `center` one. It
 // belongs here for both of this file's uses. In `assertNoDeviceCalls` its absence silently WEAKENED
@@ -110,7 +110,7 @@ const C_HZ = 200.0e6, C_VIEW_SPAN_HZ = 250e3;
 // ---------------------------------------------------------------------------
 
 const ROWS = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((v) => {
-  const b = document.querySelector('${PANE_ACTION}');
+  const b = v.querySelector('.sf-pane-retune:not([hidden]) .sf-pane-retune-go');
   return {
     id: v.dataset.pane ?? '',
     viewport: 'pane',
@@ -118,7 +118,7 @@ const ROWS = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((
     counts: v.dataset.counts ?? '',
     hasButton: !!b,
     disabled: b ? b.disabled : null,
-    why: document.querySelector('.map-retune-why')?.textContent ?? '',
+    why: v.querySelector('.sf-pane-retune-why')?.textContent ?? '',
     // The pane's own time span in seconds (T-996: the scale block's \`data-span-s\`, the exact number
     // the frame laid the pane out with — it was inferred from the retired row's ruler sentence).
     ruler: v.dataset.spanS ?? '',
@@ -966,77 +966,10 @@ async function harvestMarks(browser, backend) {
 // Pixels
 // ---------------------------------------------------------------------------
 
-function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
-  // them since T-995 retired the minimap).
-  // T-1041: the trace reserves nothing any more (it is a layer over the pane's top rows, off by
-  // default), so the pane's measurement starts at the inset — its own first row.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
-  return { x: rect.x, w: rect.w, y: rect.y + ins.top, h: paneH / dpr };
-}
-/**
- * The pane, narrowed to the columns nothing foreign covers (T-801). Since MAP-01 the app's canvas
- * is full-bleed and its inventory/focus panels float over it by design, so the pane's whole box is
- * no longer all surface: measured on the first red run, band C read 55.0 % THE grey across the box
- * and the missing ~45 % was the two panels' own background. Every claim below — never-swept reads
- * THE grey, departed reads shadow, re-swept reads live — is about what the SURFACE drew, so it is
- * measured over the columns the browser's own hit test says the surface is on top at
- * (`Page.unoccludedColumns`), never over a hard-coded panel width. The pane still maps frequency
- * across the canvas's full width; only the sampled columns narrow.
- */
-async function paneGeometry(page) {
-  const rect = await page.$rect(".sf-canvas");
-  assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
-  const dpr = await page.eval("window.devicePixelRatio || 1");
-  const whole = paneRectOf(rect, dpr, await page.canvasInsets());
-  const band = await clearBand(page, whole);
-  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: band.y, y1: band.y + band.h });
-  const pane = clipToUnoccluded(band, rect, unocc);
-  assert.ok(pane.w > 200 && pane.h > 200,
-    `less than 200 x 200 px of the pane is uncovered by the app's floating chrome: ` +
-    `${JSON.stringify({ band: { y: band.y, h: band.h }, unocc })}`);
-  return { rect, dpr, pane };
-}
+// `paneRectOf`, `clearBand` and `paneGeometry` used to be defined here; T-1078 moved them into the
+// ONE shared copy every spec measuring `.sf-canvas` pixels now imports, `harness.mjs`'s
+// `paneGeometry` (T-801/T-1072).
 
-/**
- * The pane, narrowed to the ROWS between the floating chrome at its top and bottom edges (T-1072),
- * so the column clip after it measures the surface rather than excluding every column a chip sits
- * over anywhere in the pane's height.
- *
- * Since T-993 retired the app-shell top bar, its controls are small `data-band="chrome"` boxes in a
- * row along the pane's top edge (Go-to, nudge, inventory pills, status chips, top-right chips) and a
- * status line along its bottom. Measured 2026-09-26 at 1440 x 900: those boxes lie at y 8–130 and
- * 769–798 and between them cover columns 8–1432, so the column-only clip over the pane's whole height
- * (T-801's rule, written when the chrome was side PANELS that covered whole columns) left 8 px of 1440
- * — while the hit test found the canvas at 20 of 25 points across the pane. The map was not covered;
- * the measure assumed a chrome geometry that no longer exists. Same intent, same 200 px floor: the
- * claims are still measured only over pixels the surface drew, now as a rectangle. The band is the
- * one of largest area among the pane's edges and the chrome boxes' edges nearest them.
- */
-async function clearBand(page, whole) {
-  const boxes = await page.eval(`[...document.querySelectorAll('[data-band="chrome"] > *')]
-    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0)
-    .map((b) => ({ l: b.left, r: b.right, t: b.top, b: b.bottom }))`);
-  const top = whole.y, bot = whole.y + whole.h, mid = (top + bot) / 2;
-  const inPane = boxes.filter((b) => b.b > top && b.t < bot);
-  const y0s = [top, ...inPane.filter((b) => b.t < mid).map((b) => b.b)];
-  const y1s = [bot, ...inPane.filter((b) => b.b >= mid).map((b) => b.t)];
-  const x0 = Math.ceil(whole.x), x1 = Math.floor(whole.x + whole.w);
-  let best = { ...whole, area: -1 };
-  for (const y0 of y0s) {
-    for (const y1 of y1s) {
-      if (!(y1 > y0)) continue;
-      const over = inPane.filter((b) => b.b > y0 && b.t < y1);
-      let run = 0, widest = 0;
-      for (let x = x0; x < x1; x++) {
-        if (over.some((b) => x + 1 > b.l && x < b.r)) run = 0; else widest = Math.max(widest, ++run);
-      }
-      const area = widest * (y1 - y0);
-      if (area > best.area) best = { x: whole.x, w: whole.w, y: y0, h: y1 - y0, area };
-    }
-  }
-  return { x: best.x, w: best.w, y: best.y, h: best.h };
-}
 /** The pane's data rect, inset a few pixels clear of every edge (a boundary pixel is a rounding
  * question, not a colour question — `surface-colour.e2e.mjs`'s `INSET`). */
 function roiOf(pane, inset = 8) {

@@ -7,6 +7,7 @@
 // a real browser — `census()` over a screenshot, `net` over CDP's `Network` domain, and `$text` /
 // `$count` over the live DOM — and **not** to offer a "did it throw" convenience, which is the
 // vacuous test the brief warns about.
+import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { connect, kill, launch } from "./cdp.mjs";
@@ -131,6 +132,86 @@ export function clipToUnoccluded(pane, canvasRect, unocc) {
   const w = Math.max(0, x1 - x0);
   return { ...pane, x: x0, w, fracLo: (x0 - canvasRect.x) / canvasRect.w, fracHi: (x0 + w - canvasRect.x) / canvasRect.w,
     clipped: pane.w - w };
+}
+
+/**
+ * The rectangle a pane draws its MEASUREMENT into, in page coordinates.
+ *
+ * Not the canvas: the panes sit between the floating chrome's stated insets (T-918). Since T-1041
+ * the trace reserves no rows above it (it is a layer over the pane's top rows, off by default), so
+ * the pane's measurement starts at the inset — its own first row.
+ */
+export function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top, h: paneH / dpr };
+}
+
+/**
+ * The pane, narrowed to the ROWS between the floating chrome at its top and bottom edges (T-1072),
+ * so a following column clip measures the surface rather than excluding every column a chip sits
+ * over anywhere in the pane's height.
+ *
+ * Since T-993 retired the app-shell top bar, its controls are small `data-band="chrome"` boxes in a
+ * row along the pane's top edge (Go-to, nudge, inventory pills, status chips, top-right chips) and a
+ * status line along its bottom. Measured 2026-09-26 at 1440 x 900: those boxes lie at y 8-130 and
+ * 769-798 and between them cover columns 8-1432, so a column-only clip over the pane's WHOLE height
+ * (T-801's rule, written when the chrome was side PANELS that covered whole columns) left 8 px of
+ * 1440 — while the hit test found the canvas at 20 of 25 points across the pane. The map was not
+ * covered; the measure assumed a chrome geometry that no longer exists. Same intent, same 200 px
+ * floor: the claims are still measured only over pixels the surface drew, now as a rectangle. The
+ * band is the one of largest area among the pane's edges and the chrome boxes' edges nearest them.
+ *
+ * ONE COPY (T-1078): this used to be duplicated per spec (`fog-of-war.e2e.mjs`, and independently
+ * missing from `canvas-journey.e2e.mjs`, which is why its own geometry check kept excluding every
+ * column the top/bottom chrome touched over the pane's whole height and read "less than 200 px of
+ * the pane is uncovered" on every one of its column-clipped assertions).
+ */
+export async function clearBand(page, whole) {
+  const boxes = await page.eval(`[...document.querySelectorAll('[data-band="chrome"] > *')]
+    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0)
+    .map((b) => ({ l: b.left, r: b.right, t: b.top, b: b.bottom }))`);
+  const top = whole.y, bot = whole.y + whole.h, mid = (top + bot) / 2;
+  const inPane = boxes.filter((b) => b.b > top && b.t < bot);
+  const y0s = [top, ...inPane.filter((b) => b.t < mid).map((b) => b.b)];
+  const y1s = [bot, ...inPane.filter((b) => b.b >= mid).map((b) => b.t)];
+  const x0 = Math.ceil(whole.x), x1 = Math.floor(whole.x + whole.w);
+  let best = { ...whole, area: -1 };
+  for (const y0 of y0s) {
+    for (const y1 of y1s) {
+      if (!(y1 > y0)) continue;
+      const over = inPane.filter((b) => b.b > y0 && b.t < y1);
+      let run = 0, widest = 0;
+      for (let x = x0; x < x1; x++) {
+        if (over.some((b) => x + 1 > b.l && x < b.r)) run = 0; else widest = Math.max(widest, ++run);
+      }
+      const area = widest * (y1 - y0);
+      if (area > best.area) best = { x: whole.x, w: whole.w, y: y0, h: y1 - y0, area };
+    }
+  }
+  return { x: best.x, w: best.w, y: best.y, h: best.h };
+}
+
+/**
+ * **The pane's data rect, narrowed to what the floating chrome leaves clear (T-801/T-1072/T-1078).**
+ *
+ * The one shared geometry every spec measuring pixels over `.sf-canvas` calls: the canvas minus the
+ * chrome's stated insets, minus [[clearBand]]'s row band between the top/bottom chrome, minus
+ * whatever columns inside that band `Page.unoccludedColumns` finds a chip still sitting over. The
+ * 200 px floor is on WIDTH AND HEIGHT — a band so short (or so narrow) it cannot carry a claim is a
+ * geometry failure, not a passing measurement over three pixels.
+ */
+export async function paneGeometry(page, { selector = ".sf-canvas", minW = 200, minH = 200 } = {}) {
+  const rect = await page.$rect(selector);
+  assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
+  const dpr = await page.eval("window.devicePixelRatio || 1");
+  const whole = paneRectOf(rect, dpr, await page.canvasInsets(selector));
+  const band = await clearBand(page, whole);
+  const unocc = await page.unoccludedColumns(selector, { y0: band.y, y1: band.y + band.h });
+  const pane = clipToUnoccluded(band, rect, unocc);
+  assert.ok(pane.w > minW && pane.h > minH,
+    `less than ${minW} x ${minH} px of the pane is uncovered by the app's floating chrome: ` +
+    `${JSON.stringify({ band: { y: band.y, h: band.h }, unocc })}`);
+  return { rect, dpr, pane };
 }
 
 /**

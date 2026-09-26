@@ -172,24 +172,22 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost, SettingsHos
   /** The retune offer for the active pane when no tuned window covers it, else null. */
   gotoOffer(): GotoOffer | null;
   /**
-   * T-996: the ACTIVE viewport's own persistent Retune (T-476) and capture-width presets (T-496),
-   * rehomed here from the retired per-viewport panel — "the Retune button stays where Go-to lives"
-   * (user, 2026-09-25). Strings and a bit, exactly as `RowAction`/`WidthAction` always were: this
-   * cluster still learns nothing about tuning, and the press is a callback the host routes through
-   * its own gated `DeviceAction` path. Asked EVERY FRAME (`syncRetune`), because the sentence names
-   * the window the viewport is showing now — a label from a 1 s poll names somewhere it is not.
+   * The ACTIVE viewport's capture-width presets (T-496). Strings and a bit, exactly as
+   * `WidthAction` always was: this cluster learns nothing about tuning, and the press is a callback
+   * the host routes through its own gated `DeviceAction` path. Asked EVERY FRAME (`syncRetune`),
+   * because each label names the window the viewport is showing now — a label from a 1 s poll names
+   * somewhere it is not.
+   *
+   * **T-1003 moved Retune itself, and the retune-mode sentence, out of this cluster.** They named
+   * "the" viewport, which with two panes open is the hidden active one; they now live inside each
+   * pane's own chip (`surface/scale.ts`), per pane, beside its scale bars. The presets moved with
+   * them as far as the VIEWPORT MENU, which already names the pane it acts on (T-1000) — a chip
+   * small enough to sit inside a 400 px pane has no room for five more buttons, and the user's
+   * complaint that started this ("the info side bar on the bottom left with the Retune button looks
+   * out of place") was about the permanent block under Go-to, which is now gone entirely.
    */
-  paneRetune?(): RowAction | null;
-  pressPaneRetune?(): void;
   paneWidths?(): readonly WidthAction[];
   pressPaneWidth?(key: string): void;
-  /**
-   * T-1028 × T-996: one sentence about a retune that retune mode has pending, settling or in flight
-   * for the active viewport (`null` when nothing is). T-1028 said it on the per-viewport row, which
-   * T-996 retired from the app, so it is said here, on the capture block beside Retune — the one
-   * place on the map where a gesture moving the radio is reported. Asked every frame, like the rest.
-   */
-  paneStatus?(): string | null;
   /** Tell the rest of the page the view moved (the surface's `mirror`). */
   viewChanged(): void;
   toast(text: string): void;
@@ -394,19 +392,12 @@ export function mountMapControls(host: MapControlHost): {
   const offerOverlay = trackOverlay("retune-offer", () => hideOffer());
   const hideOffer = () => { shown = null; offer.hidden = true; offerOverlay.open(false); };
 
-  // T-996: the ACTIVE viewport's persistent capture controls, under Go-to — "the Retune button
-  // stays where Go-to lives", beside the nudges and the Go-to offer, which is where every device
-  // command on this map already is. Small and never faded (it is a device command with a stated
-  // destination, docs/23 §10.2), and shown only while the host offers one for this viewport.
-  const retuneWhy = h("span", { class: "map-retune-why" });
-  const retuneGo = h("button", { type: "button", class: "map-retune-go" }, "Retune") as HTMLButtonElement;
+  // T-996 put the active viewport's persistent Retune here, under Go-to. T-1003 takes it into the
+  // pane it acts on (`surface/scale.ts`'s chip): with a split open, "this viewport" named a pane
+  // nothing on screen identified, and the block itself was the "info side bar on the bottom left"
+  // the user asked to be rid of. What is left of it here is the capture-WIDTH presets, in the
+  // viewport menu below — five buttons are a menu section, not a corner chip.
   const widthRow = h("div", { class: "map-widths", role: "group", "aria-label": "Capture width" });
-  // T-1028: what retune mode is doing to this viewport now. `role="status"` so a screen reader hears
-  // a retune the user's own pan asked for; hidden (not emptied) when there is nothing to say.
-  const retuneStatus = h("span", { class: "map-retune-status", role: "status", hidden: true });
-  const retuneRow = h("div", { class: "map-retune-row" }, retuneGo, retuneWhy);
-  const retune = h("div", { class: "map-glass map-retune", role: "group", "aria-label": "Capture this viewport", hidden: true },
-    retuneRow, widthRow, retuneStatus);
 
   const layersBtn = h("button", {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
@@ -516,6 +507,10 @@ export function mountMapControls(host: MapControlHost): {
   const deviceHead = h("h4", {}, "Front end");
   const deviceSection = h("div", { class: "map-layers-axis map-pane-device", "data-axis": "device", role: "radiogroup", "aria-label": "Front end", hidden: true },
     deviceHead, deviceRows, deviceNote, perDevice);
+  const widthSection = h("div", { class: "map-layers-axis map-pane-width", "data-axis": "width", hidden: true },
+    h("h4", {}, "Capture width"),
+    widthRow,
+    h("div", { class: "map-note" }, "Commands the radio: the viewport's front end is asked for that span, snapped to the nearest it can capture."));
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
     h("div", { class: "map-layers-head" }, paneHead, paneClose),
     paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split("columns")),
@@ -524,6 +519,9 @@ export function mountMapControls(host: MapControlHost): {
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
     deviceSection,
+    // T-1003: the capture-width presets, rehomed from the retired block under Go-to. The menu is
+    // already named for the viewport it acts on, which is exactly what the block could not say.
+    widthSection,
     ...(host.paneMenuExtras ?? []),
     h("div", { class: "map-note" }, "View only: splitting, closing, zooming out and choosing a front end never command the radio."));
   // The mockup's `#mode` banner: while a tool mode is on (Measure, or T-820's Annotate / Pin), say
@@ -564,7 +562,7 @@ export function mountMapControls(host: MapControlHost): {
   // block is exactly how the offer came to be drawn over the width presets at 400 px. In flow, each
   // starts where the last ended; the pills lead it, so their one fixed place under Go-to holds.
   // T-1028's retune-mode banner joins it under the tool-mode banner (beside it, never instead).
-  const stack = h("div", { class: "map-stack" }, invHome, retune, offer, modeBanner, retuneBanner);
+  const stack = h("div", { class: "map-stack" }, invHome, offer, modeBanner, retuneBanner);
   const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, stack, statusHome, topright, layers, paneMenu, moreMenu, host.scan?.panel ?? null, zoom);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
@@ -799,7 +797,7 @@ export function mountMapControls(host: MapControlHost): {
   const zoomBy = (k: number) => { host.zoom(k); hideOffer(); host.viewChanged(); };
   zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
-  // ---- T-996: the active viewport's Retune and width presets, re-asked every frame ----
+  // ---- T-996/T-1003: the active viewport's width presets, re-asked every frame ----
   //
   // Same discipline the per-viewport row had (T-476/T-496/T-407): buttons are created once and only
   // ever UPDATED — a button rebuilt each frame is a button that cannot be pressed, because the
@@ -817,14 +815,6 @@ export function mountMapControls(host: MapControlHost): {
     b.setAttribute("aria-disabled", a.enabled ? "false" : "true");
   };
   const syncRetune = () => {
-    const a = host.paneRetune?.() ?? null;
-    const said = host.paneStatus?.() ?? null;
-    const show = !!a || said !== null;
-    if (retune.hidden === show) retune.hidden = !show;
-    if (retuneRow.hidden === !!a) retuneRow.hidden = !a;
-    if (a) { apply(retuneGo, a); setText(retuneWhy, a.why); }
-    if (retuneStatus.hidden !== (said === null)) retuneStatus.hidden = said === null;
-    if (said !== null) setText(retuneStatus, said);
     const ws = host.paneWidths?.() ?? [];
     while (widthBtns.length < ws.length) {
       const rec = { el: h("button", { type: "button", class: "map-width" }) as HTMLButtonElement, key: "" };
@@ -833,10 +823,9 @@ export function mountMapControls(host: MapControlHost): {
       widthRow.append(rec.el);
     }
     while (widthBtns.length > ws.length) widthBtns.pop()!.el.remove();
-    if (widthRow.hidden !== (ws.length === 0)) widthRow.hidden = ws.length === 0;
+    if (widthSection.hidden !== (ws.length === 0)) widthSection.hidden = ws.length === 0;
     ws.forEach((w, i) => { widthBtns[i].key = w.key; apply(widthBtns[i].el, w); });
   };
-  retuneGo.addEventListener("click", () => { if (!retuneGo.disabled) host.pressPaneRetune?.(); });
 
   const syncResearch = () => researchBtn.setAttribute("aria-pressed", String(!!host.research?.isOpen()));
   researchBtn.addEventListener("click", () => { host.research?.toggle(); syncResearch(); });

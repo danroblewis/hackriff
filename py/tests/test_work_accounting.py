@@ -1415,20 +1415,20 @@ def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_h
     d = f"{local_ops}/work/T-9"
     w = R.to_remote("node2", R.remote_wrapper(str(local_repo), "task-t9", "exec sleep 60", {}, d, "out.json"))
     p = subprocess.Popen(["bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(50):
-        if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
-            break
+    # Hang detectors, not latency budgets (docs/10 3.6): the pgid file is written before the fixture's python setsid
+    # shim has called setsid(), and every remote_run_state call spawns a shell - at load 40-60 (2026-09-26 07:1x, a
+    # board-only gate went red on this) that took longer than the old fixed 5 s + 10 s. Wait on the condition itself,
+    # up to a minute each; what is asserted is unchanged. The host's util-linux setsid has no gap.
+    deadline = time.monotonic() + 60
+    while not (far / "ops" / "work" / "T-9" / "remote.pgid").exists() and time.monotonic() < deadline:
         time.sleep(0.1)
-    # The pgid file is written before the fixture's python setsid shim has called setsid() - under load (1-min 39,
-    # 2026-09-25 06:00) longer than a fixed 0.3 s. Wait for the group, bounded; the host's util-linux setsid has no gap.
-    for _ in range(100):
-        if R.remote_run_state(c) == "running":
-            break
-        time.sleep(0.1)
+    deadline = time.monotonic() + 60
+    while R.remote_run_state(c) != "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
     assert R.remote_run_state(c) == "running"
     assert R.remote_stop(c, wait_s=5)
     assert R.remote_run_state(c) == "gone"
-    p.wait(timeout=10)
+    p.wait(timeout=60)
 
 
 @pytest.fixture
@@ -2427,3 +2427,27 @@ def test_while_a_batch_gates_the_gated_base_is_what_a_branch_is_measured_against
     R.rescue_stranded(claims, dry=False)
     assert "task-t902" in queue() and "task-t908" not in queue()
     assert not [ln for ln in needs() if "task-t902" in ln]
+
+
+def test_a_result_the_branch_board_cannot_take_is_left_pending_for_the_landing(tmp_path, monkeypatch):
+    """2026-09-26: 12 RESULT writes failed, every one 'no such ticket' (the branch was cut before its ticket reached
+    main) behind uv's 'Using CPython ...' banner, and 7 tickets landed with no result. The log must show the error
+    and the result must be left for the merge runner to write on main (result.pending)."""
+    wt = tmp_path / "wt"
+    (wt / "py" / "hkpy").mkdir(parents=True)
+    (wt / "py" / "hkpy" / "tasks.py").write_text("")
+    d = tmp_path / "work" / "T-1"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(R, "WORKDIR", str(tmp_path / "work"))
+    monkeypatch.setattr(R, "resource_line", lambda c: "")
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(
+        args, 0 if args[0] == "git" else 2, "", "Using CPython 3.13.9 interpreter at: /x\n" + "." * 400 + "task: no such ticket: T-1"))
+    R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
+    assert any("no such ticket: T-1" in m for m in said)
+    assert (d / "result.pending").exists() and "x" in (d / "result.txt").read_text()
+    # a later run whose write works clears the earlier run's marker (else the landing would re-write and cry FAILED)
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, "", ""))
+    R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
+    assert not (d / "result.pending").exists()

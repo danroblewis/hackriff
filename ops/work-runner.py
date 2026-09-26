@@ -1283,9 +1283,14 @@ def write_result(c, hb):
     if r.returncode == 0 and hb["outcome"] == "cancel":
         r = subprocess.run(args + ["set", tid, "status=cancelled", f"cancelled_reason={(hb.get('cancel') or {}).get('evidence', '')[:300]}", "--file", f"{wt}/docs/tasks.yaml"], cwd=wt, capture_output=True, text=True)
     if r.returncode != 0:
-        log(f"RESULT {tid}: task CLI failed: {(r.stderr or r.stdout).strip()[:160]}")
+        log(f"RESULT {tid}: task CLI failed: {(r.stderr or r.stdout).strip()[-300:]} - the merge runner writes it on main at landing")
         subprocess.run(["git", "checkout", "--", "docs/tasks.yaml"], cwd=wt, capture_output=True)
+        # 2026-09-26: 12 results failed here, every one 'no such ticket' (the branch was cut before its ticket reached
+        # main; the log showed only uv's banner), and 7 landed with no result until the coordinator wrote them by hand.
+        open(f"{WORKDIR}/{tid}/result.pending", "w").close()
         return
+    if os.path.exists(f"{WORKDIR}/{tid}/result.pending"):   # an earlier run's failure; this run's result is on the branch
+        os.remove(f"{WORKDIR}/{tid}/result.pending")
     subprocess.run(["git", "add", "docs/tasks.yaml"], cwd=wt, capture_output=True)
     r = subprocess.run(["git", "commit", "-q", "-m", f"{tid}: result and status from handback.json (work-runner)"], cwd=wt, capture_output=True, text=True)
     log(f"RESULT {tid}: board {'written on the branch' if r.returncode == 0 else 'commit failed: ' + r.stderr.strip()[:100]}")

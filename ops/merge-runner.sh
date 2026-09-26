@@ -181,6 +181,16 @@ flip_done(){ # ticket merge_sha
   if (cd "$REPO" && uv run --locked --project py python -m hkpy.tasks set "$t" status=done commit="${sha:0:8}" >>"$LOG" 2>&1 \
       && git add docs/tasks.yaml && HK_MERGE_RUNNER=1 git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
     log "BOARD $t -> done (${sha:0:8})"
+    # The work runner could not write the result on the branch (its board lacked the ticket): write it here, on main.
+    if [ -f "$S/work/$t/result.pending" ]; then
+      if (cd "$REPO" && uv run --locked --project py python -m hkpy.tasks result "$t" --from "$S/work/$t/result.txt" >>"$LOG" 2>&1 \
+          && git add docs/tasks.yaml && HK_MERGE_RUNNER=1 git commit -q -m "Board: $t result from handback.json (merge runner)"); then
+        rm -f "$S/work/$t/result.pending"; log "RESULT $t -> written on main"
+      else
+        (cd "$REPO" && git checkout -q HEAD -- docs/tasks.yaml 2>/dev/null)
+        log "RESULT $t on main FAILED - it stays in $S/work/$t/result.txt; needs reconcile"
+      fi
+    fi
   else
     (cd "$REPO" && git checkout -q -- docs/tasks.yaml 2>/dev/null)
     log "flip_done $t FAILED - board left as is; needs reconcile"
