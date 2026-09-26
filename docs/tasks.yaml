@@ -31342,9 +31342,7 @@ tasks:
     milestone: MUI
     title: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
     status: todo
-    priority: high
-    deps:
-    - T-1007
+    priority: P1
     parallel_group: UI-TOPCHROME-FLAKE
     needs: none
     model: opus
@@ -31355,6 +31353,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY UI-stack integrator 2026-09-26: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
+
+      2026-09-26 coordinator: now RED ON MAIN in the release candidate (rc-20260926, 170bf91a) - not T-1007-only - in THREE specs with one message: app-top-chrome, app-split-frozen and live-ring-metrics all fail 'hiding the chips changed the face of FORM.map-glass map-goto map-fade by 25.29, no more than the canvas moved by itself (36.53) - the chips were not hidden'. The shared instrument (hide the chips, compare faces against the canvas's own motion) is either not hiding FORM.map-goto (the Go-to box) or the canvas's self-motion baseline is too large (a following pane scrolls). Deps on T-1007 dropped; P1 (RC rule). Fix the one shared helper for all three specs; if the chips really do not hide, fix the product.
   - id: T-1074
     milestone: MUI
     title: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
@@ -31430,6 +31430,126 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1072 worker 2026-09-26: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
+  - id: T-1078
+    milestone: MUI
+    title: "RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper"
+    status: todo
+    priority: P1
+    deps:
+    - T-1072
+    parallel_group: UI-FOG-SPEC
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). Specs canvas-journey.e2e.mjs, scan-everything.e2e.mjs and live-edge.e2e.mjs all fail with 'less than 200 px of the pane is uncovered by the app's floating chrome: {"x":1432,"w":8,"occluded":1425,"box":{"x":0,"y":0,"w":1440,"h":900}}'. SAME CAUSE as fog-of-war's (T-1072, f4051bbb, queued): the pane geometry clips every COLUMN any floating-chrome box touches over the pane's whole height (T-801's rule, written when the chrome was side panels); with today's small top-edge chips, bottom status line and right zoom stack it removes ~all columns, though 20 of 25 hit-test points reach the canvas. The UI stack (T-996) migrated live-edge's reads (green 4/4 on task-t1051), so check live-edge after the stack lands.
+      DELIVER: move T-1072's clearBand() (the largest band of rows between the top-edge and bottom-edge chrome, then the unoccludedColumns hit test inside it) into the ONE shared geometry helper every spec uses (ui/e2e harness or wherever paneGeometry lives), delete the per-spec copies, keep the 200 px floor on width AND height. Then whatever these specs assert after the geometry check must be triaged on its own (they were masked).
+      ACCEPTANCE: canvas-journey, scan-everything, live-edge (and fog-of-war's geometry check) green past the geometry check alone on a FRESH hk; any later red named with its assertion and split or fixed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper
+  - id: T-1079
+    milestone: MLIVE
+    title: "RC P1: surface-contention - a tab has 2 tile reads in flight against its operating cap of 1 (a retry/revalidate/refetch path bypasses the lane accounting)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-TILE-CAP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). surface-contention.e2e.mjs: 'the first tab reports more reads out than its own operating cap: "2+0/1 in flight (share 1..."' - a tab has 2 tile reads in flight against an operating cap of 1. Suspects landed since the last green run of this spec: T-1057 (60d4f60c, 03:14: every pending visible address re-requested with jittered backoff - a retry path that may issue outside the lane/AIMD cap), T-1039 (487b80a2: stale-while-revalidate + Service Worker, jittered backoff over T-499/T-454), T-1040 (875da851: a retune re-fetches the moved tiles in one batch). The cap is the server-shared admission budget (T-454 AIMD / T-438): exceeding it is a real contention defect (and feeds the request storm the user measured - T-1060..T-1068).
+      DELIVER: reproduce alone; find which path issues a read without taking a lane slot (retry, revalidate, coverage_changed refetch, batch remainder); every read - first try, retry, revalidate, refetch - goes through the same in-flight accounting. Spy-client test in ui/test: under failures + a retune, in-flight never exceeds the cap.
+      ACCEPTANCE: surface-contention green alone 3/3 on a FRESH hk; the new unit test red on the pre-fix code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: surface-contention - a tab has 2 tile reads in flight against its operating cap of 1 (a retry/revalidate/refetch path bypasses the lane accounting)
+  - id: T-1080
+    milestone: MUI
+    title: "RC P1: app-detail - T-517's step control is not beside the sweep (scan panel layout moved)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-SCAN-PANEL
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). app-detail.e2e.mjs: "T-517's step control is not beside the sweep". The scan/sweep panel layout moved: T-1008 (scan plan overlay), T-1009 (8bc83674: per-front-end ScanRunners, measure-box 'Scan this region with <device>'), T-1007/T-993 (settings/tools folded into menus) are the suspects. Decide with a screenshot whether T-517's step control (a coarse step widens the window only where bins stay exactly as wide) is still reachable beside the sweep it controls: if the product lost or misplaced it, fix the product; if it moved deliberately (e.g. into the plan overlay), re-point the assertion at its new home with the same intent (beside the sweep).
+      ACCEPTANCE: app-detail green alone 3/3 on a FRESH hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: app-detail - T-517's step control is not beside the sweep (scan panel layout moved)
+  - id: T-1081
+    milestone: MUI
+    title: "RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-INV-REQ
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). app-pane-inventory.e2e.mjs: "after 40 s the page had asked about [] - two panes must be two windows" - with two panes, the client issued NO per-pane /api/inventory request in 40 s (the spy saw an empty list). USER-VISIBLE if real: the Candidate/Confirmed lists would never load for split panes (CLAUDE.md: the inventory is time-scoped to each view window). Suspects: the split-view/pane-spec path (T-1005), T-967 (inventory rows show decoded identity), T-1055 (census), and the explore subscription (ui/src/app/explore/index.ts:182-194 subscribes reload to s.time and paneSpecsKey). NOTE T-1060 (queued) rewrites exactly that subscription (settle + material window + latest-wins) - coordinate: if T-1060 fixes it, prove it on main after T-1060 lands; if not, fix it here.
+      DELIVER: reproduce alone; assert the REQUEST the client builds (T-367 rule): two panes -> two inventory windows requested.
+      ACCEPTANCE: app-pane-inventory green alone 3/3 on a FRESH hk; a spy test in ui/test red on the defect.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)
+  - id: T-1082
+    milestone: MLIVE
+    title: "RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-LSR-METRICS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). shadow-level.e2e.mjs: "the dashboard tile never reported a sample of both windows: {latency:{n:0,...},fold:{n:256,meanMs:0.0039,...}}" - the LSR-7 metrics (T-1048, landed 03:47 as 191df5fd; 31806274 fixed 'the dashboard tile going dark after merging main's T-1041') report fold samples but ZERO latency samples. Either the sample->pixel latency is never measured on this spec's path (the ring off / the trace layer off by default since T-1041 / a pane not following), or the spec asks for 'both windows' that no longer both exist. Find which: if the product stops measuring latency whenever the trace layer is off, fix the product (LSR-7: measured, never assumed); if the spec's precondition is wrong, establish it through the product's own controls.
+      ACCEPTANCE: shadow-level green alone 3/3 on a FRESH hk, latency n > 0.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)
+  - id: T-1083
+    milestone: M2-hardening
+    title: "RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: PIPE-RDS-LOOP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). Rust acceptance: hk-e2e::acceptance_m0 tutorial_rds::signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_oracle - 'group agreement 0.200' (tests/e2e/tests/acceptance/tutorial_rds.rs:581): oracle PI 1694 PS 'Unstoppa' 45 CRC-valid groups; the recipe decoded PI 1694 and 105/129 CRC-valid groups (0.814) but only 9 of the oracle's 45 positions agree - 36 oracle groups have 'no CRC-valid recipe group there', conflict 0. The recording replays in a LOOP through the mock SDR (the test's own comment at :447: 'the looping recording resets the chain at its seam'). T-926 (landed 03:47 as 381e948d) made WFM windows full-length and committed (they no longer end at 0.5 s); its worker predicted exactly this: 'other tests that loop a scene shorter than the WFM window will now hit the same seam'. The merge gate's check tier does not run acceptance, so the RC is the first run over T-926.
+      DELIVER: confirm the cause (the recipe's groups sit at positions shifted/duplicated across the loop seam, or the chain's window restarted mid-recording) and fix it the RIGHT way: if the product mis-times groups across a replay loop (a loop is a sample-index discontinuity the mock reports?), fix the product; if the fixture replays a scene shorter than the window, align the comparison per loop pass or play it once, as T-926 did for SIGNAL-062 - never lower the 0.9 agreement bar. Also grep other acceptance/pipeline tests that loop a scene shorter than the WFM window (radio::looped) and list which are exposed.
+      ACCEPTANCE: the test green alone 3/3; the exposed-tests list in the result.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam
+    high_effort_reason: RDS decode timing across a replay loop on the real-time chain window path (T-926 follow-up); hard debugging
+  - id: T-1084
+    milestone: MUI
+    title: "RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands"
+    status: todo
+    priority: P1
+    deps:
+    - T-1051
+    parallel_group: UI-RC-VERIFY
+    needs: none
+    model: sonnet
+    effort: low
+    acceptance: |
+      RELEASE CANDIDATE RED (rc-20260926, main 170bf91a, 'just rc' acceptance tier 03:47-04:00; attention file line RC_RED P1; nothing un-lands - user rule 2026-09-24: RC reds become P1 tickets). Two specs whose fix is on the UNLANDED UI stack (T-996 -> T-1026 -> T-1007 -> T-1051, re-integrated and queued): app-trace.e2e.mjs 'the trace's highest ink is at column 380, row 36, but the column it SAYS its peak is in - 101.2791 MHz, px 922..929 of 1440 - is drawn at row nothing at all' (T-1051 fixes a following pane's trace to the newest row; app-trace 8/8 on task-t1051) and app-dismiss.e2e.mjs 'closing the bottom sheet gave no columns back to the map' (the sheet floats over the full-bleed canvas since T-1056; the stack's app-dismiss was reworked and is 3/3 on task-t1051).
+      DELIVER: once T-1051 is on main, run both specs alone on main with a FRESH hk; if green 3/3, close this with the evidence; if not, fix what remains (app-trace AFTERGLOW belongs to T-1074).
+      ACCEPTANCE: both green alone 3/3 on main after the stack lands.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
+    notes: |
+      FOUND BY rc-20260926: RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
