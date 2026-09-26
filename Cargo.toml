@@ -51,6 +51,16 @@ opt-level = 2
 [profile.dev.package.hk-demod]
 opt-level = 2
 
+# T-1077: the view lattice's writer seals and compresses every live tile with zstd on its own
+# thread, and zstd-sys is C that cc-rs builds at the profile's opt-level — 0 in dev, which is the
+# `hk` the browser tier serves from. Sampled on a bare mock server (load ~40): ~79 % of the
+# `hk-view` thread's ingest was inside ZSTD_compress*, and the writer folded 21.8 rows/s against
+# 24.8 rows/s produced — slower than real time with no reader at all, 6.3 rows/s with four tile
+# readers — so the finest tiles trailed the record without bound and served "observed, nothing
+# folded" (ui/e2e/fog-of-war's band-A baseline at 3-12 % of the pane). Same reason as T-175.
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }

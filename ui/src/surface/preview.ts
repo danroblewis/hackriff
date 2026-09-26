@@ -825,6 +825,9 @@ export class SurfacePreview {
     this.view.minimap.setFollowing(!!this.edgeFn);
     // Coverage FIRST (T-580): with a survey source, nothing is requested until it has answered.
     if (this.surveyFn) this.view.surface.setSurvey("awaiting");
+    // A following surface re-asks the survey every SURVEY_EVERY_MS ([[maybeSurvey]]), so a place newer
+    // than the survey in hand can wait for the next one instead of being requested (T-1077).
+    this.view.surface.setSurveyRenews(!!this.surveyFn && !!this.edgeFn);
     // The map opens on the whole surface — it is the thing that says where the opened pane sits in
     // a mostly-grey world, which is half the answer to the empty-screen problem.
     this.view.minimap.setFreq(
