@@ -29284,7 +29284,7 @@ tasks:
   - id: T-989
     milestone: MAUTO
     title: Conventional DMR (Tier II) identification + header decode on any 4FSK 4800 sym/s emission
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: DECODE-DMR
@@ -29306,6 +29306,7 @@ tasks:
       Commits: 7b9e4b46
       Observed, not chased: The window-3 DMR blind member (T-986) and its fixture (T-985) are not on main - T-985 is in-progress on branch task-t985 (fixture dmr-464p6125-bs, 5 s trim, 41 syncs) and T-986 is todo - so this ticket's 'window-3 blind member goes green' could not be run here. The capability it needs is in place: `hk_detect::dmr_tier2::scan` takes the dibits of any 4FSK 4800 Bd region and `hk_pipeline::dmr::identify` runs it from IQ, and the pipeline writes the verdict + headers. T-986's member should assert the verdict row and the sync count; header fields may not decode on a real off-air capture for the reason below. | REAL-CAPTURE RISK, stated not hidden: three constants could not be corroborated offline and are documented as UNVERIFIED in crates/hk-detect/src/dmr_tier2/fec.rs - the RS(12,9) field polynomial/roots (full-LC parity), the CRC-CCITT initial value (data header; this repo's 0x0000, matching trunk::dmr's recorded choice), and which of the four equivalent (20,8,8) cyclic codes the standard's Golay(20,8) is. If one is wrong, a REAL DMR capture still identifies (sync search and CACH are independent of all three) but its colour code reads 'unknown' and its headers are counted as refused instead of published - the failure direction is a stated gap, never a confident wrong number. Settling them needs either the ETSI TS 102 361-1 text or a real capture to check against; the window-3 fixture would settle the Golay and CRC questions empirically (a correct code gives a consistent colour code across 41 bursts). | No use-case ids were added: T-985's handback reports it appended SIGNAL-090..093 on its own branch, and per the one-writer rule only the coordinator allocates ids. If a use case for conventional DMR blind identification is wanted beyond T-985's, the coordinator should allocate it.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 166d0fd3
   - id: T-990
     milestone: M2-hardening
     title: Noise-only band yields ~6 candidates/min, each given a band-plan explanation with no measured support (airband, spurs as AIS)
