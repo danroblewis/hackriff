@@ -293,3 +293,30 @@ test("LSR-6: ringMaxHoldColumns is the column-wise max over every ring row in th
   const before: Box = { ...BAND, t0Ns: T0 - 100 * PERIOD, t1Ns: T0 - 10 * PERIOD };
   for (const v of ringMaxHoldColumns(f, before, 4)) assert.ok(Number.isNaN(v));
 });
+
+test("LSR-6 (review fix): a pane wider than the ring's band lands the ring's max-hold at the ring's OWN frequencies, never at the pane's own left edge", () => {
+  const ring = new LiveRing({ rows: 32 });
+  // The ring's own band, one quarter-width of the wide pane used below.
+  const ringBand = { f0Hz: 100e6, f1Hz: 200e6 };
+  for (let i = 0; i < 4; i++) ring.push(row(T0 + i * PERIOD, i === 2 ? -20 : -80, ringBand));
+  const f = frameOf(ring);
+  const coverTime = { t0Ns: T0, t1Ns: T0 + 4 * PERIOD };
+  // A pane FOUR TIMES wider than the ring's band: 0..400 MHz over 4 columns of 100 MHz each, so the
+  // ring's band is exactly the pane's second column (index 1), not its first.
+  const paneWindow: Box = { f0Hz: 0, f1Hz: 400e6, ...coverTime };
+  const cols = ringMaxHoldColumns(f, paneWindow, 4);
+  assert.ok(Number.isNaN(cols[0]), "column 0 (0-100 MHz) is outside the ring's band and must stay NaN");
+  assert.equal(cols[1], -20, "column 1 (100-200 MHz) IS the ring's band, and must carry its peak");
+  assert.ok(Number.isNaN(cols[2]), "column 2 (200-300 MHz) is outside the ring's band");
+  assert.ok(Number.isNaN(cols[3]), "column 3 (300-400 MHz) is outside the ring's band");
+  // The exact bug this guards against: dividing the ring's own (clipped) band into the SAME `n`
+  // columns puts the identical peak at column 0 instead of column 1 — correct as an answer about
+  // `ringBand` alone, but the wrong column the instant it is folded by index into an array whose `n`
+  // columns span the pane's wider window instead.
+  const narrowWindow: Box = { ...ringBand, ...coverTime };
+  const wrong = ringMaxHoldColumns(f, narrowWindow, 4);
+  assert.equal(wrong[0], -20, "dividing the clipped band alone puts the peak at ITS column 0");
+  assert.notEqual(wrong[0], cols[0],
+    "…which is exactly why folding a narrow-box answer into a pane-wide array by column index is " +
+    "wrong: the same ring row lands in a different column depending on which box divided the columns");
+});

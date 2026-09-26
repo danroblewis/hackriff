@@ -961,8 +961,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // never a replacement: a max-hold is idempotent and associative, so taking the greater of the two
     // sources over the same cell is still a max-hold over their union, and the pyramid still answers
     // for the rest of the window exactly as before.
+    //
+    // **Column `c` must stay `hold`'s own column** — the pane's WHOLE frequency window divided into
+    // `n`, the same division `maxHoldColumns` just used — never `ringCover`'s narrower band. A pane
+    // zoomed out past the tuned span has `ringCover.f0Hz/f1Hz` inside `pane.box`'s own range, so
+    // asking `ringMaxHoldColumns` to divide THAT band into `n` columns would put the ring's answer at
+    // the wrong frequencies once resampled onto `hold`'s columns (review finding on this ticket). So
+    // the box handed to it keeps the PANE's frequency extent — which is what `n` was sized for — and
+    // narrows only the TIME axis to what `ringCover` actually vouches for continuously; a column
+    // outside the ring's own band still comes back `NaN` from `sampleRingRow`'s own band check.
     if (report.ringFrame && report.ringCover) {
-      const ringHold = ringMaxHoldColumns(report.ringFrame, report.ringCover, n);
+      const ringWindow = { ...pane.box, t0Ns: report.ringCover.t0Ns, t1Ns: report.ringCover.t1Ns };
+      const ringHold = ringMaxHoldColumns(report.ringFrame, ringWindow, n);
       for (let c = 0; c < n; c++) {
         const v = ringHold[c];
         if (Number.isFinite(v) && !(hold[c] >= v)) hold[c] = v;

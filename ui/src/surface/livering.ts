@@ -427,12 +427,23 @@ export function ringSliceColumns(ring: RingFrame, box: Box, n: number, tAtNs: nu
  * **The ring-covered max-hold**: the column-wise maximum over every ring row whose own extent falls
  * inside `box`'s time window.
  *
- * `box` is meant to be the ring's own covered extent ([[RingPlan.cover]]) clipped to the pane — the
- * strip [[ringCovers]] tells the tile lane not to request — not the pane's whole window: over the
- * rest of the window the pyramid is still the answer, and still the finer one where both exist
- * (history reaches back further than this ring ever will). Folding the two together is safe because
- * a max-hold is idempotent and associative (`hk-api`'s `MAX_HOLD_RULE`): taking the greater of a ring
- * answer and a pyramid answer over the same cell is still a max-hold over the union.
+ * **`box`'s frequency extent decides where the `n` columns fall, and it must be the CALLER's own
+ * column domain — ordinarily the pane's whole frequency window, the same one the caller divided into
+ * `n` to answer the pyramid — never a narrower band such as [[RingPlan.cover]]'s.** A column is index
+ * `c` of `n` evenly spaced across `box.f0Hz..box.f1Hz`; if `box` is narrower than the range the
+ * caller's `n` columns actually span, column `c` here and column `c` there are different frequencies,
+ * and folding the two arrays together by index puts this function's answer at the wrong place in the
+ * caller's picture the moment the pane is wider than the ring's own band. A column outside the ring's
+ * own band comes back `NaN` regardless — [[sampleRingRow]] checks that itself — so widening `box`'s
+ * frequency costs nothing.
+ *
+ * `box`'s TIME extent is the one field this is meant to narrow: pass [[RingPlan.cover]]'s `t0Ns`/
+ * `t1Ns` (with the caller's own frequency window) to fold in only the strip [[ringCovers]] tells the
+ * tile lane not to request — not the pane's whole window, over the rest of which the pyramid is still
+ * the answer, and still the finer one where both exist (history reaches back further than this ring
+ * ever will). Folding the two together is safe because a max-hold is idempotent and associative
+ * (`hk-api`'s `MAX_HOLD_RULE`): taking the greater of a ring answer and a pyramid answer over the same
+ * cell is still a max-hold over the union.
  */
 export function ringMaxHoldColumns(ring: RingFrame, box: Box, n: number): Float32Array {
   const out = new Float32Array(n).fill(Number.NaN);
