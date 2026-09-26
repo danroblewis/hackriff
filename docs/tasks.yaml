@@ -30813,8 +30813,6 @@ tasks:
     status: in-progress
     branch: task-t1055
     priority: high
-    deps:
-    - T-964
     parallel_group: SCAN-SHADOW
     needs: none
     model: opus
