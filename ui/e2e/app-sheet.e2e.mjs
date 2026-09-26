@@ -64,7 +64,7 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at peek, the zoom stack overlaps the sheet");
 
   // (2) A real drag on the grab handle, released near the half-height mark, snaps to half.
-  // T-933 (review finding): the minimap's sheet clearance is anchored to the sheet's fixed bottom
+  // T-933 (review finding): the panes' sheet clearance is anchored to the sheet's fixed bottom
   // edge and the constant peek height, never its live top/height — a mid-drag regression would
   // show up as the canvas's own `insetBottom` (`centre/surface.ts`'s `fit`) tracking the sheet's
   // height as it rises toward full, which shifts every pane. Sampled through the drag itself,
@@ -82,13 +82,13 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
     if (i === Math.floor(steps / 2)) midInsets.push((await page.canvasInsets()).bottom);
   }
   await page.mouse("mouseReleased", g.x, g.y - dy, { buttons: 0, clickCount: 1 });
-  t.diagnostic(`minimap clearance through the drag: before ${insetBefore}, mid-drag ${JSON.stringify(midInsets)}`);
+  t.diagnostic(`pane clearance through the drag: before ${insetBefore}, mid-drag ${JSON.stringify(midInsets)}`);
   for (const mid of midInsets) {
-    assert.ok(Math.abs(mid - insetBefore) < 1, `the minimap's clearance moved mid-drag (${insetBefore} -> ${mid}) — it followed the sheet's rising height`);
+    assert.ok(Math.abs(mid - insetBefore) < 1, `the panes' clearance moved mid-drag (${insetBefore} -> ${mid}) — it followed the sheet's rising height`);
   }
   await waitSnap("half");
   assert.ok(Math.abs((await page.canvasInsets()).bottom - insetBefore) < 1,
-    "the minimap's clearance changed once the sheet settled at half");
+    "the panes' clearance changed once the sheet settled at half");
   const half = await height();
   assert.ok(half > vh * 0.3 && half < vh * 0.6, `half is ~45 vh, got ${half} of ${vh}`);
   assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at half, the sheet covers the zoom stack");

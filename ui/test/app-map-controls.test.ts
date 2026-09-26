@@ -51,6 +51,8 @@ test("MAP-02: zoom, go-to and layer toggles change the view and reach NO route",
     // The page's own wiring: go-to is `requestGoto` in the store, which the surface turns into
     // `setFreq` on the active pane (surface.ts's `nav.gotoHz` subscriber) — reproduced here.
     ctx.store.select((s) => s.nav.gotoHz, (hz) => { if (hz !== null) m.setFreq(id, hz, m.get(id)!.freq.spanHz); });
+    // T-995: no map strip to keep in step — the minimap is retired; T-1001: follow/freeze is each
+    // pane's own button, so `paneActions` is the zoom arithmetic and nothing else.
     const acts = paneActions(m, () => id);
     const span0 = m.get(id)!.freq.spanHz;
 
@@ -153,7 +155,8 @@ test("MAP-02: fade rules — idle chrome dims, the offer and focused controls ne
 
 // T-882's claim that the FAB carried the retired toolbar `Live` button's press is now
 // T-1001's: the press lives on each pane's own button (`ui/test/app-pane-live.test.ts`), which
-// asserts the freeze, the re-pin, the map strip following with the pane and the empty call list.
+// asserts the freeze, the re-pin, T-955's states and the empty call list — per pane, so a press
+// on pane 1 cannot reach pane 2.
 
 test("T-882: the rehomed controls live in the cluster — Measure, the viewport menu, the colour scale — and no toolbar row remains", () => {
   const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
@@ -210,6 +213,22 @@ test("T-919: the status box is a collapsed line by default, with a toggle and a 
   }
 });
 
+test("T-995: with no minimap, the Zoom-out press reaches the WHOLE device range — the lock holds until time is saturated", () => {
+  const m = model();
+  const id = m.list()[0].id;
+  const acts = paneActions(m, () => id);
+  const f0 = m.get(id)!.freq.spanHz, t0 = m.get(id)!.time.spanNs;
+  acts.zoom(1 / ZOOM_STEP);
+  // While time can still widen, the press is T-472's uniform zoom: both spans by the same factor.
+  const kF = m.get(id)!.freq.spanHz / f0, kT = m.get(id)!.time.spanNs / t0;
+  assert.ok(kF > 1 && Math.abs(kF - kT) < 1e-9, `the aspect lock broke before time saturated: ${kF} vs ${kT}`);
+  for (let i = 0; i < 60; i++) acts.zoom(1 / ZOOM_STEP);
+  const p = m.get(id)!;
+  assert.equal(p.freq.spanHz, BOUNDS.f1Hz - BOUNDS.f0Hz,
+    `zooming out stopped at ${p.freq.spanHz} Hz: the whole spectrum is unreachable without a minimap`);
+  assert.equal(acts.isFollowing(), true, "zooming out walked a live pane off the growing edge");
+});
+
 // ——— T-955: a painted Go-to offer is re-derived when the radio retunes (by anyone) ———
 
 type Handler = (e: unknown) => void;
@@ -225,6 +244,8 @@ class FakeEl {
   value = "";
   title = "";
   style = { setProperty() {}, removeProperty() {} };
+  /** T-1028: `data-*` state a control writes (the retune chip's held marker). */
+  dataset: Record<string, string> = {};
   classList = {
     add: (...c: string[]) => c.forEach((x) => this.classes.add(x)),
     remove: (...c: string[]) => c.forEach((x) => this.classes.delete(x)),
@@ -309,5 +330,85 @@ test("T-955: a painted Go-to offer is withdrawn when the radio retunes onto the 
     assert.match(why.textContent, /10\.000 MHz span/, "the offer was not re-derived against the new tuned window");
   } finally {
     g.document = saved.document; g.window = saved.window;
+  }
+});
+
+// ——— T-1028: retune mode's chip — the one control here whose STATE decides what a gesture does ———
+
+test("T-1028: the retune-mode chip states the mode, toggles it, and still reaches no route itself", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  const fetched: unknown[] = [];
+  const realFetch = g.fetch;
+  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("the chip reached the network")); };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    const acts = paneActions(m, () => id);
+    // The surface host's own state: a mode flag and a momentary key, exactly the two bits
+    // `RetuneModeController` exposes.
+    let on = false, held = false;
+    const host = {
+      ...acts,
+      measuring: () => false, setMeasuring() {},
+      retuneMode: () => ({ on: on || held, held }),
+      setRetuneMode: (next: boolean) => { on = next; },
+      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const chip = root.find("map-retune-btn")!;
+    const banner = root.find("map-retune-mode")!;
+
+    // OFF is the default, and it is SAID: an unlit chip and no banner.
+    assert.equal(chip.hidden, false, "a host that has the mode must show its chip");
+    assert.equal(chip.getAttribute("aria-pressed"), "false");
+    assert.equal(banner.hidden, true, "no banner while the mode is off");
+
+    // The press turns it on through the host — the chip holds no state of its own.
+    chip.fire("click");
+    assert.equal(on, true, "the chip did not reach the host");
+    assert.equal(chip.getAttribute("aria-pressed"), "true", "the mode is on and the chip does not say so");
+    assert.ok(chip.classes.has("is-on"));
+    assert.equal(banner.hidden, false, "the mode is on and nothing on screen says what a pan will now do");
+    assert.match(banner.textContent, /pan or zoom/, "the banner must say what the mode does to a gesture");
+
+    // The HELD form is marked apart from the latch: "ends when I let go" is a different promise.
+    on = false; held = true;
+    c.syncRetuneMode();
+    assert.equal(chip.getAttribute("aria-pressed"), "true", "a held key is the mode being ON");
+    assert.equal(chip.dataset.held, "true", "the momentary form is not distinguishable from the latch");
+    held = false;
+    c.syncRetuneMode();
+    assert.equal(chip.getAttribute("aria-pressed"), "false");
+    assert.equal(banner.hidden, true, "releasing the key left the banner claiming the mode is on");
+
+    // The press a second time turns it off again, through the same host call.
+    on = true;
+    chip.fire("click");
+    assert.equal(on, false);
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+    if (realFetch) g.fetch = realFetch; else delete g.fetch;
+  }
+  assert.deepEqual(fetched, [], "the chip itself must reach nothing: it changes what a GESTURE means");
+});
+
+test("T-1028: the cluster module still names no route, no client and no DeviceAction", () => {
+  const src = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  for (const bad of ["/api/control/", "applyDeviceAction", "retuneAction", "controls/client"]) {
+    assert.ok(!src.includes(bad), `map-controls.ts names ${bad}: the device stays behind the host`);
   }
 });

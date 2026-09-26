@@ -32,8 +32,6 @@ const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 // The canvas is one drawing buffer with three tenants, and this test measures the middle one. Both
 // numbers are `app/centre/surface.ts`'s own, in device px; the arithmetic below is `view.ts`'s.
-/** The minimap strip along the BOTTOM of the canvas (`MINIMAP_PX`). */
-const MINIMAP_PX = 110;
 /** The spectrum-trace strip carved off the TOP of each pane (`TRACE_PX`, T-457). */
 const TRACE_PX = 96;
 
@@ -46,8 +44,9 @@ const TRACE_PX = 96;
  * except here it would make the test *pass* on the trace's own colours, which is worse than red.
  */
 function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
+  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
+  // them since T-995 retired the minimap).
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
   return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
 }

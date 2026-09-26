@@ -38,8 +38,11 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
-const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Viewport",
-  "Review", "More: settings", "Zoom in", "Zoom out"];
+// T-1028 added the Retune-mode chip to the cluster; T-1001 took the follow-live FAB out of it. Both
+// landed against a list written before the other, so the set is stated here once, true of the
+// cluster the page actually mounts.
+const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Retune mode",
+  "Viewport", "Review", "More: settings", "Zoom in", "Zoom out"];
 
 /** The rehomed controls are exactly the named set: none missing, none extra, none twice, and no two
  * drawn over each other. */
