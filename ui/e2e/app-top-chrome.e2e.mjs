@@ -87,15 +87,27 @@ const TOP_EDGE_PAINT = `JSON.stringify([...document.querySelectorAll('body *')].
  * root is the canvas's own ancestor — assertion (1)'s bar-shape rule is what stands there.
  * `visibility` keeps every box, so nothing reflows and the gaps measured from the DOM still
  * describe the pixels. Returns how many roots it hid.
+ *
+ * What it must NOT hide (T-1073) is the map's own overlay layers — see the comment in the loop.
  */
 const HIDE_TOP_CHROME = `(() => {
   const canvas = document.querySelector('.sf-canvas');
+  const stage = canvas.parentElement;
   const roots = new Set();
   for (const e of document.querySelectorAll('body *')) {
     const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
     if (!r.width || !r.height || r.top > 24) continue;
     if (cs.visibility === 'hidden' || cs.display === 'none') continue;
     if (e.contains(canvas)) continue;
+    // T-1073: the canvas's SIBLING layers inside .sf-stage (.sf-hud's detection boxes, .sf-annos,
+    // .sf-priors-labels, .sf-pins, the pane rectangles) are the MAP's own drawing, not chrome over
+    // it — they are excluded here, and only the floating control cluster inside the stage is
+    // chrome. Hiding them made the second photograph show a map with its boxes and labels removed,
+    // so "the pixels changed when the chrome was hidden" read true wherever the map had drawn one
+    // in the band: measured, a gap changing by 82.16 against a 132.98 chip, with the map itself
+    // still to the pixel. That is T-1031's defect again — the comparison deciding on the map's
+    // contents — moved from the sample point into the hide.
+    if (stage.contains(e) && !e.closest('.map-ctl')) continue;
     let root = e;
     while (root.parentElement && root.parentElement !== document.body && !root.parentElement.contains(canvas)) {
       root = root.parentElement;
@@ -117,6 +129,59 @@ const SHOW_TOP_CHROME = `(() => {
   document.querySelector('#e2e-hide-chrome')?.remove();
   return document.querySelectorAll('[data-e2e-chrome-hidden]').length;
 })()`;
+
+/**
+ * Hold the MAP STILL for the three photographs below, and give it back the way it was (T-1073).
+ *
+ * A pane that follows the live edge scrolls between one shot and the next, so every difference
+ * measured across two shots carries however far the waterfall happened to have moved: 4.9 mean at
+ * a gap here, and 36.53 on the 2026-09-26 release candidate — more than hiding a translucent glass
+ * chip changed the chip's own face (25.29), which is how the *control* came to fail saying "the
+ * chips were not hidden". Freezing is the product's own view act, one click on each pane's Live
+ * button (`.sf-pane-live-btn`, T-1001): it freezes the VIEW, never the capture, and reaches no
+ * device route — the assertion at the end of this spec is what proves that, run for run. Measured
+ * frozen, six successive shots differ by exactly 0.00, so the baseline is a real zero rather than
+ * a tolerance. Returns the panes to following before it returns.
+ *
+ * Freezing stops the SCROLL; [[stillShot]] is what waits out a one-off REPAINT (the theme flip
+ * repaints the waterfall in the new palette some frames after `document.documentElement.dataset
+ * .theme` already says "light"). Both are needed: a frozen map still redraws once when the palette
+ * changes, and a redraw landing between the first and the second photograph reads exactly like
+ * chrome painting in the gap — measured, a gap changing 112.71 at 99 % of its pixels.
+ */
+async function withStillMap(page, body) {
+  const FOLLOWING_BTNS = ".sf-pane-live-btn.following";
+  const n = await page.eval(`document.querySelectorAll('${FOLLOWING_BTNS}').length`);
+  for (let i = 0; i < n; i++) await page.click(`document.querySelector('${FOLLOWING_BTNS}')`);
+  await page.waitFor("every pane to stop following the live edge",
+    `document.querySelectorAll('${FOLLOWING_BTNS}').length === 0`, { timeoutMs: 10000 });
+  await page.frames(3);
+  try {
+    return await body();
+  } finally {
+    for (let i = 0; i < n; i++) await page.click("document.querySelector('.sf-pane-live-btn:not(.following)')");
+    await page.waitFor("the panes to follow the live edge again",
+      `document.querySelectorAll('${FOLLOWING_BTNS}').length === ${n}`, { timeoutMs: 10000 });
+  }
+}
+
+/**
+ * The photograph the comparison starts from, taken only once the MAP has stopped changing under
+ * the rectangles that will be compared (T-1073): successive shots until two agree to the pixel at
+ * every one of them. Only the map's own rectangles are watched, never the chips' faces — a chip
+ * carries a readout whose text ticks with the data, and waiting for that to stop would wait for
+ * ever. Exact equality, not a tolerance; a map that never goes still throws and says so, because
+ * no pixel comparison taken over a moving map means anything.
+ */
+async function stillShot(page, rects, { tries = 40 } = {}) {
+  let prev = await page.shot();
+  for (let i = 0; i < tries; i++) {
+    const next = await page.shot();
+    if (rects.every((r) => pixelDiff(prev, next, r).meanAbs === 0)) return next;
+    prev = next;
+  }
+  throw new Error(`the map never went still under the top chips over ${tries} successive photographs`);
+}
 
 /** (3) CHIPS, NOT A BAR — run in BOTH themes, since the theme decides which of chip and canvas is
  * the darker and a guard that only holds in one of them is off half the time. */
@@ -154,20 +219,48 @@ async function chipsNotABar(t, page, W, theme) {
   // about one run in four it held a detection box, a guide line or unobserved grey and the guard
   // decided on the map's contents instead of on the chrome. Tolerance is not the fix and is not
   // widened: the reference moved to the same point.
-  const shown = await page.shot();
-  const hidden = await page.eval(HIDE_TOP_CHROME);
-  const bare = await page.shot();
-  const bareAgain = await page.shot();
-  assert.equal(await page.eval(SHOW_TOP_CHROME), 0, "the top chrome stayed hidden");
-  await page.frames(2);
+  //
+  // The three shots are taken with every pane FROZEN and only once the map has gone still under
+  // the very rectangles compared (T-1073, `withStillMap` + `stillShot`), so the only thing that can
+  // differ between them is the chrome this hides — a following pane's scroll, and the repaint a
+  // theme flip costs, used to be in every one of these numbers.
+  const band = { y: rowY - 6, h: 12 };
+  const measured = gaps.filter((x) => x.w >= 6).slice(0, 4).map((g) => {
+    const left = chips.filter((c) => c.x + c.w <= g.x + 2).sort((a, b) => b.x - a.x)[0];
+    return { g, left,
+      gapRect: { x: g.x + 2, y: band.y, w: g.w - 4, h: band.h },
+      chipRect: { x: left.x + 4, y: band.y, w: Math.max(4, Math.min(24, left.w - 8)), h: band.h } };
+  });
+  const gapRects = measured.map((m) => m.gapRect);
+  const { shown, bare, bareAgain, hidden, attempts } = await withStillMap(page, async () => {
+    // BRACKETED, and re-taken until the bracket closes (T-1073). Stillness checked only before the
+    // first photograph is not enough on a loaded box: a repaint pending at that moment lands in the
+    // middle of the sequence and reads as chrome (measured: a gap changing 89.83 with the two bare
+    // shots agreeing to 0.00, and a "canvas moved by itself" of 121.22 between them). So the map is
+    // photographed WITH the chrome again at the end, and the whole sequence is thrown away and
+    // retaken unless those gap pixels are identical to the first photograph's — proof that nothing
+    // but the hide changed them. Exact equality, never a tolerance; if the page will not hold still
+    // for one hide cycle, that is said out loud rather than averaged away.
+    for (let attempt = 1; ; attempt++) {
+      const shown = await stillShot(page, gapRects);
+      const hidden = await page.eval(HIDE_TOP_CHROME);
+      const bare = await page.shot();
+      const bareAgain = await page.shot();
+      assert.equal(await page.eval(SHOW_TOP_CHROME), 0, "the top chrome stayed hidden");
+      await page.frames(2);
+      const shownAgain = await page.shot();
+      if (gapRects.every((r) => pixelDiff(shown, shownAgain, r).meanAbs === 0)) {
+        return { shown, bare, bareAgain, hidden, attempts: attempt };
+      }
+      assert.ok(attempt < 10, "the map repainted under the top chips during every one of 10 hide cycles, " +
+        "so no photograph of the gaps can be attributed to the chrome");
+    }
+  });
+  if (attempts > 1) t.diagnostic(`at ${W} (${theme}) the hide cycle was retaken ${attempts - 1}x (the map repainted mid-sequence)`);
   t.diagnostic(`at ${W} (${theme}) hid ${hidden} chrome roots for the pixel comparison`);
   assert.ok(hidden >= 1, "no chrome root to hide — the top-edge chips were not found");
 
-  for (const g of gaps.filter((x) => x.w >= 6).slice(0, 4)) {
-    const band = { y: rowY - 6, h: 12 };
-    const gapRect = { x: g.x + 2, y: band.y, w: g.w - 4, h: band.h };
-    const left = chips.filter((c) => c.x + c.w <= g.x + 2).sort((a, b) => b.x - a.x)[0];
-    const chipRect = { x: left.x + 4, y: band.y, w: Math.max(4, Math.min(24, left.w - 8)), h: band.h };
+  for (const { g, left, gapRect, chipRect } of measured) {
     // Three numbers at the SAME rectangles: what hiding the chrome did to the gap, what it did to
     // the chip's own face, and what the canvas did on its own over one shot's interval.
     const gapChange = pixelDiff(shown, bare, gapRect);
