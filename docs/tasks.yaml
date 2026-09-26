@@ -31390,7 +31390,8 @@ tasks:
   - id: T-1073
     milestone: MUI
     title: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
-    status: todo
+    status: in-progress
+    branch: task-t1073
     priority: P1
     parallel_group: UI-TOPCHROME-FLAKE
     needs: none
@@ -31426,7 +31427,8 @@ tasks:
   - id: T-1075
     milestone: M2-hardening
     title: api_contract a_retune_keeps_connected_stream_consumers_connected fails ALONE on main again in a worker worktree (load 5.3, 54a22653) - regression since T-974's fix; bisect and fix the product cause
-    status: todo
+    status: in-progress
+    branch: task-t1075
     priority: P1
     deps: []
     parallel_group: CLI-RETUNE-STREAM
@@ -31444,7 +31446,8 @@ tasks:
   - id: T-1076
     milestone: M2-hardening
     title: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
-    status: todo
+    status: in-progress
+    branch: task-t1076
     priority: high
     deps: []
     parallel_group: CLI-TILE-ENC
@@ -31461,7 +31464,8 @@ tasks:
   - id: T-1077
     milestone: MLIVE
     title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
-    status: todo
+    status: in-progress
+    branch: task-t1077
     priority: high
     deps:
     - T-1072
@@ -31482,7 +31486,8 @@ tasks:
   - id: T-1078
     milestone: MUI
     title: "RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper"
-    status: todo
+    status: in-progress
+    branch: task-t1078
     priority: P1
     deps:
     - T-1072
@@ -31500,7 +31505,8 @@ tasks:
   - id: T-1079
     milestone: MLIVE
     title: "RC P1: surface-contention - a tab has 2 tile reads in flight against its operating cap of 1 (a retry/revalidate/refetch path bypasses the lane accounting)"
-    status: todo
+    status: in-progress
+    branch: task-t1079
     priority: P1
     deps: []
     parallel_group: UI-TILE-CAP
