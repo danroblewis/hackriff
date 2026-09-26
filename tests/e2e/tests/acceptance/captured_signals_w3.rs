@@ -72,7 +72,7 @@ use hk_e2e::blind::{matching, truth_emissions};
 use hk_e2e::{Fixture, TruthItem};
 use hk_model::{
     Decode, Demodulation, Detection, FreqRange, IdleGap, InventoryEntry, InventoryQuery,
-    LinkTarget, Region, SubaudibleKind, Timestamp,
+    LinkTarget, Region, SubaudibleKind, Timestamp, Watched,
 };
 use serde_json::Value;
 
@@ -297,7 +297,13 @@ impl Member {
     fn presence(&self, e: &InventoryEntry) -> (Option<Timestamp>, f64) {
         let (a, b) = self.on_air();
         let iv = repo(&self.run.dir.0)
-            .presence_intervals(e.emitter.id, IdleGap::continuous(), ever().end)
+            .presence_intervals(
+                e.emitter.id,
+                IdleGap::continuous(),
+                ever().end,
+                // T-940: unrecorded = the original elapsed-silence reading (as captured_signals.rs).
+                &Watched::unrecorded(),
+            )
             .unwrap();
         let start = iv.iter().map(|p| p.time.start).min();
         let covered = iv

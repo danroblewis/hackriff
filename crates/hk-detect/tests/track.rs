@@ -1171,6 +1171,153 @@ fn gain_change_mid_track_keeps_the_track_and_records_a_segment() {
     );
 }
 
+// ---- T-940: a burst in flight is not silence ----
+
+/// T-940: a continuous carrier arrives as `max_duration_s` split records, so its measured end
+/// steps by a whole record at a time. That step is **not** silence: while the burst is in flight
+/// the live extent reads 0 in both clocks, and only after the carrier really stops does silence
+/// accumulate — from the *measured* end, which the extent keeps. Before T-940 the extent read up
+/// to one record length (here 0.5 s; 1 s by default, the whole idle floor) of "silence" between
+/// every pair of pieces, which is what read an on-air FM station as ended.
+#[test]
+fn t940_a_continuous_carrier_reads_no_silence_between_its_split_records() {
+    let fc = 433.92e6;
+    let mut cfg = DetectorConfig::new(SurveyId::new());
+    cfg.max_duration_s = 0.5;
+    let mut s = Scene::new(
+        cfg,
+        GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 16.0), 5),
+    );
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut out = Out::default();
+    let mut carrier = flat(BINS);
+    add_line(&mut carrier, s.bin_of(fc - 1.0e6).round() as usize, 3, 20.0);
+    let quiet = flat(BINS);
+    let frame_s = s.src.frame_period_s();
+    let mut ext = Vec::new();
+
+    // On the air for 4 s.
+    let (mut reads, mut worst_observed, mut worst_wall) = (0u32, 0i64, 0i64);
+    let mut ends: Vec<i64> = Vec::new();
+    for _ in 0..(4.0 / frame_s) as usize {
+        step(&mut s, &mut tr, &mut out, &carrier, Discontinuity::NONE);
+        tr.live_extents_into(&mut ext);
+        for e in &ext {
+            reads += 1;
+            worst_observed = worst_observed.max(e.observed_silence_ns);
+            worst_wall = worst_wall.max(e.wall_silence_ns);
+            if ends.last() != Some(&e.t_end_ns) {
+                ends.push(e.t_end_ns);
+            }
+        }
+    }
+    assert!(
+        reads > 100,
+        "the carrier was tracked live: {reads} extent reads"
+    );
+    // The measured end really does step by a whole record, which is the premise.
+    let widest_step = ends.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0);
+    assert!(
+        widest_step as f64 >= 0.4e9,
+        "the measured end advances one split record at a time: {ends:?}"
+    );
+    assert_eq!(
+        (worst_observed, worst_wall),
+        (0, 0),
+        "a burst in flight is not silence"
+    );
+
+    // Then it stops for good: silence accumulates from the measured end, past the 1 s floor.
+    let last_end = *ends.last().unwrap();
+    let mut after = 0i64;
+    for _ in 0..(2.0 / frame_s) as usize {
+        step(&mut s, &mut tr, &mut out, &quiet, Discontinuity::NONE);
+        tr.live_extents_into(&mut ext);
+        for e in &ext {
+            after = after.max(e.observed_silence_ns);
+            assert!(e.t_end_ns >= last_end, "the measured end never moves back");
+        }
+    }
+    assert!(
+        after as f64 > hk_model::MIN_IDLE_GAP_S * 1e9,
+        "a carrier that stopped is silent: {after} ns"
+    );
+}
+
+/// T-940: a retune **away** from a track's band is not silence. The tracker's coverage says when
+/// frames arrived, not where they were tuned, so after an in-place retune a carrier the receiver
+/// could no longer see accumulated observed silence and read as ended. Wall silence still grows —
+/// the pair is how a consumer tells "we looked away" from "it stopped" — but the observed figure
+/// counts only time the tuned window contained the track.
+#[test]
+fn t940_a_retune_away_from_a_track_observes_no_silence_there() {
+    let fc = 433.92e6;
+    let mut cfg = DetectorConfig::new(SurveyId::new());
+    cfg.max_duration_s = 0.5;
+    let mut s = Scene::new(
+        cfg,
+        GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 16.0), 5),
+    );
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut out = Out::default();
+    let mut carrier = flat(BINS);
+    add_line(&mut carrier, s.bin_of(fc - 1.0e6).round() as usize, 3, 20.0);
+    let quiet = flat(BINS);
+    let frame_s = s.src.frame_period_s();
+    for _ in 0..(2.0 / frame_s) as usize {
+        step(&mut s, &mut tr, &mut out, &carrier, Discontinuity::NONE);
+    }
+    let mut ext = Vec::new();
+    tr.live_extents_into(&mut ext);
+    let track = ext.first().expect("the carrier is tracked live").track;
+
+    // Retune 100 MHz up: the carrier is 100 MHz outside the new 20 MHz window.
+    s.switch(provenance(fc + 100e6, FS, 16.0));
+    let (mut observed, mut wall) = (0i64, 0i64);
+    for i in 0..(2.0 / frame_s) as usize {
+        let flags = if i == 0 {
+            Discontinuity::RETUNE
+        } else {
+            Discontinuity::NONE
+        };
+        step(&mut s, &mut tr, &mut out, &quiet, flags);
+        tr.live_extents_into(&mut ext);
+        if let Some(e) = ext.iter().find(|e| e.track == track) {
+            observed = e.observed_silence_ns;
+            wall = e.wall_silence_ns;
+        }
+    }
+    assert!(
+        wall as f64 > 1.5e9,
+        "two seconds passed on the wall clock: {wall} ns"
+    );
+    assert!(
+        (observed as f64) < 0.5e9,
+        "none of it was observed at the carrier's frequency: {observed} ns"
+    );
+
+    // Tuned back, the silence the receiver now watches is counted again.
+    s.switch(provenance(fc, FS, 16.0));
+    for i in 0..(1.5 / frame_s) as usize {
+        let flags = if i == 0 {
+            Discontinuity::RETUNE
+        } else {
+            Discontinuity::NONE
+        };
+        step(&mut s, &mut tr, &mut out, &quiet, flags);
+    }
+    tr.live_extents_into(&mut ext);
+    let back = ext
+        .iter()
+        .find(|e| e.track == track)
+        .expect("still open: 60 s idle timeout");
+    assert!(
+        back.observed_silence_ns as f64 > 1.0e9,
+        "watched silence counts: {} ns",
+        back.observed_silence_ns
+    );
+}
+
 // ---- record-level: merge and fused split ----
 
 fn rec(

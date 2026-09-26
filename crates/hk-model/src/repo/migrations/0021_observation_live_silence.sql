@@ -1,0 +1,23 @@
+-- T-940 (ADR-0017/0019): an observation row whose source is an OPEN track says how much silence
+-- the tracker has OBSERVED since the row's measured end, so "ongoing until an end is detected"
+-- stops being decided by the wall clock.
+--
+-- `t_end` is the end of presence the tracker actually measured. For a closed source it is final,
+-- and the silence after it is read off the receiver's coverage (unobserved time is not quiet).
+-- For an open track it moves as the tracker measures more of the emission, but the silence after
+-- it is NOT something the database can derive: the time since the last write is time the detector
+-- has not yet reported, and a continuous carrier's own measured end steps by whole split records
+-- while the burst is still in flight. Reading either as "the signal went quiet" is what made every
+-- on-air FM station read `ended` on staging (2026-09-25).
+--
+--   live_silence_ns IS NULL      -> the source is closed (or was never followed live): `t_end` is
+--                                   final, and silence after it is what the coverage map observed.
+--   live_silence_ns IS NOT NULL  -> the source is a track the pipeline is still following; this is
+--                                   the silence it had OBSERVED since `t_end` at its latest report
+--                                   (0 while a burst is in flight). Nothing after that report is
+--                                   claimed as silence.
+--
+-- A measurement, not a decision: the idle gap that turns silence into an END stays a parameter of
+-- the reading (hk_model::presence), exactly as it is for the closed case.
+ALTER TABLE emitter_observation ADD COLUMN live_silence_ns INTEGER
+    CHECK (live_silence_ns IS NULL OR live_silence_ns >= 0);
