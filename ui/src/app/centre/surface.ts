@@ -963,7 +963,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const tAtNs = pane.box.t1Ns;
     const win = sliceWindow(lat, report.levelT, tAtNs);
     const fr = liveRow.get();
-    const live = liveFrameFits(fr, win);
+    const live = liveFrameFits(fr, win, p.view.panes.isFollowing(pane.id));
     const slice = live && fr
       ? sampleFrame(fr, pane.box, n)
       : sliceColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);

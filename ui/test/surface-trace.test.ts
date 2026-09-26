@@ -164,6 +164,29 @@ test("the live row is preferred only INSIDE the cell the slice asks about — a 
     "an unknown time is not a time inside the cell");
 });
 
+test("T-1051: a FOLLOWING pane's slice is the newest row even when it has run past the edge cell", () => {
+  // The display floor: 40 ms cells. The pane's edge is written from the stream at most every
+  // EDGE_WRITE_S = 0.25 s, so the newest delivered row routinely sits several cells past the cell
+  // the pane's time position names. Measured in app-trace.e2e.mjs as a trace that flickered between
+  // "(live frame)" and a not-yet-built pyramid cell, and a page held on the wrong side of it.
+  const lat: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 40e6, levelsF: 20, levelsT: 15 };
+  const edge = T0;
+  const win = sliceWindow(lat, 0, edge);
+  for (const aheadMs of [0, 40, 120, 240]) {
+    const fr = frame(64, -100, 100.3e6, -42, edge + aheadMs * 1e6);
+    assert.equal(liveFrameFits(fr, win, true), true,
+      `a following pane dropped the newest row ${aheadMs} ms past its edge cell for a pyramid cell`);
+    if (aheadMs > 0) {
+      // A FROZEN pane is a view over the past: the same row is newer than its window, so no line
+      // from now over a picture of then — the rule the test above states, unchanged.
+      assert.equal(liveFrameFits(fr, win, false), false, `a frozen pane took a row ${aheadMs} ms after its window`);
+    }
+  }
+  // A row OLDER than the edge cell is not the top-most sample of a following pane either.
+  assert.equal(liveFrameFits(frame(64, -100, 100.3e6, -42, win.t0Ns - 1e6), win, true), false);
+  assert.equal(liveFrameFits(null, win, true), false);
+});
+
 test("sliceWindow is ONE lattice cell, snapped to the grid, ending at the pane's time position", () => {
   const lat: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
   for (const levelT of [0, 1, 5]) {

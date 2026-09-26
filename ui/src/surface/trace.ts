@@ -375,14 +375,28 @@ export function sliceWindow(lat: Lattice, levelT: number, tAtNs: number): { t0Ns
 /**
  * Is the live spectrum row a *finer* answer than the pyramid for this pane's time position?
  *
- * Only when the row's own capture time falls inside the cell the slice is asking about. That single
- * rule gives both halves of the spec: a pane at the growing edge shows the newest delivered frame,
+ * Only when the row's own capture time falls inside the cell the slice is asking about — or, for a
+ * FOLLOWING pane, at or after that cell's start (see the note in the body). That rule gives both halves of the spec: a pane at the growing edge shows the newest delivered frame,
  * and a pane scrubbed into the past shows the pyramid's row for *that* instant instead of a line
  * from now laid over a picture of then. "Pause freezes the view, not the capture" means the rows
  * keep arriving — it does not mean the newest of them is true of the window being held.
  */
-export function liveFrameFits(fr: LiveFrame | null, slice: { t0Ns: number; t1Ns: number }): boolean {
-  return !!fr && Number.isFinite(fr.tNs) && fr.tNs >= slice.t0Ns && fr.tNs <= slice.t1Ns;
+export function liveFrameFits(
+  fr: LiveFrame | null, slice: { t0Ns: number; t1Ns: number }, following = false,
+): boolean {
+  if (!fr || !Number.isFinite(fr.tNs) || fr.tNs < slice.t0Ns) return false;
+  // **A FOLLOWING pane's time position is the growing edge, so the newest row is its slice even
+  // when that row has run past the edge cell** (T-1051). "Following live it is the top-most sample"
+  // (CLAUDE.md, T-457). The pane's edge is written from the stream at most every
+  // `EDGE_WRITE_S` = 0.25 s (`app/centre/slice.ts`) while a cell at the display floor is 40–80 ms,
+  // so the newest row sits one to several cells past `slice.t1Ns` most of the time. Requiring it
+  // to be inside the cell made a following pane's trace flicker between the live row and a pyramid
+  // cell that is usually not built yet ("no tile in hand"), several times a second — and a page
+  // held on either side of that flicker stayed there: `app-trace.e2e.mjs` measured it as "the page
+  // would not hold still in the state under test". A row OLDER than the cell is still refused, and
+  // a frozen pane (`following` false) keeps the cell-only rule, so a scrubbed pane still gets no
+  // line from now.
+  return following || fr.tNs <= slice.t1Ns;
 }
 
 /**
