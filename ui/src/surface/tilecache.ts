@@ -309,6 +309,41 @@ export interface TileCacheOptions {
    * 11.4 ms: guessing *fast* and being wrong is the failure this exists to stop.
    */
   serverMsGuess?: number;
+  /**
+   * **How long a resident tile may go without a successful re-read before it is reported STALE**
+   * (T-1039), ms. Default [[DEFAULT_STALE_AFTER_MS]].
+   *
+   * The last good tile is never dropped for going stale — that is the whole point of
+   * stale-while-revalidate (an unstable network must never clear what is drawn) — this only decides
+   * when a copy in hand is old enough that the honesty tier should say so ([[TileCache.isStale]]).
+   */
+  staleAfterMs?: number;
+  /** The source of jitter for backoff delays (T-1039), `[0, 1)`. Injectable so a test can pin the
+   * spread; defaults to `Math.random`. */
+  random?: () => number;
+}
+
+/**
+ * **State N** for stale-while-revalidate (T-1039): a resident tile whose last successful fetch is
+ * older than this, with no fresher answer having landed since, is reported stale rather than silently
+ * trusted forever. 30 s is comfortably past every refresh cadence in ordinary operation (the fastest
+ * live-edge lane refreshes at ~1 s, T-460) and short enough that a genuinely stuck network is visible
+ * to the user within one glance at the pane's own readout, not just to the request log.
+ */
+export const DEFAULT_STALE_AFTER_MS = 30_000;
+
+/**
+ * **Jittered backoff** (T-1039): `base` plus up to `base × spread` of randomness, so a batch of
+ * requests that all failed together (a retune, a reload, a network drop) do not all retry on the
+ * exact same tick and hammer the route the instant it comes back — the same herd this file already
+ * avoids for the live-edge lane by construction, applied here to the retry clock itself. `rand` is
+ * `[0, 1)`; the jitter is additive and never shortens the wait below `base`, so it can only ever make
+ * the ladder more spread out, never less patient.
+ */
+function jittered(base: number, rand: () => number): number {
+  const r = rand();
+  const spread = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
+  return base + base * 0.5 * spread;
 }
 
 export interface TileCacheStats {
@@ -636,9 +671,23 @@ export class TileCache<T> {
    * The unit the duty gate is charged to. See [[nextRefresh]] for why it cannot be the tile.
    */
   private refreshPassLeft = new Map<string, number>();
-  /** When each resident tile's data was last taken in, ms. The refresh interval is measured from
-   * this, so a tile is never asked for again inside the period its newest cell spans. */
+  /**
+   * **When each resident tile's data was last taken in, ms** — but only as a cadence clock. It is
+   * stamped by [[pumpRefresh]] at the moment a revalidation is ISSUED, not when it lands, so the
+   * refresh interval is measured from *asking* and a tile is never asked for again inside the period
+   * its newest cell spans. **Not** what [[isStale]] reads (see [[lastGoodAt]]): an issued-but-not-
+   * yet-answered, or issued-and-failed, request must not read as a confirmation.
+   */
   private refreshedAt = new Map<string, number>();
+  /**
+   * **When each resident tile was last CONFIRMED, ms** (T-1039): stamped only by [[insert]], on a
+   * successful fetch or revalidation. This is [[isStale]]'s clock. A failed or slow revalidation
+   * must never advance it — the whole of stale-while-revalidate is that an unconfirmed copy stays on
+   * screen and stays honestly labelled unconfirmed, and [[refreshedAt]] alone cannot say that: it is
+   * stamped at issue, so a request that never comes back would otherwise look freshly confirmed for
+   * as long as the network stays down.
+   */
+  private lastGoodAt = new Map<string, number>();
   /** The next instant each lane may issue, and the next one the resident set may be walked. Per
    * lane, because a share of measured cost is only a fair share if it is that lane's own cost. */
   private refreshNextIssue = new Map<string, number>();
@@ -747,6 +796,10 @@ export class TileCache<T> {
   private silenced = new Set<string>();
   /** Measured mean production time, ms. See [[observe]]. */
   private serverMs: number;
+  /** See [[TileCacheOptions.staleAfterMs]]. */
+  private readonly staleAfterMs: number;
+  /** See [[TileCacheOptions.random]]. */
+  private readonly random: () => number;
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
@@ -766,6 +819,8 @@ export class TileCache<T> {
     this.busyBackoffMs = opts.busyBackoffMs ?? 200;
     this.serverMs = clamp(opts.serverMsGuess ?? 400, MIN_SERVER_MS, MAX_SERVER_MS);
     this.now = opts.now ?? (() => Date.now());
+    this.staleAfterMs = Math.max(0, opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS);
+    this.random = opts.random ?? Math.random;
   }
 
   get residentTiles(): number { return this.map.size; }
@@ -885,6 +940,24 @@ export class TileCache<T> {
   /** Is a copy of this place in hand? No scheduling, no pin, no statistics: how the renderer asks
    * before deciding whether the coverage survey may answer the place instead (T-580). */
   isResident(addr: TileAddr): boolean { return this.map.has(keyOf(addr)); }
+
+  /**
+   * **State N of stale-while-revalidate** (T-1039): is the resident copy of this place older than
+   * [[TileCacheOptions.staleAfterMs]] since its last successful fetch or revalidation?
+   *
+   * `false` for a place not resident at all — staleness is a fact about a copy in hand, not about a
+   * miss, which is already drawn as `pending`/`refused` and needs no second mark. [[lastGoodAt]] is
+   * stamped by [[insert]] on every successful answer, including a revalidation that only confirmed
+   * the same bytes, so a tile the network keeps failing to refresh ages here exactly as long as it
+   * has genuinely gone unconfirmed — never reset by a failed attempt, which is the whole point: a
+   * failed or slow batch must not clear what is drawn, and it must not silently un-stale it either.
+   */
+  isStale(addr: TileAddr): boolean {
+    const key = keyOf(addr);
+    if (!this.map.has(key)) return false;
+    const at = this.lastGoodAt.get(key);
+    return at === undefined || this.now() - at >= this.staleAfterMs;
+  }
 
   /**
    * **Places the coverage survey settles as never sampled — no lane may start a request for one**
@@ -1678,6 +1751,7 @@ export class TileCache<T> {
     this.refreshingLane = null;
     this.refreshQueued.clear();
     this.refreshedAt.clear();
+    this.lastGoodAt.clear();
     this.terminal.clear();
     this.silences = 0;
     this.silentUntil = 0;
@@ -2149,8 +2223,10 @@ export class TileCache<T> {
       this.goodRuns = 0;
       this.refusals = Math.min(this.refusals + 1, 4);
       // The refusal itself cost the server nothing, but whatever is holding the slots has not
-      // finished — so wait longer each time rather than re-asking on the same cadence.
-      this.busyUntil = this.now() + this.busyBackoffMs * 2 ** (this.refusals - 1);
+      // finished — so wait longer each time rather than re-asking on the same cadence. **Jittered**
+      // (T-1039): every viewport's tiles refused by the same overload would otherwise retry on the
+      // exact same tick, re-creating the burst that got them refused.
+      this.busyUntil = this.now() + jittered(this.busyBackoffMs * 2 ** (this.refusals - 1), this.random);
       // **And the quiet clock starts when that backoff ends** (T-539): completions are one way to
       // earn a slot back, elapsed quiet is the other, and a frozen view only ever has the second.
       // Quiet means quiet *after* the route has stopped saying it is busy.
@@ -2178,8 +2254,11 @@ export class TileCache<T> {
     this.stats.silentFailures++;
     this.silenced.add(keyOf(addr));
     this.silences++;
-    this.silentUntil = this.now() +
-      Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1));
+    // **Jittered** (T-1039): a whole batch (T-573) fails together on a dropped connection, so
+    // without jitter every address in it would arm the SAME probe instant and the "one probe at a
+    // time" half-open shape would still cost a burst the moment the wire returns.
+    this.silentUntil = this.now() + jittered(
+      Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1)), this.random);
     return false;
   }
 
@@ -2267,6 +2346,7 @@ export class TileCache<T> {
     this.map.set(key, entry);
     this.bytes += data.bytes;
     this.refreshedAt.set(key, this.now());
+    this.lastGoodAt.set(key, this.now());
     // **Rows already pushed past this answer's horizon are laid back over it** (T-893). The route's
     // horizon trails the feed, so an answer is usually older at its top than what is on screen, and
     // replacing the copy without this would take the newest rows off the pane until the next push.
@@ -2292,6 +2372,7 @@ export class TileCache<T> {
       this.tex.destroy(victim.tex);
       this.map.delete(victim.key);
       this.refreshedAt.delete(victim.key);
+      this.lastGoodAt.delete(victim.key);
       this.speculativeResident.delete(victim.key);
       this.standInFrame.delete(victim.key);
       this.bytes -= victim.data.bytes;

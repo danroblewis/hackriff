@@ -55,7 +55,11 @@ function harness(opts: TileCacheOptions = {}) {
         reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
       });
     }),
-    { now: () => 0, ...opts },
+    // `random: () => 0` by default (T-1039): every OTHER test in this file was written against exact
+    // backoff arithmetic, and the jitter this cache now adds is `base + base * 0.5 * rand()` — a
+    // `rand` of 0 reproduces that arithmetic exactly. The tests that assert the jitter itself pass
+    // their own `random`.
+    { now: () => 0, random: () => 0, ...opts },
   );
   return {
     cache, calls, urls, waiting,
@@ -233,6 +237,98 @@ test("a real failure is counted and does not wedge the queue — it PACES it (T-
   await flush();
   assert.deepEqual(h.calls, [keyOf(addr(2)), keyOf(addr(1))],
     "and once it opens the queue drains — a backoff is not a wedge");
+});
+
+// ——— T-1039: jittered backoff, so a batch that fails together does not retry together ———
+
+test("the silence backoff is jittered: a fixed base spreads to different waits under different draws", async () => {
+  let clock = 0;
+  let draw = 0;
+  const draws = [0, 0.999999];
+  const h = harness({ inFlight: 1, now: () => clock, random: () => draws[draw++ % draws.length] });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new Error("boom")); // draw 0: the minimum of the jitter's range
+  // Not yet reopened just short of the unjittered base (500 ms): a rand()=0 draw adds nothing, so
+  // this is the floor every draw must reach.
+  clock = 499;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 1, "the base delay must still be honoured at the low end of the jitter");
+  clock = 500;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 2, "and it reopens once the base has genuinely elapsed");
+  await h.fail(addr(1), new Error("boom again")); // draw 1: the top of the jitter's range
+  clock = 500 + 999; // past the unjittered second rung (1000 ms) but short of its jittered ceiling
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 2,
+    "a high draw must widen the wait past the unjittered rung — jitter never shortens it");
+  clock = 500 + 1500; // base(1000) x 1.5, the ceiling this jitter formula can reach
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 3, "and it is bounded — the spread does not grow without limit");
+});
+
+test("the busy (503) backoff is jittered the same way", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 1, now: () => clock, busyBackoffMs: 100, random: () => 0.999999 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  clock = 99;
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 1, "the unjittered base has not elapsed yet");
+  clock = 149; // still short of base x 1.5 at the top draw
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 1, "a high draw widens the busy backoff past its unjittered rung too");
+  clock = 150;
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 2);
+});
+
+// ——— T-1039: stale-while-revalidate — the last good tile is never cleared, only labelled ———
+
+test("a resident tile is not stale fresh off the wire, and goes stale only once staleAfterMs elapses", async () => {
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 1000 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  assert.equal(h.cache.isStale(addr(1)), false, "a tile just fetched is fresh");
+  clock = 999;
+  assert.equal(h.cache.isStale(addr(1)), false);
+  clock = 1000;
+  assert.equal(h.cache.isStale(addr(1)), true, "state N: unconfirmed for staleAfterMs is stale");
+});
+
+test("isStale is false for a place with no resident copy at all — staleness is a fact about a copy in hand", () => {
+  const h = harness({ now: () => 0 });
+  assert.equal(h.cache.isStale(addr(9)), false);
+});
+
+test("a failed revalidation never clears the resident tile, and never resets its staleness either", async () => {
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 1000, inFlight: 4 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  clock = 1000;
+  assert.equal(h.cache.isStale(addr(1)), true);
+  // Re-ask (as the live-edge refresh lane would) and fail it: the copy on screen is untouched.
+  const lat: Lattice = LAT;
+  h.cache.refreshEdge(lat, 0, [{ box: { f0Hz: 0, f1Hz: 1e12, t0Ns: 0, t1Ns: 1e12 }, levelF: 0, levelT: 0 }]);
+  await flush();
+  assert.ok(h.cache.acquire(addr(1)).kind === "resident", "the last good tile stays resident throughout");
+  await h.fail(addr(1), new Error("network drop"));
+  assert.ok(h.cache.acquire(addr(1)).kind === "resident", "a failed revalidation clears nothing that was drawn");
+  assert.equal(h.cache.isStale(addr(1)), true, "and it is still honestly reported stale — the failure did not confirm it");
+  // A SUCCESSFUL revalidation is what clears the mark. (Past the lane's own cadence floor —
+  // one tile's own newest cell can't have changed inside it — or this second ask would be skipped.)
+  clock = 2000;
+  h.cache.refreshEdge(lat, 0, [{ box: { f0Hz: 0, f1Hz: 1e12, t0Ns: 0, t1Ns: 1e12 }, levelF: 0, levelT: 0 }]);
+  await flush();
+  await h.settle(addr(1));
+  assert.equal(h.cache.isStale(addr(1)), false, "a confirmed re-read is fresh again");
 });
 
 test("the residency answer is never a cell state", async () => {
