@@ -57,12 +57,15 @@ export interface Row {
   status: { author: string; reason: string | null; prior_ref: string | null; reason_withheld: boolean } | null;
   tags: string[]; tags_withheld?: boolean; family: string | null;
   identity_scheme: string | null; identity_value?: string; identity_class: string | null; withheld: boolean;
-  /** docs/api.md `identity_label`/`identity_label_share` (T-967): the backend's voted session
-   * label for the decoded identity (RDS: the most frequent PS, never the latest fragment) and that
-   * label's own share of the session's frames (not the PI vote). Both `null` for a scheme with no
-   * decoder summary and on a withheld row. Optional so fixtures/tests that predate T-967 still
-   * typecheck; a current server always sends both. */
+  /** docs/api.md `identity_label`/`identity_label_share`/`identity_label_meaning` (T-967,
+   * contract T-1017): the label the identity's decoder **declared** as its name (RDS: the most
+   * frequent PS, never the latest fragment), its declared confidence, and what that confidence
+   * means (`vote-share`, `crc-valid-rate`, `decoder-score`) — a bare number beside a name is not
+   * self-describing, so the wording follows the declared meaning and never assumes one. All three
+   * `null` for a decoder that declared no label and on a withheld row. Optional so fixtures/tests
+   * that predate them still typecheck; a current server always sends all three. */
   identity_label?: string | null; identity_label_share?: number | null;
+  identity_label_meaning?: "vote-share" | "crc-valid-rate" | "decoder-score" | null;
   recurrence: Recurrence | null;
   /** Optional so existing fixtures/tests that predate T-193 still typecheck; a server that serves
    * the field always sends `null` when unset, never omits it. */

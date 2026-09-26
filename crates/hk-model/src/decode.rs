@@ -8,6 +8,8 @@
 //! Content gating (ADR-0004): see [`crate::content`]. A Decode keeps metadata and content in
 //! separate fields so that a gated class can still record the metadata.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -294,29 +296,6 @@ pub struct DecodeView {
     pub labels_withheld: bool,
 }
 
-/// A backend-rendered summary of a decoded identity for a list row (T-967): the stable,
-/// human-readable label the identity's decoder **voted** over its latest committed session, and
-/// how much of that session's evidence agreed with it. Thin-client rule (CLAUDE.md): the UI
-/// renders `label` as given and never parses a decode's raw fields to build one itself.
-///
-/// Served only for schemes whose built-in decoder writes an explicit per-session summary row —
-/// today RDS (`rds-pi`, see [`rds_session_summary`]). Every other scheme has none, and is served
-/// no summary rather than a guess from similarly-named fields: a per-decoder declared label field
-/// is its own contract, not something this module infers from key names.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DecodeIdentitySummary {
-    /// The decoder's own session label, trimmed — for RDS the **most frequent** complete PS frame
-    /// of the session (the vote `hk_demod::RdsReport::ps` takes), never the latest fragment: a
-    /// station scrolling song/artist text through PS sends many fragments, one of which is always
-    /// the newest.
-    pub label: String,
-    /// The fraction, 0–1, of the session's complete PS frames that read exactly `label` — the
-    /// label's own vote share (the same figure the decoder's Label annotation carries as its
-    /// confidence). `None` when the summary row recorded no frame counts. Deliberately **not** the
-    /// PI vote share (`pi_share`), which is confidence in the code, not in the name.
-    pub label_share: Option<f64>,
-}
-
 /// The built-in RDS decoder's id (`hk_demod::RDS_DECODER_ID`; `hk-model` cannot depend on
 /// `hk-demod`, and `hk-demod`'s T-967 test writes rows through the real writer and reads them
 /// back here, which pins the two together).
@@ -325,42 +304,319 @@ pub(crate) const RDS_DECODER_ID: &str = "hk-rds";
 /// The frame model of the RDS decoder's once-per-session summary row (`hk_demod::rds_decodes`):
 /// the accepted PI's vote, the most frequent PS frame (`ps`) and every PS frame's count
 /// (`ps_frames`, most frequent first). The per-frame rows (`rds-group-0-ps-frame`) are the raw
-/// fragments and are never read for the summary.
+/// fragments and are never read for the label (T-967).
 pub(crate) const RDS_SUMMARY_FRAME_MODEL: &str = "rds-pi";
 
-/// The [`DecodeIdentitySummary`] an RDS session summary row states, or `None` when `d` is not one
-/// (another decoder, a per-frame row) or voted no PS. Reads `ps` and `ps_frames` exactly as
-/// `hk_demod::rds_decodes` writes them.
-pub(crate) fn rds_session_summary(d: &Decode) -> Option<DecodeIdentitySummary> {
-    if d.decoder_id != RDS_DECODER_ID || d.frame_model != RDS_SUMMARY_FRAME_MODEL {
-        return None;
+/// A backend-rendered summary of a decoded identity for a list row (T-967, contract T-1017): the
+/// stable, human-readable **label** a decoder **declared** as its identity's name, and how much of
+/// the evidence agrees with it. Thin-client rule (CLAUDE.md): the UI renders `label` as given and
+/// never parses a decode's raw fields to build one itself.
+///
+/// A summary exists only where a decoder **declared** which of its output fields is the label —
+/// [`IdentityLabelDecl`], from a recipe's or plugin manifest's `decode.identity_label` or a
+/// built-in chain's declaration. Nothing is ever inferred from a field's *name*: a plugin that
+/// declares no label is served no label, however its fields are spelled (the T-967 defect this
+/// contract replaces guessed at `ps`/`callsign`/`station`, making any plugin's `station` field an
+/// identity label by accident).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecodeIdentitySummary {
+    /// The decoder's declared label for the identity, trimmed — for RDS the **most frequent**
+    /// complete PS frame of the session (the vote `hk_demod::RdsReport::ps` takes), never the
+    /// latest fragment: a station scrolling song/artist text through PS sends many fragments, one
+    /// of which is always the newest.
+    pub label: String,
+    /// The label's declared confidence, 0–1, or `None` when the declaration names none or the row
+    /// recorded no figure. Its meaning is [`Self::confidence_meaning`] — a vote share, a
+    /// CRC-valid rate or a decoder score — never an unstated "confidence".
+    pub label_share: Option<f64>,
+    /// What [`Self::label_share`] means, as declared; `None` exactly when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_meaning: Option<LabelConfidence>,
+}
+
+/// What a declared label confidence figure *means* (T-1017). A bare 0–1 number beside a name is
+/// not self-describing: a PS vote share and a CRC-valid rate are different claims, and the
+/// decoder says which it is served.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LabelConfidence {
+    /// The share of the session's agreeing frames that read exactly this label.
+    VoteShare,
+    /// The share of the decoder's frames for this identity whose frame check passed.
+    CrcValidRate,
+    /// The decoder's own score for the label, on its own scale normalised to 0–1.
+    DecoderScore,
+}
+
+impl LabelConfidence {
+    /// Manifest / recipe / stored name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LabelConfidence::VoteShare => "vote-share",
+            LabelConfidence::CrcValidRate => "crc-valid-rate",
+            LabelConfidence::DecoderScore => "decoder-score",
+        }
     }
-    let raw = d.metadata.get("ps")?.as_str()?;
-    let label = raw.trim();
-    if label.is_empty() {
-        return None;
+
+    /// Parses [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "vote-share" => LabelConfidence::VoteShare,
+            "crc-valid-rate" => LabelConfidence::CrcValidRate,
+            "decoder-score" => LabelConfidence::DecoderScore,
+            _ => return None,
+        })
     }
-    // `ps_frames`: `[[text, count], …]`. The label's share is its own count over all counts.
-    let label_share = d
-        .metadata
-        .get("ps_frames")
-        .and_then(Value::as_array)
-        .and_then(|frames| {
-            let (mut total, mut mine) = (0u64, None);
-            for f in frames {
-                let n = f.get(1)?.as_u64()?;
-                total += n;
-                if f.get(0)?.as_str()? == raw {
-                    mine = Some(n);
-                }
+}
+
+/// Where a declared label's confidence is read from in the decode's `metadata`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "from")]
+pub enum LabelConfidenceSource {
+    /// A field already holding the figure as a 0–1 fraction.
+    Field {
+        /// Metadata path.
+        field: String,
+    },
+    /// A `[[value, count], …]` table; the figure is **this label's own** count over every count,
+    /// so a decoder that keeps its vote tally need not also compute a share (RDS's `ps_frames`).
+    VoteCounts {
+        /// Metadata path of the table.
+        field: String,
+    },
+}
+
+impl LabelConfidenceSource {
+    /// The metadata path read.
+    pub fn field(&self) -> &str {
+        match self {
+            LabelConfidenceSource::Field { field }
+            | LabelConfidenceSource::VoteCounts { field } => field,
+        }
+    }
+
+    /// Stored/manifest name of the source kind.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            LabelConfidenceSource::Field { .. } => "field",
+            LabelConfidenceSource::VoteCounts { .. } => "vote-counts",
+        }
+    }
+}
+
+/// A declared label confidence: where it is read and what it means.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LabelConfidenceDecl {
+    /// Where the figure comes from.
+    pub source: LabelConfidenceSource,
+    /// What it means.
+    pub meaning: LabelConfidence,
+}
+
+/// A decoder's **declaration** of which output field is its identity's human-readable label, and
+/// which its confidence (T-1017; `docs/stream-contract.md` §9.4, `docs/api.md`).
+///
+/// One declaration per `(decoder_id, frame_model)`: a decoder's own row kind is what fixes where
+/// its label lives. Declarations come from a decoder/recipe manifest (`decode.identity_label`), a
+/// plugin manifest (`output.identity_label`) or a built-in chain
+/// ([`IdentityLabelRegistry::builtin`]), and are stored with the decodes they describe, so a
+/// database serves the same label after the process that decoded it has gone.
+///
+/// **Declaring is opt-in and is the only way in.** Pluggable decoders are consumers, not
+/// privileged insiders (CLAUDE.md), so a decoder that declares nothing is served no label rather
+/// than having one guessed from its field names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IdentityLabelDecl {
+    /// The declaring decoder's `Decode::decoder_id` (`hk-rds`, `recipe:ais`, a plugin id).
+    pub decoder_id: String,
+    /// The `Decode::frame_model` of the rows that carry the label — a decoder's summary row kind,
+    /// not necessarily every row it writes.
+    pub frame_model: String,
+    /// Metadata path of the label (dotted; `ps`, `station.name`).
+    pub label_field: String,
+    /// Its confidence, when the decoder declared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<LabelConfidenceDecl>,
+}
+
+/// A declaration that could not be accepted (T-1017): the names in a declaration reach a JSON path
+/// and a SQL predicate, so they are validated once, here, at the boundary.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[error("invalid identity-label declaration: {0}")]
+pub struct IdentityLabelDeclError(pub String);
+
+/// Longest metadata path a declaration may name, in segments.
+const MAX_LABEL_PATH_SEGMENTS: usize = 4;
+
+/// Whether `path` is a dotted path of `[A-Za-z0-9_]` segments — the only shape a declaration may
+/// name, so building a JSON path from it can never inject one.
+fn is_metadata_path(path: &str) -> bool {
+    let segs: Vec<&str> = path.split('.').collect();
+    !segs.is_empty()
+        && segs.len() <= MAX_LABEL_PATH_SEGMENTS
+        && segs
+            .iter()
+            .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+impl IdentityLabelDecl {
+    /// A validated declaration. Both ids must be non-empty and free of whitespace, and each field
+    /// path a dotted `[A-Za-z0-9_]` path of at most [`MAX_LABEL_PATH_SEGMENTS`] segments.
+    pub fn new(
+        decoder_id: impl Into<String>,
+        frame_model: impl Into<String>,
+        label_field: impl Into<String>,
+        confidence: Option<LabelConfidenceDecl>,
+    ) -> Result<Self, IdentityLabelDeclError> {
+        let decl = IdentityLabelDecl {
+            decoder_id: decoder_id.into(),
+            frame_model: frame_model.into(),
+            label_field: label_field.into(),
+            confidence,
+        };
+        let bad = |m: &str| Err(IdentityLabelDeclError(m.to_owned()));
+        if decl.decoder_id.trim().is_empty() || decl.decoder_id.split_whitespace().count() > 1 {
+            return bad("`decoder_id` must be a non-empty name without whitespace");
+        }
+        if decl.frame_model.trim().is_empty() || decl.frame_model.split_whitespace().count() > 1 {
+            return bad("`frame_model` must be a non-empty name without whitespace");
+        }
+        if !is_metadata_path(&decl.label_field) {
+            return bad("`label_field` must be a dotted path of [A-Za-z0-9_] segments");
+        }
+        if let Some(c) = &decl.confidence {
+            if !is_metadata_path(c.source.field()) {
+                return bad("the confidence field must be a dotted path of [A-Za-z0-9_] segments");
             }
-            let mine = mine?;
-            (total > 0).then(|| mine as f64 / total as f64)
+        }
+        Ok(decl)
+    }
+
+    /// The key a registry and the store hold this declaration under.
+    pub fn key(&self) -> (&str, &str) {
+        (&self.decoder_id, &self.frame_model)
+    }
+
+    /// SQLite JSON path of the label inside a stored decode body.
+    pub(crate) fn label_json_path(&self) -> String {
+        format!("$.metadata.{}", self.label_field)
+    }
+
+    /// The summary `metadata` states under this declaration, or `None` when the row holds no
+    /// non-empty label. A missing or unreadable confidence leaves `label_share` `None`; it never
+    /// withholds the label, which is the fact a list row needs.
+    pub fn summarise(&self, metadata: &Value) -> Option<DecodeIdentitySummary> {
+        let raw = path(metadata, &self.label_field)?.as_str()?;
+        let label = raw.trim();
+        if label.is_empty() {
+            return None;
+        }
+        let label_share = self.confidence.as_ref().and_then(|c| match &c.source {
+            LabelConfidenceSource::Field { field } => path(metadata, field)
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            // `[[value, count], …]`: the label's own count over all counts.
+            LabelConfidenceSource::VoteCounts { field } => {
+                let rows = path(metadata, field)?.as_array()?;
+                let (mut total, mut mine) = (0u64, None);
+                for f in rows {
+                    let n = f.get(1)?.as_u64()?;
+                    total += n;
+                    if f.get(0)?.as_str()? == raw {
+                        mine = Some(n);
+                    }
+                }
+                let mine = mine?;
+                (total > 0).then(|| mine as f64 / total as f64)
+            }
         });
-    Some(DecodeIdentitySummary {
-        label: label.to_owned(),
-        label_share,
-    })
+        Some(DecodeIdentitySummary {
+            label: label.to_owned(),
+            confidence_meaning: label_share
+                .is_some()
+                .then(|| self.confidence.as_ref().map(|c| c.meaning))
+                .flatten(),
+            label_share,
+        })
+    }
+}
+
+/// A dotted path into a JSON object.
+fn path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = v;
+    for seg in path.split('.') {
+        cur = cur.get(seg)?;
+    }
+    Some(cur)
+}
+
+/// Every identity-label declaration in force (T-1017): the built-in chains' plus every one a
+/// recipe or plugin manifest declared and the store recorded.
+///
+/// Read once per request and consulted per row, so one answer cannot hold two different views of
+/// what a decoder declared ([`crate::Repository::identity_label_declarations`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IdentityLabelRegistry {
+    decls: BTreeMap<(String, String), IdentityLabelDecl>,
+}
+
+impl IdentityLabelRegistry {
+    /// No declarations: every decoder is served no label.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// The built-in chains' declarations. Today one: the RDS decoder's per-session summary row
+    /// (`hk-rds` / `rds-pi`), whose `ps` is the session's most frequent complete PS frame and
+    /// whose `ps_frames` vote table gives that label's own share. The share is deliberately
+    /// **not** `pi_share`, which is confidence in the code, not in the name.
+    pub fn builtin() -> Self {
+        let mut r = Self::empty();
+        r.declare(
+            IdentityLabelDecl::new(
+                RDS_DECODER_ID,
+                RDS_SUMMARY_FRAME_MODEL,
+                "ps",
+                Some(LabelConfidenceDecl {
+                    source: LabelConfidenceSource::VoteCounts {
+                        field: "ps_frames".into(),
+                    },
+                    meaning: LabelConfidence::VoteShare,
+                }),
+            )
+            .expect("the built-in RDS declaration is valid"),
+        );
+        r
+    }
+
+    /// Adds `decl`, replacing any declaration for the same `(decoder_id, frame_model)`.
+    pub fn declare(&mut self, decl: IdentityLabelDecl) {
+        let key = (decl.decoder_id.clone(), decl.frame_model.clone());
+        self.decls.insert(key, decl);
+    }
+
+    /// The declaration for a decoder's row kind, if it declared one.
+    pub fn get(&self, decoder_id: &str, frame_model: &str) -> Option<&IdentityLabelDecl> {
+        self.decls
+            .get(&(decoder_id.to_owned(), frame_model.to_owned()))
+    }
+
+    /// Every declaration, by key.
+    pub fn iter(&self) -> impl Iterator<Item = &IdentityLabelDecl> {
+        self.decls.values()
+    }
+
+    /// Whether nothing is declared (no row can carry a label).
+    pub fn is_empty(&self) -> bool {
+        self.decls.is_empty()
+    }
+
+    /// The summary `d` states under its decoder's declaration, or `None` when its decoder declared
+    /// no label for this `frame_model` or the row holds none.
+    pub fn summarise(&self, d: &Decode) -> Option<DecodeIdentitySummary> {
+        self.get(&d.decoder_id, &d.frame_model)?
+            .summarise(&d.metadata)
+    }
 }
 
 /// What a bitstream carries.

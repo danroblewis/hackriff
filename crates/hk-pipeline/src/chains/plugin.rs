@@ -318,7 +318,13 @@ fn run_inner(
     if let (Some(sink), Some(p)) = (&shared.cfg.stream_sink, &publisher) {
         sink(&header, p.handle());
     }
-    let repo = Repository::open(&shared.db_path)?;
+    let mut repo = Repository::open(&shared.db_path)?;
+    // T-1017: the plugin's **declared** identity label, recorded beside the rows it describes, so
+    // the list surfaces render the label this manifest named — and no label at all for a plugin
+    // that declared none, whatever its fields are called.
+    if let Some(decl) = &m.output.identity_label {
+        repo.declare_identity_label(decl)?;
+    }
     let ingest = Arc::new(Mutex::new(match publisher {
         Some(p) => Ingest::with_republish(repo, p),
         None => Ingest::new(repo),

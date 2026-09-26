@@ -508,6 +508,7 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
              DROP INDEX IF EXISTS idx_emitter_classification_input_detection; \
              DROP INDEX IF EXISTS idx_emitter_observation_time; \
              DROP INDEX IF EXISTS idx_provenance_tune_center; \
+             DROP TABLE IF EXISTS identity_label_decl; \
              DROP TABLE IF EXISTS detection_retune; \
              DROP TABLE IF EXISTS harmonic_family_member; \
              DROP TABLE IF EXISTS harmonic_family; \

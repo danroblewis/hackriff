@@ -14,11 +14,12 @@ use crate::cluster::{
 };
 use crate::content::ContentClass;
 use crate::decode::{
-    Decode, DecodeIdentitySummary, DecodeView, RDS_DECODER_ID, RDS_SUMMARY_FRAME_MODEL,
-    WITHHELD_LABEL, rds_session_summary,
+    Decode, DecodeIdentitySummary, DecodeView, IdentityLabelDecl, IdentityLabelRegistry,
+    LabelConfidence, LabelConfidenceDecl, LabelConfidenceSource, WITHHELD_LABEL,
 };
-use crate::emitter::{DecodedIdentity, IdentityScheme};
+use crate::emitter::DecodedIdentity;
 use crate::ids::{DecodeId, EmitterId};
+use crate::region::TimeRange;
 use crate::time::Timestamp;
 
 /// Shortest metadata value treated as a possible identifier when checking labels.
@@ -429,25 +430,136 @@ impl Repository {
             .collect())
     }
 
-    /// The decoded identity's summary for a list row (T-967, `/api/inventory`'s `identity_label` /
-    /// `identity_label_share`): the label its decoder **voted** over its latest committed session,
-    /// and that label's own share of the session's frames — see [`DecodeIdentitySummary`].
+    /// Every identity-label declaration in force (T-1017): the built-in chains'
+    /// ([`IdentityLabelRegistry::builtin`]) plus every one a recipe or plugin manifest declared
+    /// through [`Repository::declare_identity_label`], which wins on the same
+    /// `(decoder_id, frame_model)` key.
     ///
-    /// Only schemes whose built-in decoder writes an explicit session summary row are served; today
-    /// that is RDS (`rds-pi`: the `hk-rds` decoder's `rds-pi` row, whose `ps` is the session's most
-    /// frequent complete PS frame). Every other scheme answers `None`, as does an identity withheld
-    /// from [`IdentityAccess::Standard`] (never confirms one indirectly, matching
-    /// [`Repository::decodes_for_identity`]) and an identity whose sessions voted no PS.
+    /// Read **once per answer** and then consulted per row, so one `/api/inventory` page or
+    /// `/api/events` answer cannot hold two different views of what a decoder declared.
+    pub fn identity_label_declarations(&self) -> Result<IdentityLabelRegistry, RepoError> {
+        let tx = self.read_tx()?;
+        let mut reg = IdentityLabelRegistry::builtin();
+        let mut stmt = tx.prepare_cached(
+            "SELECT decoder_id, frame_model, label_field, confidence_from, confidence_field, \
+             confidence_meaning FROM identity_label_decl ORDER BY decoder_id, frame_model",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (decoder_id, frame_model, label_field, from, field, meaning) in rows {
+            // A stored row that no longer parses (a hand-edited database, a downgrade) declares
+            // nothing rather than declaring something unintended: fail closed, as
+            // `BiasTee::Unknown` is not `Off`.
+            let confidence = match (from.as_deref(), field, meaning.as_deref()) {
+                (None, _, _) => None,
+                (Some(kind), Some(field), Some(m)) => {
+                    let Some(meaning) = LabelConfidence::parse(m) else {
+                        continue;
+                    };
+                    let source = match kind {
+                        "field" => LabelConfidenceSource::Field { field },
+                        "vote-counts" => LabelConfidenceSource::VoteCounts { field },
+                        _ => continue,
+                    };
+                    Some(LabelConfidenceDecl { source, meaning })
+                }
+                _ => continue,
+            };
+            if let Ok(decl) =
+                IdentityLabelDecl::new(decoder_id, frame_model, label_field, confidence)
+            {
+                reg.declare(decl);
+            }
+        }
+        Ok(reg)
+    }
+
+    /// Records a decoder's identity-label declaration (T-1017), replacing any earlier one for the
+    /// same `(decoder_id, frame_model)` — a recipe or plugin that is re-loaded with a changed
+    /// manifest declares the new shape, and the old one does not linger.
     ///
-    /// Reads **one** row — the newest summary row with a PS, over `idx_decode_identity` newest
-    /// first — so the label is never the newest per-frame fragment (a scrolling song/artist PS),
-    /// and a list page of up to 500 rows pays one identity-class scan and one indexed lookup per
-    /// row, not a decode-history read.
+    /// Declarations are stored, not held in the process, because the decoder writing rows and the
+    /// server rendering them use different connections and outlive each other: a database must
+    /// serve the same label after the pipeline that decoded it has gone.
+    pub fn declare_identity_label(&mut self, decl: &IdentityLabelDecl) -> Result<(), RepoError> {
+        let (from, field, meaning) = match &decl.confidence {
+            None => (None, None, None),
+            Some(c) => (
+                Some(c.source.kind()),
+                Some(c.source.field()),
+                Some(c.meaning.as_str()),
+            ),
+        };
+        let tx = self.write_tx()?;
+        tx.execute(
+            "INSERT INTO identity_label_decl (decoder_id, frame_model, label_field, \
+             confidence_from, confidence_field, confidence_meaning, declared_t) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT (decoder_id, frame_model) DO UPDATE SET label_field = excluded.label_field, \
+             confidence_from = excluded.confidence_from, \
+             confidence_field = excluded.confidence_field, \
+             confidence_meaning = excluded.confidence_meaning, declared_t = excluded.declared_t",
+            params![
+                decl.decoder_id,
+                decl.frame_model,
+                decl.label_field,
+                from,
+                field,
+                meaning,
+                Timestamp::now().as_unix_nanos()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The decoded identity's summary for a list row (`/api/inventory` and `/api/events`'s
+    /// `identity_label` / `identity_label_share` / `identity_label_meaning`) under the built-in
+    /// declarations only, over all time — the convenience form of
+    /// [`Repository::latest_decode_identity_summary_in`].
     pub fn latest_decode_identity_summary(
         &self,
         identity: &DecodedIdentity,
     ) -> Result<Option<DecodeIdentitySummary>, RepoError> {
-        if !matches!(identity.scheme, IdentityScheme::RdsPi) {
+        self.latest_decode_identity_summary_in(identity, &IdentityLabelRegistry::builtin(), None)
+    }
+
+    /// The decoded identity's summary for a list row (T-967; declared contract T-1017): the label
+    /// its decoder **declared** as the identity's name on its latest such row, and that label's
+    /// declared confidence — see [`DecodeIdentitySummary`].
+    ///
+    /// Only a `(decoder_id, frame_model)` that `declarations` holds can carry a label; every other
+    /// row answers `None`, whatever its fields are called. `None` also for an identity withheld
+    /// from [`IdentityAccess::Standard`] (never confirms one indirectly, matching
+    /// [`Repository::decodes_for_identity`]), for a row whose own class hides its metadata, and
+    /// when no declared row holds a non-empty label.
+    ///
+    /// **`window` scopes the answer to the viewed time window** (CLAUDE.md: the inventory is
+    /// time-scoped to the view). A scrubbed pane therefore shows the label that was known *inside
+    /// its window*, not one decoded minutes after it; `None` scopes to all time, which is what an
+    /// unwindowed query asks.
+    ///
+    /// Reads **one** row per declaration — the newest with a non-empty label, over
+    /// `idx_decode_identity` newest first — so the label is never the newest per-frame fragment (a
+    /// scrolling song/artist PS), and a list page pays one identity-class scan and one indexed
+    /// lookup per declaration per row.
+    pub fn latest_decode_identity_summary_in(
+        &self,
+        identity: &DecodedIdentity,
+        declarations: &IdentityLabelRegistry,
+        window: Option<TimeRange>,
+    ) -> Result<Option<DecodeIdentitySummary>, RepoError> {
+        if declarations.is_empty() {
             return Ok(None);
         }
         let tx = self.read_tx()?;
@@ -455,25 +567,62 @@ impl Repository {
         if !IdentityAccess::Standard.reveals(class) {
             return Ok(None);
         }
-        let rows: Vec<Decode> = bodies(
-            &tx,
-            "SELECT body FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2 \
-             AND decoder_id = ?3 AND json_extract(body, '$.frame_model') = ?4 \
-             AND json_extract(body, '$.metadata.ps') IS NOT NULL \
-             ORDER BY t DESC, decode_id DESC LIMIT 1",
-            params![
-                identity.scheme.as_string(),
-                identity.value,
-                RDS_DECODER_ID,
-                RDS_SUMMARY_FRAME_MODEL
-            ],
-        )?;
-        Ok(rows.into_iter().next().and_then(|d| {
+        // Newest first across every declaration, and the first row that actually states a label
+        // wins: two decoders declaring labels for one identity are ranked by capture time, never
+        // by declaration order.
+        let mut best: Option<(i64, DecodeIdentitySummary)> = None;
+        for decl in declarations.iter() {
+            let mut sql = String::from(
+                "SELECT t, body FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2 \
+                 AND decoder_id = ?3 AND json_extract(body, '$.frame_model') = ?4 \
+                 AND json_extract(body, '",
+            );
+            // The path is built from a validated declaration (`IdentityLabelDecl::new`: dotted
+            // `[A-Za-z0-9_]` segments only), so it can hold no quote and inject nothing.
+            sql.push_str(&decl.label_json_path());
+            sql.push_str("') IS NOT NULL");
+            if window.is_some() {
+                sql.push_str(" AND t >= ?5 AND t <= ?6");
+            }
+            sql.push_str(" ORDER BY t DESC, decode_id DESC LIMIT 1");
+            let scheme = identity.scheme.as_string();
+            let mut stmt = tx.prepare_cached(&sql)?;
+            let read = |r: &rusqlite::Row<'_>| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?));
+            let row = match window {
+                None => stmt
+                    .query_row(
+                        params![scheme, identity.value, decl.decoder_id, decl.frame_model],
+                        read,
+                    )
+                    .optional()?,
+                Some(w) => stmt
+                    .query_row(
+                        params![
+                            scheme,
+                            identity.value,
+                            decl.decoder_id,
+                            decl.frame_model,
+                            w.start.as_unix_nanos(),
+                            w.end.as_unix_nanos()
+                        ],
+                        read,
+                    )
+                    .optional()?,
+            };
+            let Some((t, body)) = row else { continue };
+            if best.as_ref().is_some_and(|(bt, _)| *bt >= t) {
+                continue;
+            }
+            let d: Decode = serde_json::from_str(&body)?;
             // Gated like every decode read: a row whose own class hides its detail loses its
-            // metadata here, and then states no label.
+            // metadata here, and then states no label (a restricted or metadata-only decode can
+            // never state an identity's name through this field).
             let gated = gate_decode_with_class(d, IdentityAccess::Standard, class).decode;
-            rds_session_summary(&gated)
-        }))
+            if let Some(summary) = decl.summarise(&gated.metadata) {
+                best = Some((t, summary));
+            }
+        }
+        Ok(best.map(|(_, s)| s))
     }
 
     /// Opens an emitter's decoded identity to `new_class` after the user asserts it is their own

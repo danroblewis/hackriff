@@ -612,27 +612,49 @@ export function clusterChip(r: Pick<Row, "cluster_id" | "cluster_group">): Chip 
   return { cls: "cluster", text, title: CLUSTER_CHIP_TITLE };
 }
 
-/** Why the identity chip shows what it shows, on hover (T-967). */
+/** Why the identity chip shows what it shows, on hover (T-967, T-1017). */
 export const IDENTITY_CHIP_TITLE =
-  "The decoded identity — the label its decoder voted over its latest session (for RDS the most "
-  + "frequent PS station name, not the latest scrolling fragment), then the bare code, then the share "
-  + "of that session's frames that read the label, when under 100 %. Backend-rendered, never re-parsed here.";
+  "The decoded identity — the label its decoder declared as the identity's name (for RDS the most "
+  + "frequent PS station name, not the latest scrolling fragment), then the bare code, then the "
+  + "decoder's declared confidence in the label, in the terms it declared. Backend-rendered, never "
+  + "re-parsed here.";
+
+/**
+ * How a declared label confidence reads (T-1017 `identity_label_meaning`): the same 0–1 number is a
+ * different claim per meaning, so the wording comes from the declaration and is never assumed. With
+ * no declared meaning the bare percentage is shown and no claim is made about what it counts.
+ */
+export function labelConfidenceText(
+  share: number,
+  meaning: Row["identity_label_meaning"],
+): string {
+  const pct = `${Math.round(share * 100)}%`;
+  switch (meaning) {
+    case "vote-share": return `${pct} of frames`;
+    case "crc-valid-rate": return `${pct} CRC-valid`;
+    case "decoder-score": return `${pct} decoder score`;
+    default: return pct;
+  }
+}
 
 /**
  * The decoded-identity chip for a row (T-967, the explorer's field report: a CRC-valid RDS PI/PS
  * decode was invisible in the list — "unknown", "100% unk" — because nothing rendered it).
  *
  * With `identity_label` (RDS's voted PS station name) the chip reads `KROQ · 1694`, the label
- * beside the bare `identity_value` it names; `identity_label_share` — the label's own share of the
- * session's frames, *not* the PI vote — is appended as `· 75% of frames`, worded so it reads as a
- * share of frames and never as confidence in the code, and only under 100 % so a settled name is
- * not cluttered. Without a label (a scheme with no decoder summary, an ICAO address, an MMSI) the
+ * beside the bare `identity_value` it names; `identity_label_share` — the decoder's declared
+ * confidence in the label, *not* the PI vote — is appended in the terms
+ * `identity_label_meaning` declares ([[labelConfidenceText]]: `· 75% of frames` for a vote share),
+ * so it never reads as confidence in the code, and only under 100 % so a settled name is not
+ * cluttered. Without a label (a decoder that declared none, an ICAO address, an MMSI) the
  * bare code alone, so a decoded identity still shows something. `null` without a decoded identity
  * at all; "withheld" on a gated row, exactly as the focus panel's identity box reads it. Every
  * word comes straight off already-rendered backend fields (thin-client rule, CLAUDE.md).
  */
 export function identityChip(
-  r: Pick<Row, "identity_scheme" | "identity_value" | "identity_label" | "identity_label_share" | "withheld">,
+  r: Pick<Row,
+    "identity_scheme" | "identity_value" | "identity_label" | "identity_label_share"
+    | "identity_label_meaning" | "withheld">,
 ): Chip | null {
   if (!r.identity_scheme) return null;
   if (r.withheld) return { cls: "identity", text: "withheld", title: IDENTITY_CHIP_TITLE };
@@ -642,7 +664,7 @@ export function identityChip(
   const parts = label ? [label, ...(code && code !== label ? [code] : [])] : [code as string];
   const share = r.identity_label_share;
   if (label && share !== null && share !== undefined && share < 1) {
-    parts.push(`${Math.round(share * 100)}% of frames`);
+    parts.push(labelConfidenceText(share, r.identity_label_meaning));
   }
   return { cls: "identity", text: parts.join(" · "), title: IDENTITY_CHIP_TITLE };
 }

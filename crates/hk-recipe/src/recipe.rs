@@ -341,6 +341,10 @@ pub struct DecodeMapping {
     /// Identity naming the emitter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityMapping>,
+    /// The identity's **declared** human-readable label and its confidence (T-1017). Absent means
+    /// this decoder has no label, and none is guessed from its field names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_label: Option<IdentityLabelMapping>,
     /// Field paths copied into `metadata` (flat; key = last path segment unless duplicated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata: Vec<String>,
@@ -380,6 +384,115 @@ impl IdentityMapping {
             (hk_stream::policy::is_token(&self.scheme) && !self.scheme.contains(':'))
                 .then(|| hk_model::IdentityScheme::Other(self.scheme.clone()))
         })
+    }
+}
+
+/// A declared identity label (T-1017): which mapped metadata field is the identity's
+/// human-readable name, and which field carries its confidence.
+///
+/// Declaring is the **only** way a recipe's label is served: a recipe without this block gets no
+/// label, however its fields are spelled. `field` must be one of `decode.metadata`'s paths (a
+/// label is metadata: it is served on list rows, so it can never be content) whose stored key is
+/// unambiguous.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityLabelMapping {
+    /// Field path of the label; a `decode.metadata` path.
+    pub field: String,
+    /// The label's confidence, when the decoder has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<LabelConfidenceMapping>,
+}
+
+/// Where a declared label's confidence is read and what it means (T-1017).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelConfidenceMapping {
+    /// Field path of the figure; a `decode.metadata` path.
+    pub field: String,
+    /// `field` (the figure itself, 0–1) or `vote-counts` (a `[[value, count], …]` table whose
+    /// share of this label is the figure). Default `field`.
+    #[serde(default = "conf_from_field")]
+    pub from: String,
+    /// What the figure means: `vote-share`, `crc-valid-rate` or `decoder-score`. A bare number
+    /// beside a name is not self-describing, so the meaning is declared, never assumed.
+    pub meaning: String,
+}
+
+fn conf_from_field() -> String {
+    "field".into()
+}
+
+/// The metadata key a mapped `path` is stored under: its last segment, unless another mapped path
+/// shares that segment, in which case the whole dotted path is the key. One rule, read by the
+/// recipe's declaration check and by the writer that fills `metadata`
+/// (`hk_pipeline::recipes::messages`), so a declaration can never name a key the writer does not
+/// produce.
+pub fn stored_key(paths: &[String], path: &str) -> String {
+    let last = |p: &str| p.rsplit('.').next().unwrap_or(p).to_owned();
+    let k = last(path);
+    let shared = paths.iter().filter(|p| last(p) == k).count() > 1;
+    if shared { path.to_owned() } else { k }
+}
+
+impl DecodeMapping {
+    /// The [`hk_model::IdentityLabelDecl`] this mapping declares for rows written by `decoder_id`,
+    /// or `None` when it declares no label. `Err` when the declaration is not valid (the same
+    /// check [`Recipe::validate`] reports).
+    pub fn identity_label_decl(
+        &self,
+        decoder_id: &str,
+    ) -> Option<Result<hk_model::IdentityLabelDecl, String>> {
+        let l = self.identity_label.as_ref()?;
+        Some(self.build_label_decl(decoder_id, l))
+    }
+
+    fn build_label_decl(
+        &self,
+        decoder_id: &str,
+        l: &IdentityLabelMapping,
+    ) -> Result<hk_model::IdentityLabelDecl, String> {
+        let key = |path: &str, what: &str| -> Result<String, String> {
+            if !self.metadata.iter().any(|p| p == path) {
+                return Err(format!(
+                    "the {what} field `{path}` must be one of `decode.metadata`"
+                ));
+            }
+            let k = stored_key(&self.metadata, path);
+            if k.contains('.') {
+                return Err(format!(
+                    "the {what} field `{path}` shares its name with another mapped field, so its \
+                     stored key is ambiguous"
+                ));
+            }
+            Ok(k)
+        };
+        let label_field = key(&l.field, "label")?;
+        let confidence = match &l.confidence {
+            None => None,
+            Some(c) => {
+                let field = key(&c.field, "confidence")?;
+                let source = match c.from.as_str() {
+                    "field" => hk_model::LabelConfidenceSource::Field { field },
+                    "vote-counts" => hk_model::LabelConfidenceSource::VoteCounts { field },
+                    other => {
+                        return Err(format!(
+                            "confidence `from` is `field` or `vote-counts`, not `{other}`"
+                        ));
+                    }
+                };
+                let meaning = hk_model::LabelConfidence::parse(&c.meaning).ok_or_else(|| {
+                    format!(
+                        "confidence `meaning` is `vote-share`, `crc-valid-rate` or \
+                         `decoder-score`, not `{}`",
+                        c.meaning
+                    )
+                })?;
+                Some(hk_model::LabelConfidenceDecl { source, meaning })
+            }
+        };
+        hk_model::IdentityLabelDecl::new(decoder_id, &self.frame_model, label_field, confidence)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -916,6 +1029,19 @@ impl Recipe {
                     for p in paths {
                         if !is_field_path(p) {
                             e.push(format!("{path}.decode"), "field paths are dotted names");
+                        }
+                    }
+                    // T-1017: a declared label is checked here, against this mapping's own
+                    // metadata, so a recipe can never declare a field its writer never stores.
+                    if let Some(l) = &d.identity_label {
+                        if d.identity.is_none() {
+                            e.push(
+                                format!("{path}.decode.identity_label"),
+                                "a label names an identity, so `decode.identity` is required",
+                            );
+                        }
+                        if let Err(why) = d.build_label_decl("recipe:validate", l) {
+                            e.push(format!("{path}.decode.identity_label"), why);
                         }
                     }
                     if let Some(i) = &d.identity {
@@ -1540,6 +1666,116 @@ mod tests {
             v
         });
         assert!(unknown.is_err(), "unknown mapping keys are errors");
+    }
+
+    /// T-1017: a recipe **declares** its identity label, and the declaration is validated against
+    /// this mapping's own metadata — a recipe can never declare a field its writer never stores,
+    /// and a recipe that declares nothing has no label at all.
+    #[test]
+    fn a_declared_identity_label_is_validated_against_the_mappings_own_metadata() {
+        let with = |decode: Value| {
+            let mut v = minimal();
+            v["outputs"] = json!([{"id": "m", "kind": "messages", "from": "b", "decode": decode}]);
+            serde_json::from_value::<Recipe>(v).unwrap()
+        };
+        let paths = |r: &Recipe| -> Vec<String> {
+            r.validate_structure()
+                .err()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.path)
+                .collect()
+        };
+        let base = |label: Value| {
+            json!({"frame_model": "pager-session",
+                   "identity": {"scheme": "pocsag-ric", "field": "ric", "format": "dec"},
+                   "metadata": ["alias", "crc_ok_rate", "a.name", "b.name"],
+                   "identity_label": label})
+        };
+
+        // Declared, valid: the decl names the stored key and carries the declared meaning.
+        let ok = with(base(json!({"field": "alias",
+            "confidence": {"field": "crc_ok_rate", "meaning": "crc-valid-rate"}})));
+        assert!(
+            !paths(&ok).iter().any(|p| p.contains("identity_label")),
+            "{:?}",
+            paths(&ok)
+        );
+        let decl = ok.outputs[0]
+            .decode
+            .as_ref()
+            .unwrap()
+            .identity_label_decl("recipe:pager")
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.decoder_id, "recipe:pager");
+        assert_eq!(decl.frame_model, "pager-session");
+        assert_eq!(decl.label_field, "alias");
+        assert_eq!(
+            decl.confidence,
+            Some(hk_model::LabelConfidenceDecl {
+                source: hk_model::LabelConfidenceSource::Field {
+                    field: "crc_ok_rate".into()
+                },
+                meaning: hk_model::LabelConfidence::CrcValidRate,
+            })
+        );
+
+        // No declaration: no label, and nothing is inferred from the field names.
+        let none = with(json!({"frame_model": "pager-session",
+            "identity": {"scheme": "pocsag-ric", "field": "ric", "format": "dec"},
+            "metadata": ["station", "callsign", "share"]}));
+        assert!(
+            none.outputs[0]
+                .decode
+                .as_ref()
+                .unwrap()
+                .identity_label_decl("recipe:pager")
+                .is_none()
+        );
+
+        // A field the writer never stores, an unknown `from`, an unknown `meaning`, an ambiguous
+        // stored key (two mapped paths sharing `name`), and a label with no identity: all errors.
+        for label in [
+            json!({"field": "not_mapped"}),
+            json!({"field": "alias", "confidence": {"field": "nope", "meaning": "vote-share"}}),
+            json!({"field": "alias", "confidence": {"field": "crc_ok_rate", "from": "guess", "meaning": "vote-share"}}),
+            json!({"field": "alias", "confidence": {"field": "crc_ok_rate", "meaning": "vibes"}}),
+            json!({"field": "a.name"}),
+        ] {
+            let r = with(base(label.clone()));
+            assert!(
+                paths(&r)
+                    .iter()
+                    .any(|p| p == "outputs[0].decode.identity_label"),
+                "{label} should be refused: {:?}",
+                paths(&r)
+            );
+        }
+        let no_identity = with(json!({"frame_model": "x", "metadata": ["alias"],
+            "identity_label": {"field": "alias"}}));
+        assert!(
+            paths(&no_identity)
+                .iter()
+                .any(|p| p == "outputs[0].decode.identity_label"),
+            "a label names an identity: {:?}",
+            paths(&no_identity)
+        );
+    }
+
+    /// T-1017: one rule for the key a mapped path is stored under — the last segment unless two
+    /// mapped paths share it, when the whole path is the key. The writer and the declaration check
+    /// read this same function, so a declaration can never name a key the writer does not produce.
+    #[test]
+    fn stored_key_is_the_last_segment_unless_shared() {
+        let paths: Vec<String> = ["mmsi", "a.name", "b.name", "x.y.sog"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(stored_key(&paths, "mmsi"), "mmsi");
+        assert_eq!(stored_key(&paths, "x.y.sog"), "sog");
+        assert_eq!(stored_key(&paths, "a.name"), "a.name");
+        assert_eq!(stored_key(&paths, "b.name"), "b.name");
     }
 
     fn audio_catalogue() -> Vec<BlockDescriptor> {

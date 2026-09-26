@@ -23,7 +23,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hk_model::sigmf::Datatype;
-use hk_model::{ContentClass, IdentityScheme};
+use hk_model::{
+    ContentClass, IdentityLabelDecl, IdentityScheme, LabelConfidence, LabelConfidenceDecl,
+    LabelConfidenceSource,
+};
 use hk_stream::policy::is_token;
 use hk_stream::{FeedFraming, StreamKind};
 use serde::Deserialize;
@@ -131,6 +134,11 @@ pub struct InputSpec {
 /// Output declaration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputSpec {
+    /// The **declared** identity label of this plugin's rows (T-1017, §9.1): which output field is
+    /// the identity's human-readable name and which its confidence. `None` — the default — means
+    /// this plugin has no label, and none is guessed from its field names: a plugin opts in by
+    /// declaring, never by naming a field a certain way (CLAUDE.md: decoders are consumers).
+    pub identity_label: Option<IdentityLabelDecl>,
     /// Schema id of the messages' `metadata`/`content`.
     pub schema_id: String,
     /// Ceiling class: messages claiming less restrictive classes are clamped to it (and to the
@@ -297,12 +305,30 @@ struct RawRange {
 #[serde(deny_unknown_fields)]
 struct RawOutput {
     format: Option<String>,
+    identity_label: Option<RawIdentityLabel>,
     schema_id: Option<String>,
     content_class: Option<String>,
     metadata_keys: Option<BTreeMap<String, RawMetaKey>>,
     frame_models: Option<Vec<String>>,
     labels: Option<Vec<String>>,
     identity: Option<RawIdentity>,
+}
+
+/// §9.1 `output.identity_label`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIdentityLabel {
+    frame_model: String,
+    field: String,
+    confidence: Option<RawLabelConfidence>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLabelConfidence {
+    field: String,
+    from: Option<String>,
+    meaning: String,
 }
 
 #[derive(Deserialize)]
@@ -401,6 +427,70 @@ fn string_max_len(
         }
     }
     Ok(n)
+}
+
+/// The [`IdentityLabelDecl`] `raw` declares for plugin `id`, validated (T-1017).
+///
+/// A label is **metadata** — it is served on list rows — so under a class that forbids content the
+/// declared field must also be allowlisted by `output.metadata_keys`: otherwise the host would
+/// strip the very field the manifest promises, and the plugin would silently never show a label.
+fn identity_label(
+    raw: Option<RawIdentityLabel>,
+    id: &str,
+    class: ContentClass,
+    policy: Option<&MetadataPolicy>,
+) -> Result<Option<IdentityLabelDecl>, ManifestError> {
+    let Some(l) = raw else { return Ok(None) };
+    let field = "output.identity_label";
+    let confidence = match l.confidence {
+        None => None,
+        Some(c) => {
+            let source = match c.from.as_deref().unwrap_or("field") {
+                "field" => LabelConfidenceSource::Field {
+                    field: c.field.clone(),
+                },
+                "vote-counts" => LabelConfidenceSource::VoteCounts {
+                    field: c.field.clone(),
+                },
+                other => {
+                    return Err(invalid(
+                        field,
+                        format!("confidence `from` is `field` or `vote-counts`, not {other:?}"),
+                    ));
+                }
+            };
+            let meaning = LabelConfidence::parse(&c.meaning).ok_or_else(|| {
+                invalid(
+                    field,
+                    format!(
+                        "confidence `meaning` is `vote-share`, `crc-valid-rate` or \
+                         `decoder-score`, not {:?}",
+                        c.meaning
+                    ),
+                )
+            })?;
+            Some(LabelConfidenceDecl { source, meaning })
+        }
+    };
+    let decl = IdentityLabelDecl::new(id, l.frame_model, l.field, confidence)
+        .map_err(|e| invalid(field, e.0))?;
+    if !class.permits_content() {
+        for path in std::iter::once(decl.label_field.as_str())
+            .chain(decl.confidence.as_ref().map(|c| c.source.field()))
+        {
+            let top = path.split('.').next().unwrap_or(path);
+            if !policy.is_some_and(|p| p.keys.contains_key(top)) {
+                return Err(invalid(
+                    field,
+                    format!(
+                        "under {class:?} the declared field {path:?} must be allowlisted in \
+                         output.metadata_keys, or the host strips it"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(Some(decl))
 }
 
 fn metadata_policy(
@@ -721,6 +811,12 @@ impl PluginManifest {
         if !content_class.permits_content() && raw_output_lacks_keys(&metadata_policy) {
             return Err(ManifestError::Missing("output.metadata_keys"));
         }
+        let identity_label = identity_label(
+            raw_output.identity_label.take(),
+            &id,
+            content_class,
+            metadata_policy.as_ref(),
+        )?;
 
         let restart = RestartPolicy {
             backoff_initial: Duration::from_millis(raw.restart.backoff_initial_ms.unwrap_or(200)),
@@ -778,6 +874,7 @@ impl PluginManifest {
                 schema_id,
                 content_class,
                 metadata_policy,
+                identity_label,
             },
             restart,
             limits,
@@ -920,6 +1017,104 @@ mod tests {
             emitter_id: None,
             provenance_ref: None,
         }
+    }
+
+    /// T-1017: a plugin's identity label is **declared** in its manifest or it does not exist. The
+    /// default is no label — so a plugin whose fields are spelled like a built-in decoder's gets
+    /// none — and a declaration is validated: the meaning is required and named, the paths are
+    /// dotted `[A-Za-z0-9_]` paths, and under a class that forbids content the declared fields must
+    /// also be allowlisted, or the host would strip the field the manifest promises.
+    #[test]
+    fn an_identity_label_is_declared_or_absent_and_is_validated() {
+        // The default: no declaration, so no label.
+        assert_eq!(parse(&base()).unwrap().output.identity_label, None);
+
+        let with = |label: Value| {
+            let mut v = base();
+            v["output"] = json!({"format": "ndjson", "schema_id": "hackriff.adsb/1",
+                                 "content_class": "unrestricted", "identity_label": label});
+            parse(&v)
+        };
+        let m = with(json!({"frame_model": "adsb-ident", "field": "callsign",
+                            "confidence": {"field": "crc_ok_rate", "meaning": "crc-valid-rate"}}))
+        .unwrap();
+        assert_eq!(
+            m.output.identity_label,
+            Some(
+                IdentityLabelDecl::new(
+                    "adsb-like",
+                    "adsb-ident",
+                    "callsign",
+                    Some(LabelConfidenceDecl {
+                        source: LabelConfidenceSource::Field {
+                            field: "crc_ok_rate".into()
+                        },
+                        meaning: LabelConfidence::CrcValidRate,
+                    })
+                )
+                .unwrap()
+            ),
+            "the declaration names the declaring plugin as the decoder"
+        );
+        // A vote table instead of a figure.
+        let votes = with(json!({"frame_model": "adsb-ident", "field": "callsign",
+            "confidence": {"field": "callsign_votes", "from": "vote-counts", "meaning": "vote-share"}}))
+        .unwrap();
+        assert_eq!(
+            votes
+                .output
+                .identity_label
+                .unwrap()
+                .confidence
+                .unwrap()
+                .source,
+            LabelConfidenceSource::VoteCounts {
+                field: "callsign_votes".into()
+            }
+        );
+
+        for bad in [
+            json!({"frame_model": "adsb-ident", "field": "call sign"}),
+            json!({"frame_model": "", "field": "callsign"}),
+            json!({"frame_model": "adsb-ident", "field": "callsign",
+                   "confidence": {"field": "r", "meaning": "vibes"}}),
+            json!({"frame_model": "adsb-ident", "field": "callsign",
+                   "confidence": {"field": "r", "from": "guess", "meaning": "vote-share"}}),
+        ] {
+            let err = with(bad.clone()).unwrap_err();
+            assert!(
+                format!("{err}").contains("output.identity_label"),
+                "{bad} should be refused: {err}"
+            );
+        }
+        // A missing `meaning` is a shape error, not a silent default.
+        assert!(
+            with(json!({"frame_model": "f", "field": "callsign", "confidence": {"field": "r"}}))
+                .is_err()
+        );
+
+        // Under a class that forbids content the declared fields must be allowlisted. The rule
+        // applies exactly where the host actually strips fields, so it is checked under content
+        // gating, like the neighbouring `output.metadata_keys` requirement (T-143: gating is
+        // opt-in, and each nextest test runs in its own process).
+        hk_model::set_content_gating(true);
+        let restricted = |keys: Value| {
+            let mut v = base();
+            v["output"] = json!({"format": "ndjson", "schema_id": "hackriff.pager/1",
+                "content_class": "restricted-paging",
+                "metadata_keys": keys,
+                "identity_label": {"frame_model": "pager-session", "field": "alias"}});
+            parse(&v)
+        };
+        let err = restricted(json!({"capcode": {"type": "digits"}})).unwrap_err();
+        assert!(
+            format!("{err}").contains("output.identity_label"),
+            "an unallowlisted label field is refused: {err}"
+        );
+        let ok = restricted(json!({"capcode": {"type": "digits"},
+                                   "alias": {"type": "enum", "values": ["FIRE-DISPATCH"]}}));
+        assert!(ok.is_ok(), "{:?}", ok.err());
+        hk_model::set_content_gating(false);
     }
 
     /// A startup budget shorter than the responsiveness one would re-create the T-540 defect in a

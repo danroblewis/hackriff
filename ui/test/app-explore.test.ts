@@ -161,10 +161,26 @@ test("identityChip: the voted label beside its code, the label's frame share wor
     { cls: "identity", text: "KROQ · A1B2", title: IDENTITY_CHIP_TITLE },
   );
   // A split vote: the label's share of the session's frames, worded as a share of frames so it
-  // never reads as confidence in the code (T-967 N2).
+  // never reads as confidence in the code (T-967 N2) — and worded so BECAUSE the decoder declared
+  // the figure to be a vote share (T-1017 `identity_label_meaning`), not because a share is assumed.
   assert.deepEqual(
-    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92 })),
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92, identity_label_meaning: "vote-share" })),
     { cls: "identity", text: "KROQ · A1B2 · 92% of frames", title: IDENTITY_CHIP_TITLE },
+  );
+  // T-1017: a different declared meaning is a different claim, and reads as one. The same 0.92
+  // beside the same name is not "92% of frames" when the decoder declared a CRC-valid rate.
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "other:pocsag-ric", identity_value: "1234567", identity_label: "FIRE DISPATCH", identity_label_share: 0.92, identity_label_meaning: "crc-valid-rate" })),
+    { cls: "identity", text: "FIRE DISPATCH · 1234567 · 92% CRC-valid", title: IDENTITY_CHIP_TITLE },
+  );
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "other:x", identity_value: "7", identity_label: "NAME", identity_label_share: 0.5, identity_label_meaning: "decoder-score" })),
+    { cls: "identity", text: "NAME · 7 · 50% decoder score", title: IDENTITY_CHIP_TITLE },
+  );
+  // A share with no declared meaning claims nothing about what it counts: the bare percentage.
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "other:x", identity_value: "7", identity_label: "NAME", identity_label_share: 0.5 })),
+    { cls: "identity", text: "NAME · 7 · 50%", title: IDENTITY_CHIP_TITLE },
   );
   // No label decoded yet: the bare code, so a decoded-but-unlabelled identity (an ICAO address,
   // an MMSI) still shows something rather than nothing.
@@ -1230,6 +1246,7 @@ test("loadInventoryRows: THE REQUEST — the decoded identity rides the one list
   const withPi = makeRow({
     id: "station", state: "confirmed",
     identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92,
+    identity_label_meaning: "vote-share",
   });
   const { ctx, paths, atLiveEdge } = windowCtx({ confirmed: [withPi], candidate: [] });
   atLiveEdge(CAPTURE_EDGE_S);

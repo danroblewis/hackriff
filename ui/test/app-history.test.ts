@@ -147,6 +147,17 @@ test("eventRowView shows a ranked explanation as a suggestion, never as what the
   assert.equal(eventRowView(event(), emitter()).what, "unknown");
   assert.equal(eventRowView(event(), emitter({ family: "wfm-broadcast" })).what, "wfm-broadcast");
   assert.equal(eventRowView(event(), emitter({ identity_value: "A1B2" })).what, "A1B2");
+  // T-1017: the catalogue names the identity by the label its decoder DECLARED, when the backend
+  // served one for this window — "KROQ", not the four hex digits of the PI. Never composed here:
+  // the label is taken as served, and an emitter with no declared label still shows its code.
+  assert.equal(
+    eventRowView(event(), emitter({ identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92, identity_label_meaning: "vote-share" })).what,
+    "KROQ",
+  );
+  assert.equal(
+    eventRowView(event(), emitter({ identity_value: "a1b2c3", identity_label: null })).what,
+    "a1b2c3",
+  );
 });
 
 test("eventRowView carries the backend's `open`, and an event with no emitter still renders", () => {

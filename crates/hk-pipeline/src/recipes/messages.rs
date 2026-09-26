@@ -149,25 +149,29 @@ impl RowSpec {
     }
 }
 
+/// Records the recipe's **declared** identity label (T-1017) for the rows this writer will write,
+/// so `/api/inventory` and `/api/events` can render the label the recipe named — and only that.
+/// A recipe that declares none records nothing and is served none. A declaration that does not
+/// validate is skipped: `Recipe::validate` reports it, and a writer is not the place to fail a
+/// pipeline over a cosmetic field.
+fn declare_identity_label(repo: &mut Repository, recipe: &Recipe, mapping: &DecodeMapping) {
+    if let Some(Ok(decl)) = mapping.identity_label_decl(&format!("recipe:{}", recipe.id)) {
+        let _ = repo.declare_identity_label(&decl);
+    }
+}
+
 /// A present, decoded field (not a layer, not a failed field).
 fn present<'a>(tree: &'a LayerTree, path: &str) -> Option<&'a LayerNode> {
     tree.node(path).filter(|n| !n.error && n.value.is_some())
 }
 
 /// `(path, key)`: the key is the path's last segment unless another path in `paths` shares it.
+/// The rule itself is [`hk_recipe::stored_key`], shared with the recipe's declared-label check
+/// (T-1017), so a declaration can never name a key this writer does not produce.
 fn keyed(paths: &[String]) -> Vec<(String, String)> {
-    let last = |p: &str| p.rsplit('.').next().unwrap_or(p).to_owned();
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-    for p in paths {
-        *seen.entry(last(p)).or_default() += 1;
-    }
     paths
         .iter()
-        .map(|p| {
-            let k = last(p);
-            let key = if seen[&k] > 1 { p.clone() } else { k };
-            (p.clone(), key)
-        })
+        .map(|p| (p.clone(), hk_recipe::stored_key(paths, p)))
         .collect()
 }
 
@@ -311,7 +315,8 @@ impl MessagesSink {
                 .and_then(|p| Publisher::with_metadata_policy(header.clone(), config, p).ok())
         };
         let stream = publisher.as_ref().map(|p| (header.clone(), p.handle()));
-        let repo = Repository::open(&shared.db_path).map_err(|e| format!("repository: {e}"))?;
+        let mut repo = Repository::open(&shared.db_path).map_err(|e| format!("repository: {e}"))?;
+        declare_identity_label(&mut repo, recipe, &mapping);
         let evidence = mapping.service.clone().unwrap_or_else(|| recipe.id.clone());
         let (classify, errors) = (Arc::clone(shared), Arc::clone(shared));
         let writer = Writer {
@@ -382,7 +387,8 @@ impl MessagesSink {
             .decode
             .clone()
             .ok_or("a messages output needs a decode mapping")?;
-        let repo = Repository::open(db_path).map_err(|e| format!("repository: {e}"))?;
+        let mut repo = Repository::open(db_path).map_err(|e| format!("repository: {e}"))?;
+        declare_identity_label(&mut repo, recipe, &mapping);
         let writer = Writer {
             stats: Arc::clone(&stats),
             ingest: Ingest::new(repo),

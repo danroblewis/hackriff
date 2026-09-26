@@ -24,7 +24,8 @@ import {
   type Loaded,
 } from "./focus";
 import {
-  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, identityChip, loadInventoryRows,
+  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, identityChip,
+  labelConfidenceText, loadInventoryRows,
   nextInventorySort, promoteEntry, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   liveEdgeS, sortInventoryRows, viewWindow, windowKey, type Row,
 } from "./inventory";
@@ -332,11 +333,23 @@ export function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<Signatu
     h("p", { class: "hint" }, clusterText));
 
   // GAP 3: only the identity (not the latest decoded fields, e.g. RDS PS/PTY) is on the row, so
-  // this shows only what's actually served — no invented decode summary.
+  // this shows only what's actually served — no invented decode summary. T-1017: the declared
+  // label is one of those served fields, and this panel is where the identity is read in full, so
+  // it shows the name and its declared confidence in the declared terms — the same
+  // backend-rendered strings the list chip shows, never a second derivation. A decoder that
+  // declared no label leaves the row out entirely rather than showing an empty "Name".
+  const labelShare = r.identity_label_share;
   const identityBox = r.identity_scheme
     ? h("div", { class: "decode" },
         h("div", { class: "section-h", style: "margin-bottom:6px" }, "Identity"),
-        h("dl", { class: "kv" }, h("dt", {}, r.identity_scheme), h("dd", {}, r.identity_value ?? (r.withheld ? "withheld" : "—"))))
+        h("dl", { class: "kv" },
+          h("dt", {}, r.identity_scheme), h("dd", {}, r.identity_value ?? (r.withheld ? "withheld" : "—")),
+          ...(r.identity_label
+            ? [h("dt", {}, "name"),
+               h("dd", {}, labelShare !== null && labelShare !== undefined
+                 ? `${r.identity_label} · ${labelConfidenceText(labelShare, r.identity_label_meaning)}`
+                 : r.identity_label)]
+            : [])))
     : null;
 
   // T-804: the sheet's device actions (the mockup's Listen … Delete), built from the context
