@@ -13,7 +13,7 @@
 //! **Flag search before destuffing (AIS/AX.25).** Stuffing guarantees six ones in a row only
 //! ever occur in a flag *on the stuffed line*; destuffed data can contain `01111110` (40 % of
 //! random AIS position reports do), so a receiver frames first (`sync_search` on the stuffed
-//! bits) and destuffs each frame here in `frames` mode. `bit_order: lsb` (frames only) then
+//! bits) and destuffs each frame here in `frames` mode. `bit_order: lsb` (frames, destuff only) then
 //! reverses the destuffed body per 8 bits from its first bit — the octets of a protocol that
 //! sends each octet LSB first (HDLC, ISO/IEC 13239 §4.3), in the packed form `crc` and `fields`
 //! read (the `sync_search` `bit_order` convention, which cannot be used there: the stuffed line
@@ -60,8 +60,8 @@ pub(crate) fn descriptor(inputs: Vec<PortSpec>, outputs: Vec<PortSpec>) -> Block
             param(
                 "bit_order",
                 one_of(&["msb", "lsb"]),
-                "frames only: lsb = the protocol sends octets LSB first (HDLC/AIS); the \
-                 destuffed body is bit-reversed per 8 bits from its first bit.",
+                "frames and destuff only: lsb = the protocol sends octets LSB first \
+                 (HDLC/AIS); the destuffed body is bit-reversed per 8 bits from its first bit.",
             )
             .default_value("msb"),
         ],
@@ -88,6 +88,13 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         "lsb" => true,
         _ => return Err(BlockError::Params("bit_order must be msb or lsb".into())),
     };
+    if lsb && stuff {
+        return Err(BlockError::Params(
+            "bit_order: lsb needs direction: destuff (the per-octet reversal runs after the \
+             rule, so stuffing would reverse already-stuffed bits)"
+                .into(),
+        ));
+    }
     if abort <= after {
         return Err(BlockError::Params(
             "abort_ones must exceed stuff_after".into(),
@@ -359,5 +366,17 @@ mod tests {
             hold_items: 0,
         }]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn lsb_with_stuff_is_refused() {
+        use crate::blocks::framing::common::testutil::try_build;
+        let refused = try_build(
+            "bitstuff",
+            json!({ "bit_order": "lsb", "direction": "stuff" }),
+            PortType::Frames,
+        );
+        assert!(refused.is_err_and(|e| e.contains("destuff")));
+        assert!(try_build("bitstuff", json!({ "bit_order": "lsb" }), PortType::Frames).is_ok());
     }
 }

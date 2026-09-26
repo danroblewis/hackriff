@@ -2515,7 +2515,7 @@ fn record_quiet_after(
             Timestamp::from_unix_nanos(before_ns),
         ),
     );
-    if !ev.has_source() || ev.truncated {
+    if !ev.has_source() || ev.truncated() {
         return None;
     }
     let floor = from.max(ev.oldest_record?.as_unix_nanos());
