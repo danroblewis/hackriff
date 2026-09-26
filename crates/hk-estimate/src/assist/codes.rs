@@ -22,10 +22,15 @@
 //! 4. Validation over frames **distinct across all classes** (a repeated frame is one piece of
 //!    evidence); init/xorout solved over GF(2) from two lengths (a linear system in `I`), else
 //!    the standard settings, else `init 0` with the constant as xorout.
-//! 5. Claim only when the independent differences `D = validated − constants − structured`
-//!    (differences from the group's first frame that repeat with a period ≤ 16 bits are not
-//!    random multiples of the generator) are ≥ 2, `validated / tested ≥ 0.5` and the evidence
-//!    `w·D − log2(hypotheses)` is ≥ 16 bits.
+//! 5. Claim only when the independent differences `D = validated − constants − uncredited` are
+//!    ≥ 2, `validated / tested ≥ 0.5` and the evidence `w·D − log2(hypotheses)` is ≥ 16 bits.
+//!    *Uncredited* is two things: a difference from the group's first frame that repeats with a
+//!    period ≤ 16 bits (not a random multiple of the generator), **and** a span that ADR-0022
+//!    §4.3.1's count refuses as an independent trial — the real `CheckTally`, the same code the
+//!    check blocks run (T-921). A refused span is still *tested*, so the look-elsewhere
+//!    denominator is unchanged: fewer bits, never more. Without it every zero-padded shift of
+//!    one no-code burst counted as its own difference, and a single 2⁻ʷ event confirmed at
+//!    **every** width (T-577 §2.5).
 //! 6. Ambiguity: every divisor of a fitting generator fits too, and with few differences the GCD
 //!    carries chance factors (3 Mode-S frames: CRC-24 × a small factor fits). The fits of one
 //!    cell compete: each gets its posterior share (weight `2^((D−1)·w)`, the odds of a multiple
@@ -54,6 +59,8 @@ use super::{
     BchFragment, BlockFragment, Budget, CrcBlocks, CrcFragment, CrcSpan, FragmentParams, Meter,
     ParityFragment, WorkReport, hex_bits,
 };
+use hk_model::synth::tally::CheckTally;
+
 use crate::framing::bits::{BitOrder, pack};
 use crate::framing::crc::{CATALOGUE, CrcParams, Endianness, read_field};
 
@@ -192,7 +199,8 @@ pub struct CodeSuggestion {
     /// Distinct frames tested.
     pub tested: usize,
     /// Independent frame differences behind the claim: validated distinct frames minus the
-    /// constants, not counting differences that repeat with a short period.
+    /// constants, not counting differences that repeat with a short period, nor spans ADR-0022
+    /// §4.3.1's count refuses as independent trials (T-921 — see the module header, step 5).
     pub differences: usize,
     /// `w·differences − log2(hypotheses)`.
     pub evidence_bits: f64,
@@ -292,6 +300,16 @@ struct Covered {
     class: usize,
     len: usize,
     poly: Poly,
+    /// Whether ADR-0022 §4.3.1's count credits this span as an **independent trial** — the real
+    /// [`CheckTally`], the same code the `crc` / `bch` / `parity` / `checksum` blocks run
+    /// (T-921). A span it refuses (idle fill under the degenerate guard; a shift, doubling or
+    /// repeat of one already-counted burst; a frame inside the others' affine span) is still
+    /// *tested* here — it keeps the look-elsewhere denominator honest — but it may not pay for
+    /// the claim, because it is valid by construction once the others are. Without this the
+    /// searched path credited every zero-padded shift of one burst as its own difference, and
+    /// a single 2^−w event confirmed at **every** width, worst at 32 where ADR-0021 §8.2's null
+    /// control cannot see it (T-577 §2.5).
+    counted: bool,
 }
 
 /// Searches CRC / cyclic codes and parity over `frames` (bits, one `u8` per bit), in order (the
@@ -320,6 +338,9 @@ pub(crate) fn search_indexed(
     meter: &mut Meter,
 ) -> (Vec<CodeSuggestion>, Vec<ParitySuggestion>) {
     let parity = search_parity(frames, cfg, meter);
+    // One tally for the whole search: its GF(2) arena is allocated here and rewound per cell
+    // (T-928 — a `CheckTally` reserves ~11.7 KiB, and a cell list runs to hundreds).
+    let mut tally = CheckTally::default();
     let min_w = usize::from(cfg.min_width.clamp(3, 32));
     let max_w = usize::from(cfg.max_width.clamp(cfg.min_width.clamp(3, 32), 32));
     let min_len = frames.iter().map(|f| f.1.len()).min().unwrap_or(0);
@@ -386,7 +407,9 @@ pub(crate) fn search_indexed(
                 break 'stages;
             }
             meter.hypothesis();
-            search_cell(frames, *cell, min_w, max_w, log2_h, cfg, meter, &mut found);
+            search_cell(
+                frames, *cell, min_w, max_w, log2_h, cfg, meter, &mut tally, &mut found,
+            );
         }
         if !found.is_empty() {
             break;
@@ -476,17 +499,23 @@ fn search_cell(
     log2_h: f64,
     cfg: &CodeSearchConfig,
     meter: &mut Meter,
+    tally: &mut CheckTally,
     found: &mut Vec<CodeSuggestion>,
 ) {
     // Distinct covered frames: a frame repeated (in any class) is one piece of evidence.
     let mut seen: HashSet<(usize, Poly)> = HashSet::new();
     let mut covered: Vec<Covered> = Vec::new();
+    // The §4.3.1 count over this cell's spans, in the order they arrive. The register width is
+    // the cell's **widest** check: a span that is idle fill under the widest trim is idle fill
+    // under every narrower one, so the mask is the same for every `w` the cell tries — and the
+    // trim only ever refuses a span, never credits one.
+    tally.clear();
     for (idx, f) in frames {
         let Some(bits) = covered_bits(f, cell) else {
             continue;
         };
         // Copy, pack bit by bit, hash the words.
-        meter.charge(bits.len() as u64 * 2 + 64);
+        meter.charge(bits.len() as u64 * 3 + 128);
         if bits.len() < 2 * min_w {
             continue;
         }
@@ -494,10 +523,13 @@ fn search_cell(
         if !seen.insert((bits.len(), poly.clone())) {
             continue;
         }
+        let before = tally.independent();
+        tally.record(&bits, true, max_w as f64, max_w);
         covered.push(Covered {
             class: idx % cell.classes,
             len: bits.len(),
             poly,
+            counted: tally.independent() > before,
         });
     }
     drop(seen);
@@ -513,7 +545,14 @@ fn search_cell(
     if deg < min_w {
         return;
     }
-    let structured = structured_differences(&covered, cross_length, meter);
+    // A difference pays for the claim only when it is both a random multiple of the generator
+    // (not a short-period difference from its group's first frame) **and** an independent trial
+    // under ADR-0022 §4.3.1's count.
+    let structured: Vec<bool> = structured_differences(&covered, cross_length, meter)
+        .into_iter()
+        .zip(&covered)
+        .map(|(s, c)| s || !c.counted)
+        .collect();
     let mut fits: Vec<Fit> = Vec::new();
     for w in (min_w..=max_w.min(deg)).rev() {
         if !meter.ok() {

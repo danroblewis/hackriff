@@ -5,12 +5,16 @@
 //! artefact rather than by a code").
 //!
 //! Every input here carries **no code**. A width-`w` check that reaches ADR-0022 §4.2's
-//! requirement on it is a false confirm. The harness uses the real pieces the gate reads:
-//! `hk_estimate::framing::crc::BitCrc` (the `crc` block's engine), `hk_model::synth::null::
-//! {check_bits, is_short_periodic}` (the S5 `check_distinct_valid` arithmetic and the
-//! short-period guard `CheckTally` applies) and `hk_estimate::assist::search_codes` (the
-//! searched-generator path). The gate is ADR-0022 §6 steps 1–3 in check-only accounting:
-//! `min(check_bits(d, tested, w), w·d) − L_check ≥ 24`, which subsumes the 16-bit hard floor.
+//! requirement on it is a false confirm. The harness runs the **real** pieces the gate reads —
+//! no copy of any of them (T-921; T-577 measured a copy of the count, and ADR-0022 §4.3.1 will
+//! not move the width floor on a copy's numbers):
+//! `hk_model::synth::tally::CheckTally` (**the count itself**, exactly as the `crc` / `bch` /
+//! `parity` / `checksum` blocks run it), `hk_estimate::framing::crc::BitCrc` (the `crc` block's
+//! engine), `hk_model::synth::null::{check_bits, is_short_periodic}` (the S5 arithmetic) and
+//! `hk_estimate::assist::search_codes` (the searched-generator path, which since T-921 counts
+//! its own frames with the same `CheckTally`). The gate is ADR-0022 §6 steps 1–3 in check-only
+//! accounting: `min(check_bits(d, tested, w), w·d) − L_check ≥ 24`, which subsumes the 16-bit
+//! hard floor.
 //!
 //! The guard and the counts here read the span a check **covers**, not the frame it was cut
 //! from: with `span.start_bit > 0` an init-cancel frame is valid over its covered span while the
@@ -25,6 +29,11 @@
 //! 3. The same test's rank column — the GF(2) rank of the valid frames' differences, which is the
 //!    number of frames that are *independent trials* for a linear check.
 //!
+//! 4. [`residual_holes_in_the_shipped_count`] — the four shapes the count does **not** close,
+//!    each with its mechanism: a burst pair `x^a·A + x^b·B`, an idle tail of ≤ 16 bits, a
+//!    checksum whose cancelling prefix is wider than its register, and a covered span that
+//!    starts late. T-921 measures these before the width floor may move.
+//!
 //! The assertions pin the findings at a small default trial count so the finding cannot rot;
 //! `HK_T577_TRIALS=<n> cargo nextest run -p hk-estimate -E 'binary(degenerate_null)'
 //! --no-capture` prints the full tables (the numbers in ADR-0022 §4.3 came from n = 4000).
@@ -34,6 +43,7 @@ use std::collections::HashSet;
 use hk_estimate::assist::{CodeSearchConfig, search_codes};
 use hk_estimate::framing::crc::BitCrc;
 use hk_model::synth::null::{SHORT_PERIOD_MAX_BITS, check_bits, is_short_periodic};
+use hk_model::synth::tally::{CheckTally, degenerate_frame};
 
 /// ADR-0022 §4.1.
 const MIN_ANALYTIC: f64 = 24.0;
@@ -183,9 +193,19 @@ enum Source {
     Repeat,
     /// Synthetic: a random 20-bit payload Manchester-coded to 40 chips, never decoded.
     Manchester,
+    /// Synthetic: a no-code **two-message** emitter, sending `A`, `B`, and one slot in three the
+    /// two back-to-back inside one frame — both messages conditioned on `g | ·`, so the rate is
+    /// `2^(−2w) ×` this (importance sampling, as [`Source::BeaconSeeded`] is `2^−w ×` its own).
+    ///
+    /// `x^p·A + x^q·B` is divisible by `g` whenever `A` and `B` are, so the composite frame is
+    /// valid **by construction** — and ADR-0022 §4.3.1's dedup does not see it: the
+    /// multiple/divisor rule collapses shifts and copies of **one** already-counted burst, and
+    /// this is a sum of two. Nor does the affine-rank cap: the three frames' differences are
+    /// linearly independent. It is the hole that decides the width floor (T-921).
+    PairSeeded,
 }
 
-const SOURCES: [Source; 8] = [
+const SOURCES: [Source; 9] = [
     Source::Iid,
     Source::Runs,
     Source::Dsss,
@@ -194,6 +214,7 @@ const SOURCES: [Source; 8] = [
     Source::Sensor,
     Source::Repeat,
     Source::Manchester,
+    Source::PairSeeded,
 ];
 
 impl Source {
@@ -207,6 +228,7 @@ impl Source {
             Self::Sensor => "A sensor, no code",
             Self::Repeat => "A repeat at lag ord(g)",
             Self::Manchester => "A Manchester chips",
+            Self::PairSeeded => "A pair | g divides both",
         }
     }
     fn bursty(self) -> bool {
@@ -274,6 +296,22 @@ fn burst(source: Source, w: u8, rng: &mut Rng, state: &[u8], value: &mut i32) ->
             .into_iter()
             .flat_map(|d| [d, 1 - d])
             .collect(),
+        Source::PairSeeded => {
+            // `state` is A ‖ B. `value` is the slot counter: A, B, then the two back-to-back.
+            let k = *value as usize;
+            *value += 1;
+            let (a, b) = state.split_at(BURST);
+            match k % 3 {
+                0 => a.to_vec(),
+                1 => b.to_vec(),
+                _ => {
+                    let mut v = a.to_vec();
+                    v.extend(std::iter::repeat_n(0u8, 1 + k % 5));
+                    v.extend_from_slice(b);
+                    v
+                }
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -326,6 +364,16 @@ fn window_frames(source: Source, framer: Framer, w: u8, rng: &mut Rng) -> Vec<Ve
         state = with_check(&crc, &state[..BURST - usize::from(w)]);
     }
     let mut value = rng.below(4096) as i32;
+    if source == Source::PairSeeded {
+        // Two DIFFERENT messages, each conditioned on `g | ·`: the `2^(−2w)` prior is priced in
+        // the result, not sampled.
+        let crc = template(w, Affine::Linear);
+        let a = with_check(&crc, &rng.bits(BURST - usize::from(w)));
+        let b = with_check(&crc, &rng.bits(BURST - usize::from(w)));
+        state = a;
+        state.extend_from_slice(&b);
+        value = 0;
+    }
     let mut stream = vec![0u8; n * 2 * FRAME];
     let mut onsets = Vec::with_capacity(n);
     for k in 0..n {
@@ -365,75 +413,6 @@ fn hash(bits: &[u8]) -> u64 {
     }) ^ (bits.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
-/// The frame with leading and trailing zeros removed: equal for zero-padded shifts of one
-/// burst.
-fn core(bits: &[u8]) -> &[u8] {
-    let a = bits.iter().position(|&b| b == 1).unwrap_or(bits.len());
-    let z = bits.iter().rposition(|&b| b == 1).map_or(a, |i| i + 1);
-    &bits[a..z]
-}
-
-fn poly(bits: &[u8]) -> u128 {
-    bits.iter()
-        .fold(0u128, |v, &b| (v << 1) | u128::from(b & 1))
-}
-
-fn degree(p: u128) -> Option<u32> {
-    (p != 0).then(|| 127 - p.leading_zeros())
-}
-
-/// `a mod b` over GF(2).
-fn poly_mod(mut a: u128, b: u128) -> u128 {
-    let Some(db) = degree(b) else { return a };
-    while let Some(da) = degree(a) {
-        if da < db {
-            break;
-        }
-        a ^= b << (da - db);
-    }
-    a
-}
-
-/// The proposed trial count: valid, non-[`degenerate_frame`] frames whose [`core`] polynomial
-/// is not a multiple of (or a divisor of) one already counted. For a linear check `g | P`
-/// implies `g | m·P` for every `m`, so a zero-padded shift (`m = x^k`) or a frame holding two
-/// copies of one burst (`m = x^a + x^b`) is valid by construction once `P` is: one chance
-/// event, not two. Two different real frames of one length are never multiples of each other.
-fn independent_frames<'a>(frames: impl IntoIterator<Item = &'a [u8]>, w: usize) -> u64 {
-    let mut counted: Vec<u128> = Vec::new();
-    for f in frames {
-        if degenerate_frame(f, w) {
-            continue;
-        }
-        let c = poly(core(f));
-        if c == 0
-            || counted
-                .iter()
-                .any(|&p| poly_mod(c, p) == 0 || poly_mod(p, c) == 0)
-        {
-            continue;
-        }
-        counted.push(c);
-    }
-    counted.len() as u64
-}
-
-/// The degenerate-frame guard the measurement argues for: `CheckTally`'s short-period test,
-/// applied also with up to `w` bits trimmed from either end. An affine check (init ≠ 0) is
-/// satisfied by the frame `init ‖ 0…0` — the leading `w` bits cancel the register and the rest
-/// is idle fill — and with `xorout ≠ 0` by `init ‖ 0…0 ‖ xorout`; neither frame is periodic as a
-/// whole, so the shipped guard lets a single idle frame through.
-///
-/// `bits` is the span the check **covers** (`frame[start_bit ..]` here — `valid` reads the check
-/// field at its end), never the frame it was cut from: with `start_bit > 0` the cancelling `init`
-/// starts at `start_bit`, and trimming the *frame*'s ends misses it (T-928).
-fn degenerate_frame(bits: &[u8], w: usize) -> bool {
-    let n = bits.len();
-    [(0, n), (w, n), (0, n - w), (w, n - w)]
-        .iter()
-        .any(|&(a, z)| is_short_periodic(&bits[a..z], SHORT_PERIOD_MAX_BITS))
-}
-
 /// GF(2) rank of `{f_i ⊕ f_0}` over `frames` (all the same length ≤ 128): the number of frames
 /// beyond the first that are independent trials for a linear check. Any frame in the span of
 /// the others is valid automatically once they are.
@@ -463,16 +442,24 @@ struct Tally {
     valid: u64,
     /// `CheckSummary::distinct_valid`: distinct valid frames.
     distinct_valid: u64,
-    /// `CheckTally` / `HoldoutEvidence::differences`: distinct valid frames that are not
-    /// short-periodic.
+    /// The count that shipped **before** ADR-0022 §4.3.1: distinct valid frames that are not
+    /// short-periodic as a whole. Kept as the comparison column, not as a model of anything
+    /// live.
     differences: u64,
-    /// The proposed count, [`independent_frames`] over the frames `differences` counts.
-    fixed: u64,
-    /// GF(2) rank of the valid distinct frames' differences, + 1 for the first frame.
+    /// **The shipped count**, read off the real [`CheckTally`] (T-921): ADR-0022 §4.3.1's
+    /// trimmed degenerate guard, multiple/divisor dedup and affine-rank cap, exactly the code
+    /// the `crc` / `bch` / `parity` / `checksum` blocks and `assist::codes` run.
+    real: u64,
+    /// GF(2) rank of the valid distinct frames' differences, + 1 for the first frame — the
+    /// population quantity measurement 3 is about, not a count the gate reads.
     rank1: u64,
 }
 
-fn tally(crc: &BitCrc, frames: &[Vec<u8>]) -> Tally {
+/// Runs the frames of one window through the **real** [`CheckTally`] and, beside it, the two
+/// pre-§4.3.1 counts the result compares against. `tally` is cleared here, so one instance
+/// serves a whole cell (the arena is allocated once — T-928).
+fn tally(crc: &BitCrc, frames: &[Vec<u8>], real: &mut CheckTally) -> Tally {
+    real.clear();
     let mut t = Tally {
         tested: frames.len() as u64,
         ..Tally::default()
@@ -482,7 +469,9 @@ fn tally(crc: &BitCrc, frames: &[Vec<u8>]) -> Tally {
     let mut seen = HashSet::new();
     let w = usize::from(crc.width());
     for f in frames {
-        if !valid(crc, f) {
+        let ok = valid(crc, f);
+        real.record(f, ok, w as f64, w);
+        if !ok {
             continue;
         }
         t.valid += 1;
@@ -493,7 +482,7 @@ fn tally(crc: &BitCrc, frames: &[Vec<u8>]) -> Tally {
     }
     t.distinct_valid = dv.len() as u64;
     t.differences = diff.len() as u64;
-    t.fixed = independent_frames(diff.iter().copied(), w);
+    t.real = real.independent();
     t.rank1 = if diff.is_empty() {
         0
     } else {
@@ -528,8 +517,8 @@ struct Rates {
     gate: u64,
     /// The gate on `min(differences, rank + 1)`: the rank cap alone.
     gate_rank: u64,
-    /// The gate on `min(fixed, rank + 1)`: the proposed count.
-    gate_fixed: u64,
+    /// The gate on the real [`CheckTally`] count: **what ships** (ADR-0022 §4.3.1).
+    gate_real: u64,
     /// Frames tested, and frames valid: the per-frame pass rate against `2^−w`.
     frames: u64,
     frames_valid: u64,
@@ -539,10 +528,11 @@ fn template_rates(source: Source, framer: Framer, w: u8, a: Affine, n: usize) ->
     let crc = template(w, a);
     let req = min_differences(w, 0.0);
     let mut r = Rates::default();
+    let mut real = CheckTally::default();
     let mut rng = Rng(0x7577 ^ (u64::from(w) << 32) ^ ((source as u64) << 40) ^ framer as u64);
     for _ in 0..n {
         let frames = window_frames(source, framer, w, &mut rng);
-        let t = tally(&crc, &frames);
+        let t = tally(&crc, &frames, &mut real);
         r.trials += 1;
         r.frames += t.tested;
         r.frames_valid += t.valid;
@@ -550,7 +540,7 @@ fn template_rates(source: Source, framer: Framer, w: u8, a: Affine, n: usize) ->
         r.diff_req += u64::from(t.differences >= req);
         r.gate += u64::from(gate(t.differences, t.tested, w, 0.0));
         r.gate_rank += u64::from(gate(t.differences.min(t.rank1), t.tested, w, 0.0));
-        r.gate_fixed += u64::from(gate(t.fixed.min(t.rank1), t.tested, w, 0.0));
+        r.gate_real += u64::from(gate(t.real, t.tested, w, 0.0));
     }
     r
 }
@@ -563,11 +553,10 @@ struct SearchRates {
     /// ... whose validated distinct frames reach `min_differences(w, w + 5)`.
     dv_req: u64,
     /// ... whose `differences` reach it: ADR-0022 §6 step 2–3 for a searched check, before the
-    /// §5.3 null control.
+    /// §5.3 null control. Since T-921 the search counts its own frames with the real
+    /// [`CheckTally`], so this column **is** the §4.3.1 count applied to the searched path;
+    /// T-577 §2.5 records the same column before that change.
     gate: u64,
-    /// The same, with the proposed count applied upstream of the search: only frames that
-    /// [`independent_frames`] counts are searched.
-    gate_fixed: u64,
 }
 
 fn searched_gate(
@@ -610,19 +599,6 @@ fn searched_rates(source: Source, framer: Framer, w: u8, n: usize) -> SearchRate
             r.dv_req += u64::from(validated >= req);
             r.gate += u64::from(pass);
         }
-        // The proposed count applied upstream of the search: keep only frames that are
-        // independent trials in the [`independent_frames`] sense.
-        let mut reduced: Vec<Vec<u8>> = Vec::new();
-        for f in frames {
-            let before = independent_frames(reduced.iter().map(Vec::as_slice), usize::from(w));
-            reduced.push(f);
-            if independent_frames(reduced.iter().map(Vec::as_slice), usize::from(w)) == before {
-                reduced.pop();
-            }
-        }
-        if let Some((_, pass)) = searched_gate(&reduced, w, &cfg, l_check) {
-            r.gate_fixed += u64::from(pass);
-        }
     }
     r
 }
@@ -661,7 +637,7 @@ fn degenerate_null_rate_per_width() {
         "diff>=req",
         "GATE",
         "gate|rank",
-        "gate|fix",
+        "gate|REAL",
         "2^-w"
     );
     let mut results = Vec::new();
@@ -671,7 +647,8 @@ fn degenerate_null_rate_per_width() {
                 continue;
             }
             for a in [Affine::Linear, Affine::Ones] {
-                if source == Source::BeaconSeeded && a == Affine::Ones {
+                if matches!(source, Source::BeaconSeeded | Source::PairSeeded) && a == Affine::Ones
+                {
                     continue;
                 }
                 for w in WIDTHS {
@@ -687,7 +664,7 @@ fn degenerate_null_rate_per_width() {
                         pct(r.diff_req, r.trials),
                         pct(r.gate, r.trials),
                         pct(r.gate_rank, r.trials),
-                        pct(r.gate_fixed, r.trials),
+                        pct(r.gate_real, r.trials),
                         (-f64::from(w)).exp2(),
                     );
                     results.push((source, framer, a, w, r));
@@ -700,12 +677,15 @@ fn degenerate_null_rate_per_width() {
          L_check = w + 5, {n_search} windows. Before the §5.3 null control.\n"
     );
     println!(
-        "{:<26} {:<9} {:>3} | {:>12} {:>12} {:>12} {:>12}",
-        "source", "framer", "w", "claimed", "dv>=req", "GATE", "gate|fix"
+        "{:<26} {:<9} {:>3} | {:>12} {:>12} {:>12}",
+        "source", "framer", "w", "claimed", "dv>=req", "GATE"
     );
     let mut searched = Vec::new();
     for source in SOURCES {
-        if !full_search && source.bursty() && source != Source::BeaconSeeded {
+        if !full_search
+            && source.bursty()
+            && !matches!(source, Source::BeaconSeeded | Source::PairSeeded)
+        {
             continue;
         }
         let framers: &[Framer] = if full_search {
@@ -717,14 +697,13 @@ fn degenerate_null_rate_per_width() {
             for w in WIDTHS {
                 let r = searched_rates(source, framer, w, n_search);
                 println!(
-                    "{:<26} {:<9} {:>3} | {:>12} {:>12} {:>12} {:>12}",
+                    "{:<26} {:<9} {:>3} | {:>12} {:>12} {:>12}",
                     source.name(),
                     framer.name(),
                     w,
                     pct(r.claimed, r.trials),
                     pct(r.dv_req, r.trials),
                     pct(r.gate, r.trials),
-                    pct(r.gate_fixed, r.trials),
                 );
                 searched.push((source, framer, w, r));
             }
@@ -747,7 +726,7 @@ fn degenerate_null_rate_per_width() {
             for a in [Affine::Linear, Affine::Ones] {
                 for w in WIDTHS {
                     let r = get(s, f, a, w);
-                    assert_eq!(r.gate_fixed, 0, "{s:?} {f:?} {a:?} w={w}: {r:?}");
+                    assert_eq!(r.gate_real, 0, "{s:?} {f:?} {a:?} w={w}: {r:?}");
                     if !(s == Source::Runs && a == Affine::Ones && w >= 24) {
                         assert_eq!(r.gate, 0, "{s:?} {f:?} {a:?} w={w}: {r:?}");
                     }
@@ -782,7 +761,9 @@ fn degenerate_null_rate_per_width() {
         let covered = &f[START..];
         assert!(valid(&crc, covered), "w={w}");
         assert!(degenerate_frame(covered, wu), "covered span, w={w}");
-        assert_eq!(independent_frames([covered], wu), 0, "w={w}");
+        let mut t = CheckTally::default();
+        t.record(covered, true, f64::from(w), wu);
+        assert_eq!(t.independent(), 0, "w={w}");
         // The hole: the guard applied to the whole frame accepts it as an independent trial.
         assert!(!degenerate_frame(&f, wu), "whole frame, w={w}");
     }
@@ -808,14 +789,11 @@ fn degenerate_null_rate_per_width() {
             );
             // Counting shift-collapsed cores does.
             assert!(
-                r.gate_fixed * 5 <= r.trials,
-                "fixed count, w={w} {f:?}: {r:?}"
+                r.gate_real * 5 <= r.trials,
+                "shipped count, w={w} {f:?}: {r:?}"
             );
         }
-        assert_eq!(
-            get(Source::BeaconSeeded, f, Affine::Linear, 8).gate_fixed,
-            0
-        );
+        assert_eq!(get(Source::BeaconSeeded, f, Affine::Linear, 8).gate_real, 0);
     }
     // An exact anchor closes the shift door.
     for w in [8u8, 12] {
@@ -824,13 +802,41 @@ fn degenerate_null_rate_per_width() {
             0
         );
     }
+    // DEGENERATE NULL D (the burst pair, T-921): the shipped count collapses shifts, copies and
+    // repeats of ONE already-counted burst, because `g | P ⇒ g | m·P`. It does not see a frame
+    // holding two DIFFERENT counted bursts, `x^p·A + x^q·B`, which is divisible by `g` whenever
+    // both are — and the affine-rank cap does not either, since A, B and the composite are
+    // linearly independent. Conditional on the two `2^−w` events, the gate passes at every
+    // width, so the realised rate is `C(M, 2)·2^(−2w)` for an emitter with M distinct messages:
+    // 1.5e-5 at w = 8 for the minimal M = 2 — 30 % of the WHOLE 5e-5 budget for one mechanism on
+    // one population, and 4.2e-4 (8× over) for an M = 8 sensor — against 2.3e-10 at w = 16.
+    // This is why T-921 leaves `min_check_width` at 16 (ADR-0022 §4.3.1).
+    // Anchored (and with onset jitter) it is open at EVERY width from 8, conditionally certain.
+    for f in [Framer::Anchored, Framer::Jitter] {
+        for w in [8u8, 12, 16, 24, 32] {
+            let r = get(Source::PairSeeded, f, Affine::Linear, w);
+            assert!(
+                r.gate_real * 100 >= r.trials * 99,
+                "the burst-pair hole is open at w={w} {f:?}: {r:?}"
+            );
+        }
+    }
+    // A grid framer splits the composite more often than not, so the `tested` multiplicity
+    // holds it below the gate at w = 8 and it opens from w = 12 — the opposite of a floor
+    // argument, and the reason the decision rests on the anchored rows.
+    let grid = |w| get(Source::PairSeeded, Framer::Grid, Affine::Linear, w);
+    assert_eq!(grid(8).gate_real, 0, "{:?}", grid(8));
+    for w in [24u8, 32] {
+        let r = grid(w);
+        assert!(r.gate_real * 100 >= r.trials * 99, "{r:?}");
+    }
     // DEGENERATE NULL C (period): a payload repeated at lag ord(x mod g) satisfies the check
     // whatever the payload. ord ≤ 2^w − 1, so below a byte the lag is at most 15 bits, and
     // every frame is valid AND distinct: certain at w = 4, and no count fixes it.
     assert_eq!(order_of_x(4, template_poly(4), 64), Some(15));
     let rep4 = get(Source::Repeat, Framer::Anchored, Affine::Linear, 4);
     assert_eq!(rep4.gate, rep4.trials, "{rep4:?}");
-    assert!(rep4.gate_fixed * 10 >= rep4.trials * 9, "{rep4:?}");
+    assert!(rep4.gate_real * 10 >= rep4.trials * 9, "{rep4:?}");
     // It does not exist for the byte-and-over templates within a frame (orders > 20 bits).
     for w in [8u8, 12, 16, 24, 32] {
         assert!(
@@ -842,9 +848,12 @@ fn degenerate_null_rate_per_width() {
             0
         );
     }
-    // Searched: N2/N3 never reach the gate; the shift artefact does, at any width, because the
-    // GCD of shifted copies contains the burst polynomial and any degree-w divisor of it fits
-    // every frame. The proposed count removes it.
+    // Searched: N2/N3 never reach the gate. The shift artefact used to, **at every width** and
+    // worst at w = 32 (T-577 §2.5: 1–15 % unseeded, 20–31 % seeded), because the GCD of shifted
+    // copies contains the burst polynomial and any degree-w divisor of it fits every frame.
+    // Since T-921 `search_codes` counts its own frames with the real `CheckTally`, so a shift of
+    // one burst is one trial and the artefact is gone at every width — including w = 32, where
+    // ADR-0021 §8.2's null control cannot see it.
     let sb = |s: Source, f: Framer, w: u8| {
         searched
             .iter()
@@ -856,17 +865,8 @@ fn degenerate_null_rate_per_width() {
         for s in [Source::Iid, Source::Runs, Source::Dsss] {
             assert_eq!(sb(s, Framer::Grid, w).gate, 0, "{s:?} w={w}");
         }
-        assert_eq!(
-            sb(Source::BeaconSeeded, Framer::Grid, w).gate_fixed,
-            0,
-            "w={w}"
-        );
+        assert_eq!(sb(Source::BeaconSeeded, Framer::Grid, w).gate, 0, "w={w}");
     }
-    assert!(
-        WIDTHS
-            .iter()
-            .any(|&w| sb(Source::BeaconSeeded, Framer::Grid, w).gate > 0)
-    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -959,9 +959,9 @@ fn distinct_valid_versus_differences_on_real_emitters() {
     println!(
         "\nT-577 measurements 2 and 3: emitters WITH a code (template-fixed, anchored frames), mean \
          over {reps} runs. valid = repeat count; dv = distinct_valid; diff = differences \
-         (CheckTally); indep = the proposed count (multiples of one burst once, degenerate frames \
-         out); codesD = assist::codes' D on the same frames; rank+1 = independent trials for a \
-         linear check.\n"
+         (pre-§4.3.1: distinct, non-short-periodic); real = the SHIPPED CheckTally count \
+         (T-921); codesD = assist::codes' D on the same frames; rank+1 = independent trials for \
+         a linear check.\n"
     );
     println!(
         "{:<9} {:>3} {:>4} | {:>6} {:>6} {:>6} {:>6} {:>7} {:>7} | {:>9} {:>9}",
@@ -971,7 +971,7 @@ fn distinct_valid_versus_differences_on_real_emitters() {
         "valid",
         "dv",
         "diff",
-        "indep",
+        "real",
         "codesD",
         "rank+1",
         "dv-diff",
@@ -987,6 +987,7 @@ fn distinct_valid_versus_differences_on_real_emitters() {
     ] {
         let w = e.width();
         let crc = template(w, Affine::Linear);
+        let mut real = CheckTally::default();
         for k in [3usize, 4, 8, 16, 32, 64, 128] {
             let mut acc = [0f64; 5];
             let mut rng = Rng(0xe417 ^ (k as u64) << 8 ^ (w as u64) << 40);
@@ -995,12 +996,12 @@ fn distinct_valid_versus_differences_on_real_emitters() {
             let mut codes_d = 0f64;
             for r in 0..reps {
                 let frames = e.frames(k, &mut rng);
-                let t = tally(&crc, &frames);
+                let t = tally(&crc, &frames, &mut real);
                 acc[0] += t.valid as f64;
                 acc[1] += t.distinct_valid as f64;
                 acc[2] += t.differences as f64;
                 acc[3] += t.rank1 as f64;
-                acc[4] += t.fixed as f64;
+                acc[4] += t.real as f64;
                 if r % search_every == 0 {
                     let cfg = CodeSearchConfig {
                         min_width: w,
@@ -1057,9 +1058,34 @@ fn distinct_valid_versus_differences_on_real_emitters() {
         for k in [8usize, 64] {
             let r = at(e, k);
             assert!((r.3 - r.4).abs() < 1e-9, "{e} k={k}: {r:?}");
-            // The proposed count costs a real emitter nothing.
-            assert!((r.7 - r.4).abs() < 1e-9, "indep {e} k={k}: {r:?}");
+            // T-921: the SHIPPED count is the rank cap, so it is never above `differences` and
+            // it is exactly `rank + 1` up to the 64-frame counting cap. ADR-0022 §4.3.1 said
+            // the count "costs the five real-emitter models nothing: it equals `differences` at
+            // every k" — that was measured on the count WITHOUT the rank cap, and it is not
+            // true of what shipped: a repetitive payload loses the trials it never had (a
+            // counter 8.0 against 128 differences at k = 128, a slow sensor 7.4 against 17.8).
+            // That is the cap working, not a regression, and §4.3.1 is corrected by this run.
+            assert!(
+                r.7 <= r.4 + 1e-9,
+                "real above differences, {e} k={k}: {r:?}"
+            );
+            assert!(
+                (r.7 - r.6).abs() < 1e-9,
+                "real should be rank+1, {e} k={k}: {r:?}"
+            );
         }
+    }
+    // Every emitter still reaches the §4.2 requirement on its own width from few frames: the
+    // cap costs bits, it does not close the door on a real code.
+    for (e, k, need) in [
+        ("Beacon", 8usize, 1.0),
+        ("Toggle", 8, 2.0),
+        ("Sensor", 16, 3.0),
+        ("Counter", 8, 2.0),
+        ("Squitter", 4, 1.0),
+    ] {
+        let r = at(e, k);
+        assert!(r.7 >= need, "{e} k={k} real={:.2} < {need}", r.7);
     }
     let b = at("Beacon", 64);
     assert!(b.2 >= 64.0 && b.3 == 1.0, "{b:?}");
@@ -1067,13 +1093,13 @@ fn distinct_valid_versus_differences_on_real_emitters() {
     // dimension, not a frame count. A slow sensor's distinct frames outrun its rank; a counter's
     // rank tracks its counter bits; a squitter keeps adding independent trials.
     let s = at("Sensor", 128);
-    assert!(s.4 > 2.0 * s.6, "sensor over-credit: {s:?}");
+    assert!(s.4 > 2.0 * s.7, "sensor over-credit: {s:?}");
     assert!(
-        s.6 < 16.0,
+        s.7 < 16.0,
         "sensor rank should saturate below its 20 varying bits: {s:?}"
     );
     let c = at("Counter", 128);
-    assert!(c.6 <= 17.0 && c.4 > c.6 + 100.0, "{c:?}");
+    assert!(c.7 <= 17.0 && c.4 > c.7 + 100.0, "{c:?}");
     let q = at("Squitter", 64);
-    assert!(q.6 > 36.0, "{q:?}");
+    assert!(q.7 > 36.0, "{q:?}");
 }
