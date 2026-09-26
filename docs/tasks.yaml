@@ -31514,6 +31514,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)
+
+      2026-09-26 coordinator: a SECOND shadow-level red, seen by the UI-stack integrator alone on 170bf91a (and identically on task-t1051): T-911 'a departed band's shadow keeps its last live row's colour' fails 'never reached 101375000 +- 37500' - the view pans down from 434.5 MHz and never gets back to band A. Own both shadow-level reds here (the dashboard tile's latency n=0 and this navigation); if the navigation one is its own defect (the spec's pan target unreachable after a retune - T-1040's coverage_changed re-lay?), split it with evidence.
   - id: T-1083
     milestone: M2-hardening
     title: "RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam"
