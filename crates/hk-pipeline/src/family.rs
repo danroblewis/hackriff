@@ -30,6 +30,7 @@
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
 //! | `p25-tsbk`, `dmr-csbk`, `nxdn-cac` | decoder | `public-safety` | 0.97 | a CRC-valid trunked control channel; nothing else transmits one (T-546) |
+//! | `dmr-tier2` | decoder | `public-safety` | 0.97 | DMR frame syncs plus an FEC-checked slot type: a **conventional** DMR repeater, which no control-channel hunt ever reaches (T-989) |
 //! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
 //! | `nbfm`, `nfm` | demod mode | — | — | land mobile, amateur, marine, public safety and FRS/GMRS share it |
 //! | `am` | demod mode | — | — | aviation, AM broadcast, CB and amateur share it |
@@ -368,6 +369,14 @@ const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
      raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
 
+/// T-989: conventional DMR, which is not trunked and therefore never reaches the control-channel
+/// hunt. The evidence is the air interface itself — DMR's own frame sync words at 4800 Bd, and
+/// the FEC-checked slot type behind them — so it stands beside the trunking decoders rather than
+/// under them.
+const DMR_TIER2_NOTE: &str = "DMR frame syncs at 4800 Bd with an FEC-checked slot type: a \
+     conventional (Tier II) DMR repeater or radio. Nothing else transmits DMR bursts, and DMR is \
+     public safety, land mobile and business radio";
+
 /// T-977: what a frame sync without a check actually says.
 const TRUNK_SYNC_NOTE: &str = "frame sync at the expected spacing with no CRC-valid control block: the air interface is \
      recognised, the channel is not a control channel (a voice or data channel of the same system \
@@ -442,6 +451,14 @@ pub const VOCABULARY: &[VocabEntry] = &[
         Some("public-safety"),
         0.97,
         TRUNK_CC_NOTE,
+    ),
+    // T-989: the conventional-DMR identifier, which is not a control-channel decode.
+    entry(
+        "dmr-tier2",
+        Decoder,
+        Some("public-safety"),
+        0.97,
+        DMR_TIER2_NOTE,
     ),
     // T-977: frame sync at the expected spacing with NO CRC-valid control block. The same service
     // family, at less certainty, under its own id — a P25 voice or data channel carries P25's

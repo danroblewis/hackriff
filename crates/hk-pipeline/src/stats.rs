@@ -540,6 +540,20 @@ counter_group!(
         /// Classifications made but not written: the inventory recorded no entry for the track
         /// within the bounded wait, so the row had nothing to be evidence about.
         classify_no_emitter,
+        /// T-989: regions a conventional-DMR scan ran on ([`crate::dmr`]). Counted apart from
+        /// the classifications beside them: the scan runs whether or not the classifier could
+        /// say anything, which is the point of it.
+        dmr_scanned,
+        /// Regions identified as conventional DMR (Tier II) from their sync words.
+        dmr_identified,
+        /// DMR headers published on a `messages` stream, each one FEC- or CRC-checked.
+        dmr_headers,
+        /// DMR blocks whose BPTC could not be resolved, or whose CRC or RS parity refused them.
+        /// Counted, never published as a guess — a real capture shows a number here rather than
+        /// a silence.
+        dmr_headers_refused,
+        /// DMR header records the egress gate withheld.
+        dmr_headers_gated,
         /// Chain errors (demod, repository).
         errors,
         /// T-605: chain errors that came back from the **storage engine** — a write the database
