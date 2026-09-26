@@ -42,10 +42,11 @@
 //
 // ## The jitter, and why it is additive
 //
-// The same shape T-1035 gave the control transport's ladder (`../controls/backoff.ts`: 500 ms
-// doubling to 30 s, reset on the first answer, never terminal) and T-1039 gave this file's own two
-// gates: **`base` plus up to `base × RETRY_JITTER` of randomness**. Additive, so jitter can only ever
-// make the wait longer than the ladder says, never shorter — a spread that could shorten the wait
+// The same shape T-1035 gave the control transport's ladder (`../controls/backoff.ts`: 500 ms doubling
+// to 30 s, reset on the first answer, never terminal) and T-1039 gave `tilecache.ts`'s own two gates —
+// whose helper is now [[jittered]] below, one implementation for all three, drawing on one injected
+// `random` per cache: **`base` plus up to `base × RETRY_JITTER` of randomness**. Additive, so jitter can
+// only ever make the wait longer than the ladder says, never shorter — a spread that could shorten it
 // would be a way for a herd to arrive *earlier* than the backoff allows. A whole batch (T-573) fails
 // together on one dropped connection and a whole viewport's tiles fail together on one retune, so
 // without the spread every address in the set would come back on the identical tick and re-create
@@ -72,11 +73,24 @@ export const RETRY_JITTER = 0.5;
 export const RETRY_MEMORY = 512;
 
 /**
- * The ladder's `n`th wait, jittered: `min(cap, base × 2^(n-1))` plus up to [[RETRY_JITTER]] of it.
+ * **One wait, jittered** (T-1039, moved here by T-1057 so the two backoffs that need it share one
+ * implementation): `base` plus up to `base × RETRY_JITTER` of randomness, so a set of requests that
+ * failed together — a batch on one dropped connection, a viewport's tiles on one retune, every lane
+ * on one reload — do not all come back on the identical tick and re-create the burst that failed.
  *
  * `rand` is `[0, 1)` and is injected so a test can pin the spread; a source that answers outside that
  * range contributes no jitter rather than a wild delay (a clamp is the one safe reading of a broken
- * `random`, since a negative multiplier would shorten the wait).
+ * `random`, since a negative multiplier would shorten the wait). Read `tilecache.ts`'s two gates —
+ * the `503` backoff and the silence ladder — and [[retryDelayMs]] below as its three callers.
+ */
+export function jittered(base: number, rand: () => number): number {
+  const r = rand();
+  const spread = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
+  return base + base * RETRY_JITTER * spread;
+}
+
+/**
+ * The ladder's `n`th wait, jittered: `min(cap, base × 2^(n-1))` plus up to [[RETRY_JITTER]] of it.
  */
 export function retryDelayMs(
   attempts: number,
@@ -85,10 +99,7 @@ export function retryDelayMs(
   capMs = RETRY_MAX_MS,
 ): number {
   const n = Math.max(1, Math.floor(attempts));
-  const step = Math.min(capMs, baseMs * 2 ** Math.min(n - 1, 40));
-  const r = rand();
-  const spread = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
-  return step + step * RETRY_JITTER * spread;
+  return jittered(Math.min(capMs, baseMs * 2 ** Math.min(n - 1, 40)), rand);
 }
 
 /** What one refused place is remembering. */

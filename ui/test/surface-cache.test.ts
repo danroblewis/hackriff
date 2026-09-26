@@ -55,7 +55,11 @@ function harness(opts: TileCacheOptions = {}) {
         reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
       });
     }),
-    { now: () => 0, ...opts },
+    // `random: () => 0` by default (T-1039): every OTHER test in this file was written against exact
+    // backoff arithmetic, and the jitter this cache now adds is `base + base * 0.5 * rand()` — a
+    // `rand` of 0 reproduces that arithmetic exactly. The tests that assert the jitter itself pass
+    // their own `random`.
+    { now: () => 0, random: () => 0, ...opts },
   );
   return {
     cache, calls, urls, waiting,
@@ -233,6 +237,170 @@ test("a real failure is counted and does not wedge the queue — it PACES it (T-
   await flush();
   assert.deepEqual(h.calls, [keyOf(addr(2)), keyOf(addr(1))],
     "and once it opens the queue drains — a backoff is not a wedge");
+});
+
+// ——— T-1039: jittered backoff, so a batch that fails together does not retry together ———
+
+test("the silence backoff is jittered: a fixed base spreads to different waits under different draws", async () => {
+  let clock = 0;
+  let draw = 0;
+  const draws = [0, 0.999999];
+  const h = harness({ inFlight: 1, now: () => clock, random: () => draws[draw++ % draws.length] });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new Error("boom")); // draw 0: the minimum of the jitter's range
+  // Not yet reopened just short of the unjittered base (500 ms): a rand()=0 draw adds nothing, so
+  // this is the floor every draw must reach.
+  clock = 499;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 1, "the base delay must still be honoured at the low end of the jitter");
+  clock = 500;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 2, "and it reopens once the base has genuinely elapsed");
+  await h.fail(addr(1), new Error("boom again")); // draw 1: the top of the jitter's range
+  clock = 500 + 999; // past the unjittered second rung (1000 ms) but short of its jittered ceiling
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 2,
+    "a high draw must widen the wait past the unjittered rung — jitter never shortens it");
+  clock = 500 + 1500; // base(1000) x 1.5, the ceiling this jitter formula can reach
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 3, "and it is bounded — the spread does not grow without limit");
+});
+
+test("the busy (503) backoff is jittered the same way", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 1, now: () => clock, busyBackoffMs: 100, random: () => 0.999999 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  clock = 99;
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 1, "the unjittered base has not elapsed yet");
+  clock = 149; // still short of base x 1.5 at the top draw
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 1, "a high draw widens the busy backoff past its unjittered rung too");
+  clock = 150;
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 2);
+});
+
+// ——— T-1039: stale-while-revalidate — the last good tile is never cleared, only labelled ———
+
+/** A following viewport drawing exactly `addr(1)` at its own level, over a box wide enough that
+ * `behindTheEdge`/`drawnBy` never trip on geometry — the scope tests are about TIME, not space. */
+const FOLLOWING_1: Viewport[] = [{ box: { f0Hz: 0, f1Hz: 1e12, t0Ns: 0, t1Ns: 1e12 }, levelF: 0, levelT: 0 }];
+
+test("a resident tile NEVER offered to refreshEdge is never marked stale, however old", async () => {
+  // Nothing ever calls refreshEdge here: this tile is not in ANY following pane's scope, and
+  // isStale must say so regardless of age — the review finding this replaces (a flat wall-clock
+  // age flagged a tile nobody is even trying to keep fresh).
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 1000 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  clock = 100_000;
+  assert.equal(h.cache.isStale(addr(1)), false, "out of scope (no refreshEdge call at all) is never stale");
+});
+
+test("a resident tile IN SCOPE is not stale fresh off the wire, and goes stale only once staleAfterMs elapses", async () => {
+  // staleAfterMs is set well above LAT's own level-0 cadence margin (STALE_CADENCE_MARGIN x 1 s =
+  // 2 s) so the flat default is what this test is actually measuring, not the cadence floor —
+  // that floor gets its own dedicated "COARSE level" test below.
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 5000 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  // Bring it into scope, at the SAME instant it was confirmed: a following pane draws it at its
+  // own level.
+  h.cache.refreshEdge(LAT, 0, FOLLOWING_1);
+  assert.equal(h.cache.isStale(addr(1)), false, "a tile just fetched is fresh");
+  clock = 4999;
+  assert.equal(h.cache.isStale(addr(1)), false);
+  clock = 5000;
+  assert.equal(h.cache.isStale(addr(1)), true, "state N: unconfirmed for staleAfterMs, while in scope, is stale");
+});
+
+test("isStale is false for a place with no resident copy at all — staleness is a fact about a copy in hand", () => {
+  const h = harness({ now: () => 0 });
+  assert.equal(h.cache.isStale(addr(9)), false);
+});
+
+test("a SEALED tile is never stale, however long it sits: nothing further is coming, so nothing is owed", async () => {
+  // The review's first false positive: `behindTheEdge` false (this copy's own fetch already
+  // reached the tile's end) means no further revalidation will ever be attempted, so a flat
+  // wall-clock age must not label it stale.
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 1000 });
+  // The edge is already past every tile's end (LAT's cell x cells = 2.56e11 ns) BEFORE this tile is
+  // even fetched — an empty `following` list only stamps the edge, changing nothing else — so the
+  // fetch that follows is stamped `edgeAtFetchNs` past the tile's own end from the start: sealed.
+  h.cache.refreshEdge(LAT, 1e12, []);
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  h.cache.refreshEdge(LAT, 1e12, FOLLOWING_1);
+  clock = 10_000;
+  assert.equal(h.cache.isStale(addr(1)), false, "sealed — the edge has already fully passed this tile's own end");
+});
+
+test("a FROZEN pane's tile is never stale: refreshEdge only ever revalidates what `following` names", async () => {
+  // The review's second false positive: a pane that stopped following is simply never offered to
+  // refreshEdge again, so its tiles must not be judged against a clock nothing is keeping.
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 1000 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  h.cache.refreshEdge(LAT, 0, FOLLOWING_1); // briefly following: now in scope
+  clock = 500;
+  assert.equal(h.cache.isStale(addr(1)), false, "not yet due");
+  // The pane freezes: the NEXT scan (and every one after) is called with an empty following list.
+  h.cache.refreshEdge(LAT, 500, []);
+  clock = 10_000;
+  assert.equal(h.cache.isStale(addr(1)), false, "frozen — no longer offered to refreshEdge at all, so never judged");
+});
+
+test("a COARSE level's own slower cadence does not read as stale between its healthy refreshes", async () => {
+  // The review's third false positive: level 5's own cadence (tCellNs/1e6 = 32 s) is longer than
+  // the flat 30 s default, so a tile refreshed exactly on schedule must not flicker "stale" for the
+  // last two seconds of every cycle on a perfectly healthy network.
+  let clock = 0;
+  const coarse = { ...addr(1), levelF: 5, levelT: 5 };
+  const following: Viewport[] = [{ box: { f0Hz: 0, f1Hz: 1e15, t0Ns: 0, t1Ns: 1e15 }, levelF: 5, levelT: 5 }];
+  const h = harness({ now: () => clock, staleAfterMs: 30_000 });
+  h.cache.beginFrame(); h.cache.acquire(coarse); h.cache.endFrame();
+  await h.settle(coarse);
+  h.cache.refreshEdge(LAT, 0, following);
+  clock = 30_001; // past the flat default, but well inside one 32 s cadence (2x = 64 s)
+  assert.equal(h.cache.isStale(coarse), false, "healthy at this level's own cadence, not the flat default");
+  clock = 64_001; // past TWO full cadences with nothing confirmed since: genuinely overdue
+  assert.equal(h.cache.isStale(coarse), true);
+});
+
+test("a failed revalidation never clears the resident tile, and never resets its staleness either", async () => {
+  let clock = 0;
+  const h = harness({ now: () => clock, staleAfterMs: 5000, inFlight: 4 });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await h.settle(addr(1));
+  h.cache.refreshEdge(LAT, 0, FOLLOWING_1);
+  clock = 5000;
+  assert.equal(h.cache.isStale(addr(1)), true);
+  // Re-ask (as the live-edge refresh lane would) and fail it: the copy on screen is untouched.
+  h.cache.refreshEdge(LAT, 0, FOLLOWING_1);
+  await flush();
+  assert.ok(h.cache.acquire(addr(1)).kind === "resident", "the last good tile stays resident throughout");
+  await h.fail(addr(1), new Error("network drop"));
+  assert.ok(h.cache.acquire(addr(1)).kind === "resident", "a failed revalidation clears nothing that was drawn");
+  assert.equal(h.cache.isStale(addr(1)), true, "and it is still honestly reported stale — the failure did not confirm it");
+  // A SUCCESSFUL revalidation is what clears the mark. (Past the lane's own cadence floor —
+  // one tile's own newest cell can't have changed inside it — or this second ask would be skipped.)
+  clock = 6000;
+  h.cache.refreshEdge(LAT, 0, FOLLOWING_1);
+  await flush();
+  await h.settle(addr(1));
+  assert.equal(h.cache.isStale(addr(1)), false, "a confirmed re-read is fresh again");
 });
 
 test("the residency answer is never a cell state", async () => {
@@ -1116,7 +1284,7 @@ test("a 400 is fetched at most ONCE PER WAIT, however many frames ask for it", a
   // the defect: sixty frames of a render loop must cost ONE request. What is no longer true is that
   // the place is never asked again — see the test below for why the user's screen depended on it.
   let clock = 0;
-  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+  const h = harness({ inFlight: 4, now: () => clock, random: () => 0 });
   const bad = addr(9, 218471, 10, 0);
   h.cache.beginFrame();
   h.cache.acquire(bad);
@@ -1153,7 +1321,7 @@ test("T-1057: a VISIBLE place that failed is ASKED AGAIN, on a doubling jittered
   // cannot fold *yet* (`crates/hk-api/src/tiles.rs`: "this tile's level cannot be built from the
   // levels below it"). One frame of the second meaning cost that place for the rest of the session.
   let clock = 0;
-  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+  const h = harness({ inFlight: 4, now: () => clock, random: () => 0 });
   const a = addr(3);
   const askAFrame = async () => {
     h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame(); await flush();
@@ -1193,7 +1361,7 @@ test("T-1057: the jitter is additive — a herd that failed together does not co
   let clock = 0;
   const spread = [0, 0.5, 0.999];
   let i = 0;
-  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => spread[i++ % spread.length] });
+  const h = harness({ inFlight: 4, now: () => clock, random: () => spread[i++ % spread.length] });
   const due: number[] = [];
   for (let k = 0; k < 3; k++) {
     const a = addr(20 + k);
@@ -1216,7 +1384,7 @@ test("only a 404/410 ends the asking — the route STATING the place does not ex
   // moment, and a place refused for a moment is a place still owed a request.
   for (const status of [400, 401, 403, 405, 413, 422, 429, 431, 500, 501]) {
     let clock = 0;
-    const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+    const h = harness({ inFlight: 4, now: () => clock, random: () => 0 });
     const a = addr(status % 7);
     h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
     await flush();
@@ -1234,7 +1402,7 @@ test("only a 404/410 ends the asking — the route STATING the place does not ex
   }
   for (const status of [404, 410]) {
     let clock = 0;
-    const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+    const h = harness({ inFlight: 4, now: () => clock, random: () => 0 });
     const a = addr(status % 7);
     h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
     await flush();
@@ -1450,7 +1618,7 @@ test("an unreadable 200 is an ANSWER: never at frame rate, and never written off
   // this moment's accident, not a property of the place — so it goes on the ladder like any other
   // refusal, one request per wait.
   let clock = 0;
-  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+  const h = harness({ inFlight: 4, now: () => clock, random: () => 0 });
   const a = addr(2);
   h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
   await flush();

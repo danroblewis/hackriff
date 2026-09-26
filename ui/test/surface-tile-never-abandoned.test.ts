@@ -107,7 +107,7 @@ test("30 % of tile answers dropped/refused/unreadable: every VISIBLE address is 
         return Promise.reject(e);
       }
       return Promise.resolve(data(a));
-    }, { inFlight: 4, now: () => clock, retryJitter: rand, budgetBytes: 1 << 20 }),
+    }, { inFlight: 4, now: () => clock, random: rand, budgetBytes: 1 << 20 }),
   );
   surface.setScale(-100, -60);
 
@@ -183,7 +183,7 @@ test("the asking is paced, not a flood: a place refused twice is asked at most o
     (tex) => new TileCache(tex, (a) => {
       asked.push(keyOf(a));
       return Promise.reject(httpError(500, "history store poisoned"));
-    }, { inFlight: 4, now: () => clock, retryJitter: () => 0 }),
+    }, { inFlight: 4, now: () => clock, random: () => 0 }),
   );
   surface.setScale(-100, -60);
   const visible = new Set([...tilesFor(LAT, PANE.box, 0, 0, "any")].map(keyOf)).size;
@@ -255,7 +255,7 @@ test("a batch entry the answer never named is RE-ASKED, not written off (and `re
   const cache = new TileCache<{ id: number }>(
     { upload: () => ({ id: 1 }), destroy: () => {} },
     () => Promise.reject(new TileDecodeError("batch answer named no entry for any|view|0|0|2|7|2")),
-    { inFlight: 2, now: () => 0, retryJitter: () => 0 },
+    { inFlight: 2, now: () => 0, random: () => 0 },
   );
   cache.beginFrame(); cache.acquire(addrs[2]); cache.endFrame();
   await flush();
