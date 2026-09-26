@@ -30238,7 +30238,7 @@ tasks:
   - id: T-1036
     milestone: M2-hardening
     title: "hk-model detection_write_throughput_is_reported asserts a wall-clock throughput bound in the default tier (fails under load, passes alone; 173 gate-log mentions): split - correctness in default, the bound to the timing tier"
-    status: todo
+    status: done
     priority: medium
     deps: []
     parallel_group: DEFLAKE-HKMODEL-THROUGHPUT
@@ -30259,6 +30259,7 @@ tasks:
       Commits: 2dfa64ff
       Observed, not chased: Under load the split's own default half took 151 s while the bound half ran beside it (both at 20k debug-build inserts); alone the insert run is 0.9-3.8 s. Nothing to fix - the gating half has no bound - but it means the default tier still pays ~10 s for ADR-0006's dense-write exercise on a busy box.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 832a670c
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
