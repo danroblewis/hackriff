@@ -71,7 +71,7 @@ export interface LayerRow {
 /**
  * What the layers menu shows (T-806 / MAP-06, docs/24 §4): two independent axes for the ACTIVE
  * pane — exactly one base style, any number of overlays in paint order — plus the few switches that
- * are view-wide rather than per pane (the spectrum-trace strip), stated as such. Built fresh from
+ * are view-wide rather than per pane (the spectrum trace), stated as such. Built fresh from
  * the registry each time the menu renders; the rows are data, and every press goes back through
  * the host, which writes presentation state and reaches no route.
  */
