@@ -29717,7 +29717,8 @@ tasks:
   - id: T-1003
     milestone: MMAP
     title: "Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes"
-    status: todo
+    status: in-progress
+    branch: task-t1003
     priority: medium
     deps:
     - T-1001
@@ -30302,7 +30303,8 @@ tasks:
   - id: T-1027
     milestone: MMAP
     title: "Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge"
-    status: todo
+    status: in-progress
+    branch: task-t1027
     priority: high
     deps:
     - T-1026
@@ -30786,7 +30788,8 @@ tasks:
   - id: T-1044
     milestone: MLIVE
     title: "LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles"
-    status: todo
+    status: in-progress
+    branch: task-t1044
     priority: medium
     deps:
     - T-1042
@@ -31494,7 +31497,8 @@ tasks:
   - id: T-1074
     milestone: MUI
     title: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
-    status: todo
+    status: in-progress
+    branch: task-t1074
     priority: high
     deps:
     - T-1051
