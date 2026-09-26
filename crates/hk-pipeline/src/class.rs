@@ -6,11 +6,14 @@
 //!
 //!
 //! - **Source class** ([`source_class`]): a recording's `hackriff:content_class` when present
-//!   (parsed failing closed). Without one it is derived from frequency ([`band_class`]):
-//!   `restricted-paging` / `restricted-cellular` when any capture window overlaps a
+//!   (parsed failing closed). Without one it is derived from frequency ([`band_class`]) by
+//!   summarising each window's sub-band map ([`class_map`], T-991): each sub-band carries the
+//!   class of its own allocation — `restricted-paging` / `restricted-cellular` inside a
 //!   [`restricted_band`] (47 CFR Parts 22, 24, 27 and 90; [`RESTRICTED_BANDS_HZ`] plus
-//!   hk-context's cellular rows); `unrestricted` only when every capture lies inside one
-//!   positively chosen band prior ([`UNRESTRICTED_BANDS_HZ`]); otherwise the fail-closed
+//!   hk-context's cellular rows), `unrestricted` inside a positively chosen band prior
+//!   ([`UNRESTRICTED_BANDS_HZ`]), else the fail-closed `metadata-only` — and the window is a
+//!   restricted class only when wholly restricted, `unrestricted` only when wholly unrestricted,
+//!   and otherwise
 //!   `metadata-only`. It sets the spectrum stream class, whether chains that write content
 //!   (analog audio/RDS, SigMF recordings) may attach, and the plugin input ceiling.
 //! - **Emitter classification** ([`classify_emitter`]): a user rule (`ScanPlan.extra.pipeline.
@@ -18,6 +21,9 @@
 //!   open content in a fail-closed (`metadata-only`) band, but never under a restricted source
 //!   class, and never for an emitter overlapping a restricted band (whatever the source class):
 //!   restricted classes clamp every rule.
+//!   With no rule, an emitter lying wholly inside an unrestricted band prior is `unrestricted`
+//!   under any non-restricted window class: the class of its own sub-band, not the window's
+//!   summary (T-991).
 //! - **Spectrum rows** ([`row_plan`], [`spectrum_header`]): moved here from `hk serve`; under a
 //!   gated class the declared row rate is the actual rate + 10 %, capped at the contract's 50
 //!   rows/s.
@@ -35,11 +41,21 @@ use hk_dsp::{PartialFrames, StftConfig, WelchConfig, WindowKind};
 pub const SPECTRUM_DATATYPE: &str = "rf32_le";
 
 /// Bands whose content is positively chosen as `unrestricted` (a band prior, not a guess):
-/// FM broadcast, and the 1090 MHz ADS-B / Mode S channel (unencrypted aircraft broadcasts; the
-/// readsb manifest's own output class).
-pub const UNRESTRICTED_BANDS_HZ: [(f64, f64, &str); 2] = [
+/// FM broadcast; the 1090 MHz ADS-B / Mode S channel (unencrypted aircraft broadcasts; the
+/// readsb manifest's own output class); and (T-991) the maritime VHF service with AIS and the
+/// NOAA Weather Radio channels — ship/coast and weather broadcasts, a marine communications
+/// system readily accessible to the general public. The US maritime VHF channel plan is split:
+/// ship transmit 156.025–157.425 MHz and coast transmit 160.625–162.025 MHz (AIS 1/2 at
+/// 161.975 / 162.025 MHz ± 12.5 kHz), with Part 90 land-mobile and Part 22 paging between them
+/// (157.45–160.6 MHz), which stays fail-closed or restricted. Edges from the channel plan in 47
+/// CFR 80.371/80.373 (**not re-checked against eCFR this session**), widened by half a 25 kHz
+/// channel.
+pub const UNRESTRICTED_BANDS_HZ: &[(f64, f64, &str)] = &[
     (87.5e6, 108.0e6, "fm-broadcast"),
     (1087.0e6, 1093.0e6, "adsb-1090"),
+    (156.0e6, 157.4375e6, "marine-vhf"),
+    (160.6125e6, 162.0375e6, "marine-vhf-ais"),
+    (162.3875e6, 162.5625e6, "noaa-weather-radio"),
 ];
 
 /// FM broadcast band, Hz (kept for `hk serve`).
@@ -205,31 +221,128 @@ pub fn restricted_band(lo: f64, hi: f64) -> Option<&'static RestrictedBand> {
         .find(|b| lo < b.hi_hz && hi > b.lo_hz)
 }
 
-/// The class for a window `[centre ± fs/2]` set: a restricted class when any window overlaps a
-/// [`restricted_band`] (its IQ, spectrum and recordings then carry that content);
-/// `unrestricted` only when every window lies in one [`UNRESTRICTED_BANDS_HZ`] band; else fail
-/// closed.
+/// One sub-band of a window's content-class map ([`window_class_map`]): `[lo_hz, hi_hz]` and
+/// the class of what lies in it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SubBandClass {
+    /// Lower edge, Hz.
+    pub lo_hz: f64,
+    /// Upper edge, Hz.
+    pub hi_hz: f64,
+    /// The class of this sub-band's content.
+    pub content_class: ContentClass,
+    /// Why: the restricted band's source, the band prior's name, or `unallocated prior`.
+    pub source: String,
+}
+
+/// The class of the point `f` (Hz): the first [`restricted_band`] holding it (paging before
+/// cellular), else the [`UNRESTRICTED_BANDS_HZ`] prior holding it, else fail closed.
+fn point_class(f: f64) -> (ContentClass, String) {
+    if let Some(b) = restricted_bands()
+        .iter()
+        .find(|b| f >= b.lo_hz && f < b.hi_hz)
+    {
+        return (b.class, b.source.clone());
+    }
+    if let Some(&(_, _, name)) = UNRESTRICTED_BANDS_HZ
+        .iter()
+        .find(|&&(lo, hi, _)| f >= lo && f < hi)
+    {
+        return (ContentClass::Unrestricted, format!("band prior {name}"));
+    }
+    (ContentClass::FAIL_CLOSED, "no band prior".to_owned())
+}
+
+/// The content-class map of `[lo, hi]` at the resolution of its allocations (T-991): the span
+/// is cut at every restricted-band and band-prior edge inside it, each piece carries the class
+/// of the allocation it lies in, and adjacent pieces of the same class and source are merged.
+/// A restricted band's class covers **only the sub-band it overlaps**, never the whole span.
+pub fn class_map(lo: f64, hi: f64) -> Vec<SubBandClass> {
+    if lo >= hi || !lo.is_finite() || !hi.is_finite() {
+        let (class, source) = if lo.is_finite() && lo == hi {
+            point_class(lo)
+        } else {
+            (ContentClass::FAIL_CLOSED, "no band prior".to_owned())
+        };
+        return vec![SubBandClass {
+            lo_hz: lo,
+            hi_hz: hi,
+            content_class: class,
+            source,
+        }];
+    }
+    let mut cuts = vec![lo, hi];
+    let edges = restricted_bands()
+        .iter()
+        .flat_map(|b| [b.lo_hz, b.hi_hz])
+        .chain(UNRESTRICTED_BANDS_HZ.iter().flat_map(|&(l, h, _)| [l, h]));
+    cuts.extend(edges.filter(|&e| e > lo && e < hi));
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut out: Vec<SubBandClass> = Vec::new();
+    for w in cuts.windows(2) {
+        let (class, source) = point_class(0.5 * (w[0] + w[1]));
+        match out.last_mut() {
+            Some(last) if last.content_class == class && last.source == source => {
+                last.hi_hz = w[1];
+            }
+            _ => out.push(SubBandClass {
+                lo_hz: w[0],
+                hi_hz: w[1],
+                content_class: class,
+                source,
+            }),
+        }
+    }
+    out
+}
+
+/// The content-class map of one tuned window `[centre ± rate/2]` ([`class_map`]); what
+/// `/api/status` reports as `run.content_classes`.
+pub fn window_class_map(center_hz: f64, sample_rate_hz: f64) -> Vec<SubBandClass> {
+    class_map(
+        center_hz - sample_rate_hz / 2.0,
+        center_hz + sample_rate_hz / 2.0,
+    )
+}
+
+/// The one class summarising a set of sub-band classes, for what covers them all at once (the
+/// whole window's IQ, spectrum stream and recordings): `unrestricted` only when every piece is;
+/// a restricted class only when every piece is restricted (paging before cellular); anything
+/// mixed is the fail-closed `metadata-only` — a restricted sliver never labels the whole window
+/// (T-991), and nothing unvouched opens it either.
+fn summarise(pieces: impl IntoIterator<Item = ContentClass>) -> ContentClass {
+    let mut all_open = true;
+    let mut all_restricted = true;
+    let mut paging = false;
+    let mut any = false;
+    for c in pieces {
+        any = true;
+        all_open &= c == ContentClass::Unrestricted;
+        all_restricted &= is_restricted(c);
+        paging |= c == PAGING;
+    }
+    match (any, all_open, all_restricted) {
+        (false, _, _) => ContentClass::FAIL_CLOSED,
+        (true, true, _) => ContentClass::Unrestricted,
+        (true, _, true) if paging => PAGING,
+        (true, _, true) => CELLULAR,
+        _ => ContentClass::FAIL_CLOSED,
+    }
+}
+
+/// The class for a window `[centre ± fs/2]` set, summarising every window's [`class_map`]: a
+/// restricted class when every window lies wholly in restricted bands; `unrestricted` only when
+/// every window lies wholly in [`UNRESTRICTED_BANDS_HZ`] priors; else fail closed. A window
+/// that only partly overlaps a restricted band is `metadata-only`, not the restricted class —
+/// the restricted class belongs to its sub-band ([`window_class_map`], and
+/// [`classify_emitter`] for anything inside it), never to the whole window (T-991).
 pub fn band_class(centres: &[f64], fs: f64) -> ContentClass {
-    if let Some(b) = centres
-        .iter()
-        .find_map(|fc| restricted_band(fc - fs / 2.0, fc + fs / 2.0))
-    {
-        return b.class;
-    }
-    let inside = |lo: f64, hi: f64| {
-        !centres.is_empty()
-            && centres
-                .iter()
-                .all(|fc| fc - fs / 2.0 >= lo && fc + fs / 2.0 <= hi)
-    };
-    if UNRESTRICTED_BANDS_HZ
-        .iter()
-        .any(|&(lo, hi, _)| inside(lo, hi))
-    {
-        ContentClass::Unrestricted
-    } else {
-        ContentClass::FAIL_CLOSED
-    }
+    summarise(centres.iter().flat_map(|fc| {
+        class_map(fc - fs / 2.0, fc + fs / 2.0)
+            .into_iter()
+            .map(|p| p.content_class)
+    }))
 }
 
 /// The class of one tuned window `[centre ± rate/2]` ([`band_class`] of a single window): what a
@@ -296,7 +409,12 @@ pub fn classify_emitter(
     match rule {
         Some(r) => Some((r.content_class, r.by.clone())),
         None if source == ContentClass::Unrestricted => Some((source, "band prior".to_owned())),
-        None => None,
+        // T-991: the sub-band's own prior, not the whole window's summary — an AIS emitter in a
+        // window that also holds a paging channel is still inside the marine prior.
+        None => UNRESTRICTED_BANDS_HZ
+            .iter()
+            .find(|&&(lo, hi, _)| f_lo >= lo && f_hi <= hi)
+            .map(|&(_, _, name)| (ContentClass::Unrestricted, format!("band prior {name}"))),
     }
 }
 

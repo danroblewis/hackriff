@@ -70,6 +70,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hk_core::{Discontinuity, ReadOutcome};
+use hk_detect::{ClipLedger, FrontEndMonitor};
 use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftProcessor};
 use hk_model::ContentClass;
 use hk_store::history::{FrameOrigin, source_key};
@@ -150,6 +151,10 @@ struct Output<'a> {
     view: Option<Arc<crate::history::ViewQueue>>,
     /// T-133: the site each frame is folded under, peeked at the frame's sample time.
     attention: Option<Arc<AttentionService>>,
+    /// T-981: clipped samples and ADC peaks of the chunks read, for each row's own span.
+    ledger: ClipLedger,
+    /// T-981: the per-row front-end judgement (clipped; a whole-span step while clipped).
+    monitor: FrontEndMonitor,
 }
 
 impl<'a> Output<'a> {
@@ -175,6 +180,8 @@ impl<'a> Output<'a> {
             error: None,
             view: shared.view_queue.clone(),
             attention,
+            ledger: ClipLedger::default(),
+            monitor: FrontEndMonitor::default(),
         }
     }
 
@@ -300,9 +307,37 @@ impl<'a> Output<'a> {
             c.copy_from_slice(&v.to_le_bytes());
         }
         let mut flags = RecordFlags::empty();
-        if frame.provenance.get().overload {
+        let provenance = frame.provenance.get();
+        if provenance.overload {
             flags = flags.with(RecordFlags::OVERLOAD);
         }
+        // T-981: this row's OWN clip state, measured over its span — not the sticky tune-state
+        // flag above, which says only that this gain state has clipped at some point. The
+        // reference is NOT forgotten on `reset`: the overload itself mints a provenance (a
+        // discontinuity), and forgetting there would lose exactly the level it steps from. The
+        // monitor forgets on a change of tuning or gains, the changes that move the level.
+        let a = frame.t.sample_index;
+        let span = self.ledger.span(a, a + frame.sample_count);
+        let verdict = self.monitor.observe(&spec.psd, span.clip, &provenance.tune);
+        if verdict.clipped {
+            flags = flags.with(RecordFlags::CLIPPED);
+        }
+        if verdict.event {
+            flags = flags.with(RecordFlags::FRONTEND_EVENT);
+        }
+        let dur_ns = (frame.sample_count as f64 * 1e9 / spec.sample_rate_hz).round() as i64;
+        self.shared
+            .counters
+            .frontend
+            .row(&crate::frontend::RowMeasure {
+                t0: frame.t.host_time,
+                t1: frame.t.host_time.saturating_add_nanos(dur_ns),
+                device_id: &provenance.device_id,
+                center_hz: spec.f_center_hz,
+                sample_rate_hz: spec.sample_rate_hz,
+                span,
+                verdict,
+            });
         if reset {
             flags = flags.with(RecordFlags::DISCONTINUITY);
         }
@@ -514,6 +549,7 @@ pub(crate) fn run(
                     // Resuming needs nothing done here: the STFT was cleared when the idle began,
                     // so no sample from before the gap survives to be stitched across it, and the
                     // flag `skipped` left behind restarts the average and marks the first row.
+                    out.ledger.push(chunk.first_sample(), &buf[..chunk.len]);
                     stft.push(InputInfo::from(&chunk), &buf[..chunk.len], |frame| {
                         out.row(frame)
                     });
@@ -531,6 +567,7 @@ pub(crate) fn run(
                         }
                         stft.reset();
                     }
+                    out.ledger.clear();
                     out.skipped();
                     // No row will correct the header in force while none is produced, so the
                     // offer follows the window here instead (T-057's rule has no rows to follow).
