@@ -296,9 +296,9 @@ export function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<Signatu
   const distSection = dist.length
     ? h("div", {}, h("div", { class: "section-h" }, "Classification distribution"),
         h("div", { class: "dist" }, ...dist.map((d) => h("div", { class: "dist-row" },
-          h("span", { class: "dist-label" }, d.label),
+          h("span", { class: "dist-label", title: d.tied ? "tied: equal posteriors, no order between them" : undefined }, d.label),
           h("span", { class: "dist-bar" }, h("i", { style: `width:${d.pct}%` })),
-          h("span", { class: "dist-pct mono" }, `${d.pct}%`),
+          h("span", { class: "dist-pct mono" }, d.tied ? `${d.pct}% each (tied)` : `${d.pct}%`),
         ))))
     : null;
 

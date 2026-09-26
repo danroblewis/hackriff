@@ -21,7 +21,8 @@
 - **Methods.** `GET`, `POST`, `PUT`, `DELETE`, `OPTIONS` are parsed; anything else is `405`. A *known* path with the wrong method is `405` with an `Allow` header listing the methods it does accept. An *unknown* `/api/*` path is `404`.
 - **Errors.** Every non-2xx JSON body is `{"error": "<message>"}`; every route reached through the control dispatcher (`control.rs`/`selections.rs`/`outputs.rs`/`inventory.rs` — everything except the five read-only endpoints in the first table below and `/ws/*`) additionally carries a stable machine `"code"`: `{"error", "code"}`. Error messages never echo raw request values. Common codes: `invalid` (400, malformed/out-of-range field), `not_found` (404), `unauthorized` (401), `forbidden`/cross-origin (403), `not_live` (409, device settings on a replayed recording), `device_required` (400, a device route on a run with several front ends and no `device_id` selector — T-511), `unknown_device` (404, a `device_id` selector naming no front end this run holds), `conflict` (409, a re-plumb or another operation is in progress), `refused` (409, legal/content-class gate said no), `finished` (409, the run has ended), `timeout` (504), `out_of_range` (400, a device value outside its capabilities), `unsupported` (501, the device lacks the capability, e.g. no bias tee), `not_implemented` (501, a route is defined but its engine isn't built yet), `busy`/`quota` (503/507, output-recording admission), `unavailable` (503, the server has no audit log / bookmark store / output recorder / etc. for this feature).
 - **Audit.** Every **mutating** request to `/api/control/*`, `/api/bookmarks*`, `/api/collections*`, `/api/markers*`, `/api/selections*`, `/api/outputs*` or `/api/inventory/{id}*` is written to the run's audit log (`<data dir>/control-audit.jsonl`, mode `0600`) once authenticated: time, token id (never the token), peer, method, path, action name, request body, old/new values, status, result. A request that reaches the front end also carries `device: {action, id}` (T-343), so the log distinguishes the requests that changed the radio from the ones that changed the view, and says which radio. Unauthenticated mutating attempts are logged too, coalesced per client to bound disk use. **`GET` requests are never audited**, on any route. Without an audit log every mutating endpoint answers `503 unavailable`. See `crates/hk-api/src/control.rs` module docs for the exact schema.
-- **Bounded resources.** At most `ServerConfig::max_connections` (default 64) connection threads at once (WebSocket consumers included); request heads ≤ 16 KiB, bodies ≤ 64 KiB, both within `request_timeout` (default 10 s); `/api/history`/`/api/floor`/`/api/inventory` cap result size (below).
+- **Bounded resources, in two pools (T-1063).** At most `ServerConfig::max_connections` (default **256**) HTTP connection threads and `ServerConfig::max_ws_connections` (default **128**) WebSocket ones. A connection is counted as HTTP from the moment it is accepted — nothing has been read from it yet — and moves to the WebSocket pool as soon as its handler sees a `/ws/…` `GET`, so a tab's 17–19 long-lived stream sockets cannot exhaust the HTTP slots its own requests need. Request heads ≤ 16 KiB, bodies ≤ 64 KiB, both within `request_timeout` (default 10 s); `/api/history`/`/api/floor`/`/api/inventory` cap result size (below).
+- **At a cap the server answers; it never drops the connection (T-1063).** A connection past either cap gets `503 Service Unavailable` with `Retry-After: 1`, `Connection: close` and `{"error", "code": "overloaded"}` — written from the accept thread as canned bytes, with no handler thread, so a server at its cap does the least work per refused connection and still says so. It is counted per pool on `GET /api/health` and logged at most once a second with the number refused since the last line. **A client must treat `overloaded` as retryable**, like any other `503` on this API: the server is alive and asking for a moment, which is exactly what the old silent drop could not express — behind cloudflared it surfaced only as the tunnel's "Unable to reach the origin service: EOF" (8 622 in 15 minutes, 2026-09-26), with no response, no log and no counter anywhere on this side.
 - **Receive only.** No route reaches a transmit path; `transmit.available` is always `false` (C37 stays gated at the type level, not just by convention — there is no transmit operation to call).
 
 ## Read-only query routes
@@ -40,6 +41,7 @@
 | GET | `/api/timeline` | token | `f_lo`+`f_hi`? (Hz, together), `columns`? (1…4096, default 96), `rows`? (1…512, default 1). **No `t0`/`t1`** — the time extent is the ring's, not the caller's | T-338 the capture window (the IQ ring's configured retention), the compressed overview waterfall drawn on it, and T-423 the record-derived per-cell coverage plane beside it (below) | 400 unknown parameter, a half-given band, or a column/row budget out of range; 404 no spectrum history on this server |
 | GET | `/api/coverage` | token | `f_lo`+`f_hi` (Hz, **required**), `cells`? (1…4096, default 256), `rows`? (1…4096, default 1), `t0`+`t1`? (Unix s, together; default the capture window) | T-368 the coverage map: which front end actually sampled which frequency **and when** (T-423's time axis), so a view greys only what was **never observed** (below) | 400 unknown parameter, a missing or half-given band, a half-given window, or a cell/row budget out of range; 404 no capture window and no `t0`/`t1` given |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
+| GET | `/api/health` | token | – | T-1063 the server's own connection health: pool occupancy, caps and connections refused at a cap (below) | 401 |
 
 None of these are audited (`GET` requests never are). All are capped in result size as noted per route.
 
@@ -1480,6 +1482,97 @@ Messages are JSON text, in order:
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
 - **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
 
+### `GET /ws/spectrum/rows` — **one pane's** rows, folded, quantised, pushed as binary blocks (T-1043, LSR-2)
+
+WebSocket; token as for every `/ws/` route. **The subscription is a pane and a time range**, not a
+lattice address: `f_lo_hz`, `f_hi_hz` and `nf` (the pane's columns, 8…4096) say *where and how wide*,
+`t_from` (**required**, absolute capture time in Unix **nanoseconds**, snapped down to a row
+boundary) and `t_to` (optional, ns) say *when*, and `level_t` (default `0`) names the row period on
+the same lattice [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8)
+addresses. `device` (`any` default) chooses whose coverage decides this pane's grey and `scheme`
+(`view` default) which store answers. A tile parameter — `level_f`, `f_index`, `t_index`, `cells` — is
+**refused**, not ignored: a pane is a window, and the fold onto its columns is this route's job.
+
+**Why this exists beside [`GET /ws/tiles/rows`](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468).**
+That route pushes rows at tile-lattice addresses, as JSON, which is the right shape for the tile cache
+and the wrong shape for a pane's live edge: a following pane covers a number of lattice columns that
+is neither 1 nor constant (the shipped client opens up to 12 subscriptions per pane), none of them on
+the pane's own pixel grid, and a 1600-cell row is ~12 kB of JSON text against 3.2 kB of binary16 —
+300 kB/s against 80 kB/s at 25 rows/s, plus a `JSON.parse` per block on the frame thread. Here the
+**pane** is the subscription, the fold happens once on the server where the cells already are, and the
+values are the same quantisation `/api/tiles?planes=f16` serves. Everything else is deliberately
+identical, because it is the same walk over the same store: `t_from` required and nothing defaulting
+it, a row pushed **once** when it is complete *and* the tune record has reached it, `final` when no
+late frame can still land in the block, and a uniformly-unobserved stretch answered from the coverage
+map alone (T-461) as one payload-less block whose probe span doubles while the grey continues.
+
+The first message is **text**, the subscription stated back; every block after it is one **binary**
+message (`docs/stream-contract.md` §17 is the record, field by field); a closed range ends with one
+text `end`.
+
+```jsonc
+{ "type": "subscribed",
+  "pane": { "f_lo_hz": 88e6, "f_hi_hz": 108e6, "nf": 1600, "f_cell_hz": 12500.0,
+            "device": "any", "scheme": "view", "level_t": 0, "t_cell_s": 0.040106667 },
+  "range": { "t_from": 1795000000000000000, "t_to": null, "t0_s": …, "t1_s": null,
+             "row0": 44758698, "open": true },
+  "record": { "contract": "docs/stream-contract.md#17",
+              "framing": "one WebSocket binary message per block",
+              "byte_order": "little-endian", "header_bytes": 48,
+              "kinds": { "rows": 1, "unobserved": 2 },
+              "values": { "code": 1, "type": "f16", "cells": "rows x nf, row-major, …",
+                          "absent": "nan" },
+              "coverage": { "encoding": 1, "name": "run8",
+                            "states": ["unobserved", "observed", "unknown", "excluded"],
+                            "grid": "the block's own cells, the same order as the values" } },
+  "epoch": 0, "epoch_rule": "…",
+  "store": "view-lattice", "candidates": [0, 1], "rows_per_block": 40,
+  "data_edge_s": …, "watermark_s": …, "rule": "…" }
+{ "type": "end", "row": 44758738, "t_ns": …, "reason": "range-complete" }   // only when t_to is given
+```
+
+- **Each block states what it is a measurement of, in its own header** (`docs/stream-contract.md`
+  §17.1): the store `level` that answered — by the tile route's own rule, the cheapest level that only
+  folds, walking on only when a level holds nothing (T-1018, T-426) — the honesty `tier` that level
+  makes this block (`tier_of`, T-902), and the `fold` **direction per axis**. A pane asking for its
+  own resolution over the finest level reads `exact` on both axes; a pane coarser than the store's
+  cells reads `folded`; a level coarser than the pane on either axis reads `replicated` and the tier
+  is `survey-overview`. A client states **this** block's tier and never borrows a neighbour's.
+- **Values are binary16, NaN = not measured** — never a zero and never a floor (C26's rule, unchanged
+  by the representation), and bit-for-bit the numbers `/api/tiles` serves for the same cells.
+- **Grey rides with the rows**, as the block's own coverage trailer over the block's own axes, in the
+  same four states and with the same rule the tile route's plane has (§17.2): grey if and only if
+  `unobserved`; `excluded` is drawn.
+- **`DISCONTINUITY` marks every part the store did not have** (§17.3) — a grey stretch, rows a tuned
+  band has no frame for, and the far side of either — and that is exactly the part a client fills from
+  `/api/tiles`. It is not "the row addresses skipped": the cursor walks forward contiguously, so a
+  flag computed that way would fire on nothing but a subscription's first block. A marked part is
+  never stitched across, and on a reconnect (`t_from` = the last row in hand) it is how the server
+  says which rows of the gap carry no values.
+- **`epoch`** (§17.4) increments when the tuning configurations over this pane's window change — a
+  retune under the pane — and not when a dwell simply goes on. It is the "the fog moved" signal a
+  client re-lays its coverage and re-reads its tiles on, and it is a *change*, never a value to
+  interpret: a block straddling a retune sees both configurations and the next sees only the new one,
+  so one retune can advance it twice.
+- **Block size.** At most 64 rows, and at most 65 536 cells (`nf × rows`), which is the coverage
+  rasteriser's own grid bound — so a block's plane is **always** laid cell-for-cell on the block's axes
+  and never read through another grid's addressing. An `unobserved` block spans as many rows as the
+  coverage map says are grey, capped so its `rows` always fits the field (2³⁰ rows, ~1.4 years at a
+  40 ms row): `row0 + rows` is therefore always exactly the next row to expect. At the live edge
+  blocks go out as the rows are recorded, in the few rows the tune record has reached, never a burst
+  after a stall.
+- **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never
+  holds the history mutex longer than one tile chunk; it holds no `/api/tiles` in-flight slot. At most
+  **16** pane subscriptions are open per server (one per pane, where the tile route's client held up to
+  12 per pane) and the seventeenth is refused `503`.
+- **Refusals complete the upgrade**: one `{"type": "refused", "status", "reason"}` message, then close
+  `4000 + status` — `4400` a bad pane, range or parameter (including a missing `t_from`, an `nf`
+  outside 8…4096, `f_hi_hz <= f_lo_hz`, a `t_to` not after `t_from`, or a tile parameter), `4404` no
+  such time level, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`.
+  Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
+- **What blocks do not carry:** no `shadow`, no emitters and no per-cell sampling metadata — the same
+  exclusions as the tile route.
+
 ### `GET /ws/tiles/changes` — `coverage_changed` pushed on a retune (T-1040)
 
 WebSocket; token as for every `/ws/` route; no other query parameter (anything else is refused `4400`). One socket per client, not per column: the event is about the tune record, which every tile of every lattice is rasterised against. The live edge's own rows are not here — they are `/ws/tiles/rows` (and, once it lands, the live-stream ring, LSR-1/2, which supersedes the `tile_committed` half of the user's "change events instead of re-asking"); this route carries the one change that rewrites tiles a client **already holds**: a front end moving.
@@ -1502,6 +1595,28 @@ WebSocket; token as for every `/ws/` route; no other query parameter (anything e
 - **What it means for a client:** every tile intersecting `[f_lo, f_hi] × [t, ∞)` holds coverage that is now out of date — from `t` the band left is `unobserved` (the departed band's fog) and the band arrived at is observed — and **no other tile changed**. So the client re-asks its coverage survey at once and re-fetches exactly those tiles it holds, in one batch (`ui/src/surface/changefeed.ts`, `TileCache.coverageChanged`); the survey timer and the live-edge refresh lane become the fallback for a socket that is not open, until LSR-5 retires the lane. By the time the event is sent the coverage map already answers `unobserved` over the band left between `t` and `as_of_s` (contract: `api_contract.rs::coverage_changed_is_pushed_once_per_retune_and_the_departed_fog_is_already_served`).
 - **Where the band comes from:** the same tune records the coverage map rasterises — the IQ ring's journal (the tuned window, `center ± rate/2`) and, for a front end the ring holds nothing for (the ring refused, T-588/T-596), the observation log's dwell in flight (its analysed extent, the hull of a notched dwell's spans). **One source per front end, never a mix**: alternating between a tuned and an analysed extent would report moves that never happened. Nothing new is recorded.
 - **Cost and cap:** each tick reads the ring's 64 newest segments and the dwells in flight, both in memory. At most **16** change subscriptions are open per server; the seventeenth is refused `4503`. Refusals complete the upgrade and close with `4000 + status`, as `/ws/tiles/rows` does; a request that is not an upgrade is `426`. Anything the client sends other than a close or a ping is ignored.
+
+### `GET /api/health` — connection health (T-1063)
+
+What the server is doing about its own connection limits. **Separate from `/api/status`**, which is the *pipeline's* counters and answers `404` on a server with no run: this is a fact about the server process itself and is always answerable, including on a server that is refusing connections and serving nothing else.
+
+```json
+{"t": 1790000000.5,
+ "connections": {
+   "http": {"open": 12, "max": 256, "refused": 0},
+   "websocket": {"open": 18, "max": 128, "refused": 0},
+   "refused_last_t": null}}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | number | The server's wall clock when the response was built, Unix seconds (as `/api/status`) |
+| `connections.<pool>.open` | integer | Connections the pool is holding right now (the request making this call is itself one of `http.open`) |
+| `connections.<pool>.max` | integer | The pool's cap: `ServerConfig::max_connections` / `max_ws_connections` |
+| `connections.<pool>.refused` | integer | Connections answered `503 overloaded` at that pool's cap since the server started — cumulative, never reset, and never rate-limited (the log line is; this is the authoritative number) |
+| `connections.refused_last_t` | number \| null | When the most recent refusal happened, Unix seconds; `null` if there has been none |
+
+A non-zero `refused` is not an error to hide: it is the measurement that says the caps, or the client's request volume, need attention. `http.refused` rising while `websocket.open` sits near its own cap is the shape of the defect T-1063 fixed.
 
 ### `GET /api/status` — pipeline counters (T-027)
 
@@ -2216,6 +2331,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 | GET | `/ws/{stream_id}` | token (header or `?token=`) | Upgrades to WebSocket and bridges the named always-on stream (§10) |
 | GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, `iq`, with query parameters per opener |
 | GET | `/ws/tiles/rows` | token | Rows pushed to a subscription over a tile-lattice **address range** — see [its section](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468) (T-468) |
+| GET | `/ws/spectrum/rows` | token | **One pane's** rows — its window folded onto its `nf` columns, quantised to binary16, pushed as binary blocks with a coverage trailer and an epoch; see [its section](#get-wsspectrumrows--one-panes-rows-folded-quantised-pushed-as-binary-blocks-t-1043-lsr-2) (T-1043) |
 | GET | `/ws/tiles/changes` | token | `coverage_changed {f_lo, f_hi, t}` pushed once per front-end move, so a retune re-lays the fog and re-fetches exactly the moved tiles — see [its section](#get-wstileschanges--coverage_changed-pushed-on-a-retune-t-1040) (T-1040) |
 
 **`GET /ws/{stream_id}`** (e.g. `spectrum/live`): the header JSON is the first **text** message, verbatim; every later record is one message — text (NDJSON line) for `messages` streams, binary (32-byte record header + payload) for every binary kind. Refusals never upgrade the connection and are plain HTTP: `401` (bad/missing token, checked before the upgrade), `403` (a `own-key-decrypted` stream — those are Unix-socket-only and never served over the bridge), `404` (unknown `stream_id`), `410` (stream finished), `426` (not a valid WebSocket upgrade request), `503` (consumer cap reached, or `replumbing` — see below).
@@ -2228,7 +2344,26 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 
 **`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter; `&channels=2` opts in to **stereo**, T-874: on a broadcast-FM channel the header's `audio.channels` is then 2 and each record interleaves `L, R`, other modes stay mono and say `channels: 1`, and without the parameter the stream is exactly the mono one — stream contract §12.2), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`), `iq?emitter=<id>` or `iq?f_lo=<Hz>&f_hi=<Hz>` (T-165, ADR-0013 §4.9 gap 8: raw channelised IQ, `cf32_le`, stream-contract §12.3 — no mode or parameter either, there is nothing to demodulate). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen on a bursty channel opens waiting (T-987):** when the probe finds nothing to demodulate at the instant of opening — a land-mobile, GMRS or airband channel opened between transmissions — the target's own history decides instead of a refusal: an `emitter=` target's past bursts (its per-burst classifications and demodulation sessions), or those of the inventory emitter whose centre an `f_lo`/`f_hi` range covers, choose the mode and channel; the squelch is armed from the silence the probe read; and the header's `audio.wait` (`{emitter_id, last_seen_ns, mode_bursts, analog_bursts, probe, statement}`, stream contract §12.2) says `waiting for carrier (last seen <UTC>, mode nbfm from n of m bursts)`. Status records then flow with `squelch_open: false` and audio starts when the carrier returns. A target whose history holds no analog mode (or no history at all) is still refused `4422 no-analog-mode`, its reason ending `nothing to wait for: <what the history held>`. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs` (T-1015: the delivered audio's own level while `squelch_open` is true, else the documented silence floor — stream contract §12.2), `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …; on a two-channel stream also `stereo` — the pilot is locked and L−R decoded — and `stereo_lock_losses`; on an **NBFM** stream also the blind CTCSS/DCS identification (T-988), flattened because a status record is flat metadata: `subaudible` (`measuring` below 2 s of squelch-open audio, then `ctcss`, `tone`, `dcs` or `none`), `subaudible_s`, and when present `ctcss_hz` (the matched standard tone), `tone_hz` and `tone_snr_db` (the measured line), `tone2_hz` (a second tone), `dcs_code`, `dcs_polarity`, `dcs_alias`. Once settled, the answer is also filed on the target emitter (or the inventory entry at the channel) as a Demodulation, served as `estimated_params.subaudible`).
 
-**An open session ends with a real close frame, never a bare hang-up (T-954).** Every `/ws/open/<name>` session — `listen`, `bits`, `symbols`, `iq`, `playback`, `inspector`, `stage`, every opener — shares one close path (`ondemand.rs`, T-066's liveness watcher), which sends a code and reason before the socket goes down, from **whichever side ends the session first**: a client-detected end (`watch`, on this connection's own thread) is `1000` (`closed`) for a peer's close frame, `1000` (`no response within the peer timeout`) for a peer this server reaped for silence (§ above, `ondemand_peer_timeout`), `1002` (`unexpected message from a consumer`) since consumers never write, or `1011` (`transport reset`) attempted best-effort on a faulted socket, which may already be unwritable. A **producer-initiated** end — the publisher finished, or the producer itself dropped this consumer (too slow, didn't drain in time) — runs on a *different* thread (the consumer's own writer, inside `hk-stream`), which is why this is sent from **both** places, guarded so only the one that gets there first actually writes: `1000` (`producer finished`), or `1008` (`too slow to keep up`) / `1008` (`did not drain in time`). Before this a session simply shut the TCP connection down once it decided the peer was gone, which every browser reports as `1006` ("abnormal closure") — indistinguishable from a real fault — however clean the actual reason was; a producer-initiated end was the harder case, since sending only from the connection's own thread (after its `watch` loop woke on the socket the producer side had already shut down) always lost that race. The one exception is a session that ended before any byte ever reached the peer (the producer's first publish never arrived): there the `101` upgrade itself is incomplete on the wire, so no close frame is sent either — the raw hang-up is the honest answer there, same as before.
+**An open session ends with a real close frame, never a bare hang-up (T-954, completed by T-1010).** Every `/ws/open/<name>` session — `listen`, `bits`, `symbols`, `iq`, `playback`, `inspector`, `stage`, every opener — and every `/ws/{stream_id}` bridge share one close path (`wsclose.rs`, over T-066's liveness watcher), which sends a code and reason before the socket goes down, from **whichever side ends the session first**. Before this a session simply shut the TCP connection down once it decided the peer was gone, which every browser reports as `1006` ("abnormal closure") — indistinguishable from a real fault — however clean the actual reason was.
+
+| Close code | Reason | Sent when | Delivery |
+|---|---|---|---|
+| `1000` | `closed` | the peer sent a close frame, or this server ended the connection | always |
+| `1000` | `no response within the peer timeout` | nothing came back, not even a pong, for `ondemand_peer_timeout` (§ above) | always |
+| `1000` | `producer finished` | the publisher finished and this consumer had drained | always |
+| `1002` | `unexpected message from a consumer` | the peer wrote something other than a close or a pong — consumers never write (§2) | always |
+| `1008` | `too slow to keep up` | the producer dropped this consumer for filling its queue (§7) | **best effort** |
+| `1008` | `did not drain in time` | the publisher finished and this consumer had not drained within the drain timeout | **best effort** |
+| `1011` | `transport reset` | the socket itself faulted (reset, broken pipe) | best effort — it is usually already unwritable |
+| `4000 + status` | the refusal's own reason | the open was refused; one JSON `refused` message precedes it (above) | always |
+
+A **client-detected** end (`watch`, on this connection's own thread) writes the frame itself. A **producer-initiated** end — the publisher finished, or the producer dropped this consumer — runs on a *different* thread (the producer's own real-time thread, the consumer's writer, or the shared drain watchdog, inside `hk-stream`), which is why the frame is sent from **both** places, guarded so only the one that gets there first actually writes.
+
+**Why the two `1008`s are best effort, and what that means for a client.** The producer never waits on a browser, so those two closers take the connection's lock only if it is free *right now* and write the frame with the socket **non-blocking**; a full send buffer costs a `WouldBlock` and the frame is skipped rather than paid for on the real-time thread. A consumer that is reading — the ordinary "slow over the tunnel" case this is for — gets the `1008`; a consumer whose socket buffer is also full is, by construction, not reading, and gets the hang-up (`1006`) it would have got anyway. So **a client must still treat `1006` as "ended for an unstated reason"** and never as a fault report; the codes above are what it can *believe* when it gets one, not a promise that one always arrives. (Before T-1010 these two sent no frame at all, and this page said they did.)
+
+The one exception to the whole rule is a session that ended before any byte ever reached the peer (the producer's first publish never arrived): there the `101` upgrade itself is incomplete on the wire, so no close frame is sent either — the raw hang-up is the honest answer, same as before. On `/ws/{stream_id}` a **finished publisher is not the end of the connection** (T-417): the connection is carried over to the next publisher under that id and nothing is said on the wire; only when the carry-over finds no successor does the connection close, with `1000` (`closed`).
+
+Contract tests: `hk-cli/tests/api_contract.rs::ws_open_close_codes_match_the_documented_contract` (the three codes a client can provoke against a real server, end to end) and `hk-api`'s `ondemand::tests::every_close_reason_sends_its_documented_code` (every producer-side reason's exact code and reason bytes, read off a real socket).
 
 ### `hk` stream-tail
 

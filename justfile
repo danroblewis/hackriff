@@ -593,9 +593,13 @@ acceptance-mauto *args:
 # identifying; plus the P25 member (T-976, captured_p25: one region, C4FM 4-level, P25-like from
 # its own frame syncs, the hunt's verdict on the row). The set grows by one line in
 # `captured_signals::CAPTURES` (or `captured_p25::P25_CAPTURES`). A milestone exit target, not a
-# regression gate: seven controls are green and nine red proofs are `#[ignore]`d until
+# regression gate: its green controls gate nothing, and its red proofs are `#[ignore]`d until
 # T-926/T-937/T-938/T-940 and the tickets T-976's hand-back asks for land - run those with
-# `just acceptance-captured-signals --run-ignored all`. Extra args go to the runner (see `_e2e-run`).
+# `just acceptance-captured-signals --run-ignored all`. T-986 added the window-3 members (`w3_*`,
+# SIGNAL-090/091): four DMR emissions identified by an independent sync oracle, and the settled
+# "no CTCSS tone" on 461.125 MHz; two green controls, four red proofs for T-989 and a 450-470 MHz
+# band-plan row. Its 15 s capture is EXTERNAL and is skipped when no store holds it. Extra args go
+# to the runner (see `_e2e-run`).
 acceptance-captured-signals *args:
     #!/usr/bin/env bash
     set -euo pipefail
