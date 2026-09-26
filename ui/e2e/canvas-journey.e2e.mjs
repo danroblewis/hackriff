@@ -93,8 +93,16 @@ const PORT_BASE = Number(process.env.HK_E2E_JOURNEY_PORT ?? 8801);
  * which is what a dead server looks like from the client's side, and no other process can bind it
  * while this test is making claims about it. `null` if it could not be taken within the grace
  * period — the caller fails rather than measuring something it cannot name.
+ *
+ * **The grace is 20 s, not 5** (T-1035). A SIGKILLed process does not release its listening socket
+ * until the kernel can reap it, and one blocked in an uninterruptible read does not leave that state
+ * on a signal: measured on this box at load 41 with a debug `hk`, the port answered EADDRINUSE for
+ * **4.4 s** after the kill with no browser even attached, and test 4 then failed on THIS assertion,
+ * before reaching its subject. Waiting longer weakens no claim — the port is still held for the whole
+ * of both measurement windows, which begin at the page's own observed socket close
+ * (`__hkWs.deadAt`), and that close cannot precede the process's death.
  */
-async function holdPort(port, { graceMs = 5000 } = {}) {
+async function holdPort(port, { graceMs = 20000 } = {}) {
   const t0 = Date.now();
   do {
     const srv = net.createServer((s) => s.destroy());
@@ -111,10 +119,6 @@ async function holdPort(port, { graceMs = 5000 } = {}) {
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
-/** The minimap strip along the BOTTOM of the canvas (`MINIMAP_PX` in app/centre/surface.ts). */
-const MINIMAP_PX = 110;
-/** The spectrum-trace strip carved off the TOP of each pane (`TRACE_PX`, T-457). */
-const TRACE_PX = 96;
 
 /**
  * **THE grey**, as the compositor writes it: `CELL_MARKS[UNOBSERVED]` is `[0.155, 0.16, 0.18]` and
@@ -411,12 +415,14 @@ async function tunedWindow(backend) {
 // Reading the pixels
 // ---------------------------------------------------------------------------
 
-/** The rectangle a pane draws its MEASUREMENT into: the canvas, minus the map strip and the trace. */
+/** The rectangle a pane draws its MEASUREMENT into: the canvas, minus the chrome's insets. */
 function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
-  const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
+  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
+  // them since T-995 retired the minimap).
+  // T-1041: the trace reserves nothing any more (it is a layer over the pane's top rows, off by
+  // default), so the pane's measurement starts at the inset — its own first row.
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top, h: paneH / dpr };
 }
 
 /**
@@ -1645,6 +1651,19 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
   // the tap pins it in the close handler, and both measurement windows start after it. The claim
   // is unweakened — arguably stronger, since it now also requires that the client NOTICE.
   const failedBefore = page.requests.filter((r) => r.error !== null).length;
+  // **Which routes** kept asking, not only how many asks there were (T-1035). A count says the
+  // client is hammering; a histogram by pathname says WHICH lane is, which is the difference between
+  // a finding and a ticket somebody has to re-measure. Reported, never asserted on.
+  const failedSince = (n) => page.requests.filter((r) => r.error !== null).slice(n);
+  const byRoute = (rs) => {
+    const h = new Map();
+    for (const r of rs) {
+      let k;
+      try { k = new URL(r.url).pathname; } catch { k = r.url; }
+      h.set(k, (h.get(k) ?? 0) + 1);
+    }
+    return [...h].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} x${n}`).join(", ") || "none";
+  };
   const uploadsAtKill = await page.eval("window.__hkGl.uploads");
   await page.eval("window.__hkWs.armDeath = true");
   const killedPort = Number(new URL(backend.origin).port);
@@ -1689,10 +1708,12 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
   await new Promise((r) => setTimeout(r, WINDOW_MS));
   const uploadsW1 = (await page.eval("window.__hkGl.uploads")) - uploadsAtKill;
   const failedW1 = page.requests.filter((r) => r.error !== null).length - failedBefore;
+  const routesW1 = byRoute(failedSince(failedBefore));
   const imgW1 = await page.shot();
   await new Promise((r) => setTimeout(r, WINDOW_MS));
   const uploadsW2 = (await page.eval("window.__hkGl.uploads")) - uploadsAtKill - uploadsW1;
   const failedW2 = page.requests.filter((r) => r.error !== null).length - failedBefore - failedW1;
+  const routesW2 = byRoute(failedSince(failedBefore + failedW1));
   const imgW2 = await page.shot(path.join(ART, "canvas-journey-streamloss.png"));
 
   // **The dead-stream control for TEST 2's instrument**, and it costs nothing to take here. Test 2
@@ -1732,6 +1753,8 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
   t.diagnostic(`after the kill: uploads ${uploadsW1} in the first ${WINDOW_MS / 1000} s, ${uploadsW2} in the second; ` +
     `failed requests ${failedW1} then ${failedW2}; ${draws} draw calls total (the rAF loop, not the subject); ` +
     `${(churn.share * 100).toFixed(2)} % of the pane's pixels changed between the two windows`);
+  t.diagnostic(`the failing routes, first window: ${routesW1}`);
+  t.diagnostic(`the failing routes, second window: ${routesW2}`);
   t.diagnostic(`the pane, ${((Date.now() - tKill) / 1000).toFixed(0)} s after the kill: ${pixW2.magenta} magenta px, ` +
     `${(pixW2.greyShare * 100).toFixed(2)} % THE grey, ${pixW2.census.distinct} distinct, ` +
     `dominant ${(pixW2.census.dominantShare * 100).toFixed(0)} %`);

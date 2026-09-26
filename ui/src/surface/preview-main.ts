@@ -19,7 +19,7 @@ import {
 } from "./contrast";
 import { newClientId, setTileClientId } from "./clientid";
 import { markSurface } from "./mounted";
-import { shareText } from "./tilecache";
+import { heldText, shareText } from "./tilecache";
 import { attachSurfaceInput } from "./input";
 import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
 import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
@@ -218,6 +218,11 @@ async function main(): Promise<void> {
       // an idle tab keeps the number it was last told while other tabs come and go, and "share 4"
       // with no age would claim a current fact this page cannot know.
       `${preview.view.surface.cache.inFlightCount}+${preview.view.surface.cache.abandonedSlots}/${preview.view.surface.cache.inFlightLimit} in flight (${shareText(preview.view.surface.cache.inFlightCeiling, preview.view.surface.cache.inFlightShareAgeMs)})`,
+      // T-959: and WHOSE slots the abandoned charge is about. The count alone cannot say whether
+      // the route agreed it is still holding them or the client is running on its own estimate of
+      // the service time — the difference between a stale charge and contention.
+      heldText(preview.view.surface.cache.abandonedSlots, preview.view.surface.cache.serverHeldStated,
+        preview.view.surface.cache.serverHeldStatedAgeMs),
       `queue ${preview.view.surface.cache.queueDepth}`,
       `~${preview.view.surface.cache.serverEstimateMs.toFixed(0)} ms/tile`,
       `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.abandoned} abandoned · ${s.busyRefusals} backpressure · ${s.failures} failed`,

@@ -381,3 +381,42 @@ test("pane outlines and live segments are the only overlay kinds, and neither is
     assert.equal(cellMarks.includes(q.rgba.slice(0, 3).join(", ")), false, "an overlay reused a cell-mark colour");
   }
 });
+
+// ——— T-995: the minimap is retired from the app; what only it showed moves onto the panes ———
+
+test("T-995: with no map strip, each REPORTED capture window is lit in the pane that shows it — nothing is lost", async () => {
+  const g = stubGl(W, H);
+  const view = new SurfaceView({
+    canvas: g.canvas, lattice: LAT, bounds: BOUNDS,
+    cache: (tex) => new TileCache(tex, (a) => Promise.resolve(data(a)), { inFlight: 64, now: () => 0 }),
+    surface: { pinParents: false },
+    // Zoomed right out, Google-Maps style: the pane IS the whole-spectrum view now.
+    freq: { centerHz: (BOUNDS.f0Hz + BOUNDS.f1Hz) / 2, spanHz: BOUNDS.f1Hz - BOUNDS.f0Hz }, spanNs: 20 * S,
+  });
+  assert.equal(view.minimapPx, 0, "the default view draws no minimap strip");
+  const ws = [windowAt("hackrf-0", 100.8e6, 2.4e6), windowAt("hackrf-1", 2.45e9, 20e6)];
+  const f = view.frame(T0, ws);
+  assert.equal(f.mapRect, null, "a map strip was laid out");
+  assert.equal(f.views.length, view.panes.count, "a viewport other than the panes was drawn");
+  const lit = f.quads.filter((q) => q.kind === "live-segment");
+  assert.deepEqual(lit.map((q) => q.id), ["hackrf-0", "hackrf-1"], "one segment per reported SDR window, in the backend's order");
+  assert.notDeepEqual(lit[0].rgba, lit[1].rgba, "two front ends must be tellable apart");
+  const rect = f.views[0].rect;
+  // Still a stroke (never a wash), and still visible at 6 GHz wide: the drawing floor carried over.
+  for (const q of lit) {
+    const { wPx, hPx } = quadSizePx(q, rect);
+    assert.ok(wPx >= 1.999, `a ${q.id} window rounded away to nothing on the zoomed-out pane`);
+    assert.ok(hPx <= 3.001, `a ${q.id} segment is a wash, not a stroke`);
+  }
+  // No window reported: no segment — a segment appears because a window was reported, never assumed.
+  assert.equal(view.frame(T0, []).quads.filter((q) => q.kind === "live-segment").length, 0);
+  // Zoomed onto 100.8 MHz: hackrf-1's 2.45 GHz window is off the pane and omitted, never clamped.
+  view.panes.setFreq(view.panes.list()[0].id, 100.8e6, 4e6);
+  assert.deepEqual(view.frame(T0, ws).quads.filter((q) => q.kind === "live-segment").map((q) => q.id), ["hackrf-0"]);
+});
+
+test("T-995: the app draws no minimap and its follow FAB has no minimap toggle", () => {
+  const app = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(app, /const MINIMAP_PX = 0;/, "the app still lays out a minimap strip");
+  assert.equal(/view\.minimap\.setFollowing/.test(app), false, "the follow-live FAB still toggles a minimap");
+});

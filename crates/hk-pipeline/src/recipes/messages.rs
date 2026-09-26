@@ -21,16 +21,39 @@
 //!   `decodes/<pipeline>/<output>`. New emitters get the family step
 //!   ([`crate::chains::plugin::classify_decoder_emitters`]) with the mapping's `service` (or the
 //!   recipe id) as decoder evidence.
+//! - **A vote bar on weak identities (T-962).** A scheme whose check cannot carry an identity on
+//!   one frame ([`hk_model::IdentityScheme::commit_votes`] > 1; today `rds-pi`, whose block check
+//!   is 10 bits) is counted **per pipeline, across all its `messages` outputs**
+//!   ([`PipelineStats::identity_tally`]): each CRC-valid row naming the identity is an agreeing
+//!   vote at the row's own capture time ([`IdentityTally`]), counted once per distinct capture
+//!   time ([`VoteWindow::vote_distinct`]) — so the unit is the received frame (the RDS group),
+//!   the unit the bar was derived in, whichever outputs report it — and until the scheme's bar of votes
+//!   has fallen **within its capture-time window** (10 in 5 s for `rds-pi`: a rate, so a
+//!   long-running pipeline on a chance lock cannot accumulate its way there) the row is written
+//!   **without** its identity — no sighting, so no emitter is created, keyed or confirmed by it —
+//!   and marked `identity_provisional: true` with `identity_scheme`, `identity_value`,
+//!   `identity_votes`, `identity_votes_needed`, `identity_votes_in_window` and
+//!   `identity_votes_window_s` in its metadata, linked to the pipeline's target
+//!   emitter when it has one. It is the same bar `hk-demod`'s always-on RDS decoder applies, so an
+//!   RDS PI becomes an identity on the same evidence whichever decoder heard it. Why shared
+//!   (round 3): a `station` (PS) row is emitted once per completed four-segment PS cycle, at most
+//!   ~1 per second on a real station, so a per-writer count could never put 10 of them in 5 s
+//!   and a clean station's PS never gained its PI; sharing lets the `group-info` output's
+//!   per-group rows commit the PI for the whole pipeline. Counting each capture time once keeps
+//!   the sum honest: the PS string, the group row it completed and a CT row from that group are
+//!   one frame, and N outputs over the same frames still add up to the frames received. The bar
+//!   lives in the scheme, not the recipe, so a user-saved copy of a recipe cannot lower it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use hk_blocks::{Output, PortVec};
 use hk_model::{
     ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, EmitterId, Repository, Timestamp,
+    VoteWindow,
 };
 use hk_plugins::{Ingest, MetadataPolicy, output_metadata_policy};
 use hk_recipe::{DecodeMapping, OutputSpec, Recipe};
@@ -148,6 +171,77 @@ fn keyed(paths: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Most distinct identities one writer tallies; a frame naming another once full stays
+/// provisional (fails closed; a noise-driven spray of values cannot grow the map).
+const MAX_TALLIED: usize = 256;
+
+/// Agreeing CRC-valid frames per identity, for schemes with a vote bar (T-962; module docs),
+/// each held as an [`hk_model::VoteWindow`] over the rows' own capture times, one vote per
+/// distinct capture time. One per pipeline ([`PipelineStats::identity_tally`]), shared by its
+/// `messages` writers.
+#[derive(Debug, Default)]
+pub struct IdentityTally {
+    votes: BTreeMap<(hk_model::IdentityScheme, String), VoteWindow>,
+}
+
+impl IdentityTally {
+    /// Counts `d`'s identity as one more agreeing vote at the row's capture time `d.t` and, for a
+    /// scheme with a vote bar, records the vote in `d`'s metadata; until the scheme's bar of votes
+    /// has fallen within its capture-time window ([`hk_model::IdentityScheme::commit_window_ns`])
+    /// it moves the identity off the row into that metadata. Returns whether the row was made
+    /// provisional. Rows without an identity, and schemes a single frame suffices for, pass
+    /// untouched.
+    pub fn gate(&mut self, d: &mut Decode) -> bool {
+        let Some(id) = d.identity.as_ref() else {
+            return false;
+        };
+        let needed = id.scheme.commit_votes();
+        if needed <= 1 {
+            return false;
+        }
+        let window_ns = id.scheme.commit_window_ns();
+        let t = d.t.as_unix_nanos();
+        let key = (id.scheme.clone(), id.value.clone());
+        let full = self.votes.len() >= MAX_TALLIED;
+        let (committed, votes, in_window) = match self.votes.get_mut(&key) {
+            Some(w) => (
+                w.vote_distinct(t, needed, window_ns),
+                w.votes(),
+                w.window_votes(),
+            ),
+            None => {
+                let mut w = VoteWindow::default();
+                let c = w.vote_distinct(t, needed, window_ns);
+                let r = (c, w.votes(), w.window_votes());
+                if !full {
+                    self.votes.insert(key, w);
+                }
+                r
+            }
+        };
+        let provisional = !committed;
+        if !d.metadata.is_object() {
+            d.metadata = Value::Object(Map::new());
+        }
+        let Value::Object(m) = &mut d.metadata else {
+            unreachable!("metadata was just made an object");
+        };
+        m.insert("identity_provisional".into(), Value::Bool(provisional));
+        m.insert("identity_votes".into(), votes.into());
+        m.insert("identity_votes_needed".into(), needed.into());
+        m.insert("identity_votes_in_window".into(), in_window.into());
+        m.insert(
+            "identity_votes_window_s".into(),
+            (window_ns as f64 / 1e9).into(),
+        );
+        if provisional && let Some(id) = d.identity.take() {
+            m.insert("identity_scheme".into(), id.scheme.as_string().into());
+            m.insert("identity_value".into(), id.value.into());
+        }
+        provisional
+    }
+}
+
 /// One frame queued for a writer.
 pub struct QueuedFrame {
     /// Frame time.
@@ -253,6 +347,32 @@ impl MessagesSink {
         stats: Arc<PipelineStats>,
         on_emitters: impl FnMut(&[EmitterId], Timestamp) + Send + 'static,
     ) -> Result<Self, String> {
+        Self::spawn_standalone_targeting(
+            db_path,
+            recipe,
+            output_id,
+            class,
+            None,
+            max_batch,
+            stats,
+            on_emitters,
+        )
+    }
+
+    /// [`Self::spawn_standalone`] with a target emitter (the pipeline's `{emitter_id}`), as a
+    /// recipe started on an inventory entry has.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_standalone_targeting(
+        db_path: &Path,
+        recipe: &Recipe,
+        output_id: &str,
+        class: ContentClass,
+        emitter: Option<EmitterId>,
+        max_batch: usize,
+        stats: Arc<PipelineStats>,
+        on_emitters: impl FnMut(&[EmitterId], Timestamp) + Send + 'static,
+    ) -> Result<Self, String> {
         let spec = recipe
             .outputs
             .iter()
@@ -268,7 +388,7 @@ impl MessagesSink {
             ingest: Ingest::new(repo),
             row: RowSpec::new(recipe, mapping, class),
             policy: policy_or_warn(recipe, output_id),
-            emitter: None,
+            emitter,
             bandwidth_hz: 0.0,
             max_batch: max_batch.max(1),
             on_emitters: Box::new(on_emitters),
@@ -412,14 +532,16 @@ impl Writer {
         };
         let (row, policy) = (&self.row, self.policy.as_ref());
         let (emitter, bandwidth_hz) = (self.emitter, self.bandwidth_hz);
+        // The pipeline's one tally, shared with its other `messages` writers (T-962 round 3).
+        let tally = &self.stats.identity_tally;
         let mut attempted = 0u64;
         let result = self.ingest.batch(|ingest| {
             store_rows(
                 ingest,
                 row,
                 policy,
-                emitter,
-                bandwidth_hz,
+                (emitter, bandwidth_hz),
+                tally,
                 batch,
                 &mut attempted,
             )
@@ -432,8 +554,8 @@ impl Writer {
                 &mut self.ingest,
                 row,
                 policy,
-                emitter,
-                bandwidth_hz,
+                (emitter, bandwidth_hz),
+                tally,
                 batch,
                 &mut attempted,
             ),
@@ -461,8 +583,8 @@ fn store_rows(
     ingest: &mut Ingest,
     row: &RowSpec,
     policy: Option<&MetadataPolicy>,
-    emitter: Option<EmitterId>,
-    bandwidth_hz: f64,
+    (emitter, bandwidth_hz): (Option<EmitterId>, f64),
+    tally: &Mutex<IdentityTally>,
     batch: &mut Vec<QueuedFrame>,
     attempted: &mut u64,
 ) -> (u64, u64) {
@@ -473,10 +595,22 @@ fn store_rows(
         };
         drop(job.layers);
         *attempted += 1;
+        // T-962: below its scheme's vote bar the identity comes off the row before anything
+        // downstream (sanitising, the sighting, the republish) can see it.
+        let provisional = tally
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .gate(&mut d);
         // The same sanitising as `hk_plugins::output::parse_line`: a no-op under a class that
         // permits content, the output policy's allowlist otherwise.
         policy::sanitize_decode(policy, DECODE_MESSAGE_SCHEMA, &mut d);
-        match ingest.store_decode(d, emitter, None, Some(job.channel_hz), Some(bandwidth_hz)) {
+        let stored = match emitter {
+            // A provisional row is a record, not a claim: linked to the target so the emitter's
+            // decode route can show it, with no identity sighting.
+            Some(target) if provisional => ingest.store_decode_linked(d, target, None),
+            _ => ingest.store_decode(d, emitter, None, Some(job.channel_hz), Some(bandwidth_hz)),
+        };
+        match stored {
             Ok(_) => ok += 1,
             Err(_) => failed += 1,
         }

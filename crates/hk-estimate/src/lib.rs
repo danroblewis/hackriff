@@ -69,6 +69,7 @@
 //! by the caller's content class.
 
 pub mod assist;
+pub mod atsc;
 pub mod blind;
 pub mod clock;
 pub(crate) mod dsp;

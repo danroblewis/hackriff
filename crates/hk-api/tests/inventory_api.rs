@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hk_api::{ApiState, Server, ServerConfig, Token};
-use hk_model::Repository;
+use hk_model::{Repository, Timestamp};
 use serde_json::{Value, json};
 
 #[allow(dead_code)]
@@ -22,17 +22,25 @@ const TOKEN: &str = "t022-inventory-token-0123456789abcdef";
 const T0: i64 = seed::DEFAULT_T0_S;
 
 fn serve_seeded() -> (Server, seed::Seeded) {
+    let (server, seeded, _) = serve_seeded_repo();
+    (server, seeded)
+}
+
+/// [`serve_seeded`] keeping the repository handle, for a test that must change the store under the
+/// running server (a merge, say).
+fn serve_seeded_repo() -> (Server, seed::Seeded, Arc<Mutex<Repository>>) {
     let mut repo = Repository::open_in_memory().unwrap();
     let seeded = seed::seed(&mut repo, T0).unwrap();
+    let repo = Arc::new(Mutex::new(repo));
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         Token::from_config(TOKEN).unwrap(),
     );
     let state = ApiState {
-        inventory: Some(Arc::new(Mutex::new(repo))),
+        inventory: Some(Arc::clone(&repo)),
         ..ApiState::default()
     };
-    (Server::start(config, state).unwrap(), seeded)
+    (Server::start(config, state).unwrap(), seeded, repo)
 }
 
 fn get(addr: SocketAddr, path: &str, authorization: Option<&str>) -> (u16, Vec<u8>) {
@@ -104,6 +112,64 @@ fn unauthenticated_inventory_calls_are_rejected() {
     );
     let bare = Server::start(config, ApiState::default()).unwrap();
     assert_eq!(authed(bare.local_addr(), "/api/inventory").0, 404);
+}
+
+/// T-972 (docs/api.md, "Inventory entry"): `GET /api/inventory/{id}` resolves an id that has been
+/// merged away to its live survivor and serves **the survivor's row** — so the `id` in the answer is
+/// not necessarily the one asked for, and that is how a caller learns its id was re-keyed.
+///
+/// This is not a corner case in a live run: the inventory is self-cleaning and merges near-duplicate
+/// rows continuously (CLAUDE.md, ADR-0019), so an id read from `/api/inventory` can be absorbed
+/// before the very next call. `hk-cli`'s `api_contract.rs` used to assert the two ids were equal and
+/// raced exactly that under load; here the merge is *made* to happen, so the documented answer is
+/// pinned by value instead of waited for.
+#[test]
+fn the_entry_route_resolves_a_merged_id_to_its_survivor() {
+    let (server, s, repo) = serve_seeded_repo();
+    let addr = server.local_addr();
+    // The absorbed row is listed, and answers under its own id, before the merge.
+    let before = page(addr, "/api/inventory");
+    assert!(ids(&before).contains(&s.carrier.to_string()));
+    let entry = page(addr, &format!("/api/inventory/{}", s.carrier));
+    assert_eq!(entry["id"], json!(s.carrier.to_string()));
+
+    // Merge the identity-free `carrier` into `rds` (only one side holds an identity, so the merge
+    // is allowed), as the pipeline's same-emission link does.
+    repo.lock()
+        .unwrap()
+        .merge_emitters(
+            s.carrier,
+            s.rds,
+            Timestamp::from_unix_nanos((T0 + 10) * 1_000_000_000),
+            "same emission (test)",
+        )
+        .unwrap();
+
+    // The absorbed id still answers `200` — never a 404, and never a shell under the old id — with
+    // the survivor's row, field for field the row the survivor's own id serves.
+    let resolved = page(addr, &format!("/api/inventory/{}", s.carrier));
+    assert_eq!(
+        resolved["id"],
+        json!(s.rds.to_string()),
+        "the answer carries the survivor's id: {resolved}"
+    );
+    // Field for field the row the survivor's own id serves, bar `presence.silence_s`: that one is
+    // measured from the live edge at the moment of the call, so two calls differ by their spacing.
+    let settled = |mut v: Value| -> Value {
+        v["presence"].as_object_mut().unwrap().remove("silence_s");
+        v
+    };
+    assert_eq!(
+        settled(resolved),
+        settled(page(addr, &format!("/api/inventory/{}", s.rds))),
+        "resolution serves the survivor's row, not a copy under the old id"
+    );
+    // And the list no longer carries the absorbed id, which is what leaves a client holding one:
+    // re-read the id from the row the server returns.
+    let after = page(addr, "/api/inventory");
+    let listed = ids(&after);
+    assert!(!listed.contains(&s.carrier.to_string()), "{after}");
+    assert!(listed.contains(&s.rds.to_string()), "{after}");
 }
 
 #[test]
@@ -794,7 +860,9 @@ fn the_inventory_row_and_filter_keep_not_searched_apart_from_unknown_and_solved(
             kind: ResolutionKind::Unknown,
             deepest_verdict: Some(Verdict::Framed),
             reason: Some(ResolutionReason::BudgetExhausted),
+            suspected: None,
             summary: "9 of 11 skeletons tried; more budget is the missing ingredient".into(),
+            explanations: Vec::new(),
         }),
         receiver: None,
         job: Some(SynthesisJob {

@@ -1081,3 +1081,131 @@ fn invalid_sightings_are_refused() {
         "rolled back"
     );
 }
+
+/// T-961, rule 2b: **a decode attaches to the entry whose (t, f) region it came from.**
+///
+/// The 106.1 MHz case from the explorer's second FM pass (2026-09-25). Blind detection had a row
+/// at 106.1127 MHz, 160 kHz wide, still `unknown`; a recipe run on a *band* — so no emitter
+/// context to name — decoded its RDS PI on a 200 kHz channel at 106.1126 MHz. The identity was
+/// held by nobody, so rule 5 minted a second entry 100 Hz away: two overlapping boxes for one
+/// station, and a CRC-valid decode that named neither the detection nor its family.
+///
+/// The station is one emitter, and the PI belongs to it.
+#[test]
+fn signal_062_a_decoded_identity_with_no_context_lands_on_the_detection_it_came_from() {
+    let mut r = repo();
+    let detection = track_sighting(wfm(106.1127e6), tr(0, 12), 3);
+    let station = r.record_sighting(&detection, None).unwrap();
+    assert_eq!(station.assignment, Assignment::Created);
+
+    let pi = claim(IdentityScheme::RdsPi, "1323", ContentClass::Unrestricted);
+    let decode = decode_sighting(pi.clone(), 9, 106.1126e6, 200e3, None);
+    let d = r.record_sighting(&decode, None).unwrap();
+
+    assert_eq!(
+        d.emitter_id, station.emitter_id,
+        "the PI lands on the detection it was decoded from, not a second row"
+    );
+    assert!(matches!(d.assignment, Assignment::Region { .. }), "{d:?}");
+    assert!(!d.created);
+    assert_eq!(d.conflict, None);
+    assert_eq!(
+        r.emitter(station.emitter_id).unwrap().identity,
+        Identity::Decoded(pi.identity.clone()),
+        "the entry now carries the PI"
+    );
+    let region = Region::new(FreqRange::new(106.0e6, 106.2e6), tr(0, 60));
+    let rows: Vec<EmitterId> = r
+        .emitters_in_region(&region)
+        .unwrap()
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(rows, vec![station.emitter_id], "one box, not two");
+
+    // The PI's own entry now exists, so further decodes resolve to it by rule 2 as before.
+    let again = r
+        .record_sighting(&decode_sighting(pi, 11, 106.1126e6, 200e3, None), None)
+        .unwrap();
+    assert_eq!(
+        (again.emitter_id, again.assignment),
+        (station.emitter_id, Assignment::Identity)
+    );
+}
+
+/// T-961: rule 2b reaches only where "the region it came from" names one transmitter.
+///
+/// Four refusals, each of which would be a wrong attachment: a **channel-sharing** scheme (every
+/// aircraft in a 2 MHz ADS-B window is not the one emitter there); an entry that **already holds
+/// another identity**; an entry **not on air** when the decode was made; and a decode that names
+/// **no channel** at all, so it cannot say what region it came from. Each falls back to rule 5
+/// exactly as before.
+#[test]
+fn signal_062_region_attachment_refuses_a_shared_channel_another_identity_or_another_time() {
+    let mut r = repo();
+    let window = r
+        .record_sighting(
+            &track_sighting(Fingerprint::new(1090e6, 2e6), tr(0, 12), 3),
+            None,
+        )
+        .unwrap()
+        .emitter_id;
+    let icao = claim(
+        IdentityScheme::AdsbIcao,
+        "a1b2c3",
+        ContentClass::Unrestricted,
+    );
+    let d = r
+        .record_sighting(&decode_sighting(icao, 6, 1090e6, 2e6, None), None)
+        .unwrap();
+    assert!(d.created, "a shared channel names no single transmitter");
+    assert_ne!(d.emitter_id, window);
+
+    // Another station's entry, already identified: its identity is not up for replacement.
+    let held = claim(IdentityScheme::RdsPi, "3AAB", ContentClass::Unrestricted);
+    let other = r
+        .record_sighting(&decode_sighting(held, 6, 88.5e6, 200e3, None), None)
+        .unwrap()
+        .emitter_id;
+    let pi = claim(IdentityScheme::RdsPi, "1323", ContentClass::Unrestricted);
+    let clash = r
+        .record_sighting(&decode_sighting(pi.clone(), 7, 88.5e6, 200e3, None), None)
+        .unwrap();
+    assert!(clash.created, "{clash:?}");
+    assert_ne!(clash.emitter_id, other);
+
+    // On air yesterday, silent now: this decode was not made from it.
+    let past = r
+        .record_sighting(&track_sighting(wfm(99.7e6), tr(0, 12), 3), None)
+        .unwrap()
+        .emitter_id;
+    let later = r
+        .record_sighting(
+            &decode_sighting(
+                claim(IdentityScheme::RdsPi, "4C5D", ContentClass::Unrestricted),
+                DAY,
+                99.7e6,
+                200e3,
+                None,
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(later.created, "{later:?}");
+    assert_ne!(later.emitter_id, past);
+
+    // A producer that recorded no channel (folded to 0 Hz) names no region.
+    let unplaced = r
+        .record_sighting(
+            &decode_sighting(
+                claim(IdentityScheme::RdsPi, "6E7F", ContentClass::Unrestricted),
+                6,
+                0.0,
+                0.0,
+                None,
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(unplaced.created, "{unplaced:?}");
+}

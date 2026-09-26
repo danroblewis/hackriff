@@ -28,6 +28,13 @@
 //     this is not the client-side accumulator T-457 declined to build, and it answers no question
 //     about the past. The past is the pyramid's, and the trace's max-hold reads it from the tiles.
 //
+//  4. **The rows, kept** (T-1042 / LSR-1, `../../surface/livering.ts`'s [[LiveRing]]) — behind the
+//     `live-ring` flag. LSR-1 gives the newest rows back their own lane to the screen: a following
+//     pane paints its live edge from these rows, and the pyramid serves the history below them, so
+//     "rows append as they are recorded" stops depending on a tile being produced, revalidated and
+//     re-fetched first. It is bounded (`DEFAULT_RING_ROWS`) and answers nothing about a time it does
+//     not hold, which is what keeps it a ring and not the accumulator (3) declined to build.
+//
 // The stream is therefore no longer consumed purely for its timestamps, which was the honest
 // inefficiency this header used to admit. A lighter live-edge source is still a backend question;
 // with a trace on the screen there is now less reason to want one.
@@ -35,6 +42,8 @@
 // It also keeps `conn.spectrum`, which the shell shows: the socket's health is the honest signal for
 // "is this server producing".
 import * as ax from "../../axis";
+import { flags } from "../../flags";
+import { LiveRing } from "../../surface/livering";
 import { LiveRow } from "../../surface/trace";
 import type { AppContext } from "../context";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
@@ -50,6 +59,21 @@ import { nextView } from "./view";
  * cadence beside a per-frame scroll is T-388 on the other axis.
  */
 export const liveRow = new LiveRow();
+
+/**
+ * **The live ring: the rows themselves, kept for as long as a pane can paint them** (T-1042 / LSR-1,
+ * `../../surface/livering.ts`).
+ *
+ * The fourth thing this module takes off the stream, and the reason the header above says the
+ * rows were thrown away. It is the same socket, the same rows and the same absolute capture times —
+ * nothing new is subscribed, nothing new is polled, and the backend does not learn that this exists
+ * (docs/api.md: the producer already runs because this page is a consumer).
+ *
+ * A module singleton beside [[liveRow]] and for its reasons: `mountLiveEdge` is mounted exactly once,
+ * and rows must not travel through the store. Filled only while the `live-ring` flag is on, so an
+ * unflagged page allocates no ring buffer at all — the ring's buffers are allocated by its first row.
+ */
+export const liveRing = new LiveRing();
 
 /** The `/api/streams` fields this needs (docs/api.md discovery). */
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
@@ -79,10 +103,12 @@ export function mountLiveEdge(ctx: AppContext): () => void {
     const rate = typeof hd.sample_rate_hz === "number" ? hd.sample_rate_hz : 25;
     const prev = geom();
     const retuned = !prev || prev.centerHz !== g.centerHz || prev.bandwidthHz !== g.bandwidthHz || prev.bins !== g.bins;
-    // A retune re-plumbs the stream, and the row held here is of the band that has just ended. Drop
-    // it for the same reason `edgeTS` goes back to null: a picture of the old band drawn over the new
-    // one is not a stale picture, it is a false one.
-    if (retuned) liveRow.clear();
+    // A retune re-plumbs the stream, and the rows held here are of the band that has just ended. Drop
+    // them for the same reason `edgeTS` goes back to null: a picture of the old band drawn over the new
+    // one is not a stale picture, it is a false one. The ring goes with the row, by the same rule
+    // (`livering.ts`'s rule 3) — and its epoch moves, which is what makes the renderer rebuild the
+    // texture rather than patch this band's rows into the last one's.
+    if (retuned) { liveRow.clear(); liveRing.clear(); }
     store.set((s) => ({
       conn: { ...s.conn, spectrum: "live", message: "" },
       live: {
@@ -115,14 +141,18 @@ export function mountLiveEdge(ctx: AppContext): () => void {
     // spectrum, so the last real frame stands rather than being replaced by nothing.
     const g = geom();
     if (r.row && g && r.row.length > 0) {
-      liveRow.set({
+      const frame = {
         f0Hz: g.centerHz - g.bandwidthHz / 2,
         f1Hz: g.centerHz + g.bandwidthHz / 2,
         // Copied, not aliased: `parseSpectrumRecord` returns a view onto the socket's buffer, which
         // the next message reuses. A retained view would silently become the next row.
         db: new Float32Array(r.row),
         tNs: r.tS * 1e9,
-      });
+      };
+      liveRow.set(frame);
+      // T-1042: the same row, kept — the ring copies it into its own buffer, so the two holders share
+      // no storage and neither can be changed by the other.
+      if (flags().liveRing) liveRing.push(frame);
     }
   };
 

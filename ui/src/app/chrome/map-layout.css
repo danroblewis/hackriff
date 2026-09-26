@@ -1,6 +1,7 @@
-/* T-801 (MAP-01): full-bleed Explore. The one canvas fills 100vw x 100vh; the bar, inventory
-   side, focus and dock float over it in SCREEN space. Data overlays stay in content space and are
-   laid out per frame by the surface (unchanged). Decode/History keep the framed shell. */
+/* T-801 (MAP-01): full-bleed Explore. The one canvas fills 100vw x 100vh; the inventory side, focus
+   and dock float over it in SCREEN space (T-993: the top bar no longer does — it is gone from
+   Explore). Data overlays stay in content space and are laid out per frame by the surface
+   (unchanged). Decode/History keep the framed shell. */
 .app:has(#view-explore:not([hidden])) { display: block; position: relative; height: 100vh; height: 100dvh; width: 100%; overflow: hidden; }
 .app:has(#view-explore:not([hidden])) #view-explore { position: fixed; inset: 0; display: block; z-index: 0; }
 #view-explore > .centre { position: absolute; inset: 0; width: 100vw; height: 100vh; height: 100dvh; max-width: 100%; box-sizing: border-box; }
@@ -8,57 +9,38 @@
    dock, and outlived that row (T-882). The canvas is 100vw x 100vh (docs/23 §10.1); the map strip
    lifts itself clear of the dock (`centre/surface.ts` fit), and nothing else subtracts. */
 #view-explore > .centre > .surface { min-height: 0; height: 100%; }
-.app:has(#view-explore:not([hidden])) > .bar { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 5; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px); min-height: 40px; }
-.app:has(#view-explore:not([hidden])) > .dock { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 5; height: 54px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); }
-/* T-801 round 3: `--panel-w`/`--panel-gap` are the one definition of the floating column's width
-   and the chrome's gap (T-895: no longer an inset anything else must clear — see below). */
-#view-explore { --panel-w: 300px; --panel-gap: 8px; }
-/* T-895 (user P1, docs/23 §10.6 rule 1): the left column is COLLAPSED BY DEFAULT on every width
-   (`chrome/side-chip.ts`): a chip at the left edge, vertically centred (mirroring the zoom stack on
-   the right, so it is clear of Go-to at the top, the sheet at the bottom and the FAB/zoom on the
-   right), at most 56 px tall, stating the lists' counts. Open, it is a floating column with a
-   header and a close (×); closed, the lists take NO pixels (display: none, not a fade).
-   The open column starts BELOW the top chrome — the bar and the floating Go-to and top-right
-   cluster, measured by the script into `--side-top` — so it claims no inset from the floating
-   cluster (an inset squeezed T-528's old toolbar off-screen at 1000/920 px) and can never sit over
-   Go-to or a top-right control. */
-#view-explore > .side { position: absolute; z-index: 4; left: 8px; }
-#view-explore > .side.is-open { top: var(--side-top, 104px); bottom: 74px; width: min(var(--panel-w), calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); grid-template-rows: auto minmax(0,1fr) minmax(0,150px); }
-#view-explore > .side.is-collapsed { display: block; top: 50%; transform: translateY(-50%); bottom: auto; width: auto; border: 0; background: none; }
-#view-explore > .side.is-collapsed > :not(.side-chip), #view-explore > .side.is-open > .side-chip { display: none; }
-.side-chip { display: flex; align-items: center; gap: 8px; box-sizing: border-box; max-height: 56px; min-height: 44px; padding: 4px 10px 4px 8px; cursor: pointer;
-  color: var(--text); font: 12px var(--ui); border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); border-radius: 10px;
-  background: color-mix(in srgb, var(--panel) 72%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); box-shadow: 0 4px 18px var(--shadow); }
-.side-chip:hover { border-color: var(--muted); }
-.side-chip:focus-visible, .side-close:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
-.side-chip-ico { font-size: 16px; color: var(--muted); }
-.side-chip-counts { display: grid; gap: 1px; line-height: 1.2; }
-.side-chip-n { font-family: var(--mono); font-weight: 600; }
-.side-chip-n.cand { color: var(--lav); }
-.side-chip-n.conf { color: var(--teal); }
-.side-chip small { color: var(--muted); font-size: 10.5px; }
-.side-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 0 14px; }
-.side-top-h { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
-.side-close { min-width: 32px; min-height: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--raise, none); color: var(--text); font-size: 18px; line-height: 1; cursor: pointer; }
-.side-close:hover { border-color: var(--muted); }
+/* T-993: the app-shell top bar RETIRES over the map. It takes no pixels at all in Explore — not a
+   floating strip, not a zero-height box — and its controls are moved into the map's own floating
+   chrome (`chrome/top-chrome.ts`, placed by `map-controls.css`). Decode and History keep it. */
+.app:has(#view-explore:not([hidden])) > .bar { display: none; }
+/* T-994: the floating Outputs dock bar is retired (its pixels return to the map); the small
+   Active-outputs strip that replaced it is `dock/dock.css`'s `.out-strip`, shown only while an
+   output is open. */
+/* T-801 round 3: `--panel-gap` is the one definition of the floating chrome's gap to the canvas edge
+   (`map-controls.css` reads it). T-997 retired `--panel-w`: there is no floating column left to
+   size — the lists went into the sheet. */
+#view-explore { --panel-gap: 8px; }
+/* T-997 (user 2026-09-25): the left inventory COLUMN is gone from the map entirely. T-895 collapsed
+   it to a chip at mid-height on the left edge, which is where each pane's time ruler prints its
+   labels (`surface/hud.ts`), so it sat over the timeline markers and belonged to no cluster. Its
+   counts are now two pills in the map's top-left chrome, under Go-to (`chrome/inv-pills.ts`,
+   `map-controls.css`'s `.map-inv`), and the lists themselves are a section of the bottom sheet
+   (`index.html`, `sheet.css`), which a pill opens on its own list. So `.side` takes NO screen-space
+   rule here at all: over the map it is sheet content, laid out by `sheet.css`. */
+
 /* T-803: the focus panel is no longer a right-hand column — it is the body of the bottom sheet
    (`chrome/sheet.css`), which is collapsed to its title strip rather than hidden when nothing is
    focused, so the old `.focus.is-empty { display: none }` column rule is gone with the column. */
 /* T-882: the surface's toolbar row (`.sf-bar`, whose buttons T-801 round 3 found painted behind
-   these panels) is gone; its controls float in `.map-ctl` inside the stage, which the panels already
-   stay clear of (see the T-895 rules above). */
+   these panels) is gone; its controls float in `.map-ctl` inside the stage, which the sheet already
+   stays clear of (`sheet.css`, `focus-sheet.ts`'s measured `clearOf`). */
 /* T-802: in Explore, Go-to is the floating one docked over the canvas (`map-controls.ts`), which
    submits through the same `requestGoto`; the bar's copy stays for Decode/History, where it
-   switches to Explore first. One Go-to on screen, not two. */
-.app:has(#view-explore:not([hidden])) > .bar #goto-form { display: none; }
+   switches to Explore first. One Go-to on screen, not two (T-993: the whole bar is hidden there now). */
 @media (max-width: 900px) {
   body:has(#view-explore:not([hidden])) { overflow: hidden; }
   .app:has(#view-explore:not([hidden])) { height: 100dvh; }
-  .app:has(#view-explore:not([hidden])) > .bar { flex-wrap: wrap; max-height: 40dvh; overflow: auto; }
   #view-explore > .centre { grid-template-rows: minmax(0, 1fr); }
-  /* T-895: open on a narrow screen, the lists span the width between the top chrome's measured
-     bottom (`--side-top`) and the sheet's peek strip, stopping short of the right-edge column the
-     zoom stack and the FAB live in (`sheet.css`'s 64 px gutter). */
-  #view-explore > .side.is-open { width: auto; right: 64px; bottom: calc(70px + 56px + 8px); }
-  .app:has(#view-explore:not([hidden])) > .dock { flex-wrap: nowrap; }
+  /* T-997: nothing to place here any more — the lists are in the sheet, which already spans the
+     narrow width between the chrome and the map's bottom edge — T-994 retired the dock (`sheet.css`). */
 }

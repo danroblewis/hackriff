@@ -1,14 +1,17 @@
 # HackRF One fixtures, 2026-09-25 (explorer agent)
 
-Three live captures clipped by the Mac-only explorer agent through `POST /api/iqbuffer/clip` on
-its staging build, 2026-09-25, San Francisco (`~/.hackriff-ops/explorer/journal-20260925.md`): two
-FM/RDS captures ~04:00-04:14 PDT, plus a P25 capture ~06:19 PDT (T-975, its own section below).
+Live captures by the Mac-only explorer agent on its staging build, 2026-09-25, San
+Francisco (`~/.hackriff-ops/explorer/journal-20260925.md`): four FM/RDS captures ~04:00-04:58 PDT
+(T-935's pair and T-960's pair) and a P25 capture ~06:19 PDT (T-975), all clipped through
+`POST /api/iqbuffer/clip`, plus the window-3 LMR/DMR captures (T-985, their own section below).
 Hardware: HackRF One serial `0000000000000000d2b861dc263bc293`, firmware 2026.01.3, board rev
-older than r6, libhackrf 0.9.2, antenna unknown (whatever was on the SMA, not changed). The FM/RDS
-pair used LNA 32 / VGA 30 / amp on; bias-tee **untouched, so unknown** — the fixture's provenance
-and `capture_settings` omit `bias_tee`/`antenna_port` rather than writing `off`/`unknown` literally
-(`docs/sigmf-extension.md`: an absent key is unknown, and unknown is not `off`). All three clips
-are 2.4 Msps x 5 s, ci8, 24 000 000 bytes (Git LFS). Licence: project-owned capture.
+older than r6, libhackrf 0.9.2, antenna unknown (whatever was on the SMA, not changed). The four
+FM/RDS captures used LNA 32 / VGA 30 / amp on; bias-tee is **untouched, so unknown** for the first
+pair (T-935) — the fixture's provenance and `capture_settings` omit `bias_tee`/`antenna_port`
+rather than writing `off`/`unknown` literally (`docs/sigmf-extension.md`: an absent key is
+unknown, and unknown is not `off`) — and recorded as `"off"` for the second pair (T-960), per the
+explorer's own truth claim. The four FM/RDS clips and the P25 clip are 2.4 Msps x 5 s, ci8,
+24 000 000 bytes (Git LFS). Licence: project-owned capture.
 
 Regenerate the `hackriff:truth` annotations and manifest rows (data/meta files are placed by hand
 from the explorer agent's `~/.hackriff-ops/explorer/captures/20260925/` output, which sits outside
@@ -26,6 +29,8 @@ invisible to it exactly as for every other fixture.
 |---|---|---|
 | `fm-101p3-pi1694` (capture centre 100.9 MHz) | SIGNAL-062 | **101.300 MHz WFM + RDS**, oracle PI `1694` (56/56 CRC-valid groups, BLER 0.0 over the 5 s window), PTY 7, TP 0, pilot 18999.890 Hz, clock −5.77 ppm. PS is dynamic (song/artist scroll); the window's only complete frame is `Animals ` (2x), consistent with the explorer's live RT "... Glass Animals - Heat Waves". Whole-file `overload` artefact: 11 811 945 / 12 000 000 samples clipped (98.4 %) at LNA 32/VGA 30/amp on — severe front-end overload in SF's FM environment, not a bug. |
 | `fm-98p9-piA4FF` (capture centre 98.5 MHz) | SIGNAL-062 | **98.900 MHz WFM + RDS**, oracle PI `A4FF` (3/27 CRC-valid groups, BLER 0.639 — weak but internally consistent, all 3 groups vote the same PI), PTY 9, pilot 18999.849 Hz. **98.100 MHz WFM**, pilot present (18999.890 Hz) but 0 CRC-valid groups in the window: oracle agrees with the explorer's "no PI" claim. Whole-file `overload` artefact: 1 441 836 / 12 000 000 samples clipped (12.0 %). |
+| `fm-88p5-pi3AAB` (capture centre 89.0 MHz) | SIGNAL-062 | **88.500 MHz WFM + RDS**, oracle PI `3AAB` (4/34 CRC-valid groups, BLER 0.507 — weak), PTY 22, TP 0, pilot 18999.665 Hz, clock −17.62 ppm. **89.435 MHz WFM**, pilot present (18999.935 Hz) but 0 CRC-valid groups: oracle agrees with the explorer's "no PI, weak" claim. Whole-file `overload`: 579 551 / 12 000 000 samples clipped (4.8 %), consistent with the explorer's `app_overload_flag: true`. |
+| `fm-106p1-pi1323` (capture centre 106.5 MHz) | SIGNAL-062 | **106.100 MHz WFM + RDS**, oracle PI `1323` (22/55 CRC-valid groups, BLER 0.227), PTY 16, TP 0, pilot 18999.894 Hz, clock −5.60 ppm. **106.907 MHz WFM**, pilot present (18999.114 Hz) but 0 CRC-valid groups: oracle agrees with the explorer's "pilot lock, no RDS" claim. Whole-file `overload`: 694 878 / 12 000 000 samples clipped (5.8 %), consistent with the explorer's `app_overload_flag: true`. |
 
 **Oracle cross-check (T-935): no disagreements.** The independent `rds_ref.py` oracle, run fresh
 over each fixture's own 5 s window, confirms both PI codes the explorer agent's live RDS recipe
@@ -33,6 +38,25 @@ reported (`1694` and `A4FF`) and confirms that 98.1 MHz has a locked pilot but n
 this short window, matching the explorer's own weaker-signal finding there (3 groups in 45 s live,
 0 in this 5 s clip). Had the oracle disagreed with the explorer's truth, this README and the
 fixture's `hackriff:truth` would record the disagreement rather than silently preferring one.
+
+**Oracle cross-check (T-960): PI agrees on both; one vote-count discrepancy, not a PI
+disagreement.** `rds_ref.py` re-run fresh over each fixture's own 5 s window confirms `3AAB` at
+88.5 MHz (the explorer's own truth file already logged the oracle's `x4` vote there, and this
+build's independent run agrees: 4) and `1323` at 106.1 MHz (PI agrees), but the **vote count and
+BLER differ from the explorer's narrative claim of "x18 votes, block error rate 0.29"** — this
+build's fresh run found **22 votes, BLER 0.227**. The PI itself is not in question (both runs
+decode `1323`); the difference is in exactly how many of the window's groups landed on a CRC-valid
+frame, which can shift slightly between runs of the same decoder over the same 5 s buffer depending
+on lattice-sync recovery order. Recorded here rather than silently reconciled, per the "never edit
+the truth silently" rule; the committed `hackriff:truth.rds.pi_votes` carries this build's fresh
+count (22), not the explorer's narrative figure. Both new stations' 89.435/106.907 MHz "no RDS"
+claims are confirmed by the oracle exactly as the FM/RDS pair above.
+
+The T-960 pair's raw `.sigmf-meta` (a slightly different staging-build capture path than T-935's)
+omitted `hackriff:clip_count` per capture entirely rather than writing `0`; the build script
+backfills it from the sample data itself (`fxlib.count_clipped`), which is how the real 4.8 %/
+5.8 % clip fractions above were found — the naive "missing key defaults to 0" reading would have
+under-reported both as unclipped, contradicting the explorer's own `app_overload_flag: true`.
 
 ## The FLEX paging capture (T-949): external store, not this directory
 
@@ -116,10 +140,10 @@ channel tried (seven, in this build), so a false-positive floor is not what is d
 
 Two more captures from the explorer agent's 2026-09-25 window-3 sweep of 460-470 MHz land-mobile/
 GMRS (~06:37-07:03 PDT), taken through `POST /api/outputs/record/start` (whole tuned window)
-rather than the clip endpoint the earlier three used, so their source `.sigmf-meta` carried no
+rather than the clip endpoint the earlier FM/RDS and P25 clips used, so their source `.sigmf-meta` carried no
 `hackriff:clip_count` yet either (`build_explorer_2026_09_25.py` measures it directly, same gap
 `build_p25` fixed). Same hardware as above; LNA 32 / VGA 30 / amp on, bias-tee **off** (confirmed
-in this pass's provenance, unlike the FM/RDS pair's unknown).
+in this pass's provenance, unlike T-935's FM/RDS pair's unknown).
 
 - `lmr-461p125-nbfm-ctcss` (`fixtures/store/explorer-2026-09-25/`, **external**: SIGNAL-090):
   15 s x 2.4 Msps @ 461.675 MHz, 72 MB — over the 25 MB committed cap even before considering that

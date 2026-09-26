@@ -27,7 +27,7 @@ import {
   type TileAddr,
 } from "./lattice";
 import {
-  TileBusyError, TileDecodeError, capFromRefusal, decodeTile, fetchTile, shareFromRefusal,
+  TileBusyError, TileDecodeError, capFromRefusal, heldFromRefusal, decodeTile, fetchTile, shareFromRefusal,
   type TileData, type TileFetch, type TileResponse,
 } from "./tile";
 import type { TileSourceHint } from "./tilecache";
@@ -35,6 +35,9 @@ import type { TileSourceHint } from "./tilecache";
 /** One waiting address. */
 interface Waiter {
   readonly addr: TileAddr;
+  /** The set this address must be answered WITH, if its caller named one (T-1037). Part of the
+   * group key, so one lane's addresses never ride in another lane's request. */
+  readonly lane?: string;
   readonly signal?: AbortSignal;
   readonly resolve: (d: TileData) => void;
   readonly reject: (e: unknown) => void;
@@ -96,7 +99,10 @@ export function batchedTileSource(
   };
 
   const requeue = (w: Waiter): void => {
-    const group = batchGroupKey(w.addr);
+    // **A named lane is its own group** (T-1037). The coarse stand-in enumeration exists to arrive
+    // as ONE picture — that is the whole of "never black" — so its four addresses must not be split
+    // across the chunks a hundred-address viewport is cut into, nor wait on the slowest tile in one.
+    const group = w.lane === undefined ? batchGroupKey(w.addr) : `${w.lane}\u0000${batchGroupKey(w.addr)}`;
     const q = pending.get(group);
     if (q) q.push(w); else pending.set(group, [w]);
     arm(group);
@@ -147,7 +153,8 @@ export function batchedTileSource(
         // member's refusal is the main way this tab hears another client arrived. Parsing only the
         // limit left a tab told "share 2" claiming 4 (surface-contention's red under load).
         w.reject(status === 503
-          ? new TileBusyError(capFromRefusal(err.message), err.message, shareFromRefusal(err.message))
+          ? new TileBusyError(capFromRefusal(err.message), err.message, shareFromRefusal(err.message),
+              heldFromRefusal(err.message))
           : err);
         continue;
       }
@@ -164,7 +171,7 @@ export function batchedTileSource(
     if (hint?.solo) return fetchTile(addr, token, fetchFn, signal);
     return new Promise<TileData>((resolve, reject) => {
       if (signal?.aborted) { reject(abortError()); return; }
-      requeue({ addr, signal, resolve, reject });
+      requeue({ addr, lane: hint?.lane, signal, resolve, reject });
     });
   };
 }

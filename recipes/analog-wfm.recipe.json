@@ -627,9 +627,7 @@
   },
   "refine": {
     "objective": {
-      "node": "crc",
-      "metric": "error_rate",
-      "goal": "min"
+      "builtin": "wfm-pilot"
     },
     "tune": [
       "center_hz"
