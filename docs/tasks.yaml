@@ -31850,7 +31850,8 @@ tasks:
   - id: T-1083
     milestone: M2-hardening
     title: "RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam"
-    status: todo
+    status: in-progress
+    branch: task-t1083
     priority: P1
     deps: []
     parallel_group: PIPE-RDS-LOOP
