@@ -31260,7 +31260,8 @@ tasks:
   - id: T-1069
     milestone: M2-hardening
     title: listen_identifies_ctcss_67p0 fails alone intermittently (67.0 Hz, the lowest CTCSS tone, settles to subaudible:none on a clean 38 dB station) - red in bulk 1090f468 and on T-988's branch 09-25 13:35
-    status: todo
+    status: in-progress
+    branch: task-t1069
     priority: P1
     deps: []
     parallel_group: PIPE-SUBAUDIBLE
@@ -31278,7 +31279,8 @@ tasks:
   - id: T-1070
     milestone: MLIVE
     title: "P1: spectrum-history pyramid levels >= 1 hold nothing in a live run - a zoomed-out tile has grid 0 while coverage says observed (the whole-surface view has no data to draw)"
-    status: todo
+    status: in-progress
+    branch: task-t1070
     priority: P1
     deps: []
     parallel_group: STORE-PYRAMID
@@ -31296,7 +31298,8 @@ tasks:
   - id: T-1071
     milestone: MLIVE
     title: "P1: a coarse 'Scan everything (fast)' pass retains no spectrum history after its rate change - the swept range leaves nothing on the canvas"
-    status: todo
+    status: in-progress
+    branch: task-t1071
     priority: P1
     deps: []
     parallel_group: PIPE-SCAN-HISTORY
