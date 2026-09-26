@@ -549,16 +549,21 @@ def host_room(claims, h, exclude=None):
     n = busy_workers({k: v for k, v in claims.items() if k != exclude}, h)
     if n >= slot_cap(h):
         return f"{n}/{slot_cap(h)} running"
+    try:
+        probe = json.load(open(f"{S}/hosts/{h}.json"))
+    except (OSError, ValueError):
+        probe = {}
     bound = (hosts().get(h) or {}).get("max_load1")
     if bound is not None:
-        try:
-            load = json.load(open(f"{S}/hosts/{h}.json")).get("load1")
-        except (OSError, ValueError):
-            load = None
+        load = probe.get("load1")
         if load is None:
             return f"no 1-min load reading (bound {bound})"
         if load >= bound:
             return f"1-min load {load} >= {bound}"
+    # This Mac's disk floor binds a host too: 2026-09-26 08:4x node2 fell to 8 GB free and every link there failed.
+    free = probe.get("disk_free_gb")
+    if free is not None and free < DISK_MIN_GB:
+        return f"{free} GB free < {DISK_MIN_GB} GB floor"
     return None
 
 
@@ -2472,6 +2477,48 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
+REMOTE_REAP_PER_TICK = 10   # ssh round-trips per tick; the first pass after a restart has every landed claim to visit
+
+
+def reap_remote_worktrees(claims, dry):
+    """A remote host never removed a worktree after its branch landed (the merge runner removes only this Mac's):
+    2026-09-26 08:23 node2 held 115 landed worktrees, 408 GB, and fell to 8 GB free with every link there failing
+    until the coordinator removed 97 by hand. A remote claim that is `merged` has its worktree removed on its host,
+    once, by reap_worktrees' rules: not while main is provisional, not while a live claim or a process uses it, and
+    only when its HEAD holds no commit that main lacks. Branches are kept."""
+    if not hosts() or os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD"):
+        return False
+    main = sh(["git", "rev-parse", "main"], cwd=REPO).strip()
+    live = ("running", "fix-held", "limited", "sync-error")
+    changed, tries = False, 0
+    for tid, c in claims.items():
+        h, wt = c.get("host"), c.get("wt")
+        if c.get("state") != "merged" or not h or not wt or c.get("wt_removed") or h not in hosts() or not host_ready(h):
+            continue
+        if any(o is not c and o.get("host") == h and o.get("wt") == wt and o.get("state") in live for o in claims.values()):
+            continue
+        if tries >= REMOTE_REAP_PER_TICK:
+            break
+        tries += 1
+        if remote_leaked(c, claims, dry=True):
+            continue
+        if dry:
+            log(f"DRY-RUN would reap {h}:{wt} ({tid} merged)")
+            continue
+        q = shlex.quote
+        rc, out = remote_sh(h, f"test -d {q(wt)} || exit 3; n=$(git -C {q(wt)} rev-list --count {main}..HEAD) || exit 4; "
+                               f"[ \"$n\" = 0 ] || exit 5; git -C {q(REPO)} worktree remove --force {q(wt)}")
+        if rc in (0, 3):
+            c["wt_removed"] = time.time()
+            changed = True
+            log(f"REAP {h}:{wt} ({tid} merged) {'ok' if rc == 0 else 'already gone'}")
+        elif (tid, rc) not in _REAP_SAID:
+            _REAP_SAID.add((tid, rc))
+            why = {4: "main is not on the host yet", 5: "its HEAD has commits main lacks"}.get(rc, f"exit {rc}: {out.strip()[-120:]}")
+            log(f"REAP {h}:{wt} ({tid} merged) kept - {why}")
+    return changed
+
+
 E2E_DATA_IDLE_MIN = 60   # a leaked browser-e2e backend data dir untouched this long is removed
 
 
@@ -3099,6 +3146,10 @@ def tick(dry):
         reap_worktrees(claims, dry)
     except Exception as e:
         log(f"reap_worktrees error: {e}")
+    try:
+        changed |= reap_remote_worktrees(claims, dry)
+    except Exception as e:
+        log(f"reap_remote_worktrees error: {e}")
     try:
         reclaim_e2e_data(dry)
     except Exception as e:
