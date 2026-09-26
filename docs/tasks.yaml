@@ -31725,7 +31725,7 @@ tasks:
   - id: T-1080
     milestone: MUI
     title: "RC P1: app-detail - T-517's step control is not beside the sweep (scan panel layout moved)"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-SCAN-PANEL
@@ -31750,6 +31750,7 @@ tasks:
       Observed, not chased: The ticket's brief names app-detail.e2e.mjs as the failing spec; the assertion string and the actual regression live in scan-everything.e2e.mjs instead — the RC attention-file entry appears mislabeled (coordinator may want to check the rc-20260926 tooling that filed it). | The Device panel's Survey-sweep fieldset and the map's Scan-plan overlay are now two separate, functioning step controls for two separate scan surfaces (a full-range/off-screen sweep vs. a dragged on-map plan) — this looks intentional per T-1008's ticket text, not a duplication bug, but it is worth the coordinator's eye if the product intends to retire one.
       Use cases: AWARE-011, AWARE-042
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 64c5235e
   - id: T-1081
     milestone: MUI
     title: "RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)"
