@@ -329,11 +329,24 @@ fn ring_spans(state: &ApiState, freq: FreqRange, window: TimeRange) -> Vec<Cover
 ///
 /// Returns the spans and how many of them named a device, so the answer's `sources` row can say
 /// whether this record actually knew.
+#[cfg(test)]
 fn observation_spans(
     store: &ObservationStore,
     freq: FreqRange,
     window: TimeRange,
 ) -> (Vec<CoverageSpan>, usize) {
+    let (spans, named, _) = observation_spans_paged(store, freq, window);
+    (spans, named)
+}
+
+/// [`observation_spans`], and whether the page was **cut** (T-1034): the log answers in log order,
+/// oldest first, so a cut page is missing the NEWEST records — the ones a reader asking "when was
+/// this band last looked at" needs most.
+fn observation_spans_paged(
+    store: &ObservationStore,
+    freq: FreqRange,
+    window: TimeRange,
+) -> (Vec<CoverageSpan>, usize, bool) {
     let page = store.query(&RecordQuery {
         freq,
         span: window,
@@ -342,7 +355,7 @@ fn observation_spans(
         limit: MAX_RECORD_LIMIT,
     });
     let read = hk_store::spans_from_records(&page.records, &page.geometries, freq);
-    (read.spans, read.named)
+    (read.spans, read.named, page.next_cursor.is_some())
 }
 
 /// **The dwell each front end is inside right now** (T-596), as spans.
@@ -504,6 +517,10 @@ pub(crate) struct Evidence {
     /// past it as *"nothing looked"* — only as *"this answer does not reach here"*. It is the same
     /// sentence as `oldest_record_s`, pointing the other way.
     pub newest_record: Option<Timestamp>,
+    /// A source answered with **fewer records than it holds** over the window (T-1034): the IQ
+    /// ring's segment list reached its limit, or the observation log's page had a next page. The
+    /// spans are then not every span, and "no span here" is not evidence of anything.
+    pub truncated: bool,
 }
 
 impl Evidence {
@@ -527,6 +544,9 @@ impl Evidence {
         // subset `ring_spans` would have kept (the same `overlaps` test), and the rest are the
         // evidence that the radio was somewhere else — which is what `newest_record` reads below.
         let ring_all = ring_spans(state, ALL_FREQ, window);
+        // Every segment the ring returned is in `ring_all` unless malformed, so a list at the
+        // limit may be a cut one.
+        let mut truncated = ring_all.len() >= RING_SEGMENTS;
         let ring_reach = ring_all.iter().map(|s| s.time.end).max();
         let mut spans: Vec<CoverageSpan> = ring_all
             .into_iter()
@@ -538,7 +558,8 @@ impl Evidence {
         let mut open = 0;
         let mut open_named = 0;
         if let Some(store) = state.observations.as_ref() {
-            let (log_spans, named) = observation_spans(store, freq, window);
+            let (log_spans, named, cut) = observation_spans_paged(store, freq, window);
+            truncated |= cut;
             log_named = named;
             spans.extend(log_spans);
         }
@@ -616,6 +637,7 @@ impl Evidence {
             recording_began: memory.recording_began,
             forgotten: memory.forgotten,
             newest_record,
+            truncated,
         }
     }
 

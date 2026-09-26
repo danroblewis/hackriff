@@ -257,9 +257,49 @@ export class PaneModel {
     return true;
   }
 
-  /** Move the boundary of the split that owns `id` (its own edge against its sibling). */
+  /** Move the boundary of the split that owns `id` (its own edge against its sibling). `frac` is
+   * the share `id` itself gets, whichever side of the divider it is on. */
   setSplitFraction(id: string, frac: number): boolean {
     const next = reFrac(this.root, id, clamp(frac, 0.05, 0.95));
+    if (!next) return false;
+    this.root = next;
+    return true;
+  }
+
+  /**
+   * **Every divider of the layout (T-1005)** — one per split, in GL device px, with what a drag on
+   * it needs: the axis it moves along, the parent rectangle its fraction is a share of, and how to
+   * address it. A divider between two panes is addressed by the pane on its first side (`paneId`,
+   * through [[setSplitFraction]]); one between two splits has no such pane, so every divider also
+   * carries its `path` from the root for [[setDividerFraction]].
+   */
+  dividers(wPx = this.wPx, hPx = this.hPx): Divider[] {
+    const out: Divider[] = [];
+    dividersInto(this.root, { x: 0, y: 0, w: wPx, h: hPx }, "", this.gapPx, out);
+    return out;
+  }
+
+  /** Set the first child's share of the split at `path` (a [[Divider]]'s own `path`). */
+  setDividerFraction(path: string, frac: number): boolean {
+    const f = clamp(frac, 0.05, 0.95);
+    const next = atPath(this.root, path, (n) => ({ ...n, frac: f }));
+    if (!next) return false;
+    this.root = next;
+    return true;
+  }
+
+  /** The orientation of the split that owns pane `id`, or null when `id` is the only pane. */
+  splitDirOf(id: string): SplitDir | null {
+    const path = ownerPath(this.root, id, "");
+    return path === null ? null : (nodeAt(this.root, path) as SplitNode).dir;
+  }
+
+  /** **Rows ⇄ columns (T-1005):** re-orient the split that owns `id`, keeping its fraction and both
+   * panes' view state — a layout change, never a view change. False with a single pane. */
+  setSplitDir(id: string, dir: SplitDir): boolean {
+    const path = ownerPath(this.root, id, "");
+    if (path === null) return false;
+    const next = atPath(this.root, path, (n) => ({ ...n, dir }));
     if (!next) return false;
     this.root = next;
     return true;
@@ -668,6 +708,83 @@ function drop(n: LayoutNode, id: string): LayoutNode | null {
   if (!a) return b;
   if (!b) return a;
   return { ...n, a, b };
+}
+
+type SplitNode = Extract<LayoutNode, { kind: "split" }>;
+
+/**
+ * **Which pane is active after a close (T-1005).** `panes` and `rects` are the layout AFTER the
+ * close (the survivor has grown into the closed pane's area), `at` the pointer in the same GL px or
+ * null. The rule: the pane under the pointer; else the first pane that follows the live edge; else
+ * `prev` if it survived; else the first pane. Before this a close made the first pane active,
+ * whatever the user was looking at.
+ */
+export function activeAfterClose(panes: readonly PaneState[], rects: ReadonlyMap<string, PaneRect>,
+  at: { x: number; y: number } | null, prev: string): string | null {
+  if (at) {
+    for (const p of panes) {
+      const r = rects.get(p.id);
+      if (r && at.x >= r.x && at.x < r.x + r.w && at.y >= r.y && at.y < r.y + r.h) return p.id;
+    }
+  }
+  return panes.find((p) => p.time.live)?.id ?? (panes.some((p) => p.id === prev) ? prev : panes[0]?.id ?? null);
+}
+
+/** One divider of the layout, for a drag (see [[PaneModel.dividers]]). */
+export interface Divider {
+  /** `a`/`b` steps from the root to the split this divider belongs to (`""` = the root split). */
+  readonly path: string;
+  readonly dir: SplitDir;
+  /** The first child's (`a`: left, or top) share of `parent`. */
+  readonly frac: number;
+  /** The split's own rectangle, GL device px — a drag's fraction is measured across it. */
+  readonly parent: PaneRect;
+  /** The gap between the two sides, GL device px (its thickness is the pane gap). */
+  readonly rect: PaneRect;
+  /** The pane directly on the first side, if that side is a pane rather than another split. */
+  readonly paneId: string | null;
+}
+
+function dividersInto(n: LayoutNode, r: PaneRect, path: string, gap: number, out: Divider[]): void {
+  if (n.kind === "pane") return;
+  const paneId = n.a.kind === "pane" ? n.a.id : null;
+  if (n.dir === "columns") {
+    const w = r.w * n.frac;
+    out.push({ path, dir: n.dir, frac: n.frac, parent: r, paneId, rect: { x: r.x + w - gap / 2, y: r.y, w: gap, h: r.h } });
+    dividersInto(n.a, { ...r, w }, path + "a", gap, out);
+    dividersInto(n.b, { ...r, x: r.x + w, w: r.w - w }, path + "b", gap, out);
+  } else {
+    const h = r.h * n.frac;
+    out.push({ path, dir: n.dir, frac: n.frac, parent: r, paneId, rect: { x: r.x, y: r.y + (r.h - h) - gap / 2, w: r.w, h: gap } });
+    dividersInto(n.a, { ...r, y: r.y + (r.h - h), h }, path + "a", gap, out);
+    dividersInto(n.b, { ...r, h: r.h - h }, path + "b", gap, out);
+  }
+}
+
+function nodeAt(n: LayoutNode, path: string): LayoutNode | null {
+  let cur: LayoutNode = n;
+  for (const c of path) {
+    if (cur.kind !== "split") return null;
+    cur = c === "a" ? cur.a : cur.b;
+  }
+  return cur;
+}
+
+/** `n` with the split at `path` replaced by `f(it)`, or null when `path` names no split. */
+function atPath(n: LayoutNode, path: string, f: (s: SplitNode) => SplitNode): LayoutNode | null {
+  if (n.kind !== "split") return null;
+  if (path === "") return f(n);
+  const rest = path.slice(1);
+  if (path[0] === "a") { const a = atPath(n.a, rest, f); return a ? { ...n, a } : null; }
+  const b = atPath(n.b, rest, f);
+  return b ? { ...n, b } : null;
+}
+
+/** Path of the split whose direct child is pane `id`, or null. */
+function ownerPath(n: LayoutNode, id: string, path: string): string | null {
+  if (n.kind === "pane") return null;
+  if ((n.a.kind === "pane" && n.a.id === id) || (n.b.kind === "pane" && n.b.id === id)) return path;
+  return ownerPath(n.a, id, path + "a") ?? ownerPath(n.b, id, path + "b");
 }
 
 function reFrac(n: LayoutNode, id: string, frac: number): LayoutNode | null {

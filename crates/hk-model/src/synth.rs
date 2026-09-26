@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod null;
+pub mod tally;
 
 /// The closed synthesis stage ladder, S0–S6 (ADR-0015 §1.1). Adding a stage is a contract change.
 ///

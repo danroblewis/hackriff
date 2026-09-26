@@ -53,7 +53,13 @@ export interface PaneControl {
 }
 
 /** What the Go-to offer shows: the words and acceptability `retune.ts` computed, and the press. */
-export interface GotoOffer { why: string; enabled: boolean; press(): void }
+export interface GotoOffer {
+  why: string; enabled: boolean; press(): void;
+  /** T-1004: the button's word, when the press is not a plain retune — a frozen pane's offer is
+   * taken as "go live at this frequency" (unfreeze, then tune there), and a button still reading
+   * "Retune" would name half of what it does. Absent = "Retune". */
+  label?: string;
+}
 
 /** One row of the layers menu: a base style (radio) or an overlay (checkbox). Display only. */
 export interface LayerRow {
@@ -65,7 +71,7 @@ export interface LayerRow {
 /**
  * What the layers menu shows (T-806 / MAP-06, docs/24 §4): two independent axes for the ACTIVE
  * pane — exactly one base style, any number of overlays in paint order — plus the few switches that
- * are view-wide rather than per pane (the spectrum-trace strip), stated as such. Built fresh from
+ * are view-wide rather than per pane (the spectrum trace), stated as such. Built fresh from
  * the registry each time the menu renders; the rows are data, and every press goes back through
  * the host, which writes presentation state and reaches no route.
  */
@@ -100,8 +106,13 @@ export interface LayerMenuHost {
  * view; `extras` are host-built items (Record IQ) appended below, whose own code states their route.
  */
 export interface PaneMenuHost {
-  split(): void;
+  /** Split the active pane: `columns` (side by side, the default) or `rows` (stacked). T-1005. */
+  split(dir?: "columns" | "rows"): void;
   closePane(): void;
+  /** T-1005: the orientation of the split holding the active pane (null with one pane), and a flip
+   * of it between rows and columns. Layout only: both panes keep their views. */
+  splitDir?(): "columns" | "rows" | null;
+  flipSplit?(): void;
   wholeSurface(): void;
   /** How many panes exist, so the menu can say the last one never closes. */
   paneCount(): number;
@@ -169,6 +180,10 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   toast(text: string): void;
   /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
   research?: { isOpen(): boolean; toggle(): void };
+  /** T-1008: the scan plan's small button (in the Go-to cluster — it commands the radio, like the
+   * retune offer beside it) and its panel. Built by `app/map/scan-overlay.ts`, whose own code states
+   * its routes; absent, the cluster offers no scan. */
+  scan?: { button: HTMLElement; panel: HTMLElement };
   /**
    * T-1000 (docs/23 §10.7): which pane the per-pane chrome acts on, as the user names it — its
    * position in layout order ("pane 2 of 3") — or `null` when there is one pane and so nothing to
@@ -338,7 +353,9 @@ export function mountMapControls(host: MapControlHost): {
   const gotoPane = h("span", { class: "map-goto-pane", hidden: true });
   const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off" },
     svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input, gotoPane,
-    h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"));
+    h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"),
+    // T-1008: the Scan button sits in the Go-to glass — small, because it commands the radio.
+    host.scan?.button ?? null);
 
   // The retune offer never fades (docs/23 §10.2), so it carries no `map-fade`.
   const offerWhy = h("span", { class: "map-offer-why" });
@@ -442,6 +459,9 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
+  // T-1005: rows ⇄ columns for the split the active pane is in. Hidden without a host that can.
+  const flipItem = paneItem("flip", "Stack as rows", "Re-orient the active viewport's split between side by side and stacked. Both viewports keep what they show.", () => host.flipSplit?.());
+  flipItem.hidden = !host.flipSplit;
   const paneHead = h("span", {}, "Viewport");
   // T-1006: the front-end picker for THIS viewport, and the "one viewport per front end" split.
   // Rebuilt from `host.deviceMenu()` each time the menu opens (`syncPaneMenu`), hidden entirely when
@@ -457,7 +477,9 @@ export function mountMapControls(host: MapControlHost): {
     deviceHead, deviceRows, deviceNote, perDevice);
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
     h("div", { class: "map-layers-head" }, paneHead, paneClose),
-    paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
+    paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split("columns")),
+    paneItem("split-rows", "Split ⇕", "Two viewports onto the same surface, stacked one above the other. They show the identical box until one is moved.", () => host.split("rows")),
+    flipItem,
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
     deviceSection,
@@ -495,7 +517,7 @@ export function mountMapControls(host: MapControlHost): {
   const layersPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
   layersBtn.append(layersPane);
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, retuneBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, retuneBanner, statusHome, topright, layers, paneMenu, moreMenu, host.scan?.panel ?? null, zoom);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
@@ -553,6 +575,7 @@ export function mountMapControls(host: MapControlHost): {
     shown = host.gotoOffer();
     if (!shown) { hideOffer(); return; }
     offerWhy.textContent = shown.why;
+    offerGo.textContent = shown.label ?? "Retune";
     offerGo.disabled = !shown.enabled;
     offer.hidden = false;
     offerOverlay.open(true);
@@ -619,6 +642,10 @@ export function mountMapControls(host: MapControlHost): {
     const last = host.paneCount() <= 1;
     closeItem.disabled = last;
     closeItem.title = last ? "The last viewport never closes." : "Close the active viewport. The last one never closes.";
+    const dir = host.splitDir?.() ?? null;
+    flipItem.disabled = dir === null;
+    flipItem.textContent = dir === "rows" ? "Side by side ⇔" : "Stack as rows ⇕";
+    flipItem.dataset.dir = dir ?? "";
     // T-1006: the front-end picker. Built on open rather than per frame — a menu the user is reading
     // must not have its radio inputs replaced under the pointer — and only when the host offers one.
     const dm = host.deviceMenu?.();
@@ -738,7 +765,9 @@ export function mountMapControls(host: MapControlHost): {
     if (!shown) return;
     shown = host.gotoOffer();
     if (!shown) hideOffer();
-    else { offerWhy.textContent = shown.why; offerGo.disabled = !shown.enabled; }
+    // T-1004: the BUTTON's word is re-derived too, not only the sentence — a pane that froze or
+    // went live since the offer was painted must not keep "Go live here" / "Retune" from before.
+    else { offerWhy.textContent = shown.why; offerGo.textContent = shown.label ?? "Retune"; offerGo.disabled = !shown.enabled; }
   };
   // A gesture moved the view: the Go-to offer describes a window the pane has left.
   const viewMoved = () => { hideOffer(); };

@@ -44,6 +44,7 @@ import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
+import type { RingFrame } from "./livering";
 import { LiveRowFeeds, type RowOpener } from "./rowfeed";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
@@ -51,6 +52,7 @@ import {
   type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
 } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
+import { activeAfterClose } from "./panes";
 import type { HudReserve } from "./hud";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
@@ -325,40 +327,36 @@ const inRect = (r: PaneRect, p: GlPoint): boolean =>
   p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
 
 /**
- * **Which pane a pointer belongs to — and the rule that the trace strip is part of its pane.**
+ * **Which pane a pointer belongs to.**
  *
- * T-457 carves a strip off the top of each pane's rectangle for the spectrum trace. **The strip is a
- * readout, not a control: it passes every pointer event through to the pane it describes.** A point
- * in it resolves to that pane, and callers clamp it into the pane's own rectangle, so it reads as a
- * point on the pane's **top edge** — the same frequency, at the pane's newest instant, which is
- * exactly the instant the strip is a spectrum *of*. Nothing about a gesture changes because it
- * started a few pixels higher.
+ * A pure function of a frame, deliberately, and not two lines inside `paneAt`. T-457 and T-458 were
+ * each green alone and broke on merge: one changed the geometry the other's gestures are measured
+ * in, and the trace strip it had carved off the top of each pane became a hole that swallowed every
+ * drag starting in it — not only the new region stroke, but plain and alt drags that T-456 had
+ * settled. The invariant that catches that class is **"a layer being switched on may not shrink the
+ * set of points a gesture can start from"**, and it is only checkable if the resolution is a pure
+ * function of a frame. `ui/test/surface-trace.test.ts` asserts it over a grid of points, with the
+ * trace on and off, knowing nothing about any particular gesture.
  *
- * The alternative — the strip handling pointers itself with a meaning of its own — was rejected
- * twice over: the obvious meaning for a vertical drag on a dB axis is *set the display range by
- * hand*, which is the control T-457 deliberately did not restore; and a second gesture vocabulary on
- * one canvas is T-412's wheel-zoom mismatch waiting to happen.
+ * Since T-1041 the trace reserves no rectangle at all: it is a layer over the pane's own top rows,
+ * so those points were already this pane's and there is nothing extra to resolve. The invariant is
+ * now structural rather than restored by a second lookup — which is why the `frame.traces` pass
+ * this function used to make is gone, and why the test above still runs.
  *
- * **Why this is a function and not two lines inside `paneAt`.** T-457 and T-458 were each green
- * alone and broke on merge: one changed the geometry the other's gestures are measured in, and the
- * strip became a hole that swallowed every drag starting in it — not only the new region stroke, but
- * plain and alt drags that T-456 had settled. The invariant that catches that class is *"turning the
- * trace on may not shrink the set of points a gesture can start from"*, and it is only checkable if
- * the resolution is a pure function of a frame. `ui/test/surface-trace.test.ts` asserts it over a
- * grid of points, with and without the strip, knowing nothing about any particular gesture.
+ * The rejected alternative is unchanged: the trace handling pointers itself with a meaning of its
+ * own. The obvious meaning for a vertical drag on a dB axis is *set the display range by hand*,
+ * which is the control T-457 deliberately did not restore; and a second gesture vocabulary on one
+ * canvas is T-412's wheel-zoom mismatch waiting to happen.
  */
 export function paneAtPoint(frame: SurfaceFrame | null, minimapId: string, p: GlPoint): string | null {
   for (const v of frame?.views ?? []) {
     if (v.id === minimapId) continue;
     if (inRect(v.rect, p)) return v.id;
   }
-  for (const t of frame?.traces ?? []) {
-    if (inRect(t.rect, p)) return t.id;
-  }
   return null;
 }
 
-/** `p` clamped into `rect`. A point in a pane's trace strip becomes a point on its top edge. */
+/** `p` clamped into `rect` — a pointer just outside a pane reads as the nearest point in it. */
 export function clampToRect(rect: PaneRect, p: GlPoint): GlPoint {
   return {
     x: Math.min(Math.max(p.x, rect.x), rect.x + rect.w),
@@ -653,6 +651,19 @@ export interface PreviewOptions {
    * lane next comes round. Omitted, the live edge advances by polling alone (T-460), as before.
    */
   rows?: RowOpener | null;
+  /**
+   * **The live ring** (T-1042 / LSR-1, `./livering.ts`): the rows `/ws/spectrum/live` has published,
+   * read once per frame, which every **following** pane paints its live edge from.
+   *
+   * Omitted or `null` — the default, and what an unflagged page passes — the surface is drawn from
+   * tiles exactly as before: nothing is asked of the ring, nothing is excluded from the tile lane,
+   * and no ring texture exists.
+   *
+   * A getter rather than a pushed frame for the reason every overlay here is a callback: the ring is
+   * read in the **render pass**, so what is painted is the rows that had arrived when the frame was
+   * drawn, and never a snapshot taken on a poll and laid out against a scroll (T-388).
+   */
+  liveRing?: (() => RingFrame | null) | null;
 }
 
 /**
@@ -750,6 +761,19 @@ export class SurfacePreview {
       hudReserve: opts.hudReserve ?? null,
       dom: opts.dom ?? null,
     });
+    // **The live rows, per following pane** (T-1042). The follow question is answered here, beside
+    // the row feed's own reading of it (`refreshLiveEdge`), because this object is the one that knows
+    // which viewports follow — a frozen pane is a view over recorded data, which the pyramid answers,
+    // and painting live rows into it would be a live claim about a window that is not live. The
+    // minimap is excluded for the same reason it is excluded from the refresh lane: it is a viewport
+    // over the whole surface, where a 40 ms row is a small fraction of a pixel.
+    if (opts.liveRing) {
+      const ring = opts.liveRing;
+      this.view.surface.setLiveRings({
+        ringFor: (paneId) =>
+          paneId !== this.view.minimap.id && this.view.panes.isFollowing(paneId) ? ring() : null,
+      });
+    }
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
     // probe, never from a viewport. Nothing below this line, and nothing in `frame()`, moves it.
@@ -1171,9 +1195,26 @@ export class SurfacePreview {
     if (id) this.activePane = id;
   }
 
-  closeActive(): void {
-    if (!this.view.panes.close(this.activePane)) return;
-    this.activePane = this.view.panes.list()[0].id;
+  /** Close the active pane. See [[closePane]] for which pane is active afterwards. */
+  closeActive(at: GlPoint | null = null): void {
+    this.closePane(this.activePane, at);
+  }
+
+  /**
+   * **Close pane `id` (T-1005), and choose the active pane by a stated rule, not by position** —
+   * [[activeAfterClose]]: the pane under the pointer `at` (GL device px of the canvas, against the
+   * layout AFTER the close), else the live one. The last pane never closes. View only — nothing
+   * here reaches a route.
+   */
+  closePane(id: string, at: GlPoint | null = null): boolean {
+    if (!this.view.panes.close(id)) return false;
+    const next = activeAfterClose(this.view.panes.list(), this.view.paneRects(), at, this.active)
+      ?? this.view.panes.list()[0].id;
+    // The setter refuses a no-op, so the listeners still hear about a close that kept the active
+    // pane: the outline and the chrome's "pane N of M" re-state against the new count.
+    if (next === this.active) for (const f of this.activeListeners) f(next);
+    else this.activePane = next;
+    return true;
   }
 }
 

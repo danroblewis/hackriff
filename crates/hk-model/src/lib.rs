@@ -144,10 +144,12 @@ pub use recording::{
 };
 pub use region::{FreqRange, Region, TimeRange};
 pub use relate::{
-    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, OVERLAP_MIN_FRACTION,
-    ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RelationVisibility, RowEvidence,
-    TunedLo, distinct_chains, distinguishing_evidence, overlap_fraction, predict_artifacts,
-    present_only_with, rank_score,
+    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, MeasuredEmission,
+    OVERLAP_MIN_FRACTION, REGION_IDENTITY, REGION_MERGE_UNCOVERED, REGION_MIN_BINS,
+    REGION_NO_EMISSION, REGION_OFF_CENTRE, REGION_ROW_UNEXPLAINED, REGION_TOO_COARSE, ReceiveChain,
+    RegionMeasurement, RegionVerdict, RelationAuthor, RelationClaim, RelationKind,
+    RelationVisibility, RowEvidence, TunedLo, distinct_chains, distinguishing_evidence,
+    overlap_fraction, predict_artifacts, present_only_with, rank_score, region_verdicts,
 };
 pub use repo::{
     AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
@@ -162,8 +164,8 @@ pub use repo::{
     RetuneFamily, RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX,
     SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX,
     SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink, SelectionLinkKind, SelectionWatch,
-    StorePage, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand,
-    ViewTier, authored_block,
+    StorePage, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ,
+    UnresolvedRegion, UserBand, ViewTier, authored_block,
 };
 // T-904 per-frame detection retention and rollup (docs/07 §2.9).
 pub use repo::{

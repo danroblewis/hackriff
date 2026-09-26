@@ -857,6 +857,17 @@ fn alarm_control(
     Ok(Arc::new(service))
 }
 
+/// T-977: the run's control-channel hunt behind the API's
+/// [`hk_api::trunk_cc::CcHuntControl`]. The pass renders itself (`CcPass::to_json`), so this
+/// adapter is the seam and nothing more.
+pub struct PipelineCcHunt(pub std::sync::Arc<hk_pipeline::ccverdict::CcVerdictLog>);
+
+impl hk_api::trunk_cc::CcHuntControl for PipelineCcHunt {
+    fn last_pass(&self) -> Option<serde_json::Value> {
+        self.0.last_pass().map(|p| p.to_json())
+    }
+}
+
 /// T-122: the novelty alarm service behind the API's [`hk_api::anomalies::AnomalyControl`].
 pub struct PipelineAnomalies(pub Arc<hk_pipeline::alarms::AlarmService>);
 
@@ -1176,6 +1187,8 @@ pub fn serve_api(
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::clone(&db)),
         trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
+        // T-977: the hunt's last pass, with the verdict on every channel it looked at.
+        cc_hunt: Some(Arc::new(PipelineCcHunt(handle.cc_verdicts()))),
         // T-891: the run's accessory-fed VLF services (an empty list without an accessory).
         vlf: Some(Arc::new(PipelineVlf(handle.vlf()))),
         // T-981: the front-end events the spectrum reader judged, for the canvas's mark.
