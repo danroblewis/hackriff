@@ -314,6 +314,10 @@ counter_group!(
         fsk_bursts,
         /// FSK boxes whose samples had left the chain buffer.
         fsk_boxes_missed,
+        /// T-980: FSK boxes refused because they carried no on/off energy contrast against their
+        /// own pads — a steady carrier, a receiver line or noise, never a burst
+        /// (`hk_demod::DemodError::NotABurst`). Not an error: the chain asked and got an answer.
+        fsk_not_a_burst,
         /// CRC-valid frames.
         crc_valid,
         /// T-247: M3 classification rows the C15 cascade wrote (`crate::classify`).
@@ -549,6 +553,26 @@ counter_group!(
         /// Classifications made but not written: the inventory recorded no entry for the track
         /// within the bounded wait, so the row had nothing to be evidence about.
         classify_no_emitter,
+        /// T-950: narrowband-FSK frame-hunting chains attached ([`crate::chains::frames`]).
+        /// Counted apart from `attached`, for the reason `sweep_attached` is.
+        frames_attached,
+        /// Frame-hunting chains that finished.
+        frames_detached,
+        /// Frame-hunting chains the concurrency cap refused to attach.
+        frames_admission_refused,
+        /// Transmissions a frame-hunting chain could not decode: their samples had left its
+        /// buffer, or never reached it.
+        frames_missed,
+        /// Frames decoded but not written: no inventory entry for the track within the bounded
+        /// wait.
+        frames_no_emitter,
+        /// Frame-hunting chains that gave up: a transmission on the air for a whole segment
+        /// without one sync-1 (a carrier, not a framed FSK transmitter).
+        frames_abandoned,
+        /// FLEX frames decoded (sync-1 found and the frame information word checked).
+        flex_frames,
+        /// FLEX pages (address + vector) found in those frames.
+        flex_pages,
         /// T-989: regions a conventional-DMR scan ran on ([`crate::dmr`]). Counted apart from
         /// the classifications beside them: the scan runs whether or not the classifier could
         /// say anything, which is the point of it.

@@ -507,3 +507,104 @@ fn a_1600_bd_pager_population_stores_1600_bd_or_abstains_never_its_harmonic() {
     eprint!("{report}");
     assert!(failures.is_empty(), "{}\n{report}", failures.join("\n"));
 }
+
+/// **A sub-harmonic lock is not a measured rate either** (T-1011). The single-symbol-run gate
+/// catches a trial at `k×` the true clock; the opposite mistake is a trial at `1/k` of it — 9600 Bd
+/// data locked by the 4800 Bd table entry, which samples every other symbol. Those bits are random
+/// NRZ (single-symbol runs ≈ 50 %), so the run gate cannot see it; what refuses it is the Gardner
+/// loop itself: at half the clock half the samples straddle a transition the loop cannot track, so
+/// timing RMS stays above the 0.15 UI lock threshold (or the eye stays closed) and the burst does
+/// not vote. This proves it, blind, for 9600 Bd (sub-harmonic 4800) and 19 200 Bd (9600 and
+/// 4800), both members of the standard-rate table, and for 14 400 and 3600 Bd, which are **not** —
+/// only their 1/3 (4800, 1200) is, so there the sub-harmonic trial has no true-rate trial to lose
+/// to. The emitter must store **the true rate or no rate**, never a divisor of it.
+#[test]
+fn a_fast_pager_population_never_stores_a_sub_harmonic_of_its_clock() {
+    let cases: [(&str, f64, &[f64], u64); 4] = [
+        ("9600 Bd 2-FSK ±4.8 kHz", 9600.0, &[-4800.0, 4800.0], 10111),
+        (
+            "19200 Bd 2-FSK ±9.6 kHz",
+            19200.0,
+            &[-9600.0, 9600.0],
+            10112,
+        ),
+        // The hard shape: the true rate is NOT in the table but its 1/3 is, so the sub-harmonic
+        // trial has no true-rate trial to lose to — only the loop's own lock gate can refuse it.
+        (
+            "14400 Bd 2-FSK ±7.2 kHz (only 4800 = 1/3 in the table)",
+            14400.0,
+            &[-7200.0, 7200.0],
+            10113,
+        ),
+        (
+            "3600 Bd 2-FSK ±3.6 kHz (only 1200 = 1/3 in the table)",
+            3600.0,
+            &[-3600.0, 3600.0],
+            10114,
+        ),
+    ];
+    let mut failures = Vec::new();
+    let mut report = String::new();
+    for (name, true_rate, levels, seed) in cases {
+        let (x, bursts) = pager_only_scene(true_rate, levels, seed);
+        let mine: Vec<&Burst> = bursts.iter().collect();
+        let out = demodulate(&x, &mine);
+        let consensus = rate_consensus(&out);
+        let bits: Vec<&[u8]> = out.iter().map(FskBurst::bits).collect();
+        let framing = infer_framing(&bits, &FramingConfig::default());
+        let mut repo = Repository::open_in_memory().unwrap();
+        let w = write_framed_bursts(&mut repo, &out, &framing, &FramedRecordContext::default())
+            .unwrap();
+        let stored: Vec<EstimatedParams> = w
+            .demodulation_ids
+            .iter()
+            .map(|(_, id)| repo.demodulation(*id).unwrap().params)
+            .collect();
+        let tracked: Vec<String> = out
+            .iter()
+            .filter_map(|b| b.symbols.as_ref())
+            .map(|s| {
+                format!(
+                    "{:.0}{}",
+                    s.lock.tracked_rate_bd,
+                    if s.lock.locked { "" } else { "?" }
+                )
+            })
+            .collect();
+        let fp_rate = repo.emitter(w.emitter_id).unwrap().fingerprint["symbol_rate_hz"].as_f64();
+        report.push_str(&format!(
+            "[T-1011] {name}: {} bursts, tracked {tracked:?}, consensus {:?}, {} stored rows \
+             ({} with a rate), fingerprint rate {fp_rate:?}\n",
+            out.len(),
+            consensus.map(|c| c.evidence()),
+            stored.len(),
+            stored.iter().filter(|p| p.symbol_rate_hz.is_some()).count(),
+        ));
+        if out.len() < 8 {
+            failures.push(format!("{name}: only {} bursts", out.len()));
+        }
+        let wrong = |r: f64| (r / true_rate - 1.0).abs() > 0.02;
+        if let Some(c) = consensus.filter(|c| wrong(c.rate_bd)) {
+            failures.push(format!(
+                "{name}: the population 'agreed' on {:.1} Bd, not the true {true_rate} Bd",
+                c.rate_bd
+            ));
+        }
+        if let Some(r) = stored
+            .iter()
+            .filter_map(|p| p.symbol_rate_hz)
+            .find(|r| wrong(*r))
+        {
+            failures.push(format!(
+                "{name}: a Demodulation row stored {r:.1} Bd for a {true_rate} Bd emitter"
+            ));
+        }
+        if let Some(r) = fp_rate.filter(|r| wrong(*r)) {
+            failures.push(format!(
+                "{name}: the emitter's fingerprint carries {r:.1} Bd for a {true_rate} Bd emitter"
+            ));
+        }
+    }
+    eprint!("{report}");
+    assert!(failures.is_empty(), "{}\n{report}", failures.join("\n"));
+}

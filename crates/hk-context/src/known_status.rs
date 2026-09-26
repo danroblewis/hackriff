@@ -50,9 +50,12 @@ fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
         "cellular" | "lte" => Some(&["cellular"]),
         "public-safety" | "p25" | "dmr" => Some(&["public-safety"]),
         // T-953: 929-932 MHz paging (Part 90 Subpart P private paging, Part 24 narrowband PCS,
-        // Part 22 Subpart E common-carrier paging). `flex` and `pocsag` are the air interfaces
-        // the service is carried on, and they name the service; a bare `2fsk` never does.
-        "paging" | "flex" | "pocsag" => Some(&["paging"]),
+        // Part 22 Subpart E common-carrier paging). `pocsag` is an air interface the service is
+        // carried on, and it names the service; a bare `2fsk` never does. `pager` is T-950's
+        // alias for the service. `flex` is not a service name: since T-950 it is the FLEX
+        // decoder's own label in hk-pipeline's vocabulary, which maps it to `paging` on a
+        // BCH-checked frame decode (a label never shadows a service family).
+        "paging" | "pager" | "pocsag" => Some(&["paging"]),
         // T-953: frequency hopping is a measured *behaviour*, and 47 CFR 15.247 is where it is
         // expressly authorised. The tag says "hopping is expected here", never "this hops".
         "fhss" => Some(&["fhss"]),

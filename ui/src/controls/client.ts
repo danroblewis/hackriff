@@ -108,7 +108,8 @@ export class ControlClient {
 export type Reaction =
   | "reauth"      // 401: ask for the token again
   | "not-live"    // 409 not_live: disable device controls (replay)
-  | "busy"        // 409 conflict / device_busy: a re-plumb, a recording, or another holder of the radio
+  | "busy"        // 409 conflict / device_busy: a re-plumb, a recording, or another holder of the radio;
+                  // 503 overloaded: the server is at a connection cap and said to retry (T-1063)
   | "refused"     // 409 refused: legal/class gating said no (show the reason)
   | "pending"     // 504 timeout: the re-plumb continues; state polling catches up
   | "finished"    // 409 finished: the run ended
@@ -131,6 +132,12 @@ export function reactionTo(e: unknown): { reaction: Reaction; message: string } 
     // and stop; never retry a device command into a race.
     case "device_busy": return { reaction: "busy", message: `radio busy: ${m}` };
     case "refused": return { reaction: "refused", message: `refused: ${m}` };
+    // T-1063: the server at a connection cap answers `503 {code: "overloaded"}` with
+    // `Retry-After: 1`. It is ALIVE and asking for a moment — the opposite of the silent drop it
+    // replaced, which reached the browser through the tunnel only as "EOF". So it is `busy`
+    // (retry shortly), never `error` and never `offline`; `apiConnFor` keeps the connection state
+    // `ok` for the same reason.
+    case "overloaded": return { reaction: "busy", message: `server busy, retrying: ${m}` };
     case "timeout": return { reaction: "pending", message: `still re-plumbing: ${m}` };
     case "finished": return { reaction: "finished", message: `run finished: ${m}` };
     case "invalid": case "out_of_range": return { reaction: "field", message: m };

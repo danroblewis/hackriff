@@ -84,6 +84,22 @@ test("classificationDistribution: label/percentage pairs straight off classifica
   assert.deepEqual(classificationDistribution(classification({ top: null })), []);
   assert.deepEqual(
     classificationDistribution(classification({ top: [{ label: "unknown", p: 0.62 }, { label: "fsk", p: 0.2 }, { label: "psk-qam", p: 0.18 }] })),
-    [{ label: "unknown", pct: 62 }, { label: "fsk", pct: 20 }, { label: "psk-qam", pct: 18 }],
+    [{ label: "unknown", pct: 62, tied: false }, { label: "fsk", pct: 20, tied: false }, { label: "psk-qam", pct: 18, tied: false }],
+  );
+});
+
+test("classificationDistribution: tied posterior residue collapses into one entry, never an alphabetical ranking (T-1011)", () => {
+  // Open-set saturation: unknown capped at 0.9, the 0.1 residual spread uniformly over K families
+  // and sorted alphabetically by the server. Four rows would read as a ranking; one entry does not.
+  const p = 0.1 / 9;
+  const top = [{ label: "unknown", p: 0.9 }, { label: "analog", p }, { label: "css", p }, { label: "fsk", p }, { label: "noise-like", p }];
+  assert.deepEqual(classificationDistribution(classification({ top })), [
+    { label: "unknown", pct: 90, tied: false },
+    { label: "analog · css · fsk · noise-like", pct: 1, tied: true },
+  ]);
+  // Equal rounded percentages from different posteriors are NOT a tie: the rule reads the value.
+  assert.deepEqual(
+    classificationDistribution(classification({ top: [{ label: "fsk", p: 0.204 }, { label: "psk-qam", p: 0.196 }] })),
+    [{ label: "fsk", pct: 20, tied: false }, { label: "psk-qam", pct: 20, tied: false }],
   );
 });

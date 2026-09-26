@@ -1,5 +1,13 @@
 // T-803 (MAP-03): the reusable bottom sheet — docs/23 §5 and §10.3, ui/mockups/map-ui-v1.html.
 //
+// T-1026 (user 2026-09-25): the sheet is also CLOSED-BY-DEFAULT now, which is a state of its own and
+// not a fourth snap. Openness answers "is this panel on screen at all" (the Google-Maps place card:
+// nothing at the bottom edge until a feature is clicked, gone again on a click on the back of the
+// map); the snap answers "how tall is it while it is". So the two are separate: `show`/`hide` put
+// the host on and off the screen (`hidden`, so it takes no pixels and no hit test), while `set`,
+// `reveal` and the drag size it, and the size is the only half a viewer's `localStorage` remembers —
+// openness belongs to the current selection, never to the browser profile.
+//
 // A non-modal panel docked to the bottom of the full-bleed surface with three snap states, `peek`
 // (a title strip), `half` (~45 % of the viewport) and `full` (as tall as the chrome allows). It is
 // dragged by its grab handle (with flick), clicked to cycle, and driven from the keyboard
@@ -90,6 +98,33 @@ export function keySnap(key: string, s: SheetSnap): SheetSnap | null {
   }
 }
 
+/** What a gesture asks for: a snap height, or `"close"` — off the screen altogether (T-1026). */
+export type SheetMove = SheetSnap | "close";
+
+/**
+ * The keyboard move, with the dismiss on the end of it (T-1026): shrinking a sheet that is already
+ * at its smallest closes it, so the same key that made it smaller can give the last 56 px back to
+ * the map. Every other key is [[keySnap]] unchanged.
+ */
+export function keyMove(key: string, s: SheetSnap): SheetMove | null {
+  const next = keySnap(key, s);
+  if (next === null) return null;
+  const shrinking = key === "ArrowDown" || key === "End";
+  return next === s && shrinking ? "close" : next;
+}
+
+/**
+ * Where a released drag lands, with the dismiss (T-1026): a downward flick from `peek` — the sheet
+ * is already as small as a sheet gets, and the finger is still going down — closes it, the Material
+ * "swipe to dismiss" the bottom-sheet grammar ends in. Every other release is [[releaseSnap]].
+ */
+export function releaseMove(
+  from: SheetSnap, heightPx: number, velocityPxPerMs: number, heights: Record<SheetSnap, number>,
+): SheetMove {
+  const next = releaseSnap(from, heightPx, velocityPxPerMs, heights);
+  return from === "peek" && next === "peek" && velocityPxPerMs <= -FLICK_PX_PER_MS ? "close" : next;
+}
+
 /** The storage surface the sheet needs — `localStorage`, or a test double, or `null` (unavailable). */
 export type SnapStorage = Pick<Storage, "getItem" | "setItem"> | null;
 
@@ -122,6 +157,13 @@ export interface SheetOptions {
   label: string;
   /** State when nothing is stored. */
   initial?: SheetSnap;
+  /** Whether the sheet is on screen when it mounts. Default **false** (T-1026: the detail card is
+   * hidden until a feature is clicked); openness is never read from or written to storage. */
+  initialOpen?: boolean;
+  /** Run when the VIEWER dismissed the sheet — the ×, Escape, a keyboard shrink past `peek` or a
+   * downward flick — so the owner can clear what the card was about. Not called by [[hide]], which
+   * is the owner closing it itself. */
+  onClose?: () => void;
   /** Viewport pixels the sheet must leave uncovered (top chrome + dock). */
   reservedPx?: number;
   /** Test/embedding seam; defaults to `localStorage`. */
@@ -144,6 +186,12 @@ export function reservedFor(minPx: number, clearY: number | null, bottomGapPx: n
 
 export interface SheetController {
   get(): SheetSnap;
+  /** Is the sheet on screen at all (T-1026)? */
+  isOpen(): boolean;
+  /** Put it on screen, at `min` or the taller state the viewer last sized it to. */
+  show(min?: SheetSnap): void;
+  /** Take it off screen: no strip, no pixels at the bottom edge, nothing to hit-test. */
+  hide(): void;
   /** Move to `s`. `persist` (default true) records it as the viewer's choice. */
   set(s: SheetSnap, persist?: boolean): void;
   /** Raise to at least `s` without persisting — for content that needs room (a new selection).
@@ -174,21 +222,25 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   title.className = "sheet-title";
   const head = document.createElement("div");
   head.className = "sheet-head";
-  // docs/23 §10.6 P1: an overlay exists to be closed — a visible dismiss that collapses the sheet to
-  // its peek strip and hands its pixels back to the map (shown only while the sheet is open).
+  // docs/23 §10.6 P1: an overlay exists to be closed — a visible dismiss that hands ALL of the
+  // sheet's pixels back to the map (T-1026: off the screen, not down to a 56 px strip along the
+  // bottom edge, which is the bar the user asked to be rid of).
   const close = document.createElement("button");
   close.type = "button";
   close.className = "sheet-close";
   close.textContent = "×";
   close.setAttribute("aria-label", `Close ${opts.label} sheet`);
-  close.setAttribute("title", "Close (collapse to the strip)");
+  close.setAttribute("title", "Close");
   head.append(title, close);
   host.prepend(grab, head);
   host.classList.add("sheet");
   host.setAttribute("aria-label", opts.label);
 
-  const overlay = trackOverlay(`sheet:${opts.storageKey}`, () => { ctl.set("peek"); grab.focus?.(); });
+  // T-1026: Escape closes the card, exactly as the × does — the same `dismiss` both, so the two
+  // dismissals can never mean two different things.
+  const overlay = trackOverlay(`sheet:${opts.storageKey}`, () => dismiss());
   let snap = readSnap(storage, opts.storageKey, opts.initial ?? "peek");
+  let open = opts.initialOpen ?? false;
   const heights = () => {
     const vh = window.innerHeight;
     // The dock offset is CSS (`--sheet-bottom`); the host's bottom edge does not move with height.
@@ -197,20 +249,46 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   };
 
   function apply() {
+    // T-1026: closed means OFF THE SCREEN — `hidden`, so it takes no pixels, no hit test and no tab
+    // stop, and `data-open` states which it is for the CSS and for a test that reads the DOM.
+    host.hidden = !open;
+    host.dataset.open = String(open);
     host.dataset.snap = snap;
     host.style.height = `${heights()[snap]}px`;
     grab.setAttribute("aria-label", `${opts.label} sheet, ${SNAP_LABEL[snap]}. Drag, click or use arrow keys to resize.`);
     grab.setAttribute("aria-expanded", String(snap !== "peek"));
     // Collapsed content is not on screen, so it must not be in the tab order either.
-    if (body) body.inert = snap === "peek";
-    close.hidden = snap === "peek";
-    // T-900: an open sheet is an overlay on the one stack, so Escape collapses it when it is topmost.
-    overlay.open(snap !== "peek");
+    if (body) body.inert = !open || snap === "peek";
+    // The dismiss is offered whenever the sheet is on screen — including at `peek`, whose strip is
+    // exactly the chrome that has to be closeable (it used to be hidden there, so the strip was the
+    // one state with no way out but a drag).
+    close.hidden = !open;
+    // T-900: an open sheet is an overlay on the one stack, so Escape closes it when it is topmost.
+    overlay.open(open);
+  }
+
+  /** The viewer dismissed it (×, Escape, a shrink past `peek`, a downward flick). */
+  function dismiss() {
+    if (!open) return;
+    ctl.hide();
+    opts.onClose?.();
   }
 
   let drag: { y0: number; h0: number; moved: boolean; lastY: number; lastT: number; v: number } | null = null;
   const ctl: SheetController = {
     get: () => snap,
+    isOpen: () => open,
+    show(min = "half") {
+      // Opening never *shrinks* what the viewer sized the sheet to, and the raise it does make is
+      // not persisted: the height a selection needed is the selection's, not the profile's.
+      if (!open) { open = true; if (SNAPS.indexOf(min) > SNAPS.indexOf(snap)) snap = min; apply(); return; }
+      ctl.reveal(min);
+    },
+    hide() {
+      if (!open) return;
+      open = false;
+      apply();
+    },
     set(s, persist = true) {
       snap = s;
       if (persist) writeSnap(storage, opts.storageKey, s);
@@ -251,7 +329,8 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     host.classList.remove("dragging");
     if (!d.moved) { apply(); return; }
     swallowClick = true;
-    ctl.set(releaseSnap(snap, host.getBoundingClientRect().height, d.v, heights()));
+    const move = releaseMove(snap, host.getBoundingClientRect().height, d.v, heights());
+    if (move === "close") dismiss(); else ctl.set(move);
   };
   grab.addEventListener("pointerup", end);
   grab.addEventListener("pointercancel", end);
@@ -260,15 +339,15 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     ctl.set(cycleSnap(snap));
   });
   grab.addEventListener("keydown", (ev) => {
-    const next = keySnap(ev.key, snap);
+    const next = keyMove(ev.key, snap);
     if (next === null) return;
     ev.preventDefault();
-    ctl.set(next);
+    if (next === "close") dismiss(); else ctl.set(next);
   });
   close.addEventListener("click", (ev) => {
-    // Not the head's click below, which would re-open a collapsed sheet.
+    // Not the head's click below, which would re-size a collapsed sheet.
     ev.stopPropagation();
-    ctl.set("peek");
+    dismiss();
   });
   // The title strip is a second, larger target: clicking it while collapsed opens the sheet.
   head.addEventListener("click", () => { if (snap === "peek") ctl.set("half"); });

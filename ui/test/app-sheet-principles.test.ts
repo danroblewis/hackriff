@@ -115,9 +115,11 @@ function row(over: Partial<Row> = {}): Row {
 const SEL = { id: "s1", name: "Region 1", f_lo: 100_700_000, f_hi: 100_900_000, tags: [], links: [], created: T0, updated: T0 } as Selection;
 
 /** The store with the parts that are only MARKS (which signal is focused, which list tab shows it)
- * removed: everything left is view or device state a sheet body must never move. */
+ * or the PANEL'S OWN presence (T-1026: whether the detail card is on screen, which docs/23 §10.6 P4
+ * names as allowed in the same breath as the sheet raising itself to `half` — "the panel's own size,
+ * not the map's") removed: everything left is view or device state a sheet body must never move. */
 function viewState(ctx: AppContext): string {
-  const { focus: _f, inventory, ...rest } = ctx.store.get() as unknown as Record<string, unknown> & { inventory: Record<string, unknown> };
+  const { focus: _f, card: _c, inventory, ...rest } = ctx.store.get() as unknown as Record<string, unknown> & { inventory: Record<string, unknown> };
   const { tab: _t, ...inv } = inventory;
   return JSON.stringify({ ...rest, inventory: inv });
 }
@@ -201,26 +203,35 @@ test("P4: the action buttons are small (>= 24 px hit target, sized to the label,
   }
 });
 
-test("P1: the sheet has a visible dismiss that collapses it and returns its pixels to the map", () => {
+test("P1: the sheet has a visible dismiss that takes it OFF the map (T-1026), at every snap", () => {
   withFakeDom(() => {
     const host = new FakeEl("section");
     const body = new FakeEl("div");
     body.className = "sheet-body";
     host.append(body);
-    const ctl = mountSheet(host as unknown as HTMLElement, { storageKey: "s", label: "Selected", reservedPx: 170, storage: null });
+    let closed = 0;
+    const ctl = mountSheet(host as unknown as HTMLElement, {
+      storageKey: "s", label: "Selected", reservedPx: 170, storage: null, onClose: () => { closed++; },
+    });
     const head = host.children[1] as FakeEl;
     const close = head.children.find((c) => typeof c !== "string" && c.className === "sheet-close") as FakeEl | undefined;
     assert.ok(close, "a dismiss button in the sheet's head");
     assert.equal(close.tag, "button");
     assert.ok(close.attrs["aria-label"] && close.textContent, "visible and labelled");
-    assert.equal(close.hidden, true, "nothing to dismiss while collapsed");
+    // T-1026: a closed card has nothing to dismiss because it is not on screen at all.
+    assert.equal(ctl.isOpen(), false, "the card starts hidden");
+    assert.equal(host.hidden, true, "and takes no pixels at the bottom edge");
+    assert.equal(close.hidden, true, "nothing to dismiss while it is not on screen");
+    ctl.show("peek");
+    // The strip is the state that most needs a way out — it is the shape that spans the edge.
+    assert.equal(close.hidden, false, "visible at the peek strip too");
     ctl.set("half");
     assert.equal(close.hidden, false, "visible while open");
-    const tall = parseFloat(host.style.height);
     const ev: Record<string, unknown> = {};
     close.fire("click", ev);
-    assert.equal(ctl.get(), "peek");
-    assert.ok(parseFloat(host.style.height) < tall, "the sheet's pixels go back to the map");
+    assert.equal(ctl.isOpen(), false, "the dismiss closed the card");
+    assert.equal(host.hidden, true, "every one of the sheet's pixels went back to the map");
+    assert.equal(closed, 1, "and the owner was told, so it can clear what the card was about");
     assert.equal(ev.stopped, true, "does not bubble into the head's open-on-click");
     const css = readFileSync("src/app/chrome/sheet.css", "utf8");
     const rule = css.match(/^\.sheet \.sheet-close \{([^}]*)\}/m)?.[1] ?? "";
