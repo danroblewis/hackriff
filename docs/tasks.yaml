@@ -30061,7 +30061,7 @@ tasks:
   - id: T-1017
     milestone: MAUTO
     title: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
-    status: in-progress
+    status: done
     branch: task-t1017
     priority: medium
     deps:
@@ -30092,6 +30092,7 @@ tasks:
       Commits: 7a48eb0e, 9685a010
       Observed, not chased: hk-api::shutdown::shutdown_leaves_no_thread_writing_under_the_handlers_directory is load-sensitive: red in 0.092 s during a 900 s whole-crate run at load average ~50, green alone in 0.206 s. Arrived with the merged main (a9f82aa1) and is untouched by this diff. | hk-pipeline recipe_runtime remains a load-flake source (first round: 2 of 8 timeouts at load ~50, a different pair each run). Its waits are wall-clock latency bounds, which docs/10 3.6 would put in the timing tier. | The manifest/recipe restricted-class allowlist rule for a declared label is only enforced when content gating is enabled, the same property the pre-existing output.metadata_keys requirement has; left consistent with its neighbour rather than diverging. | No landed recipe decodes a human-readable name field, so the recipe declaration path still has no product witness: AIS types 1/2/3 carry MMSI only (type 5 static data is a follow-up), POCSAG has no capcode alias, the rds recipe's PS is content (RDS's label comes from the built-in hk-rds chain), and FLEX (T-950) has not landed. Each is a one-line declaration when it lands.
       Resources: 5 CPU-s, peak 0.3 GB
+    commit: 1e98bc00
   - id: T-1018
     milestone: MLIVE
     title: "Coarse /api/tiles reads fold from the FINEST affordable level and never read their own pre-built T-585 node: read the exact node first, else the cheapest candidate ((3,1) 150 ms -> ~25 ms)"
