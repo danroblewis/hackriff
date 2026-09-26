@@ -31631,7 +31631,7 @@ tasks:
   - id: T-1077
     milestone: MLIVE
     title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
-    status: in-progress
+    status: done
     branch: task-t1077
     priority: high
     deps:
@@ -31652,6 +31652,7 @@ tasks:
       FOUND BY T-1072 worker 2026-09-26: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
 
       2026-09-26 coordinator: T-1078's worker (fog-of-war past the geometry check with the shared helper) hit a THIRD fog-of-war red, reproduced twice: 'the pane REQUESTED a tile over band C, spectrum the coverage survey settles as never sampled - T-580's short-circuit did not fire'. Suspect T-1057 (landed 03:14: the survey may only turn a place GREY, a retune refreshes the survey before it may veto) - it changed exactly when the survey vetoes. Own it here with the band-A/re-sweep reads, or split with evidence.
+    commit: 9a7c7d6c
   - id: T-1078
     milestone: MUI
     title: "RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper"
