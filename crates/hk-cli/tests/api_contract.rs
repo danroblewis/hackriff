@@ -13766,11 +13766,39 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     // back to back HERE, from ONE address, and the ordering between them is asserted. Byte counts,
     // never wall clock (the ticket's own rule) — `cost.build_ms` is printed because the honest
     // half of this result is that it does NOT move, and a future read of this log should see that.
+    //
+    // T-1076: the six reads below are SEPARATE HTTP requests, and a LIVE tile's content can grow
+    // between them — measured, a ~300 B real difference between spellings swamped by ~1 KB of
+    // read-to-read noise (`compact+gzip 57070 B against f16+gzip 56775 B`). So the address is
+    // fixed (the same one `settled` already proved has station content in it, just scaled to a
+    // 256-cell tile) and the test WAITS at that one address until the tile itself reports
+    // `sealed: true` — T-572: sealedness is a fact about the ADDRESS versus the watermark, and a
+    // sealed tile's whole extent has passed the watermark and can never change again (the
+    // hot-tile cache is even keyed on exactly that). Walking the address instead — trying a
+    // different, earlier `t_index` when this one isn't sealed yet — was tried and rejected: it
+    // can walk clean off the front of the fixture's captured span into a tile that is sealed
+    // (permanently in the past) but has NO data at all, which made every spelling collapse to the
+    // same near-empty, coverage-map-short-circuited answer and the size assertions fail for an
+    // unrelated reason. So this waits, at the one address, for BOTH sealed and non-empty.
+    let big_f_index = (STATION_HZ / (f_cell * 256.0)).floor() as u64;
     let big = format!(
-        "/api/tiles?level_f=0&level_t=0&f_index={}&t_index={}&cells=256",
-        (STATION_HZ / (f_cell * N as f64 * 8.0)).floor() as u64,
+        "/api/tiles?level_f=0&level_t=0&f_index={big_f_index}&t_index={}&cells=256",
         (settled as f64 / 8.0) as u64,
     );
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let (st, probe) = get(addr, &big);
+        let observed = probe["grid"]["observed_cells"].as_u64().unwrap_or(0);
+        if st == 200 && probe["sealed"] == json!(true) && observed > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never got a sealed, non-empty 256-cell tile at {big}: {st} sealed={} observed={observed}",
+            probe["sealed"],
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let read = |extra: &str, ae: Option<&str>| {
         let (st, enc, body) = get_encoded(addr, &format!("{big}{extra}"), ae);
         assert_eq!(st, 200, "{}{extra}", big);
