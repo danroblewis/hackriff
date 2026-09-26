@@ -29931,7 +29931,7 @@ tasks:
   - id: T-1029
     milestone: MAUTO
     title: "test_explorer_launcher.py (T-983) is red on main under load: wall-clock polls for the launcher's log lines (reap, crash release) - make them deterministic or fix the launcher; blocks every py-class gate"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: DEFLAKE-EXPLORER-LAUNCHER
@@ -29953,6 +29953,7 @@ tasks:
     dispatch: manual
     result: |
       FIXED on task-t1029 (base: gated 793f967e + task-pm-deflake-explorer-launcher, now on main as e92bfe4c). ops/explorer-window.sh: the leftover-server fallback pattern is anchored to an hk serve invocation, (^|/)hk serve .*127.0.0.1:PORT([^0-9]|$), so it never matches the agent's prompt or anything else that merely names the server. py/tests/test_explorer_launcher.py: autouse fixture reserves each test's own port with a listening socket (no fixed 65531 shared by concurrent runs); the child starts with default dispositions for INT/QUIT/HUP/TERM as well as an empty mask; the two watcher tests run a 1 h window with an exec'd agent and wait on the watcher's own reap line under the 120 s hang detector (not a 20 s window racing 10 s polls), identify the rogue by pid in the ALERT line, and collect the rogue only after the window is gone (the fake ps table keeps listing its pid); new test_one_windows_exit_never_stops_another_process_naming_its_server; remaining timeout=30 budgets -> HANG_S. RED-PROOFS: old pattern -> new two-window test red (agent killed); watcher without kill -> 'rogue was never stopped'; rogue reap without --exclude -> second-listener red; rogue reap --dry-run -> 'ring never reaped'; SIG_IGN INT parent -> [2] red before, green after. EVIDENCE: 10/10 solo at load 32-42 plus 20/20 with two runs concurrent at load 36-50 (one of them a background job, SIGINT ignored), 28 tests each, 0 leftover processes (ps by basetemp). just lint-py clean.
+    commit: 31fdba7d
   - id: T-1015
     milestone: M2-hardening
     title: Listen level_dbfs while squelch is closed reads the dropped demod audio (docs say 'delivered'); stereo halves its time constant; docs + WFM/AGC and squelch-closed tests
