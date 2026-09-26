@@ -29743,7 +29743,6 @@ tasks:
     milestone: MLIVE
     title: "Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache"
     status: in-progress
-    branch: task-t1020
     priority: medium
     deps:
     - T-1019
@@ -29764,6 +29763,15 @@ tasks:
       2026-09-25 supervisor amendment (partial - the message arrived truncated, start being re-requested): (c) with A (T-1018) + B (T-1019) landed, the RAM hot cache is an ACCELERATOR ONLY - size it in viewports, not 32 MB. Raw IQ (ring.ci8, native 8-bit) is fine - no change there.
 
       2026-09-25 coordinator, user ruling (via supervisor 13:10): the tiles are NOT a cache - they are rolling history STORAGE filled alongside the raw IQ, budgeted and evicted coarse-last under T-1023 (one rolling storage budget). This ticket is only the RAM accelerator in front of that storage: size it in viewports, report its hit rate; it holds no data the disk pyramid does not.
+    branch: task-t1020
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 16:53).
+      Raised the hot tile cache's bound from 32 MiB/256 entries (~35 planes=f16 tiles, staging measured 0 hits/27 misses on a pan-back) to 256 MiB/600 entries: after T-1019's planes=compact landed a tile is ~467 kB on the acceptance fixture, so 256 MiB holds ~560 tiles, past the 135-290 tiles/screen the review measured, and stays under 6% of the smallest Jetson Orin Nano module's RAM (docs/02). Per the coordinator's T-1023 ruling the cache is a RAM accelerator only (no data the disk pyramid does not hold), so this costs RAM, never durability. Added HotTileCache::by_client (hits/misses per declared `client` id, bounded to 64 clients the same way the T-630 admission share table is) and surfaced it in GET /api/status's tile_cache.by_client so a pane's own cache traffic is directly measurable. docs/api.md and api_contract.rs updated together (T-079); added a new hk-api test proving a pan-back over a just-seen viewport is a cache hit with the client's own hit count rising and zero filesystem reads.
+      Tests: cargo nextest run -p hk-api -E 'binary(hk_api) and test(/cache/)' -> exit 0 (6 passed (includes new a_pan_back_over_a_just_seen_viewport_is_a_cache_hit_reported_per_client)); cargo nextest run -p hk-api -E 'binary(hk_api) and test(/tiles/)' -> exit 0 (50 passed); cargo nextest run -p hk-cli -E 'binary(api_contract) and test(/tile/)' -> exit 0 (5 passed (1 flaky retry: tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell failed try 1 on an as_of_s/wall-clock race unrelated to tile_cache sizing, passed try 2)); cargo nextest run -p hk-cli -E 'binary(api_contract) and test(discovery_history_floor_status_and_control_state_have_the_documented_shape)' -> exit 0 (1 passed (the tile_cache.by_client assertion))
+      precheck exit 0
+      Commits: 13a5cdb0
+      Observed, not chased: cargo nextest run -p hk-cli -E 'binary(api_contract) and test(/tile/)': tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell failed once with an as_of_s vs oldest_record_s/recording_began_s wall-clock timing assertion (left: Null, right: String("unobserved")), then passed on retry. This test does not touch tile_cache sizing or hit/miss code and the failure mode is a wall-clock race in the as_of/unknown-rows logic, not my change; flagging for deflake-triage rather than fixing in scope.
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
