@@ -30693,6 +30693,23 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+  - id: T-1052
+    milestone: MLIVE
+    title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: LSR-RING-SPEC
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      ORDER-DEPENDENT SPEC (found by T-1037's worker 2026-09-25 22:30, proven on main's unmodified UI 8ac9cfb9): ui/e2e/live-ring.e2e.mjs (LSR-1 / T-1042, landed 22:10) passes alone (19.4 s) but fails when it runs after another spec on the same lane's backend ('rowPx: 0.4', lane 0 rows after 90138 ms). Its premise needs a YOUNG recording: a following pane's time window is the capture clock, which grows, so after ~90 s of another spec driving the backend the pane is zoomed out past MIN_ROW_PX and the ring correctly stands aside. surface-nav then live-ring on one lane reproduces it every time.
+      DELIVER: make the spec establish its own precondition - zoom the pane in time until row px >= MIN_ROW_PX (or open it on an explicit short time span through the view state) before asserting the ring draws, and assert the ring stands aside when zoomed out (that is correct product behaviour and worth pinning). Never weaken the ring assertion; never rely on test order or backend age. If the product should instead keep the ring at the live edge when zoomed out, say so with evidence and stop - that is a design question for the coordinator.
+      ACCEPTANCE: live-ring green alone and after surface-nav (and after any long spec) on one lane, 3/3 each, against a FRESH hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone and in the stated order on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1037 worker 2026-09-25 (proven on main 8ac9cfb9): live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
