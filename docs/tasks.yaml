@@ -31908,7 +31908,7 @@ tasks:
   - id: T-1086
     milestone: M2-hardening
     title: "An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)"
-    status: in-progress
+    status: done
     branch: task-t1086
     priority: high
     deps: []
@@ -31925,6 +31925,7 @@ tasks:
     notes: |
       FOUND BY coordinator deflaker 2026-09-26: An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)
     high_effort_reason: liveness horizon on the detection/presence contract (ADR-0017/0019 end-is-affirmative invariant); cross-writer timing
+    commit: f8359d8a
   - id: T-1087
     milestone: M2-hardening
     title: "events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5"
