@@ -30860,6 +30860,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on your own ports >= 9216; the hk-cli scan_coverage binary; api_contract with docs/api.md together), then HAND BACK with screenshots. Never `just gate`.
     notes: |
       FOUND BY user feature (scan + fog of war) via explorer; review of T-964 2026-09-25 (re-filed: first filed as T-1014 on task-t964, lost in a board merge): After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation
+
+      2026-09-26 coordinator: the worker's handback (branch task-t1055, queued) delivers the scan-shadow e2e, paged /api/coverage + sources[].truncated, and the census wording; the user-visible symptom's upstream causes are filed as T-1070 (pyramid levels >= 1 empty in a live run) and T-1071 (fast pass keeps no history after its rate change), with T-1058 (last-known ledger) for the shadow. This ticket closes on its deliverables; the symptom lives on in those three.
   - id: T-1060
     milestone: MUI
     title: "P1: Inventory reloads on every intermediate wheel/pointer view (100 of 264 requests per trackpad zoom) - one subscription, quantized material window key, 300 ms settle, one in flight per pane (latest-wins, the superseded request never issued)"
@@ -31055,6 +31057,42 @@ tasks:
     notes: |
       FOUND BY merge-runner triage 2026-09-26 00:50: listen_identifies_ctcss_67p0 fails alone intermittently (67.0 Hz, the lowest CTCSS tone, settles to subaudible:none on a clean 38 dB station) - red in bulk 1090f468 and on T-988's branch 09-25 13:35
     high_effort_reason: intermittent DSP defect at the sub-audible detector's low edge; hard debugging (deflake-triage) on the real-time listen path
+  - id: T-1070
+    milestone: MLIVE
+    title: "P1: spectrum-history pyramid levels >= 1 hold nothing in a live run - a zoomed-out tile has grid 0 while coverage says observed (the whole-surface view has no data to draw)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: STORE-PYRAMID
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY T-1055's worker (2026-09-26 00:35, branch task-t1055 result, mock SDR): "the spectrum-history pyramid's levels >= 1 hold nothing in a live run, so the moment a tile is answered from level 1 it has grid 0 and shadow 0 while coverage still says observed 25 - that is exactly the user's whole-surface view over a 1.7 h time axis, which has no data to draw at all." This is the user's T-1055 symptom ("after a full scan the canvas does not show where it looked") at every zoomed-out view, and it violates the CLAUDE.md live-tile invariant: "a level that downsamples every N rows adjusts its in-progress top row as rows arrive and commits every N - the same rule at 2, 4, 8, 16, 32. Coarse levels are incrementally maintained structures, not batch materialize-on-demand work."
+      DELIVER: reproduce first through the mock SDR (hk serve --device mock:..., a live run of a few minutes, then /api/tiles at level 0, 1, 2, ... over the same window: grid cell counts per level) and state which it is - levels never written by the live view writer (crates/hk-pipeline/src/history.rs view_writer / hk-store Pyramid::ingest), written but not sealed/readable until a batch, evicted by T-1023's budget, or read at the wrong address. Fix it so every level >= 1 carries the downsampled rows of a live run as they arrive (in-progress top row adjusted per row, committed every N). Measure the per-row capture-thread cost before/after (T-453: state the number). Cross-reference T-1058 (last-known ledger: the shadow plane) - that ticket owns shadow; this one owns the grid.
+      ACCEPTANCE (mock SDR, deterministic, hk-store/hk-api tests + api_contract where a route changes): after N rows at level 0, every level L >= 1 over the same window has floor(N / 2^L) committed rows plus an in-progress top row whose values fold what arrived; a tile answered from level 1..k over a live run has grid > 0 where coverage says observed; ui/e2e: the whole-surface zoomed-out view over a live run draws measured cells, not blank.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, hk-pipeline history, hk-api tiles, api_contract, the e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1055 worker 2026-09-26: P1: spectrum-history pyramid levels >= 1 hold nothing in a live run - a zoomed-out tile has grid 0 while coverage says observed (the whole-surface view has no data to draw)
+    core_interface: true
+  - id: T-1071
+    milestone: MLIVE
+    title: "P1: a coarse 'Scan everything (fast)' pass retains no spectrum history after its rate change - the swept range leaves nothing on the canvas"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: PIPE-SCAN-HISTORY
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY T-1055's worker (2026-09-26 00:35, branch task-t1055 result, mock SDR): "a coarse pass, which is what 'Scan everything (fast)' runs, retains no spectrum history at all after its rate change, so after THAT pass there is nothing to shadow." The user's T-1055 symptom for the one-click fast scan: the survey leaves no trace on the canvas.
+      DELIVER: reproduce through the mock SDR (the 'Scan everything (fast)' pass via the gated scan route, then /api/tiles + /api/coverage over the swept range) and find where the rate change drops history - the history writer not re-plumbed after the rate change (compare T-? 'After a retune the spectrum-history pyramid stops recording' - a retune fix that may not cover a RATE change), the fast pass's rows gated out as sweep/survey frames, or rows rejected as 'late'/'rejected' by the view writer (history.rs view_late/view_rejected counters: report them). Fix it so every coarse-pass step's rows reach the pyramid at their own frequency/time with provenance (device, rate, step), so the canvas shows the swept range as observed (and T-1058's ledger then has its last-known). Measure the per-row cost (T-453).
+      ACCEPTANCE (mock SDR, deterministic): after a 'Scan everything (fast)' pass over a fixture range, /api/tiles over the swept range at the survey-overview level has grid > 0 in every swept step's columns and none outside; view_rejected/view_late stay 0 for the pass; ui/e2e scan-shadow (T-1055's spec) extended to the FAST pass green alone 3/3 on a FRESH hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1055 worker 2026-09-26: P1: a coarse 'Scan everything (fast)' pass retains no spectrum history after its rate change - the swept range leaves nothing on the canvas
+    high_effort_reason: real-time history path across a rate change (scheduler/scan re-plumb + view writer); hard debugging
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
