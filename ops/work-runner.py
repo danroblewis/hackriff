@@ -26,6 +26,7 @@ State lives in $HACKRIFF_OPS (the merge runner's pointer at ~/.hackriff-ops/acti
   work-done.jsonl            one line per finished run: minutes, cost, turns, outcome
   work/<ticket>/             brief.md, out.json (claude -p result), run.log, review.json
   work-runner.log            this script's log
+  stranded.json              first-seen times of branches ahead of main in no queue (rescue_stranded)
 
 Builder cap: CLAUDE.md allows 4 Rust-building agents INCLUDING a running gate, so the cap is
 4 minus one while the merge runner is gating. Disk floor 20 GB (df, not du).
@@ -175,7 +176,8 @@ def attention(ticket, branch, kind, detail=""):
     # stay in the file only.
     level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info",
              "DEFLAKE_BLOCKED": "amber", "DEFLAKE_ERROR": "amber", "DEFLAKE_REVIEW_FAIL": "amber",
-             "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber", "SYNC_ERROR": "amber"}.get(kind)
+             "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber", "SYNC_ERROR": "amber",
+             "STRANDED": "amber"}.get(kind)
     # "needs a person" only where no automation will pick it up (user, 2026-09-24 11:40): fix runs spent
     # or impossible, a cancellation to confirm, a review FAIL no fix round will take (REVIEW_FAIL is only
     # written then), and a BLOCKED hand-back that asks the user to decide.
@@ -1815,6 +1817,77 @@ def release_stale_claims(claims, tasks_by_id):
     return changed
 
 
+STRANDED = f"{S}/stranded.json"
+STRANDED_AFTER_S = 30 * 60
+_LIVE_CLAIM = ("running", "fix-held", "limited")
+
+
+def rescue_stranded(claims, dry):
+    """A finished branch ahead of main that sits in NO queue, with nobody on it, is never landed: 11 did
+    from ~12:50 to 22:07 on 2026-09-25 - bulk conflict-skips (the runner drops the branch from the queue
+    and only a runner claim gets a fix run) and claims left `queued` after a hand-pull from the queue.
+    Candidates are only what is already known: runner claims in state `queued`, and branches named by a
+    `CONFLICT(skipped from bulk)` line in merge-needs-attention.txt within 24 h. One stranded > 30 min
+    that merges cleanly onto main is re-queued (the conflict path's 'merges cleanly now'); one that does
+    not gets ONE `STRANDED` attention line per branch tip. Never one under a review hold."""
+    if os.path.exists(f"{REPO}/.git/MERGE_HEAD"):
+        return                                 # a staged merge is in no list: the next tick decides
+    now = time.time()
+    by_branch = {c["branch"]: tid for tid, c in claims.items() if c.get("branch")}
+    cands = {c["branch"]: tid for tid, c in claims.items() if c.get("state") == "queued" and c.get("branch")}
+    unseen = set()                             # a conflict line the conflict path has yet to decide
+    try:
+        for line in open(MERGE_NEEDS):
+            parts = line.split()               # MM-DD HH:MM  branch  ticket  CONFLICT...
+            if not is_conflict(line):
+                continue
+            tid = by_branch.get(parts[2])
+            if tid and line.rstrip("\n") not in claims[tid].get("gate_fails_seen", []):
+                unseen.add(parts[2])
+            t = _line_ts(line)
+            if parts[4] == "CONFLICT(skipped" and t is not None and now - t < 24 * 3600:
+                cands.setdefault(parts[2], parts[3])
+    except OSError:
+        pass
+    try:
+        st = json.load(open(STRANDED))
+    except (OSError, ValueError):
+        st = {}
+    first, said = st.get("first", {}), st.get("said", [])
+    waiting, target, statuses = branches_waiting(), merge_target(), None
+    stranded = {}
+    for b, tid in cands.items():
+        c = claims.get(by_branch.get(b), {})
+        if (b in waiting or b in unseen or os.path.exists(f"{S}/review-hold/{b}")
+                or c.get("state") in _LIVE_CLAIM or commits_ahead(b, target) <= 0):
+            continue
+        stranded[b] = first.get(b, now)
+        if now - stranded[b] <= STRANDED_AFTER_S:
+            continue
+        if statuses is None:
+            statuses = board_statuses()
+        if not statuses or statuses.get(tid) in ("done", "cancelled", "cancel-proposed"):
+            continue                           # unreadable board, or it landed as a rebuilt branch
+        mins = int((now - stranded[b]) / 60)
+        if merges_cleanly(b, target):
+            log(f"STRANDED {tid}: {b} ahead of main and in no queue for {mins} min - merges cleanly now - re-queued")
+            if not dry:
+                enqueue(b, c.get("wt"))
+                del stranded[b]
+            continue
+        tip = sh(["git", "rev-parse", "-q", "--verify", b]).strip()
+        if f"{b}@{tip}" in said:
+            continue
+        if dry:
+            log(f"DRY-RUN would say STRANDED {tid} {b}")
+            continue
+        said.append(f"{b}@{tip}")
+        attention(tid, b, "STRANDED", f"ahead of main and in no queue for {mins} min - conflicts with main - needs a fix/rebase")
+    if not dry:
+        with open(STRANDED, "w") as f:
+            json.dump({"first": stranded, "said": said[-500:]}, f)
+
+
 def merge_target():
     """What a fix merges and is tested against: main - except while a batch gates, when main holds
     that ungated batch and may be rewound; then the bulk marker's base=, the last gated main."""
@@ -2995,6 +3068,10 @@ def tick(dry):
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
         log(f"release_stale_claims error: {e}")
+    try:
+        rescue_stranded(claims, dry)
+    except Exception as e:
+        log(f"rescue_stranded error: {e}")
     try:
         sync_remote_view(claims, dry)
     except Exception as e:
