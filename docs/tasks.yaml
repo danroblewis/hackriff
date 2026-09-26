@@ -30591,6 +30591,15 @@ tasks:
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:50).
+      Merged main e48d0eff into task-t1040 as 4be75dca. The only conflict was in ui/src/surface/tilecache.ts: in the in-flight `done` callback, main added `this.lanes.delete(key)` (stand-in lane tags) where this ticket added the `changedInflight` cleanup. Both are independent statements and both are kept. main's lane tag reaches the batch source as a hint, and coverage-change re-asks carry no lane, so they still coalesce into one /api/tiles/batch; the spy-client test still passes. docs/tasks.yaml was taken from main and the T-1040 result re-applied with `just task result`.
+      The feature is unchanged: GET /ws/tiles/changes pushes coverage_changed {f_lo, f_hi, t, departed, arrived, as_of_s} once per front-end move. The client re-asks the coverage survey at once and re-fetches exactly the tiles the move rewrote, in one batch. It is covered by docs/api.md, an api_contract.rs retune test and the ui spy-client test.
+      Tests: just test-ui -> exit 0 (build + typecheck + 107/107 test files passed (after merge)); cargo nextest run -p hk-api --lib -> exit 0 (216 passed (after merge)); cargo nextest run -p hk-cli -E 'binary(api_contract) & (test(coverage_changed) | test(every_route_in_the_route_table) | test(row_push_route))' -> exit 0 (3 passed (after merge))
+      precheck exit 0
+      Commits: 875da851, b4147978, 4be75dca
+      Observed, not chased: No browser e2e spec or screenshot of the departed band greying without a timer wait. The contract test and the spy-client test cover it. | One event can send up to 64 tile re-fetches at once, more than the client normally keeps in flight. The batch holds one server slot at a time (T-573), but ordinary misses wait until it drains.
+      Resources: 70 CPU-s, peak 3.4 GB
   - id: T-1041
     milestone: MMAP
     title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"

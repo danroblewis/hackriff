@@ -59,6 +59,7 @@ import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend"
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
+import { wsChangeOpener } from "../../surface/changefeed";
 import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, acceptGoLive, goLiveOfferLabel, isGoLiveOffer, GO_LIVE_LABEL,
@@ -1668,6 +1669,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
+        // T-1040: a front-end move re-lays the fog and re-fetches exactly the tiles it rewrote.
+        changes: wsChangeOpener(ctx.token),
         // T-1042 / LSR-1, behind `?live-ring=1` (`src/flags.ts`): the published spectrum rows every
         // FOLLOWING pane paints its live edge from, read in the render pass. Off, this is `null` and
         // the surface is drawn from tiles exactly as before — one flag, one lane, no second picture.

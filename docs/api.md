@@ -1457,6 +1457,29 @@ Messages are JSON text, in order:
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
 - **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
 
+### `GET /ws/tiles/changes` — `coverage_changed` pushed on a retune (T-1040)
+
+WebSocket; token as for every `/ws/` route; no other query parameter (anything else is refused `4400`). One socket per client, not per column: the event is about the tune record, which every tile of every lattice is rasterised against. The live edge's own rows are not here — they are `/ws/tiles/rows` (and, once it lands, the live-stream ring, LSR-1/2, which supersedes the `tile_committed` half of the user's "change events instead of re-asking"); this route carries the one change that rewrites tiles a client **already holds**: a front end moving.
+
+```jsonc
+{ "type": "subscribed",                       // first, always: the band each front end is on now
+  "tuned": [ { "device": "hackrf:…", "f_lo": 99600000.0, "f_hi": 102000000.0,
+               "since_s": …, "as_of_s": …, "source": "iq-ring" } ],   // or "open-dwell"
+  "tick_ms": 100, "rule": "…" }
+{ "type": "coverage_changed", "seq": 1, "device": "hackrf:…",
+  "t": 1789300920.1,                          // Unix s: when the front end arrived on the new band
+  "f_lo": 99600000.0, "f_hi": 122000000.0,    // Hz: the UNION of the band left and the band arrived at
+  "departed": { "f_lo": 99600000.0, "f_hi": 102000000.0 },   // null when the front end is new
+  "arrived":  { "f_lo": 119600000.0, "f_hi": 122000000.0 },
+  "as_of_s": 1789300920.3,                    // how far the record of the new band already reaches
+  "source": "iq-ring" }
+```
+
+- **One event per move.** A front end *moves* when the band its newest tune record names changes (edges more than 1 Hz apart); the event is sent once, within one `tick_ms` of the record stating it. A provenance change that keeps the band (a gain step, a new ring segment, a reseal) is not a move and sends nothing; a front end whose record stops sends nothing either (its fog simply stops advancing, which the rows already say). A reading older than the one in hand is a lagging source, never a move back.
+- **What it means for a client:** every tile intersecting `[f_lo, f_hi] × [t, ∞)` holds coverage that is now out of date — from `t` the band left is `unobserved` (the departed band's fog) and the band arrived at is observed — and **no other tile changed**. So the client re-asks its coverage survey at once and re-fetches exactly those tiles it holds, in one batch (`ui/src/surface/changefeed.ts`, `TileCache.coverageChanged`); the survey timer and the live-edge refresh lane become the fallback for a socket that is not open, until LSR-5 retires the lane. By the time the event is sent the coverage map already answers `unobserved` over the band left between `t` and `as_of_s` (contract: `api_contract.rs::coverage_changed_is_pushed_once_per_retune_and_the_departed_fog_is_already_served`).
+- **Where the band comes from:** the same tune records the coverage map rasterises — the IQ ring's journal (the tuned window, `center ± rate/2`) and, for a front end the ring holds nothing for (the ring refused, T-588/T-596), the observation log's dwell in flight (its analysed extent, the hull of a notched dwell's spans). **One source per front end, never a mix**: alternating between a tuned and an analysed extent would report moves that never happened. Nothing new is recorded.
+- **Cost and cap:** each tick reads the ring's 64 newest segments and the dwells in flight, both in memory. At most **16** change subscriptions are open per server; the seventeenth is refused `4503`. Refusals complete the upgrade and close with `4000 + status`, as `/ws/tiles/rows` does; a request that is not an upgrade is `426`. Anything the client sends other than a close or a ping is ignored.
+
 ### `GET /api/status` — pipeline counters (T-027)
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …), plus one field this route itself adds: **`t`**, the server's own wall clock (`Timestamp::now`, not the run's sample clock) at the instant the response was built — bare name, Unix seconds, per the units convention (T-351). Without it a caller could not tell a fresh read from a cached one, or measure its own clock skew against this device. Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
@@ -2170,6 +2193,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 | GET | `/ws/{stream_id}` | token (header or `?token=`) | Upgrades to WebSocket and bridges the named always-on stream (§10) |
 | GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, `iq`, with query parameters per opener |
 | GET | `/ws/tiles/rows` | token | Rows pushed to a subscription over a tile-lattice **address range** — see [its section](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468) (T-468) |
+| GET | `/ws/tiles/changes` | token | `coverage_changed {f_lo, f_hi, t}` pushed once per front-end move, so a retune re-lays the fog and re-fetches exactly the moved tiles — see [its section](#get-wstileschanges--coverage_changed-pushed-on-a-retune-t-1040) (T-1040) |
 
 **`GET /ws/{stream_id}`** (e.g. `spectrum/live`): the header JSON is the first **text** message, verbatim; every later record is one message — text (NDJSON line) for `messages` streams, binary (32-byte record header + payload) for every binary kind. Refusals never upgrade the connection and are plain HTTP: `401` (bad/missing token, checked before the upgrade), `403` (a `own-key-decrypted` stream — those are Unix-socket-only and never served over the bridge), `404` (unknown `stream_id`), `410` (stream finished), `426` (not a valid WebSocket upgrade request), `503` (consumer cap reached, or `replumbing` — see below).
 

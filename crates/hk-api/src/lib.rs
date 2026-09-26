@@ -32,6 +32,7 @@ pub mod assist;
 pub mod auth;
 pub mod bridge;
 pub mod captures;
+pub mod changes; // T-1040: coverage_changed pushed on a retune (`/ws/tiles/changes`)
 pub mod classification; // T-247
 pub mod clusters; // T-202
 pub mod collections; // T-817 (MAP-17): time-frequency marker collections

@@ -159,7 +159,7 @@
 // of actual motion, only while otherwise idle**, for the tile the pan is heading into.
 
 import {
-  extentOf, fCellHz, fTileHz, inLattice, intersects, keyOf, tCellNs, tTileNs, tilesFor,
+  TILES_BATCH_MAX_ADDRESSES, extentOf, fCellHz, fTileHz, inLattice, intersects, keyOf, tCellNs, tTileNs, tilesFor,
   type Box, type Lattice, type TileAddr,
 } from "./lattice";
 import { BYTES_PER_CELL, TileBusyError, TileDecodeError, weakerTier, type TileData } from "./tile";
@@ -419,6 +419,10 @@ export interface TileCacheStats {
   rowsPushed: number;
   /** Tiles built from pushed rows before any answer for the address arrived (T-893). */
   rowTilesSynthesized: number;
+  /** `coverage_changed` events applied (T-1040, [[TileCache.coverageChanged]]). */
+  coverageChanges: number;
+  /** Tiles re-asked because a `coverage_changed` named them (T-1040). */
+  coverageRefetches: number;
 }
 
 const MB = 1024 * 1024;
@@ -519,6 +523,9 @@ const AHEAD_SERVICES = 8;
 /** The [[InFlight.owner]] of a look-ahead read: on the global budget like an orphan (-1), but not
  * sent alone the way a revalidation is. */
 const AHEAD_OWNER = -2;
+/** Owner of a re-ask a `coverage_changed` event named (T-1040): like [[AHEAD_OWNER]], no viewport's
+ * share, and never `-1` — which would ask it alone and so break the one batch the event is. */
+const CHANGE_OWNER = -3;
 /** How long after a push a column counts as fed, ms: a few row periods at the finest level, so a
  * feed that stalls or closes hands its column back to the polling lane within seconds (T-893). */
 const FEED_FRESH_MS = 2000;
@@ -623,6 +630,10 @@ export class TileCache<T> {
   /** Keys whose in-flight fetch was overtaken by a retune: the data that arrives describes the old
    * tuning, so it is dropped on arrival and asked for again ([[invalidateEdge]]). */
   private stale = new Set<string>();
+  /** Resident tiles a `coverage_changed` named, waiting to be re-asked together (T-1040). */
+  private changedPending = new Map<string, TileAddr>();
+  /** Those re-asks in flight: their answer REPLACES the copy in hand, as a revalidation's does. */
+  private changedInflight = new Set<string>();
   /**
    * Places the route refused permanently, and why (T-479).
    *
@@ -868,7 +879,7 @@ export class TileCache<T> {
     edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, retryScheduled: 0,
     edgeRefreshCompletions: 0,
     silentFailures: 0, speculativeIssued: 0, speculativeHits: 0, aheadIssued: 0,
-    rowsPushed: 0, rowTilesSynthesized: 0,
+    rowsPushed: 0, rowTilesSynthesized: 0, coverageChanges: 0, coverageRefetches: 0,
   };
 
   constructor(
@@ -1346,6 +1357,68 @@ export class TileCache<T> {
       if (a && this.atEdge(lat, a, edgeNs, box)) this.stale.add(key);
     }
     return n;
+  }
+
+  /**
+   * **A front end moved: re-ask exactly the tiles it moved under, together** (T-1040,
+   * `GET /ws/tiles/changes` in docs/api.md). Returns how many resident tiles it named.
+   *
+   * A `coverage_changed {f_lo, f_hi, t}` says the tune record changed over `[f_lo, f_hi] × [t, ∞)`
+   * — the band left is fog from `t`, the band arrived at is observed — and that nothing else did.
+   * So the tiles to re-ask are the resident ones of any lattice whose extent meets that region,
+   * and no others; before this the client learnt of a move it did not make itself only when the
+   * refresh lane or a pan next came round to each tile, which is the timer this replaces.
+   *
+   * - **One batch, not one per tile.** Every named tile is issued in the same synchronous turn, so
+   *   `batchedTileSource` coalesces them into one `GET /api/tiles/batch` per lattice level (the
+   *   batch holds one route slot at a time, T-573). They go before the ordinary queue: they are on
+   *   screen and wrong. Up to [[TILES_BATCH_MAX_ADDRESSES]] per turn; the rest follow on the next.
+   * - **Nothing goes blank.** Like a revalidation ([[refreshEdge]]) the copy in hand stays drawn
+   *   and the answer replaces it in place ([[insert]]); a failed re-ask keeps the old copy.
+   * - **A read already in flight is overtaken**: a miss is dropped on arrival and asked again (the
+   *   [[invalidateEdge]] rule); a resident tile's read is followed by one more once it lands.
+   */
+  coverageChanged(lats: readonly Lattice[], change: { readonly fLoHz: number; readonly fHiHz: number; readonly tNs: number }): number {
+    const { fLoHz, fHiHz, tNs } = change;
+    if (!(fHiHz > fLoHz) || !Number.isFinite(tNs)) return 0;
+    this.stats.coverageChanges++;
+    const hit = (a: TileAddr): boolean => {
+      const lat = lats.find((l) => l.scheme === a.scheme);
+      if (!lat) return false;
+      const e = extentOf(lat, a);
+      return e.f1Hz > fLoHz && e.f0Hz < fHiHz && e.t1Ns > tNs;
+    };
+    let n = 0;
+    for (const e of this.map.values()) {
+      if (!hit(e.addr)) continue;
+      this.changedPending.set(e.key, e.addr);
+      n++;
+    }
+    for (const key of this.inflight.keys()) {
+      const a = parseKey(key);
+      if (!a || !hit(a)) continue;
+      if (this.map.has(key)) this.changedPending.set(key, a);
+      else this.stale.add(key);
+    }
+    this.pump();
+    return n;
+  }
+
+  /** Issue every pending coverage-change re-ask in ONE turn, so they share one batch (T-1040). */
+  private pumpChanged(): void {
+    if (!this.changedPending.size) return;
+    let issued = 0;
+    for (const [key, addr] of [...this.changedPending]) {
+      if (issued >= TILES_BATCH_MAX_ADDRESSES) break;
+      // In flight: asked again once it lands (`done` pumps). Evicted since: the miss path owns it.
+      if (this.inflight.has(key)) continue;
+      this.changedPending.delete(key);
+      if (!this.map.has(key)) continue;
+      this.changedInflight.add(key);
+      this.stats.coverageRefetches++;
+      this.issue(addr, CHANGE_OWNER);
+      issued++;
+    }
   }
 
   /**
@@ -1892,6 +1965,8 @@ export class TileCache<T> {
     this.queue = [];
     this.queued.clear();
     this.stale.clear();
+    this.changedPending.clear();
+    this.changedInflight.clear();
     this.refreshing.clear();
     this.refreshLanes.clear();
     this.refreshPassLeft.clear();
@@ -1945,6 +2020,8 @@ export class TileCache<T> {
     // **Nothing at all while the silence gate is armed** (T-499). The queue keeps filling — it is
     // deduplicated and bounded — so recovery is immediate on the frame after the gate opens.
     if (this.now() < this.silentUntil) return;
+    // The tiles a coverage change named go first and together (T-1040): they are on screen and wrong.
+    this.pumpChanged();
     // The budget is what the ROUTE has out on this client's behalf — the requests being waited on
     // *and* the ones walked away from, which it is still producing. See [[abandonedSlots]].
     while (this.inflight.size + this.abandonedSlots < this.effectiveLimit && this.queue.length) {
@@ -2147,6 +2224,8 @@ export class TileCache<T> {
       let requeue = wanted;
       this.lastWireAt = Math.max(this.lastWireAt, this.now());
       this.inflight.delete(key);
+      // A failed re-ask leaves the copy in hand; a later event, or the survey, asks again.
+      if (this.changedInflight.delete(key)) requeue = false;
       // The lane tag belongs to the request, not to the place: a re-ask from the ordinary miss path
       // must not inherit the stand-in lane it once rode in.
       this.lanes.delete(key);
@@ -2495,11 +2574,12 @@ export class TileCache<T> {
   private insert(addr: TileAddr, data: TileData, edgeAtFetchNs: number): boolean {
     const key = keyOf(addr);
     if (this.stale.delete(key)) return false;
+    const changed = this.changedInflight.delete(key);
     const prev = this.map.get(key);
     // A **live-edge revalidation replaces** the copy in hand (T-460); anything else that arrives for
     // a resident key is a duplicate, and the same tile is never uploaded twice — except a copy built
     // from pushed rows, which any real answer replaces (T-893).
-    if (prev && !this.refreshing.has(key) && !prev.synthetic) return true;
+    if (prev && !this.refreshing.has(key) && !changed && !prev.synthetic) return true;
     data = this.horizonOf(addr, data, edgeAtFetchNs);
     const tex = this.tex.upload(data);
     this.stats.uploads++;
