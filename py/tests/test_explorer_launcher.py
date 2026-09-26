@@ -362,7 +362,7 @@ def _exited_uncollected(proc):
     return subprocess.run(["ps", "-o", "stat=", "-p", str(proc.pid)], capture_output=True, text=True).stdout.startswith("Z")
 
 
-def _watched_window(tmp_path, ring_kb=8):
+def _watched_window(tmp_path, ring_kb=8, extra_env=None):
     """A window whose rogue-server watcher reads a fake process table (EXPLORER_PS_OUTPUT), so the
     test decides exactly which `hk serve` lines it sees. The window is 1 h and the agent sleeps 600 s:
     nothing ends it but `_stop`. The T-983 version ran 20 s windows against its own 10 s waits, and a
@@ -372,6 +372,8 @@ def _watched_window(tmp_path, ring_kb=8):
     ps_file = tmp_path / "ps.txt"
     ps_file.write_text("")
     env["EXPLORER_PS_OUTPUT"] = str(ps_file)
+    if extra_env:
+        env.update(extra_env)
     p = _start([str(WINDOW), "--window", "1h"], env)
     d = ops / "explorer"
     # server.datadir is the last of the server.* records the window writes
@@ -447,6 +449,101 @@ def test_a_second_listener_sharing_the_kept_data_dir_never_reaps_the_kept_ring(t
             rogue.kill()  # a no-op on the zombie it should be
             rogue.wait()
     assert rogue.returncode in (-signal.SIGTERM, -signal.SIGKILL)
+    assert p.returncode == 128 + signal.SIGTERM
+    assert _radio_calls(radio_log) == ["take", "release"]
+
+
+def _identity_stub_ps(tmp_path):
+    """A stub `ps` for EXPLORER_PS_BIN, the seam `ps_stamp()` uses to verify a pid's identity right
+    before the final -KILL. It alternates its answer for a given pid on every call (1st call "A", 2nd
+    "B", 3rd "A", ...), so the baseline captured before a kill sequence and the check right before its
+    final -KILL - always a consecutive pair for the same pid - never match. That is exactly what a pid
+    reused in that window looks like to the script, without needing the OS to actually reuse a pid
+    inside a test's wall-clock budget (T-1033)."""
+    counts = tmp_path / "ps-counts"
+    counts.mkdir()
+    ps = tmp_path / "ps-stub"
+    ps.write_text(
+        "#!/bin/bash\n"
+        'pid="${@: -1}"\n'
+        f'f="{counts}/$pid"\n'
+        'n=0; [ -f "$f" ] && n=$(cat "$f")\n'
+        'n=$((n+1)); echo "$n" > "$f"\n'
+        'if [ $((n % 2)) = 1 ]; then echo "stamp-A-$pid"; else echo "stamp-B-$pid"; fi\n'
+    )
+    ps.chmod(0o755)
+    return ps
+
+
+def test_a_pid_whose_identity_changed_before_the_final_kill_is_not_killed(tmp_path):
+    """Red on the old script: once the grace period elapsed it sent `kill -KILL $pid` unconditionally,
+    trusting that a pid still (or again) answering `kill -0` was still the process it TERMed - a
+    narrow but real window for an unrelated process, given a reused pid, to take that -KILL instead.
+    The stub `ps` above makes the identity check see a DIFFERENT process at the final-kill instant
+    than it did when the kill sequence started. The fix must withhold the -KILL; the rogue - which
+    ignores TERM, so only a delivered -KILL would end it - must still be alive once the window is
+    done handling it."""
+    ps_stub = _identity_stub_ps(tmp_path)
+    p, env, ops, radio_log, ps_file, kept_pid, kept_datadir = _watched_window(
+        tmp_path, extra_env={"EXPLORER_PS_BIN": str(ps_stub)})
+    port = env["EXPLORER_PORT"]
+    rogue = subprocess.Popen(["bash", "-c", "trap '' TERM; exec sleep 600"])
+    try:
+        rogue_datadir = ops / "explorer" / "data-rogue"
+        (rogue_datadir / "iqbuffer").mkdir(parents=True)
+        ps_file.write_text(
+            f"{kept_pid} hk serve --hackrf --data-dir {kept_datadir} --bind 127.0.0.1:{port}\n"
+            f"{rogue.pid} hk serve --hackrf --data-dir {rogue_datadir} --bind 127.0.0.1:{port}\n"
+        )
+        _wait_for(p, "the watcher finished with the rogue (ring reaped)",
+                  _log_has(ops, "rogue server's ring reaped"))
+        log = (ops / "explorer" / "window.log").read_text()
+        assert f"ALERT: rogue hk serve detected (pid {rogue.pid}, data-dir {rogue_datadir})" in log
+        os.kill(rogue.pid, 0)  # still alive: the -KILL was correctly withheld, not delivered
+    finally:
+        _stop(p)
+        rogue.kill()
+        rogue.wait()
+
+
+def test_a_rogue_detected_just_before_the_window_ends_is_still_stopped(tmp_path):
+    """T-1033: the watcher only checks every EXPLORER_WATCH_POLL seconds, and the old cleanup() just
+    killed it outright on the way out - so a rogue that appeared (or was mid-way through being
+    stopped) right as the window itself ended used to survive whenever the watcher's next poll never
+    came round. Here the poll interval is far longer than the test, so the watcher on its own will
+    never see this rogue; the window's own exit must still stop it, by finishing (or re-running) the
+    watcher's job itself rather than merely killing it."""
+    env, ops, radio_log = _stubs(tmp_path, claude_body=LONG_AGENT)
+    ps_file = tmp_path / "ps.txt"
+    ps_file.write_text("")
+    env["EXPLORER_PS_OUTPUT"] = str(ps_file)
+    env["EXPLORER_WATCH_POLL"] = "3600"  # the background watcher will not poll again in this test
+    p = _start([str(WINDOW), "--window", "1h"], env)
+    d = ops / "explorer"
+    _wait_for(p, "the window's own hk serve started", lambda: (d / "server.datadir").exists())
+    kept_pid = int((d / "server.pid").read_text())
+    kept_datadir = pathlib.Path((d / "server.datadir").read_text().strip())
+    port = env["EXPLORER_PORT"]
+    rogue = None
+    try:
+        rogue = subprocess.Popen(["sleep", "600"])
+        rogue_datadir = ops / "explorer" / "data-rogue"
+        (rogue_datadir / "iqbuffer").mkdir(parents=True)
+        (rogue_datadir / "iqbuffer" / "ring.bin").write_bytes(b"\0" * 4096)
+        ps_file.write_text(
+            f"{kept_pid} hk serve --hackrf --data-dir {kept_datadir} --bind 127.0.0.1:{port}\n"
+            f"{rogue.pid} hk serve --hackrf --data-dir {rogue_datadir} --bind 127.0.0.1:{port}\n"
+        )
+        _stop(p)  # ends the window right away, long before the watcher's next (3600s-away) poll
+        log = (ops / "explorer" / "window.log").read_text()
+        assert f"ALERT: rogue hk serve detected (pid {rogue.pid}, data-dir {rogue_datadir})" in log
+        assert "rogue server's ring reaped: 4096 bytes" in log
+        assert _exited_uncollected(rogue), "the window's own exit never stopped the rogue"
+        assert not (rogue_datadir / "iqbuffer").exists(), "the rogue's ring was never reaped"
+    finally:
+        if rogue is not None:
+            rogue.kill()
+            rogue.wait()
     assert p.returncode == 128 + signal.SIGTERM
     assert _radio_calls(radio_log) == ["take", "release"]
 
