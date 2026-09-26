@@ -341,3 +341,127 @@ export function ringCovers(cover: Box, ext: Box, box: Box): boolean {
 export interface LiveRingSource {
   ringFor(paneId: string): RingFrame | null;
 }
+
+/**
+ * **The trace reads the ring too** (T-1047 / LSR-6).
+ *
+ * `./trace.ts`'s slice and max-hold were built entirely from the pyramid, because at T-457 that was
+ * the only place either question could be answered. Since LSR-1 the tile lane is *told to stand
+ * aside* over the ring's own extent ([[ringCovers]]), so a tile-only trace now has a hole exactly
+ * where the picture beneath it is freshest: the newest few seconds are on screen from rows, and the
+ * trace over the same seconds would read "unobserved" from a tile that was never requested. These two
+ * functions are the ring's own answers to the same two questions [[maxHoldColumns]]/[[sliceColumns]]
+ * ask of the pyramid, so a caller can fold them in exactly where the ring, not the pyramid, is the
+ * fresher source — never instead of the pyramid, only where a tile genuinely has nothing to say.
+ */
+
+/**
+ * The ring row whose own extent contains `tNs` — the ring's form of "genuinely finer than the
+ * pyramid" ([[trace.ts]]'s old `liveFrameFits`): a row that CONTAINS the instant asked about is a
+ * strictly better answer than any cell that merely spans it, at every level. Searches the newest
+ * span first, since a following pane's time position is almost always at or near the live edge.
+ * `null` when the ring holds no row there — older than the ring, or a retune emptied it.
+ */
+export function ringRowAt(ring: RingFrame, tNs: number): { readonly slot: number; readonly tNs: number } | null {
+  if (!Number.isFinite(tNs)) return null;
+  for (let i = ring.spans.length - 1; i >= 0; i--) {
+    const span = ring.spans[i];
+    if (tNs < span.t0Ns || tNs >= span.t1Ns || !(span.rows > 0)) continue;
+    const cadence = (span.t1Ns - span.t0Ns) / span.rows;
+    if (!(cadence > 0)) continue;
+    const offset = Math.min(span.rows - 1, Math.floor((tNs - span.t0Ns) / cadence));
+    return { slot: (span.row0 + offset) % ring.capacity, tNs: span.t0Ns + offset * cadence };
+  }
+  return null;
+}
+
+/**
+ * One ring row, pooled onto `n` columns spanning `box`'s frequency window.
+ *
+ * The ring's own [[trace.ts]] `sampleFrame`: max-pooling where a column covers more than one bin (a
+ * narrow burst between two sample points must survive the collapse, the same reason the server folds
+ * this way), the nearest bin replicated where a column is narrower than one. A column outside the
+ * ring's band, or a cell this ring has not written, is left `NaN` — never a floor, never a level the
+ * ring does not hold.
+ */
+export function sampleRingRow(ring: RingFrame, slot: number, box: Box, n: number): Float32Array {
+  const out = new Float32Array(n).fill(Number.NaN);
+  const { nf, f0Hz, f1Hz } = ring;
+  const span = box.f1Hz - box.f0Hz;
+  if (!(nf > 0) || !(f1Hz > f0Hz) || !(span > 0) || !(n > 0)) return out;
+  const binHz = (f1Hz - f0Hz) / nf;
+  const colHz = span / n;
+  const base = slot * nf;
+  for (let c = 0; c < n; c++) {
+    const lo = box.f0Hz + c * colHz, hi = lo + colHz;
+    if (hi <= f0Hz || lo >= f1Hz) continue;
+    let i0 = Math.floor((Math.max(lo, f0Hz) - f0Hz) / binHz);
+    let i1 = Math.ceil((Math.min(hi, f1Hz) - f0Hz) / binHz);
+    i0 = Math.max(0, Math.min(nf - 1, i0));
+    i1 = Math.max(i0 + 1, Math.min(nf, i1));
+    let m = -Infinity;
+    for (let i = i0; i < i1; i++) {
+      const k = base + i;
+      if (ring.state[k] !== CELL.OBSERVED) continue;
+      const v = ring.value[k];
+      if (Number.isFinite(v) && v > m) m = v;
+    }
+    if (m > -Infinity) out[c] = m;
+  }
+  return out;
+}
+
+/**
+ * **The slice, from the ring**: the row covering the pane's own instant `tAtNs`, pooled across the
+ * whole viewport. `null` when the ring has no row there — a scrub past the ring's ~40 s, a band the
+ * ring is not about, or no ring at all — and the caller falls back to [[sliceColumns]] exactly as it
+ * did before the ring existed.
+ */
+export function ringSliceColumns(ring: RingFrame, box: Box, n: number, tAtNs: number): Float32Array | null {
+  const at = ringRowAt(ring, tAtNs);
+  if (!at) return null;
+  return sampleRingRow(ring, at.slot, box, n);
+}
+
+/**
+ * **The ring-covered max-hold**: the column-wise maximum over every ring row whose own extent falls
+ * inside `box`'s time window.
+ *
+ * **`box`'s frequency extent decides where the `n` columns fall, and it must be the CALLER's own
+ * column domain — ordinarily the pane's whole frequency window, the same one the caller divided into
+ * `n` to answer the pyramid — never a narrower band such as [[RingPlan.cover]]'s.** A column is index
+ * `c` of `n` evenly spaced across `box.f0Hz..box.f1Hz`; if `box` is narrower than the range the
+ * caller's `n` columns actually span, column `c` here and column `c` there are different frequencies,
+ * and folding the two arrays together by index puts this function's answer at the wrong place in the
+ * caller's picture the moment the pane is wider than the ring's own band. A column outside the ring's
+ * own band comes back `NaN` regardless — [[sampleRingRow]] checks that itself — so widening `box`'s
+ * frequency costs nothing.
+ *
+ * `box`'s TIME extent is the one field this is meant to narrow: pass [[RingPlan.cover]]'s `t0Ns`/
+ * `t1Ns` (with the caller's own frequency window) to fold in only the strip [[ringCovers]] tells the
+ * tile lane not to request — not the pane's whole window, over the rest of which the pyramid is still
+ * the answer, and still the finer one where both exist (history reaches back further than this ring
+ * ever will). Folding the two together is safe because a max-hold is idempotent and associative
+ * (`hk-api`'s `MAX_HOLD_RULE`): taking the greater of a ring answer and a pyramid answer over the same
+ * cell is still a max-hold over the union.
+ */
+export function ringMaxHoldColumns(ring: RingFrame, box: Box, n: number): Float32Array {
+  const out = new Float32Array(n).fill(Number.NaN);
+  const span = box.f1Hz - box.f0Hz;
+  if (!(span > 0) || !(n > 0)) return out;
+  for (const s of ring.spans) {
+    if (s.t1Ns <= box.t0Ns || s.t0Ns >= box.t1Ns || !(s.rows > 0)) continue;
+    const cadence = (s.t1Ns - s.t0Ns) / s.rows;
+    if (!(cadence > 0)) continue;
+    const r0 = Math.max(0, Math.floor((box.t0Ns - s.t0Ns) / cadence));
+    const r1 = Math.min(s.rows, Math.ceil((box.t1Ns - s.t0Ns) / cadence));
+    for (let r = r0; r < r1; r++) {
+      const row = sampleRingRow(ring, (s.row0 + r) % ring.capacity, box, n);
+      for (let c = 0; c < n; c++) {
+        const v = row[c];
+        if (Number.isFinite(v) && !(out[c] >= v)) out[c] = v;
+      }
+    }
+  }
+  return out;
+}

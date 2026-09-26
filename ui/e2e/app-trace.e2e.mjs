@@ -243,6 +243,15 @@ const SNAPSHOT = `(() => {
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
     counts: row?.dataset.counts ?? "",
+    // T-1050: the trace layer's own statement of the CORE it stroked this frame, for the active pane
+    // — one [xPx, yPx, r, g, b] per MEASURED column, x/y the PIXEL CENTRE from the CANVAS ELEMENT's
+    // top-left (not from the pane's rectangle), 0-255 ink. Read in the same evaluation as the words,
+    // like the box.
+    traceCore: JSON.parse(document.querySelector('.sf-stage')?.dataset.traceCore ?? 'null'),
+    // The canvas element's own top-left, which traceCore is relative to. rect above is the PANE
+    // (the canvas box plus the inset it states), so the two differ by that inset and are not
+    // interchangeable.
+    canvas: box ? { x: box.x, y: box.y } : null,
     tap: { headers: window.__hkTap.headers, rows: window.__hkTap.rows, geom: window.__hkTap.geom,
            held: window.__hkTap.held, withheld: window.__hkTap.withheld,
            recent: window.__hkTap.recent.slice(-400) },
@@ -475,44 +484,113 @@ function cellColours(img, rect, x, halfPx, rows) {
 }
 
 /**
- * **The colour of the stroke's CORE**, not of its feathered edge.
+ * **The trace's CORE, at the pixels the layer itself says it stroked** (T-1050).
  *
- * `tracepass.ts` fades coverage over the last device pixel of the stroke, so the topmost drawn pixel
- * of a line is a partial blend with the backdrop — a real property of an anti-aliased line and
- * exactly the wrong pixel to compare against a cell. The core is the fullest-coverage RAMP pixel
- * within a stroke of the top; the ramp-ink filter matters because an afterglow row can cross the
- * slice, and grey at the top of the ramp's scale is brighter than the ramp's own dark end, so
- * "the brightest pixel in the stroke" alone would sometimes return a shadow.
+ * ## Three instruments failed at this before the page was asked
+ *
+ * The claim below is an equality between two colours in a framebuffer, so something has to say which
+ * pixels are the stroke's core. While the trace had a strip of its own the pixels answered that
+ * themselves: the band was backdrop `rgb(10,10,13)`, so the brightest pixel in a column was the core
+ * and the feathered edge and the bloom were darker. T-1041 put the layer **over the pane's own rows**
+ * and all three replacements broke on the same two facts, both measured:
+ *
+ *  - **A difference against the trace-off baseline cannot find the core.** Where the property HOLDS
+ *    the core pixel is *identical* to the cell under it, so a difference mask keeps precisely the
+ *    columns where the claim fails and throws away the ones where it holds — a filter that turns a
+ *    passing property into 9.1 %.
+ *  - **"The brightest pixel in the stroke" returns the BLOOM.** The bloom is 18 %-opaque achromatic
+ *    grey (`shade: "mono"`) over a coloured cell, i.e. a lightened, desaturated copy of that cell:
+ *    brighter than a dark-blue core and chromatic enough to pass a ramp test. Measured: ink
+ *    `[69,170,194]` read against cells `[20,183,213]`.
+ *
+ *  - **Guessing the core's ROW from the product's stroke constants** (`(GLOW_PX − SLICE_PX) / 2`
+ *    below the bloom's top edge, then the most-saturated ramp pixel in those rows) got the same
+ *    property to 57.8 % — still bloom pixels, one row off the assumed core. It is also the wrong
+ *    shape of instrument: it re-derives in the test what the renderer already knows, which is the
+ *    T-388 family (two derivations of one picture) with a stroke in it.
+ *
+ * ## So the page states where it stroked, and the framebuffer is still what is read
+ *
+ * `stage.dataset.traceCore` (ui/src/app/centre/surface.ts, `stateTraceCore` → `coreSamples`) is the
+ * **vertices of the `trace-slice` paths that were handed to the GPU** this frame: one per CSS pixel
+ * column, the stroke's own centre — where `tracepass.ts`'s coverage ramp is saturated for any
+ * `widthPx ≥ 3` however the pixel grid falls — and the 0-255 ink of that vertex, read off the path's
+ * own `rgb` attribute rather than recomputed from `cmap`. Nothing about the colour claim is taken on
+ * the page's word: the colour is read out of the composited framebuffer at the stated position, and
+ * the statement is checked against it.
+ *
+ * That is what makes a wrong statement of position fail rather than pass. A `traceCore` that pointed
+ * at a cell instead of the stroke would read the cell's own pixel, which matches the cell trivially
+ * — so the pixel is ALSO required to carry the stated ink ([[locatedCore]]). A position off the
+ * stroke fails that; a ramp that diverged from the waterfall's keeps it (the stroke does carry the
+ * colour it declared) and fails the equality instead. The two together say: the layer drew what it
+ * said it drew, at the place it said, and that colour is one the waterfall paints in that column.
  */
-/** The bloom's own edge above the core: `(GLOW_PX − SLICE_PX) / 2`, from the product's constants. */
-const BLOOM_EDGE = 2;
-
-function coreInk(img, rect, x, top) {
-  const x0 = Math.round(rect.x) + x, y0 = Math.round(rect.y);
-  // **The core's row is GEOMETRY, not "the brightest pixel in the stroke"** (T-1041). The brightest
-  // rule worked while the band was empty: the bloom was 18 % grey over `rgb(10,10,13)`, darker than
-  // any ramp ink, so the core always won. Over the cells the bloom is 18 % grey over a cyan cell —
-  // a lightened, desaturated version of that cell, brighter than a dark-blue core — and the rule
-  // returned the bloom for most columns (measured: `ink [69,170,194]` against cells `[20,183,213]`,
-  // 15.6 % matching). The stroke's own geometry does not move: `tracepass.ts` strokes the bloom
-  // `GLOW_PX` wide and the slice `SLICE_PX` wide about the same centre, so the core begins
-  // `BLOOM_EDGE` px below the bloom's top edge and is `SLICE_PX` px thick. This takes the ramp ink
-  // in exactly those rows.
-  // Within those rows it takes the MOST SATURATED ramp pixel, for the same structural reason: the
-  // bloom is achromatic (`shade: "mono"`), so blending it over a cell can only pull that cell's
-  // chroma DOWN, while the core is the ramp colour itself at full coverage. A bloom pixel therefore
-  // never out-saturates the core it hugs — measured on the misses this replaced: bloom
-  // `[76,169,193]` chroma 117 against a cell `[31,185,203]` chroma 172.
-  let best = null, bestChroma = -1;
-  for (let y = top + BLOOM_EDGE - 1; y <= top + BLOOM_EDGE + 3 && y < TRACE_PX; y++) {
-    if (y < 0) continue;
-    const d = ((y0 + y) * img.width + x0) * 4;
-    const c = [img.data[d], img.data[d + 1], img.data[d + 2]];
-    if (!isRampInk(c[0], c[1], c[2])) continue;
-    const ch = CHROMA(c[0], c[1], c[2]);
-    if (ch > bestChroma) { bestChroma = ch; best = c; }
+const INK_TOL = 8;
+/**
+ * The samples of `snap.traceCore` that fall inside the band and inside the columns the surface is on
+ * top at, indexed into the observation's image, **paired with the pixel that is actually there**.
+ *
+ * `x` is relative to the pane rectangle (what every other reader in this file uses); `traceCore` is
+ * relative to the canvas element, and the two differ by the inset the canvas states. Each stated
+ * `(xPx, yPx)` is a PIXEL CENTRE, so the pixel it names is `floor()` of it in the image — never
+ * `round()`, which would step into the next pixel for every sample.
+ */
+function coreSamples(obs, vis) {
+  const rows = obs.snap.traceCore, cv = obs.snap.canvas;
+  if (!Array.isArray(rows) || !cv) return [];
+  const rx = Math.round(obs.rect.x), ry = Math.round(obs.rect.y);
+  const out = [];
+  for (const [cx, cy, r, g, b] of rows) {
+    const ix = Math.floor(cv.x + cx), iy = Math.floor(cv.y + cy);
+    const x = ix - rx, y = iy - ry;
+    if (x < vis.lo || x > vis.hi) continue;
+    if (y < 0 || y >= TRACE_PX) continue;
+    if (ix < 0 || iy < 0 || ix >= obs.img.width) continue;
+    const d = (iy * obs.img.width + ix) * 4;
+    out.push({ x, y, said: [r, g, b],
+      px: [obs.img.data[d], obs.img.data[d + 1], obs.img.data[d + 2]] });
   }
-  return best ?? [0, 0, 0];
+  return out;
+}
+
+/**
+ * **The columns of the pane this check may read**: where the SURFACE is on top (T-801's rule), from
+ * the browser's own hit test on the observed layout. The app's panels float over the full-bleed
+ * canvas by design and their pixels are neither the trace's nor the waterfall's.
+ */
+function visibleColumns(rect, unocc) {
+  const w = Math.round(rect.w);
+  return unocc && unocc.w > 0
+    ? { lo: Math.max(0, Math.round(unocc.x - rect.x)),
+        hi: Math.min(w - 1, Math.round(unocc.x - rect.x) + unocc.w - 1) }
+    : { lo: 0, hi: w - 1 };
+}
+
+/** A sample whose pixel carries the ink the layer said it stroked there — see [[coreSamples]]. */
+const locatedCore = (s) => Math.max(Math.abs(s.px[0] - s.said[0]), Math.abs(s.px[1] - s.said[1]),
+  Math.abs(s.px[2] - s.said[2])) <= INK_TOL;
+
+/**
+ * **A pooled trace column, in screen px**, at the viewport this runs at: `1440 / 256 ≈ 5.6`. What it
+ * bounds is how many MEASURED columns a span of clear pixels can hold, which is what makes the
+ * minimum below a derived number rather than a taste.
+ */
+const MEASURED_MIN = 12;
+
+/**
+ * **The observation can answer T-475's question**: the surface's own pixels are in this capture
+ * ([[bandIsPicture]]) and the layer states at least [[MEASURED_MIN]] core columns inside the columns
+ * the floating panels leave clear. One definition, used by the wait ([[heldObservation]]'s
+ * `acceptView`) and re-verified on the accepted observation, for the reason this whole file exists:
+ * a wait that establishes one state and an assertion about another proves nothing.
+ */
+function readableCore(obs) {
+  const vis = visibleColumns(obs.rect, obs.unocc);
+  const picture = bandIsPicture(obs.img, obs.rect, vis);
+  const core = coreSamples(obs, vis);
+  return { ok: picture.ok && core.length >= MEASURED_MIN, ...picture, vis, inClear: core.length,
+    stated: Array.isArray(obs.snap.traceCore) ? obs.snap.traceCore.length : null };
 }
 
 /** Closest match, as a max-channel distance, between one colour and a set of them. */
@@ -817,7 +895,45 @@ const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.t
  */
 const sameBox = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
-async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000, scrubbed = false }) {
+/**
+ * **The band in this screenshot is a PICTURE, not a blank canvas** — the third thing an observation
+ * has to be, beside "the readout says the state" and "nothing moved between the reads" (T-1050).
+ *
+ * Measured on this fixture, 2 runs in 6 under load: the whole surface came back **white** —
+ * `rgb(244,246,247)`, the page's own background — with the readout still saying `6 tiles · 0 coarse
+ * stand-ins · 0 pending`, the trace-off baseline 100 % still (both shots blank), and the canvas box
+ * unmoved. The composited GL layer was simply missing from the capture. Every claim in this file is
+ * about pixels the surface drew, so an observation without them is not a failing property, it is a
+ * failed observation — and it is exactly what `heldObservation` already retries for. Reported as a
+ * failure, never skipped, if every attempt comes back that way: a surface that has genuinely stopped
+ * drawing would look the same and must not pass.
+ *
+ * The rule is `waitForCanvas`'s own, applied to the observed image instead of to a live read: a
+ * drawn band carries many colours and no single one owns it. Quantised to 4 bits per channel so the
+ * ramp's neighbouring shades do not count as distinct, and read over **the clear columns only** —
+ * over the whole width the floating panels supply enough colours of their own that a blank surface
+ * still scored 84 distinct with the page's white at 81 %, which is the shape that has to be caught.
+ * Measured, same viewport: a drawn band is 375-397 distinct with its commonest colour at 11.5 %, a
+ * blank capture is its background at ~100 %, so the 50 % bound sits in an empty gap between them.
+ */
+function bandIsPicture(img, rect, vis) {
+  const x0 = Math.round(rect.x), y0 = Math.round(rect.y);
+  const seen = new Map();
+  let n = 0;
+  for (let y = 0; y < TRACE_PX; y += 2) {
+    for (let x = vis.lo; x <= vis.hi; x += 2) {
+      const d = ((y0 + y) * img.width + (x0 + x)) * 4;
+      const k = ((img.data[d] >> 4) << 8) | ((img.data[d + 1] >> 4) << 4) | (img.data[d + 2] >> 4);
+      seen.set(k, (seen.get(k) ?? 0) + 1);
+      n++;
+    }
+  }
+  const dominant = Math.max(0, ...seen.values());
+  return { ok: seen.size >= 16 && dominant / Math.max(1, n) < 0.5, distinct: seen.size,
+    dominantShare: dominant / Math.max(1, n) };
+}
+
+async function heldObservation(page, shotPath, { expr, accept, acceptView = null, what, tries = 6, timeoutMs = 60000, scrubbed = false }) {
   let last = null;
   for (let i = 0; i < tries; i++) {
     await page.eval("window.__hkTap.resume()");
@@ -832,16 +948,22 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
     const after = JSON.parse(await page.eval(SNAPSHOT));
     const still = before.trace === after.trace && before.headline === after.headline
       && sameBox(before.rect, after.rect);
-    if (still && accept(before)) {
-      // T-801: which of the strip's columns the SURFACE is on top at, from the browser's own hit
-      // test on this same (held, box-checked) layout — the app's panels float over the full-bleed
-      // canvas by design, and their pixels are not the trace's.
-      const unocc = await page.unoccludedColumns(".sf-canvas",
-        { y0: before.rect.y, y1: before.rect.y + TRACE_PX });
-      return { snap: before, img, rect: before.rect, unocc, withheld: after.tap.withheld, waited,
-        rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
-    }
-    last = { still, accepted: accept(before), before: before.trace, after: after.trace,
+    // T-801: which of the strip's columns the SURFACE is on top at, from the browser's own hit
+    // test on this same (held, box-checked) layout — the app's panels float over the full-bleed
+    // canvas by design, and their pixels are not the trace's. Read BEFORE the observation is
+    // accepted (T-1050), because what a pixel check can see in those columns is part of the state
+    // it is waiting for, not something to discover afterwards and assert about regardless.
+    const unocc = await page.unoccludedColumns(".sf-canvas",
+      { y0: before.rect.y, y1: before.rect.y + TRACE_PX });
+    const obs = { snap: before, img, rect: before.rect, unocc, withheld: after.tap.withheld, waited,
+      rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
+    // [[bandIsPicture]] and the caller's own view test: the composited GL layer is sometimes missing
+    // from a capture under load, and the columns this observation can read are not always the ones
+    // the trace was drawn in. An observation that cannot answer the question is retried like any
+    // other unreached state — and its exhaustion is a failure, never a skip.
+    const drew = acceptView ? acceptView(obs) : { ok: true };
+    if (still && drew.ok && accept(before)) return obs;
+    last = { still, accepted: accept(before), drew, before: before.trace, after: after.trace,
       held: after.tap.held, box: sameBox(before.rect, after.rect),
       rects: `${JSON.stringify(before.rect)} -> ${JSON.stringify(after.rect)}` };
     await page.frames(2);
@@ -851,6 +973,7 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
     "and the pixels cannot be compared as one frame.\n" +
     `  waiting for: ${what}\n  held: ${last?.held}; readout unchanged across the capture: ${last?.still}; ` +
     `canvas box unchanged across the capture: ${last?.box} (${last?.rects})\n` +
+    `  the band came back as a drawn picture: ${JSON.stringify(last?.drew)}\n` +
     `  state still held at the capture: ${last?.accepted}\n  before: ${last?.before}\n  after:  ${last?.after}`);
 }
 
@@ -871,11 +994,27 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
  * cannot pass that: at the default zoom its rows scroll hundreds of pixels a second, which is why
  * the live-edge checks in this file use the phosphor ink instead.
  */
-async function traceOffBaseline(page, obs, shotPath) {
+async function traceOffBaseline(page, obs, shotPath, { soft = false } = {}) {
   await setTraceLayer(page, false);
   const snap = JSON.parse(await page.eval(SNAPSHOT));
   const base = await page.shot(shotPath);
   await setTraceLayer(page, true);
+  // `soft` (T-1050): return the verdict instead of throwing it, so a caller that can re-establish the
+  // whole observation retries rather than failing. The premise is unchanged and the numbers are the
+  // same — what moves is who decides. Measured over 9 runs on this box: the pane below the band came
+  // back 100 % identical 6 times and 97.0 % twice, either side of the bound, as a tile arriving
+  // repainted part of a frozen pane between the two shots. That is a baseline that cannot be used,
+  // not a product fault and not a property failure, and it is the same shape `heldObservation`
+  // already retries. Exhausting the retries is still a failure.
+  const verdict = (ok, why, extra) => {
+    if (!soft) assert.ok(ok, why);
+    return { ok, why, base, ...extra };
+  };
+  if (!sameBox(snap.rect, obs.rect)) {
+    return verdict(false,
+      `the canvas moved while the baseline was taken (${JSON.stringify(obs.rect)} -> ${JSON.stringify(snap.rect)}), ` +
+      "so the two shots are not one frame", { stillness: 0, sampled: 0 });
+  }
   assert.ok(sameBox(snap.rect, obs.rect),
     `the canvas moved while the baseline was taken (${JSON.stringify(obs.rect)} -> ${JSON.stringify(snap.rect)}), ` +
     "so the two shots are not one frame");
@@ -891,11 +1030,11 @@ async function traceOffBaseline(page, obs, shotPath) {
     }
   }
   const stillness = seen ? 1 - moved / seen : 0;
-  assert.ok(seen > 1000 && stillness >= 0.97,
+  return verdict(seen > 1000 && stillness >= 0.97,
     `the picture below the band moved between the two shots (${(stillness * 100).toFixed(1)}% of ` +
     `${seen} sampled pixels unchanged) — a frozen viewport with the stream held should be still, so ` +
-    "this baseline cannot be used to say which ink is the trace's");
-  return { base, stillness, sampled: seen };
+    "this baseline cannot be used to say which ink is the trace's",
+    { stillness, sampled: seen });
 }
 
 /**
@@ -1277,29 +1416,52 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // and walks out of the frozen top cell on its own — at which point the slice comes from the
   // pyramid and the comparison above is between two readings of one set of cells.
   const parked = await scrubOntoCell(page, 2);
-  const obs = await heldObservation(page, path.join(ART, "app-trace-colour.png"), {
-    what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak, " +
-      "in a pane holding every tile it is addressing (no coarse stand-ins, nothing pending)",
-    expr: scrubbedExpr(2, { resident: true }),
-    accept: (snap) => CELL_SLICE_RE.test(snap.trace) && isResident(snap.counts),
-    scrubbed: true,
-  });
-  t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
-    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
-  // **How far the canvas moved while this test was getting into state.** Reported rather than
-  // asserted: the movement is legitimate (the chrome above the stage grows and shrinks with what it
-  // has to say), and the only thing that was ever wrong was measuring pixels with the box from
-  // before it. A non-zero number here is this deflake's own evidence.
-  const drift = Math.round(obs.rect.y - opened.rect.y);
-  t.diagnostic(`the canvas moved ${drift} px vertically and ${Math.round(obs.rect.h - opened.rect.h)} px ` +
-    "in height between the first real render and this observation; the pixels below are indexed by " +
-    "the box this observation itself reported");
-  // The baseline: the same frozen, held frame with the layer off. Its band is the CELLS the slice
-  // is a slice of — the comparison this check is about — and the difference between the two shots
-  // is the trace's own ink.
-  const { base, stillness, sampled } = await traceOffBaseline(page, obs, path.join(ART, "app-trace-colour-off.png"));
+  // **One attempt is an observation AND its baseline** (T-1050). The comparison needs two shots of
+  // one frozen frame, and either half can come back unusable — the observation for the reasons
+  // `acceptView` lists, the baseline because something repainted the pane between the shots (a tile
+  // arriving; measured at 97.0 % twice in 9 runs, either side of that check's own bound). Retrying
+  // only the first half would pair a fresh observation with nothing; so the pair is the unit, and
+  // exhausting the attempts is a failure that says which half kept failing.
+  let obs = null, base = null, stillness = 0, sampled = 0;
+  const rejected = [];
+  for (let attempt = 1; attempt <= 3 && !base; attempt++) {
+    obs = await heldObservation(page, path.join(ART, "app-trace-colour.png"), {
+      what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak, " +
+        "in a pane holding every tile it is addressing (no coarse stand-ins, nothing pending)",
+      expr: scrubbedExpr(2, { resident: true }),
+      accept: (snap) => CELL_SLICE_RE.test(snap.trace) && isResident(snap.counts),
+      // T-1050: **and the observation can answer the question** — the surface's own pixels are in the
+      // capture ([[bandIsPicture]]), and the layer states measured core columns inside the columns the
+      // panels leave clear. Both were observed failing on a correct build: the GL layer missing from a
+      // capture (2 runs in 6 under load, the whole surface `rgb(244,246,247)`), and a frame whose slice
+      // began at column 464 with the clear span at 308..461 — the left of the pane not yet resident, so
+      // the trace honestly drew nothing there. Neither is a property failure; both are states to wait
+      // through, and ONE definition of the state is used here and re-verified on the accepted
+      // observation below, so the wait and the assertion cannot be about different things.
+      acceptView: readableCore,
+      scrubbed: true,
+    });
+    t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
+      `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
+    // **How far the canvas moved while this test was getting into state.** Reported rather than
+    // asserted: the movement is legitimate (the chrome above the stage grows and shrinks with what it
+    // has to say), and the only thing that was ever wrong was measuring pixels with the box from
+    // before it. A non-zero number here is this deflake's own evidence.
+    const drift = Math.round(obs.rect.y - opened.rect.y);
+    t.diagnostic(`the canvas moved ${drift} px vertically and ${Math.round(obs.rect.h - opened.rect.h)} px ` +
+      "in height between the first real render and this observation; the pixels below are indexed by " +
+      "the box this observation itself reported");
+    // The baseline: the same frozen, held frame with the layer off. Its band is the CELLS the slice
+    // is a slice of — the comparison this check is about — and the difference between the two shots
+    // is the trace's own ink.
+    const shot = await traceOffBaseline(page, obs, path.join(ART, "app-trace-colour-off.png"), { soft: true });
+    if (shot.ok) ({ base, stillness, sampled } = shot);
+    else { rejected.push(`attempt ${attempt}: ${shot.why}`); t.diagnostic(`baseline rejected — ${shot.why}`); }
+  }
+  assert.ok(base, `no usable trace-off baseline in 3 attempts:\n  ${rejected.join("\n  ")}`);
   t.diagnostic(`trace-off baseline taken on the same frozen frame: ${(stillness * 100).toFixed(1)}% of ` +
-    `${sampled} sampled pixels below the band came back identical`);
+    `${sampled} sampled pixels below the band came back identical` +
+    `${rejected.length ? ` (after ${rejected.length} rejected: ${rejected.join("; ")})` : ""}`);
   const s = strip(obs.img, obs.rect, { base });
   t.diagnostic(`readout: ${obs.snap.trace}`);
   t.diagnostic(`strip ink: ${s.slicePx} ramp px, ${s.holdPx} max-hold px, ${s.greyPx} afterglow/bloom px`);
@@ -1307,11 +1469,15 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
     const at = s.cols.map((v, i) => (v >= 0 ? i : -1)).filter((i) => i >= 0);
     t.diagnostic(`drawn columns ${at[0]}..${at[at.length - 1]} (${at.length} of ${s.w})`);
   }
-  assert.ok(s.drawn > 20, `only ${s.drawn} of ${s.w} columns carry ramp ink — nothing to compare`);
+  // The difference mask stays as DIAGNOSTICS here and is no longer what the comparison is built on
+  // (T-1050): where the equality holds the core pixel is identical to the baseline's, so the number
+  // of columns it finds is a measure of where the trace is *visible against* the cells — the bloom's
+  // feather, mostly — not of where the core is. `core.length` below is the count that gates the
+  // claim.
 
-  // Column by column: the colour the TRACE drew, against the colours the WATERFALL drew in that same
-  // screen column, in the top rows of the pane — the cell the slice is a slice of, read off the
-  // baseline because the trace is now drawn over it.
+  // Sample by sample: the colour the TRACE drew, at the pixels the layer states it stroked, against
+  // the colours the WATERFALL drew in that same screen column, in the top rows of the pane — the cell
+  // the slice is a slice of, read off the baseline because the trace is now drawn over it.
   const halfPx = Math.max(1, Math.round(s.w / TRACE_COLUMNS / 2) + 1);
   const ROWS = 6;
   let compared = 0, matched = 0, worst = 0;
@@ -1328,32 +1494,60 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // eight identical [20,28,33] — the panel's lettering on the panel. Those are not the trace's
   // pixels or the waterfall's, so they are neither compared nor counted, exactly as the extent
   // check does with the same `obs.unocc`.
-  const vis = obs.unocc && obs.unocc.w > 0
-    ? { lo: Math.max(0, Math.round(obs.unocc.x - obs.rect.x)),
-        hi: Math.min(s.w - 1, Math.round(obs.unocc.x - obs.rect.x) + obs.unocc.w - 1) }
-    : { lo: 0, hi: s.w - 1 };
+  const vis = visibleColumns(obs.rect, obs.unocc);
   const visW = vis.hi - vis.lo + 1;
   t.diagnostic(`comparing uncovered columns ${vis.lo}..${vis.hi} of ${s.w} ` +
     `(${obs.unocc?.occluded ?? 0} under floating chrome)`);
-  for (let x = vis.lo; x <= vis.hi; x++) {
-    if (s.cols[x] < 0) continue;
+  // **The core, where the LAYER says it stroked it** ([[coreSamples]]) — and the pixel that is
+  // actually there. A pixel read cannot find the core by itself now that the layer is drawn over the
+  // cells: the header on `coreSamples` records the three instruments that tried and what each of them
+  // returned instead. Nothing here trusts the statement, though — the colour is the framebuffer's,
+  // and the statement is checked against it first.
+  const core = coreSamples(obs, vis);
+  const readable = readableCore(obs);
+  t.diagnostic(`the layer states ${readable.stated} measured core columns, ${core.length} of them ` +
+    `inside the clear columns ${vis.lo}..${vis.hi}; the band is a drawn picture ` +
+    `(${readable.distinct} distinct colours, dominant ${(readable.dominantShare * 100).toFixed(1)}%)`);
+  assert.ok(readable.ok,
+    `the accepted observation cannot answer this question after all: ${JSON.stringify(readable)}. ` +
+    "This is the state `acceptView` waits for, re-verified here — see [[readableCore]].");
+  // **First: the pixel at each stated position carries the ink that was stated for it.** This is what
+  // stops a wrong statement of position from passing the equality below for free — a `traceCore`
+  // aimed at a cell would read the cell's own pixel and "match" it trivially, and fails here instead.
+  // It is a claim about the product too, in the same family as the readout naming its source: the
+  // layer drew what it says it drew, where it says.
+  const located = core.filter(locatedCore);
+  const misplaced = core.filter((c) => !locatedCore(c)).slice(0, 3);
+  t.diagnostic(`${located.length}/${core.length} stated core samples carry the stated ink in the ` +
+    `framebuffer (±${INK_TOL}/255)${misplaced.length ? `; first misplaced ${JSON.stringify(misplaced)}` : ""}`);
+  assert.ok(located.length / core.length >= 0.8,
+    `only ${((located.length / core.length) * 100).toFixed(1)}% of the ${core.length} core samples the ` +
+    `layer states are actually that colour in the framebuffer — so either the layer is not stroking ` +
+    `where it says (its statement is derived from the very vertices handed to the GPU, so that is a ` +
+    `renderer or a mapping fault, not a stale readout) or the stroke is not getting the vertex colour ` +
+    `it was given. Either way the equality below would be measuring the wrong pixels. ` +
+    `First misplaced: ${JSON.stringify(misplaced)}`);
+  // **The subject is the MEASURED columns**, which is what the layer states — the ones whose dB is a
+  // cell's own dB. Between two of them the trace draws the monotone interpolant (`TRACE_SUBDIV`
+  // points per column), which at this zoom is 5.6 px of climb between two pooled columns whose
+  // colours are ~20/255 apart: a dB no cell there carries, drawn honestly, and a colour the cells
+  // cannot be asked about. Measured over every column instead, including those: 84.4 %, 88.3 %,
+  // 84.4 % on three runs, with every miss on the FM carrier's flank. The measured columns alone
+  // scored 27/27 on three runs, worst distance 2/255 — an equality, which is what T-475 claims.
+  for (const c of located) {
     compared++;
-    // **The core is read WITHOUT the baseline mask, and that is not an oversight.** The property
-    // under test is that the trace's core is *the same colour* as the cell under it — so exactly
-    // where it holds, the core pixel is IDENTICAL to the baseline's and the mask would throw it
-    // away, leaving only the columns where the claim fails. (Measured: 14 of 154 columns compared,
-    // 9.1 % matched, with the misses' "ink" being the bloom's feather rather than the core.) The
-    // mask is used for what it can say — where the stroke IS, `s.cols[x]` above — and the core is
-    // then the fullest-coverage ramp pixel within a stroke of that top, as it always was.
-    const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
-    const cells = cellColours(base, obs.rect, x, halfPx, ROWS);
-    const d = nearestDist(ink, cells);
+    const cells = cellColours(base, obs.rect, c.x, halfPx, ROWS);
+    const d = nearestDist(c.px, cells);
     if (d <= 8) { matched++; worst = Math.max(worst, d); }
     else {
-      missAt.push(x);
-      if (misses.length < 3) misses.push({ x, d, ink, cells: cells.slice(0, 8) });
+      missAt.push(c.x);
+      if (misses.length < 3) misses.push({ x: c.x, y: c.y, d, ink: c.px, cells: cells.slice(0, 8) });
     }
   }
+  assert.ok(compared >= MEASURED_MIN,
+    `only ${compared} of the ${located.length} located core samples are at a MEASURED column ` +
+    `(clear columns ${vis.lo}..${vis.hi}), which is too few to say anything about the ramp. ` +
+    "A pooled trace column is ~5.6 px wide here, so a 154-column span holds ~27 of them.");
   // The misses as runs, and the widest of them — a whole tile's worth is the tell.
   const runs = [];
   for (const x of missAt) {
@@ -1364,7 +1558,7 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   const shape = `${runs.length} run(s), widest ${widest} column(s) = ${((widest / Math.max(1, compared)) * 100).toFixed(1)}% ` +
     `of the drawn span; drawn with ${obs.snap.counts}`;
   const rate = matched / Math.max(1, compared);
-  t.diagnostic(`${s.drawn}/${s.w} columns drawn; ${matched}/${compared} trace columns carry a colour the cells below them also carry ` +
+  t.diagnostic(`${s.drawn}/${s.w} columns drawn; ${matched}/${compared} MEASURED trace columns carry a colour the cells below them also carry ` +
     `(worst matched distance ${worst}/255); misses in ${shape}` +
     `${misses.length ? `; first misses ${JSON.stringify(misses)}` : ""}`);
   assert.ok(rate >= 0.8,
@@ -1380,11 +1574,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // strip is one colour, or the waterfall is — this would score as well as the real comparison, and
   // the test would be measuring the ramp's coarseness rather than the trace's colour.
   let shuffled = 0;
-  for (let x = vis.lo; x <= vis.hi; x++) {
-    if (s.cols[x] < 0) continue;
+  for (const c of located) {
     // A third of the UNCOVERED span away, wrapping inside it, so the control never reads the panel.
-    const far = vis.lo + ((x - vis.lo + Math.floor(visW / 3)) % visW);
-    if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(base, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
+    const far = vis.lo + ((c.x - vis.lo + Math.floor(visW / 3)) % visW);
+    if (nearestDist(c.px, cellColours(base, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
   t.diagnostic(`negative control: ${shuffled}/${compared} = ${(shuffledRate * 100).toFixed(1)}% match a ` +

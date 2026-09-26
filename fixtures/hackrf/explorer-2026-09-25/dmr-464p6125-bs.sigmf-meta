@@ -1,0 +1,508 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:version": "1.2.0",
+    "core:sample_rate": 2400000.0,
+    "core:description": "hk-pipeline IQ capture buffer clip (SIGNAL-091, dmr-464p6125-bs), trimmed to [5.0s, 10.0s) of the original 10 s capture -- the whole burst measures inside this window (source: store/explorer-2026-09-25/dmr-464p6125-bs-full.sigmf-{meta,data})",
+    "core:hw": "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (USB API 1.10), board rev 0, libhackrf 0.9.2 (2026.01.3), antenna unknown",
+    "core:recorder": "hk-pipeline:outputs",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ],
+    "hackriff:provenance": {
+      "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+      "tune": {
+        "center_hz": 464300000.0,
+        "sample_rate_hz": 2400000.0,
+        "lna_db": 32.0,
+        "vga_db": 30.0,
+        "amp_on": true,
+        "bandwidth_hz": 1750000.0
+      },
+      "overload": false,
+      "quantisation_limited": false,
+      "antenna_port": "unknown",
+      "bias_tee": "off",
+      "clock_source": "internal",
+      "clock_locked": true,
+      "timestamp_method": "host-arrival"
+    },
+    "core:license": "project-owned capture"
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 464300000.0,
+      "core:datetime": "2026-09-25T14:02:31.333477Z",
+      "hackriff:provenance": {
+        "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+        "tune": {
+          "center_hz": 464300000.0,
+          "sample_rate_hz": 2400000.0,
+          "lna_db": 32.0,
+          "vga_db": 30.0,
+          "amp_on": true,
+          "bandwidth_hz": 1750000.0
+        },
+        "overload": false,
+        "quantisation_limited": false,
+        "antenna_port": "unknown",
+        "bias_tee": "off",
+        "clock_source": "internal",
+        "clock_locked": true,
+        "timestamp_method": "host-arrival"
+      },
+      "core:global_index": 12000000,
+      "hackriff:clip_count": 0
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "capture",
+      "hackriff:truth": {
+        "role": "scenario",
+        "kind": "capture",
+        "recording": "dmr-464p6125-bs",
+        "use_cases": [
+          "SIGNAL-091"
+        ],
+        "generator": "py/fixtures/build_explorer_2026_09_25.py",
+        "source": {
+          "capture": "explorer agent live clip",
+          "method": "POST /api/outputs/record/start on the explorer agent's staging build",
+          "captured": "2026-09-25T14:02:31.333477Z",
+          "device": "hackrf:0000000000000000d2b861dc263bc293",
+          "trim": "[5.0s, 10.0s) of the original 10 s capture, kept whole at store/explorer-2026-09-25/dmr-464p6125-bs-full.sigmf-{meta,data}"
+        },
+        "datatype": "ci8",
+        "sample_rate_hz": 2400000.0,
+        "n_samples": 12000000,
+        "duration_s": 5.0,
+        "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
+        "clip_count": 0,
+        "clip_fraction": 0.0,
+        "overload": false,
+        "quantisation_limited": false,
+        "quantisation_noise_dbfs_per_hz": -113.65969934007163,
+        "capture_settings": {
+          "lna_db": 32.0,
+          "vga_db": 30.0,
+          "amp": true,
+          "bias_tee": "off",
+          "antenna": "unknown"
+        },
+        "identification_source": "oracle: explorer/tools/nbfm3.py (deviation histogram) + tools/dmrsync.py (DMR sync search) + tools/chanscan.py; band chosen from coordinator window-3 list (GMRS/FRS region)",
+        "not_signals": [
+          {
+            "f_center_hz": 464300000.0,
+            "kind": "DC/LO"
+          }
+        ],
+        "annotation_completeness": "partial: the emissions named in the explorer's truth file, plus the whole-clip overload artefact; this is a 5 s tail trim of a 10 s original, not the whole capture",
+        "legal": "Receive-only capture. Truth is PHY/metadata only; RDS PI/PS/PTY are public broadcast station identity (CLAUDE.md legal guardrails).",
+        "t_start_s": 0.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 464606250.0,
+      "core:freq_upper_edge": 464618750.0,
+      "core:label": "464.6125 MHz",
+      "core:comment": "4-level FSK deviation histogram (peaks ~\u00b10.6/\u00b11.8 kHz), DMR BS-sourced DATA sync 0xDFF57D75DF5D found 42x (<=4 bit errors) at 4800 Bd; bursts +24 dB; not content-decoded",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "dmr-4fsk-bursts",
+        "modulation": "4FSK",
+        "center_hz": 464612500.0,
+        "offset_hz": 312500.0,
+        "bandwidth_hz": 12500.0,
+        "channel_hz": 464612500.0,
+        "decoded": false,
+        "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
+        "dmr": {
+          "sync_patterns": {
+            "BS_voice": "755FD7DF75F7",
+            "BS_data": "DFF57D75DF5D",
+            "MS_voice": "7F7D5DD57DFD",
+            "MS_data": "D5D7F77FD757"
+          },
+          "sync_rate_bd": 4800.0,
+          "n_syncs": 41,
+          "syncs_by_pattern": {
+            "BS_data": 41
+          },
+          "syncs": [
+            {
+              "t_s": 3.7834,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 3.8134,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 3.8434,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 3.8734,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 3.9034,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 3.9334,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 3.9634,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 3.9934,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.0234,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.0534,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.0834,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.1134,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.1434,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.1734,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.2034,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 9
+            },
+            {
+              "t_s": 4.2334,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.2634,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.2934,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.3234,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.3534,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.3834,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.4134,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.4434,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.4734,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.5034,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.5334,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.5634,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.5934,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.6234,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.6534,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 5
+            },
+            {
+              "t_s": 4.6834,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.7134,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.7434,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 6
+            },
+            {
+              "t_s": 4.7734,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.8034,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 7
+            },
+            {
+              "t_s": 4.8334,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.8634,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.8934,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.9234,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.9534,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            },
+            {
+              "t_s": 4.9834,
+              "hamming": 0,
+              "order": "natural",
+              "n_phases": 8
+            }
+          ],
+          "levels": {
+            "n_levels": 2,
+            "level_centres_hz": [
+              -3853.6,
+              -132.9
+            ],
+            "n_symbols": 18876
+          },
+          "decoder": "py/fixtures/dmr_ref.py (independent oracle: FM discriminator + 4800 Bd 4-level-sliced 48-bit DMR SYNC-pattern correlation (both bit orders/polarities, all four ETSI SYNC patterns), then a 4-level re-slice of the data following each sync)",
+          "oracle_agrees_with_explorer_sync_count": false,
+          "explorer_claim": {
+            "kind": "dmr-4fsk-bursts",
+            "decoded": "4-level FSK deviation histogram (peaks ~\u00b10.6/\u00b11.8 kHz), DMR BS-sourced DATA sync 0xDFF57D75DF5D found 42x (<=4 bit errors) at 4800 Bd; bursts +24 dB; not content-decoded",
+            "claimed_syncs_in_full_10s_file": 42,
+            "source": "app blind detection + the explorer's own numpy oracle tools/dmrsync.py (4800 Bd 4FSK slicer against the ETSI SYNC table), 2026-09-25 ~07:02 PDT (journal-20260925.md)"
+          }
+        },
+        "ctcss": null,
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 463393750.0,
+      "core:freq_upper_edge": 463406250.0,
+      "core:label": "463.4000 MHz",
+      "core:comment": "100 % duty ~13 dB",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "continuous-unknown",
+        "modulation": "NBFM",
+        "center_hz": 463400000.0,
+        "offset_hz": -900000.0,
+        "bandwidth_hz": 12500.0,
+        "channel_hz": 463400000.0,
+        "decoded": false,
+        "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
+        "dmr": null,
+        "ctcss": null,
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 463481250.0,
+      "core:freq_upper_edge": 463493750.0,
+      "core:label": "463.4875 MHz",
+      "core:comment": "100 % duty ~12 dB",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "continuous-unknown",
+        "modulation": "NBFM",
+        "center_hz": 463487500.0,
+        "offset_hz": -812500.0,
+        "bandwidth_hz": 12500.0,
+        "channel_hz": 463487500.0,
+        "decoded": false,
+        "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
+        "dmr": null,
+        "ctcss": null,
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 464694375.0,
+      "core:freq_upper_edge": 464705625.0,
+      "core:label": "464.7000 MHz",
+      "core:comment": "51 % on; tone 100.0 Hz measured at 06:38 (19.8 dB), not re-verified in this file",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "nbfm-burst",
+        "modulation": "NBFM",
+        "center_hz": 464700000.0,
+        "offset_hz": 400000.0,
+        "bandwidth_hz": 11250.0,
+        "channel_hz": 464700000.0,
+        "decoded": false,
+        "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
+        "dmr": null,
+        "ctcss": {
+          "tone_hz_measured": 66.74504047019275,
+          "tone_snr_db": 5.947663602291479,
+          "table_match": null,
+          "table": "EIA/TIA RS-220 50-tone CTCSS set",
+          "decoder": "py/fixtures/ctcss_ref.py (independent oracle: NBFM discriminator -> zero-phase low-pass < 300 Hz -> Welch-averaged zero-padded tone estimate to ~0.1 Hz -> nearest EIA 50-tone match)",
+          "note": "explorer's own claim is for an earlier, wider observation window, not re-verified in this specific file/clip; a null or differing oracle result here is not a disagreement with that claim.",
+          "explorer_claim": {
+            "ctcss_hz": null,
+            "decoded": "51 % on; tone 100.0 Hz measured at 06:38 (19.8 dB), not re-verified in this file"
+          }
+        },
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "overload",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "overload",
+        "clipped_samples": 0,
+        "clip_fraction": 0.0,
+        "overload_rule": "clip_fraction > 0.0001 (component at -128 or 127)",
+        "note": "LNA 32 / VGA 30 / amp on; provenance reports overload=false for this capture.",
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    }
+  ]
+}
