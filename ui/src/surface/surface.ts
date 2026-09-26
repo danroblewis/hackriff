@@ -194,6 +194,17 @@ export interface PaneReport {
   /** One ring row's height in this pane, device px — the eligibility measurement, reported rather
    * than hidden so a pane that stood the ring aside can say why. `0` with no ring. */
   readonly ringRowPx: number;
+  /**
+   * **The ring this pane just painted from, and the extent it painted continuously** (T-1047, LSR-6):
+   * the same `ring`/`plan.cover` this data pass used to draw and to exclude tiles, handed to the
+   * trace so it reads the one ring rather than re-deriving a second answer about the same rows. `null`
+   * on every pane with no ring this frame — see [[ringRows]].
+   */
+  readonly ringFrame: RingFrame | null;
+  /** The extent [[ringFrame]] answers continuously, clipped to the pane — what the trace may answer
+   * from the ring instead of a tile that was never requested (T-1042's `ringCovers`). `null` with no
+   * ring, or a ring that has not yet measured a continuous run. */
+  readonly ringCover: Box | null;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -861,7 +872,11 @@ export class Surface {
         this.dropRing(pane.id);
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0 });
+      reports.push({
+        id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank,
+        shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, ringRows, ringTiles,
+        ringRowPx: plan?.rowPx ?? 0, ringFrame: ring, ringCover: plan?.cover ?? null,
+      });
     }
     gl.disable(gl.SCISSOR_TEST);
     for (const id of this.ringTex.keys()) if (!drawn.has(id)) this.dropRing(id);

@@ -75,6 +75,7 @@ import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
   afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
+import { ringMaxHoldColumns, ringRowAt, sampleRingRow } from "../../surface/livering";
 import type { OverlayQuad } from "../../surface/minimap";
 import { boxOf, type PaneState } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
@@ -954,19 +955,47 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // the max-hold answers a different question over a different interval than the slice, so giving
     // both the ramp would put two identically-coloured lines on one strip.
     const hold = maxHoldColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n);
+    // **LSR-6 (T-1047): fold in the ring-covered max-hold.** T-1042 tells the tile lane to stand
+    // aside over the ring's own extent (`report.ringCover`), so the pyramid has nothing requested
+    // there at all — the ring is the only source that can answer for it. Folding is a plain max,
+    // never a replacement: a max-hold is idempotent and associative, so taking the greater of the two
+    // sources over the same cell is still a max-hold over their union, and the pyramid still answers
+    // for the rest of the window exactly as before.
+    if (report.ringFrame && report.ringCover) {
+      const ringHold = ringMaxHoldColumns(report.ringFrame, report.ringCover, n);
+      for (let c = 0; c < n; c++) {
+        const v = ringHold[c];
+        if (Number.isFinite(v) && !(hold[c] >= v)) hold[c] = v;
+      }
+    }
     out.push(...tracePaths(hold, pane.box, strip, s.lo, s.hi, "trace-hold", pane.id,
       { ink: [HOLD_INK[0], HOLD_INK[1], HOLD_INK[2]], alpha: HOLD_INK[3], widthPx: HOLD_PX }));
 
-    // The slice, at this viewport's own time position. The live row is preferred only where it is
-    // genuinely finer — inside the cell the slice is asking about — and the pyramid answers
+    // The slice, at this viewport's own time position. The live RING is preferred first — a row that
+    // CONTAINS this instant is a strictly finer answer than any pyramid cell that merely spans it
+    // (T-1047 / LSR-6) — then the single held live row for a band with no ring, then the pyramid
     // everywhere else, which is what makes a scrubbed pane show the spectrum of *then*.
     const tAtNs = pane.box.t1Ns;
     const win = sliceWindow(lat, report.levelT, tAtNs);
+    const ringAt = report.ringFrame ? ringRowAt(report.ringFrame, tAtNs) : null;
     const fr = liveRow.get();
-    const live = liveFrameFits(fr, win);
-    const slice = live && fr
-      ? sampleFrame(fr, pane.box, n)
-      : sliceColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+    const live = !ringAt && liveFrameFits(fr, win);
+    let slice: Float32Array;
+    let sliceSrc: string;
+    let sliceAtNs: number;
+    if (ringAt && report.ringFrame) {
+      slice = sampleRingRow(report.ringFrame, ringAt.slot, pane.box, n);
+      sliceSrc = "live ring row";
+      sliceAtNs = ringAt.tNs;
+    } else if (live && fr) {
+      slice = sampleFrame(fr, pane.box, n);
+      sliceSrc = "live frame";
+      sliceAtNs = fr.tNs;
+    } else {
+      slice = sliceColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+      sliceSrc = `${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} cell`;
+      sliceAtNs = tAtNs;
+    }
 
     // **The afterglow** (T-475): the rows just before THIS pane's time position, oldest first so the
     // newest shadow sits on top of the older ones and the current slice on top of all of them. They
@@ -1002,7 +1031,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const slicePk = peakOf(slice, pane.box);
       const holdPk = peakOf(hold, pane.box);
       const spanS = (pane.box.t1Ns - pane.box.t0Ns) / S_TO_NS;
-      const src = live ? "live frame" : `${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} cell`;
+      const src = sliceSrc;
       // **A gap is not evidence of quiet, and "not loaded" is not "never observed."** The trace draws
       // nothing in either case, which is the safe direction — absence claims nothing. But the
       // sentence beside it must not turn a memory-and-latency fact into a statement about the radio,
@@ -1013,7 +1042,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         : "nothing observed across this span";
       setText(traceEl, [
         slicePk
-          ? `slice ${at(live && fr ? fr.tNs : tAtNs)} (${src}) · peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}`
+          ? `slice ${at(sliceAtNs)} (${src}) · peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}`
           : `slice ${at(tAtNs)} (${src}) — ${empty}`,
         ...(phosphor ? ["phosphor style: trace in one green ink, not on the ramp"] : []),
         holdPk
