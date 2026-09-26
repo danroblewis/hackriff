@@ -29591,7 +29591,7 @@ tasks:
   - id: T-1005
     milestone: MMAP
     title: "Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close"
-    status: in-progress
+    status: done
     priority: medium
     deps:
     - T-1000
@@ -29615,6 +29615,7 @@ tasks:
       Observed, not chased: Main 6f029754: app-surface.e2e.mjs T-807 expects the layers-menu rows with a key to be [coverage, detections, tune], but T-1006 added a 'frontend' key, so the spec fails with actual [coverage, detections, tune, frontend]. Main's app-surface also still expected 5 viewport-menu items although T-1006 added a 'per-device' button, which made 6 on main; this branch updates that count to 8. | precheck: only `cargo fmt --all --check` was run (exit 0). The diff has no Rust, and `just precheck` with no crates would run clippy over the whole workspace.
       Resources: 873 CPU-s, peak 4.6 GB
     branch: task-t1005
+    commit: a14050d4
   - id: T-1006
     milestone: MMAP
     title: "Pane device selector in the UI: a device pill in each pane's status, a picker in the pane menu, 'one pane per device' when two SDRs are attached; Go-to/retune command that pane's device"
