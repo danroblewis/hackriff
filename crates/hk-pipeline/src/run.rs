@@ -56,7 +56,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::chains::spec::ChainSpec;
-use crate::class::{class_name, source_class, window_class};
+use crate::class::{SubBandClass, class_name, source_class, window_class, window_class_map};
 use crate::config::{DisplayPatch, DisplaySettings, PipelineConfig, detection_resolution};
 use crate::control::{SchedState, SwitchableControl};
 use crate::events::{Candidate, ControlEvent};
@@ -813,8 +813,13 @@ pub struct RetuneOutcome {
 pub struct ControlStatus {
     /// Device settings can be changed (a live, window-classed source).
     pub live: bool,
-    /// Content class of the running segment.
+    /// Content class of the running segment: the summary of [`Self::content_classes`] for what
+    /// covers the whole window (its IQ, spectrum stream, recordings).
     pub content_class: ContentClass,
+    /// The window's content classes per sub-band, at the resolution of its allocations (T-991,
+    /// [`crate::class::window_class_map`]); a single entry for a source whose class is not the
+    /// window's derived one (a recording's own `hackriff:content_class`).
+    pub content_classes: Vec<SubBandClass>,
     /// Requested centre, Hz.
     pub center_hz: f64,
     /// Requested sample rate, Hz.
@@ -836,6 +841,21 @@ pub struct ControlStatus {
     pub recording: RecordingStatus,
     /// Control counters.
     pub stats: Value,
+}
+
+/// The per-sub-band class map `/api/status` reports (T-991): the window's derived map when the
+/// run's class is the one derived from its window, else the run's own class over the whole
+/// window (a recording tagged with `hackriff:content_class` is not re-derived per sub-band).
+fn status_class_map(class: ContentClass, center_hz: f64, rate_hz: f64) -> Vec<SubBandClass> {
+    if window_class(center_hz, rate_hz) == class {
+        return window_class_map(center_hz, rate_hz);
+    }
+    vec![SubBandClass {
+        lo_hz: center_hz - rate_hz / 2.0,
+        hi_hz: center_hz + rate_hz / 2.0,
+        content_class: class,
+        source: "source class".to_owned(),
+    }]
 }
 
 /// Whether a run's front end is delivering samples (T-508).
@@ -2625,6 +2645,7 @@ impl PipelineController {
         ControlStatus {
             live: st.live,
             content_class: st.class,
+            content_classes: status_class_map(st.class, st.window.0, st.window.1),
             center_hz: st.window.0,
             sample_rate_hz: st.window.1,
             segment: st.segment,

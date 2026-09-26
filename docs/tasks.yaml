@@ -29156,7 +29156,6 @@ tasks:
     milestone: M2-hardening
     title: Content class computed for the whole window from one sub-band (152-162 MHz reads restricted-paging)
     status: in-progress
-    branch: task-t991
     priority: P2
     deps: []
     parallel_group: CONTENT-CLASS
@@ -29167,7 +29166,18 @@ tasks:
       FOUND by explorer window 2/3: the gating content class for a 152-162 MHz window reads 'restricted-paging' although it spans marine VHF, AIS and NOAA WX (the paging allocation is 929-932 MHz; 152-158 has some Part 22 paging, but the window's class is taken from one sub-band). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md, window 3 (06:25-07:04; live HackRF in SF, indoor stock antenna) (Marine VHF entry). Note: content-class boundaries also trigger T-941's freeze, so a wrong class widens that defect.
       DELIVER: a window's content class is computed per sub-band (the class map at the resolution of its allocations), the most-restrictive class applied only to the sub-band it covers (metadata-only there), never to the whole window; /api/status reports the per-sub-band classes. Test: a 152-162 window -> marine/AIS/NOAA sub-bands unrestricted, only the paging sub-bands restricted; red on current code.
       core_interface (content gating). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      Review attempt 2 returned REVIEW_FAIL 'no verdict line' because the reviewer session itself failed (review.json: api_error_status 429, monthly spend limit) - no finding was produced. Merged main cleanly (d7f23cb7); targeted tests green, precheck clean; no code change. Needs a real review.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 18:29).
+      A 152-162 MHz window read restricted-paging because four 20 kHz Part 22 paging channels (152.24/152.84/158.10/158.70 MHz) lie inside it and band_class let any overlap label the whole window. hk-pipeline::class now builds a per-sub-band class map at the resolution of the allocations (class_map / window_class_map, SubBandClass): restricted classes cover only the sub-band they overlap, band priors are unrestricted (new priors: maritime VHF 156.0-157.4375 and 160.6125-162.0375 MHz incl. AIS, NOAA WX 162.3875-162.5625 MHz; edges from 47 CFR 80.371/80.373, not re-checked against eCFR), anything else fails closed. The whole-window class (band_class/window_class, which gates IQ/spectrum/recordings) summarises the map: restricted only when wholly restricted, unrestricted only when wholly unrestricted, otherwise metadata-only - so content gating for whole-window artefacts is unchanged (metadata-only also refuses content) but the label no longer comes from one sliver. classify_emitter classes an unvouched emitter wholly inside an unrestricted prior as unrestricted under a non-restricted window (AIS in the 152-162 window), paging emitters still restricted. /api/status serves control.content_classes and /api/control/state run.content_classes ([{lo_hz,hi_hz,content_class,content_permitted,source}]); docs/api.md updated. Windows wholly in paging (930.5 MHz @2.4 Msps) or cellular stay restricted. Merge fix 1: merged main 954e342f; the one conflict was the docs/api.md /api/control/state `run` line, resolved by taking main's line and re-inserting content_classes (field list + T-991 paragraph); code auto-merged. Fix 2: the REVIEW_FAIL ('no verdict line') was the reviewer hitting HTTP 429 (spend limit; review.json is_error, api_error_status 429) - no finding to fix. Merged main cleanly; no code change; needs a real review.
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(content_class_per_subband)' (old any-paging-labels-window rule re-injected) -> exit 100 (2 of 4 failed: 152-162 window summary and per-sub-band emitter class); cargo nextest run -p hk-pipeline -E 'binary(content_class_per_subband) | binary(spectrum_header_follows_tune)' (after main merge 2) -> exit 0 (5 passed); cargo nextest run -p hk-api -E 'binary(control_api)' (after main merge 2) -> exit 0 (21 passed); cargo nextest run -p hk-cli -E 'binary(control_http)' (after main merge 2) -> exit 0 (2 passed)
+      precheck exit 0
+      Commits: 21282bc9, 0d86ee43, d7f23cb7, 401da62e
+      Observed, not chased: Recordings with no sample rate (fs=inf) now summarise to metadata-only rather than restricted-paging (both refuse content); no test asserted the old label. | Part 90 land-mobile 157.45-160.6 MHz stays fail-closed metadata-only; no prior was added for it.
+      Resources: 222 CPU-s, peak 3.3 GB
+    branch: task-t991
   - id: T-992
     milestone: MAUTO
     title: "T-926 live-air verification: unprompted FM/RDS ratio >= 90 % over 88-108 MHz after the fix (needs ~15 min of radio in a scheduled window)"

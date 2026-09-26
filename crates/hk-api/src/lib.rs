@@ -89,7 +89,7 @@ pub use analyze::{
 pub use auth::{Token, default_token_path};
 pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
 pub use control::{
-    AuditLog, CaptureStatus, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
+    AuditLog, CaptureStatus, ClassBand, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
     RunControl, RunState,
 };
 pub use datasets::{DatasetControl, DatasetFailure};
