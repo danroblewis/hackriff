@@ -492,6 +492,54 @@ export const __selftestMark = __selftestPredicate(1);
         ' <!-- injected by ui/e2e/selftest.mjs — a retired slot left behind -->\n');
     },
   },
+  {
+    // T-958. The flake this entry was written beside was a TEST fault, not a product one: the spec
+    // pressed the close (×) at a rect read while the sheet was still travelling, so the press
+    // missed and the sheet never collapsed. The fix — waiting on the page's own report that the
+    // sheet has ARRIVED (`app-chrome.mjs`'s `arrived`) — is only worth having if the guard still
+    // goes red when the close genuinely stops working, rather than having been turned into a wait
+    // that passes whatever the sheet does. This is that check, and it is the defect in its real
+    // shape: the dismiss is still there, still visible, still pressable, and does nothing.
+    name: "t958-sheet-close-never-collapses",
+    // Named singly, not as an array: app-detail and app-dismiss press the same close and are
+    // expected to redden too, but the guard this entry is FOR is app-phone's, and "any of three"
+    // would let it pass while the one that flaked stayed blind.
+    expect: "app-phone.e2e.mjs",
+    what: "T-958: the sheet's close (x) stops collapsing it — the button swallows its click and " +
+      "leaves the snap state alone, so an overlay that has a visible dismiss cannot be dismissed " +
+      "(docs/23 section 10.6 P1).",
+    file: "app/chrome/sheet.ts",
+    patch: (src) => {
+      const from = `  close.addEventListener("click", (ev) => {
+    // Not the head's click below, which would re-open a collapsed sheet.
+    ev.stopPropagation();
+    ctl.set("peek");
+  });`;
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in sheet.ts: the close handler");
+      return src.replace(from, `  close.addEventListener("click", (ev) => {
+    ev.stopPropagation(); // injected by ui/e2e/selftest.mjs — the close no longer collapses the sheet
+  });`);
+    },
+  },
+  {
+    // T-1049: the browser tier's only reach for the touch long-press. `app-outputs-map` step 6 is
+    // the one place a HELD finger has to open the box menu, and until T-1049 its press point was
+    // pinned to the box's top — under the 400 px mode strip — so the step timed out before it ever
+    // pressed anything. With the press point now chosen where the canvas actually receives it, this
+    // fault checks the step can still go red for the REASON it exists: a long-press treated as a tap.
+    name: "t1049-long-press-is-a-tap",
+    expect: "app-outputs-map.e2e.mjs",
+    what: "T-824/T-994: a held finger stops being a long-press — the stroke decides 'tap' at " +
+      "release whatever it was held for, so no context menu opens on touch and the box menu is " +
+      "unreachable on a phone (docs/23 section 10.5).",
+    file: "surface/input.ts",
+    patch: (src) => {
+      const from = `      if (touchIntent(e.timeStamp - d.t0) === "region") { if (!d.map) opts.onContext?.(d.press, e); }`;
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in input.ts: the touch long-press branch");
+      // injected by ui/e2e/selftest.mjs — every held finger falls through to the tap below
+      return src.replace(from, `      if (false) { if (!d.map) opts.onContext?.(d.press, e); }`);
+    },
+  },
 ];
 
 function build(fault) {

@@ -24,7 +24,9 @@
 //!    **Narrow floor features** (T-316) are the sub-block case: a span of raised noise wider than
 //!    the OS guard band and narrower than its reference span is estimated by neither the block
 //!    floor nor the OS reference cells, so a floor-like one takes its own per-bin running mean as
-//!    the floor and runs the floor branch alone there.
+//!    the floor and runs the floor branch alone there — unless its median level stands
+//!    `narrow_feature_max_db` (10 dB) or more above the reference, which is an emission, not
+//!    raised noise (T-937: at the fine sweep's 512 bins that width band holds a whole FM station).
 //! 3. **Components** ([`components`]): 4-connected time–frequency components of the raw region
 //!    that contain a seed and span ≥ 3 frames are kept; kept components then merge across ≤ 2-frame
 //!    gaps. No frequency merge. Streamed, so a box is emitted `gap + 1` frames after it ends.
@@ -76,7 +78,9 @@ pub mod components;
 pub mod config;
 pub mod detector;
 pub mod dmr_tier2;
+pub mod frontend;
 pub mod integrated;
+pub mod overlap;
 pub mod record;
 pub mod rules;
 pub mod step;
@@ -89,16 +93,19 @@ pub use burst::{BURST_DETECTOR, BurstConfig, BurstDetector, BurstStats};
 pub use cfar::{
     BranchMasks, CELL_NONE, CELL_REGION, CELL_SEED, CfarEngine, ClassifyStats, Thresholds,
 };
-pub use clip::{ClipCount, count_clipped_ci8};
+pub use clip::{ClipCount, ClipLedger, SpanClip, count_clipped_ci8};
 pub use comb::{Comb, CombFinder};
 pub use components::FrameOutcome;
 pub use config::{
     BandProfile, Branches, CfarWindow, ClockHarmonicRule, CombRule, ConfigError, ConfirmConfig,
     DETECT_RESET_ON, DcRule, DetectionProfile, DetectorConfig, EdgeRule, FloorReference,
-    Hysteresis, ImageRule, IntegrationConfig, RefHarmonicRule, Rules, RunContext,
+    Hysteresis, ImageRule, IntegrationConfig, NOISE_BAND_MAX_CANDIDATES_PER_MIN, RefHarmonicRule,
+    Rules, RunContext,
 };
 pub use detector::{Detector, DetectorStats, SegmentInfo};
+pub use frontend::{FrameVerdict, FrontEndConfig, FrontEndMonitor};
 pub use integrated::{IntegratedEmitter, IntegratedEvaluation, IntegratedSnapshot, SpanMeasure};
+pub use overlap::{OverlapConfig, measure_region};
 pub use record::{
     Candidate, CloseReason, ConfirmReason, Confirmation, DetectionRecord, DetectorEvent,
     ImageEvidence,

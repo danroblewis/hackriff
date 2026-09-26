@@ -45,6 +45,12 @@ pub struct RadioControl {
     /// T-525: reads that do not look at the control mailbox (see
     /// [`RadioControl::hold_changes`]).
     hold_changes: AtomicU64,
+    /// T-939: blocks between dropped spans (see [`RadioControl::drop_every`]).
+    drop_every: AtomicU64,
+    /// T-939: samples dropped each time.
+    drop_samples: AtomicU64,
+    /// Blocks delivered (the drop cadence counts these, not samples).
+    delivered: AtomicU64,
     /// `(stream index of the first block, centre, rate)` for every applied window change.
     pub windows: Mutex<Vec<(u64, f64, f64)>>,
     /// Receive-side control calls, in order.
@@ -60,6 +66,17 @@ impl RadioControl {
     /// Streams without holding.
     pub fn run_free(&self) {
         self.hold_at.store(u64::MAX, Ordering::SeqCst);
+    }
+
+    /// **Drops `samples` samples before every `blocks`-th block** (T-939), the way a USB front end
+    /// that the host did not drain in time does: the stream index jumps over them and the block
+    /// carrying the jump reports them in `dropped_before`.
+    ///
+    /// Deterministic in stream terms — the drops fall on block counts, not on the wall clock — so
+    /// a gate test can state exactly how often the stream breaks. `blocks = 0` turns it off.
+    pub fn drop_every(&self, blocks: u64, samples: u64) {
+        self.drop_every.store(blocks, Ordering::SeqCst);
+        self.drop_samples.store(samples, Ordering::SeqCst);
     }
 
     /// Ends the stream (the next read returns `Ok(None)`).
@@ -299,6 +316,9 @@ impl Radio {
             fail_reads: AtomicBool::new(false),
             fail_reads_for: AtomicU64::new(0),
             refuse_rate: AtomicU64::new(0),
+            drop_every: AtomicU64::new(0),
+            drop_samples: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
             garbage: AtomicU64::new(0),
             hold_changes: AtomicU64::new(0),
             windows: Mutex::new(vec![(0, center_hz, rate_hz)]),
@@ -341,6 +361,14 @@ impl Radio {
             },
             control,
         )
+    }
+
+    /// T-942: the same radio, its first sample stamped `t_ns` — a **restart** resumes later in
+    /// capture time than the run before it, which is the whole shape of the defect.
+    #[must_use]
+    pub fn starting_at(mut self, t_ns: i64) -> Self {
+        self.t_ns = t_ns;
+        self
     }
 }
 
@@ -423,6 +451,21 @@ impl Source for Radio {
                     Discontinuity::from_bits_truncate(self.pending.bits() | flags.bits());
             }
         }
+        // T-939: a front end that drops. The stream index jumps over the dropped span and the
+        // clock with it; everything after is generated at the new index, so the samples stay
+        // continuous in content and only the stream is broken.
+        let every = c.drop_every.load(Ordering::SeqCst);
+        let dropped =
+            if every > 0 && c.delivered.fetch_add(1, Ordering::SeqCst) % every == every - 1 {
+                c.drop_samples.load(Ordering::SeqCst)
+            } else {
+                0
+            };
+        let index = index + dropped;
+        if dropped > 0 {
+            self.t_ns +=
+                (dropped as f64 * 1e9 / self.provenance.tune.sample_rate_hz).round() as i64;
+        }
         let header = |d: Discontinuity, t_ns: i64, prov: &ProvenanceHandle| BlockHeader {
             time: SampleTime {
                 sample_index: index,
@@ -441,7 +484,7 @@ impl Source for Radio {
                 &self.provenance,
             )));
         }
-        let n = (self.block as u64).min(hold - index) as usize;
+        let n = (self.block as u64).min(hold.saturating_sub(index)) as usize;
         let (center, rate) = (
             self.provenance.tune.center_hz,
             self.provenance.tune.sample_rate_hz,
@@ -455,6 +498,7 @@ impl Source for Radio {
             );
         }
         let mut h = header(flags, self.t_ns, &self.provenance);
+        h.dropped_before = dropped;
         // T-541: a block whose provenance cannot be true. The samples are real (the generator
         // ran); it is the *description* of them that is corrupt, which is the interesting half —
         // an impossible rate or centre reaches the axis arithmetic, the coverage map and the
