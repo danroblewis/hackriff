@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createStore } from "../src/app/store";
-import { initialState, type AppState, type OutputEntry } from "../src/app/state";
+import { dismissOutputsStrip, initialState, outputsStripShown, upsertOutput, type AppState, type OutputEntry } from "../src/app/state";
 import { startRecordsOutput, startListen, stopOutput, type ListenTarget } from "../src/app/dock/api";
 import {
   audioSubText, copyAddressText, levelPct, listenQuery, listenTcpTarget, nextId, outputsCountText, recordsTcpTarget, refusalText,
@@ -40,7 +40,7 @@ test("recordsTcpTarget and copyAddressText never include the token", () => {
 });
 
 test("outputsCountText matches the mockup's wording", () => {
-  const audio: OutputEntry = { id: "a", kind: "audio", label: "", sub: "", state: "live", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: null, pipelineId: null, message: null };
+  const audio: OutputEntry = { id: "a", kind: "audio", label: "", sub: "", state: "live", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: null, pipelineId: null, outputId: null, message: null };
   const rec: OutputEntry = { ...audio, id: "b", kind: "records" };
   assert.equal(outputsCountText([]), "0 live · 0 pipelines");
   assert.equal(outputsCountText([audio]), "1 live · 0 pipelines");
@@ -86,7 +86,7 @@ test("startListen: the same emitter twice returns the existing entry without add
   const existing: OutputEntry = {
     id: "listen1", kind: "audio", label: "101.3 MHz", sub: "estimating…", state: "opening",
     tcpTarget: listenTcpTarget(target), muted: false, levelDbfs: null, recordsPerS: null,
-    emitterId: "e1", pipelineId: null, message: null,
+    emitterId: "e1", pipelineId: null, outputId: null, message: null,
   };
   ctx.store.set((s: AppState) => ({ outputs: [existing] }));
   const id = startListen(ctx, target);
@@ -94,11 +94,41 @@ test("startListen: the same emitter twice returns the existing entry without add
   assert.equal(ctx.store.get().outputs.length, 1, "no duplicate audio entry for the same emitter");
 });
 
-// ---- layout: the strip scrolls sideways rather than clipping entries at narrow widths ----
+// ---- layout (T-994): the dock BAR is retired; the Active-outputs strip reserves nothing ----
 
-test("dock.css: the outputs strip is its own horizontal scroller, wraps at 900px, with no wide min-width", () => {
+test("T-994: no fixed-height Outputs bar — the shell reserves no bottom row, the page carries no dock", () => {
+  const html = readFileSync("src/app/index.html", "utf8");
+  assert.doesNotMatch(html, /class="dock"/, "the dock element is gone from the page");
+  assert.match(html, /<div class="out-strip" data-slot="outputs"[^>]*\bhidden\b/, "the strip that replaced it starts hidden");
+  const base = readFileSync("src/app/base.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(base, /\.app \{[^}]*grid-template-rows: 48px minmax\(0,1fr\); \}/, "no 62 px dock row under the views");
+  assert.doesNotMatch(base, /\.dock\b/);
+  for (const f of ["src/app/chrome/map-layout.css", "src/app/chrome/phone.css"]) {
+    assert.doesNotMatch(readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, ""), /> \.dock\b/, `${f} still lays out a dock`);
+  }
+});
+
+test("T-994: the Active-outputs strip floats, hides when empty, scrolls its own row and has no wide min-width", () => {
   const css = readFileSync("src/app/dock/dock.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  assert.match(css, /\.dock \.outs\s*\{[^}]*overflow-x:\s*auto/);
+  assert.match(css, /\.out-strip \{ position: fixed;/, "floating chrome, never a grid row");
+  assert.match(css, /\.out-strip\[hidden\] \{ display: none; \}/, "hidden takes no pixels");
+  assert.match(css, /\.out-strip \.outs \{[^}]*overflow-x:\s*auto/);
+  const strip = /\.out-strip \{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.doesNotMatch(strip, /(^|[^-])height:/, "the strip is as tall as its chips — no fixed bar height");
   for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
-  assert.match(readFileSync("src/app/base.css", "utf8"), /@media \(max-width:\s*900px\)\s*\{[\s\S]*\.dock\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(css, /@media \(max-width:\s*900px\)\s*\{[\s\S]*\.out-strip \{[^}]*bottom: calc\(var\(--sheet-bottom, 8px\) \+ 56px/, "above the sheet's peek on a narrow screen");
+});
+
+test("T-994: the strip shows only while something is open, and Close holds until the set of outputs changes", () => {
+  const ctx = fakeCtx();
+  const a: OutputEntry = { id: "a", kind: "audio", label: "", sub: "", state: "live", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: "e1", pipelineId: null, message: null };
+  assert.equal(outputsStripShown(ctx.store.get()), false, "nothing open: no strip");
+  ctx.store.set(upsertOutput(a));
+  assert.equal(outputsStripShown(ctx.store.get()), true);
+  ctx.store.set(dismissOutputsStrip);
+  assert.equal(outputsStripShown(ctx.store.get()), false, "closed");
+  ctx.store.set(upsertOutput({ ...a, levelDbfs: -20 }));
+  assert.equal(outputsStripShown(ctx.store.get()), false, "a status update on the same output keeps it closed");
+  ctx.store.set(upsertOutput({ ...a, id: "b" }));
+  assert.equal(outputsStripShown(ctx.store.get()), true, "a NEW output reopens it");
 });

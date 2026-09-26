@@ -46,10 +46,15 @@
 //! the stream has retuned (or changed rate), a reset emits the averaging in progress as a row when
 //! it holds at least `K / 10` segments ([`hk_dsp::PartialFrames`]): its resolution's `n_avg` and
 //! `sample_count` are what was actually averaged, so the pyramid's per-cell noise shape and
-//! observed duration stay honest. A stream that never retunes (fixed tuning; gaps and gain steps
-//! only) folds exactly the frames it did before, and a full row disarms partial rows until the
-//! next retune, so a tune held after the scheduler left it discards at overrun gaps as before. Rows are one per step at most beyond the full
-//! rows, so the reader's per-block cost is unchanged.
+//! observed duration stay honest. A stream that never retunes and never loses a sample (fixed
+//! tuning, gain steps only) folds exactly the frames it did before, and a full row disarms partial
+//! rows until the next such input. Rows are one per step at most beyond the full rows, so the
+//! reader's per-block cost is unchanged.
+//!
+//! **T-939 arms them on a `GAP` too, and that is what keeps the waterfall from going empty.** A
+//! stream whose source drops transfers more often than one row period used to fold **no row at
+//! all** — the reset arrived before `K` segments ever completed — while this reader lost not one
+//! ring sample of its own. See [`history_stft_config`] for the measurement and the argument.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -81,7 +86,7 @@ pub(crate) const PARTIAL_MIN_DIVISOR: usize = 10;
 
 /// T-139's minimum for a partial row of a `k`-segment STFT; also the minimum a stream's last
 /// averaging needs to be emitted at the stream's end ([`hk_dsp::StftProcessor::finish`], T-915).
-pub(crate) fn partial_min_segments(k: usize) -> usize {
+pub fn partial_min_segments(k: usize) -> usize {
     k.div_ceil(PARTIAL_MIN_DIVISOR)
 }
 
@@ -928,7 +933,7 @@ pub(crate) fn frame_site(attention: Option<&AttentionService>, t: Timestamp) -> 
 
 /// Reader 2's STFT: the history bin width, `K` for ~`rows_per_s` frames/s, T-139 partial rows
 /// and the T-524 DC notch-and-interpolate.
-pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> StftConfig {
+pub fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> StftConfig {
     let welch = history_welch(fft_len);
     let rows = rows_per_s.max(0.01);
     let k = ((fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
@@ -938,9 +943,21 @@ pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> S
     // hop's centre. Detection runs its own STFT without this and keeps its DC rule.
     stft_cfg.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
     // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
+    //
+    // **T-939 adds `GAP`, and it is what keeps the waterfall from going empty.** A row needs `K`
+    // segments of unbroken samples — 0.1 s at 10 rows/s — and every gap resets the averaging. At
+    // 20 Msps a loaded box drops USB transfers more often than that (measured: 54 M samples in
+    // 4 minutes, in bursts), so the reset arrived before any row completed and this reader folded
+    // **nothing at all** while losing not one ring sample of its own: `frames` flat, the pyramid
+    // empty, the live surface grey over spectrum the radio really did sample. The averaging
+    // interrupted by a gap is honest data with its own `n_avg` and `sample_count` — the argument
+    // T-915 already makes for the stream's last segments — so it is emitted rather than discarded,
+    // and "show all the data that exists" holds through a lossy stream instead of only a clean
+    // one. A full row still disarms until the next gap, so a stream that neither retunes nor drops
+    // folds exactly the frames it did before.
     stft_cfg.partial = Some(PartialFrames {
         min_segments: partial_min_segments(k),
-        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE | Discontinuity::GAP,
     });
     stft_cfg
 }

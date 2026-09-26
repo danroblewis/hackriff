@@ -11,11 +11,16 @@ export async function paneAct(page, act) {
   await page.click(`document.querySelector('#map-pane-menu [data-pane-act="${act}"]')`);
 }
 
-/** The retired `.sf-live` button's state, read off the FAB that replaced it: true when following. */
-export const FOLLOWING = "document.querySelector('.map-fab').classList.contains('following')";
+/** T-1001: the follow-live FAB retired — Live/Freeze is a button INSIDE each pane's rectangle, one
+ * per pane. This is the first pane's; `liveBtn(n)` names any pane's by its position. */
+export const LIVE_BTN = ".sf-pane-live-btn";
+export const liveBtn = (n = 1) => `document.querySelectorAll('${LIVE_BTN}')[${n - 1}]`;
+/** Whether the first pane is following the live edge, read off its own Live button. */
+export const FOLLOWING = `${liveBtn(1)}.classList.contains('following')`;
 
-/** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state. */
-export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out, .map-fab";
+/** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state.
+ * (T-1001: the FAB left this list with the FAB; each pane's Live button is on the canvas.) */
+export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out";
 /** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ. */
 export const PANE_ITEMS = "#map-pane-menu button";
 /** Inside the layers menu: Signals (the detections overlay), Trace (view-wide) and the colour scale. */

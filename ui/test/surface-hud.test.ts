@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import {
   HUD_TICK, HudAxes, fmtRulerAge, fmtRulerHz, hudLabels, hudTickQuads, paneRuler, timeLabelReserved,
+  fmtRulerLocal, compactRulerAge, setTimeLabelMode, getTimeLabelMode,
 } from "../src/surface/hud";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { toClip, type PaneRect } from "../src/surface/surface";
@@ -122,9 +123,37 @@ test("labels land on their ticks in CSS px (GL rect → DOM, device px → CSS) 
     const tick = r.freq.find((x) => x.value === l.value)!;
     near(l.x, tick.pos / 2);
     near(l.y, (1200 - 1200) / 2 + 500, 1e-9); // the pane's bottom edge, in CSS px from the canvas top
-    assert.ok(l.x >= 64, "no frequency label under the time ruler's corner");
+    assert.ok(l.x >= 40, "no frequency label under the time ruler's corner");
   }
   for (const l of t) near(l.y, r.time.find((x) => x.value === l.value)!.pos / 2);
+});
+
+test("T-998: time labels are relative or local clock, both from the tick's capture time", () => {
+  const r = paneRuler("p", BOX, RECT, 1e3, 0.01, T0);
+  const rel = hudLabels(r, RECT.h, 1, null, "relative").filter((l) => l.axis === "time");
+  const abs = hudLabels(r, RECT.h, 1, null, "absolute").filter((l) => l.axis === "time");
+  assert.ok(rel.length > 0 && rel.length === abs.length);
+  for (const l of rel) { assert.equal(l.sub, null); assert.match(l.text, /^(−|\+|now)/); assert.ok(!l.text.includes(" ")); }
+  for (const l of abs) {
+    assert.equal(l.sub, null);
+    assert.equal(l.text, fmtRulerLocal(l.value, r.timeStepNs));
+    assert.match(l.text, /^(\d\d:)?\d\d[:.]\d\d(\.\d+)?$/);
+  }
+  const d = new Date(1_700_000_000_000);
+  assert.equal(fmtRulerLocal(1_700_000_000_000 * 1e6),
+    [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":"));
+  // Distinct ticks never read the same, at any step: sub-second steps carry fractions.
+  for (const stepMs of [1000, 500, 200, 100, 50, 20, 10, 5, 2, 1]) {
+    const base = 1_700_000_000_000 * 1e6;
+    const labels = Array.from({ length: 8 }, (_, i) => fmtRulerLocal(base + i * stepMs * 1e6, stepMs * 1e6));
+    assert.equal(new Set(labels).size, labels.length, `step ${stepMs} ms repeats a label: ${labels.join(" ")}`);
+    for (const l of labels) assert.ok(l.length <= 8, `"${l}" is too wide for the narrow ruler`);
+  }
+  assert.equal(compactRulerAge("live edge"), "now");
+  assert.equal(compactRulerAge("−1 m 20 s"), "−1m20s");
+  setTimeLabelMode("absolute");
+  assert.equal(getTimeLabelMode(), "absolute");
+  setTimeLabelMode("relative");
 });
 
 // T-997: the map's floating chrome is docked down the SAME left edge the time ruler runs down

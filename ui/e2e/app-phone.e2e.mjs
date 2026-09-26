@@ -6,7 +6,7 @@
 //     top-right cluster, the nudges, the mode switch, zoom, the FAB, the sheet's handle, the lists' chip) is on screen,
 //     at least 24 px, and what a press at its centre lands on — Go-to never under the top-right cluster.
 //     The sheet's peek strip covers none of the surface's statements (coverage sentence, pane rows).
-//  2. Idle: after ~6 s untouched the floating chrome — the cluster (with the bar's former controls), the dock, the chip —
+//  2. Idle: after ~6 s untouched the floating chrome — the cluster (with the bar's former controls), the chip —
 //     fades to ~35 %, while the sheet and the honesty statements do not; a touch brings it all back.
 //  3. Sheets and menus stay reachable and closeable: the sheet's handle opens it and its close shuts
 //     it; Research opens as a full-height panel above the cluster, the sheet drops to peek, and its
@@ -27,7 +27,7 @@ const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
 const W = 400, H = 820;
 
-const GUARDED = ".map-goto input, .map-topright button:not([hidden]), .map-nudge .nudge-btn, .map-status .mode, .map-zoom-in, .map-zoom-out, .map-fab, .sheet-grab, .map-inv .map-pill";
+const GUARDED = ".map-goto input, .map-topright button:not([hidden]), .map-nudge .nudge-btn, .map-status .mode, .map-zoom-in, .map-zoom-out, .sf-pane-live-btn, .sheet-grab, .map-inv .map-pill";
 // T-528's hit test at phone width: on screen, >= 24 px, and what a press at its centre lands on.
 const unpressable = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})].map((el) => {
   const r = el.getBoundingClientRect();
@@ -59,7 +59,8 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitForSurfaceMounted({ timeoutMs: 240000 });
   await page.waitFor("the floating controls, the sheet and the inventory pills",
-    `!!document.querySelector('.map-ctl .map-fab') && document.querySelector('.sheet')?.dataset.snap === 'peek' &&
+    `!!document.querySelector('.map-ctl .map-zoom-in') && !!document.querySelector('.sf-pane-live-btn') &&
+     document.querySelector('.sheet')?.dataset.snap === 'peek' &&
      !!document.querySelector('.map-inv .map-pill') && !!document.querySelector('.sf-chrome')`, { timeoutMs: 240000 });
   await page.frames(5);
   await shot("1-open");
@@ -81,7 +82,11 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   // nothing, at phone width too.
   assert.equal(await page.eval(overlap(".map-inv", ".map-goto, .map-nudge, .map-topright, .map-status, .sheet")), 0,
     "the inventory pills collide with another piece of chrome at phone width");
-  assert.equal(await page.eval(overlap(".map-zoom", ".map-fab, .map-topright")), 0, "the zoom stack collides with the FAB or the top-right cluster");
+  // T-1001: the FAB left this list with the FAB; the pane's own Live button took its place, and it
+  // is inside the pane at the top — it must not land under the zoom stack or the top-right cluster.
+  assert.equal(await page.eval(overlap(".map-zoom", ".map-topright")), 0, "the zoom stack collides with the top-right cluster");
+  assert.equal(await page.eval(overlap(".sf-pane-live-btn", ".map-zoom, .map-topright, .map-goto")), 0,
+    "the pane's Live button collides with the floating chrome");
   assert.equal(await page.eval(overlap(".sheet", ".sf-note, .sf-chrome, .sf-ring")), 0,
     "the sheet's peek strip covers one of the surface's honesty statements");
 
@@ -89,13 +94,20 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   await page.waitFor("the chrome to go idle (~6 s)", "document.body.classList.contains('chrome-idle')", { timeoutMs: 15000 });
   await new Promise((r) => setTimeout(r, 800)); // the .5 s opacity transition
   await shot("2-idle");
+  // T-994: the Outputs dock bar is retired — there is no bottom bar left to fade, and none at all
+  // while nothing is open (the Active-outputs strip that replaced it exists only then).
+  assert.equal(await page.eval(`document.querySelector('.app > .dock')`), null, "the Outputs dock bar is retired");
+  assert.equal(await page.eval(`document.querySelector('.app > .out-strip').hidden`), true, "nothing open: no outputs strip");
   const idle = JSON.parse(await page.eval(`JSON.stringify({
-    status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, dock: ${opacity(".app > .dock")}, zoom: ${opacity(".map-zoom")},
-    fab: ${opacity(".map-fab")}, pills: ${opacity(".map-inv")}, sheet: ${opacity(".sheet")},
+    status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, zoom: ${opacity(".map-zoom")},
+    live: ${opacity(".sf-pane-live-btn")}, pills: ${opacity(".map-inv")}, sheet: ${opacity(".sheet")},
     chrome: ${opacity(".sf-chrome")}, note: ${opacity(".sf-note")} })`));
   t.diagnostic(`idle opacities: ${JSON.stringify(idle)}`);
-  for (const k of ["status", "nudge", "dock", "zoom", "fab", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
-  for (const k of ["sheet", "chrome", "note"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
+  // T-994: the dock bar is retired, so there is no bottom bar left to fade.
+  for (const k of ["status", "nudge", "zoom", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
+  // T-1001: a pane's Live button is also its statement of whether what it shows is live, and an
+  // honesty statement never fades (docs/23 §10.2) — it is on the picture, not in the cluster.
+  for (const k of ["sheet", "chrome", "note", "live"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
   // T-1025: the wake-up touch lands on the DEVICE chip, found by its own box, not on a fixed
   // (200, 110) that happened to be over the Explore button while the status pill was one wide box.
   // The chips made that point "Decode" — the touch switched view, and everything after it was

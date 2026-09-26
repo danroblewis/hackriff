@@ -1,5 +1,6 @@
 //! T-577 (MAUTO-RESEARCH): measures the two numbers ADR-0022's false-confirm derivation could
-//! not derive: the **check-width floor** (§4.3, `min_check_width = 8`, an assumption) and the
+//! not derive: the **check-width floor** (§4.3, `min_check_width = 8` as assumed, raised to 16 by
+//! what this harness measured) and the
 //! **degenerate-framing null** (below about a byte a check "can be satisfied by a framing
 //! artefact rather than by a code").
 //!
@@ -10,6 +11,11 @@
 //! short-period guard `CheckTally` applies) and `hk_estimate::assist::search_codes` (the
 //! searched-generator path). The gate is ADR-0022 §6 steps 1–3 in check-only accounting:
 //! `min(check_bits(d, tested, w), w·d) − L_check ≥ 24`, which subsumes the 16-bit hard floor.
+//!
+//! The guard and the counts here read the span a check **covers**, not the frame it was cut
+//! from: with `span.start_bit > 0` an init-cancel frame is valid over its covered span while the
+//! whole frame looks like structure (T-928; the same rule the `crc`/`checksum`/`parity` blocks
+//! now follow).
 //!
 //! Three measurements (the ticket's 1–3):
 //! 1. [`degenerate_null_rate_per_width`] — per `w ∈ {4, 8, 12, 16, 24, 32}`, the rate at which a
@@ -417,6 +423,10 @@ fn independent_frames<'a>(frames: impl IntoIterator<Item = &'a [u8]>, w: usize) 
 /// satisfied by the frame `init ‖ 0…0` — the leading `w` bits cancel the register and the rest
 /// is idle fill — and with `xorout ≠ 0` by `init ‖ 0…0 ‖ xorout`; neither frame is periodic as a
 /// whole, so the shipped guard lets a single idle frame through.
+///
+/// `bits` is the span the check **covers** (`frame[start_bit ..]` here — `valid` reads the check
+/// field at its end), never the frame it was cut from: with `start_bit > 0` the cancelling `init`
+/// starts at `start_bit`, and trimming the *frame*'s ends misses it (T-928).
 fn degenerate_frame(bits: &[u8], w: usize) -> bool {
     let n = bits.len();
     [(0, n), (w, n), (0, n - w), (w, n - w)]
@@ -758,6 +768,28 @@ fn degenerate_null_rate_per_width() {
         assert!(!is_short_periodic(&f, SHORT_PERIOD_MAX_BITS), "w={w}");
         assert!(degenerate_frame(&f, wu), "w={w}");
     }
+    // The same artefact through a check whose COVERED span starts late — a template-fixed CRC
+    // over a payload that begins after a header, `span.start_bit = 8` (T-928). The cancelling
+    // `init` sits at `start_bit`, so the guard has to read `frame[start_bit..]`: over the frame
+    // none of the four trims is short-periodic, and one such frame clears the gate at w = 32.
+    // Modelled here on the CW / voice-slicer frame `1^(8+w) ‖ 0…0`, valid at every width.
+    const START: usize = 8;
+    for w in WIDTHS {
+        let wu = usize::from(w);
+        let crc = template(w, Affine::Ones);
+        let mut f = vec![1u8; START + wu];
+        f.resize(FRAME, 0);
+        let covered = &f[START..];
+        assert!(valid(&crc, covered), "w={w}");
+        assert!(degenerate_frame(covered, wu), "covered span, w={w}");
+        assert_eq!(independent_frames([covered], wu), 0, "w={w}");
+        // The hole: the guard applied to the whole frame accepts it as an independent trial.
+        assert!(!degenerate_frame(&f, wu), "whole frame, w={w}");
+    }
+    assert!(
+        gate(1, 1, 32, 0.0),
+        "and one counted frame confirms at w = 32"
+    );
     // DEGENERATE NULL B (shift): a linear check plus a framer that yields zero-padded shifts of
     // one burst. Given the one chance event `g | P` (probability 2^−w), every shift is valid and
     // distinct, so `differences` climbs and the shipped gate passes at every width from 8. The

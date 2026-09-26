@@ -24,7 +24,10 @@
 // radio; a pan is a pan (retune is T-444).
 
 import type { ActiveWindow } from "../navigators";
-import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
+import {
+  SurfaceChrome, readoutOf,
+  type Readout, type RowActionFor, type RowDeviceFor, type StatusFor, type WidthActionsFor,
+} from "./chrome";
 import type { Box, Lattice, LatticeSet } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
@@ -68,6 +71,14 @@ export interface SurfaceViewOptions {
   /** The press, naming which preset (its opaque `key`). A discrete click; nothing here reads a
    * pointer stream. */
   onWidthAction?: ((paneId: string, key: string) => void) | null;
+  /** A viewport's status line (T-1028), re-asked every frame for the same reason `chromeAction` is:
+   * it says what is happening to the window on screen NOW, and a poll-produced sentence would be
+   * about a window the pane has left. Strings only — this file learns nothing about tuning. */
+  chromeStatus?: StatusFor | null;
+  /** The device pill on each pane's chrome row (T-1006) — whose coverage decides that pane's grey.
+   * Asked every frame like the rest of the row, so a pane whose device was just picked, or whose
+   * front end has just gone, says so in the same frame the grey changes. */
+  rowDevice?: RowDeviceFor | null;
   /** Draw the overlay pass. A user preference — **not** what keeps the data pass untinted. */
   overlays?: boolean;
   overlayStyle?: OverlayStyle;
@@ -190,6 +201,10 @@ export class SurfaceView {
   private readonly chromeAction: RowActionFor | null;
   /** Per-viewport width presets, re-asked every frame (T-496). Null when the host offers none. */
   private readonly widthActions: WidthActionsFor | null;
+  /** Per-viewport status line, re-asked every frame (T-1028). Null when the host states none. */
+  private readonly chromeStatus: StatusFor | null;
+  /** Per-viewport device pill, re-asked every frame (T-1006). Null when the host offers none. */
+  private readonly rowDevice: RowDeviceFor | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
@@ -225,11 +240,15 @@ export class SurfaceView {
       bounds: opts.bounds, lattice: opts.lattice, freq: opts.freq, spanNs: opts.spanNs, device: opts.device,
     });
     this.minimap = new Minimap({ bounds: opts.bounds, lattice: opts.lattice });
-    this.minimapPx = opts.minimapPx ?? 96;
+    // T-995: 0 by default — the minimap is retired from the app (user, 2026-09-25). The strip
+    // survives only for the `/surface.html` dev preview and the unit tests that pass a height.
+    this.minimapPx = opts.minimapPx ?? 0;
     this.overlays = opts.overlays ?? true;
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
     this.widthActions = opts.widthActions ?? null;
+    this.chromeStatus = opts.chromeStatus ?? null;
+    this.rowDevice = opts.rowDevice ?? null;
     this.chrome = opts.chrome
       ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null, opts.onWidthAction ?? null)
       : null;
@@ -330,6 +349,17 @@ export class SurfaceView {
         if (q.length) paneQuads.push({ rect: v.rect, quads: q });
       }
     }
+    // T-995: with no map strip (the app's shape since the user retired the minimap, 2026-09-25 —
+    // the whole spectrum is reached by zooming a pane out, Google-Maps style), the one thing only
+    // the map drew — a lit segment per reported active capture window, per SDR — is drawn in each
+    // pane instead, through the same function and the same pane mapping: at the live edge when the
+    // pane shows it, omitted (never clamped) where the window is off the pane. Nothing is lost.
+    if (!mapRect) {
+      for (const v of paneViews) {
+        const q = liveSegmentQuads(windows, edgeNs, v.box, v.rect, this.overlayStyle);
+        if (q.length) paneQuads.push({ rect: v.rect, quads: q });
+      }
+    }
     // 2b. the trace strips: the same overlay program, into the rectangle carved off each pane's top.
     //     Scissored to that strip, so a trace cannot reach the measurement it is a trace of, and
     //     handed the report the data pass produced so its reduction is at the level that was drawn.
@@ -373,6 +403,7 @@ export class SurfaceView {
     };
     const readout = readoutOf(
       statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor, this.widthActions,
+      this.chromeStatus, this.rowDevice,
     );
     this.chrome?.update(readout);
 
@@ -393,7 +424,7 @@ export class SurfaceView {
         if (!s) continue;
         const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
         rulers.push(r);
-        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        const q = hudTickQuads(r, { alpha, majorPx: 5 * dpr, minorPx: 3 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
         if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
         labels.push(...hudLabels(r, hPx, dpr, reserve));
       }

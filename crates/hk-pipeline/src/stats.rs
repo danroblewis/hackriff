@@ -108,9 +108,45 @@ counter_group!(
         /// Frames emitted from a reset's partial averaging (T-139; history reader only, included
         /// in `frames`).
         partial_frames,
-        /// CPU time of this reader's thread(s), ns (T-510; history reader only: the per-row cost
-        /// of the growing edge, paid on every front end's ring whether or not anyone looks).
+        /// CPU time of this reader's thread(s), ns (T-510, history reader; T-939, detection
+        /// reader): the per-row cost of the growing edge, paid on every front end's ring whether
+        /// or not anyone looks.
         cpu_ns,
+        /// **The per-stage profile (T-939; detection reader).** Wall-clock ns the reader's own
+        /// thread spent in each stage, accumulated per ring chunk — one `Instant::now()` per stage
+        /// per chunk, so ~5 clock reads per 65 536 samples (~1.5 k/s at 20 Msps) rather than
+        /// anything per sample. Divide by `samples` for ns/sample, which is the number that
+        /// decides whether a rate is reachable at all: at 20 Msps one core is 50 ns/sample.
+        ///
+        /// Waiting for the ring **and copying out of it** — the one stage that is not all work:
+        /// a reader that keeps up spends most of its time here, a reader that cannot spends none,
+        /// and the ring copy itself (a few ns per sample) is inside it either way.
+        wait_ns,
+        /// Scanning the raw ci8 chunk for clipped samples (and, for the stream's first 16 k
+        /// samples only, hashing the capture name).
+        clip_ns,
+        /// The time-domain burst detector (T-075).
+        burst_ns,
+        /// `StftProcessor::push`, **including** the per-frame callback below: subtract
+        /// `frame_ns` for the transform's own cost.
+        stft_ns,
+        /// The per-frame stage — floor, detector, tracker, batching — inside `stft_ns`. **This is
+        /// the one that dominates** (T-939 measured 77 % of the reader's cost here), so it is
+        /// split three ways, each of these inside it:
+        frame_ns,
+        /// the noise-floor tracker's update over the frame's bins,
+        floor_ns,
+        /// the detector (CFAR, run labelling, confirmation),
+        detector_ns,
+        /// and the tracker's `observe_frame` plus the batching that follows it.
+        track_ns,
+        /// **Samples skipped deliberately to hold the reader's lag budget** (T-939; detection
+        /// reader). Unlike `lost_samples` these were never queued behind: the reader chose the
+        /// live edge over a backlog it could not clear, and the interval is published as an
+        /// unanalysed one rather than passed over in silence.
+        shed_samples,
+        /// Skips forward to the live edge (T-939).
+        shed_events,
     }
 );
 
@@ -1059,6 +1095,9 @@ pub struct Counters {
     /// T-904: the detection store's size and the retention thread's last pass
     /// (`/api/status` `storage`).
     pub storage: crate::retention::StorageCounters,
+    /// T-981: the front end's clip state per spectrum row, and the front-end events
+    /// (`/api/status` `frontend`, `GET /api/frontend/events`).
+    pub frontend: crate::frontend::FrontEndReport,
 }
 
 impl Counters {
@@ -1110,6 +1149,7 @@ impl Counters {
             "compute": self.compute.to_json(),
             "observations": self.observations.to_json(),
             "storage": self.storage.to_json(),
+            "frontend": self.frontend.to_json(),
         })
     }
 

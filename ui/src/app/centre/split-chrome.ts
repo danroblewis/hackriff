@@ -87,8 +87,9 @@ const chromeBoxes = (): CssBox[] => {
   const base = opts.canvas.getBoundingClientRect();
   const out: CssBox[] = [];
   // A `map-chips` row's chips can wrap outside the row's own box (a phone width), so each chip
-  // is measured as well as the row.
-  const els = [...Array.from(stage().querySelectorAll(".map-ctl > *, .map-ctl .map-chips > *")), stage().querySelector(".sf-status")];
+  // is measured as well as the row. Each pane's own Live button (T-1001) shares the pane's
+  // top-right corner, so the × steps clear of it too (it never reads the × back: no feedback).
+  const els = [...Array.from(stage().querySelectorAll(".map-ctl > *, .map-ctl .map-chips > *, .sf-pane-live-btn")), stage().querySelector(".sf-status")];
   for (const el of els) {
     const r = el?.getBoundingClientRect();
     if (r && r.width > 0 && r.height > 0) out.push({ left: r.left - base.left, top: r.top - base.top, width: r.width, height: r.height });
