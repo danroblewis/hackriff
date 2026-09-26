@@ -31588,7 +31588,7 @@ tasks:
   - id: T-1076
     milestone: M2-hardening
     title: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
-    status: in-progress
+    status: done
     branch: task-t1076
     priority: high
     deps: []
@@ -31605,6 +31605,7 @@ tasks:
       FOUND BY T-1021 + T-1058 workers 2026-09-26: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
 
       2026-09-26 coordinator: queued UNPROVEN - the worker never saw its own target test green: every run timed out earlier at api_contract.rs:221 ('timed out waiting for the station's tile to be observed', a 60 s wait) at Mac load 60-100. The gate arbitrates; if the sealed+observed wait cannot be met on this fixture, the gate will show it - then re-open here.
+    commit: 0e63557f
   - id: T-1077
     milestone: MLIVE
     title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
