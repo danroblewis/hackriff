@@ -28563,6 +28563,8 @@ tasks:
       - Neither test shows it: the Rust test (crates/hk-blocks/tests/ais_recipe.rs, framing/tests.rs) pads with idle ones, and the Python oracle (py/fixtures/ais_ref.py) searches every flag pair.
       DELIVER: a failing-first test that feeds random (noise) bits between real AIS frames through the recipe and asserts every real frame decodes (red today); then the fix - a sync_search terminator option that also re-opens a frame on the same flag (shared-flag HDLC semantics), default unchanged for existing recipes; enable it in recipes/ais.recipe.json (and check T-952's AX.25 recipe). This changes the ADR-0011 sync_search contract: update its block row and state the default. Also the reviewer's nit: refuse bitstuff bit_order: lsb with direction: stuff (crates/hk-blocks/src/blocks/symbol/bitstuff.rs:205), since the reversal would happen after stuffing.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-blocks -E 'binary(ais_recipe)'; the framing lib tests; just precheck hk-blocks), then HAND BACK. Never `just gate`.
+
+      2026-09-25 recovery: merged gated main d8bc9fa2 (board: took main's, re-applied the fix-round note). The textual merge compiled-broke hk-blocks framing tests: T-952 (APRS, on main) and T-963 each added an identical lsb_first_bits helper in crates/hk-blocks/src/blocks/framing/tests.rs (E0428); kept one, doc comment names both uses. hk-blocks ais_recipe + aprs_recipe + framing/bitstuff lib tests 25/25, python fixture/synth tests 110 passed, precheck hk-blocks clean.
     model_reason: "sonnet/high: a well-specified recipe over existing blocks, plus a new validated oracle"
     branch: task-t963
   - id: T-964

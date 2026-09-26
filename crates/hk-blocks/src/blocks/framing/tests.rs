@@ -465,7 +465,8 @@ fn hdlc_stuff(bits: &[u8]) -> Vec<u8> {
 }
 
 /// Octets in HDLC transmission order: each one LSB first (ISO/IEC 13239 §4.3, ITU-R M.1371-5
-/// Annex 2).
+/// Annex 2) — AX.25's wire order too: every octet, including the flag (shared by the AIS and
+/// APRS tests).
 fn lsb_first_bits(bytes: &[u8]) -> Vec<u8> {
     bytes
         .iter()
@@ -691,14 +692,6 @@ fn ax25_bit_stuff(bits: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-/// AX.25's wire order: every octet, including the flag, least-significant-bit first.
-fn lsb_first_bits(bytes: &[u8]) -> Vec<u8> {
-    bytes
-        .iter()
-        .flat_map(|&b| (0..8).map(move |k| (b >> k) & 1))
-        .collect()
 }
 
 /// The bug T-952 found and fixed: `bitstuff` must destuff the *whole continuous line* before
