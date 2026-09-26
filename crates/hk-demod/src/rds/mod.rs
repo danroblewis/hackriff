@@ -3,7 +3,8 @@
 //! - [`demod`]: MPX + pilot phase → bits (57 kHz = 3 × pilot, biphase matched filter, timing
 //!   recovery, differential decoding).
 //! - [`block`]: block code, syndromes, offset words, block synchronisation.
-//! - [`group`]: groups → PI, PS frames (scrolling-aware), PTY, TP/TA, error rates.
+//! - [`group`]: groups → PI, PS frames (scrolling-aware), PTY, TP/TA, RadioText, AF, CT, error
+//!   rates (T-971: an accumulated field view, bounded for a followed station).
 //!
 //! Broadcast RDS is public station identity: decodes are [`hk_model::ContentClass::Unrestricted`].
 //! RDS on a mono station without a pilot is not handled yet (the subcarrier is recovered from the
@@ -18,7 +19,8 @@ use serde::{Deserialize, Serialize};
 pub use block::{BlockEvent, BlockSync, Offset, SyncConfig, encode_block, syndrome};
 pub use demod::{RdsBit, RdsDemod, RdsDemodConfig};
 pub use group::{
-    GroupConfig, PiAbstain, PiDecision, PsFrame, RDS_BITRATE_BD, RdsDecoder, RdsGroup, RdsReport,
+    GroupConfig, PiAbstain, PiDecision, PsFrame, RDS_BITRATE_BD, RdsClockTime, RdsDecoder,
+    RdsGroup, RdsReport, RtMessage,
 };
 
 /// RDS settings: physical layer and group decoding.

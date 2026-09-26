@@ -672,8 +672,8 @@
       "name": "fm-101p3-pi1694",
       "status": "committed",
       "path": "hackrf/explorer-2026-09-25/fm-101p3-pi1694.sigmf-meta",
-      "size_bytes": 7274,
-      "sha256": "898f915c849958af46f4b2e738abed20d9931f400e5688a8aa0b9bca46505293",
+      "size_bytes": 7491,
+      "sha256": "4df8c54434ae0762b5ceb6a666d23a3ed7a34a6a9f9d6b0fb8151d2c06fa66dd",
       "kind": "sigmf-meta",
       "use_cases": [
         "SIGNAL-062"
@@ -705,8 +705,8 @@
       "name": "fm-98p9-piA4FF",
       "status": "committed",
       "path": "hackrf/explorer-2026-09-25/fm-98p9-piA4FF.sigmf-meta",
-      "size_bytes": 9223,
-      "sha256": "0d12ad01ec21c6db5d66141ffb9e81fb5bcded0275bd8a6200bb943441f4a6a5",
+      "size_bytes": 9325,
+      "sha256": "011e7c7ff4f9962ba366e31f180570f97d5cb92d66289e3e2ebd6f327a47fc63",
       "kind": "sigmf-meta",
       "use_cases": [
         "SIGNAL-062"
@@ -738,8 +738,8 @@
       "name": "fm-88p5-pi3AAB",
       "status": "committed",
       "path": "hackrf/explorer-2026-09-25/fm-88p5-pi3AAB.sigmf-meta",
-      "size_bytes": 8903,
-      "sha256": "7f58f8de977a7b34342054b570838efbb2523b64863174eabc2760dc1f733fb9",
+      "size_bytes": 9005,
+      "sha256": "be1b69a19e38b04881e868c85e2751cdab054b840c1a7531e6d753c9745391f5",
       "kind": "sigmf-meta",
       "use_cases": [
         "SIGNAL-062"
@@ -771,8 +771,8 @@
       "name": "fm-106p1-pi1323",
       "status": "committed",
       "path": "hackrf/explorer-2026-09-25/fm-106p1-pi1323.sigmf-meta",
-      "size_bytes": 8985,
-      "sha256": "800194cbd5d24227f8c1e75ab91d829e17c3470cc99ea521b31b9e41467ab49f",
+      "size_bytes": 9087,
+      "sha256": "40a07a75e00206395b1cea67ea0b98f0908e4e9d8a7df7b4305b7db85fb5c7d4",
       "kind": "sigmf-meta",
       "use_cases": [
         "SIGNAL-062"

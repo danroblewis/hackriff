@@ -126,6 +126,11 @@ pub enum NodeSpec {
         /// The probe must find a 19 kHz pilot.
         #[serde(default)]
         require_pilot: bool,
+        /// T-971: once the window decoded RDS, keep decoding the station incrementally for up to
+        /// this long, s, accumulating its RDS fields on its row (0 = never; see
+        /// `chains::analog`'s follow).
+        #[serde(default)]
+        follow_s: f64,
     },
     /// C20 FSK bursts from the track's member boxes, then C21 framing.
     FskBursts {
@@ -305,6 +310,8 @@ pub enum ChainShape {
         accept_modes: Vec<String>,
         /// Pilot required.
         require_pilot: bool,
+        /// T-971: longest RDS follow after the window, s (0 = none).
+        follow_s: f64,
     },
     /// FSK bursts + framing.
     Fsk {
@@ -404,6 +411,7 @@ impl ChainSpec {
                     probe_s,
                     accept_modes,
                     require_pilot,
+                    follow_s,
                 },
             ] => {
                 if !self.requires_content {
@@ -412,6 +420,9 @@ impl ChainSpec {
                 if !(*window_s > 0.0 && *bandwidth_hz > 0.0 && *pre_s >= 0.0 && *probe_s >= 0.0) {
                     return Err("analog-auto needs window_s, bandwidth_hz > 0".into());
                 }
+                if !(follow_s.is_finite() && *follow_s >= 0.0) {
+                    return Err("analog-auto needs follow_s >= 0".into());
+                }
                 Ok(ChainShape::Analog {
                     pre_s: *pre_s,
                     window_s: *window_s,
@@ -419,6 +430,7 @@ impl ChainSpec {
                     probe_s: *probe_s,
                     accept_modes: accept_modes.iter().map(|m| m.to_lowercase()).collect(),
                     require_pilot: *require_pilot,
+                    follow_s: *follow_s,
                 })
             }
             [
@@ -666,7 +678,7 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "nodes": [
       { "node": "record", "pre_s": 0.25, "post_s": 0.25 },
       { "node": "analog-auto", "pre_s": 0.5, "window_s": 4.0, "bandwidth_hz": 200e3,
-        "probe_s": 0.5, "accept_modes": ["wfm"], "require_pilot": true }
+        "probe_s": 0.5, "accept_modes": ["wfm"], "require_pilot": true, "follow_s": 600.0 }
     ]
   },
   {

@@ -10,7 +10,7 @@ EN 50067 offset-word syndromes. Changes for real captures:
 - the subcarrier phase is tracked over sliding windows instead of one global estimate;
 - PI and PS are majority votes over CRC-valid groups, and decode statistics are reported.
 
-Broadcast RDS only (PI, PS, PTY, TP: public station identity). Research/tooling code, never the
+Broadcast RDS only (PI, PS, PTY, TP: public station identity; RadioText since T-971). Research/tooling code, never the
 real-time path.
 """
 
@@ -192,6 +192,7 @@ def _frames(bits: np.ndarray, fs: float, dec: int, sym_off: float, sps: float) -
         else:
             buf = []
         prev_p, prev_seg = p, seg
+    rt_messages = _radiotext(valid, syn, info)
     ps = ps_frames.most_common(1)[0][0] if ps_frames else None
     pi = pis.most_common(1)[0][0] if pis else None
     first_bit_s = None
@@ -216,7 +217,56 @@ def _frames(bits: np.ndarray, fs: float, dec: int, sym_off: float, sps: float) -
         "blocks_ok": int(blocks_ok),
         "block_error_rate": None if not blocks_total else 1.0 - blocks_ok / blocks_total,
         "first_valid_group_s": first_bit_s,
+        "rt": rt_messages[-1]["text"] if rt_messages else None,
+        "rt_messages": rt_messages,
     }
+
+
+def _radiotext(valid: list[int], syn: np.ndarray, info: np.ndarray) -> list[dict]:
+    """RadioText (groups 2A/2B, EN 50067 3.1.5.3) from the fully CRC-valid groups at ``valid``:
+    characters are kept per address under one A/B flag; a toggled flag, or a character that
+    differs from the one held at its address, starts a new message; a message is complete when
+    every address before its carriage return (0x0D), or all 64 (2A) / 32 (2B), has arrived.
+    Returns the distinct consecutive complete messages, each ``{"text", "ab"}`` (trailing spaces
+    removed). T-971."""
+    out: list[dict] = []
+    held: dict[int, int] = {}
+    key = None
+    for p in valid:
+        b2 = int(info[p + 26])
+        if b2 >> 12 != 2:
+            continue
+        version_b = bool((b2 >> 11) & 1)
+        if (syn[p + 52] == RDS_SYNDROMES["C'"]) != version_b:
+            continue
+        ab, addr = (b2 >> 4) & 1, b2 & 0xF
+        if key != (ab, version_b):
+            held, key = {}, (ab, version_b)
+        c, d = int(info[p + 52]), int(info[p + 78])
+        if version_b:
+            chars = {2 * addr: d >> 8, 2 * addr + 1: d & 0xFF}
+        else:
+            chars = {4 * addr: c >> 8, 4 * addr + 1: c & 0xFF,
+                     4 * addr + 2: d >> 8, 4 * addr + 3: d & 0xFF}
+        for pos, ch in chars.items():
+            if pos in held and held[pos] != ch:
+                held = {}
+            held[pos] = ch
+        size = 32 if version_b else 64
+        text = []
+        for pos in range(size):
+            if pos not in held:
+                text = None
+                break
+            if held[pos] == 0x0D:
+                break
+            text.append(chr(held[pos]))
+        if text is None:
+            continue
+        msg = {"text": "".join(text).rstrip(" "), "ab": bool(ab)}
+        if not out or out[-1] != msg:
+            out.append(msg)
+    return out
 
 
 def decode_ci8(path: str, fs: float, offset_hz: float, start_s: float = 0.0,

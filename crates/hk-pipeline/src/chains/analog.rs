@@ -58,15 +58,15 @@ use hk_context::signature::FeatureObservation;
 use hk_core::{Discontinuity, ProvenanceHandle, ReadChunk};
 use hk_demod::refine::{IqWindow, RefineStart, RefinementOutcome, Tuning};
 use hk_demod::{
-    AnalogMode, AnalogReceiver, AnalogSession, ReceiverConfig, RecordContext, write_declined,
-    write_session,
+    AnalogMode, AnalogReceiver, AnalogSession, FollowRecord, ReceiverConfig, RecordContext,
+    WfmFollower, write_declined, write_follow, write_session,
 };
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_model::signature::field;
 use hk_model::{
     Classification, EmitterId, EmitterLink, Fingerprint, LinkTarget, MeasurementKey, RepoError,
-    Repository, SampleTime, Sighting,
+    Repository, SampleTime, Sighting, TimeRange,
 };
 use num_complex::Complex;
 
@@ -87,6 +87,8 @@ pub(crate) struct AnalogNode {
     pub probe_s: f64,
     pub accept_modes: Vec<String>,
     pub require_pilot: bool,
+    /// T-971: longest RDS follow after the window, s (0 = none). See [`follow`].
+    pub follow_s: f64,
     /// Largest distance of the locked emission from the channel centre, Hz: half the spec's
     /// raster step (so a neighbour's chain owns a station between two raster channels), or
     /// unbounded off a raster. Half the bandwidth also applies.
@@ -400,6 +402,20 @@ fn demodulate(
     refined: Option<&Tuning>,
     rds: bool,
 ) -> Option<Result<AnalogSession, hk_demod::DemodError>> {
+    demodulate_following(w, len, cand, bandwidth_hz, refined, rds, false).map(|r| r.map(|(s, _)| s))
+}
+
+/// [`demodulate`], and with `follow` the session's WFM chain left running at the window's end
+/// (T-971, [`hk_demod::WfmFollower`]).
+fn demodulate_following(
+    w: &Window,
+    len: usize,
+    cand: &Candidate,
+    bandwidth_hz: f64,
+    refined: Option<&Tuning>,
+    rds: bool,
+    follow: bool,
+) -> Option<Result<(AnalogSession, Option<WfmFollower>), hk_demod::DemodError>> {
     let (time, prov) = w.head.as_ref()?;
     let info = InputInfo {
         time: *time,
@@ -425,7 +441,14 @@ fn demodulate(
     if !rds {
         config.wfm.rds = None;
     }
-    Some(AnalogReceiver::new(config).run(info, &w.iq[..len], &request))
+    let mut receiver = AnalogReceiver::new(config);
+    Some(if follow {
+        receiver.run_following(info, &w.iq[..len], &request)
+    } else {
+        receiver
+            .run(info, &w.iq[..len], &request)
+            .map(|s| (s, None))
+    })
 }
 
 /// T-209: whether the window's front end was in compression over its first `len` samples: its
@@ -1042,9 +1065,20 @@ fn collect_and_write(
         }
     }
     collect(&mut cr, rx, &mut w, want);
-    drop(cr);
-    // Nothing is read after this, so the chunk the last read ran past the window can go.
-    w.iq.truncate(want);
+    // T-971: a follow continues from the window's end, so the part of the last chunk that ran
+    // past the window is its first input; without a follow nothing is read after this.
+    let tail = if w.iq.len() > want {
+        w.iq.split_off(want)
+    } else {
+        Vec::new()
+    };
+    let follow_wanted = node.follow_s > 0.0 && !w.ended && w.iq.len() >= want;
+    let mut cr = if follow_wanted {
+        Some(cr)
+    } else {
+        drop(cr);
+        None
+    };
     if (w.iq.len() as f64) < 0.25 * fs {
         return;
     }
@@ -1065,13 +1099,14 @@ fn collect_and_write(
             (refined, None, false)
         }
     };
-    let session = match demodulate(
+    let (session, follower) = match demodulate_following(
         &w,
         w.iq.len(),
         cand,
         node.bandwidth_hz,
         refined.as_ref().map(|o| &o.tuning),
         true,
+        cr.is_some(),
     ) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
@@ -1112,6 +1147,7 @@ fn collect_and_write(
     let enough = w.iq.len() >= identify_samples;
     let overloaded = front_end_overloaded(&w, w.iq.len());
     let mut repo = shared.repo();
+    let mut follow_from = None;
     match write_session(&mut repo, &session, &ctx) {
         Ok(written) => {
             inc(&c.demodulations);
@@ -1157,10 +1193,317 @@ fn collect_and_write(
                 // T-321: the fourth measured field a purely analogue emitter can supply.
                 write_shape(&mut repo, c, e, &session);
             }
+            // T-971: a station whose window decoded RDS is followed; its row is the emitter's.
+            if session.rds().is_some_and(|r| r.pi.is_some())
+                && let Some(e) = emitter
+            {
+                let mut record = FollowRecord::after(&session, &written, &ctx);
+                record.emitter_id = Some(e);
+                follow_from = Some(record);
+            }
         }
         Err(e) => {
             crate::stats::storage_error(c, "analog chain write", &e);
         }
+    }
+    drop(repo);
+    if let (Some(record), Some(follower), Some(cr)) = (follow_from, follower, cr.take()) {
+        let head = w.head.as_ref().map(|(t, p)| (*t, p.clone()));
+        if let Some((t, prov)) = head {
+            let tail_at = t.sample_index + want as u64;
+            let tail_time = SampleTime {
+                sample_index: tail_at,
+                host_time: t.time_of(tail_at, fs),
+            };
+            follow(
+                shared,
+                rx,
+                cr,
+                Follow {
+                    follower,
+                    session,
+                    record,
+                    prov,
+                    tail,
+                    tail_time,
+                    budget_s: node.follow_s,
+                    track: cand.track,
+                },
+            );
+        }
+    }
+}
+
+/// T-971: most stations followed at once across the run.
+///
+/// A follow is a chain that stays alive — a thread, a ring reader, a DDC at the source rate —
+/// and it holds one of [`super::MAX_RUNTIME_CHAINS`] run-wide slots while it does. Six leaves
+/// the rest of those slots to every other decode chain, and covers the stations a live 88–108 MHz
+/// window actually gives RDS on (five of nineteen, explorer window 1, 2026-09-25). A station past
+/// the cap has its window written exactly as before, and is followed on a later attach once a
+/// follow ends (budget, silence) and its channel's cooldown passes.
+pub(crate) const MAX_RDS_FOLLOWS: u64 = 6;
+
+/// T-971: CPU all follows may take together, cores.
+///
+/// A follow's cost is dominated by its DDC's first stage, which runs at the **source** rate, so
+/// it scales with the tuned rate: measured on the explorer's 101.3 MHz capture (`t971_rds_follow`,
+/// Apple M-series, unloaded) at **~64 ns per source sample — 0.15 cores per station at 2.4 Msps,
+/// and so ~1.3 at 20 Msps**. A fixed count of six would be ~8 cores at 20 Msps. Admission instead
+/// prices the next follow with the cost the run's follows have **measured** so far
+/// (`rds_follow_ns / rds_follow_samples`, T-453: measured, never assumed) at this segment's rate,
+/// and admits it while every follow together stays within this budget. The first follow is always
+/// admitted (nothing is measured yet, and one station must be decodable on any host).
+const FOLLOW_CPU_CORES: f64 = 1.5;
+
+/// T-971: a follow ends when no CRC-valid RDS group has arrived for this long of stream time —
+/// the station's RDS (the emitter, as this chain knows it) has stopped. A real station sends
+/// 11.4 groups/s; ten seconds without one is not fading, it is gone (or never decodable here).
+const FOLLOW_SILENCE_S: f64 = 10.0;
+
+/// T-971: how often, in stream time, a follow looks at its report.
+const FOLLOW_CHECK_S: f64 = 1.0;
+
+/// T-971: a changed field view is written at most this often, s of stream time.
+const FOLLOW_MIN_WRITE_S: f64 = 5.0;
+
+/// T-971: an unchanged field view is still refreshed this often, s of stream time, so its
+/// counts, current PS, clock time and span keep up with the station.
+const FOLLOW_REFRESH_S: f64 = 30.0;
+
+/// What a follow carries over from its window.
+struct Follow {
+    follower: WfmFollower,
+    session: AnalogSession,
+    record: FollowRecord,
+    prov: ProvenanceHandle,
+    /// Samples read past the window's end, first.
+    tail: Vec<Complex<i8>>,
+    tail_time: SampleTime,
+    budget_s: f64,
+    /// The track the chain was attached for (the inventory's key for the emission).
+    track: Option<hk_model::TrackId>,
+}
+
+/// The fields whose change is worth a row (T-971): identity, PS as voted, RadioText, PTY and the
+/// AF set. The current PS and clock time change every few seconds and ride along with the next
+/// row, or the periodic refresh, instead of each costing one.
+fn view_key(r: &hk_demod::RdsReport) -> String {
+    format!(
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        r.pi.map(|p| (p.pi, p.window_votes >= hk_model::RDS_PI_COMMIT_VOTES)),
+        r.ps(),
+        r.rt,
+        r.rt_ab,
+        r.pty,
+        r.tp,
+        r.ta,
+        r.af_mhz
+    )
+}
+
+/// Releases a follow's slot of [`MAX_RDS_FOLLOWS`].
+struct FollowSlot<'a>(&'a crate::stats::ChainCounters);
+
+impl FollowSlot<'_> {
+    /// A slot for one more follow on a source at `fs`, if [`MAX_RDS_FOLLOWS`] and
+    /// [`FOLLOW_CPU_CORES`] admit it.
+    fn claim(c: &crate::stats::ChainCounters, fs: f64) -> Option<FollowSlot<'_>> {
+        use std::sync::atomic::Ordering;
+        let (samples, ns) = (
+            c.rds_follow_samples.load(Ordering::Relaxed),
+            c.rds_follow_ns.load(Ordering::Relaxed),
+        );
+        let per_station = (samples > 0).then(|| ns as f64 / samples as f64 * fs / 1e9);
+        c.rds_follows_active
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                admits_follow(n, per_station).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| FollowSlot(c))
+    }
+}
+
+/// Whether one more follow may start beside `active` ones each measured at `per_station` cores
+/// (`None`: nothing measured yet).
+fn admits_follow(active: u64, per_station: Option<f64>) -> bool {
+    active < MAX_RDS_FOLLOWS
+        && (active == 0
+            || per_station.is_none_or(|cores| (active + 1) as f64 * cores <= FOLLOW_CPU_CORES))
+}
+
+impl Drop for FollowSlot<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let _ = self
+            .0
+            .rds_follows_active
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_sub(1))
+            });
+    }
+}
+
+/// T-971: **continuous RDS accumulation on the station's own row.**
+///
+/// Measured on live air (explorer window 1, 2026-09-25): the chain decoded one window, committed
+/// PI and stopped — 101.3 MHz read `ps: null, ps_frames: []` after a three-minute dwell, and PS was
+/// unprompted on 0 of 19 stations. A PS is four 0A segments and a RadioText sixteen 2A groups; a
+/// station's scrolling PS and song RadioText change for as long as it is on air. So once the
+/// window found RDS, the chain keeps demodulating the station — the window's own DDC, pilot PLL
+/// and RDS decoder carried straight on ([`WfmFollower`]), so no sample is demodulated twice and
+/// the decode extends with the region — and writes the accumulated field view (PS, RadioText,
+/// PTY, AF, CT, the PI vote) onto the station's emitter as `rds-pi` rows
+/// ([`hk_demod::write_follow`]): a row when a field that matters changes (at most every
+/// [`FOLLOW_MIN_WRITE_S`]), a refresh every [`FOLLOW_REFRESH_S`], and one when the follow ends.
+///
+/// **Bounded.** At most [`MAX_RDS_FOLLOWS`] at once, and only while their measured cost fits
+/// [`FOLLOW_CPU_CORES`]; each ends at its spec's `follow_s`, when its
+/// RDS goes silent for [`FOLLOW_SILENCE_S`] (the station ended), or with its stream — a retune, a
+/// gap, the segment stopping, or an overrun: a follow that cannot keep up with the ring is not
+/// given more CPU, it stops. The track that triggered the chain detaching does not end it: a
+/// station reaches the tracker as short-lived fragments (see [`collect`]); its RDS is the
+/// station. Its cost is measured (`rds_follow_samples`, `rds_follow_ns`).
+fn follow(shared: &Arc<Shared>, rx: &Receiver<ChainMsg>, mut cr: ChainReader, f: Follow) {
+    let c = &shared.counters.chains;
+    let Some(_slot) = FollowSlot::claim(c, shared.fs) else {
+        inc(&c.rds_follow_refused);
+        return;
+    };
+    inc(&c.rds_follows);
+    let Follow {
+        mut follower,
+        session,
+        mut record,
+        prov,
+        tail,
+        tail_time,
+        budget_s,
+        track,
+    } = f;
+    let fs = shared.fs;
+    let start_index = follower.next_index();
+    let span_start = session.time_range().start;
+    let budget = (budget_s * fs) as u64;
+    let silence = (FOLLOW_SILENCE_S * fs) as u64;
+    let check = ((FOLLOW_CHECK_S * fs) as u64).max(1);
+    let min_write = (FOLLOW_MIN_WRITE_S * fs) as u64;
+    let refresh = (FOLLOW_REFRESH_S * fs) as u64;
+    let mut last_ok = follower.rds_groups_ok();
+    let mut last_ok_at = start_index;
+    let mut next_check = start_index + check;
+    let mut written_key = session.rds().map(view_key);
+    let mut written_at = start_index;
+    let mut written_ok = last_ok;
+    // The ring's own flags ride with each chunk, so the DDC resets on a gap it marks.
+    let push = |follower: &mut WfmFollower, info: InputInfo<'_>, samples: &[Complex<i8>]| {
+        let t0 = std::time::Instant::now();
+        let r = follower.push(info, samples);
+        add(&c.rds_follow_ns, t0.elapsed().as_nanos() as u64);
+        add(&c.rds_follow_samples, samples.len() as u64);
+        r
+    };
+    let tail_info = InputInfo {
+        time: tail_time,
+        discontinuity: Discontinuity::NONE,
+        dropped_before: 0,
+        provenance: &prov,
+    };
+    if !tail.is_empty() && push(&mut follower, tail_info, &tail).is_err() {
+        inc(&c.rds_follow_ended_stream);
+        return;
+    }
+    let mut newest = SampleTime {
+        sample_index: follower.next_index(),
+        host_time: tail_time.time_of(follower.next_index(), fs),
+    };
+    let mut write = |follower: &WfmFollower, at: SampleTime| -> Option<String> {
+        let rds = follower.rds()?;
+        let key = view_key(&rds);
+        let span = TimeRange::new(span_start, at.host_time);
+        let mut repo = shared.repo();
+        match write_follow(&mut repo, &session, &rds, &mut record, span) {
+            Ok(Some(w)) => {
+                inc(&c.rds_follow_rows);
+                inc(&c.decodes);
+                add(&c.labels, u64::from(w.label_id.is_some()));
+                if w.identity_claimed
+                    && let Some(e) = record.emitter_id
+                {
+                    // The identity committed during the follow is route A's evidence: offer the
+                    // emitter for review (repository before inventory, as every chain locks).
+                    let mut inv = shared
+                        .inventory
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Err(err) = inv.chain_emitter(&mut repo, track, e) {
+                        crate::stats::storage_error(c, "analog follow emitter", &err);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(err) => crate::stats::storage_error(c, "analog follow write", &err),
+        }
+        Some(key)
+    };
+    let ended = loop {
+        while let Ok(msg) = rx.try_recv() {
+            // A detach or a member box is the triggering fragment's, not the station's.
+            let _ = msg;
+        }
+        let chunk = match cr.next() {
+            Next::Data(chunk) => chunk,
+            Next::Idle => continue,
+            Next::Lost | Next::Closed => break &c.rds_follow_ended_stream,
+        };
+        let (a, b) = (&chunk.provenance.get().tune, &prov.get().tune);
+        if chunk.first_sample() != follower.next_index()
+            || a.center_hz != b.center_hz
+            || a.sample_rate_hz != b.sample_rate_hz
+        {
+            break &c.rds_follow_ended_stream;
+        }
+        let at = chunk.time;
+        if push(&mut follower, InputInfo::from(&chunk), &cr.buf[..chunk.len]).is_err() {
+            break &c.rds_follow_ended_stream;
+        }
+        cr.release_to(chunk.end_sample());
+        let now = follower.next_index();
+        newest = SampleTime {
+            sample_index: now,
+            host_time: at.time_of(now, fs),
+        };
+        if now < next_check {
+            continue;
+        }
+        next_check = now + check;
+        let ok = follower.rds_groups_ok();
+        if ok > last_ok {
+            last_ok = ok;
+            last_ok_at = now;
+        }
+        if now - last_ok_at >= silence {
+            break &c.rds_follow_ended_silent;
+        }
+        if now - start_index >= budget {
+            break &c.rds_follow_ended_budget;
+        }
+        let since = now - written_at;
+        let due = since >= refresh && ok > written_ok;
+        if since >= min_write || due {
+            let key = follower.rds().map(|r| view_key(&r));
+            if due || key != written_key {
+                written_key = write(&follower, newest);
+                written_at = now;
+                written_ok = ok;
+            }
+        }
+    };
+    inc(ended);
+    drop(cr);
+    // The view as the follow ends: its counts, span and anything that changed since.
+    if follower.rds_groups_ok() > written_ok {
+        write(&follower, newest);
     }
 }
 
@@ -1381,10 +1724,26 @@ mod tests {
             probe_s: 0.5,
             accept_modes: Vec::new(),
             require_pilot: false,
+            follow_s: 0.0,
             channel_tolerance_hz: 0.5 * raster_hz,
             record: None,
             owner: 0,
         }
+    }
+
+    /// T-971: follows are admitted by count and by their measured cost at the tuned rate.
+    #[test]
+    fn follows_are_admitted_by_count_and_measured_cost() {
+        // Nothing measured: admitted up to the count.
+        assert!(admits_follow(0, None) && admits_follow(5, None));
+        assert!(!admits_follow(MAX_RDS_FOLLOWS, None));
+        // 0.15 cores a station (2.4 Msps, measured): six fit in the budget.
+        assert!(admits_follow(5, Some(0.15)));
+        // 1.3 cores a station (20 Msps): one runs, a second does not.
+        assert!(admits_follow(0, Some(1.3)));
+        assert!(!admits_follow(1, Some(1.3)));
+        // The first is always admitted, however dear.
+        assert!(admits_follow(0, Some(10.0)));
     }
 
     #[test]

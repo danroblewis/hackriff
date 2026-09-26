@@ -179,6 +179,9 @@ def build_one(name: str) -> dict[str, Any]:
             "subcarrier_hz": 57000.0,
             "decoder": "py/fixtures/rds_ref.py (independent oracle, run over this fixture's own window)",
             "oracle_agrees_with_explorer_pi": agrees,
+            # T-971: RadioText, the latest complete message and every distinct one in order.
+            "rt": oracle["rt"],
+            "rt_messages": oracle["rt_messages"],
             "explorer_claim": {
                 "pi": explorer_pi,
                 "decoded": explorer_em.get("decoded"),

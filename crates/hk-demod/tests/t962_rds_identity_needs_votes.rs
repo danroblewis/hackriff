@@ -293,3 +293,56 @@ fn t962_one_bar_and_a_weaker_config_cannot_lower_it() {
         row.metadata
     );
 }
+
+/// T-971 (from T-962's final review): the served contract `identity_provisional ==
+/// identity_votes_in_window < identity_votes_needed` holds for **any** decoder configuration. A
+/// config *above* the scheme's bar lets the decoder keep more vote times, so its `window_votes`
+/// can exceed 10; the record caps the in-window count at the model constant (never the decoder
+/// config), so the row can never report `in_window >= needed` while provisional.
+#[test]
+fn t962_a_stricter_config_keeps_the_served_contract() {
+    let strict = GroupConfig {
+        pi_commit_votes: 20,
+        ..GroupConfig::default()
+    };
+    let mut bits = Vec::new();
+    for g in 0..16 {
+        bits.extend(group_0a_bits(0xC0DE, b"HACKRIFF", g % 4));
+    }
+    let rds = report_bits(strict, &bits);
+    let pi = rds.pi.expect("PI");
+    assert!(
+        pi.window_votes > 10 && pi.window_votes < 20 && pi.provisional,
+        "[{T962}] the scene sits between the scheme's bar and the stricter config's: {pi:?}"
+    );
+    let s = session_with(rds);
+    let mut repo = Repository::open_in_memory().unwrap();
+    let w = write_session(&mut repo, &s, &RecordContext::default()).unwrap();
+    let row = w
+        .decode_ids
+        .iter()
+        .map(|d| repo.decode(*d).unwrap())
+        .find(|d| d.frame_model == "rds-pi")
+        .unwrap();
+    let m = &row.metadata;
+    let in_window = m["identity_votes_in_window"].as_u64().unwrap();
+    let needed = m["identity_votes_needed"].as_u64().unwrap();
+    assert_eq!(needed, 10, "[{T962}] {m}");
+    assert!(
+        in_window <= needed,
+        "[{T962}] in-window capped at the bar: {m}"
+    );
+    assert_eq!(
+        m["identity_provisional"],
+        json!(in_window < needed),
+        "[{T962}] provisional must be exactly in_window < needed: {m}"
+    );
+    assert_eq!(
+        m["pi_provisional"], m["identity_provisional"],
+        "[{T962}] {m}"
+    );
+    assert!(
+        repo.emitter_by_identity(&pi_c0de()).unwrap().is_some(),
+        "[{T962}] the scheme's bar (10 in 5 s) was met, so the identity is written"
+    );
+}

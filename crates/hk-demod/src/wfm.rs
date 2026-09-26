@@ -129,6 +129,8 @@ pub struct WfmDemod {
     audio: Vec<f32>,
     /// The L−R path, when stereo is enabled.
     side: Option<Box<Side>>,
+    /// T-971: the audio path runs ([`Self::disable_audio`]).
+    audio_on: bool,
     n: u64,
     mean_sum: f64,
     mean_prev: f64,
@@ -164,6 +166,7 @@ impl WfmDemod {
             rds_start: None,
             audio: Vec::new(),
             side: None,
+            audio_on: true,
             n: 0,
             mean_sum: 0.0,
             mean_prev: 0.0,
@@ -182,7 +185,16 @@ impl WfmDemod {
         (self.audio_fir.factor() - 1) as f64 - self.audio_fir.group_delay()
     }
 
-    /// Demodulates contiguous baseband samples.
+    /// T-971: stops producing audio (mono and L−R). A chain that keeps decoding a station's RDS
+    /// for minutes ([`crate::receiver::WfmFollower`]) has no listener, and the audio low-pass is
+    /// the demodulator's largest cost after the discriminator. Pilot, RDS and the deviation and
+    /// carrier statistics are unchanged.
+    pub fn disable_audio(&mut self) {
+        self.audio_on = false;
+        self.side = None;
+        self.audio.clear();
+    }
+
     /// Also decodes the L−R channel from now on (see the module docs): [`Self::take_side`]
     /// then yields one `S = (L−R)/2` sample per mono sample, aligned with it. Idempotent.
     pub fn enable_stereo(&mut self) {
@@ -240,7 +252,9 @@ impl WfmDemod {
                 self.rds_start.get_or_insert(self.n + i as u64);
                 demod.push(f, theta);
             }
-            if let Some(a) = self.audio_fir.push(f) {
+            if self.audio_on
+                && let Some(a) = self.audio_fir.push(f)
+            {
                 self.audio.push(self.deemph.push((a - mean) * scale));
             }
             if let Some(side) = self.side.as_deref_mut() {
@@ -292,6 +306,21 @@ impl WfmDemod {
             .as_mut()
             .map(|(_, dec)| dec.take_groups())
             .unwrap_or_default()
+    }
+
+    /// T-971: the RDS results so far, without the rest of [`Self::report`] (`None` without RDS).
+    pub fn rds_report(&self) -> Option<crate::rds::RdsReport> {
+        self.rds.as_ref().map(|(_, dec)| dec.report())
+    }
+
+    /// T-971: CRC-valid RDS groups so far (0 without RDS).
+    pub fn rds_groups_ok(&self) -> u64 {
+        self.rds.as_ref().map_or(0, |(_, dec)| dec.groups_ok())
+    }
+
+    /// T-971: the pilot PLL is locked at the last sample.
+    pub fn pilot_locked(&self) -> bool {
+        self.pll.is_locked()
     }
 
     /// Results so far.
