@@ -30760,7 +30760,7 @@ tasks:
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
-    status: in-progress
+    status: done
     branch: task-t1048
     priority: medium
     deps:
@@ -30789,6 +30789,7 @@ tasks:
       Commits: 9da96d96, 46483dfb, 31806274, 9e7f6fd6
       Observed, not chased: During triage, both e2e specs (including the untouched T-1042 spec) failed identically with a page.goto CDP-navigation timeout (harness.mjs's hardcoded 30 s Page.loadEventFired wait, line ~485) while this shared box's load average was 45.93 with 80 concurrent chromium processes from other agents' e2e runs. This is a pre-existing, unowned infrastructure timeout that is not deterministic under extreme shared-box load; it cleared on its own once load dropped (down to ~12-17) and is unrelated to this ticket's diff. Not something I changed -- noting it since it briefly looked like a real failure before the actual T-1041 regression was found underneath it.
       Resources: 3 CPU-s, peak 0.3 GB
+    commit: 191df5fd
   - id: T-1049
     milestone: MMAP
     title: "app-outputs-map (T-994) reported red 3x at 400 px ('no pressable box in 60 s') - triage on main with a FRESH hk: close as stale-binary or fix"
