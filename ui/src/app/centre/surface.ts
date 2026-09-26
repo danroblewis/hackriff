@@ -1113,7 +1113,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const win = sliceWindow(lat, report.levelT, tAtNs);
     const ringAt = report.ringFrame ? ringRowAt(report.ringFrame, tAtNs) : null;
     const fr = liveRow.get();
-    const live = !ringAt && liveFrameFits(fr, win);
+    const live = !ringAt && liveFrameFits(fr, win, p.view.panes.isFollowing(pane.id));
     let slice: Float32Array;
     let sliceSrc: string;
     let sliceAtNs: number;
