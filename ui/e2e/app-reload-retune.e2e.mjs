@@ -13,7 +13,7 @@
 // reloads, and asserts what the PAGE draws: the pane's window, and the retune offer beside it.
 //
 // ——— RED ON CODE BEFORE THE T-955 FIX ROUND ———
-// On 448a9a65 the FAB press froze the drifted-but-following pane (it read `isFollowing`, never the
+// On 448a9a65 the follow-live press froze the drifted-but-following pane (it read `isFollowing`, never the
 // tuned window), the painted Go-to offer outlived the retune, and the reload 30 s after a retune
 // opened on the union of both tunings (recency counted from the grid's end, not the newest row).
 //
@@ -30,7 +30,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 const shot = (page, name) => (SHOTS ? page.shot(`${SHOTS}/${name}.png`) : Promise.resolve());
 /** The page's own view of the tuned window, from the navigation poll it already runs. */
-const FAB = "document.querySelector('.map-ctl .map-fab')";
+/** T-1001: the pane's own Live/Freeze button, inside its rectangle (the FAB retired). */
+const LIVE = "document.querySelector('.sf-pane-live-btn')";
 const OFFER_SHOWN = "!document.querySelector('.map-ctl .map-offer').hidden";
 const OFFER_TEXT = "document.querySelector('.map-ctl .map-offer-why').textContent";
 /** Go-to, the way the user did it: type into the box and submit (a view move, never a retune). */
@@ -141,9 +142,9 @@ test("T-955: after an API retune — the Go-to offer does not outlive it, follow
     const drifted = await pane0(page);
     assert.equal(drifted.following, true, "precondition: the drifted pane still follows live time");
     assert.ok(Math.abs(windowOf(drifted.where).centerHz - tuned0.center_hz) < 1e6, `precondition: ${drifted.where}`);
-    await page.waitFor("the FAB to say the pane is off the tuned window", `${FAB}.classList.contains('off-tuned')`, { timeoutMs: 15000 });
+    await page.waitFor("the pane's Live button to say it is off the tuned window", `${LIVE}.classList.contains('off-tuned')`, { timeoutMs: 15000 });
     await shot(page, "t955-follow-before");
-    await page.click(FAB);
+    await page.click(LIVE);
     await page.frames(4);
     const followed = await pane0(page);
     assert.equal(await page.eval(OFFER_SHOWN), false, "the Go-to offer for the band the pane LEFT survived the follow-live press");

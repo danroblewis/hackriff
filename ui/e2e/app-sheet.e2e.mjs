@@ -27,12 +27,13 @@ const UNCLICKABLE = hitTest(TOP_CONTROLS);
 const TOP_BOTTOM = `Math.max(...[...document.querySelectorAll('.map-ctl .map-goto, .map-ctl .map-topright, .map-ctl .map-nudge, .map-ctl .map-status')].map((e) => e.getBoundingClientRect().bottom))`;
 // T-802's floating controls on the right edge: the sheet grows upward beside them (its gutter), so
 // they must be pressable at every snap height.
-const MAP_RIGHT = hitTest(".map-fab, .map-zoom-in, .map-zoom-out");
+// (T-1001 retired the FAB; each pane's Live button lives inside the pane, well clear of the sheet.)
+const MAP_RIGHT = hitTest(".map-zoom-in, .map-zoom-out");
 // ...and neither may sit over the sheet either (the cluster paints above it, so a hit test from the
 // control's side alone passes while the control hides the sheet's content): the boxes are disjoint.
 const OVERLAPS_SHEET = `JSON.stringify((() => {
   const s = document.querySelector('.sheet').getBoundingClientRect();
-  return [...document.querySelectorAll('.map-fab, .map-zoom')].map((el) => ({ cls: el.className, r: el.getBoundingClientRect() }))
+  return [...document.querySelectorAll('.map-zoom')].map((el) => ({ cls: el.className, r: el.getBoundingClientRect() }))
     .filter(({ r }) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top)
     .map(({ cls }) => cls);
 })())`;
@@ -58,9 +59,9 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   // (1) Peek is a title strip that states the (empty) selection.
   assert.ok((await height()) < 80, `peek is a strip, got ${await height()} px`);
   assert.match(await page.$text(".sheet-title"), /nothing yet/);
-  await page.waitFor("the floating controls to mount", "!!document.querySelector('.map-fab')", { timeoutMs: 30000 });
-  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at peek, the sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at peek, the FAB or zoom overlaps the sheet");
+  await page.waitFor("the floating controls to mount", "!!document.querySelector('.map-zoom-in')", { timeoutMs: 30000 });
+  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at peek, the sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at peek, the zoom stack overlaps the sheet");
 
   // (2) A real drag on the grab handle, released near the half-height mark, snaps to half.
   // T-933 (review finding): the panes' sheet clearance is anchored to the sheet's fixed bottom
@@ -90,8 +91,8 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
     "the panes' clearance changed once the sheet settled at half");
   const half = await height();
   assert.ok(half > vh * 0.3 && half < vh * 0.6, `half is ~45 vh, got ${half} of ${vh}`);
-  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at half, the sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at half, the FAB or zoom overlaps the sheet");
+  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at half, the sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at half, the zoom stack overlaps the sheet");
 
   // (3) Non-modal: beside the open sheet, the browser's own hit test lands on the surface, and a
   // drag there pans the view — with the sheet still open.
@@ -120,8 +121,8 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   const topBottom = await page.eval(TOP_BOTTOM);
   assert.ok(full.y >= topBottom, `full stops below the top chrome (${full.y} vs ${topBottom})`);
   assert.deepEqual(JSON.parse(await page.eval(UNCLICKABLE)), [], "the full sheet covers a toolbar button");
-  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at full, the sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at full, the FAB or zoom overlaps the sheet");
+  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at full, the sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at full, the zoom stack overlaps the sheet");
 
   // (5) Per-viewer state: a reload comes back at full.
   // (A reload, not a goto: the app strips `#token=` from the address bar, so navigating back to the
@@ -161,9 +162,9 @@ for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sh
     + `unpressable top controls (not the sheet's doing unless bySheet): ${JSON.stringify(bad)}`);
   assert.deepEqual(bad.filter((b) => b.bySheet), [], "the full sheet covers a top control");
   const right = JSON.parse(await page.eval(MAP_RIGHT));
-  t.diagnostic(`FAB/zoom not pressable at ${width} px: ${JSON.stringify(right)}`);
-  assert.deepEqual(right.filter((b) => b.bySheet), [], "the full sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "the FAB or zoom overlaps the full sheet");
+  t.diagnostic(`zoom not pressable at ${width} px: ${JSON.stringify(right)}`);
+  assert.deepEqual(right.filter((b) => b.bySheet), [], "the full sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "the zoom stack overlaps the full sheet");
   const edges = JSON.parse(await page.eval(`JSON.stringify({ sheet: document.querySelector('.sheet').getBoundingClientRect().top,
     bar: ${TOP_BOTTOM} })`));
   assert.ok(edges.sheet >= edges.bar, `the full sheet's top (${edges.sheet}) rises over the top controls (end ${edges.bar})`);

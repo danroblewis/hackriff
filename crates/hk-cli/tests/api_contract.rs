@@ -2800,6 +2800,114 @@ fn tune_history_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-981: the front end's clip state — `/api/status`'s `frontend` block and
+/// `GET /api/frontend/events` — answers as `docs/api.md` documents it, on a live `hk serve` over
+/// the mock device. The blind end-to-end assertion (a saturating burst through the mock SDR is
+/// flagged on its row, counted, logged as one event and never stored as a detection) is
+/// `hk-pipeline/tests/frontend_overload.rs`; this pins the wire shape and the rule by value.
+#[test]
+fn frontend_status_block_and_events_route_answer_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    wait_for(
+        "spectrum rows measured by the front-end judgement",
+        Duration::from_secs(60),
+        || {
+            get(addr, "/api/status").1["frontend"]["rows"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let (st, v) = get(addr, "/api/status");
+    assert_eq!(st, 200, "{v}");
+    let fe = &v["frontend"];
+    for field in [
+        "rows",
+        "clipped_rows",
+        "event_rows",
+        "events",
+        "clipped_samples",
+        "samples",
+        "suppressed_detections",
+        "evicted_events",
+    ] {
+        assert!(fe[field].is_u64(), "frontend.{field}: {fe}");
+    }
+    assert!(fe["adc_peak_max"].is_number(), "{fe}");
+    assert!(
+        fe["clipped_rows"].as_u64() <= fe["rows"].as_u64(),
+        "a clipped row is a measured row: {fe}"
+    );
+    assert!(
+        fe["event_rows"].as_u64() <= fe["clipped_rows"].as_u64(),
+        "an event row is a clipped row: {fe}"
+    );
+    let last = &fe["last_row"];
+    for field in ["t", "clip_fraction", "adc_peak"] {
+        assert!(last[field].is_number(), "frontend.last_row.{field}: {fe}");
+    }
+    for field in ["clipped", "event"] {
+        assert!(last[field].is_boolean(), "frontend.last_row.{field}: {fe}");
+    }
+    assert!(
+        fe["last_event"].is_null() || fe["last_event"]["t0"].is_number(),
+        "{fe}"
+    );
+    assert_eq!(fe["log"]["capacity"], json!(1024), "{fe}");
+    assert_eq!(fe["rule"]["clip_fraction"], json!(1e-4), "{fe}");
+    assert_eq!(fe["rule"]["step_db"], json!(6.0), "{fe}");
+    assert_eq!(fe["rule"]["saturation_fraction"], json!(0.01), "{fe}");
+
+    // Every capture time there could be: a replay's clock is its recording's, not the wall's.
+    let (t0, t1) = (0.0_f64, 4.0e9_f64);
+    let url = |extra: &str| format!("/api/frontend/events?t0={t0}&t1={t1}{extra}");
+    let (st, e) = get(addr, &url(""));
+    assert_eq!(st, 200, "{e}");
+    for field in ["window", "events", "total", "limit", "truncated", "log"] {
+        assert!(
+            e.get(field).is_some(),
+            "frontend/events missing {field}: {e}"
+        );
+    }
+    assert_eq!(e["limit"], json!(256), "{e}");
+    assert_eq!(e["window"]["t0"].as_f64(), Some(t0), "{e}");
+    assert_eq!(e["log"]["capacity"], json!(1024), "{e}");
+    let events = e["events"].as_array().expect("events is an array");
+    assert_eq!(e["total"].as_u64(), Some(events.len() as u64), "{e}");
+    for ev in events {
+        assert_eq!(ev["kind"], json!("clip"), "{ev}");
+        let (c, r) = (
+            ev["center_hz"].as_f64().unwrap(),
+            ev["sample_rate_hz"].as_f64().unwrap(),
+        );
+        assert_eq!(ev["f_lo_hz"].as_f64(), Some(c - r / 2.0), "{ev}");
+        assert_eq!(ev["f_hi_hz"].as_f64(), Some(c + r / 2.0), "{ev}");
+        assert!(ev["t1"].as_f64() > ev["t0"].as_f64(), "{ev}");
+    }
+    let (st, d) = get(addr, &url("&device=no-such-radio&limit=5"));
+    assert_eq!(st, 200, "{d}");
+    assert_eq!(
+        (d["total"].clone(), d["limit"].clone()),
+        (json!(0), json!(5)),
+        "{d}"
+    );
+    for bad in [
+        format!("/api/frontend/events?t0={t0}"),
+        format!("/api/frontend/events?t0={t1}&t1={t0}"),
+        url("&limit=0"),
+        url("&limit=5000"),
+        url("&f_lo=1"),
+    ] {
+        let (st, e) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    let (st, e) = post(addr, "/api/frontend/events", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
@@ -12241,7 +12349,17 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     assert_eq!(p["budget"]["step_span_hz"], json!(1.8e6), "{p}");
     let duty = p["budget"]["duty"].as_f64().unwrap_or_default();
     assert!((duty - 1.0 / 12.0).abs() < 1e-9, "duty is dwell/pass: {p}");
+    // T-965: nothing has retuned this front end under a scan yet, so there is no measurement of
+    // what a step pays beyond its dwell — and `null` is not zero. The pass length is the dwells,
+    // and the statement says in words that it is a floor rather than implying it is the answer.
+    assert_eq!(p["budget"]["dwell_total_s"], json!(144.0), "{p}");
+    assert_eq!(p["budget"]["step_overhead_s"], Value::Null, "{p}");
+    assert_eq!(p["budget"]["overhead_measured"], json!(false), "{p}");
     let statement = p["budget"]["statement"].as_str().unwrap_or_default();
+    assert!(
+        statement.contains("a floor, not the answer"),
+        "an unmeasured per-step cost must be admitted, not priced at zero: {statement:?}"
+    );
     assert!(
         statement.contains("12 steps") && statement.contains("144.0 s pass"),
         "the statement must carry this plan's own numbers: {statement:?}"
@@ -12374,6 +12492,44 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     } else {
         panic!("a running sweep that has stepped names the step it dwells on: {v}");
     }
+
+    // T-965: **a step has now been timed, so the stated pass length includes what it cost.**
+    // The live defect this closes: `Scan everything (fast)` priced 418 steps x 0.3 s as 125.4 s
+    // and took 237 s, because the price counted the listening and not the retuning. The served
+    // budget is repriced from this scan's own retunes, and `pass_s` is the listening plus the
+    // measured per-step cost, once per step.
+    let b = &v["scan"]["budget"];
+    assert_eq!(b["overhead_measured"], json!(true), "{b}");
+    let overhead_s = b["step_overhead_s"]
+        .as_f64()
+        .expect("a measured per-step cost once a step has been timed");
+    assert!(
+        (0.0..30.0).contains(&overhead_s),
+        "a measured retune cost, not a guess: {b}"
+    );
+    let dwell_total_s = b["dwell_total_s"].as_f64().expect("dwell total");
+    let steps = b["steps"].as_f64().expect("steps");
+    let pass_s = b["pass_s"].as_f64().expect("pass");
+    assert!(
+        (pass_s - (dwell_total_s + steps * overhead_s)).abs() < 1e-6,
+        "pass_s must be the listening plus the measured per-step cost: {b}"
+    );
+    // And the progress block states the same measurement, so the stated pass and the measured one
+    // can be compared without recomputing either.
+    let pr = &v["scan"]["progress"];
+    assert_eq!(
+        pr["measured_step_overhead_s"].as_f64(),
+        Some(overhead_s),
+        "{pr}"
+    );
+    assert!(
+        (pr["measured_pass_s"].as_f64().expect("measured pass") - pass_s).abs() < 1e-6,
+        "{pr}"
+    );
+    assert!(
+        pr["elapsed_s"].as_f64().unwrap_or(-1.0) >= 0.0,
+        "a running scan states how long it has been going: {pr}"
+    );
 
     // **Coverage honesty, which is the whole point of the feature.** T-406's finding was that a
     // dwell step must write ONE RECORD PER STEP with its true band and interval, because a coarse
