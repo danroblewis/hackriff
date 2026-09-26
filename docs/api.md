@@ -250,12 +250,13 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
       "classifications": 3,
       "cluster_id": null,
       "cluster_status": { "state": "abstained", "reason": "too_few_fields", "distance": null, "t_s": 1789300900.0 },
-      "estimated_params": { "modulation": "wfm", "symbol_rate_hz": null, "mod_order": null,
+      "estimated_params": { "modulation": "wfm", "symbol_rate_hz": null, "duration_s": 12.5, "mod_order": null,
                              "deviation_hz": 75000.2, "cfo_hz": -120.5, "bandwidth_hz": 181400.0,
                              "roll_off": null, "pilot_hz": 19000.05, "t_s": 1789300920.0,
                              "source_session": "0199…", "source_recording": null },
       "identity_scheme": "rds-pi", "identity_class": "unrestricted", "withheld": false,
       "identity_value": "A1B2",
+      "identity_label": "KROQ", "identity_label_share": 0.75,
       "snr_db": 21.4, "peak_dbfs": -18.25,
       "measured": { "snr_db": 21.4, "peak_dbfs": -18.25,
                     "t_start_s": 1789300812.0, "t_end_s": 1789300813.0, "duration_s": 1.0 },
@@ -271,6 +272,8 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 ```
 
 `identity_value` is present only when the row's identity is in clear (`withheld: false`); on a withheld row a status/lifecycle reason from an author who may have seen the identity is itself withheld (`reason_withheld: true`, `reason: null`).
+
+**`identity_label` / `identity_label_share` (T-967).** The decoded identity in the form a list row wants to show beside the bare `identity_value` (an RDS PI is a 4-hex-digit code, unreadable at a glance). `identity_label` is the **stable, voted label of the identity's latest committed decoder session — the most frequent label, not the latest fragment**: for `rds-pi` it is the `hk-rds` decoder's per-session `rds-pi` summary row's `ps`, the session's most frequent complete PS frame, trimmed. It is never read from the per-frame `rds-group-0-ps-frame` rows, because a station scrolling song/artist text through PS sends many fragments and one of them is always the newest. `identity_label_share` (0–1) is **that label's own share** of the session's complete PS frames (the same figure the decoder's Label annotation carries as its confidence) — confidence in the *name*, deliberately not `pi_share`, which is the PI vote and says nothing about the name. It is `null` when the summary row recorded no frame counts. Only schemes whose built-in decoder writes an explicit session summary are served — today `rds-pi` only; every other scheme reads `null` for both rather than a label guessed from similarly-named decode fields (a per-decoder declared label field is its own contract). Both are also `null` when no session voted a label, on a withheld-identity row, and on a row with no decoded identity, exactly as `estimated_params`/`cluster_id` are (T-159/T-163): the field can never confirm a withheld identity by appearing. Cost: one identity-class check and one indexed row per list entry. No parsing happens in the UI (CLAUDE.md thin-client rule).
 
 **`lifecycle` is the transition into the current state, carrying the latest reason for it (T-403).** `state`, `previous`, `author`, `actor` and `t_s` describe the change that put the entry in the state it is in — so `t_s` is when it was confirmed, and does not move. `reason` is the **best explanation the run has reached**, which can be written later than that change: an entry is confirmed by whichever rule is satisfied first, and the rules are not satisfied at the same moment (a continuous emission's occupancy evidence is complete seconds before a demodulator can report a pilot lock, by an amount that depends on how loaded the host is). When a stronger rule later applies, its reason replaces the weaker one as a new append-only history row carrying `state == previous`, so nothing invents a state change and the recorded explanation is a function of the evidence rather than of which rule arrived first. Clients render `reason` as the current explanation and `t_s` as the time of the change; they never treat `reason` as pinned to `t_s`. Never included: decode content, fingerprints, links. No frequency lookup ever runs before detection — the inventory is populated purely from blind measurement (vision step 4); the band-plan/licence database only supplies `explanations` and `status`, ranked, never a starting point.
 
@@ -362,7 +365,7 @@ The full classification (likelihood, prior, provenance, reasons) is not on the r
 - **It groups; it does not merge.** Rows sharing a label stay separate inventory rows with their own ids, counts, detections and history, exactly as `cluster_id` says: a cluster is a *type*, an emitter an *instance*, and clustering writes nothing on an emitter. Duplicate rows are minted upstream by entity resolution (`Fingerprint::compare`); this field makes such duplication **visible** and de-duplicates nothing. A client must render it as *"same signature cluster"*, never as *"duplicate"* — the former is what was measured, the latter a claim the data does not support. The collapse of genuinely overlapping rows is a different mechanism entirely (`relation`, `duplicate-of`, T-369).
 - **It is not computed by the client.** Only the server knows what it served, so the grouping arrives as data (CLAUDE.md, "the web UI is a thin client over `docs/api.md`").
 
-**`estimated_params` (T-163, ADR-0013 gap 7a).** The emitter's latest blind-estimated parameters (C13/C14) — symbol rate, modulation, deviation, carrier frequency offset, bandwidth — from its most recent demodulation session, for the Decode workbench's "Use" suggestions (`docs/adr/0013-ui-architecture.md` §4.6). `{"modulation", "symbol_rate_hz", "mod_order", "deviation_hz", "cfo_hz", "bandwidth_hz", "roll_off", "pilot_hz", "subaudible", "t_s", "source_session", "source_recording"}`. **`subaudible` (T-988, SIGNAL-090)** is the blind sub-audible squelch identification an NBFM Listen session measured from the discriminator and filed on the row (`hk_demod::subaudible`): `{"kind", "analysed_s", "tones", "dcs", "reason", "detector"}` with `kind` one of `ctcss` (a line matched to the EIA/TIA 50-tone table within `tolerance_hz`), `tone` (a clean line off the table, reported raw, never snapped), `dcs`, `none` (enough on-air audio carried neither — "no tone" is an answer; `reason` says why, e.g. a harmonic comb from a periodic buzz rather than a tone); `tones` is `[{"measured_hz", "snr_db", "table_hz", "delta_hz", "tolerance_hz"}]` strongest first (a second entry when two tones are present), `dcs` is `{"code": "023", "polarity": "normal"|"inverted", "words", "aliases": ["047I"]}` (every standard DCS stream is bit-for-bit another code in the other polarity, and both are named). `subaudible` is `null` when nobody looked (not an FM session), which is not the same as `kind: "none"`. `modulation` is the session's `mode` (e.g. `wfm`, `2fsk`); every other measurement field is `null` when the estimator never measured it for this signal (e.g. `symbol_rate_hz` on an analog FM station) — **measured values only, never a fabricated default.** `t_s` is when the session ended; `source_session` is the demodulation's own id and `source_recording` the replayed recording's id, `null` live (matching `/api/inventory/{id}/decode`'s `at`/`source_session`). The whole object is `null` when no demodulation session has run for this emitter yet, and — like `/api/inventory/{id}/decode` (T-159/T-036) — also `null` on a withheld-identity row whatever storage holds, so the answer there is indistinguishable from "nothing measured yet" and never confirms a withheld identity indirectly. An emitter with no decoded identity at all (the common case for an unknown signal) is served normally.
+**`estimated_params` (T-163, ADR-0013 gap 7a).** The emitter's latest blind-estimated parameters (C13/C14) — symbol rate, modulation, deviation, carrier frequency offset, bandwidth — from its most recent demodulation session, for the Decode workbench's "Use" suggestions (`docs/adr/0013-ui-architecture.md` §4.6). `{"modulation", "symbol_rate_hz", "duration_s", "mod_order", "deviation_hz", "cfo_hz", "bandwidth_hz", "roll_off", "pilot_hz", "subaudible", "t_s", "source_session", "source_recording"}`. **`duration_s` (T-953)** is the session's own extent in seconds — for a burst demodulator the burst length the `/ws/open/bits` tap reports per burst, which the inventory previously could not state at all; for a continuous session, how long it ran. **`subaudible` (T-988, SIGNAL-090)** is the blind sub-audible squelch identification an NBFM Listen session measured from the discriminator and filed on the row (`hk_demod::subaudible`): `{"kind", "analysed_s", "tones", "dcs", "reason", "detector"}` with `kind` one of `ctcss` (a line matched to the EIA/TIA 50-tone table within `tolerance_hz`), `tone` (a clean line off the table, reported raw, never snapped), `dcs`, `none` (enough on-air audio carried neither — "no tone" is an answer; `reason` says why, e.g. a harmonic comb from a periodic buzz rather than a tone); `tones` is `[{"measured_hz", "snr_db", "table_hz", "delta_hz", "tolerance_hz"}]` strongest first (a second entry when two tones are present), `dcs` is `{"code": "023", "polarity": "normal"|"inverted", "words", "aliases": ["047I"]}` (every standard DCS stream is bit-for-bit another code in the other polarity, and both are named). `subaudible` is `null` when nobody looked (not an FM session), which is not the same as `kind: "none"`. `modulation` is the session's `mode` (e.g. `wfm`, `2fsk`); every other measurement field is `null` when the estimator never measured it for this signal (e.g. `symbol_rate_hz` on an analog FM station) — **measured values only, never a fabricated default.** `t_s` is when the session ended; `source_session` is the demodulation's own id and `source_recording` the replayed recording's id, `null` live (matching `/api/inventory/{id}/decode`'s `at`/`source_session`). The whole object is `null` when no demodulation session has run for this emitter yet, and — like `/api/inventory/{id}/decode` (T-159/T-036) — also `null` on a withheld-identity row whatever storage holds, so the answer there is indistinguishable from "nothing measured yet" and never confirms a withheld identity indirectly. An emitter with no decoded identity at all (the common case for an unknown signal) is served normally.
 
 **`total` (T-171).** The number of rows the query's filters match, ignoring `cursor`/`limit`, so a UI can show a count past one page (e.g. "512 confirmed" instead of capping at "500+"). It is computed with the same filters as the list, as a single indexed `COUNT(*)` — except a `tag` filter naming a label outside the controlled vocabulary (gating hides such tags on a withheld-identity row, so matching them needs per-row checks SQL alone can't do): that path scans and gates up to 5 000 candidate rows and reports the match count found within that scan, a lower bound past the cap. That combination (a non-vocabulary tag filter over a very large inventory) is rare.
 
@@ -792,6 +795,8 @@ It is served with its semantics **on the wire**, in `grid.semantics`, because a 
 
 Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `cells` (1…4096, default 256), `rows` (1…4096, default 1 — the **time** axis, T-423), `t0`&`t1` (Unix s, given together; default the capture window this server holds).
 
+**Asking with no `t0`/`t1` asks about the capture window, which is the IQ ring's span — not about all of history (T-1055).** The default window is `GET /api/timeline`'s `window` (`crates/hk-api/src/coverage.rs`, `window_of` → `timeline::capture_window`): `t1` is the live edge and `t0` is `t1 − retention_s`, minutes, not days. `window.source` says which it was — `"capture-window"` or `"requested"` — so the answer always states the span it is of. The consequence is the one an explorer measured on 2026-09-25: a survey pass that had swept 1 MHz–6 GHz over the previous half hour read back as *observed only for the step in progress*, because everything before the ring's retention was outside the window asked about, and the un-timed query never said which half hour it meant. **A client asking about a pass, a scan or any past interval passes that interval's own `t0`/`t1`** — the observation log reaches 180 days, so the records are there to find; only the default is short. Every product caller already does (`ui/src/surface/survey.ts`'s `surveyUrl`, `ui/src/navigators.ts`'s `coverageRequest` — T-379 fixed exactly this bug one surface earlier, `ui/src/app/explore/inventory.ts`, `ui/src/app/chrome/explore-drawer.ts`); the scan panel and the map's scan overlay read `/api/control/scan`, whose `progress.started_s` is the pass's own `t0`.
+
 **The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view"):
 
 > **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** The view renders whatever samples are actually available for the current time-and-frequency selection, and greys only cells that were truly never observed — never a fixed-size grey placeholder. … This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage.
@@ -803,19 +808,23 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   "region": { "lo_hz": 88000000.0, "hi_hz": 108000000.0 },
   "window": { "t0_s": 1789300320.0, "t1_s": 1789300920.0, "span_s": 600.0,
               "source": "capture-window" },   // or "requested" when t0/t1 were given
-  "grid":   { "cells": 4, "rows": 1, "requested_rows": 1,     // `rows` is the REALISED time axis
-              "f_lo_hz": 88000000.0, "f_cell_hz": 5000000.0,
+  "grid":   { "cells": 5, "rows": 1, "requested_rows": 1,     // `rows` is the REALISED time axis
+              "f_lo_hz": 88000000.0, "f_cell_hz": 4000000.0,
               "t0_s": 1789300320.0, "t_cell_s": 600.0,
               "order": "row-major: cells[t * cells + f], earliest row first, low frequency first" },
   "devices": [{                                // one entry per front end that actually sampled here
     "device": "hackrf:0000000000000000a06063c8234e925f",
     "named": true,                             // false for the "unknown" and "any" labels
-    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "excluded_cells": 1,
-    "observed_fraction": 0.5,
+    // The five cells below, counted: three `observed`, one `excluded`, one `unobserved`. The states
+    // are counted separately and always sum to `grid.cells` (T-1055 fixed this example, which
+    // summed to 5 over a grid it called 4 cells wide).
+    "observed_cells": 3, "unobserved_cells": 1, "unknown_cells": 0, "excluded_cells": 1,
+    "observed_fraction": 0.6,
     // T-964: the same census with the TIME AXIS COLLAPSED — one entry per frequency cell, sampled
-    // if ANY row sampled it. The survey question; see below.
-    "bands": { "cells": 4, "observed_cells": 2, "excluded_cells": 1, "unobserved_cells": 1,
-               "unknown_cells": 0, "observed_fraction": 0.75, "rule": "collapsed over time: …" },
+    // if ANY row sampled it. The survey question; see below. With `rows: 1` it equals the grid
+    // census above, cell for cell.
+    "bands": { "cells": 5, "observed_cells": 3, "excluded_cells": 1, "unobserved_cells": 1,
+               "unknown_cells": 0, "observed_fraction": 0.6, "rule": "collapsed over time: …" },
     "cells": [
       // 1. observed, and there was energy
       { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
@@ -840,7 +849,7 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
     ]
   }],
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
-           "unknown_cells": 0, "bands": { "…": "…" }, "cells": [ … ] },
+           "unknown_cells": 0, "excluded_cells": 1, "bands": { "…": "…" }, "cells": [ … ] },
   "horizon": { "oldest_record_s": 1789214520.0,  // null when nothing here holds a tune record
                "recording_began_s": 1789214400.0, // T-507: null when nothing here ever recorded
                "forgotten": null,                 // or why the past before it is unbounded
@@ -850,12 +859,13 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
                "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", and must be drawn as neither grey nor a level …" },
   "sources": [
     // T-920: `available` never travels alone - `state`/`reason` say WHICH negative a false is.
+    // T-1055: `truncated` says whether THIS source answered with fewer records than it holds.
     { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true,
-      "state": "open", "reason": null },
+      "truncated": false, "state": "open", "reason": null },
     { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true,
-      "state": "open", "reason": null },
+      "truncated": false, "state": "open", "reason": null },
     { "kind": "open-dwell",      "spans":  1, "named_spans":  1, "device_known": true, "available": true,
-      "state": "open", "reason": null }  // T-596: the dwell in flight
+      "truncated": false, "state": "open", "reason": null }  // T-596: the dwell in flight
   ],
   "shade": { "fold": "max-hold", "rule": "max-hold: a cell is the maximum of the source cells folded into it, … the max of nothing is unobserved, not zero",
              "statistic": "max-hold over the whole window, per frequency cell",
@@ -933,6 +943,19 @@ sampled, that `bands` equals the fold of the cells served beside it, that the (t
 is **not** sampled everywhere (a sweep visits one window at a time), and that a band the pass never
 reached stays `unobserved`. The client half — the orientation sentence quoting this share — is
 `ui/test/surface-preview.test.ts`.
+
+#### How many records one answer reads, and `sources[].truncated` (T-1034, paged by T-1055)
+
+The spans are read from two tune histories, and **each read is bounded** — a coverage answer is on the interactive path, one per viewport. The observation log is read in pages of 10 000 records (`MAX_RECORD_LIMIT`), at most **4 of them** (`MAX_RECORD_PAGES`, 40 000 records); the IQ ring's segment list is capped at 10 000 (`RING_SEGMENTS`).
+
+A bound that binds silently is the problem this field exists to prevent. The log answers **oldest-first**, so a cut read loses the **newest** records — exactly the ones that answer *when was this band last looked at* — and every cell they would have marked comes back `"unobserved"`, which is this route's strongest claim. One `Scan everything` pass writes one record per step (~418 for a coarse 1 MHz–6 GHz pass, far more for a fine one), so before T-1055 a window holding a couple of dozen passes reached the single-page limit and dropped the rest without a word; `bands` (T-964) under-counted with it.
+
+So every `sources[]` row carries **`truncated`**, always, `false` included:
+
+- `truncated: true` means *this source answered with fewer records than it holds over this window*. The spans are then not every span, and **"no span here" is not evidence of anything** — a reader may not draw grey from it, the same way it may not draw grey past `horizon.as_of_s`.
+- The `open-dwell` source is read whole (one dwell per front end) and is always `false`.
+- It is a statement about the **read**, never about the data: nothing was forgotten, and a narrower window or band answers in full.
+- `GET /api/tiles`'s shadow search reads the same evidence and already refuses to use a cut read as a quiet bound (`tiles::record_quiet_after` returns no bound at all when either source is truncated), so a truncated answer never becomes a skipped tile read.
 
 #### The time axis: `rows` (T-423)
 
@@ -1457,9 +1480,34 @@ Messages are JSON text, in order:
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
 - **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
 
+### `GET /ws/tiles/changes` — `coverage_changed` pushed on a retune (T-1040)
+
+WebSocket; token as for every `/ws/` route; no other query parameter (anything else is refused `4400`). One socket per client, not per column: the event is about the tune record, which every tile of every lattice is rasterised against. The live edge's own rows are not here — they are `/ws/tiles/rows` (and, once it lands, the live-stream ring, LSR-1/2, which supersedes the `tile_committed` half of the user's "change events instead of re-asking"); this route carries the one change that rewrites tiles a client **already holds**: a front end moving.
+
+```jsonc
+{ "type": "subscribed",                       // first, always: the band each front end is on now
+  "tuned": [ { "device": "hackrf:…", "f_lo": 99600000.0, "f_hi": 102000000.0,
+               "since_s": …, "as_of_s": …, "source": "iq-ring" } ],   // or "open-dwell"
+  "tick_ms": 100, "rule": "…" }
+{ "type": "coverage_changed", "seq": 1, "device": "hackrf:…",
+  "t": 1789300920.1,                          // Unix s: when the front end arrived on the new band
+  "f_lo": 99600000.0, "f_hi": 122000000.0,    // Hz: the UNION of the band left and the band arrived at
+  "departed": { "f_lo": 99600000.0, "f_hi": 102000000.0 },   // null when the front end is new
+  "arrived":  { "f_lo": 119600000.0, "f_hi": 122000000.0 },
+  "as_of_s": 1789300920.3,                    // how far the record of the new band already reaches
+  "source": "iq-ring" }
+```
+
+- **One event per move.** A front end *moves* when the band its newest tune record names changes (edges more than 1 Hz apart); the event is sent once, within one `tick_ms` of the record stating it. A provenance change that keeps the band (a gain step, a new ring segment, a reseal) is not a move and sends nothing; a front end whose record stops sends nothing either (its fog simply stops advancing, which the rows already say). A reading older than the one in hand is a lagging source, never a move back.
+- **What it means for a client:** every tile intersecting `[f_lo, f_hi] × [t, ∞)` holds coverage that is now out of date — from `t` the band left is `unobserved` (the departed band's fog) and the band arrived at is observed — and **no other tile changed**. So the client re-asks its coverage survey at once and re-fetches exactly those tiles it holds, in one batch (`ui/src/surface/changefeed.ts`, `TileCache.coverageChanged`); the survey timer and the live-edge refresh lane become the fallback for a socket that is not open, until LSR-5 retires the lane. By the time the event is sent the coverage map already answers `unobserved` over the band left between `t` and `as_of_s` (contract: `api_contract.rs::coverage_changed_is_pushed_once_per_retune_and_the_departed_fog_is_already_served`).
+- **Where the band comes from:** the same tune records the coverage map rasterises — the IQ ring's journal (the tuned window, `center ± rate/2`) and, for a front end the ring holds nothing for (the ring refused, T-588/T-596), the observation log's dwell in flight (its analysed extent, the hull of a notched dwell's spans). **One source per front end, never a mix**: alternating between a tuned and an analysed extent would report moves that never happened. Nothing new is recorded.
+- **Cost and cap:** each tick reads the ring's 64 newest segments and the dwells in flight, both in memory. At most **16** change subscriptions are open per server; the seventeenth is refused `4503`. Refusals complete the upgrade and close with `4000 + status`, as `/ws/tiles/rows` does; a request that is not an upgrade is `426`. Anything the client sends other than a close or a ping is ignored.
+
 ### `GET /api/status` — pipeline counters (T-027)
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …), plus one field this route itself adds: **`t`**, the server's own wall clock (`Timestamp::now`, not the run's sample clock) at the instant the response was built — bare name, Unix seconds, per the units convention (T-351). Without it a caller could not tell a fresh read from a cached one, or measure its own clock skew against this device. Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
+
+**The spectrum reader's row fold (T-1048, LSR-7)** is reported under `"spectrum"`: `rows`, `rows_gated`, `errors` (already existing), plus `fold_ns_last`/`fold_ns_max`/`fold_ns_total` — the newest, largest and summed cost (ns) of dB-converting and wire-serializing one row (`fold_ns_total / rows` is the mean), timed at `hk_pipeline::spectrum::Output::row`'s one call site (T-453: capture-thread cost measured, never assumed). **Not per-subscription**: today's `/ws/spectrum/live` folds a row once and every watcher gets the same bytes, because the whole stream has one canonical geometry; a genuinely per-pane fold is LSR-2's (`/ws/spectrum/rows`) to add, at this same measurement point, once it lands.
 
 **Compute providers (T-056, ADR-0007)** are reported under `"compute"`. They are chosen once per run and never change mid-run.
 
@@ -2064,7 +2112,7 @@ The modulation taxonomy and the decision thresholds **as data**, so the thin cli
 
 - **`current`** is the taxonomy new classifications are written under (`"hk-mod@1"`); **`unknown`** is the open-set label (`"unknown"`), which is an outcome at every level and never a leaf of the tree.
 - **`taxonomies`**: every *released* version, oldest first — a stored row keeps the version it was written under, so a reader maps its labels with the matching entry. Each is `{"ref", "name", "version", "families": [{"family", "coarse", "classes": [...]}], "legacy": [{"label", "family"}]}`. `coarse` is `analog` / `digital` / `noise-like`. `legacy` maps pre-taxonomy spellings (e.g. `fsk2` → `fsk`); labels that are already a family or class name are not repeated there. Service labels (`adsb`, `fm-broadcast`, decoder ids) are **not** modulation labels and appear nowhere here.
-- **`thresholds`**: `{"version": "thresholds@1", "max_confidence", "lambda0_min", "families": [{"family", "snr_gate_db", "class_gate_db", "min_confidence", "open_set_max"}]}`. `snr_gate_db` is `null` for a family with no SNR gate (`noise-like` is a shape test). Below its gate a family contributes no likelihood mass — its share moves to `unknown` with reason `low_snr`, because "not measured" is not "ruled out". `max_confidence` (0.999) is the cap that keeps any call from being reported as certain; `lambda0_min` (0.1) is the smallest uniform weight a C17 prior may carry, which is what stops a band-plan prior from driving a family to zero.
+- **`thresholds`**: `{"version": "thresholds@1", "max_confidence", "lambda0_min", "families": [{"family", "snr_gate_db", "class_gate_db", "min_confidence", "open_set_max"}]}`. `snr_gate_db` is `null` for a family with no SNR gate (`noise-like` is a shape test). Below its gate a family contributes no likelihood mass — its share moves to `unknown` with reason `low_snr`, because "not measured" is not "ruled out". `max_confidence` (0.999) is the cap that keeps any call from being reported as certain, and **`max_unknown_confidence` (0.9, T-953)** the strictly lower cap on the `unknown` label — `unknown` is the residual hypothesis, its posterior comes from an open-set score whose χ² tail saturates at 1.0 for anything the shipped densities never saw, and reporting that as near-certainty overstates it (measured on live air 2026-09-25: FLEX bursts read `unknown` 0.999). The known families share the remaining mass (≥ 0.1) in the order of their likelihoods — but at a fully saturated open set (`open_set_score` 1.0) the classifier gives every family a likelihood of 0, so that share is **uniform** and carries no ranking; a reader must not read an order into it. Only below saturation does the residual rank the families. The raw `open_set_score` on the row is uncapped and is the explicit open-set output; `lambda0_min` (0.1) is the smallest uniform weight a C17 prior may carry, which is what stops a band-plan prior from driving a family to zero.
 - **Reference data, not measurement.** No emitter, detection or identity is reachable through this route, and it pre-populates nothing: what was actually *found* comes from `/api/inventory`, always from blind detection first. Errors: `405` (other methods), `401` (token).
 
 ## Signature matches (T-201, ADR-0016 §5)
@@ -2168,6 +2216,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 | GET | `/ws/{stream_id}` | token (header or `?token=`) | Upgrades to WebSocket and bridges the named always-on stream (§10) |
 | GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, `iq`, with query parameters per opener |
 | GET | `/ws/tiles/rows` | token | Rows pushed to a subscription over a tile-lattice **address range** — see [its section](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468) (T-468) |
+| GET | `/ws/tiles/changes` | token | `coverage_changed {f_lo, f_hi, t}` pushed once per front-end move, so a retune re-lays the fog and re-fetches exactly the moved tiles — see [its section](#get-wstileschanges--coverage_changed-pushed-on-a-retune-t-1040) (T-1040) |
 
 **`GET /ws/{stream_id}`** (e.g. `spectrum/live`): the header JSON is the first **text** message, verbatim; every later record is one message — text (NDJSON line) for `messages` streams, binary (32-byte record header + payload) for every binary kind. Refusals never upgrade the connection and are plain HTTP: `401` (bad/missing token, checked before the upgrade), `403` (a `own-key-decrypted` stream — those are Unix-socket-only and never served over the bridge), `404` (unknown `stream_id`), `410` (stream finished), `426` (not a valid WebSocket upgrade request), `503` (consumer cap reached, or `replumbing` — see below).
 

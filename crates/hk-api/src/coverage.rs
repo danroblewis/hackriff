@@ -358,23 +358,68 @@ fn observation_spans(
     (spans, named)
 }
 
-/// [`observation_spans`], and whether the page was **cut** (T-1034): the log answers in log order,
-/// oldest first, so a cut page is missing the NEWEST records — the ones a reader asking "when was
-/// this band last looked at" needs most.
+/// Pages of [`MAX_RECORD_LIMIT`] records one coverage answer may walk (T-1055).
+///
+/// One page was the whole read until T-1055, and a page is 10 000 records: a full 1 MHz–6 GHz
+/// `Scan everything` pass writes one record per step (~418 coarse, far more fine), so a window
+/// holding a couple of dozen passes reached the limit and the answer silently lost the records past
+/// it — **the newest ones**, because the log answers oldest-first. Four pages is 40 000 records,
+/// two orders of magnitude above one pass, and the read is bounded rather than unbounded because a
+/// coverage answer is on the interactive path: a client asks for one per viewport.
+///
+/// Past four pages the answer **says so** rather than pretending (`sources[].truncated`): a source
+/// that answered with fewer records than it holds cannot support *"nothing looked here"*.
+const MAX_RECORD_PAGES: usize = 4;
+
+/// [`observation_spans`], and whether the read was **cut** (T-1034, paged by T-1055): the log
+/// answers in log order, oldest first, so a cut read is missing the NEWEST records — the ones a
+/// reader asking "when was this band last looked at" needs most.
 fn observation_spans_paged(
     store: &ObservationStore,
     freq: FreqRange,
     window: TimeRange,
 ) -> (Vec<CoverageSpan>, usize, bool) {
-    let page = store.query(&RecordQuery {
-        freq,
-        span: window,
-        tier: None,
-        cursor: 0,
-        limit: MAX_RECORD_LIMIT,
-    });
-    let read = hk_store::spans_from_records(&page.records, &page.geometries, freq);
-    (read.spans, read.named, page.next_cursor.is_some())
+    observation_spans_pages(store, freq, window, MAX_RECORD_LIMIT, MAX_RECORD_PAGES)
+}
+
+/// [`observation_spans_paged`] with the page size and page budget given, so the paging itself is
+/// testable without writing 40 000 records (the bounds are constants, the walk is the behaviour).
+fn observation_spans_pages(
+    store: &ObservationStore,
+    freq: FreqRange,
+    window: TimeRange,
+    limit: usize,
+    pages: usize,
+) -> (Vec<CoverageSpan>, usize, bool) {
+    let mut spans: Vec<CoverageSpan> = Vec::new();
+    let mut named = 0usize;
+    let mut cursor = 0usize;
+    let mut cut = false;
+    for _ in 0..pages.max(1) {
+        let page = store.query(&RecordQuery {
+            freq,
+            span: window,
+            tier: None,
+            cursor,
+            limit,
+        });
+        let read = hk_store::spans_from_records(&page.records, &page.geometries, freq);
+        spans.extend(read.spans);
+        named += read.named;
+        match page.next_cursor {
+            // A further page exists: walk it, and if this was the last one we are allowed, the read
+            // is cut and must say so.
+            Some(next) => {
+                cursor = next;
+                cut = true;
+            }
+            None => {
+                cut = false;
+                break;
+            }
+        }
+    }
+    (spans, named, cut)
 }
 
 /// **The dwell each front end is inside right now** (T-596), as spans.
@@ -536,10 +581,14 @@ pub(crate) struct Evidence {
     /// past it as *"nothing looked"* — only as *"this answer does not reach here"*. It is the same
     /// sentence as `oldest_record_s`, pointing the other way.
     pub newest_record: Option<Timestamp>,
-    /// A source answered with **fewer records than it holds** over the window (T-1034): the IQ
-    /// ring's segment list reached its limit, or the observation log's page had a next page. The
-    /// spans are then not every span, and "no span here" is not evidence of anything.
-    pub truncated: bool,
+    /// The **IQ ring** answered with fewer segments than it holds over the window (T-1034): its
+    /// segment list reached [`RING_SEGMENTS`]. The spans are then not every span, and "no span
+    /// here" is not evidence of anything.
+    pub ring_truncated: bool,
+    /// The **observation log** answered with fewer records than it holds over the window (T-1034,
+    /// paged by T-1055): the read walked [`MAX_RECORD_PAGES`] pages and a further page was still
+    /// pending. The log answers oldest-first, so what is missing is the NEWEST records.
+    pub log_truncated: bool,
 }
 
 impl Evidence {
@@ -547,6 +596,13 @@ impl Evidence {
     /// every plane is uniformly `unobserved` and there is no forward horizon to wait for.
     pub(crate) fn has_source(&self) -> bool {
         self.ring_available || self.log_available
+    }
+
+    /// Whether **either** tune history answered with fewer records than it holds: then "no span
+    /// here" proves nothing, and a caller that would otherwise read absence as evidence (the
+    /// shadow search's quiet bound, `tiles::record_quiet_after`) must not.
+    pub(crate) fn truncated(&self) -> bool {
+        self.ring_truncated || self.log_truncated
     }
 
     /// Reads both tune histories over `freq × window`, and each one's reach.
@@ -565,7 +621,7 @@ impl Evidence {
         let ring_all = ring_spans(state, ALL_FREQ, window);
         // Every segment the ring returned is in `ring_all` unless malformed, so a list at the
         // limit may be a cut one.
-        let mut truncated = ring_all.len() >= RING_SEGMENTS;
+        let ring_truncated = ring_all.len() >= RING_SEGMENTS;
         let ring_reach = ring_all.iter().map(|s| s.time.end).max();
         let mut spans: Vec<CoverageSpan> = ring_all
             .into_iter()
@@ -574,11 +630,12 @@ impl Evidence {
         let ring = spans.len();
         let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
         let mut log_named = 0;
+        let mut log_truncated = false;
         let mut open = 0;
         let mut open_named = 0;
         if let Some(store) = state.observations.as_ref() {
             let (log_spans, named, cut) = observation_spans_paged(store, freq, window);
-            truncated |= cut;
+            log_truncated = cut;
             log_named = named;
             spans.extend(log_spans);
         }
@@ -656,7 +713,8 @@ impl Evidence {
             recording_began: memory.recording_began,
             forgotten: memory.forgotten,
             newest_record,
-            truncated,
+            ring_truncated,
+            log_truncated,
         }
     }
 
@@ -702,10 +760,14 @@ impl Evidence {
             { "kind": "iq-ring", "spans": self.ring, "named_spans": self.ring_named,
               "device_known": self.ring_named == self.ring,
               "available": self.ring_available,
+              // T-1055: this source answered with fewer records than it holds. Served per source,
+              // always, so a reader never has to infer it from a suspiciously round count.
+              "truncated": self.ring_truncated,
               "state": ring_state, "reason": ring_reason },
             { "kind": "observation-log", "spans": self.log, "named_spans": self.log_named,
               "device_known": self.log_named == self.log,
               "available": self.log_available,
+              "truncated": self.log_truncated,
               "state": if self.log_available { json!("open") } else { Value::Null },
               "reason": log_reason.clone() },
             // T-596: the dwells in flight. Same claim as a sealed record and rasterised the same
@@ -715,6 +777,10 @@ impl Evidence {
             { "kind": "open-dwell", "spans": self.open, "named_spans": self.open_named,
               "device_known": self.open_named == self.open,
               "available": self.log_available,
+              // The dwells in flight are read whole (there is one per front end), so this source
+              // cannot be cut. Served anyway: a field that appears only sometimes is a field a
+              // client reads as false when it is absent.
+              "truncated": false,
               "state": if self.log_available { json!("open") } else { Value::Null },
               "reason": log_reason },
         ])
@@ -2226,6 +2292,56 @@ mod tests {
         s
     }
 
+    /// **T-1055: the coverage read PAGES the observation log, and says so when it still cannot
+    /// reach the end.**
+    ///
+    /// Until T-1055 the read was one page of [`MAX_RECORD_LIMIT`] (10 000) records with no paging.
+    /// A full `Scan everything` pass writes one record per step — ~418 for a coarse 1 MHz–6 GHz
+    /// pass — so a window holding a couple of dozen passes hit the limit, and the log answers
+    /// **oldest-first**: what was dropped was the newest records, the ones that say where the radio
+    /// looked most recently. `/api/coverage` then served `unobserved` over bands it had a record
+    /// for, and `bands` (T-964) under-counted with it.
+    ///
+    /// The page size and budget are constants, so this drives [`observation_spans_pages`] with a
+    /// two-record page: the walk is the behaviour under test, not the size of the constants.
+    ///
+    /// RED before the fix: `pages = 2` returned the first 2 spans of 5 and reported `cut` from one
+    /// page only.
+    #[test]
+    fn a_coverage_read_pages_the_observation_log_and_says_when_it_is_still_cut() {
+        let dir = TempDir::new("paged-log");
+        // Five dwells, each over its own 2 MHz of the band, so a lost record is a lost band.
+        let records: Vec<ObservationRecord> = (0..5)
+            .map(|i| {
+                let lo = 100e6 + f64::from(i) * 2e6;
+                dwell_over(Some(RUNNING), lo, lo + 2e6)
+            })
+            .collect();
+        let store = store_of(&dir, &records);
+        let (freq, window) = (FreqRange::new(100e6, 110e6), observation_window());
+
+        // One page of two: two spans, and the answer knows it is cut.
+        let (spans, _, cut) = observation_spans_pages(&store, freq, window, 2, 1);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert!(cut, "a read that left a page unread must say so");
+
+        // Two pages of two: FOUR spans — the paging walked — and still cut.
+        let (spans, _, cut) = observation_spans_pages(&store, freq, window, 2, 2);
+        assert_eq!(spans.len(), 4, "the second page was never read: {spans:?}");
+        assert!(cut, "one record is still unread");
+
+        // Enough pages: every record, and NOT cut — so `unobserved` here is evidence again.
+        let (spans, named, cut) = observation_spans_pages(&store, freq, window, 2, 3);
+        assert_eq!(spans.len(), 5, "{spans:?}");
+        assert_eq!(named, 5, "every record named its radio");
+        assert!(!cut, "the read reached the end of the log");
+
+        // The shipped read (4 pages of 10 000) reaches the end of this log without a cut.
+        let (spans, _, cut) = observation_spans_paged(&store, freq, window);
+        assert_eq!(spans.len(), 5, "{spans:?}");
+        assert!(!cut);
+    }
+
     /// **The property.** Coverage over the observation log's horizon — the long one, far beyond the
     /// IQ ring's retention — answers *"did **this** front end look here"*, not merely "did
     /// anything". Two radios on disjoint ranges are two grids, each unobserved exactly where the
@@ -3065,6 +3181,67 @@ mod tests {
             states(&[("unobserved", 1), ("observed", 5), ("unobserved", 4)]),
             "the ring's own segment is observed, and after its reach nothing looked: {ring}"
         );
+    }
+
+    /// **T-1055: every source row says whether it answered SHORT, and the flag is never absent.**
+    ///
+    /// `Evidence` has carried this fact since T-1034 and no answer stated it, so a client reading
+    /// `unobserved` had no way to tell *nothing looked here* from *this answer does not hold every
+    /// record*. It is the same rule as T-920's `available`: a negative that cannot say which
+    /// negative it is cannot be read at all.
+    ///
+    /// RED before the fix: no `sources[]` row has a `truncated` key.
+    #[test]
+    fn every_source_row_says_whether_its_tune_history_answered_short() {
+        let window = TimeRange::new(t(7080), t(7280));
+        let sources_of = |segments: Value| {
+            let state = ApiState {
+                iq_buffer: Some(std::sync::Arc::new(FakeRing(json!({
+                    "enabled": true, "reason": Value::Null, "allocation": "full",
+                    "t0": 7100.0, "t1": 7200.0, "segments": segments,
+                })))
+                    as std::sync::Arc<dyn crate::IqBufferControl>),
+                ..ApiState::default()
+            };
+            overlay_json(&state, band(), window, 10, 1)["sources"].clone()
+        };
+        let segment = |i: i64| {
+            json!({ "device_id": RUNNING, "center_hz": 150e6, "sample_rate_hz": 20e6,
+                    "t0_ns": (7_100 + i) * 1_000_000_000, "t1_ns": (7_101 + i) * 1_000_000_000 })
+        };
+
+        // A short list: every source answered everything it holds, and every row says so.
+        let v = sources_of(json!([segment(0)]));
+        for row in v.as_array().unwrap() {
+            assert_eq!(
+                row["truncated"],
+                json!(false),
+                "the {} row does not state whether it answered short: {row}",
+                row["kind"]
+            );
+        }
+
+        // A list AT the limit is one that may have been cut, and the ring row says so — while the
+        // other sources, read whole, keep saying false. A flag that is true for everything whenever
+        // one source is cut would be the same silence one level up.
+        let full: Vec<Value> = (0..RING_SEGMENTS as i64).map(segment).collect();
+        let v = sources_of(Value::Array(full));
+        let row = |kind: &str| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["kind"] == json!(kind))
+                .cloned()
+                .unwrap_or_else(|| panic!("the {kind} source is always reported: {v}"))
+        };
+        assert_eq!(
+            row("iq-ring")["truncated"],
+            json!(true),
+            "a segment list at the limit may be a cut one and must say so: {}",
+            row("iq-ring")
+        );
+        assert_eq!(row("observation-log")["truncated"], json!(false));
+        assert_eq!(row("open-dwell")["truncated"], json!(false));
     }
 
     /// **T-920: an unavailable source says WHICH negative it is.**
