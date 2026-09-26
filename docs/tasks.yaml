@@ -29757,7 +29757,8 @@ tasks:
   - id: T-1009
     milestone: MMAP
     title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
-    status: todo
+    status: in-progress
+    branch: task-t1009
     priority: normal
     deps:
     - T-1008
@@ -30599,7 +30600,8 @@ tasks:
   - id: T-1047
     milestone: MLIVE
     title: "LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold"
-    status: todo
+    status: in-progress
+    branch: task-t1047
     priority: medium
     deps:
     - T-1042
@@ -30661,7 +30663,8 @@ tasks:
   - id: T-1050
     milestone: MMAP
     title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
-    status: todo
+    status: in-progress
+    branch: task-t1050
     priority: high
     deps:
     - T-1041
@@ -30680,7 +30683,8 @@ tasks:
   - id: T-1051
     milestone: MMAP
     title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
-    status: todo
+    status: in-progress
+    branch: task-t1051
     priority: high
     deps: []
     parallel_group: UI-TRACE-HOLD
@@ -30697,7 +30701,8 @@ tasks:
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
-    status: todo
+    status: in-progress
+    branch: task-t1052
     priority: medium
     deps: []
     parallel_group: LSR-RING-SPEC
