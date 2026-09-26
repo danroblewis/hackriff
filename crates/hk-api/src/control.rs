@@ -1107,7 +1107,7 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
     // than `action`, so the log never reads as if the request itself moved the radio.
     let device = match action.reach() {
         Reach::Device(d) => Some(audit_device_json(state, req, d)),
-        Reach::Commissions(d) => Some(commissioned_json(state, d)),
+        Reach::Commissions(d) => Some(audit_commission_json(state, req, d)),
         Reach::View => None,
     };
     let actor = req.caller.token_id.clone();
@@ -1502,21 +1502,49 @@ fn caps_json(c: &SourceCapabilities, device_id: Option<&str>) -> Value {
 /// flight — the same distinction the type [`Reach`] draws, carried onto the wire and into the
 /// audit log so neither can be read as the other. `id` is `null` when the source reports no
 /// identity, never a placeholder (the T-325 rule).
-fn commissioned_json(state: &ApiState, action: DeviceAction) -> Value {
+/// The audit entry's `device` for a commissioning route, resolved **best-effort** from the request
+/// the way [`audit_device_json`] resolves a device action's: the `device_id` the caller asked for
+/// (or the run's default when it holds one sweepable front end), `null` when it names nothing this
+/// run holds. Nothing is guessed — a selector that resolved to no radio must never be logged as
+/// having committed the default one.
+fn audit_commission_json(state: &ApiState, req: &CtlRequest<'_>, action: DeviceAction) -> Value {
+    let want = parse_body(req).ok().and_then(|b| {
+        b.get("device_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
     json!({
         "commissions": action.as_str(),
-        // The sweep drives the front end the runner was composed over, which is this run's
-        // default one (`crate::scan`); it is not re-selected per request.
         "id": state
-            .live_controls
-            .primary()
-            .and_then(|l| l.device_id())
+            .scans
+            .select_to_commission(want.as_deref())
+            .ok()
+            .and_then(|r| r.device_id())
             .map(str::to_owned),
     })
 }
 
-/// The scan runner, or the reason there is none.
-fn scan_runner(state: &ApiState) -> Result<&std::sync::Arc<crate::scan::ScanRunner>, Fail> {
+fn commissioned_json(runner: &crate::scan::ScanRunner, action: DeviceAction) -> Value {
+    json!({
+        "commissions": action.as_str(),
+        // T-1009: the front end THIS runner sweeps — the one the request selected, not the run's
+        // default read off somewhere else. One runner per front end, so the two cannot diverge.
+        "id": runner.device_id().map(str::to_owned),
+    })
+}
+
+/// The scan runner a request names, or the reason there is none.
+///
+/// T-1009: a run holds **one runner per front end**, so a request may name which radio it is about
+/// with `device_id` — the same selector the six device routes take. `commission` is whether this
+/// request *commits* a radio (a start): omitting the selector then is refused on a multi-device run
+/// rather than guessed at, exactly as a retune with no selector is, while a read (the state, a
+/// price) answers for the run's default front end and says in `device_id` which one that was.
+fn scan_runner<'a>(
+    state: &'a ApiState,
+    device_id: Option<&str>,
+    commission: bool,
+) -> Result<&'a std::sync::Arc<crate::scan::ScanRunner>, Fail> {
     if state.live_controls.is_empty() {
         return Err(Fail::new(
             409,
@@ -1524,13 +1552,31 @@ fn scan_runner(state: &ApiState) -> Result<&std::sync::Arc<crate::scan::ScanRunn
             "the source is a recording: there is no front end to sweep",
         ));
     }
-    state.scan.as_ref().ok_or_else(|| {
-        Fail::new(
+    if state.scans.is_empty() {
+        return Err(Fail::new(
             503,
             "unavailable",
             "this server was composed without a scan runner",
-        )
-    })
+        ));
+    }
+    let picked = if commission {
+        state.scans.select_to_commission(device_id)
+    } else {
+        state.scans.select(device_id)
+    };
+    picked.map_err(|e| Fail::new(e.http_status(), e.code(), e.to_string()))
+}
+
+/// The `device_id` selector in a control **body**, as a string or not at all.
+fn device_selector(body: &Map<String, Value>) -> Result<Option<&str>, Fail> {
+    match body.get("device_id") {
+        None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(Fail::invalid(
+            "device_id must be a string naming a live front end (omit it when this run holds \
+             exactly one)",
+        )),
+    }
 }
 
 fn scan_fail(e: crate::scan::ScanError) -> Fail {
@@ -1579,6 +1625,14 @@ fn scan_proposal(query: &[(String, String)]) -> Result<Option<crate::scan::ScanR
             },
         ),
     )
+}
+
+/// The `device_id` selector in a `GET /api/control/scan` query (T-1009), when one is named.
+fn scan_device(query: &[(String, String)]) -> Option<&str> {
+    query
+        .iter()
+        .find(|(n, _)| n == "device_id")
+        .map(|(_, v)| v.as_str())
 }
 
 /// `windows` on `GET /api/control/scan` (T-1008): `1`/`true` asks for each step's slice; absent,
@@ -1648,7 +1702,12 @@ pub(crate) fn state_json(state: &ApiState) -> Value {
         // T-452: the survey sweep's state, beside the tuning it moves. The panel that polls this
         // sees a scan yield to the user's own tune without a second poll, which is what makes the
         // yield visible rather than merely recorded. `null` when nothing can sweep this source.
-        "scan": state.scan.as_ref().map(|s| s.json()),
+        "scan": state.scans.primary().map(|s| s.json()),
+        // T-1009: with several front ends there is one sweep per radio, so "the scan" is as
+        // under-defined as "the device" is — `scan` above stays the run's DEFAULT front end's (what
+        // a single-SDR run has always meant by it) and this is the enumeration a client picks from,
+        // each entry naming its own `device_id`. `[]` when nothing can sweep this source.
+        "scans": state.scans.iter().map(|s| s.json()).collect::<Vec<_>>(),
         "display_limits": state.run_control.as_deref().map(|r| display_limits_json(&r.display_limits())),
         "transmit": {
             "available": false,
@@ -1666,7 +1725,9 @@ fn read(state: &ApiState, action: Action, query: &[(String, String)]) -> Result<
         // sweep would cost, **without starting it**. A 6 GHz pass at a 15 s dwell is ~80 minutes;
         // the arithmetic belongs in front of the button, not in the log after it.
         Action::ScanState => {
-            let runner = scan_runner(state)?;
+            // T-1009: `device_id` names which front end's sweep this is about; omitted, it is the
+            // run's default one, and the answer's own `device_id` says which that was.
+            let runner = scan_runner(state, scan_device(query), false)?;
             // T-1008: `windows=1` adds every step's slice to `plan` (and `proposed.plan`), so a
             // client draws the steps the engine will execute instead of tiling the range itself.
             let windows = scan_windows(query)?;
@@ -1765,25 +1826,24 @@ fn apply(
     body: &Map<String, Value>,
     actor: Option<String>,
 ) -> Result<Applied, Fail> {
+    // T-1009: the arbitration is **per radio**. The user's action names one front end (or the
+    // run's only one), and only *that* front end's sweep yields to it: a sweep of B has no
+    // business stopping because A was retuned. With one front end this is exactly what it was.
     let yielded = match action.reach() {
-        Reach::Device(d) => state
-            .scan
-            .as_ref()
-            .and_then(|s| s.note_user_device_action(d)),
+        Reach::Device(d) => device_selector(body)
+            .ok()
+            .and_then(|want| state.scans.select(want).ok())
+            .and_then(|r| r.note_user_device_action(d).map(|y| (r, y))),
         Reach::Commissions(_) | Reach::View => None,
     };
     let mut result = apply_action(state, action, body, actor);
     match (&yielded, &mut result) {
-        (Some(y), Ok(a)) => {
+        (Some((_, y)), Ok(a)) => {
             if let Some(o) = a.body.as_object_mut() {
                 o.insert("scan".into(), json!({ "yielded": y.json() }));
             }
         }
-        (Some(y), Err(_)) => {
-            if let Some(s) = state.scan.as_ref() {
-                s.unyield(y);
-            }
-        }
+        (Some((r, y)), Err(_)) => r.unyield(y),
         (None, _) => {}
     }
     result
@@ -1851,16 +1911,30 @@ fn apply_action(
         // none here, so the answer names the device it commits and the plan it will walk, and the
         // first step is taken by the driver.
         Action::ScanStart => {
-            only(body, &["f_lo_hz", "f_hi_hz", "dwell_s", "step", "resume"])?;
-            let runner = scan_runner(state)?;
+            only(
+                body,
+                &[
+                    "f_lo_hz",
+                    "f_hi_hz",
+                    "dwell_s",
+                    "step",
+                    "resume",
+                    "device_id",
+                ],
+            )?;
+            // T-1009: starting commits a radio to hundreds of retunes, so on a run holding more
+            // than one sweepable front end the selector is required, not guessed (400
+            // `device_required`) — the same rule the six device routes obey.
+            let runner = scan_runner(state, device_selector(body)?, true)?;
             let old = runner.json();
             let resume = match body.get("resume") {
                 None => false,
                 Some(Value::Bool(b)) => *b,
                 Some(_) => return Err(Fail::invalid("resume must be true or false")),
             };
+            let fields = body.len() - usize::from(body.contains_key("device_id"));
             let plan = if resume {
-                if body.len() > 1 {
+                if fields > 1 {
                     return Err(Fail::invalid(
                         "resume takes no range and no dwell: it continues the sweep that yielded, \
                          at the step it stopped on. Start a new one to change either.",
@@ -1907,7 +1981,7 @@ fn apply_action(
             let new = runner.json();
             // A coarse step from a narrower window also commits the front end to one rate change
             // before its first retune (T-517): the answer names it, as it names the retunes.
-            let mut device = commissioned_json(state, DeviceAction::Retune);
+            let mut device = commissioned_json(runner, DeviceAction::Retune);
             let rate = new["plan"]["changes_rate"]
                 .as_bool()
                 .unwrap_or(false)
@@ -1928,10 +2002,21 @@ fn apply_action(
         // Stopping surrenders the radio, so it is never refused and never a device action: a
         // control that can command the front end must always be surrenderable.
         Action::ScanStop => {
-            only(body, &[])?;
-            let runner = scan_runner(state)?;
+            only(body, &["device_id"])?;
+            let want = device_selector(body)?;
+            // T-1009: surrendering the radio must never be refusable, so an omitted selector on a
+            // multi-device run stops EVERY sweep rather than answering `device_required`: "stop"
+            // with no radio named can only mean all of them, and refusing it would be the one
+            // refusal this route is not allowed to make. A named one stops exactly that radio's.
+            let runner = scan_runner(state, want, false)?;
             let old = runner.json();
-            runner.stop();
+            if want.is_none() {
+                for r in state.scans.iter() {
+                    r.stop();
+                }
+            } else {
+                runner.stop();
+            }
             let new = runner.json();
             Ok(ok(json!({ "scan": new.clone() }), old, new))
         }

@@ -70,6 +70,9 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
       centerHz: d.tuning?.center_hz ?? null,
       sampleRateHz: d.tuning?.sample_rate_hz ?? null,
     })),
+    // T-1009: every front end's sweep. An older server sends none; `[]` then, never a guess that
+    // the default one's sweep is every radio's.
+    scans: cs.scans ?? [],
   };
 }
 

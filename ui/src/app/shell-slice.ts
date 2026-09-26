@@ -71,6 +71,10 @@ export interface DeviceSlice {
    * readings of one wire list cannot be confused (integration of T-1006 and T-1007).
    */
   frontEnds: readonly FrontEnd[];
+  /** T-1009: every front end's sweep (`/api/control/state`'s `scans`), so a scan plan bound to a
+   * chosen radio follows THAT radio's sweep — with two SDRs the default one's state says nothing
+   * about a sweep started on the other. `[]` on a replay or before the state loads. */
+  scans?: readonly ScanState[];
 }
 
 /** One front end as the shell reduces it: its identity, what it is, and what it is tuned to now. */
@@ -128,7 +132,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, devices: [], centerGrid: null, fftBounds: null, frontEnds: [] },
+  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, devices: [], centerGrid: null, fftBounds: null, frontEnds: [], scans: [] },
   nav: { gotoHz: null, gotoSpanHz: null, gotoTS: null, gotoSpanS: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,
