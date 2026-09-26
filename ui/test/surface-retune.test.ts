@@ -197,7 +197,7 @@ test("T-476: the control has a row on EVERY pane and none on the map, and the ch
     id, rect: null, following: true, device: "any", levelF: 0, levelT: 0, cellHz: 6250, cellS: 1,
     levelLabel: "6.25 kHz × 1.0 s cells (detail tier, level 0/0)", tier: "detail",
     tierLabel: "detail tier: the live chain's own lattice, at the resolution the front end measured.",
-    timeLabel: "LIVE", t0Ns: 0, t1Ns: 1e9, freqLabel: "100.800 MHz ± 500 kHz",
+    timeLabel: "LIVE", t0Ns: 0, t1Ns: 1e9, fLoHz: 100.3e6, fHiHz: 101.3e6, freqLabel: "100.800 MHz ± 500 kHz",
     tiles: 1, fallbacks: 0, pending: 0, differsFrom: [],
   });
   const asked: string[] = [];

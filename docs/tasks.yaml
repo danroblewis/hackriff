@@ -31908,7 +31908,6 @@ tasks:
     milestone: MLIVE
     title: "RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)"
     status: in-progress
-    branch: task-t1082
     priority: P1
     deps: []
     parallel_group: UI-LSR-METRICS
@@ -31923,6 +31922,15 @@ tasks:
       FOUND BY rc-20260926: RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)
 
       2026-09-26 coordinator: a SECOND shadow-level red, seen by the UI-stack integrator alone on 170bf91a (and identically on task-t1051): T-911 'a departed band's shadow keeps its last live row's colour' fails 'never reached 101375000 +- 37500' - the view pans down from 434.5 MHz and never gets back to band A. Own both shadow-level reds here (the dashboard tile's latency n=0 and this navigation); if the navigation one is its own defect (the spec's pan target unreachable after a retune - T-1040's coverage_changed re-lay?), split it with evidence.
+    branch: task-t1082
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 08:33).
+      The RC 'latency n=0' red was live-ring-metrics.e2e.mjs on lane 1. The interleaved log put it under shadow-level's heading. It reproduces alone on a fresh hk when app-no-minimap and app-status run first. A following pane opens on the OBSERVED extent, which grows as the backend ages, so rowPx fell under MIN_ROW_PX and the ring correctly stood aside. Fold counted every row (n=256), and with no ring row painted there was nothing to measure, so latency correctly read n=0. The product is right. The spec now sets its own precondition with the product's time zoom until the following pane's ring reports rows (T-1052's rule). The second red, shadow-level T-911, failed alone 3/3 on two stale premises. First, gotoFreq only panned from an 8.2 MHz view at 434.5 MHz: about 97 drags to band A against a cap of 80. It now zooms out first, then zooms in about the target. Second, the pane window was parsed from a readout that rounds the centre to 1 kHz, coarser than the 586 Hz cell, so boundary columns sampled the neighbour cell. Panes now expose their exact frequency window as data-f-lo-hz/data-f-hi-hz (PaneStatus.fLoHz/fHiHz, mirroring data-t0-ns), and the spec reads those. No assertion was loosened. Worst column deviation is now 0.25 steps.
+      Tests: HK_E2E_CONCURRENCY=1 HK_E2E_PORT=9216 npm run e2e -- app-no-minimap app-status live-ring-metrics (old spec) -> exit 1 (reproduces the RC red on a fresh hk: latency n=0, fold n=256); HK_E2E_CONCURRENCY=1 HK_E2E_PORT=9216 npm run e2e -- app-no-minimap app-status live-ring-metrics -> exit 0 (3/3 files passed; latency n=5..8); HK_E2E_PORT=9216 npm run e2e -- shadow-level (old spec, x3) -> exit 1 (fails alone 3/3: never reached 101375000 +- 37500); HK_E2E_PORT=9216 npm run e2e -- shadow-level (x3, fresh hk) -> exit 0 (3/3 green; framebuffer max 0.25 steps); HK_E2E_PORT=9216 npm run e2e -- live-ring-metrics (x3, fresh hk) -> exit 0 (3/3 green; latency n>0); just test-ui -> exit 0 (117/117 test files passed); cd ui && npx tsc --noEmit -> exit 0 (clean)
+      precheck exit 0
+      Commits: 97f990f4
+      Observed, not chased: ui/e2e/live-ring.e2e.mjs:73 waits for '.hk-surface-viewport[data-viewport="pane"]' on the app page ('/'). With that same wait, my first live-ring-metrics fix timed out at 30 s after app-status on one lane (/tmp/t1082 run: 'timed out after 30000 ms waiting for the chrome to report a viewport'). live-ring passed in the RC, so it may be order-dependent. Not verified. | The RC run's lane 1 also had live-edge.e2e.mjs (188 s) and app-pane-inventory.e2e.mjs red before live-ring-metrics (merge-runner.log around line 990000). Not examined.
+      Resources: 391 CPU-s, peak 3.4 GB
   - id: T-1083
     milestone: M2-hardening
     title: "RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam"

@@ -160,16 +160,21 @@ const PANE_ROWS = `JSON.stringify([...document.querySelectorAll('.hk-surface-vie
   tier: v.getAttribute('data-tier'),
   t0Ns: Number(v.getAttribute('data-t0-ns')),
   t1Ns: Number(v.getAttribute('data-t1-ns')),
+  fLoHz: Number(v.getAttribute('data-f-lo-hz')),
+  fHiHz: Number(v.getAttribute('data-f-hi-hz')),
 })))`;
 const panes = async (page) => JSON.parse(await page.eval(PANE_ROWS));
 
-/** The pane's frequency window, parsed from `.hk-surface-where` (fog-of-war.e2e.mjs's reading). */
-function windowOf(where) {
-  const m = /^([\d.]+) MHz ± ([\d.]+) (Hz|kHz|MHz|GHz)/.exec(where);
-  assert.ok(m, `the pane readout is not a frequency window: ${JSON.stringify(where)}`);
-  const mult = { Hz: 1, kHz: 1e3, MHz: 1e6, GHz: 1e9 }[m[3]];
-  const centerHz = Number(m[1]) * 1e6, halfHz = Number(m[2]) * mult;
-  return { centerHz, halfHz, loHz: centerHz - halfHz, hiHz: centerHz + halfHz, spanHz: 2 * halfHz };
+/** The pane's frequency window, exactly as the frame drew it: the row's `data-f-lo-hz` /
+ * `data-f-hi-hz` (T-1082). Never the `.hk-surface-where` sentence: it rounds the centre to 1 kHz,
+ * coarser than the 586 Hz cell sampled below, so per-cell sampling off it landed a cell off at
+ * boundaries (alternating ±1.5-step "errors" between neighbouring columns). */
+function windowOf(row) {
+  const { fLoHz: loHz, fHiHz: hiHz } = row;
+  assert.ok(Number.isFinite(loHz) && Number.isFinite(hiHz) && hiHz > loHz,
+    `the pane row states no frequency window: ${JSON.stringify(row)}`);
+  const spanHz = hiHz - loHz;
+  return { centerHz: (loHz + hiHz) / 2, halfHz: spanHz / 2, loHz, hiHz, spanHz };
 }
 
 /** Pane rectangles in CSS px, from the canvas box: one pane, or two side by side (Split ⇔). */
@@ -194,7 +199,7 @@ async function gotoFreq(page, rect, centerHz, spanHz) {
   const y = rect.y + rect.h / 2;
   const trail = [];
   for (let i = 0; i < 80; i++) {
-    const win = windowOf((await panes(page))[0].where);
+    const win = windowOf((await panes(page))[0]);
     trail.push(`${(win.centerHz / 1e6).toFixed(4)}±${(win.halfHz / 1e3).toFixed(1)}k`);
     const off = centerHz - win.centerHz;
     const inside = centerHz > win.loHz + win.spanHz * 0.05 && centerHz < win.hiHz - win.spanHz * 0.05;
@@ -202,6 +207,16 @@ async function gotoFreq(page, rect, centerHz, spanHz) {
       // One shift-wheel notch: zoomFactor = exp(delta * 0.0015); aim at the ratio still needed.
       const delta = Math.max(-400, Math.log(spanHz / win.spanHz) / 0.0015);
       await page.wheel({ x: xOf(rect, win, centerHz), y }, delta, { shift: true });
+      await page.frames(2);
+      continue;
+    }
+    if (!inside && Math.abs(off) > win.spanHz * 2) {
+      // Far off-screen: zoom OUT about the view's centre until the target is on it, then the
+      // branch above zooms back in about the target (Google-Maps navigation). A pan alone moves at
+      // most 0.42 of the span per drag, so from an 8.2 MHz view parked at 434.5 MHz band A's
+      // 101.4 MHz is ~97 drags away — past this loop's 80 (T-1082: fails alone 3/3 on a fresh hk).
+      const delta = Math.min(400, Math.log((2.5 * Math.abs(off)) / win.spanHz) / 0.0015);
+      await page.wheel({ x: rect.x + rect.w / 2, y }, delta, { shift: true });
       await page.frames(2);
       continue;
     }
@@ -433,7 +448,7 @@ test("T-911: a departed band's shadow keeps its last live row's colour (per colu
 
   const rows = await panes(page);
   const rects = await paneRects(page, 2);
-  const wins = rows.map((r) => windowOf(r.where));
+  const wins = rows.map(windowOf);
   const img = await page.shot(path.join(ART, "shadow-level.png"));
   const dpr = await page.eval("window.devicePixelRatio || 1");
   const S = (v) => v * dpr; // CSS px -> screenshot px

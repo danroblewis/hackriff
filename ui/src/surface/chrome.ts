@@ -122,6 +122,10 @@ export interface ReadoutRow {
    * sentence; T-472's alt-wheel probe once read `−23 s` → `−23 s` for a move that did happen). */
   readonly t0Ns: string;
   readonly t1Ns: string;
+  /** The frequency window the headline rounds, unrounded: Hz as decimal strings, set on the row as
+   * `data-f-lo-hz` / `data-f-hi-hz` (the same reason as `t0Ns`, T-1082). */
+  readonly fLoHz: string;
+  readonly fHiHz: string;
   /** **The stated level**: the cell size the pixels are made of, and the level indices. */
   readonly level: string;
   /** **Which tier the pane drew from** (T-505): `detail` or `overview`. The honesty tiers are two
@@ -206,6 +210,8 @@ export function readoutOf(
       headline: [s.freqLabel, s.timeLabel].filter(Boolean).join(" · "),
       t0Ns: String(s.t0Ns),
       t1Ns: String(s.t1Ns),
+      fLoHz: String(s.fLoHz),
+      fHiHz: String(s.fHiHz),
       level: s.levelLabel,
       tier: s.tier,
       tierLabel: s.tierLabel,
@@ -291,6 +297,8 @@ export class SurfaceChrome {
       entry.root.setAttribute("data-tier", row.tier);
       entry.root.setAttribute("data-t0-ns", row.t0Ns);
       entry.root.setAttribute("data-t1-ns", row.t1Ns);
+      entry.root.setAttribute("data-f-lo-hz", row.fLoHz);
+      entry.root.setAttribute("data-f-hi-hz", row.fHiHz);
       set(entry.cells[0], row.viewport === "minimap" ? `${row.id} (map)` : row.id);
       set(entry.cells[1], row.headline);
       set(entry.cells[2], row.level);
