@@ -10,9 +10,9 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { connect, kill, launch } from "./cdp.mjs";
-import { census, decodePng } from "./png.mjs";
+import { census, decodePng, pixelDiff } from "./png.mjs";
 
-export { census };
+export { census, pixelDiff };
 
 /** CDP's modifier bitmask, from names: **Alt 1, Ctrl 2, Meta 4, Shift 8**. One definition, used by
  * both `wheel` and `drag`, so the two gestures cannot disagree about what "shift" is. */
