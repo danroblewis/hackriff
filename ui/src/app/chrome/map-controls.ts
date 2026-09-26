@@ -100,8 +100,13 @@ export interface LayerMenuHost {
  * view; `extras` are host-built items (Record IQ) appended below, whose own code states their route.
  */
 export interface PaneMenuHost {
-  split(): void;
+  /** Split the active pane: `columns` (side by side, the default) or `rows` (stacked). T-1005. */
+  split(dir?: "columns" | "rows"): void;
   closePane(): void;
+  /** T-1005: the orientation of the split holding the active pane (null with one pane), and a flip
+   * of it between rows and columns. Layout only: both panes keep their views. */
+  splitDir?(): "columns" | "rows" | null;
+  flipSplit?(): void;
   wholeSurface(): void;
   /** How many panes exist, so the menu can say the last one never closes. */
   paneCount(): number;
@@ -442,6 +447,9 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
+  // T-1005: rows ⇄ columns for the split the active pane is in. Hidden without a host that can.
+  const flipItem = paneItem("flip", "Stack as rows", "Re-orient the active viewport's split between side by side and stacked. Both viewports keep what they show.", () => host.flipSplit?.());
+  flipItem.hidden = !host.flipSplit;
   const paneHead = h("span", {}, "Viewport");
   // T-1006: the front-end picker for THIS viewport, and the "one viewport per front end" split.
   // Rebuilt from `host.deviceMenu()` each time the menu opens (`syncPaneMenu`), hidden entirely when
@@ -457,7 +465,9 @@ export function mountMapControls(host: MapControlHost): {
     deviceHead, deviceRows, deviceNote, perDevice);
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
     h("div", { class: "map-layers-head" }, paneHead, paneClose),
-    paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
+    paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split("columns")),
+    paneItem("split-rows", "Split ⇕", "Two viewports onto the same surface, stacked one above the other. They show the identical box until one is moved.", () => host.split("rows")),
+    flipItem,
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
     deviceSection,
@@ -619,6 +629,10 @@ export function mountMapControls(host: MapControlHost): {
     const last = host.paneCount() <= 1;
     closeItem.disabled = last;
     closeItem.title = last ? "The last viewport never closes." : "Close the active viewport. The last one never closes.";
+    const dir = host.splitDir?.() ?? null;
+    flipItem.disabled = dir === null;
+    flipItem.textContent = dir === "rows" ? "Side by side ⇔" : "Stack as rows ⇕";
+    flipItem.dataset.dir = dir ?? "";
     // T-1006: the front-end picker. Built on open rather than per frame — a menu the user is reading
     // must not have its radio inputs replaced under the pointer — and only when the host offers one.
     const dm = host.deviceMenu?.();

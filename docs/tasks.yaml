@@ -29592,7 +29592,6 @@ tasks:
     milestone: MMAP
     title: "Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close"
     status: in-progress
-    branch: task-t1005
     priority: medium
     deps:
     - T-1000
@@ -29607,6 +29606,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 21:08).
+      Merged the last gated main (6f029754) into task-t1005; the conflicts were with T-1001 (per-pane Live buttons) and T-1006 (front-end picker). I kept both sides: the stage holds the split chrome and the per-pane Live layer, the frame's dom hook places the outline, the Live buttons and the split chrome, and the viewport menu syncs both the rows/columns flip and the device picker. Change on top of main: a pane's x also steps clear of that pane's Live button, which shares its top-right corner; the Live button does not read the x back, so the two cannot feed back into each other. app-surface's viewport-menu count is now 8, because T-1006 added a per-device item beside my Split ⇕ and flip; main's spec still said 5. The ticket's own work is unchanged: a draggable divider (setSplitFraction / path-addressed setDividerFraction), a x per pane, Split ⇕ plus a rows/columns flip, and after a close the active pane is the one under the pointer, else the live one.
+      Tests: just test-ui -> exit 0 (99/99 test files passed after the merge); cd ui && npm run e2e -- app-split-layout app-active-pane -> exit 0 (4/4 (1280 and 400 px each): divider drag consistent at every step, flip, close each pane, active pane after close; active-pane incl. T-1001 Live buttons); cd ui && npm run e2e -- app-surface -> exit 1 (8/9 pass. The one red is T-807 at app-surface.e2e.mjs:451: the layers-menu key list gets an extra 'frontend' entry. That key comes from main's T-1006 layer registry, and this branch's diff against 6f029754 changes neither the registry (ui/src/app/map untouched) nor that part of the spec (only the pane-count line differs). This is inferred from the diff; I did not run the spec on main's own build.)
+      precheck exit 0
+      Commits: 6437b996, 86235643, bef4f08d
+      Observed, not chased: Main 6f029754: app-surface.e2e.mjs T-807 expects the layers-menu rows with a key to be [coverage, detections, tune], but T-1006 added a 'frontend' key, so the spec fails with actual [coverage, detections, tune, frontend]. Main's app-surface also still expected 5 viewport-menu items although T-1006 added a 'per-device' button, which made 6 on main; this branch updates that count to 8. | precheck: only `cargo fmt --all --check` was run (exit 0). The diff has no Rust, and `just precheck` with no crates would run clippy over the whole workspace.
+      Resources: 873 CPU-s, peak 4.6 GB
+    branch: task-t1005
   - id: T-1006
     milestone: MMAP
     title: "Pane device selector in the UI: a device pill in each pane's status, a picker in the pane menu, 'one pane per device' when two SDRs are attached; Go-to/retune command that pane's device"
