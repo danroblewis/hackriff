@@ -29851,7 +29851,8 @@ tasks:
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
-    status: todo
+    status: in-progress
+    branch: task-t1021
     priority: normal
     deps:
     - T-1018
@@ -30177,7 +30178,8 @@ tasks:
   - id: T-1035
     milestone: MLIVE
     title: "Canvas client hammers a dead backend (40-49 failed requests per 5 s, no backoff): canvas-journey #4 red on main 3/3 - bounded backoff after connection failures, no re-render thrash"
-    status: todo
+    status: in-progress
+    branch: task-t1035
     priority: high
     deps: []
     parallel_group: UI-DEAD-BACKEND
