@@ -253,6 +253,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/analyze/{id}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
     ("GET", "/ws/tiles/rows"),
+    // T-1065 the versioned change feed: `changed {route, version}` instead of a client poll
+    ("GET", "/ws/changes"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -504,6 +506,12 @@ pub struct ApiState {
     /// T-579: the tile coverage raster, memoised against the tune history it is computed from.
     /// Always on: its key is the evidence itself, so it cannot serve a stale grey.
     pub coverage_raster: Arc<crate::coverage::CoverageRasterMemo>,
+    /// T-1065: the versioned change feed behind `/ws/changes`. Every mutating control-plane route
+    /// bumps the version of the routes it wrote (`changes::routes_for_write`, applied once in
+    /// `control::dispatch_device`), and a producer may bump one directly. Always on: a server
+    /// without it would silently answer the feed with a table that never moves, and a client that
+    /// had stopped polling would never learn.
+    pub changes: Arc<crate::changes::ChangeFeed>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -1010,6 +1018,36 @@ fn respond_tile(stream: &mut TcpStream, req: &Request, body: Value) {
     respond_cached(stream, 200, "application/json", cache_control, &extra, &out);
 }
 
+/// A **conditional** JSON answer (T-1065): a content-derived `ETag`, and a bodyless `304` when the
+/// caller's `If-None-Match` already holds it.
+///
+/// `/api/control/state` is the measured case — 10 kB every two seconds, byte-identical almost every
+/// time — and this is the half of the fix that works even for a client that has not adopted
+/// `/ws/changes` yet: the request still happens, but the body does not.
+///
+/// **`no-cache`, not `no-store`.** Every other route here is `no-store`, which forbids a cache from
+/// keeping the response at all — and a response nothing kept can never be revalidated, so
+/// `If-None-Match` would never be sent. `private, no-cache` is the exact semantics wanted: the
+/// browser may keep it, only this client may, and it must revalidate **every** time before reusing
+/// it. So a stale body is never shown; a 304 is only ever the server agreeing it is current.
+///
+/// Like [`respond_tile`], the tag is computed over the UNCOMPRESSED JSON — gzip is a transfer
+/// coding, so both forms are the same representation and validate under the same tag.
+fn respond_validated(stream: &mut TcpStream, req: &Request, body: &Value, extra: &str) {
+    let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
+    let etag = format!("\"{:08x}\"", crc32(&bytes));
+    let cache_control = "private, no-cache";
+    let extra = format!("{extra}ETag: {etag}\r\n");
+    if req
+        .header("if-none-match")
+        .is_some_and(|v| v.split(',').any(|part| part.trim() == etag))
+    {
+        return respond_cached(stream, 304, "application/json", cache_control, &extra, &[]);
+    }
+    let (extra, out) = maybe_gzip(accepts_gzip(req), &extra, &bytes);
+    respond_cached(stream, 200, "application/json", cache_control, &extra, &out);
+}
+
 /// Gzip `bytes` when the caller accepts it and the body is big enough, returning the extra headers
 /// to send with them (T-533). Borrowed body back unchanged when it is not worth it.
 fn maybe_gzip<'a>(gzip_ok: bool, extra: &str, bytes: &'a [u8]) -> (String, Cow<'a, [u8]>) {
@@ -1256,6 +1294,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             return respond_error(&mut stream, 403, "cross-origin control request refused");
         }
     }
+    // T-1065: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
+    if req.path == "/ws/changes" && req.method == "GET" {
+        return crate::changes::serve(stream, &shared.state, &req.headers);
+    }
     // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
         return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
@@ -1373,6 +1415,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             && href.bytes().all(|b| b.is_ascii_graphic())
         {
             extra.push_str(&format!("Location: {href}\r\n"));
+        }
+        // T-1065: a validator on the routes a client re-reads unchanged (`/api/control/state`,
+        // 10 kB every 2 s in the measured client). Only a successful GET: a 4xx body is a sentence,
+        // and a write must never be answered from a cache.
+        if req.method == "GET" && r.status == 200 && crate::changes::validated(&req.path) {
+            return respond_validated(&mut stream, &req, &r.body, &extra);
         }
         return respond_json_with(&mut stream, r.status, &r.body, &extra);
     }

@@ -46,18 +46,13 @@
 //! ([`MAX_ROW_FEEDS`]); a subscription holds no tile in-flight slot, because it is long-lived and a
 //! slot is the unit of a *request*.
 
-use std::io::{self, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hk_model::{FreqRange, TimeRange, Timestamp};
 use hk_store::{Overview, OverviewCell, RegionQuery, Resolution};
 use serde_json::{Value, json};
-use tungstenite::Message;
-use tungstenite::protocol::frame::CloseFrame;
-use tungstenite::protocol::frame::coding::CloseCode;
-use tungstenite::protocol::{Role, WebSocket};
 
 use crate::http::ApiState;
 use crate::query::{ApiError, Params, Region, bad, param};
@@ -65,6 +60,9 @@ use crate::tiles::{
     TileKey, TileStore, affordable_levels, axis_fold, chunk_rows, num, parse_key, read_order_until,
     servable, store_name, tier_of, tile_store, with_tile_history, with_tile_history_built,
 };
+// T-1065: the upgrade handshake and the send/close/liveness helpers this route used to own are
+// shared with `/ws/changes`; one implementation of a `101 Switching Protocols`, not two.
+use crate::websock::{close, drop_socket, peer_alive, refuse, send, upgrade};
 
 /// Rows in one `rows` message at most. Small enough that a block's coverage plane is always laid
 /// on its own axes (64 × 256 is well inside `MAX_COVERAGE_GRID_CELLS`), large enough that a sealed
@@ -617,102 +615,16 @@ impl Drop for FeedSlot<'_> {
     }
 }
 
-fn http_error(stream: &mut TcpStream, status: u16, message: &str) {
-    let body = json!({ "error": message }).to_string();
-    let head = format!(
-        "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-         Connection: close\r\nCache-Control: no-store\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
-    let _ = stream.flush();
-}
-
-fn close(ws: &mut WebSocket<TcpStream>, code: u16, reason: &str) {
-    let mut end = reason.len().min(120);
-    while !reason.is_char_boundary(end) {
-        end -= 1;
-    }
-    let _ = ws.close(Some(CloseFrame {
-        code: CloseCode::from(code),
-        reason: reason[..end].to_owned().into(),
-    }));
-    let _ = ws.get_mut().set_read_timeout(Some(Duration::from_secs(2)));
-    while ws.read().is_ok() {}
-    let _ = ws.get_mut().shutdown(Shutdown::Both);
-}
-
-/// Completes the upgrade, sends `{"type":"refused",…}` and closes with `4000 + status` — the
-/// `/ws/open/{name}` convention, because a browser cannot read an HTTP error body on a failed
-/// upgrade.
-fn refuse(mut ws: WebSocket<TcpStream>, e: &ApiError) {
-    let _ = ws.send(Message::Text(
-        json!({ "type": "refused", "status": e.status, "reason": e.message })
-            .to_string()
-            .into(),
-    ));
-    close(&mut ws, 4000 + e.status, &e.message);
-}
-
-fn send(ws: &mut WebSocket<TcpStream>, v: &Value) -> bool {
-    ws.send(Message::Text(v.to_string().into())).is_ok()
-}
-
-/// `true` while the peer is still there. Reads (and so answers pings) for at most `wait`.
-fn peer_alive(ws: &mut WebSocket<TcpStream>, wait: Duration) -> bool {
-    let _ = ws.get_mut().set_read_timeout(Some(wait));
-    match ws.read() {
-        Ok(Message::Close(_)) => false,
-        // A subscriber never sends data; anything else (a ping, a pong) is housekeeping.
-        Ok(_) => true,
-        Err(tungstenite::Error::Io(e))
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-            ) =>
-        {
-            true
-        }
-        Err(_) => false,
-    }
-}
-
 /// Serves one `/ws/tiles/rows` request (token already verified).
 pub(crate) fn serve(
-    mut stream: TcpStream,
+    stream: TcpStream,
     state: &ApiState,
     query: &Params,
     headers: &[(String, String)],
 ) {
-    let header = |n: &str| {
-        headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(n))
-            .map(|(_, v)| v.trim())
-    };
-    let has = |n: &str, want: &str| {
-        header(n).is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(want)))
-    };
-    if !has("upgrade", "websocket") || !has("connection", "upgrade") {
-        return http_error(&mut stream, 426, "WebSocket upgrade required");
-    }
-    if header("sec-websocket-version") != Some("13") {
-        return http_error(&mut stream, 426, "WebSocket version 13 required");
-    }
-    let Some(key) = header("sec-websocket-key") else {
-        return http_error(&mut stream, 400, "missing Sec-WebSocket-Key");
-    };
-    let handshake = format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {}\r\n\r\n",
-        tungstenite::handshake::derive_accept_key(key.as_bytes())
-    );
-    if stream.write_all(handshake.as_bytes()).is_err() {
+    let Some(mut ws) = upgrade(stream, headers) else {
         return;
-    }
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(20)));
-    let mut ws = WebSocket::from_raw_socket(stream, Role::Server, None);
+    };
     let Some(_slot) = FeedSlot::take(&state.row_feeds) else {
         return refuse(
             ws,
@@ -757,5 +669,5 @@ pub(crate) fn serve(
             Err(e) => return refuse(ws, &e),
         }
     }
-    let _ = ws.get_mut().shutdown(Shutdown::Both);
+    drop_socket(&mut ws);
 }

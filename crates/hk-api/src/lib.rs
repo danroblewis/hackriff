@@ -32,6 +32,8 @@ pub mod assist;
 pub mod auth;
 pub mod bridge;
 pub mod captures;
+// T-1065: the versioned change feed - the server says what changed, so a client stops asking.
+pub mod changes;
 pub mod classification; // T-247
 pub mod clusters; // T-202
 pub mod collections; // T-817 (MAP-17): time-frequency marker collections
@@ -72,6 +74,7 @@ pub mod trunk_cc; // T-977: the control-channel hunt's last pass, with per-chann
 pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
 pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
+mod websock; // T-1065: the WebSocket upgrade every self-served /ws route shares (rows, changes)
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122
@@ -90,6 +93,7 @@ pub use analyze::{
 };
 pub use auth::{Token, default_token_path};
 pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
+pub use changes::{Change, ChangeFeed};
 pub use control::{
     AuditLog, CaptureStatus, ClassBand, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
     RunControl, RunState,

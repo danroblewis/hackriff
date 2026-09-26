@@ -1299,6 +1299,11 @@ pub fn serve_api(
             // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
             ceiling_memo: Default::default(),
             coverage_raster: Default::default(),
+            // T-1065: the versioned change feed behind `/ws/changes`, per server. Every mutating
+            // control-plane route bumps the routes it wrote; a producer-side bump (a detection, the
+            // coverage widening under a sweep) is not wired yet and is stated as such in
+            // `docs/api.md`, so a client keeps a slow poll for what the feed does not carry.
+            changes: Default::default(),
         };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

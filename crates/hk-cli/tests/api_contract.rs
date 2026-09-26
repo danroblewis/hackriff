@@ -14471,3 +14471,253 @@ fn vlf_accessory_route_answers_documented_shape_through_serve() {
     stop_server(serving);
     drop(guard);
 }
+
+// --- T-1065: server change notifications instead of a client poll ---------------------------------
+
+/// A conditional GET: `(status, ETag, Cache-Control, body bytes)`.
+fn get_validating(
+    addr: SocketAddr,
+    path: &str,
+    if_none_match: Option<&str>,
+) -> (u16, Option<String>, Option<String>, Vec<u8>) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let inm = if_none_match.map_or(String::new(), |t| format!("If-None-Match: {t}\r\n"));
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\n{inm}\
+         Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let status = head[9..12].parse().unwrap();
+    let field = |n: &str| {
+        head.lines()
+            .find_map(|l| l.strip_prefix(&format!("{n}: ")))
+            .map(|v| v.trim().to_owned())
+    };
+    (
+        status,
+        field("ETag"),
+        field("Cache-Control"),
+        raw[split + 4..].to_vec(),
+    )
+}
+
+/// The next text message on a `/ws/changes` socket, or `None` once `limit` passes.
+fn next_change(ws: &mut Ws, limit: Duration) -> Option<Value> {
+    let deadline = Instant::now() + limit;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+            s.set_read_timeout(Some(left)).unwrap();
+        }
+        match ws.read() {
+            Ok(Message::Text(t)) => return Some(serde_json::from_str(t.as_str()).unwrap()),
+            Ok(Message::Close(_)) | Err(_) => return None,
+            Ok(_) => {} // a ping: an idle feed's keep-alive, never a notification
+        }
+    }
+}
+
+/// Every `changed` route seen within `limit`, at its newest version.
+fn changed_routes(ws: &mut Ws, limit: Duration, want: usize) -> Vec<(String, u64)> {
+    let deadline = Instant::now() + limit;
+    let mut out: Vec<(String, u64)> = Vec::new();
+    while out.len() < want {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match next_change(ws, left) {
+            Some(m) => {
+                assert_eq!(m["type"], json!("changed"), "{m}");
+                out.push((
+                    m["route"].as_str().expect("route").to_owned(),
+                    m["version"].as_u64().expect("version"),
+                ));
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// **T-1065 — the server says what changed, so the client stops asking.**
+///
+/// USER (2026-09-26 00:20, via supervisor, measured in real Chrome): *"Every time I zoom, even a tiny
+/// bit, over a hundred requests are made … We don't need hundreds of requests every time I slightly
+/// zoom in."* Following the live edge with one pane and nothing moving was **7.3 requests a second**
+/// besides the WebSockets, and freezing the view saved nothing — because none of those answers
+/// changes between polls in the common case.
+///
+/// This pins the server half against a real run over the mock SDR:
+///
+/// - `GET /ws/changes` opens with the **whole version table**, keyed by the path a client fetches;
+/// - a **real write** to a route's state produces **exactly one `changed`** for that route, and for
+///   the routes derived from it (a retune moves the achievable grid, the tune history and the
+///   coverage computed from them) — and for no others;
+/// - a **burst** of writes coalesces into one message at the newest version, never one per write;
+/// - and `/api/control/state` carries an **`ETag`**, so the poll that is left costs a validator
+///   instead of 10 kB: a matching `If-None-Match` is `304` with no body.
+#[test]
+fn change_feed_and_control_state_validator_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // The route is advertised where a client discovers routes.
+    let (_, state) = get(addr, "/api/control/state");
+    let routes = state["routes"].as_array().expect("routes");
+    assert!(
+        routes
+            .iter()
+            .any(|r| r["method"] == "GET" && r["path"] == "/ws/changes"),
+        "/ws/changes must be in the route table"
+    );
+
+    let mut ws = connect_ws(addr, &format!("/ws/changes?token={TOKEN}")).unwrap();
+    let snap = next_change(&mut ws, Duration::from_secs(10)).expect("the versions snapshot");
+    assert_eq!(snap["type"], json!("versions"), "{snap}");
+    assert_eq!(snap["tick_ms"], json!(250), "{snap}");
+    for route in [
+        "/api/control/state",
+        "/api/navigation",
+        "/api/coverage",
+        "/api/tune-history",
+        "/api/timeline",
+        "/api/recordings",
+        "/api/inventory",
+        "/api/annotations",
+        "/api/paths",
+        "/api/outputs",
+        "/api/pipelines",
+        "/api/frontend/events",
+    ] {
+        assert!(
+            snap["routes"][route].is_u64(),
+            "{route} must have a version: {snap}"
+        );
+    }
+
+    // A write to the display: the state body changed, and NOTHING else did — a view change never
+    // reached the front end, so it must not tell a client to re-read the coverage.
+    let (st, _) = post(addr, "/api/control/display", r#"{"averaging": 4}"#);
+    assert_eq!(st, 200);
+    let seen = changed_routes(&mut ws, Duration::from_secs(5), 2);
+    assert_eq!(
+        seen.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+        vec!["/api/control/state"],
+        "a display write moves the state and nothing else: {seen:?}"
+    );
+
+    // A write to the user's own marks: exactly one `changed`, on the route that holds them.
+    let f = FIXTURE_CENTER_HZ;
+    let note = json!({
+        "kind": "box",
+        "f_lo_hz": f - 1.0e5,
+        "f_hi_hz": f + 1.0e5,
+        "t0_s": 1000.0,
+        "t1_s": 1002.0,
+        "label": "t1065-changed",
+        "view": {"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"},
+    });
+    let (st, _) = post(addr, "/api/annotations", &note.to_string());
+    assert_eq!(st, 201);
+    let seen = changed_routes(&mut ws, Duration::from_secs(5), 2);
+    assert_eq!(
+        seen.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+        vec!["/api/annotations"],
+        "{seen:?}"
+    );
+
+    // A retune: the tuning, and everything derived from it. One message each, not one per route per
+    // poll — and the versions are the ones the snapshot's successors, so a client can file them.
+    let (st, _) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{FIXTURE_CENTER_HZ:?}}}"),
+    );
+    assert_eq!(st, 200);
+    let mut seen = changed_routes(&mut ws, Duration::from_secs(5), 5);
+    seen.sort();
+    let mut routes: Vec<&str> = seen.iter().map(|(r, _)| r.as_str()).collect();
+    routes.dedup();
+    assert_eq!(
+        routes,
+        vec![
+            "/api/control/state",
+            "/api/coverage",
+            "/api/navigation",
+            "/api/tune-history",
+        ],
+        "a retune re-derives the grid, the tune history and the coverage: {seen:?}"
+    );
+    assert_eq!(seen.len(), routes.len(), "one message per route: {seen:?}");
+
+    // A BURST: ten writes inside one sampling tick are one message at the newest version, so a
+    // client that drags a control does not get ten notifications per route.
+    let before = snap["routes"]["/api/control/state"].as_u64().unwrap();
+    for n in 1..=10 {
+        let (st, _) = post(
+            addr,
+            "/api/control/display",
+            &format!("{{\"averaging\": {}}}", 1 + n % 4),
+        );
+        assert_eq!(st, 200);
+    }
+    let burst = changed_routes(&mut ws, Duration::from_secs(5), 11);
+    // Measured on this server: **1** message for the ten writes. The bound is 3 rather than 1 only
+    // because ten HTTP round trips take ~30 ms against a 250 ms sampling tick and a loaded box can
+    // stretch that across two or three samples — which is still coalescing, not amplification.
+    assert!(
+        !burst.is_empty() && burst.len() <= 3,
+        "ten writes must not amplify: {burst:?}"
+    );
+    let last = burst.last().unwrap();
+    assert_eq!(last.0, "/api/control/state", "{burst:?}");
+    // Nothing is lost by the coalescing: the newest version reported is the one the writes reached
+    // (1 display + 1 retune + 10 display writes above this connection's snapshot).
+    assert_eq!(last.1, before + 12, "{burst:?}");
+    let _ = ws.close(None);
+
+    // The validator on `/api/control/state`: a content-derived ETag, `no-cache` so a client may keep
+    // it but must revalidate, and `304` (no body) when the caller already holds it.
+    let mut got_304 = None;
+    for _ in 0..10 {
+        let (st, etag, cc, body) = get_validating(addr, "/api/control/state", None);
+        assert_eq!(st, 200);
+        let etag = etag.expect("an ETag on /api/control/state");
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+        assert_eq!(cc.as_deref(), Some("private, no-cache"));
+        assert!(!body.is_empty());
+        let (st2, etag2, cc2, body2) = get_validating(addr, "/api/control/state", Some(&etag));
+        if st2 == 304 {
+            assert!(body2.is_empty(), "a 304 carries no body");
+            assert_eq!(etag2.as_deref(), Some(etag.as_str()));
+            assert_eq!(cc2.as_deref(), Some("private, no-cache"));
+            got_304 = Some(etag);
+            break;
+        }
+        // 200 is the honest answer when the state really did move between the two reads (a re-plumb
+        // changes `run.segment`): the tag is content-derived, so it can never serve a stale body.
+        assert_eq!(st2, 200, "{st2}");
+    }
+    let etag = got_304.expect("an unchanged /api/control/state must validate to 304");
+
+    // A tag the server does not hold is answered in full, not 304.
+    let (st, _, _, body) = get_validating(addr, "/api/control/state", Some("\"deadbeef\""));
+    assert_eq!(st, 200);
+    assert!(!body.is_empty());
+    // And a validator is not silently attached to routes that were never claimed to have one.
+    for path in ["/api/timeline", "/api/navigation", "/api/inventory"] {
+        let (st, tag, _, _) = get_validating(addr, path, Some(&etag));
+        assert_eq!((st, tag), (200, None), "{path} is not validated yet");
+    }
+
+    stop_server(serving);
+}
