@@ -827,6 +827,26 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         "unset until requested: {v}"
     );
 
+    // T-1063 `/api/health`: the SERVER's own connection health, answerable on any server (unlike
+    // `/api/status`, which is the pipeline's and 404s without a run). The caps are asserted by
+    // value: the whole point of the ticket was that 64 shared slots were too few behind the
+    // tunnel, and a silent regression of the default is exactly the EOF storm coming back.
+    let before = unix_now();
+    let (st, h) = get(addr, "/api/health");
+    let after = unix_now();
+    assert_eq!(st, 200, "{h}");
+    let t = h["t"].as_f64().expect("t (server clock, s)");
+    assert!((before - 1.0..=after + 1.0).contains(&t), "t={t}: {h}");
+    let c = &h["connections"];
+    assert_eq!(c["http"]["max"], 256, "{h}");
+    assert_eq!(c["websocket"]["max"], 128, "{h}");
+    // This very request is in the HTTP pool while it is answered, and nothing has been refused.
+    assert!(c["http"]["open"].as_u64().is_some_and(|n| n >= 1), "{h}");
+    assert!(c["websocket"]["open"].is_u64(), "{h}");
+    assert_eq!(c["http"]["refused"], 0, "{h}");
+    assert_eq!(c["websocket"]["refused"], 0, "{h}");
+    assert!(c["refused_last_t"].is_null(), "nothing refused yet: {h}");
+
     // /api/status: pipeline counters, never content.
     let before = unix_now();
     let (st, v) = get(addr, "/api/status");

@@ -73,16 +73,23 @@
 //! - **Inventory identities are gated by the model**: `/api/inventory` reads only
 //!   `Repository::query_inventory` with the default `IdentityAccess::Standard`.
 //! - **Receive only.** No route reaches a transmit path (C37 gated).
-//! - **Bounded resources.** At most `max_connections` connection threads; request heads are
-//!   limited to 16 KiB, bodies to 64 KiB, and both must arrive within `request_timeout`; query
-//!   results are capped.
+//! - **Bounded resources.** At most `max_connections` HTTP connection threads and
+//!   `max_ws_connections` WebSocket ones — two pools, so long-lived stream sockets cannot exhaust
+//!   the HTTP slots (T-1063); request heads are limited to 16 KiB, bodies to 64 KiB, and both must
+//!   arrive within `request_timeout`; query results are capped.
+//! - **A cap ANSWERS.** At either cap the connection gets `503` with `Retry-After: 1` and
+//!   `Connection: close` — written from the accept thread as canned bytes, with no handler thread
+//!   — counted per pool on `GET /api/health` and logged at most once a second with the count
+//!   (T-1063). Dropping the connection instead, as this did before, is invisible to everything
+//!   except the tunnel in front of it, which reports it as "Unable to reach the origin service:
+//!   EOF".
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -153,6 +160,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/playback"),
     ("POST", "/api/playback"),
     ("GET", "/api/status"),
+    // T-1063: the server's own connection health (pool occupancy, caps, refusals).
+    ("GET", "/api/health"),
     // T-981: front-end events - runs of clipped spectrum rows whose energy stepped across the
     // whole tuned window - over a time window, for the canvas's front-end mark
     ("GET", "/api/frontend/events"),
@@ -333,9 +342,26 @@ pub struct ServerConfig {
     pub token: Token,
     /// Directory of the built UI (`ui/dist`); `None` serves no static files.
     pub ui_dist: Option<PathBuf>,
-    /// Most connection threads at once (WebSocket consumers included; each stream also caps its
-    /// own consumers through `PublisherConfig::max_consumers`).
+    /// Most **HTTP** connection threads at once. A connection is counted here from the moment it
+    /// is accepted until its handler ends, or until that handler recognises a `/ws/…` GET and
+    /// moves it to [`Self::max_ws_connections`] (T-1063).
+    ///
+    /// **256, not 64 (T-1063).** Behind the cloudflared tunnel one browser gesture is not six
+    /// connections but a hundred-plus concurrent origin connections — a 24-event trackpad zoom was
+    /// measured at 264 requests, 100 of them `/api/inventory`, each on a fresh TCP connection —
+    /// and Chrome's 6-per-host limit, which hides this locally, does not apply to the tunnel's
+    /// multiplexed origin sockets. At 64 the overflow was dropped without an answer and the tunnel
+    /// logged 8 622 "Unable to reach the origin service: EOF" in 15 minutes. The cost of the new
+    /// cap is bounded and worth stating: a handler thread takes a 256 KiB stack, so the HTTP pool
+    /// is at most 64 MiB of stack, and the WebSocket pool a further 32 MiB at its own default.
     pub max_connections: usize,
+    /// Most **WebSocket** connection threads at once, counted in their own pool so that a tab's
+    /// long-lived stream sockets cannot exhaust the HTTP slots (T-1063). Each stream also caps its
+    /// own consumers through `PublisherConfig::max_consumers`; this caps the sockets, everywhere
+    /// they end up (`/ws/{id}`, `/ws/open/…`, `/ws/analyze/…`, `/ws/tiles/rows`).
+    ///
+    /// 128 is about seven browser tabs at the measured 17–19 sockets each.
+    pub max_ws_connections: usize,
     /// Time allowed for a request head (and body) to arrive.
     pub request_timeout: Duration,
     /// On-demand streams (`/ws/open/<name>`, T-066): how often the server pings the peer.
@@ -348,14 +374,16 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Defaults: 64 connections, 10 s request timeout, no static files, no TCP stream server,
-    /// on-demand pings every 5 s with a 20 s peer timeout.
+    /// Defaults: 256 HTTP connections and 128 WebSocket connections (T-1063), 10 s request
+    /// timeout, no static files, no TCP stream server, on-demand pings every 5 s with a 20 s peer
+    /// timeout.
     pub fn new(bind: SocketAddr, token: Token) -> Self {
         Self {
             bind,
             token,
             ui_dist: None,
-            max_connections: 64,
+            max_connections: 256,
+            max_ws_connections: 128,
             request_timeout: Duration::from_secs(10),
             ondemand_ping_interval: Duration::from_secs(5),
             ondemand_peer_timeout: Duration::from_secs(20),
@@ -533,24 +561,89 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// and is why [`hk_stream::BETWEEN_WINDOWS_GRACE`], not this, is the constant that had to move.
 const REPLUMB_HANDSHAKE_WAIT: Duration = Duration::from_secs(2);
 
-/// Connections accepted and not yet finished: one entry per handler thread, holding a cloned
-/// socket handle that [`Server::shutdown`] closes to unblock it (T-236).
+/// Which pool a connection is counted against (T-1063).
+///
+/// A connection is born [`Pool::Http`] — the accept thread has not read a byte and cannot know
+/// what it is — and moves to [`Pool::WebSocket`] as soon as its handler sees a `/ws/…` GET. The
+/// two pools are capped separately so that a tab's 17–19 long-lived stream sockets
+/// (`/ws/spectrum/live`, `/ws/presence`, 14–17 `/ws/tiles/rows`) cannot starve the short-lived
+/// HTTP requests they are drawn beside.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pool {
+    Http,
+    WebSocket,
+}
+
+impl Pool {
+    fn name(self) -> &'static str {
+        match self {
+            Pool::Http => "http",
+            Pool::WebSocket => "websocket",
+        }
+    }
+}
+
+/// One accepted connection: the cloned socket handle [`Server::shutdown`] closes to unblock its
+/// handler thread (T-236), and the pool it is counted against (T-1063).
+struct Conn {
+    sock: TcpStream,
+    pool: Pool,
+}
+
+/// Connections accepted and not yet finished: one entry per handler thread.
+///
+/// `http` and `ws` are the pools' occupancies, maintained beside `open` rather than counted from
+/// it — the accept thread tests one of them on every connection, and a scan of the map would make
+/// that O(n) in the very situation (hundreds of open connections) the cap exists for.
 #[derive(Default)]
 struct Conns {
     next: u64,
-    open: BTreeMap<u64, TcpStream>,
+    open: BTreeMap<u64, Conn>,
+    http: usize,
+    ws: usize,
+}
+
+/// How often at most an overload is logged (T-1063). The count since the last line is carried into
+/// it, so the log says how many were refused, not merely that some were.
+const OVERLOAD_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long the accept thread will spend writing its canned `503` before giving up on a peer that
+/// is not reading. The refusal must never become a new way to stall accepting.
+const OVERLOAD_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Rate-limit state for the overload log (T-1063): when a line was last printed, and how many
+/// refusals have happened since. The tail of a burst stays unprinted until the next refusal — the
+/// authoritative total is the counter on `/api/health`, which is never rate-limited.
+#[derive(Default)]
+struct OverloadLog {
+    last: Option<Instant>,
+    since: u64,
+}
+
+/// Connections refused at a pool's cap (T-1063), for `/api/health`.
+#[derive(Default)]
+struct Refusals {
+    http: AtomicUsize,
+    websocket: AtomicUsize,
+    /// Unix nanoseconds of the most recent refusal, or 0 if there has been none.
+    last_ns: AtomicI64,
 }
 
 struct Shared {
     config: ServerConfig,
     state: ApiState,
-    /// Open connections. Locked only to register or retire one (never while a request is handled,
-    /// and never by the capture or audio path) and by [`Server::shutdown`] while it drains.
+    /// Open connections. Locked only to register, reclassify or retire one (never while a request
+    /// is handled, and never by the capture or audio path) and by [`Server::shutdown`] while it
+    /// drains.
     conns: Mutex<Conns>,
     /// Signalled when the last open connection retires.
     idle: Condvar,
     /// Connection threads still running when the bounded shutdown wait expired.
     abandoned: AtomicUsize,
+    /// T-1063: connections answered `503` at a pool's cap, counted per pool.
+    refused: Refusals,
+    /// T-1063: rate limit for the overload log line.
+    overload_log: Mutex<OverloadLog>,
 }
 
 fn lock_conns(shared: &Shared) -> std::sync::MutexGuard<'_, Conns> {
@@ -580,6 +673,8 @@ impl Server {
             conns: Mutex::new(Conns::default()),
             idle: Condvar::new(),
             abandoned: AtomicUsize::new(0),
+            refused: Refusals::default(),
+            overload_log: Mutex::new(OverloadLog::default()),
         });
         let stop_flag = Arc::clone(&stop);
         let accepting = Arc::clone(&shared);
@@ -648,8 +743,8 @@ impl Server {
         // that never closes, fails its read immediately instead of holding shutdown open for its
         // own (much longer) socket timeout. Queued response bytes are still flushed: this is a
         // shutdown, not an abort.
-        for sock in conns.open.values() {
-            let _ = sock.shutdown(Shutdown::Both);
+        for conn in conns.open.values() {
+            let _ = conn.sock.shutdown(Shutdown::Both);
         }
         while !conns.open.is_empty() {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -690,13 +785,87 @@ struct ActiveGuard(Arc<Shared>, u64);
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
         let mut conns = lock_conns(&self.0);
-        conns.open.remove(&self.1);
+        // The pool is read off the entry, never guessed: a connection promoted to the WebSocket
+        // pool mid-request must give its slot back to the pool that is actually holding it.
+        if let Some(conn) = conns.open.remove(&self.1) {
+            match conn.pool {
+                Pool::Http => conns.http -= 1,
+                Pool::WebSocket => conns.ws -= 1,
+            }
+        }
         let empty = conns.open.is_empty();
         drop(conns);
         if empty {
             self.0.idle.notify_all();
         }
     }
+}
+
+/// The canned refusal the accept thread writes at the HTTP cap (T-1063): a complete `503` with
+/// `Retry-After` and `Connection: close`, built once so the rejecting path allocates nothing and
+/// needs no handler thread — the whole point is that a server at its cap does the *least* work per
+/// refused connection, and still answers.
+///
+/// The body carries the same `{error, code}` shape every other refusal does, so a client reads it
+/// with the code it already has: `overloaded` is "the server is alive and told you to come back",
+/// which is what the silent drop could never say.
+static OVERLOAD_503: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+    let body = br#"{"error":"the server is at its connection limit; retry","code":"overloaded"}"#;
+    let mut out = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\nRetry-After: 1\r\nCache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(body);
+    out
+});
+
+/// Counts a refusal and logs it at most once a second, with the number refused since the last line
+/// (T-1063). Before this, the cap was reached in silence: no response, no log, no counter — the
+/// only trace was the tunnel's "Unable to reach the origin service: EOF".
+fn note_overload(shared: &Shared, pool: Pool, open: usize, max: usize) {
+    match pool {
+        Pool::Http => &shared.refused.http,
+        Pool::WebSocket => &shared.refused.websocket,
+    }
+    .fetch_add(1, Ordering::SeqCst);
+    shared
+        .refused
+        .last_ns
+        .store(Timestamp::now().as_unix_nanos(), Ordering::SeqCst);
+    let mut log = shared
+        .overload_log
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    log.since += 1;
+    let now = Instant::now();
+    if log
+        .last
+        .is_none_or(|t| now.duration_since(t) >= OVERLOAD_LOG_INTERVAL)
+    {
+        let n = std::mem::take(&mut log.since);
+        log.last = Some(now);
+        drop(log);
+        eprintln!(
+            "hk-api: refused {n} connection(s) with 503 (Retry-After: 1) — the {} pool is full \
+             ({open}/{max}); totals are on /api/health",
+            pool.name()
+        );
+    }
+}
+
+/// Answers the canned [`OVERLOAD_503`] and closes, without spawning a handler thread.
+///
+/// The write timeout is this path's own: a peer that never reads its refusal must not hold the
+/// accept thread, which would turn the answer into a worse outage than the silent drop it replaces.
+fn refuse_overloaded(stream: &TcpStream) {
+    let _ = stream.set_write_timeout(Some(OVERLOAD_WRITE_TIMEOUT));
+    let mut out = stream;
+    let _ = out.write_all(&OVERLOAD_503);
+    let _ = out.flush();
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
@@ -707,8 +876,17 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<AtomicBool>
         let Ok(stream) = conn else { continue };
         let guard = {
             let mut conns = lock_conns(&shared);
-            if conns.open.len() >= shared.config.max_connections {
-                continue; // dropped: closes the connection
+            // T-1063: at the cap, ANSWER. A connection is born in the HTTP pool because nothing
+            // has been read from it yet; a `/ws/…` GET moves it to the WebSocket pool in its
+            // handler (`enter_ws_pool`), so long-lived stream sockets stop occupying HTTP slots
+            // for their whole life.
+            let max = shared.config.max_connections;
+            if conns.http >= max {
+                let open = conns.http;
+                drop(conns);
+                note_overload(&shared, Pool::Http, open, max);
+                refuse_overloaded(&stream);
+                continue;
             }
             // The clone is only ever used to close the socket at shutdown. A clone that fails (fd
             // exhaustion) drops the connection rather than leaving a handler shutdown can't reach.
@@ -717,7 +895,14 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<AtomicBool>
             };
             let id = conns.next;
             conns.next += 1;
-            conns.open.insert(id, sock);
+            conns.open.insert(
+                id,
+                Conn {
+                    sock,
+                    pool: Pool::Http,
+                },
+            );
+            conns.http += 1;
             ActiveGuard(Arc::clone(&shared), id)
         };
         let spawned = thread::Builder::new()
@@ -725,11 +910,65 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<AtomicBool>
             .stack_size(256 * 1024)
             .spawn(move || {
                 let guard = guard;
-                handle_connection(stream, &guard.0);
+                handle_connection(stream, &guard.0, guard.1);
             });
         // A failed spawn drops the closure, its guard and the connection.
         let _ = spawned;
     }
+}
+
+/// Moves this connection from the HTTP pool into the WebSocket pool (T-1063), or answers `false`
+/// when the WebSocket pool is full and the caller must refuse it.
+///
+/// Called once, when the handler has read the head and knows the request is a `/ws/…` GET — which
+/// is the earliest anyone can know it: the accept thread has read nothing. A connection that is
+/// already in the WebSocket pool, or that has somehow lost its entry, is left alone.
+fn enter_ws_pool(shared: &Shared, id: u64) -> bool {
+    let mut conns = lock_conns(shared);
+    if conns.open.get(&id).map(|c| c.pool) != Some(Pool::Http) {
+        return true;
+    }
+    let max = shared.config.max_ws_connections;
+    if conns.ws >= max {
+        let open = conns.ws;
+        drop(conns);
+        note_overload(shared, Pool::WebSocket, open, max);
+        return false;
+    }
+    conns.http -= 1;
+    conns.ws += 1;
+    if let Some(conn) = conns.open.get_mut(&id) {
+        conn.pool = Pool::WebSocket;
+    }
+    true
+}
+
+/// `GET /api/health` (T-1063): what the server is doing about its own connection limits.
+///
+/// Separate from `/api/status`, which is the *pipeline's* counters and answers `404` when a run
+/// has none: this is a fact about the server process itself and is always answerable, including on
+/// a server that is serving nothing else. `refused` is the count the silent drop never kept.
+fn health_json(shared: &Shared) -> Value {
+    let conns = lock_conns(shared);
+    let (http, ws) = (conns.http, conns.ws);
+    drop(conns);
+    let last_ns = shared.refused.last_ns.load(Ordering::SeqCst);
+    json!({
+        "t": Timestamp::now().as_unix_nanos() as f64 / 1e9,
+        "connections": {
+            "http": {
+                "open": http,
+                "max": shared.config.max_connections,
+                "refused": shared.refused.http.load(Ordering::SeqCst),
+            },
+            "websocket": {
+                "open": ws,
+                "max": shared.config.max_ws_connections,
+                "refused": shared.refused.websocket.load(Ordering::SeqCst),
+            },
+            "refused_last_t": (last_ns != 0).then(|| last_ns as f64 / 1e9),
+        },
+    })
 }
 
 /// A parsed request.
@@ -1211,7 +1450,7 @@ fn loopback_peer(stream: &TcpStream) -> bool {
     stream.peer_addr().is_ok_and(|a| a.ip().is_loopback())
 }
 
-fn handle_connection(mut stream: TcpStream, shared: &Shared) {
+fn handle_connection(mut stream: TcpStream, shared: &Shared, conn_id: u64) {
     let _ = stream.set_read_timeout(Some(shared.config.request_timeout));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_nodelay(true);
@@ -1255,6 +1494,21 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             control::audit_refused(state, &req.method, &req.path, &who, 403, "cross-origin");
             return respond_error(&mut stream, 403, "cross-origin control request refused");
         }
+    }
+    // T-1063: every `/ws/…` GET is counted in the WebSocket pool from here on — before any of the
+    // four upgrade paths below, so none of them can be the one that forgot. A socket that will
+    // live for minutes stops holding an HTTP slot; when the WebSocket pool itself is full the
+    // answer is the same `503 … Retry-After` the accept thread gives, never a silent drop.
+    if req.path.starts_with("/ws/") && req.method == "GET" && !enter_ws_pool(shared, conn_id) {
+        return respond_json_with(
+            &mut stream,
+            503,
+            &json!({
+                "error": "the server is at its WebSocket connection limit; retry",
+                "code": "overloaded",
+            }),
+            "Retry-After: 1\r\n",
+        );
     }
     // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
@@ -1392,6 +1646,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/tiles/events"
         | "/api/report"
         | "/api/status"
+        | "/api/health"
         | "/api/taxonomy"
             if !get =>
         {
@@ -1485,6 +1740,11 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                 v
             })
             .ok_or_else(|| ApiError::new(404, "no pipeline status")),
+        // T-1063: the server's own connection health — pool occupancy, caps, and the connections
+        // refused at a cap. Not folded into `/api/status`, which is the pipeline's counters and
+        // answers 404 without a run: a server refusing connections must be able to say so even
+        // when it has no pipeline to report on.
+        "/api/health" => Ok(health_json(shared)),
         // T-218: reference data (the taxonomy and its thresholds), so the thin client never keeps
         // its own copy of the family tree or the gates. No server state is involved.
         "/api/taxonomy" => Ok(crate::taxonomy::taxonomy_json()),

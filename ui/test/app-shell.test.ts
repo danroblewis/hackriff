@@ -43,6 +43,10 @@ test("API errors map onto the connection state", () => {
   assert.equal(apiConnFor(new ControlError(401, "unauthorized", "no")).api, "unauthorized");
   assert.equal(apiConnFor(new TypeError("fetch failed")).api, "offline");
   assert.equal(apiConnFor(new ControlError(503, "unavailable", "x")).api, "offline");
+  // T-1063: a 5xx normally reads as offline, but `overloaded` is the server ANSWERING at its
+  // connection cap with a Retry-After — it is up, the poller retries, and the UI must not go red.
+  assert.equal(apiConnFor(new ControlError(503, "overloaded", "at the connection limit")).api, "ok");
+  assert.match(apiConnFor(new ControlError(503, "overloaded", "at the connection limit")).message, /retrying/);
   assert.equal(apiConnFor(new ControlError(400, "invalid", "x")).api, "ok");
 });
 
