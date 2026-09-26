@@ -133,7 +133,7 @@ Below a gate, a family contributes no likelihood mass, so its mass moves to `unk
   4. If the prior changed the top within that margin, set `prior-tiebreak`.
   5. If the prior's top ≠ the likelihood top and `L[a] ≥ 0.5`, set `prior-mismatch`. That flag feeds `unexpected-here` in explanations, and ADR-0012 §4.3 zeroes the C17 part of the boring prior.
 - **Invariant tests (T-211):** the posterior with a uniform prior equals the likelihood; no prior can raise `p_unknown` or lower it; no prior can flip a ≥ 10:1 likelihood call; `lambda0 = 0` is refused.
-- **No C17 data** (`status: no_reference_data`): `prior: None`, posterior = likelihood.
+- **No C17 data** (`status: no_reference_data`): `prior: None`, posterior = likelihood wherever `L[unknown] ≤ MAX_UNKNOWN_CONFIDENCE` (0.9); above it the unknown posterior is the cap and the known families share the remainder in proportion to their likelihoods (uniformly at a saturated open set), exactly as in step 1's amendment (T-953; text corrected T-1011).
 
 ## 4. Classical cascade (C15, T-199/T-200)
 
