@@ -17,7 +17,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
-import { FOLLOWING, paneAct, rehomedHitTest } from "./app-chrome.mjs";
+import { FOLLOWING, LIVE_BTN, liveBtn, paneAct, rehomedHitTest } from "./app-chrome.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -28,7 +28,8 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * bar's Review into the top-right cluster and added a ⋯ settings menu (Theme), and a count of 10
  * could not say whether 12 meant those two or a doubled Zoom button. The set: Go-to input, Layers,
  * Research (T-821), Measure, Annotate and Pin (T-820), Viewport, Review and ⋯ More (T-993), zoom
- * in/out, FAB. The mode switch, device state and nudges T-993 floated are not in `CLOSED` —
+ * in/out. (T-1001 retired the FAB: Live/Freeze is a button inside each PANE, on the canvas, not in
+ * the cluster — its own pressability is asserted below.) The mode switch, device state and nudges T-993 floated are not in `CLOSED` —
  * `app-top-chrome.e2e.mjs` owns them. The viewport menu = its × (T-900), Split, Close, Whole
  * surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
@@ -37,8 +38,11 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
-const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Viewport",
-  "Review", "More: settings", "Zoom in", "Zoom out", "Follow live"];
+// T-1028 added the Retune-mode chip to the cluster; T-1001 took the follow-live FAB out of it. Both
+// landed against a list written before the other, so the set is stated here once, true of the
+// cluster the page actually mounts.
+const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Retune mode",
+  "Viewport", "Review", "More: settings", "Zoom in", "Zoom out"];
 
 /** The rehomed controls are exactly the named set: none missing, none extra, none twice, and no two
  * drawn over each other. */
@@ -214,7 +218,8 @@ test("a drag on the app's surface moves the view and still reaches no device rou
 });
 
 test("T-802: the floating controls are pressable, move only the view, and offer (never command) a retune", async (t) => {
-  // MAP-02 in a real browser: Go-to, layers, zoom and the follow-live FAB float over the canvas,
+  // MAP-02 in a real browser: Go-to, layers and zoom float over the canvas (T-1001: and each pane
+  // carries its own Live/Freeze button inside its rectangle),
   // each is clickable at its own centre (T-528's hit test — a control a user can see is a control a
   // user can press), each changes the SCREEN, and none reaches a device route. A Go-to to spectrum
   // no tuned window covers shows the retune offer; the test does not press it, and asserts that
@@ -227,12 +232,12 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
-     !!document.querySelector('.map-ctl .map-fab') &&
+     !!document.querySelector('.map-ctl .map-zoom-in') && !!document.querySelector('${LIVE_BTN}') &&
      / MHz ± /.test(document.querySelector('.sf-scale')?.dataset.where ?? "")`,
     { timeoutMs: 60000 });
 
   const covered = JSON.parse(await page.eval(`JSON.stringify(
-    ['.map-goto input', '.map-layers-btn', '.map-zoom-in', '.map-zoom-out', '.map-fab'].map((sel) => {
+    ['.map-goto input', '.map-layers-btn', '.map-zoom-in', '.map-zoom-out', '${LIVE_BTN}'].map((sel) => {
       const el = document.querySelector(sel); const r = el.getBoundingClientRect();
       const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
       return { sel, w: r.width, h: r.height, on: top ? (top.className?.baseVal ?? top.className ?? top.tagName) : 'nothing',
@@ -250,13 +255,15 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.click("document.querySelector('.map-zoom-out')");
   await page.waitFor("zoom-out to change the pane's window", `(${headline}) !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
 
-  // The FAB is the retired Live button too (T-882): a press freezes the following pane, and the
-  // next re-pins it to the growing edge. Both states are stated on the FAB itself.
-  await page.click("document.querySelector('.map-fab')");
-  await page.waitFor("the FAB to say the pane is frozen", `document.querySelector('.map-fab').classList.contains('frozen')`, { timeoutMs: 10000 });
-  await page.click("document.querySelector('.map-fab')");
-  await page.waitFor("the FAB to follow the live edge again",
-    `${FOLLOWING} && document.querySelector('.map-fab').getAttribute('aria-pressed') === 'true'`,
+  // T-1001: the pane's OWN Live button (inside its rectangle) is the retired Live button's press:
+  // it freezes the following pane, and the next press re-pins it to the growing edge. Both states
+  // are stated on the button itself.
+  await page.click(liveBtn(1));
+  await page.waitFor("the pane's Live button to say it is frozen",
+    `${liveBtn(1)}.classList.contains('frozen')`, { timeoutMs: 10000 });
+  await page.click(liveBtn(1));
+  await page.waitFor("the pane's Live button to follow the live edge again",
+    `${FOLLOWING} && ${liveBtn(1)}.getAttribute('aria-pressed') === 'true'`,
     { timeoutMs: 10000 });
 
   // Layers opens a menu and closes again.

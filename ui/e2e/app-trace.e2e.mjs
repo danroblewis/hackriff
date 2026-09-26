@@ -539,13 +539,13 @@ async function whileTilesArrive(page, what, expr) {
 async function scrubOntoCell(page, lagS, tries = 8) {
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
-  // T-882: the follow/freeze control is the FAB, which mounts once the surface has booted (the
-  // retired `.sf-live` existed from the first paint).
-  await page.waitFor("the follow-live FAB to mount", "!!document.querySelector('.map-fab')", { timeoutMs: 60000 });
+  // T-1001: the follow/freeze control is the pane's OWN Live button, inside its rectangle, placed
+  // by the first render frame (the retired `.sf-live` toolbar button existed from the first paint).
+  await page.waitFor("the pane's Live button to be placed", "!!document.querySelector('.sf-pane-live-btn')", { timeoutMs: 60000 });
   let last = "";
   for (let i = 0; i < tries; i++) {
-    // Back to the growing edge. The FAB (T-882: the retired `.sf-live`) toggles, so this presses until the pane says it is
-    // following rather than assuming one press means one direction.
+    // Back to the growing edge. The pane's Live button (T-1001) toggles, so this presses until the
+    // pane says it is following rather than assuming one press means one direction.
     //
     // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
     // T-501 is why it now matters here as well as in `surface-nav`. This used to press until the
@@ -561,12 +561,12 @@ async function scrubOntoCell(page, lagS, tries = 8) {
       // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
       // clicked three times every attempt and left the viewport frozen.
       if ((await page.eval(FOLLOWING_EXPR)) === true) break;
-      await page.click(`document.querySelector('.map-fab')`);
+      await page.click(`document.querySelector('.sf-pane-live-btn')`);
       await page.frames(8);
     }
     await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR,
       { timeoutMs: 30000 });
-    await page.click(`document.querySelector('.map-fab')`);
+    await page.click(`document.querySelector('.sf-pane-live-btn')`);
     try {
       const w = await whileTilesArrive(page, `a pyramid-cell slice at least ${lagS} s behind the live edge`,
         scrubbedExpr(lagS));
@@ -1158,7 +1158,7 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   // Upward: the pointer is in GL coordinates (y up) and a pane's time runs up, so dragging toward
   // the top of the screen walks the window BACKWARD. Repeated because one drag is half a window and
   // the window has to clear the live row entirely.
-  await page.click(`document.querySelector('.map-fab')`);
+  await page.click(`document.querySelector('.sf-pane-live-btn')`);
   for (let i = 0; i < 4; i++) {
     await page.drag(
       { x: rect.x + rect.w * 0.5, y: rect.y + rect.h * 0.75 },
