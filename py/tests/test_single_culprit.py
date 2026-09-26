@@ -64,6 +64,8 @@ TRIAGE_KIND=test; TRIAGE_CHECK=""; TRIAGE_WHAT=""; TRIAGE_FILTER="{filt}"; TRIAG
 TRIAGE_TESTS="hk-pipeline::listen listen_identifies_ctcss_67p0"; TRIAGE_ALONE_FIRST={alone_first}
 {_function("main_is_red")}
 {_function("main_side_of")}
+{_function("main_clean_on")}
+{_function("try_reset")}
 {_function("reset_to_base")}
 {_function("bisect_red")}
 {_function("bisect_fact")}

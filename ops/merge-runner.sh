@@ -256,37 +256,63 @@ check_probe(){ ( cd "$REPO" && HK_GATE_CRATES="" just "$TRIAGE_CHECK" ); }
 # A VERIFIED REWIND (incident 2026-09-26 03:07): bisect_red's `git reset -q --hard "$base"` after probe 3 did not take
 # (no reflog entry; its stderr went nowhere - likely another process's index.lock), the next probe gave up on "main
 # moved", SUITE_BROKEN logged "rewound" without rewinding, and the probe merge e88d6238 (T-940) stayed on main UNGATED
-# - the loop then skipped T-940 as "already merged". So: reset, CHECK HEAD, log git's own words, retry (a lock is
-# brief); still off base = MAIN_DIRTY for a person, and $S/main-dirty stops every gate and merge until one clears it.
-reset_to_base(){ # base why -> 0 = HEAD is base; 1 = it is not (flagged, alerted, $S/main-dirty written)
-  local base=$1 why=$2 i err head
-  for i in 1 2 3; do
-    err=$(git -C "$REPO" reset -q --hard "$base" 2>&1)
-    head=$(git -C "$REPO" rev-parse HEAD 2>/dev/null)
-    [ "$head" = "$base" ] && return 0
-    log "RESET: try $i of 3 to ${base:0:8} ($why) left HEAD at ${head:0:8}: ${err:-git said nothing}"
-    [ "$i" -lt 3 ] && sleep "${RESET_RETRY_S:-3}"
+# - the loop then skipped T-940 as "already merged". So: reset, CHECK main is clean on base, log git's own words, retry
+# (a lock is brief); still not clean = MAIN_DIRTY, and $S/main-dirty stops every gate and merge until main_dirty_tick
+# sees main clean on base again (it retries the reset itself while only the runner's own commits are in the way).
+main_clean_on(){ # base -> 0 = HEAD is base, no merge staged, no tracked change (a failed `merge --abort` on base is NOT clean)
+  [ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" = "$1" ] && [ ! -e "$REPO/.git/MERGE_HEAD" ] && git -C "$REPO" diff --quiet HEAD
+}
+try_reset(){ # base why tries -> 0 = main clean on base; each failed try logged with git's own words
+  local base=$1 why=$2 n=$3 i
+  for (( i = 1; i <= n; i++ )); do
+    RESET_ERR=$(git -C "$REPO" reset -q --hard "$base" 2>&1)
+    main_clean_on "$base" && return 0
+    RESET_HEAD=$(git -C "$REPO" rev-parse HEAD 2>/dev/null)
+    log "RESET: try $i of $n to ${base:0:8} ($why) - main not clean on it (HEAD ${RESET_HEAD:0:8}$([ -e "$REPO/.git/MERGE_HEAD" ] && echo ', a merge staged')): ${RESET_ERR:-git said nothing}"
+    [ "$i" -lt "$n" ] && sleep "${RESET_RETRY_S:-3}"
   done
-  printf 'base=%s\nhead=%s\nwhy=%s\nsince=%s\n' "$base" "$head" "$why" "$(date '+%Y-%m-%d %H:%M:%S')" > "$S/main-dirty"
-  echo "$(date '+%m-%d %H:%M')  (main)  -  MAIN_DIRTY - main is at ${head:0:8}, not ${base:0:8} after '$why': an UNGATED commit sits on main; reset main to ${base:0:8} by hand, then rm $S/main-dirty (no gate or merge runs until then)" >> "$NEEDS"
-  alert red "main left on an ungated commit" "$why: git reset --hard ${base:0:8} failed 3 times, main is at ${head:0:8}. ${err:-} No gate or merge runs until a person resets main and removes $S/main-dirty." --key "main-dirty"
   return 1
+}
+reset_to_base(){ # base why -> 0 = main clean on base; 1 = it is not (flagged, alerted, $S/main-dirty written)
+  local base=$1 why=$2
+  try_reset "$base" "$why" 3 && return 0
+  printf 'base=%s\nhead=%s\nwhy=%s\nsince=%s\n' "$base" "$RESET_HEAD" "$why" "$(date '+%Y-%m-%d %H:%M:%S')" > "$S/main-dirty"
+  echo "$(date '+%m-%d %H:%M')  (main)  -  MAIN_DIRTY - main is not clean on ${base:0:8} (HEAD ${RESET_HEAD:0:8}) after '$why': ungated work sits on main. No gate or merge runs; the runner retries the reset each minute while only its own commits are in the way, and the hold clears itself once main is clean on ${base:0:8}. Do NOT just delete $S/main-dirty - the batch would then be skipped as already merged." >> "$NEEDS"
+  alert red "main left on an ungated commit" "$why: git reset --hard ${base:0:8} failed 3 times, main is at ${RESET_HEAD:0:8}. ${RESET_ERR:-} No gate or merge runs until main is clean on ${base:0:8}; the runner retries while only its own commits are there and resumes by itself." --key "main-dirty"
+  return 1
+}
+# The runner's own commit subjects: a bisect probe, a suite probe, a batch merge. Only these may be reset away unattended.
+own_commits_only(){ # base -> 0 = HEAD descends from base, nothing staged or edited, and every commit in base..HEAD is ours
+  local base=$1 s
+  git -C "$REPO" merge-base --is-ancestor "$base" HEAD 2>/dev/null || return 1
+  [ ! -e "$REPO/.git/MERGE_HEAD" ] && git -C "$REPO" diff --quiet HEAD || return 1
+  while IFS= read -r s; do
+    case "$s" in
+      *": bisect probe (automated, never kept)"|*": batch, gated together (automated, no AI)"|"suite probe "*" (never kept)") ;;
+      *) return 1 ;;
+    esac
+  done < <(git -C "$REPO" log --first-parent --format=%s "$base..HEAD")   # main's own chain; a merge's branch commits are not
+}
+main_dirty_tick(){ # -> 0 = main is clean on the recorded base again (the hold is lifted); 1 = still held
+  local base; base=$(sed -n 's/^base=//p' "$S/main-dirty" 2>/dev/null | head -1)
+  [ -n "$base" ] || return 1
+  if ! main_clean_on "$base"; then
+    [ $(( SECONDS - ${DIRTY_RETRY_AT:--999} )) -ge "${DIRTY_RETRY_S:-60}" ] || return 1
+    DIRTY_RETRY_AT=$SECONDS
+    own_commits_only "$base" || { [ -z "${DIRTY_FOREIGN_SAID:-}" ] && log "MAIN_DIRTY: main holds more than the runner's own commits on ${base:0:8} - not resetting; held for a person"; DIRTY_FOREIGN_SAID=1; return 1; }
+    try_reset "$base" "main-dirty retry" 1 || return 1
+  fi
+  rm -f "$S/main-dirty"; DIRTY_FOREIGN_SAID=""; DIRTY_RETRY_AT=""
+  [ "$(sed -n 's/^base=//p' "$BULKMARK" 2>/dev/null)" = "$base" ] && rm -f "$BULKMARK"
+  log "MAIN_DIRTY cleared: main is back on ${base:0:8} - gates resume"
+  alert amber "main back on ${base:0:8}, gates resume" "main is clean on ${base:0:8} again; the MAIN_DIRTY hold is lifted." --key "main-dirty"
+  return 0
 }
 bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
   # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
   # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
   local base=$1; shift; local t rc=1
-  local head; head=$(git -C "$REPO" rev-parse HEAD)
-  if [ "$head" != "$base" ]; then
-    # Our own leftover probe (a reset that did not take) is ours to remove; anything else is a person's commit.
-    if [ "$(git -C "$REPO" rev-parse "HEAD^1" 2>/dev/null)" = "$base" ] \
-       && git -C "$REPO" log -1 --format=%s HEAD 2>/dev/null | grep -q ': bisect probe (automated, never kept)$'; then
-      log "BISECT: HEAD ${head:0:8} is this runner's own leftover probe on ${base:0:8} - resetting it and going on"
-      reset_to_base "$base" "leftover bisect probe ${head:0:8}" || return 2
-    else
-      log "BISECT: main moved off $base during the bisect - giving up, nothing reset"; return 2
-    fi
-  fi
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ] || { log "BISECT: main moved off $base during the bisect - giving up, nothing reset"; return 2; }
   for t in "$@"; do
     if ! git -C "$REPO" merge -q --no-ff -m "Merge $(ticket_of "${t%%=*}") (${t%%=*}): bisect probe (automated, never kept)" "${t#*=}" >>"$LOG" 2>&1; then
       git -C "$REPO" merge --abort 2>/dev/null; reset_to_base "$base" "bisect: ${t%%=*} did not merge" || return 2
@@ -434,6 +460,7 @@ suite_split(){ # base "ids" name=sha... -> "RED name=sha" / "GREEN name=sha"; no
   printf '%s ' "${@%%=*}" > "$S/isolate-remaining"   # a runner killed mid-probe re-queues the whole batch (as bisect_culprit)
   suite_red_alone "$base" "" "$ids" && return 0
   for b in "$@"; do
+    [ -e "$S/main-dirty" ] && return 0   # main is not clean on base: no probe means anything (try_bulk stops next)
     # Twice, as bisect_culprit: one red run cannot tell a defect from a test flaky even alone.
     if suite_red_alone "$base" "${b#*=}" "$ids" && suite_red_alone "$base" "${b#*=}" "$ids"; then echo "RED $b"; else echo "GREEN $b"; fi
   done
@@ -981,7 +1008,7 @@ bulk_dirty_stop(){
   [ -e "$S/main-dirty" ] || return 1
   rm -f "$S/isolate-remaining"
   for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-  log "BULK gate FAILED -> main NOT rewound to $base (MAIN_DIRTY); batch re-queued in order, nothing gates until a person clears $S/main-dirty"
+  log "BULK gate FAILED -> main NOT rewound to $base (MAIN_DIRTY); batch re-queued in order, nothing gates until main is clean on $base again"
   return 0
 }
 
@@ -1308,9 +1335,14 @@ done
 if [ -f "$BULKMARK" ]; then
   sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
   if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
-    git -C "$REPO" reset --hard "$sbase" >>"$LOG" 2>&1 && rm -f "$BULKMARK" \
-      && log "STARTUP: rewound a provisional bulk to $sbase and re-queued: $sbranches" \
-      && for b in $sbranches; do echo "$b" >> "$QUEUE"; done
+    if reset_to_base "$sbase" "startup rewind"; then
+      rm -f "$BULKMARK"
+      [ "$(sed -n 's/^base=//p' "$S/main-dirty" 2>/dev/null)" = "$sbase" ] && rm -f "$S/main-dirty"
+      log "STARTUP: rewound a provisional bulk to $sbase and re-queued: $sbranches"
+    else
+      log "STARTUP: rewind to $sbase did NOT take - bulk marker and MAIN_DIRTY kept; re-queued (they gate once main is clean): $sbranches"
+    fi
+    for b in $sbranches; do echo "$b" >> "$QUEUE"; done
   else
     log "STARTUP: bulk marker present but the tree is dirty or base unknown - NOT rewinding; a person must look"
   fi
@@ -1327,6 +1359,13 @@ while true; do
     log "RESTART: requested (${why:-no reason given}) - re-executing $REPO/ops/merge-runner.sh between gates"
     exec bash "$REPO/ops/merge-runner.sh"
   fi
+  # MAIN_DIRTY (reset_to_base): main is not clean on a gated commit. No gate, merge or RC on it; main_dirty_tick lifts the
+  # hold by itself once main is clean on the recorded base (retrying the reset while only the runner's commits are there).
+  if [ -e "$S/main-dirty" ] && ! main_dirty_tick; then
+    [ -z "${DIRTY_SAID:-}" ] && { log "HOLD: MAIN_DIRTY - $(tr '\n' ' ' < "$S/main-dirty") - no gate or merge until main is clean on its base"; DIRTY_SAID=1; }
+    sleep 8; continue
+  fi
+  DIRTY_SAID=""
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
   # too and glues every queued branch into one unmergeable name (observed 2026-09-20).
@@ -1368,13 +1407,6 @@ while true; do
     fi
   fi
   HOLD_SAID=""
-  # MAIN_DIRTY (reset_to_base): main carries an ungated commit the runner could not remove. No gate, merge or RC on it;
-  # the alert and the attention line went out when it was written. A person resets main and removes the marker.
-  if [ -e "$S/main-dirty" ]; then
-    [ -z "${DIRTY_SAID:-}" ] && { log "HOLD: MAIN_DIRTY - $(tr '\n' ' ' < "$S/main-dirty") - no gate or merge until a person resets main and removes $S/main-dirty"; DIRTY_SAID=1; }
-    sleep 8; continue
-  fi
-  DIRTY_SAID=""
   if rc_due && [ ! -e "$BULKMARK" ] && main_ready && workers_drained; then run_rc; continue; fi
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main

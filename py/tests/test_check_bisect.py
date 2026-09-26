@@ -66,6 +66,8 @@ TRIAGE_KIND=suite; TRIAGE_CHECK={check!r}; TRIAGE_WHAT="just {check}"; TRIAGE_FI
 {_check_fn()}
 {_function("main_is_red")}
 {_function("main_side_of")}
+{_function("main_clean_on")}
+{_function("try_reset")}
 {_function("reset_to_base")}
 {_function("bisect_red")}
 {_function("bisect_fact")}

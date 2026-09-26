@@ -353,6 +353,8 @@ probe(){{ echo "$1 $(tr '\\n' ' ' < {state})" >> {calls}; [ "$(grep -cxE '{culpr
 cargo(){{ [ "$1" = build ] && return 0; probe cargo; }}
 npm(){{ [ "$2" = build ] && return 0; probe npm; }}
 TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
+{_function("main_clean_on")}
+{_function("try_reset")}
 {_function("reset_to_base")}
 {_function("bisect_red")}
 {_function("bisect_culprit")}
@@ -404,6 +406,8 @@ git(){{ shift 2; case "$1" in rev-parse) [ -s {state} ] && echo moved || echo ba
   merge) b="${{@: -1}}"; echo "${{b#sha-}}" >> {state} ;; esac; return 0; }}
 cargo(){{ echo x >> {calls}; grep -qx b1 {state} || return 0; [ -e {flip} ] && return 0; touch {flip}; return 1; }}
 TRIAGE_FILTER=t; TRIAGE_SPECS=""
+{_function("main_clean_on")}
+{_function("try_reset")}
 {_function("reset_to_base")}
 {_function("bisect_red")}
 {_function("bisect_culprit")}
@@ -501,6 +505,8 @@ uv(){{ echo "$* | $(tr '\n' ' ' < {state})" >> {calls}
   grep -qx '{absent_on or "NONE"}' {state} && return 4
   if grep -qx '{flaky_once or "NONE"}' {state}; then [ -e {flip} ] && return 0; touch {flip}; return 1; fi
   grep -qxE '{culprit_re}' {state} && return 1; return 0; }}
+{_function("main_clean_on")}
+{_function("try_reset")}
 {_function("reset_to_base")}
 {_function("suite_red_alone")}
 {_function("suite_split")}
@@ -643,6 +649,8 @@ git(){{ shift 2
   esac; return 0; }}
 cargo(){{ [ "$(grep -cxE '{culprit_re}' {state})" -ge {len(culprits)} ] && return 1; return 0; }}
 TRIAGE_FILTER=t; TRIAGE_SPECS=""
+{_function("main_clean_on")}
+{_function("try_reset")}
 {_function("reset_to_base")}
 {_function("bisect_red")}
 {_function("bisect_fact")}
