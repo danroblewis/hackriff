@@ -29460,7 +29460,7 @@ tasks:
   - id: T-1001
     milestone: MMAP
     title: "Split view: a Live/Freeze button inside each pane's rectangle; the single follow-live FAB retires"
-    status: todo
+    status: done
     priority: medium
     deps:
     - T-1000
@@ -29485,6 +29485,7 @@ tasks:
       Commits: e7bf25bb, b0817e90, a9ca58a1
       Observed, not chased: REGRESSION ON MAIN (T-1028, retune mode): at 400 px the Go-to input is squeezed to 12 px wide because the new Retune-mode chip grows the top-right cluster and `.map-goto` is sized min(300px, calc(100% - var(--topright-w))). ui/e2e/app-phone.e2e.mjs fails on main's own build (evidence: /tmp/main-phone.log, main dist at 364e37a3 in /tmp/main-ui2). Needs the chip's owner to give the phone layout room; I left the CSS alone. | RED THAT WAS ON MAIN AND IS NOW FIXED HERE: ui/e2e/app-surface.e2e.mjs's CLOSED_NAMES did not list T-1028's 'Retune mode' chip, so 4 of its 9 tests failed on main's own build (/tmp/main-surface.log). Since my diff already edits that line (removing the retired 'Follow live'), I stated the set that is actually mounted. If T-1028's owner fixes it independently, that line will conflict trivially. | The repo-root debug binary /home/ubuntu/hk/hackriff/target/debug/hk (09-25 00:45) is far behind main and refuses planes=compact, which fails EVERY e2e spec at surface mount; I ran against a current-main binary (.claude/worktrees/t1023/target/debug/hk). | ui/e2e/app-trace.e2e.mjs was not re-run in this round (~200 s per run, already recorded as un-judgeable under load and red on a different subtest each run); my only change to it is the .map-fab -> .sf-pane-live-btn selector swap and it was unaffected by this merge.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 8c92bd3d
   - id: T-1002
     milestone: MMAP
     title: "Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it"
