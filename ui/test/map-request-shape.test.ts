@@ -18,6 +18,7 @@
 // Nothing here renders: the builders are pure or take a recording client, so the file needs no DOM
 // and states only what leaves the browser.
 import { SCAN_START_PATH, SCAN_STOP_PATH, SCAN_WINDOWS_REQUEST, scanPriceRequest, scanStartBody } from "../src/app/map/scan-overlay";
+import { collectionForMarkers, markerName, recordRegionIq, saveAsMarker } from "../src/app/menu/measure-actions";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -237,6 +238,39 @@ const DRIVERS: readonly { panel: string; run: () => Promise<Built[]> }[] = [
     },
   },
   {
+    panel: "measurement box menu (T-1009: scan this region with a device, record its IQ, save as marker)",
+    run: async () => {
+      const { calls, ctx, client } = recorder();
+      const m = { id: ID, f_lo_hz: 97e6, f_hi_hz: 99e6, t0_s: T0, t1_s: T0 + 2 };
+      const dev = "mock:rtl";
+      // Record IQ: the box's own window and band, off the NAMED radio's ring.
+      await recordRegionIq(ctx, client as never, m, dev, "RTL-SDR");
+      const clip = calls.at(-1)!;
+      const cb = clip.body as Record<string, unknown>;
+      assert.equal(cb.device_id, dev, "a clip says whose ring it comes from");
+      assert.deepEqual(cb.band, { f_lo: m.f_lo_hz, f_hi: m.f_hi_hz }, "band-filtered to the box");
+      assert.deepEqual([cb.t0, cb.t1], [m.t0_s, m.t1_s], "the box's own time window, unwidened");
+      // Save as marker: a collection is found (or made), then the marker is posted to it.
+      await saveAsMarker(ctx, client as never, m, markerName(m), VIEW);
+      const marker = calls.at(-1)!;
+      const mb = marker.body as Record<string, unknown>;
+      assert.ok(!("provenance" in mb) && !("f_lo_hz" in mb), "the server stamps provenance and derives the extent");
+      assert.deepEqual(mb.view, VIEW, "the client sends only the pane it was on");
+      assert.equal(mb.bandwidth_hz, m.f_hi_hz - m.f_lo_hz);
+      assert.equal(mb.duration_s, m.t1_s - m.t0_s, "a measurement box keeps its time extent");
+      await collectionForMarkers(client as never);
+      // Scan this region with that radio: the plan is priced on it, and Start names it.
+      const r = { loHz: m.f_lo_hz, hiHz: m.f_hi_hz };
+      const price = scanPriceRequest(r, 1, "fine", dev);
+      assert.match(price, /[?&]device_id=mock%3Artl(&|$)/, "the price is asked of the chosen radio");
+      return [
+        ...calls,
+        { method: "GET", path: price },
+        { method: "POST", path: SCAN_START_PATH, body: scanStartBody(r, 1, "fine", dev) },
+      ];
+    },
+  },
+  {
     panel: "Research slide-in (collections, markers, annotations, export)",
     run: async () => {
       const { calls, ctx } = recorder();
@@ -273,7 +307,6 @@ const NO_CLIENT_YET: Readonly<Record<string, string>> = {
   "/api/views": "T-819 serves the store; the Research slide-in has no Views tab yet (MAP-19 FE)",
   "/api/views/*": "as /api/views: no Views tab builds a write yet (MAP-19 FE)",
   "/api/measurements/*": "MAP-22 draws and posts measurements; editing/deleting one is not built yet",
-  "/api/collections/*/markers": "the client posts markers through the authoring gesture, not this list route",
   "/api/history": "served, but no client reads it since T-445 retired the spectrum-grid pane",
   "/api/inventory/*/classification": "served inside the /api/inventory row the sheet already reads",
 };
