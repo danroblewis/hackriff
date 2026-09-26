@@ -738,7 +738,16 @@ export class Surface {
       // it: it is levels above the pane's own, and `wants()` keeps a viewport's level and one step
       // coarser, so without saying so here the stand-in set would be cancelled at the end of the very
       // frame that asked for it.
-      const coarse = this.coarseStandIn && !awaiting
+      //
+      // **Not on the overview tier** (measured, `ui/e2e/surface-nav.e2e.mjs` test 3). The stand-in
+      // has to be cheaper than the thing it stands in for, and at the coarse end it is not: T-450
+      // measured a map-level read at **5.2 s and 9.5 MB** against 11.4 ms for a fine tile, and the
+      // queue is LIFO so the stand-in is fetched FIRST — a "fit to coverage" pane spent its whole
+      // 4-slot budget on tiles even coarser than the survey overview it was already drawing, and
+      // went from `1 tiles · 15 coarse stand-ins` to `0 tiles · 16` at the same instant. A pane on
+      // the overview tier is at the survey-overview honesty tier already: there is nothing
+      // meaningfully coarser to stand in for it, and the parent pin below still covers the zoom-out.
+      const coarse = this.coarseStandIn && !awaiting && tier !== "overview"
         ? coarsestCovering(lat, pane.box, levelF, levelT, pane.device ?? "any")
         : null;
       viewports.push({

@@ -191,6 +191,36 @@ test("the coarse stand-in SURVIVES the frame that asked for it — cancellation 
     "nothing this pane asked for was cancelled, so the stand-in set was not dropped by the predicate");
 });
 
+test("a pane on the OVERVIEW tier asks for no stand-in: at the coarse end the stand-in costs more than the tile", async () => {
+  // T-450 measured a map-level read at 5.2 s and 9.5 MB against 11.4 ms for a fine tile, and the
+  // fetch queue is LIFO, so a stand-in for an overview pane is fetched FIRST and spends the whole
+  // budget on tiles coarser than the survey overview the pane is already drawing. Measured in
+  // `ui/e2e/surface-nav.e2e.mjs` test 3: a "fit to coverage" pane went `1 tiles · 15 coarse
+  // stand-ins` -> `0 tiles · 16` the moment the stand-in was asked for at that tier.
+  // A shallow detail ladder, so a wide box CLAMPS at its ceiling and blows the tile budget — which
+  // is what `tierFor` moves a pane to the overview tier on (T-505), a budget and never a span.
+  const detail: Lattice = { ...LAT, levelsF: 3, levelsT: 2 };
+  const overview: Lattice = { ...LAT, scheme: "overview", f0Hz: LAT.f0Hz * 64, t0Ns: LAT.t0Ns * 8 };
+  const g = stubGl(W, H);
+  const asked: TileAddr[] = [];
+  const surface = new Surface(
+    g.canvas, { detail, overview },
+    (tex) => new TileCache(tex, (a) => { asked.push(a); return Promise.resolve(tile(a)); }, { now: () => 0 }),
+    { pinParents: false },
+  );
+  surface.setScale(LO, HI);
+  // Wide enough that the detail tier cannot draw it inside VIEWPORT_TILE_BUDGET, so `tierFor` moves
+  // this pane to the overview lattice — the condition the rule is about, derived and not asserted.
+  const wide = paneOver(400, 8);
+  for (let i = 0; i < 6; i++) { surface.render([wide]); await flush(); }
+  assert.equal(surface.lastFrame[0].tier, "overview", "this pane must be on the overview tier");
+  const ov = tierFor({ detail, overview }, wide.box, W, H, "any", "overview");
+  const coarser = asked.filter((a) => a.scheme === "overview" && a.levelF > ov.levelF + 1);
+  assert.deepEqual(coarser.map(keyOf), [],
+    "an overview pane asked for a level coarser than its own parent pin — the dearest reads in the " +
+    "system, fetched before its own tiles, to stand in for the survey overview it already draws");
+});
+
 // ---------------------------------------------------------------------------------------------
 // 4-5. PENDING only when no ancestor exists at any level.
 
