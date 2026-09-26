@@ -1092,12 +1092,19 @@ impl Writer {
             now_ns,
             capture_name,
         } = batch;
-        if let Some(name) = capture_name {
-            self.shared
+        if capture_name.is_some() || !live_extents.is_empty() {
+            let mut inv = self
+                .shared
                 .inventory
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .capture_name(&name);
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(name) = capture_name {
+                inv.capture_name(&name);
+            }
+            // T-1086: the inventory keeps the tracker's latest word on each open track, so the
+            // hold that first binds a track to an entry — possibly a chain's, on another thread,
+            // before this writer's next pass — files the track's report beside the binding row.
+            inv.live_extents(&live_extents);
         }
         self.pending.extend(detections);
         merge_tracks(&mut self.tracks, tracks);

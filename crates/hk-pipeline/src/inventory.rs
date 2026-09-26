@@ -80,12 +80,12 @@ use hk_context::multipath::{MULTIPATH_RULE, MultipathConfig};
 use hk_context::{BandTable, Region as BandRegion};
 use hk_detect::TrackEvent;
 use hk_detect::overlap::{OverlapConfig, measure_region};
-use hk_detect::track::TrackSummary;
 use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
+use hk_detect::track::{LiveExtent, TrackSummary};
 use hk_model::{
     DemodulationId, EmitterId, EmitterLink, IdentityScheme, LifecycleAuthor, LifecycleState,
     LinkTarget, MeasurementKey, RETUNE_MIN_CENTRES, RETUNE_RULE, RepoError, Repository,
-    RetuneTolerance, Sighting, Timestamp, Tolerances, TrackId, UnresolvedRegion,
+    RetuneTolerance, Sighting, TimeRange, Timestamp, Tolerances, TrackId, UnresolvedRegion,
 };
 use serde::{Deserialize, Serialize};
 
@@ -165,6 +165,18 @@ pub trait Inventory: Send {
     /// writer starts. An inventory that resolves overlaps against the spectrum keeps it and asks
     /// through it; one that does not ignores it and the reader never takes a snapshot.
     fn region_spectrum(&mut self, _spectrum: Arc<crate::overlap::RegionSpectrum>) {}
+
+    /// T-1086: the tracker's latest observed extents of its open tracks, as the detect writer
+    /// receives them (every flush; a non-empty list replaces the last one, the writer's own rule).
+    ///
+    /// Held so that the moment a track is first **bound** to an entry — by its live offer or by a
+    /// chain's write, which can come from another thread entirely — the tracker's report on it is
+    /// filed in the same repository hold as the row that bound it. Without it the entry's only
+    /// ledger rows until the writer's next pass were closed ones (a WFM chain's ~1 s leading
+    /// window, trailing the capture edge by the chain's latency), and the silence after them read
+    /// as observed: the station was `ended` for its first moments and revived by the next report —
+    /// an end nobody detected. Takes no repository: it only remembers.
+    fn live_extents(&mut self, _extents: &[LiveExtent]) {}
 
     /// A tracker event whose Track row and links are already stored (closes, hop sets).
     fn track_event(
@@ -1170,6 +1182,12 @@ pub struct TrackInventory {
     /// [`Self::bind`]. Bounded like [`Self::bound`]: past the cap the map is cleared, which costs
     /// a refusal its link, never a wrong one.
     awaiting: HashMap<TrackId, Vec<(DemodulationId, Timestamp)>>,
+    /// T-1086: the tracker's latest observed extent of each open track
+    /// ([`Inventory::live_extents`]), so [`Self::bind`] can file the track's report in the hold
+    /// that first binds it. Replaced wholesale by each non-empty list, so it holds at most the
+    /// writer's `MAX_LIVE_EXTENTS`; a track leaves it when it closes, merges or joins a hop set,
+    /// exactly where it leaves [`Self::bound`].
+    extents: HashMap<TrackId, LiveExtent>,
     /// T-598: the number of distinct tuning centres the last retune pass was decided at, and the
     /// rows already resolved at it. A cross-centre verdict can only change when a **new centre**
     /// appears, so the pass runs at most once per row per centre count — never once per sighting.
@@ -1269,6 +1287,7 @@ impl TrackInventory {
             recorded: HashMap::new(),
             merged_into: HashMap::new(),
             awaiting: HashMap::new(),
+            extents: HashMap::new(),
             retune_centres: 0,
             retuned: HashSet::new(),
             multipath_reviewed: HashMap::new(),
@@ -1310,12 +1329,28 @@ impl TrackInventory {
         if self.bound.len() >= RUN_MEMORY && !self.bound.contains_key(&track) {
             self.bound.clear();
         }
-        self.bound.insert(track, emitter);
+        let newly = self.bound.insert(track, emitter) != Some(emitter);
         self.remember_track(track, emitter);
         // T-416: this is the moment a track first has somewhere to file things, so any declined
         // measurement that arrived before it is attached here.
         for (demod, at) in self.awaiting.remove(&track).unwrap_or_default() {
             attach_measurement(repo, emitter, demod, at)?;
+        }
+        // T-1086: and the moment the tracker's report on it first has an entry to go to. The
+        // detect writer files these on its next pass (`Writer::file_inventory`), but the row that
+        // bound the track is already readable — a chain's closed leading window, or the offer's
+        // row — and until a report lands the silence after it reads as *observed* (T-940), which
+        // it is not: the tracker was following the emission through all of it. So the report the
+        // writer would file is filed here, in the same repository hold as the binding row, and no
+        // reader ever sees the entry with only closed rows while its track is followed. The same
+        // write the writer makes (`Repository::follow_track`), from the same extent, so the two
+        // cannot disagree; a track the tracker has not reported yet gets nothing, as before.
+        if newly && let Some(e) = self.extents.get(&track) {
+            let seen = TimeRange::new(
+                Timestamp::from_unix_nanos(e.t_start_ns),
+                Timestamp::from_unix_nanos(e.t_end_ns.max(e.t_start_ns)),
+            );
+            repo.follow_track(emitter, track, seen, e.observed_silence_ns)?;
         }
         Ok(())
     }
@@ -1710,6 +1745,14 @@ impl Inventory for TrackInventory {
         self.capture = Some(name.to_owned());
     }
 
+    fn live_extents(&mut self, extents: &[LiveExtent]) {
+        if extents.is_empty() {
+            return;
+        }
+        self.extents.clear();
+        self.extents.extend(extents.iter().map(|e| (e.track, *e)));
+    }
+
     fn track_event(&mut self, repo: &mut Repository, event: &TrackEvent) -> Result<(), RepoError> {
         match event {
             TrackEvent::Closed(summary) => {
@@ -1722,6 +1765,9 @@ impl Inventory for TrackInventory {
                 // end the tracker measured, and the close's own sighting is what the next poll
                 // serves.
                 self.bound.remove(&track);
+                // T-1086: nor any further report — a bind after this point must not mark the
+                // closed track's final row followed again.
+                self.extents.remove(&track);
                 let provisional = self.provisional.remove(&track);
                 match track_sighting(summary) {
                     Some(mut s) => {
@@ -1745,6 +1791,7 @@ impl Inventory for TrackInventory {
                 // Channels offered before the set formed now belong to the set's entry.
                 for &m in &h.members {
                     self.bound.remove(&m);
+                    self.extents.remove(&m);
                     self.recorded.remove(&m);
                     // T-416: the member's entry is being withdrawn in favour of the set's, so
                     // there is nothing left for a waiting refusal to be filed against.
@@ -1766,6 +1813,7 @@ impl Inventory for TrackInventory {
             }
             TrackEvent::Merged { from, into, at } => {
                 self.bound.remove(from);
+                self.extents.remove(from);
                 self.recorded.remove(from);
                 self.awaiting.remove(from);
                 // T-886: the absorbed track's observations continue as the survivor's, so its
@@ -3014,5 +3062,154 @@ mod tests {
                 "a member's measurement is filed against the set"
             );
         }
+    }
+
+    /// T-1086: the tracker's extent of an open track, as the detect writer hands it over.
+    fn extent(track: TrackId, t0: f64, t1: f64, silence_s: f64) -> LiveExtent {
+        let ns = (silence_s * 1e9) as i64;
+        LiveExtent {
+            track,
+            t_start_ns: t(t0).as_unix_nanos(),
+            t_end_ns: t(t1).as_unix_nanos(),
+            observed_silence_ns: ns,
+            wall_silence_ns: ns,
+        }
+    }
+
+    /// T-1086: the liveness `/api/inventory` and `/api/events` serve for `id` when the IQ ring's
+    /// sampled edge is at `edge` s, under a live dwell on the band since 0 s — the one derivation
+    /// (`hk_api::coverage::ObservedCoverage::track`) over a ring whose single segment runs from
+    /// the start of the record to the sampled edge: the idle gap measured off that coverage, the
+    /// silence observed over it (T-940), projected through the window ending at the edge.
+    fn liveness_at(repo: &Repository, id: EmitterId, edge: f64) -> hk_model::Liveness {
+        let window = TimeRange::new(t(0.0), t(edge));
+        let spans = [window];
+        let gap = hk_model::IdleGap::from_coverage(&spans, window);
+        let watched = hk_model::Watched::recorded(t(0.0), &spans);
+        let live = repo.live_emitter_id(id).unwrap();
+        let intervals = repo
+            .presence_intervals(live, gap, t(edge), &watched)
+            .unwrap();
+        hk_model::presence_in_window(&intervals, window, gap).liveness
+    }
+
+    /// **T-1086: an on-air station reads `live` at every instant from its first ledger row — never
+    /// an `ended` the next report revokes.**
+    ///
+    /// The race, with pinned times: the tracker has followed a WFM station since 0.5 s and is in
+    /// the middle of its (one, continuous) burst at 4.9 s. The analog chain, a second behind,
+    /// files the station's leading window `[1.0, 2.0]` — a CLOSED row — and binds the track to
+    /// the entry it made, from its own thread. The detect writer's first follow report for that
+    /// track lands on its next pass (here: at sampled edge 5.6 s). In between, the entry's only
+    /// row ends 3 s behind the ring's sampled edge, and the silence after it — which the tracker
+    /// was following the station through — read as observed: `ended` from the instant the row
+    /// appeared (the coordinator's probe: `ended` at t+2.987 s, `live` at t+3.054 s). An end was
+    /// reported that nothing detected (ADR-0017/0019: ongoing until an end is affirmatively
+    /// detected).
+    ///
+    /// The fix files the tracker's report in the hold that binds the track, so the pre-fix code
+    /// reads `ended` at the first instant below and this reads `live` throughout. The affirmative
+    /// end still closes it: once the tracker reports observed silence past the floor, it reads
+    /// `ended` — the fix holds open nothing the tracker has seen stop.
+    #[test]
+    fn t1086_a_station_bound_by_its_chain_is_live_from_its_first_row_until_the_tracker_ends_it() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let track = TrackId::new();
+        let f = 98.1e6;
+        // The writer's latest flush: the tracker is mid-burst.
+        inv.live_extents(&[extent(track, 0.5, 4.9, 0.0)]);
+        // The chain's leading window, filed and bound in one hold.
+        let row = overlap_decode_sighting(f, 200e3, TimeRange::new(t(1.0), t(2.0)), "wfm");
+        let id = repo.record_sighting(&row, None).unwrap().emitter_id;
+        inv.chain_emitter(&mut repo, Some(track), id).unwrap();
+
+        // Every instant from the row's arrival (sampled edge 5.0 s, 3 s past the row's end) to the
+        // writer's first report, in 10 ms steps.
+        for k in 0..=60 {
+            let edge = 5.0 + 0.01 * f64::from(k);
+            assert_eq!(
+                liveness_at(&repo, id, edge),
+                hk_model::Liveness::Live,
+                "the station reads `ended` at sampled edge {edge:.2} s before any end was \
+                 detected: rows {:?}",
+                repo.observation_spans(id).unwrap()
+            );
+        }
+        // The writer's first pass reports the track (`Writer::file_inventory`): still live.
+        repo.follow_track(id, track, TimeRange::new(t(0.5), t(5.5)), 0)
+            .unwrap();
+        for k in 0..=50 {
+            let edge = 5.6 + 0.01 * f64::from(k);
+            assert_eq!(
+                liveness_at(&repo, id, edge),
+                hk_model::Liveness::Live,
+                "sampled edge {edge:.2} s"
+            );
+        }
+        // The station stops at 5.5 s and the tracker observes 1.5 s of silence: an end detected.
+        repo.follow_track(id, track, TimeRange::new(t(0.5), t(5.5)), 1_500_000_000)
+            .unwrap();
+        assert_eq!(
+            liveness_at(&repo, id, 7.1),
+            hk_model::Liveness::Ended,
+            "an end the tracker observed still closes the interval"
+        );
+    }
+
+    /// T-1086: the live offer binds a track the same way, so its row is followed from the hold
+    /// that wrote it — and only while the tracker is following it. A track that merged away (or
+    /// closed) is forgotten, so a later bind of it cannot mark its final row followed again, which
+    /// would read an ended emission `live` for as long as the row lasts.
+    #[test]
+    fn t1086_the_bind_time_report_covers_the_live_offer_and_never_a_track_that_ended() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let offered = TrackId::new();
+        let absorbed = TrackId::new();
+        inv.live_extents(&[
+            extent(offered, 1.0, 9.0, 0.0),
+            extent(absorbed, 1.0, 3.0, 0.0),
+        ]);
+        inv.live_track(&mut repo, &channel_summary(offered, 3, 5, None))
+            .unwrap();
+        let id = inv
+            .emitter_of_track(offered)
+            .expect("the offer bound the track");
+        let followed = |repo: &Repository, id: EmitterId| {
+            repo.observation_spans(id)
+                .unwrap()
+                .iter()
+                .any(|s| s.live_silence_ns.is_some())
+        };
+        assert!(
+            followed(&repo, id),
+            "the offer's row is reported in the hold that wrote it"
+        );
+        assert_eq!(liveness_at(&repo, id, 9.5), hk_model::Liveness::Live);
+
+        // `absorbed` merges into `offered`: the tracker follows it no longer.
+        inv.track_event(
+            &mut repo,
+            &TrackEvent::Merged {
+                from: absorbed,
+                into: offered,
+                at: t(3.0),
+            },
+        )
+        .unwrap();
+        let row = overlap_decode_sighting(151.0e6, 12e3, TimeRange::new(t(1.0), t(2.0)), "fsk");
+        let other = repo.record_sighting(&row, None).unwrap().emitter_id;
+        inv.chain_emitter(&mut repo, Some(absorbed), other).unwrap();
+        let other = repo.live_emitter_id(other).unwrap();
+        assert!(
+            !followed(&repo, other),
+            "a track that ended is never reported at a later bind"
+        );
+        assert_eq!(
+            liveness_at(&repo, other, 9.5),
+            hk_model::Liveness::Ended,
+            "its closed row's silence is observed, as T-940 reads any closed source"
+        );
     }
 }
