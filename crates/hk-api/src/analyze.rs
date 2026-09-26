@@ -820,7 +820,13 @@ mod tests {
         // No marker either: the answer must not itself say that something is held back.
         let text = held.to_string();
         assert!(!text.contains("withheld"), "{held}");
-        assert!(!text.contains("a7") && !text.contains("pocsag"), "{held}");
+        // T-1012: scanned WITHOUT the emitter id, which is a random UUIDv7 (asserted exactly
+        // above) and contains the substring "a7" in roughly one run in ten — which is how this
+        // test failed alone, at random, and was filed as a load flake.
+        let mut rest = held.clone();
+        rest.as_object_mut().unwrap().remove("emitter_id");
+        let rest = rest.to_string();
+        assert!(!rest.contains("a7") && !rest.contains("pocsag"), "{held}");
     }
 
     #[test]

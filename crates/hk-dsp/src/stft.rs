@@ -149,6 +149,13 @@ pub struct PartialFrames {
     pub arm_on: Discontinuity,
 }
 
+/// T-974: how far (ns) an input's host time may sit from the current anchor's projection of it and
+/// still be read as the same capture clock, so the anchor is kept. Consecutive inputs derived from
+/// one stream anchor differ from each other's projections only by rounding — at most three
+/// half-nanosecond roundings (block, chunk, projection) — while any real re-anchoring of a clock
+/// moves it by microseconds or more.
+const ANCHOR_SLACK_NS: u64 = 8;
+
 /// Flags that reset averaging by default.
 pub const DEFAULT_RESET_ON: Discontinuity = Discontinuity::from_bits_truncate(
     Discontinuity::STREAM_START.bits()
@@ -354,7 +361,25 @@ impl Replay {
                 spectrum: self.acc.empty_spectrum(),
             });
         }
-        self.anchor = time;
+        // T-974: re-anchor only where the input's clock is not the anchor's own. Every source
+        // stamps a block as ONE stream anchor plus its sample count (`SampleTime::time_of`), and a
+        // ring chunk that starts mid-block is stamped from its block the same way, so consecutive
+        // inputs of a stream agree with each other to within their rounding. Taking each input as
+        // the new anchor stacked those roundings (source -> chunk -> frame): a frame's time then
+        // depended on where the reader's chunks happened to fall, so the same stream chopped two
+        // ways gave rows up to ~2 ns apart, against this module's promise that output is
+        // bit-identical however the stream is chopped — and `/ws/spectrum/live` served `t` that
+        // was not `sample_index` on the capture clock in ~3 runs of 4 at 2.4 Msps. A rate change,
+        // or a time a real clock step moved (a new stream, a loop splice, another capture's
+        // datetime — microseconds and up), still re-anchors.
+        let fs = prov.tune.sample_rate_hz;
+        let same_clock = !rate_changed && fs.is_finite() && fs > 0.0 && {
+            let projected = self.anchor.time_of(time.sample_index, fs).as_unix_nanos();
+            projected.abs_diff(time.host_time.as_unix_nanos()) <= ANCHOR_SLACK_NS
+        };
+        if !same_clock {
+            self.anchor = time;
+        }
         self.pending_flags |= flags;
         self.pending_dropped += dropped;
         self.stats.samples_dropped += dropped;

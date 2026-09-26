@@ -100,6 +100,42 @@ fn framed(f: f64, bw: f64, seen: TimeRange, count: u64) -> Sighting {
     }
 }
 
+/// **Two entries of one emission** — the tracker's and a decoder's own — which is what the
+/// same-emission rule exists to join.
+///
+/// Since T-961 a decoded identity that nobody holds and no producer gave a context to attaches to
+/// the live, unidentified entry whose (t, f) region it came from (rule 2b, [`crate::cluster`]), so
+/// a decode of an emission the tracker has *already observed over that instant* lands on that
+/// entry and no second one is made — which is the point of that rule. A second entry still arises
+/// when the decode lands where the entry has no observation: here the tracker has measured only
+/// its first instant when the decode arrives, and the window it finally reports covers it. The
+/// tracker's own sighting is replayed (same track id), so the entry ends with exactly the span,
+/// count and centre it would have had from one record.
+///
+/// Returns `(track entry, decoder entry)`.
+fn tracked_and_decoded(
+    r: &mut Repository,
+    tracked: &Sighting,
+    decode: &Sighting,
+) -> (EmitterId, EmitterId) {
+    assert!(
+        decode.seen.start > tracked.seen.start,
+        "the decode must fall after the tracker's first instant"
+    );
+    let early = Sighting {
+        seen: TimeRange::new(tracked.seen.start, tracked.seen.start),
+        ..tracked.clone()
+    };
+    let e = r.record_sighting(&early, None).unwrap().emitter_id;
+    let d = r.record_sighting(decode, None).unwrap();
+    assert!(
+        d.created,
+        "a decode where the entry has no observation is its own entry: {d:?}"
+    );
+    r.record_sighting(tracked, None).unwrap();
+    (e, d.emitter_id)
+}
+
 fn confirm(r: &mut Repository, id: EmitterId, author: LifecycleAuthor, actor: &str, why: &str) {
     r.change_emitter_lifecycle(id, LifecycleState::Confirmed, author, actor, why, t(5.0))
         .unwrap()
@@ -193,14 +229,11 @@ fn t183_track_shape_family_never_supersedes_the_demodulator_family_in_any_order(
     // Separate entries merged in both directions: the absorbed history is appended last.
     for track_survives in [true, false] {
         let mut r = repo();
-        let e = r
-            .record_sighting(&shaped_track(101.3e6, tr(0.0, 5.0), None), None)
-            .unwrap()
-            .emitter_id;
-        let d = r
-            .record_sighting(&rds(101.3022e6, tr(1.0, 4.0), "C0DE"), None)
-            .unwrap()
-            .emitter_id;
+        let (e, d) = tracked_and_decoded(
+            &mut r,
+            &shaped_track(101.3e6, tr(0.0, 5.0), None),
+            &rds(101.3022e6, tr(1.0, 4.0), "C0DE"),
+        );
         assert_ne!(e, d);
         let (from, into) = if track_survives { (d, e) } else { (e, d) };
         let m = r
@@ -218,17 +251,12 @@ fn t183_track_shape_family_never_supersedes_the_demodulator_family_in_any_order(
 #[test]
 fn t082_decoder_entry_of_a_tracked_emission_merges_into_one_entry_with_all_evidence() {
     let mut r = repo();
-    let e = r
-        .record_sighting(&track(101.303e6, 200e3, tr(0.0, 5.0), 5), None)
-        .unwrap()
-        .emitter_id;
+    let (e, d) = tracked_and_decoded(
+        &mut r,
+        &track(101.303e6, 200e3, tr(0.0, 5.0), 5),
+        &rds(101.3022e6, tr(1.0, 4.0), "C0DE"),
+    );
     confirm(&mut r, e, LifecycleAuthor::Auto, "rule@1", "continuous");
-    // The cause: an identity sighting with no holder and no context is created on its own.
-    let res = r
-        .record_sighting(&rds(101.3022e6, tr(1.0, 4.0), "C0DE"), None)
-        .unwrap();
-    assert!(res.created);
-    let d = res.emitter_id;
     assert_eq!(listed(&r).len(), 2);
 
     assert!(r.same_emission(e, d, &tol()).unwrap().is_some());
@@ -408,15 +436,12 @@ fn t082_distinct_emitters_stay_apart() {
         .record_sighting(&track(101.3e6, 200e3, tr(0.0, 5.0), 5), None)
         .unwrap()
         .emitter_id;
-    let b = r
-        .record_sighting(&track(101.5e6, 200e3, tr(0.0, 5.0), 5), None)
-        .unwrap()
-        .emitter_id;
+    let (b, d) = tracked_and_decoded(
+        &mut r,
+        &track(101.5e6, 200e3, tr(0.0, 5.0), 5),
+        &rds(101.501e6, tr(1.0, 4.0), "B0B0"),
+    );
     assert_ne!(a, b);
-    let d = r
-        .record_sighting(&rds(101.501e6, tr(1.0, 4.0), "B0B0"), None)
-        .unwrap()
-        .emitter_id;
     let partners: Vec<EmitterId> = r
         .same_emission_partners(d, &tol())
         .unwrap()
@@ -486,14 +511,11 @@ fn t082_distinct_emitters_stay_apart() {
 #[test]
 fn t082_after_deleting_a_merged_entry_redetection_creates_one_new_candidate() {
     let mut r = repo();
-    let e = r
-        .record_sighting(&track(101.303e6, 200e3, tr(0.0, 5.0), 5), None)
-        .unwrap()
-        .emitter_id;
-    let d = r
-        .record_sighting(&rds(101.302e6, tr(1.0, 4.0), "C0DE"), None)
-        .unwrap()
-        .emitter_id;
+    let (e, d) = tracked_and_decoded(
+        &mut r,
+        &track(101.303e6, 200e3, tr(0.0, 5.0), 5),
+        &rds(101.302e6, tr(1.0, 4.0), "C0DE"),
+    );
     let survivor = r
         .merge_same_emission(e, d, t(5.0), "same emission", &tol())
         .unwrap()
@@ -521,38 +543,21 @@ fn t082_after_deleting_a_merged_entry_redetection_creates_one_new_candidate() {
     }
 
     // Detected again: a track entry and a decoder entry, linked into one new candidate.
-    let c = r
-        .record_sighting(&track(101.303e6, 200e3, tr(100.0, 105.0), 5), None)
-        .unwrap();
-    assert!(c.created);
-    let d2 = r
-        .record_sighting(&rds(101.302e6, tr(101.0, 104.0), "C0DE"), None)
-        .unwrap();
-    assert!(d2.created);
-    assert!(
-        r.same_emission(survivor, c.emitter_id, &tol())
-            .unwrap()
-            .is_none()
+    let (c, d2) = tracked_and_decoded(
+        &mut r,
+        &track(101.303e6, 200e3, tr(100.0, 105.0), 5),
+        &rds(101.302e6, tr(101.0, 104.0), "C0DE"),
     );
+    assert!(r.same_emission(survivor, c, &tol()).unwrap().is_none());
     let partners: Vec<EmitterId> = r
-        .same_emission_partners(d2.emitter_id, &tol())
+        .same_emission_partners(d2, &tol())
         .unwrap()
         .into_iter()
         .map(|p| p.0)
         .collect();
-    assert_eq!(
-        partners,
-        vec![c.emitter_id],
-        "the deleted entry is no partner"
-    );
+    assert_eq!(partners, vec![c], "the deleted entry is no partner");
     let m = r
-        .merge_same_emission(
-            d2.emitter_id,
-            c.emitter_id,
-            t(105.0),
-            "same emission",
-            &tol(),
-        )
+        .merge_same_emission(d2, c, t(105.0), "same emission", &tol())
         .unwrap()
         .expect("merged");
     assert_eq!(listed(&r), vec![m.into]);
@@ -624,14 +629,11 @@ fn t191_merge_keeps_either_user_band_and_the_latest_set_at_wins() {
     // `e` (track, first seen) survives; `d` (RDS decode entry of the same emission) is absorbed.
     let merged = |setup: &dyn Fn(&mut Repository, EmitterId, EmitterId)| {
         let mut r = repo();
-        let e = r
-            .record_sighting(&track(101.303e6, 200e3, tr(0.0, 5.0), 5), None)
-            .unwrap()
-            .emitter_id;
-        let d = r
-            .record_sighting(&rds(101.3022e6, tr(1.0, 4.0), "C0DE"), None)
-            .unwrap()
-            .emitter_id;
+        let (e, d) = tracked_and_decoded(
+            &mut r,
+            &track(101.303e6, 200e3, tr(0.0, 5.0), 5),
+            &rds(101.3022e6, tr(1.0, 4.0), "C0DE"),
+        );
         setup(&mut r, e, d);
         let m = r
             .merge_same_emission(d, e, t(20.0), "same emission", &tol())

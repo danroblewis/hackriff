@@ -13,7 +13,9 @@
    floating strip, not a zero-height box — and its controls are moved into the map's own floating
    chrome (`chrome/top-chrome.ts`, placed by `map-controls.css`). Decode and History keep it. */
 .app:has(#view-explore:not([hidden])) > .bar { display: none; }
-.app:has(#view-explore:not([hidden])) > .dock { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 5; height: 54px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); }
+/* T-994: the floating Outputs dock bar is retired (its pixels return to the map); the small
+   Active-outputs strip that replaced it is `dock/dock.css`'s `.out-strip`, shown only while an
+   output is open. */
 /* T-801 round 3: `--panel-gap` is the one definition of the floating chrome's gap to the canvas edge
    (`map-controls.css` reads it). T-997 retired `--panel-w`: there is no floating column left to
    size — the lists went into the sheet. */
@@ -40,6 +42,5 @@
   .app:has(#view-explore:not([hidden])) { height: 100dvh; }
   #view-explore > .centre { grid-template-rows: minmax(0, 1fr); }
   /* T-997: nothing to place here any more — the lists are in the sheet, which already spans the
-     narrow width between the chrome and the dock (`sheet.css`). */
-  .app:has(#view-explore:not([hidden])) > .dock { flex-wrap: nowrap; }
+     narrow width between the chrome and the map's bottom edge — T-994 retired the dock (`sheet.css`). */
 }

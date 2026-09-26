@@ -9,7 +9,8 @@ use super::{
 };
 use crate::cluster::{IdentityAccess, InventoryEntry, InventoryIdentity};
 use crate::detection::{
-    MAX_TRACK_PAGE, PageRequest, Track, TrackFilter, TrackKind, TrackPage, TrackSegment, TrackState,
+    DetectionFlags, MAX_TRACK_PAGE, PageRequest, Track, TrackFilter, TrackKind, TrackPage,
+    TrackSegment, TrackState,
 };
 use crate::emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
@@ -102,6 +103,51 @@ const EMITTER_LATEST_DETECTION_SQL: &str = "\
        JOIN detection d ON d.detection_id = el.target_id \
        WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
      ) ORDER BY t_start DESC LIMIT 1";
+
+/// T-990: newest linked detections read for the receiver-artefact verdict
+/// ([`Repository::emitter_receiver_artefact_share`]).
+///
+/// Its own cap, well under [`super::MAX_EVIDENCE_DETECTIONS`] (256), because the question is
+/// "what is this row *mostly made of, lately*" and a majority over the newest 32 answers it —
+/// while a smaller window also makes the verdict track the latest measurements more closely,
+/// which is the revocability the whole design rests on.
+///
+/// **Measured** (T-990, the second review asked for it), on the explain path, in-memory
+/// repository, dev profile:
+///
+/// | row | census | whole `explain_emitter` |
+/// |---|---|---|
+/// | 4 linked detections (the common case) | 136 us | 460 us |
+/// | 400 linked detections, cap 256 | 793 us | 1256 us |
+/// | 400 linked detections, cap 32 | 536 us | 860 us |
+///
+/// So the cap pays on a long-lived row and nothing on a short one: the fixed part is the two
+/// prepared statements and the live-id lookup, and what the cap cannot remove is SQLite sorting
+/// the row's linked detections newest-first before the `LIMIT`. This runs on the **control
+/// thread**, once per explained emitter, beside `characterise`, the confirmation review and three
+/// overlap resolvers in the same `TrackInventory::touch`; it is not on the sample path.
+pub const MAX_ARTEFACT_DETECTIONS: usize = 32;
+
+/// T-990: the flags of an emitter's newest linked detections, for the receiver-artefact verdict.
+/// Same "linked" reach as [`EMITTER_LATEST_DETECTION_SQL`], newest first, capped at `?2`.
+///
+/// Flags and the stored spur reason only: no provenance join and no JSON extract, because the
+/// verdict asks *which mechanism* explained the detection and never *where the radio was tuned*
+/// (see [`Repository::emitter_receiver_artefact_share`] for why the tuning cannot settle it).
+/// The caller decides which bits mean what, so the rule lives in one place and not in SQL.
+const EMITTER_DETECTION_FLAGS_SQL: &str = "\
+     SELECT flags, spur_reason, t_start FROM ( \
+       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN track_detection td ON td.track_id = el.target_id \
+       JOIN detection d ON d.detection_id = td.detection_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
+       UNION ALL \
+       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN detection d ON d.detection_id = el.target_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
+     ) ORDER BY t_start DESC LIMIT ?2";
 
 /// [`EMITTER_REGION_SQL`] with a row limit (`?6`).
 const EMITTER_REGION_LIMIT_SQL: &str = concat!(
@@ -999,6 +1045,120 @@ impl Repository {
                 })
             })
             .optional()?)
+    }
+
+    /// T-990: the ingredients of the **receiver-artefact** verdict for an emitter — read from its
+    /// newest linked detections (at most [`MAX_ARTEFACT_DETECTIONS`], newest first). The
+    /// verdict itself is `hk_pipeline::family::artefact_verdict`; this method only counts, so the
+    /// rule has one home.
+    ///
+    /// The counting splits the suspect flags three ways, and the split is the whole point.
+    ///
+    /// **Established** ([`ReceiverArtefactShare::established`]) — the mechanism was measured
+    /// against something, so it stands on its own: an IQ image (a mirror measured ≥ 20 dB
+    /// stronger with a correlated shape), an intermodulation product (a measured relationship to
+    /// strong carriers, or the gain-step test), a [`crate::detection::SpurReason::SpurMap`] hit
+    /// (the frequency is listed in a **measured** spur mask, e.g. a terminated-input capture) or
+    /// a [`crate::detection::SpurReason::LoRelative`] verdict (T-598, settled by retuning).
+    ///
+    /// **Coincidence** ([`ReceiverArtefactShare::coincidence`]) — the emission's frequency
+    /// coincides with one of the receiver's own numbers, and **nothing more**. DC / LO leakage, a
+    /// reference harmonic (`n × 10 MHz`), a clock harmonic (`n × fs`), a comb tooth. None of these
+    /// can decide on its own, and the two reasons are different:
+    ///
+    /// - A reference or clock harmonic and a comb tooth sit at a **fixed absolute frequency**.
+    ///   120.000 MHz is a 10 MHz multiple *and* a valid 25 kHz airband channel; 460.000 MHz is
+    ///   both too. No retune separates the hypotheses, because neither the mark nor a real
+    ///   emission there moves.
+    /// - DC sits at the **tuned centre**, which moves — but a dwell *centres the radio on what it
+    ///   is listening to*, so every real signal being demodulated is "at the tuned centre" (this
+    ///   is measured, not argued: AWARE-042's synthetic 12.5 kHz raster at 446 MHz has every one
+    ///   of its real channels flagged `dc` on 100 % of its detections). And the corroboration
+    ///   that would settle it — the mark following the LO — is unreachable from one emitter,
+    ///   because the DC rule only marks a detection within 15 kHz of the centre
+    ///   (`hk_detect::DcRule`), so a DC line under a larger retune lands at a different frequency
+    ///   and becomes a **different** emitter. The check belongs where the detection is admitted
+    ///   (T-948's per-device, per-rate DC + spur mask), not here.
+    ///
+    /// **Neither**: `clipped` and `compressed`. They say the measurement could not be trusted,
+    /// never that the receiver invented the signal, and they are counted nowhere.
+    ///
+    /// Recomputed on every call and never stored, so the verdict follows the latest measurements.
+    pub fn emitter_receiver_artefact_share(
+        &self,
+        emitter_id: EmitterId,
+    ) -> Result<ReceiverArtefactShare, RepoError> {
+        let mut stmt = self.conn.prepare_cached(EMITTER_DETECTION_FLAGS_SQL)?;
+        let rows = stmt.query_map(
+            params![blob(emitter_id), MAX_ARTEFACT_DETECTIONS as i64],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+        )?;
+        let mut out = ReceiverArtefactShare::default();
+        for row in rows {
+            let (bits, reason) = row?;
+            out.detections += 1;
+            let f = DetectionFlags::from_bits(u32::try_from(bits).unwrap_or(0));
+            if f.image_candidate
+                || f.suspect_imd
+                || matches!(reason.as_deref(), Some("spur-map" | "lo-relative"))
+            {
+                out.established += 1;
+                if out.established_reason.is_none() {
+                    out.established_reason = Some(match reason.as_deref() {
+                        Some(kind) => kind.to_owned(),
+                        None if f.image_candidate => "image".to_owned(),
+                        None => "intermod".to_owned(),
+                    });
+                }
+            } else if f.spur_candidate {
+                out.coincidence += 1;
+                if out.coincidence_reason.is_none() {
+                    out.coincidence_reason =
+                        Some(reason.unwrap_or_else(|| "unspecified spur".to_owned()));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// T-990: [`Repository::emitter_receiver_artefact_share`]'s answer. See that method for what each
+/// count means and why the split exists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReceiverArtefactShare {
+    /// Detections read (at most [`MAX_ARTEFACT_DETECTIONS`]).
+    pub detections: u64,
+    /// Of those, the ones a mechanism *measured against something* explains.
+    pub established: u64,
+    /// The mechanism the newest established one named (`image`, `intermod`, `spur-map`,
+    /// `lo-relative`), for saying *why* rather than only *that*.
+    pub established_reason: Option<String>,
+    /// Of those, the ones explained only by a frequency coincidence with one of the receiver's
+    /// own numbers — which a real emission produces too, so this decides nothing and is reported
+    /// only so the explanation can say it out loud.
+    pub coincidence: u64,
+    /// The coincidence the newest such one named (`dc`, `ref-harmonic`, `clock-harmonic`,
+    /// `comb`, …).
+    pub coincidence_reason: Option<String>,
+}
+
+impl ReceiverArtefactShare {
+    /// Share of the read detections an **established** mechanism explains, 0 with none read.
+    pub fn established_fraction(&self) -> f64 {
+        self.share(self.established)
+    }
+
+    /// Share of the read detections a frequency **coincidence** explains, 0 with none read.
+    pub fn coincidence_fraction(&self) -> f64 {
+        self.share(self.coincidence)
+    }
+
+    fn share(&self, n: u64) -> f64 {
+        if self.detections == 0 {
+            0.0
+        } else {
+            n as f64 / self.detections as f64
+        }
     }
 }
 

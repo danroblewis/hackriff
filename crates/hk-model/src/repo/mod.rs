@@ -136,7 +136,9 @@ pub use collections::{
 };
 pub use confirm_rate::CONFIRM_DECISION_WINDOW_NS;
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
-pub use inventory::{EmitterUpsert, LatestMeasurement};
+pub use inventory::{
+    EmitterUpsert, LatestMeasurement, MAX_ARTEFACT_DETECTIONS, ReceiverArtefactShare,
+};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use measurements::{
     Computed as MeasurementComputed, MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX,

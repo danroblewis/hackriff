@@ -94,8 +94,7 @@ const ZOOM = { shift: true }; // frequency-only (T-472): every claim below is ab
 const ZOOM_IN_DELTA = -400;
 const ZOOM_OUT_DELTA = 600;
 
-// The minimap strip (bottom) and spectrum-trace strip (top of each pane), as in canvas-journey.e2e.mjs.
-const MINIMAP_PX = 110;
+// The spectrum-trace strip (top of each pane), as in canvas-journey.e2e.mjs. (No minimap strip since T-995.)
 const TRACE_PX = 96;
 
 // Band A: the recording's own live FM signal (pilot + RDS), strong and real. Band B: far outside
@@ -973,8 +972,9 @@ async function harvestMarks(browser, backend) {
 // ---------------------------------------------------------------------------
 
 function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
+  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
+  // them since T-995 retired the minimap).
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
   return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
 }

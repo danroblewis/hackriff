@@ -27,7 +27,7 @@ import {
   type TileAddr,
 } from "./lattice";
 import {
-  TileBusyError, TileDecodeError, capFromRefusal, decodeTile, fetchTile, shareFromRefusal,
+  TileBusyError, TileDecodeError, capFromRefusal, heldFromRefusal, decodeTile, fetchTile, shareFromRefusal,
   type TileData, type TileFetch, type TileResponse,
 } from "./tile";
 import type { TileSourceHint } from "./tilecache";
@@ -147,7 +147,8 @@ export function batchedTileSource(
         // member's refusal is the main way this tab hears another client arrived. Parsing only the
         // limit left a tab told "share 2" claiming 4 (surface-contention's red under load).
         w.reject(status === 503
-          ? new TileBusyError(capFromRefusal(err.message), err.message, shareFromRefusal(err.message))
+          ? new TileBusyError(capFromRefusal(err.message), err.message, shareFromRefusal(err.message),
+              heldFromRefusal(err.message))
           : err);
         continue;
       }
