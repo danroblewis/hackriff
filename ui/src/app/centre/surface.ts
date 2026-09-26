@@ -119,6 +119,8 @@ import { densityQuads } from "../../surface/density";
 import { DENSITY_POLL_MS, DensityPoll } from "./density-poll";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
+import { scanPlanQuads } from "../../surface/scanplan";
+import { ScanController } from "../map/scan-overlay";
 import {
   addResearchAnnotation, collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, rowKey, selectResearch, setResearchOpen,
   type Collection, type ResearchRow, type ResearchSlice,
@@ -133,7 +135,8 @@ const MINIMAP_PX = 0;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
  * control's `"past"` block (T-444/T-476). One frame at 60 Hz, generously. */
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
-/** Height of the spectrum-trace strip above each pane, device px (T-457). */
+/** Height of the spectrum-trace band over each pane's top rows, device px (T-457, T-1041: a
+ * layer over the waterfall, not a strip carved off it — no space is reserved either way). */
 const TRACE_PX = 96;
 /** The capture-width presets offered directly (T-496) — round numbers a HackRF-class front end
  * commonly captures at. A host decision, not an RF fact: `retune.ts` re-derives none of its own
@@ -270,7 +273,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
-  const traceEl = h("div", { class: "sf-trace", role: "status" });
+  // T-1041: hidden until the trace layer is switched on (it is off by default).
+  const traceEl = h("div", { class: "sf-trace", role: "status", hidden: true });
   // T-506: the IQ horizon and the retention bound, said in words beside the two rules that draw
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
@@ -693,9 +697,36 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // HERE, per frame, through the pane's own box. The poll below only refreshes the records.
   let frontEndEvents: FrontEndEvent[] = [];
   const frontEndQuadsFn: OverlayLayerFn = (pane) => frontEndQuads(frontEndEvents, pane.box, pane.rect);
+  // T-1008: the scan plan — a survey sweep's region and the steps the engine will take (as served,
+  // `plan.windows`; the controller never tiles a range itself), hatched over the canvas, grey cells
+  // included, and its progress while it runs. Laid out HERE, per frame, through the pane's own box;
+  // the controller only holds the served state. Its button sits in the Go-to cluster (below).
+  const scanCtl = new ScanController({
+    client,
+    paneWindow: () => {
+      const v = preview ? paneById(preview.activePane) : null;
+      return v ? { f0Hz: v.box.f0Hz, f1Hz: v.box.f1Hz } : null;
+    },
+    toast: (text) => store.set(toast(text)),
+  });
+  store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded), { immediate: true });
+  const scanQuadsFn: OverlayLayerFn = (pane) => {
+    // Where the active pane is, stated beside the plan it draws (CSS px from the canvas's top-left,
+    // and its frequency window), so a check can find a plan edge on screen without re-deriving the
+    // pane layout. Set-if-changed; presentation only.
+    if (preview && pane.id === preview.activePane && scanCtl.model()) {
+      const k = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+      const d = scanCtl.panel.dataset;
+      const put = (key: string, v: number) => { const t = String(v); if (d[key] !== t) d[key] = t; };
+      put("paneF0Hz", pane.box.f0Hz); put("paneF1Hz", pane.box.f1Hz);
+      put("paneLeftPx", pane.rect.x * k); put("paneWPx", pane.rect.w * k);
+      put("paneTopPx", (canvas.height - pane.rect.y - pane.rect.h) * k); put("paneHPx", pane.rect.h * k);
+    }
+    return scanPlanQuads(scanCtl.model(), pane.box, pane.rect);
+  };
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
     rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads,
-    paths: pathQuadsFn, tune: tuneQuadsFn, frontend: frontEndQuadsFn, priors: priorsQuads,
+    paths: pathQuadsFn, tune: tuneQuadsFn, frontend: frontEndQuadsFn, scan: scanQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -872,7 +903,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // than a hand-set scale: it still colours from a measurement, just from the visible one. The honest
   // part is unchanged — the range is **said**, by the readout below and by the label in the bar, so a
   // surprising picture is diagnosable instead of paintable-over.
-  let traceOn = true;
+  // **T-1041: OFF by default.** The trace used to be on, and to pay for itself with a reserved
+  // band above every pane — which is the black bar the user saw at the top of a full-bleed map
+  // ("the top bar looks like it's actually the phosphor display … we can remove it entirely for
+  // now", 2026-09-25). It is now a layer like any other: no reserved space, drawn over the pane's
+  // top rows when it is on, and nothing at all when it is off. T-457's invariant — viewport-wide,
+  // time-addressable, per pane — is a property of that layer, not of a band.
+  let traceOn = false;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
   /**
@@ -1015,8 +1052,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
     return out;
   };
-  // The trace strip's switch — the layers menu's "Every pane" row since T-882 (it was the toolbar's
-  // `Trace` button). Presentation only: the strip's height and whether the readout is written.
+  // The trace layer's switch — the layers menu's "Every pane" row since T-882 (it was the toolbar's
+  // `Trace` button). Presentation only: whether the layer is drawn and whether the readout is
+  // written. Since T-1041 it moves no geometry: the pane is the same rectangle either way.
   const setTrace = (on: boolean) => {
     traceOn = on;
     if (preview) preview.view.tracePx = traceOn ? TRACE_PX : 0;
@@ -1578,7 +1616,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
             ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
           ];
         },
-        trace: traceFor, tracePx: TRACE_PX,
+        trace: traceFor, tracePx: traceOn ? TRACE_PX : 0,
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
@@ -1618,9 +1656,35 @@ function mount(el: HTMLElement, ctx: AppContext) {
       if (ext && preview) preview.extendTimeFloor(ext.lo * S_TO_NS);
     }, { immediate: true });
 
+    // T-1008: the scan plan's region edges are dragged on the map, through the ONE input handler's
+    // `grabHandle` — offered only where an edge of an editable (idle) plan is under the press in a
+    // pane that shows the `scan` layer, so every other press keeps its meaning. The drag only moves
+    // the region; the server re-prices it on release, and nothing reaches a device route (Start
+    // does, on its own press).
+    const scanEdgeUnder = (x: number, y: number) => {
+      const hit = paneUnder(x, y);
+      if (!hit || !isLayerVisible(layersFor(hit.view.id), "scan")) return null;
+      const edge = scanCtl.edgeAt(hit.view.box, hit.view.rect, x, window.devicePixelRatio || 1);
+      return edge ? { edge, pane: hit.view.id } : null;
+    };
+    const grabScanEdge = (p: GlPoint, paneId: string) => {
+      const grab = scanEdgeUnder(p.x, p.y);
+      if (!grab || grab.pane !== paneId) return null;
+      return {
+        move: (q: GlPoint) => {
+          const v = paneById(grab.pane);
+          if (!v) return;
+          const x = Math.min(Math.max(q.x, v.rect.x), v.rect.x + v.rect.w);
+          scanCtl.dragTo(grab.edge, pointOn(v.box, v.rect, x, v.rect.y).fHz);
+        },
+        end: () => scanCtl.endDrag(),
+      };
+    };
+
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); viewMoved(); },
+      grabHandle: grabScanEdge,
       // T-1028: the only wire from a gesture to the front end, and it is inert while the mode is
       // off — `moved`/`settled` return immediately then, so with the mode off this handler is the
       // old rule byte for byte. A pinch and a drag report `ended` at their release (T-486's commit
@@ -1629,7 +1693,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       onHover: (p, e) => {
         // A pin under the pointer wins the MapTip; the quadtree is the hit test (docs/24 §14.4).
         hoveredPin = p ? pinLayer.pick(cssPoint(e).x, cssPoint(e).y) : null;
-        canvas.style.cursor = hoveredPin ? "pointer" : "";
+        canvas.style.cursor = hoveredPin ? "pointer" : p && scanEdgeUnder(p.x, p.y) ? "ew-resize" : "";
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
         const markLabel = hit?.mark
@@ -1941,7 +2005,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
             on: collectionVisibleOn(reg, c),
             key: undefined,
           } }))).sort((a, b) => PLANE_ORDER.indexOf(a.plane) - PLANE_ORDER.indexOf(b.plane) || a.z - b.z).map((x) => x.row),
-          viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceOn }],
+          viewWide: [{ id: "trace", label: "Spectrum trace", hint: "over every pane's top rows", on: traceOn }],
           scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
         };
       },
@@ -1966,6 +2030,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         isOpen: () => store.get().research.open,
         toggle: () => store.set(setResearchOpen(!store.get().research.open)),
       },
+      scan: { button: scanCtl.button, panel: scanCtl.panel },
       // T-1000: the per-pane chrome's name for the pane it acts on — the outline's own words.
       activeName: () => activePaneName(pv.view.panes.list().map((x) => x.id), pv.activePane),
     };

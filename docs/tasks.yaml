@@ -29652,6 +29652,8 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost
 
       Conflict fix (2026-09-25, CONFLICT_ESCALATE): merged gated base e80e080b (T-1002 per-pane rows, T-1005 split layout) as ebc31d3e. surface.ts: T-1002's paneRows(s.inventory, pane.id) kept in marks/detections/pins with T-1004's !ownsSelection(pane.id) linked-ghost flag and pinLayer's selected-pane arg, so output badges ride the per-pane rows. app-explore.test.ts: T-1002's per-pane-rows assertion plus T-1004's linkedFocus assertions (no loosening). test-ui 100/100, tsc clean, app-split-frozen + app-active-pane e2e green on fresh hk (ports 9216+).
+
+      2026-09-25 coordinator, from T-1004's conflict merge: app-split-frozen's per-pane badge check only exercises ONE pane ('drawn on [pane1], badged on [pane1]') since T-1002 draws only each pane's own rows and the live pane 2 lacks that signal. It passes, but it does not prove both panes; a follow-up should set the spec so both panes contain the row (e.g. pane 2 frozen over the same window).
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 21:08).
       Split view: the four controls that lied on a frozen pane now say what they will do, with pane 1 frozen and pane 2 live. (1) Go-to on a frozen pane no longer paints a disabled "past" offer — surface/retune.ts re-reads the same offer as a GO-LIVE (isGoLiveOffer / goLiveOfferLabel / acceptGoLive) labelled "Go live here": the pane returns to the live edge (view arithmetic, no route) and only then is the capture taken through the existing single gated DeviceAction path (acceptPaneWidth), guarded before (T-407; a refusal leaves the pane frozen) and after (the re-derived offer must be unblocked, following, and name the same capture). The offer carries `following` beside `block`, so a pane frozen exactly at the live edge is a go-live too. (2) Record IQ records forward from now: on a frozen viewport it reads "Record IQ (live)", states band, pane and reason in its title and repeats it in a toast, re-stated each frame. (3) T-994's output badges are keyed per (pane, feature). (4) A selected feature is THE selection only in the pane that owns it; every other pane draws a linked ghost — ordinary symbology plus the selection's brackets at LINKED_ALPHA, `linked` on the pin and "linked: selected in another viewport" in its accessible name. Covered by ui/e2e/app-split-frozen.e2e.mjs at 1280x800 and 400 px over the mock SDR, plus unit tiers in surface-retune, surface-features, app-capture-window and app-map-controls. TWO MERGES OF MAIN, both keeping main's landed change whole: d710aaa2 (main 4720410a) kept T-1006's per-pane front end (retuneDeviceId, block widened to device_required/device_gone) beside this ticket's `following`, so a go-live is refused for an ambiguous or departed radio exactly as a retune is, and kept T-1006's retuneDeviceId check in the T-407 re-derivation (moved into samePlannedCapture, the half acceptGoLive reuses); its test-file conflict was resolved by taking main's file whole and re-appending this ticket's test, so T-1006's picker test, T-1028's retune-mode test and T-1004's button-word test all exist. 4913314c (main a3ee7d20) hit map-controls.ts's tuningChanged, where main has since retired the cluster's follow FAB: main's early-return shape is kept exactly (no syncFollow restored) and T-1004's `offerGo.textContent = shown.label ?? "Retune"` re-applied inside it, so the button's WORD is re-derived on a retune, not only the sentence. No backend change in this branch.
@@ -29740,8 +29742,7 @@ tasks:
   - id: T-1008
     milestone: MMAP
     title: "Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop"
-    status: in-progress
-    branch: task-t1008
+    status: done
     priority: normal
     deps: []
     parallel_group: MAP-SCAN
@@ -29755,11 +29756,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop
+
+      Conflict-fix (worker, 2026-09-25): merged gated base 6f38fbb8 into task-t1008. Kept both sides: scan.rs running plan is T-965-repriced AND carries T-1008 windows; docs/api.md has T-965 budget/progress fields plus windows + dwell_step; layers/minimap carry both 'frontend' (z27, T-981) and 'scan' (z28); surface.ts registers both overlay fns; map-controls cluster keeps main's FAB retirement (T-1001) plus the Scan panel. scan-overlay Start spec: wall-clock pre-Start cut replaced by the capture clock edge from /api/timeline (was red 3/3 alone after the merge: held tune began 3.3 s before Start); assertion unchanged. Tests: test-ui 101/101, tsc clean, hk-api 330 pass, api_contract 73 pass, precheck clean, scan-overlay e2e 5/5 x3 on port 9216.
     high_effort_reason: the scan plan must be the server engine own step schedule rendered and edited on the map (no client step arithmetic), incl. progress over grey cells - new API surface over T-452 plus an editable overlay
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 19:42).
+      Fix round 2: merged 9b9d9533 (the last gated main) into task-t1008 at 242577d0. There was one conflict, the import line of ui/src/app/shell-slice.ts, and I kept both: T-1006's AttachedDevice import and T-1008's ScanState. docs/tasks.yaml and the Rust files auto-merged. Fix round 1: merged main (364e37a3) into task-t1008 at a73f89bf, keeping both sides. input.ts: T-1028's `panned` flag plus T-1008's grabHandle; a handle stroke starts panned:false and never settles, so retune mode never sees it. map-controls.ts/.css: T-1000's pane name and T-1025's chip row are kept, with the Scan button still in the Go-to glass beside gotoPane and the scan panel in the cluster. centre/surface.ts: onGesture plus grabHandle, activeName plus scan. docs/tasks.yaml auto-merged (no conflict). scan-overlay e2e hardened against main's changes: the pixel check now counts pixels that turned lime when Scan was pressed, because main's green IQ-horizon rule now crosses the pane, and the observation query reaches back by the capture-clock lag. Scan is now a buttoned map overlay. A small Scan button in the Go-to glass (icon-only on a phone) opens a scan plan over the active pane (inset 10% so both edges are visible handles). A new `scan` overlay layer (T-806 registry, z 28) draws the region and the steps exactly as the backend's iterative-scan engine compiled them, served by a new opt-in `GET /api/control/scan?windows=1` (`plan.windows = [{step, lo_hz, hi_hz, center_hz}]`, also on every POST start answer; `/api/control/state` stays compact). The steps are hatched over grey cells too, with a screen-door hatch that never washes over data. The device (`scan.device_id`) and the step/dwell arithmetic come from the server. Region edges are dragged through the one input handler (a new `grabHandle` hook in surface/input.ts, so the T-412 one-handler guard holds); the server re-prices on release, and the client never tiles a range itself. Start posts the priced plan. While the sweep runs, the step being dwelt (new `progress.dwell_step`) is bright, covered steps fade, and progress comes from the shell's existing control-state poll. Stop is the same button. docs/api.md, api_contract.rs and docs/23 §11 (a new row; rule 1 now counts three device-reaching rows) are updated together, and map-request-shape drives the new request builders.
+      Tests: just test-ui -> exit 0 (build + typecheck + 97/97 test files passed after the merge); cargo nextest run -p hk-api --lib -E 'test(/scan::/)' -> exit 0 (14 passed); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/survey_sweep|coarse_sweep/)' -> exit 0 (2 passed); cd ui && HK_E2E_PORT=9216 node e2e/run.mjs scan-overlay -> exit 0 (5/5 after the merge)
+      precheck exit 0
+      Commits: 7c0910fa, 0922639d, 06af9138, a73f89bf, 242577d0
+      Observed, not chased: app-phone e2e pinch assertion red on main 2033e9dd ('spreading two fingers did not zoom the view in (1680000 -> 1680000)'), already recorded by T-997/T-994/T-1025; no ticket id seen for it | app-surface's CLOSED hit-test selector (ui/e2e/app-chrome.mjs: '.map-goto input, .map-topright button, ...') does not cover buttons inside the Go-to glass, so the new Scan button is not in T-528's pressability guard there (scan-overlay.e2e.mjs clicks it at its centre at 1280 and 400 px instead); T-1022, which is rewriting that count, is the natural place to add '.map-goto button' | The scan runner sweeps the run's primary/default device only (commissioned_json in control.rs, 'not re-selected per request'), so on a multi-SDR run the plan names that device and there is no picker; choosing the scanning SDR needs a device selector on /api/control/scan (backend) — relevant to the Measure-box 'scan with <device>' follow-up | app-top-chrome e2e red on main 364e37a3 at 400 px: '.map-chips map-topright' spans the top width (BAR_SHAPED guard) — T-1025's chip row
+      Use cases: AWARE-011, AWARE-042
+      Resources: 1337 CPU-s, peak 7.7 GB
+    branch: task-t1008
+    commit: 0aa45c00
   - id: T-1009
     milestone: MMAP
     title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
-    status: todo
+    status: in-progress
+    branch: task-t1009
     priority: normal
     deps:
     - T-1008
@@ -30406,7 +30421,7 @@ tasks:
   - id: T-1037
     milestone: MLIVE
     title: "Tiles reveal coarse-first then ATOMICALLY per row/viewport - never black: the coarsest covering level in one batch as stand-in, the target level per row, one swap per row; PENDING only when no ancestor exists at any level"
-    status: in-progress
+    status: done
     branch: task-t1037
     priority: high
     deps: []
@@ -30422,6 +30437,15 @@ tasks:
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Tiles reveal coarse-first then ATOMICALLY per row/viewport - never black: the coarsest covering level in one batch as stand-in, the target level per row, one swap per row; PENDING only when no ancestor exists at any level
     high_effort_reason: the canvas rendering contract for every viewport change (stand-in, batching, swap) - what the user sees as 'broken' today
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 22:30).
+      Re-merged onto gated main 8ac9cfb9 and landed. main had landed T-1042 (LSR-1, the live ring, ui/src/surface/livering.ts) - the thing this ticket's acceptance named ('Live-edge rows are LSR-1's (ring) once it lands - do not fight it'). ui/src/surface/surface.ts conflicted in three places and both sides' intent is kept, neither reverted: PaneReport carries both count sets (rowsHeld/rowsLate and ringRows/ringTiles/ringRowPx); one render loop in which the ring's extent short-circuits the tile lane FIRST, exactly where main put it (before isResident, before acquire), and a ring-covered address is NOT counted `missing` by the row gate - nothing is coming for it and nothing needs to, so it must not hold its row open; the rows are still submitted LAST, so the gate is about the tile lane and can never withhold a live row. The coarse stand-in lane takes the ring's short-circuit too. My local `plan` renamed `resolved`; `plan` is the ring's. THE MERGE EXPOSED TWO REAL DEFECTS IN MY CHANGE, both found by main's surface-livering tests (whose boxes land on tile boundaries by construction), both fixed: (1) spanTiles now counts tiles with a positive VISIBLE area (ceil(hi/w)-1) rather than reusing tilesFor's floor((hi-1e-9)/w), whose epsilon is lost to float at ordinary magnitudes - a pane showing 2 tiles measured as 6 and asked for a coarser level it did not need; (2) the row gate ignores an address with no visible area - nothing is drawn for it and no viewport wants it, so it is never resident, and counted it would hold its row open for the whole 300 ms bound on every frame for ever. tilesFor itself is left alone (its emission is pinned by surface-lattice; the phantom is a separate defect, reported below). docs/tasks.yaml was not conflicted and is byte-identical to main's copy (`git diff 8ac9cfb9 -- docs/tasks.yaml` is empty); I never edited it. The net diff against main is five ui/ files. PRECHECK: `cargo fmt --all --check` clean (exit 0); the diff touches ZERO crates, so precheck's clippy half had no crate to scope to and py/hkpy/gate.py classifies this diff as the `test-ui` class. The one acceptance clause still not implemented is unchanged and is a decision, not a diff - see blocked.needs.
+      Tests: cd ui && npm run build && npm run typecheck && npm test   (just test-ui's node tier, ON THE MERGE) -> exit 0 (104/104 test files passed - main's 8 surface-livering (T-1042) cases unchanged and green, and this ticket's 10 surface-reveal cases. Before the two fixes above it was 103/104 with surface-livering red, which is how both defects were found); cd ui && npm test -- surface-reveal -> exit 0 (10/10 on the merge: the coarse set covers the viewport and is one batch; no PENDING pixel with only the stand-in in hand (rasterised at 1280x800); the set survives cancellation; no stand-in on the overview tier; a deep zoom's ancestor stands in - with the old three-step reach re-injected in the same case as the red proof, asserted to go black; PENDING still drawn when nothing exists anywhere; a row draws none of its own tiles then all of them; the 300 ms bound reveals partially; revealHoldMs=0 is the old behaviour; the stand-in lane is its own request); cd ui && npm test -- surface-livering   (MAIN's spec, unmodified, on the merge) -> exit 0 (8/8 - including 'rows at the edge, tiles below' and 'the rows are drawn where the ring's BAND is', the two that caught my defects. Neither assertion was touched: the fixes made the claims true again); cd ui && HK_BIN=<merged-tree hk> HK_E2E_PORT=9216 HK_E2E_CONCURRENCY=1 npm run e2e -- surface-nav -> exit 0 (5/5 in 88.6 s against a freshly built hk from the merged tree. T-846/T-454 still hold with room: peak 3/4 tile ADDRESSES outstanding over 2 requests; fit-to-coverage reports `1 tiles / 11 coarse stand-ins / 0 pending`); cd ui && HK_E2E_PORT=9344 HK_E2E_CONCURRENCY=1 npm run e2e -- live-ring   (main's new LSR-1 browser spec) -> exit 0 (1/1 in 19.4 s, lane satisfied after 18 ms, rowPx 12.7, 460 rows painted from the ring by t+16s. It failed when run SECOND in the same lane after surface-nav - and that reproduces on main's own UI, see reproduces_on_main below); cd ui && HK_E2E_PORT=9408 npm run e2e -- surface-nav live-ring   (ON MAIN'S UI, 8ac9cfb9 checked out over mine, merged-tree hk) -> exit 1 (PROOF that the live-ring failure is not mine: main's unmodified UI fails identically (`rowPx: 0.4`, lane 0 rows after 90138 ms) when live-ring runs after a long spec on the same lane's backend. live-ring's premise needs a YOUNG recording - a following pane's window is the capture clock, which grows, so after ~90 s of another spec's driving the pane is zoomed out past MIN_ROW_PX and the ring correctly stands aside. My tree behaves identically in both orders (19.4 s alone, red after surface-nav). Nothing on this path is touched by my diff)
+      precheck exit 0
+      Commits: be87ad2e, 5fdc3dfc, f23a2b3c
+      Observed, not chased: MAIN'S SPEC IS ORDER-DEPENDENT, and it is deterministic rather than flaky: ui/e2e/live-ring.e2e.mjs fails whenever it runs after a long spec on the same lane's shared `hk serve`, because a following pane's time window is the capture clock and that grows - after ~90 s of recording the pane is zoomed out past MIN_ROW_PX and the ring correctly stands aside (`rowPx: 0.4`, and the spec's own error text names this case). Proven on MAIN'S UNMODIFIED UI (8ac9cfb9): `npm run e2e -- surface-nav live-ring` at HK_E2E_CONCURRENCY=1 is red on main and red on mine; `npm run e2e -- live-ring` alone is green on both (19.5 s main, 19.4 s mine). It survives in the gate only because the 3-lane distribution happens to put it first. For the deflaker: the premise needs its own backend, or a pane frozen to a short window. | PRE-EXISTING, and now measured twice: `tilesFor` (ui/src/surface/lattice.ts) emits a phantom tile column/row for any box whose high edge lands exactly on a tile boundary - `Math.floor((box.f1Hz - 1e-9) / fw)` loses the epsilon at ordinary magnitudes (19200000 - 1e-9 IS 19200000 in f64). The phantom has no visible area, `intersects` says no viewport wants it, so it is requested and then cancelled every frame. Measured: a 12x9-tile box enumerated 117 addresses of which 9 - a whole column - were asked for and immediately cancelled (`stats.cancelled: 9`) on the first frame, ~8% of a cold viewport's requests. And in the livering fixtures it made a 2-tile pane measure as 6. I fixed only the MEASUREMENT (`spanTiles`, T-1037's own) and left `tilesFor` alone because its emission is pinned by ui/test/surface-lattice.test.ts; the fix is `ceil(hi/w) - 1` on both axes, and the pinned counts would need re-deriving with it. | LOAD FLAKE seen on both trees across this session: `'timeout' !== 'load'` ('the page never fired load') from Page.goto - surface-nav test 5 on the BASELINE tree, fog-of-war test 1 on mine; every one passed when re-run alone. A page-load timeout precedes all tile logic. Candidate for the deflaker: the goto timeout in ui/e2e/harness.mjs. | The acceptance's e2e wording ('no PENDING quad at 1280x800 on a cold reload and after a 2-level zoom') is asserted in the NODE tier as rasterised pixels at 1280x800, not in a browser: on a local backend a viewport's own tiles arrive in milliseconds, so a browser screenshot would be green before and after the fix and would certify nothing. A browser form needs CDP Network.emulateNetworkConditions ('especially on an unstable network connection' - the user's own words); ui/e2e/cdp.mjs does not wrap it today.
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: 8cda7442
   - id: T-1038
     milestone: MLIVE
     title: "Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget"
@@ -30480,7 +30504,7 @@ tasks:
   - id: T-1041
     milestone: MMAP
     title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"
-    status: in-progress
+    status: done
     branch: task-t1041
     priority: high
     deps: []
@@ -30496,6 +30520,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows
+    commit: c930e37c
   - id: T-1042
     milestone: MLIVE
     title: "LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)"
@@ -30591,7 +30616,8 @@ tasks:
   - id: T-1047
     milestone: MLIVE
     title: "LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold"
-    status: todo
+    status: in-progress
+    branch: task-t1047
     priority: medium
     deps:
     - T-1042
@@ -30609,7 +30635,8 @@ tasks:
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
-    status: todo
+    status: in-progress
+    branch: task-t1048
     priority: medium
     deps:
     - T-1042
@@ -30649,6 +30676,62 @@ tasks:
       Observed, not chased: UNEXPLAINED, 3 of 9 runs on main at 6f38fbb8 with a fresh hk (runs 1, 5, 11 of this triage): app-outputs-map step 3 failed 'the GL overlay drew no active halo outside the box (0 -> 0)' while the DOM said the box was active and carried the audio badge. Run 11's message (after I added the area to it) shows the sampled band was the FULL box height - area before {x0:802,y0:527.9,x1:850.4,y1:726}, now {x0:802,y0:98,x1:850.3,y1:726} - so an empty band is ruled out; a separate probe of the same box while listening counted 949-3045 near-ACTIVE_MARK pixels in exactly that band, so the halo does normally land there. Not reproduced in the 6 green runs since. The committed haloScan now prints the whole-frame near-mark total and bbox, which will say next time whether the halo was absent from the frame (total 0, i.e. a real product/GL-frame race) or drawn outside the band. Worth a ticket if it recurs in a gate. | Two runs (2 and 3 of this triage) aborted before any assertion with 'hk serve did not come up on 127.0.0.1:9216 in 20 s' and an EMPTY captured stderr, at load average 57. The same binary and fixture started fine by hand seconds later. If this shape shows up in gate logs it is a readiness-timeout under load, not a product red; ui/e2e/backend.mjs's 20 s budget may be short for a loaded 28-core box.
       Resources: 0 CPU-s, peak 0.0 GB
     commit: 2b76cfd6
+  - id: T-1050
+    milestone: MMAP
+    title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+    status: in-progress
+    branch: task-t1050
+    priority: high
+    deps:
+    - T-1041
+    parallel_group: UI-TRACE-COLOUR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOLLOW-UP OF T-1041 (trace strip removed; the trace is now an OFF-by-default layer drawn translucently OVER the pane's top rows). The product and T-1041's acceptance pass; ONE e2e instrument no longer measures what it claims: ui/e2e/app-trace.e2e.mjs T-475 'the SAME dB is the SAME COLOUR' reads 89/154 columns = 57.8 % against the file's 80 % threshold (the threshold was NOT lowered; it read 9.1 % before T-1041's worker rebuilt the core read).
+      MEASURED BY T-1041's worker (handback ~/.hackriff-ops/work/T-1041/handback.json): (a) where the property HOLDS, the core pixel is identical to the trace-off baseline, so a difference mask cannot find the core - use it only to locate the stroke; (b) the bloom is achromatic by construction, so over a cell it is a lightened, desaturated copy of that cell - which is why 'the brightest pixel in the stroke' now returns the bloom, not the core. Its last, unverified variant takes the most saturated ramp pixel in the core's own rows (bloom excluded).
+      DELIVER: make the instrument read the trace CORE colour deterministically over ramp-coloured cells (e.g. the page exposes the core's per-column colour it drew - as T-475's own honesty instrument - or the spec renders the trace over a flat known cell, or reads the core from the layer's own framebuffer pass), then re-run the SAME-COLOUR property at the unchanged 80 % (or better). If the property genuinely fails over cells, fix the product (the trace's colour must be the same dB->colour as the cells). Never lower the threshold.
+      ACCEPTANCE: app-trace T-475 green 3/3 alone on a quiet-ish box against a FRESH hk; red-proof: a deliberately mismatched trace colour ramp turns it red.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1041 worker 2026-09-25: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+  - id: T-1051
+    milestone: MMAP
+    title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+    status: in-progress
+    branch: task-t1051
+    priority: high
+    deps: []
+    parallel_group: UI-TRACE-HOLD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-25 by T-1041's worker, who built main's ui and ran main's own ui/e2e/app-trace.e2e.mjs against the same hk binary: 3 of 6 red on main): the heldObservation() tests fail with 'the page would not hold still in the state under test' - including the trace extent test - under load 30-55. The browser-e2e tier runs only in the daily RC, so this red sits on main unseen by the merge gate.
+      DELIVER (deflake-triage rules): run app-trace alone 5x on main with a FRESH hk (main's seeded target/debug/hk has been stale all day - that caused most of the day's false browser reds; rule it out first). If it is green alone and red only under load, make heldObservation deterministic - hold on a state the PAGE reports (a frame counter / render-settled flag the surface exposes for tests, or the server's capture clock) instead of comparing screenshots over a wall-clock window; never a longer timeout or fewer attempts. If it fails alone, it is a product defect (the page never settles - e.g. a re-render loop on the trace/layer path, or T-1035's backoff/refresh interplay): find and fix it with a red-on-regression proof.
+      ACCEPTANCE: app-trace (all tests except T-475's colour check, which is its own follow-up) green 5/5 alone and 3/3 at 2 lanes on a fresh hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+  - id: T-1052
+    milestone: MLIVE
+    title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
+    status: in-progress
+    branch: task-t1052
+    priority: medium
+    deps: []
+    parallel_group: LSR-RING-SPEC
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      ORDER-DEPENDENT SPEC (found by T-1037's worker 2026-09-25 22:30, proven on main's unmodified UI 8ac9cfb9): ui/e2e/live-ring.e2e.mjs (LSR-1 / T-1042, landed 22:10) passes alone (19.4 s) but fails when it runs after another spec on the same lane's backend ('rowPx: 0.4', lane 0 rows after 90138 ms). Its premise needs a YOUNG recording: a following pane's time window is the capture clock, which grows, so after ~90 s of another spec driving the backend the pane is zoomed out past MIN_ROW_PX and the ring correctly stands aside. surface-nav then live-ring on one lane reproduces it every time.
+      DELIVER: make the spec establish its own precondition - zoom the pane in time until row px >= MIN_ROW_PX (or open it on an explicit short time span through the view state) before asserting the ring draws, and assert the ring stands aside when zoomed out (that is correct product behaviour and worth pinning). Never weaken the ring assertion; never rely on test order or backend age. If the product should instead keep the ring at the live edge when zoomed out, say so with evidence and stop - that is a design question for the coordinator.
+      ACCEPTANCE: live-ring green alone and after surface-nav (and after any long spec) on one lane, 3/3 each, against a FRESH hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone and in the stated order on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1037 worker 2026-09-25 (proven on main 8ac9cfb9): live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
