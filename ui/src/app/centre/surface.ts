@@ -1776,8 +1776,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const measureChrome = () => {
       const ctl = stage.querySelector<HTMLElement>(".map-ctl");
       const base = canvas.getBoundingClientRect();
+      // T-996's left column is one in-flow container (`.map-stack`) as wide as its widest possible
+      // block; what is ON the picture is its blocks, so they are measured, not the container — at
+      // phone width the container spans the canvas and would push every Live button under it.
       chromeBoxes = ctl
-        ? Array.from(ctl.children).map((c) => {
+        ? Array.from(ctl.children).flatMap((c) => c.classList.contains("map-stack") ? Array.from(c.children) : [c]).map((c) => {
           const r = c.getBoundingClientRect();
           return {
             left: r.left - base.left, right: r.right - base.left,
