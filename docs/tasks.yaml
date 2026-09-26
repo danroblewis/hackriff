@@ -29739,7 +29739,7 @@ tasks:
   - id: T-1003
     milestone: MMAP
     title: "Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes"
-    status: in-progress
+    status: done
     priority: medium
     deps:
     - T-1001
@@ -29768,6 +29768,7 @@ tasks:
       Commits: 9dab9dae
       Observed, not chased: fog-of-war.e2e.mjs fails on main: 'the pane REQUESTED a tile over band C, spectrum the coverage survey settles as never sampled - T-580's short-circuit did not fire'. Reproduced on a clean main worktree (5272b257) with main's own ui/dist: same assertion at fog-of-war.e2e.mjs:1667, request /api/tiles/batch?addresses=0.0.1333.174381846 over [199950000 Hz + 150000 Hz]. Not touched by this diff. | app-surface.e2e.mjs's T-506 subtest ('the canvas draws the IQ horizon and the retention bound') is sensitive to the IQ ring's fill state: across three runs against fresh mock backends its two rules landed at wildly different rows (retention ink at y 63-66 with no IQ ink; IQ ink at y 790-791 with no retention ink) and it failed a different half each time. Its 0.6/0.3 ink-share thresholds assume both rules sit inside the frozen 'Whole surface' pane, which a ring seconds old does not guarantee. Worth a deflaker with a pinned ring window. | The capture rules (IQ horizon, retention bound) can run underneath the bottom-left status line and, where a pane's own chip sits, underneath that too - the reason app-surface's pixel scan needed the chrome exclusion above. Nothing is lost (the words beside them state both instants), but if the user wants the rules readable at the pane's bottom edge, the chrome in that corner would have to yield to them.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 4656a8ef
   - id: T-1004
     milestone: MMAP
     title: "Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost"
