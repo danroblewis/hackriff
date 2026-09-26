@@ -6,7 +6,7 @@
 //! | Method | Path | Body / query | Answers |
 //! |---|---|---|---|
 //! | GET | `/api/iqbuffer` | `?[t0=<unix s>][&t1=<unix s>][&limit=1..10000, default 1000]` | the buffer status (span, bytes and quota, segments with tuning and gain, gaps, eviction counts, drops) |
-//! | POST | `/api/iqbuffer/clip` | one range of `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` or `{"global_index", "samples"}`, plus `"band"?: {"f_lo", "f_hi"}, "label"?, "run"?` | `{"recording": clip}`; 404 `not_found` (nothing buffered there, or overwritten during the export), 409 `conflict` (spans a sample-rate change or a restart), 503 `unavailable` (no buffer), 507 `insufficient_storage` (no room above the free-space floor) |
+//! | POST | `/api/iqbuffer/clip` | one range of `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` or `{"global_index", "samples"}`, plus `"band"?: {"f_lo", "f_hi"}, "label"?, "run"?, "device_id"?` (T-1009: whose ring) | `{"recording": clip}`; 404 `not_found` (nothing buffered there, or overwritten during the export), 409 `conflict` (spans a sample-rate change or a restart), 503 `unavailable` (no buffer), 507 `insufficient_storage` (no room above the free-space floor) |
 //!
 //! The clip export writes a file and a `Recording` row, so it needs `Authorization: Bearer` and is
 //! audited as `iqbuffer_clip`.
@@ -122,6 +122,58 @@ fn control(state: &ApiState) -> Result<&dyn IqBufferControl, Fail> {
         .ok_or_else(|| Fail::new(503, "unavailable", "no IQ capture buffer on this server"))
 }
 
+/// **Whose ring** a clip comes from (T-1009): `device_id` names one of this run's front ends, and
+/// omitting it means the run's default one — the only ring a single-SDR run has.
+///
+/// Every front end of a run keeps its **own** ring ([`hk_pipeline::devices::RunDevice`]), so with
+/// two radios "the IQ of this region" has two answers and a clip that guessed between them would
+/// hand back another radio's samples under this one's name. An id that names no front end holding a
+/// ring is `404 unknown_device` with the ids that do — never the default ring as a fallback.
+fn control_for<'a>(
+    state: &'a ApiState,
+    body: &Map<String, Value>,
+) -> Result<&'a dyn IqBufferControl, Fail> {
+    let want = match body.get("device_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(_) => {
+            return Err(Fail::invalid(
+                "device_id is a string naming a live front end (omit it for this run's default \
+                 one)",
+            ));
+        }
+    };
+    let Some(want) = want else {
+        return control(state);
+    };
+    let default_id = state
+        .live_controls
+        .primary()
+        .and_then(|l| l.device_id())
+        .map(str::to_owned);
+    if default_id.as_deref() == Some(want) {
+        return control(state);
+    }
+    if let Some((_, c)) = state.iq_buffers.iter().find(|(id, _)| id == want) {
+        return Ok(c.as_ref());
+    }
+    let mut available: Vec<String> = default_id.into_iter().collect();
+    available.extend(state.iq_buffers.iter().map(|(id, _)| id.clone()));
+    Err(Fail::new(
+        404,
+        "unknown_device",
+        format!(
+            "no front end with device_id {want:?} holds an IQ capture ring on this server \
+             (available: {})",
+            if available.is_empty() {
+                "none (no front end reports an identity)".to_owned()
+            } else {
+                available.join(", ")
+            }
+        ),
+    ))
+}
+
 fn param<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
     q.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
@@ -179,6 +231,7 @@ fn clip(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
             "band",
             "label",
             "run",
+            "device_id",
         ],
     )?;
     let given = |keys: [&str; 2]| {
@@ -269,7 +322,7 @@ fn clip(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
         label,
         run,
     };
-    let recording = control(state)?.clip(&request).map_err(|f| {
+    let recording = control_for(state, body)?.clip(&request).map_err(|f| {
         let code = match f.code.as_str() {
             "invalid" => "invalid",
             "not_found" => "not_found",
