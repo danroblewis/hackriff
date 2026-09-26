@@ -30746,7 +30746,7 @@ tasks:
   - id: T-1043
     milestone: MLIVE
     title: "LSR-2: GET /ws/spectrum/rows - per-pane folded, quantised binary row subscription with t_from (store walk -> live), epoch and coverage trailer"
-    status: in-progress
+    status: done
     branch: task-t1043
     priority: high
     deps: []
@@ -30772,6 +30772,7 @@ tasks:
       Commits: 8848557e
       Observed, not chased: STILL OPEN from the review, unchanged by this merge and not mine to decide: four wire departures from the design doc's section 6 (a 48-byte block header instead of the stream contract's 32-byte record plus a row trailer; f16 only, with no fmt=u8|f16|f32; nf/level_t rather than columns/k; no backpressure coalescing by raising k). The doc (~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md) does not exist on this box. LSR-1 (T-1042) has landed and takes its live rows from the already-open spectrum/live socket, so re-shaping this wire now would also churn that landed client. | A uniformly-UNKNOWN stretch (T-423) is walked block by block instead of short-circuited, on BOTH row routes - the T-461 short-circuit tests uniform_state == "unobserved" only. Short-circuiting "unknown" would be wrong (the pyramid may still hold rows there), so the honest fix is a cheaper walk. Pre-existing, shared with /ws/tiles/rows.
       Resources: 41 CPU-s, peak 1.0 GB
+    commit: 82356eef
   - id: T-1044
     milestone: MLIVE
     title: "LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles"
