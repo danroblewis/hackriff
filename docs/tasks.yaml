@@ -31691,6 +31691,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper
+
+      Review fail (attempt 1): sharing paneGeometry's clearBand row-band clip between every canvas-journey.e2e.mjs measurement broke the T-846 live-edge grey check (canvas-journey.e2e.mjs:1036/1073) - it now reads from below the top chrome, so the T-532 fault it exists to catch (grey painted in the true newest rows, at the top of the canvas) fell entirely above the sampled rectangle and the check would silently read 0% whether or not the fault was present. Fixed by adding edgeZoneGeometry(), which measures from the pane's true top edge (no row-band clip), column-clipped to the gap between the top chip clusters, with its own lower floor (60x40 vs paneGeometry's 200x200) since that gap is narrower by construction. Verified directly against a live mock-SDR backend: 0.0% grey baseline, 98.6% grey with the T-532 fault re-injected via ui/e2e/selftest.mjs's t532-draw-past-the-coverage-horizon patch (19x over EDGE_GREY_MAX). Also merged main in, no conflicts; typecheck and npm test (117/117) clean.
   - id: T-1079
     milestone: MLIVE
     title: "RC P1: surface-contention - a tab has 2 tile reads in flight against its operating cap of 1 (a retry/revalidate/refetch path bypasses the lane accounting)"
