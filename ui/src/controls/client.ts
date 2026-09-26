@@ -7,6 +7,8 @@
 // - URLs are origin-relative (`/api/...`): through the cloudflared tunnel the page is https and
 //   every call stays on that origin (the server refuses cross-origin control calls).
 
+import { OfflineError, TransportBackoff, isAbort, transportBackoff } from "./backoff";
+
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 export const isMutating = (m: Method) => m !== "GET";
@@ -52,9 +54,21 @@ export type FetchFn = (url: string, init: RequestInit) => Promise<{ ok: boolean;
 /** Per-call options: an `AbortSignal` (a deadline, or a cancellation) the caller owns. */
 export interface CallOptions { readonly signal?: AbortSignal }
 
-/** Calls the API with the tab's token. */
+/**
+ * Calls the API with the tab's token.
+ *
+ * **Every call passes the shared transport gate** (`./backoff.ts`, T-1035): after consecutive
+ * connection failures the client stops asking for a bounded, doubling interval rather than letting
+ * each of its fifteen polling lanes discover the dead server on its own floor. A gated GET throws
+ * `OfflineError` without touching the wire — `reactionTo` reads it as `offline`, exactly as a refused
+ * socket — and a mutating call (a user's own press) is never gated.
+ */
 export class ControlClient {
-  constructor(private token: string, private fetchFn: FetchFn = (u, i) => fetch(u, i)) {}
+  constructor(
+    private token: string,
+    private fetchFn: FetchFn = (u, i) => fetch(u, i),
+    private gate: TransportBackoff = transportBackoff,
+  ) {}
 
   async call<T = unknown>(method: Method, path: string, body?: unknown, opts?: CallOptions): Promise<T> {
     // Mutating calls always send a JSON object (`{}` when empty): the server accepts it and the
@@ -64,7 +78,21 @@ export class ControlClient {
     // settles used to hold its slot until the browser's connection timeout). No default here — the
     // deadline belongs to the caller that knows what "too long" means for its route.
     if (opts?.signal) req.init.signal = opts.signal;
-    const r = await this.fetchFn(req.url, req.init);
+    // The shared ladder (T-1035). A gated call costs nothing on the wire and says why.
+    if (!this.gate.admit(isMutating(method))) throw new OfflineError(this.gate.reason());
+    let r;
+    try {
+      r = await this.fetchFn(req.url, req.init);
+    } catch (e) {
+      // An abort is this caller's own doing and is evidence about nothing; anything else is the
+      // server not answering at all, which is what the ladder measures.
+      if (isAbort(e) || opts?.signal?.aborted) this.gate.released();
+      else this.gate.silent();
+      throw e;
+    }
+    // It answered. A 4xx or a 5xx is an ANSWER: the transport is alive, so the ladder resets and the
+    // error travels on as the route's own business.
+    this.gate.answered();
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw errorFrom(r.status, data, r.statusText);
     return data as T;

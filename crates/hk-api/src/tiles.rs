@@ -68,20 +68,24 @@
 //!    *is* the budget, so `level_f` and `level_t` are structurally independent — changing one
 //!    cannot move the other's cell size by so much as a rounding (asserted in
 //!    `changing_one_axis_level_never_moves_the_other_axis_cell`).
-//! 2. The store level is chosen **finest-affordable-first**, never coarsest-adequate. Folding a
-//!    finer level onto the tile's grid can never grey a cell the finer level holds — a fold is a
-//!    max and a sum, so an output cell is observed if *any* source cell in it was. Only the
-//!    opposite direction (a source coarser than the tile's cell, which **replicates** a measured
-//!    value) is a claim, and it is stated per axis in `resolution.fold` and downgrades the honesty
-//!    tier to `survey-overview`.
+//! 2. The store level **never replicates while a level that only folds can answer**. Folding a
+//!    level whose cells are no larger than the tile's can never grey a cell that level holds — a
+//!    fold is a max and a sum, so an output cell is observed if *any* source cell in it was. Only
+//!    the opposite direction (a source coarser than the tile's cell, which **replicates** a
+//!    measured value) is a claim, and it is stated per axis in `resolution.fold` and downgrades the
+//!    honesty tier to `survey-overview`. Among the levels that fold, a store with **live** coarse
+//!    nodes answers from the tile's **exact node**, else the one with the **fewest source cells**
+//!    (T-1018, [`read_order`]): max-hold composes, so the answer is the same grid for a fraction of
+//!    the read. A store without live coarse nodes keeps the finest-first order, because its open
+//!    coarse tiles trail the live edge.
 //! 3. Candidates are ordered by **cell area**, explicitly, never by level index. T-434's warning:
 //!    index order is a coarseness order only for a ladder — in a lattice node (1, 0) outranks
 //!    (0, 3) in index while being *finer* in time.
-//! 4. When the finest affordable level holds nothing, the read walks **coarser** through the
-//!    remaining candidates (T-426's rule, in the direction this route's preference makes
-//!    meaningful: the byte budget evicts the finest tiles first, §5.5). `resolution.answered`
-//!    reports the level that **actually answered**, and `resolution.tried` every level consulted —
-//!    a silent fallback would trade one lie for another.
+//! 4. When the level read first holds nothing, the read walks on through the remaining candidates
+//!    (T-426's rule; the byte budget evicts the finest tiles first, §5.5, so a coarser level holds
+//!    at least what a finer one does). `resolution.answered` reports the level that **actually
+//!    answered**, and `resolution.tried` every level consulted — a silent fallback would trade one
+//!    lie for another.
 //!
 //! # Cost, and the two caps
 //!
@@ -1132,6 +1136,88 @@ pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
     out
 }
 
+/// **The order [`tile_read`] walks the candidates in** — and so the level that answers (T-1018).
+///
+/// # The exact node first, else the fewest source cells that still fold
+///
+/// On a store whose coarse nodes are maintained **live** ([`hk_store::PyramidConfig::coarse_live`],
+/// T-571/T-585) every node is current up to the fold edge (below) — its committed rows are folded as they
+/// arrive and its in-progress row is folded at read time (T-583) — and retention evicts finer
+/// tiles before coarser ones, so a coarser node holds everything a finer one does over any extent.
+/// Max-hold, frame counts and observed seconds compose under folding, so reading a coarser level
+/// whose cells are **no larger than the tile's own on either axis** gives the same grid as folding
+/// level 0 onto it, for a fraction of the source cells. The finest-first walk this replaced read a
+/// `(3, 1)` tile as 16 × 65 536 level-0 cells in four lock holds while node `(3, 1)` sat unread on
+/// disk (the user's tile-latency review, 2026-09-25: 135–152 ms against ~20 ms).
+///
+/// So the order is:
+///
+/// 1. the tile's **exact node** (`key.store_node`), when it is a candidate — `cells²` source cells;
+/// 2. every other candidate that only **folds** (both cells ≤ the tile's), **fewest source cells
+///    first** — the coarsest such level;
+/// 3. the candidates that would **replicate** (a cell coarser than the tile's on some axis), in the
+///    finest-first area order [`read_affordable_levels`] gives, so the least-replicating comes
+///    first. These are reached only when every folding level held nothing, exactly as before.
+///
+/// Honesty is untouched: a level in (1) or (2) never replicates, so the tier and
+/// `resolution.fold` state the same thing a finest-first read would have.
+///
+/// # Where it is NOT applied
+///
+/// **A tile that reaches past [`hk_store::Pyramid::coarse_lag_start`]** keeps the finest-first
+/// order: a closed level-0 row folds into the coarse nodes only once the ingest clock has left it
+/// by `seal_lag` (2 s shipped), and the read-time preview covers level 0's open column and each
+/// node's in-progress row but not those held-back rows. So "current to the live edge" above holds
+/// only before that instant, and a live-edge tile — or a `/ws/tiles/rows` block, which is pushed
+/// once and never re-sent — would otherwise lose its newest rows to a node that has not got them
+/// yet (T-1018 review). Once the rows fold, the next read of the same address takes the node.
+///
+/// A store without live coarse nodes keeps the finest-first order. Scheme 1's eager ladder rolls a
+/// child into its parent only when the child **seals**, so its open coarse tiles trail level 0 by a
+/// whole producer block at the live edge — preferring them there would stop the live edge
+/// appending, which the live-rendering invariant forbids. `coarse_on_demand` would fold the node
+/// inside the request, which is the batch work T-571 removed.
+pub(crate) fn read_order(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
+    read_order_until(p, key, key.region.t1_ns)
+}
+
+/// [`read_order`] for a read that ends at `end_ns` rather than at the tile's own end — a
+/// `/ws/tiles/rows` block is a few rows of one tile, and whether the coarse nodes are complete is a
+/// question about THOSE rows, asked when the block is read (a row is pushed once and never again).
+pub(crate) fn read_order_until(p: &hk_store::Pyramid, key: &TileKey, end_ns: i64) -> Vec<usize> {
+    let mut out = affordable_levels(p, key);
+    if !p.config().coarse_live {
+        return out;
+    }
+    // Only where the coarse nodes are complete: a closed level-0 row folds up `seal_lag` after
+    // the clock leaves it, and the read-time preview does not cover those held-back rows. A tile
+    // reaching into them keeps finest-first, so the live edge never loses its newest rows.
+    if p.coarse_lag_start()
+        .is_some_and(|t| end_ns > t.as_unix_nanos())
+    {
+        return out;
+    }
+    let geom = p.geometry();
+    let rank = |l: usize| {
+        let g = &geom.levels[l];
+        let folds = g.f_cell_hz <= key.f_cell_hz && g.t_cell_ns <= key.t_cell_ns;
+        let (nt, nf) = dims(geom, l, &key.region);
+        (
+            key.store_node != Some(l),
+            !folds,
+            if folds { nt * nf } else { 0.0 },
+        )
+    };
+    // Stable, so ties (every replicating level) keep the finest-first area order.
+    out.sort_by(|&a, &b| {
+        let (ra, rb) = (rank(a), rank(b));
+        ra.0.cmp(&rb.0)
+            .then(ra.1.cmp(&rb.1))
+            .then(ra.2.total_cmp(&rb.2))
+    });
+    out
+}
+
 /// Output rows one chunk of a read at `level` covers — **one history lock hold each**.
 ///
 /// Shared by the read and by [`servable`] on purpose: the readable ceiling is a claim about what
@@ -1374,7 +1460,7 @@ pub struct TileRead {
     /// Every level consulted, in order. More than one means a finer level held nothing and the
     /// read walked coarser.
     pub tried: Vec<u8>,
-    /// Affordable levels, finest first.
+    /// Affordable levels, in the order the read walks them ([`read_order`]).
     pub candidates: Vec<u8>,
     /// Source cells actually read.
     pub source_cells: usize,
@@ -1470,16 +1556,14 @@ fn read_level(
     })
 }
 
-/// Reads one tile: the finest affordable level, walking **coarser** only when a level holds nothing.
+/// Reads one tile from the candidates in [`read_order`] — the exact node, else the cheapest level
+/// that folds (T-1018) — walking on only when a level holds nothing.
 pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<TileRead, ApiError> {
     let (candidates, read_only) = with_tile_history(state, store, |p| {
-        let read = read_affordable_levels(p.geometry(), key);
-        let both: Vec<usize> = read
-            .iter()
-            .copied()
-            .filter(|&l| fold_affordable(p, key, l))
-            .collect();
-        Ok((both, read))
+        Ok((
+            read_order(p, key),
+            read_affordable_levels(p.geometry(), key),
+        ))
     })?;
     if candidates.is_empty() {
         // Which half emptied it is the difference between "this tile is too wide for the history's
@@ -2209,7 +2293,7 @@ fn shadow_store(state: &ApiState, tile: TileStore) -> TileStore {
     }
 }
 
-/// The level [`tile_read`] would answer `key` from first — the finest affordable one — or `None`
+/// The level [`tile_read`] would answer `key` from first — the head of [`read_order`] — or `None`
 /// when none is (T-911). A tile the coverage map answers on its own is never read, so this is how
 /// its shadow finds the level its neighbours' live rows were drawn at.
 fn answering_level(
@@ -2218,9 +2302,9 @@ fn answering_level(
     key: &TileKey,
 ) -> Result<Option<u8>, ApiError> {
     with_tile_history(state, store, |p| {
-        Ok(read_affordable_levels(p.geometry(), key)
+        Ok(read_order(p, key)
             .into_iter()
-            .find(|&l| fold_affordable(p, key, l))
+            .next()
             .and_then(|l| u8::try_from(l).ok()))
     })
 }
@@ -2737,7 +2821,7 @@ fn tile_body(
         .map(|_| hot_tile_key(&key, store, planes, max_live));
     let epoch = coverage_epoch(state);
     if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), cache_key.as_ref())
-        && let Some(mut v) = c.get(k, epoch)
+        && let Some(mut v) = c.get(k, epoch, slot.client())
     {
         // The answer is the cached one, but the measurement of what THIS read cost, and whose
         // share it was admitted under (T-630), is this read's — `http.rs` strips exactly these
@@ -2853,8 +2937,9 @@ fn tile_body(
             "budget": {
                 "max_source_cells_per_lock": TILE_MAX_SOURCE_CELLS,
                 "max_source_cells_per_tile": TILE_MAX_TOTAL_SOURCE_CELLS,
-                "statement": "these bound WORK, never resolution: the level is chosen \
-                    finest-affordable-first, so a budget can only ever move the answer toward a \
+                "statement": "these bound WORK, never resolution: the level is the tile's \
+                    exact node, else the affordable level with the fewest source cells that still \
+                    only FOLDS (T-1018), so a budget can only ever move the answer toward a \
                     COARSER source, which replicates and says so — it can never grey a cell a \
                     finer level holds. There is no caller-supplied per-axis cell budget on this \
                     route at all, which is why /api/history's max_f defect (T-437 F2: a 1.5x \
@@ -2899,17 +2984,30 @@ fn tile_body(
 ///
 /// **Bounded is the point, and the bound is in bytes** (T-453): residency must not grow with node
 /// count, and a cache sized in *tiles* would, because a tile's size is a property of the grid.
-/// Thirty-two mebibytes is a few viewports' worth of `planes=f16` tiles and a small fraction of
-/// what one `/api/history` query already allocates; it does not move when the pyramid deepens,
-/// when a pane zooms, or when a second client connects.
-pub const TILE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+///
+/// **Sized in viewports (T-1020).** This is a RAM ACCELERATOR in front of the rolling tile
+/// storage T-1023 owns — it holds no data the disk pyramid does not, so growing it costs RAM
+/// only, never durability. The tile-latency review (2026-09-25) measured a screen at 135-290
+/// tiles; the prior 32 MiB bound held ~35 of today's `planes=f16` tiles (staging: 0 hits / 27
+/// misses on a single pan-back), so a pan re-read everything every time. T-1019 landed and cut a
+/// `planes=compact` tile to ~467 kB against f16's ~922 kB on the acceptance fixture (roughly
+/// half; the docstring below still says "a few viewports' worth" for the reasoning, not the
+/// number). 256 MiB / 467 kB is ~560 compact tiles, comfortably past 290 without chasing an exact
+/// multiple of a screen that varies with pane count and zoom. On the Jetson Orin Nano target
+/// (docs/02 hardware tiers, 4/8 GB variants) 256 MiB is under 6% of the smallest module's RAM and
+/// well inside the budget the pyramid, ring and inference stages already share.
+pub const TILE_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// The cache's entry bound.
 ///
 /// The byte bound alone would admit an unbounded number of tiny answers — a 7.5 kB
 /// coverage-short-circuit tile is 4300 of them inside 32 MiB — and each entry costs a key and a
 /// `Value` tree beyond its serialized size. Whichever bound binds first evicts.
-pub const TILE_CACHE_MAX_ENTRIES: usize = 256;
+///
+/// **T-1020:** raised past the 135-290 tiles/screen the review measured, so the byte bound above
+/// is what actually binds in the common case; the entry bound still stops a flood of tiny answers
+/// from being free.
+pub const TILE_CACHE_MAX_ENTRIES: usize = 600;
 
 /// One cached answer.
 struct HotTile {
@@ -2954,23 +3052,46 @@ struct HotTileCacheInner {
     misses: u64,
     evictions: u64,
     invalidations: u64,
+    /// Per-client hit/miss, so a pan-back can be measured per pane's declared `client` (T-1020)
+    /// rather than only in aggregate. Bounded the same way the T-630 share table is: an idle
+    /// client's row is dropped for a new one rather than growing without bound.
+    by_client: std::collections::HashMap<String, ClientHitStats>,
+    client_clock: u64,
 }
 
+/// One client's hit/miss counters (T-1020), plus the clock stamp that makes eviction LRU.
+#[derive(Default, Clone, Copy)]
+struct ClientHitStats {
+    hits: u64,
+    misses: u64,
+    used: u64,
+}
+
+/// Client identities tracked in the hit/miss table at once (T-1020). Shares its bound with the
+/// T-630 admission share table (`TILE_CLIENT_MAX`) — the same population of declared clients asks
+/// both routes.
+const TILE_CACHE_CLIENT_MAX: usize = TILE_CLIENT_MAX;
+
 impl HotTileCache {
-    /// A cached answer for `key`, if one is held at `epoch`.
-    fn get(&self, key: &str, epoch: (u64, u64)) -> Option<Value> {
+    /// A cached answer for `key`, if one is held at `epoch`. `client` is the caller's declared
+    /// `client` id (T-1020): its own hit/miss counters are updated so a pan-back over a viewport
+    /// can be measured per pane, not only in aggregate.
+    fn get(&self, key: &str, epoch: (u64, u64), client: &str) -> Option<Value> {
         let mut g = self.inner.lock().ok()?;
         g.reset_if_stale(epoch);
         g.clock += 1;
         let clock = g.clock;
-        let Some(e) = g.map.get_mut(key) else {
+        let hit = g.map.get_mut(key).map(|e| {
+            e.used = clock;
+            e.body.clone()
+        });
+        g.record_client(client, hit.is_some());
+        if hit.is_some() {
+            g.hits += 1;
+        } else {
             g.misses += 1;
-            return None;
-        };
-        e.used = clock;
-        let body = e.body.clone();
-        g.hits += 1;
-        Some(body)
+        }
+        hit
     }
 
     /// Hold `body` for `key`, evicting the least recently used until both bounds hold.
@@ -3018,6 +3139,16 @@ impl HotTileCache {
         let Ok(g) = self.inner.lock() else {
             return Value::Null;
         };
+        let by_client: serde_json::Map<String, Value> = g
+            .by_client
+            .iter()
+            .map(|(client, s)| {
+                (
+                    client.clone(),
+                    json!({ "hits": s.hits, "misses": s.misses }),
+                )
+            })
+            .collect();
         json!({
             "entries": g.map.len(),
             "bytes": g.bytes,
@@ -3027,12 +3158,16 @@ impl HotTileCache {
             "misses": g.misses,
             "evictions": g.evictions,
             "invalidations": g.invalidations,
+            "by_client": by_client,
             "rule": "SEALED TILES ONLY. A sealed tile's time extent has fully passed the \
                 pyramid's watermark, so it can never change again; a live tile at the growing \
                 edge changes on every arriving row and is never cached, never looked up and \
                 always re-read. `invalidations` counts the times the observation log moved \
                 (records written or segments deleted) and every entry was dropped, because the \
-                coverage plane beside a sealed grid is derived from that log.",
+                coverage plane beside a sealed grid is derived from that log. `by_client` is the \
+                same hits/misses split by the caller's declared `client` id (T-1020, T-630's \
+                identity), bounded to the least-recently-seen 64 the same way the admission share \
+                table is, so a pan-back over one pane's own viewport is directly measurable.",
         })
     }
 }
@@ -3047,6 +3182,41 @@ impl HotTileCacheInner {
             self.bytes = 0;
             self.epoch = epoch;
         }
+    }
+
+    /// Record one lookup's outcome against `client`'s own counters (T-1020), evicting the
+    /// least-recently-seen client row first when the table is full — the same bound as the T-630
+    /// share table, over the same population.
+    fn record_client(&mut self, client: &str, hit: bool) {
+        self.client_clock += 1;
+        let clock = self.client_clock;
+        if let Some(s) = self.by_client.get_mut(client) {
+            if hit {
+                s.hits += 1;
+            } else {
+                s.misses += 1;
+            }
+            s.used = clock;
+            return;
+        }
+        if self.by_client.len() >= TILE_CACHE_CLIENT_MAX {
+            if let Some(victim) = self
+                .by_client
+                .iter()
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone())
+            {
+                self.by_client.remove(&victim);
+            }
+        }
+        self.by_client.insert(
+            client.to_string(),
+            ClientHitStats {
+                hits: u64::from(hit),
+                misses: u64::from(!hit),
+                used: clock,
+            },
+        );
     }
 }
 
@@ -3138,7 +3308,7 @@ fn hot_hit_unslotted(
     }
     let max_live = crate::http::max_live_span_hz(state);
     let k = hot_tile_key(&key, store, planes, max_live);
-    let mut v = cache.get(&k, coverage_epoch(state))?;
+    let mut v = cache.get(&k, coverage_epoch(state), client)?;
     let cost = &mut v["cost"];
     cost["build_ms"] = json!((started.elapsed().as_secs_f64() * 1e6).round() / 1000.0);
     cost["in_flight"] = json!(state.tile_admission.in_flight());
@@ -5349,6 +5519,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **T-1020: a pan back over a just-seen viewport is answered from the cache — the per-client
+    /// hit count rises and no filesystem read happens — measured through the mock SDR's own state
+    /// path (`tiles_json`), the same one `/api/tiles?client=` uses.**
+    #[test]
+    fn a_pan_back_over_a_just_seen_viewport_is_a_cache_hit_reported_per_client() {
+        let dir = temp_dir("cache-by-client");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let mut with_client = tile_params(F_INDEX, T_INDEX);
+        with_client.push(("client".into(), "pane-a".into()));
+
+        let first = tiles_json(&state, &with_client).unwrap();
+        assert!(
+            first["cost"]["served_from"].is_null(),
+            "the first read (a miss) is a real read"
+        );
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(stats["by_client"]["pane-a"]["misses"], json!(1), "{stats}");
+        assert_eq!(stats["by_client"]["pane-a"]["hits"], json!(0), "{stats}");
+
+        reset_source_reads(&state);
+        // The pan back: the SAME viewport, the SAME declared client.
+        let again = tiles_json(&state, &with_client).unwrap();
+        assert_eq!(
+            again["cost"]["served_from"],
+            json!("hot-tile-cache"),
+            "a pan back over a just-seen viewport must be a cache hit"
+        );
+        assert_eq!(source_reads(&state), 0, "a hit must not touch the pyramid");
+
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(
+            stats["by_client"]["pane-a"]["hits"],
+            json!(1),
+            "the pane's own hit count must rise: {stats}"
+        );
+        assert_eq!(stats["by_client"]["pane-a"]["misses"], json!(1), "{stats}");
+        assert_eq!(stats["hits"], json!(1), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A LIVE tile is re-read every time, and that is the correctness half of the ticket.**
     ///
     /// The growing edge changes on every arriving row: serving a stale copy would break *"the live
@@ -5423,17 +5635,22 @@ mod tests {
         for i in 0..TILE_CACHE_MAX_ENTRIES {
             c.put(format!("k{i}"), &body, epoch);
         }
-        assert!(c.get("k0", epoch).is_some());
+        assert!(c.get("k0", epoch, ANONYMOUS_CLIENT).is_some());
         c.put("fresh".into(), &body, epoch);
         assert!(
-            c.get("k0", epoch).is_some(),
+            c.get("k0", epoch, ANONYMOUS_CLIENT).is_some(),
             "the touched entry was evicted"
         );
-        assert!(c.get("k1", epoch).is_none(), "the coldest entry survived");
+        assert!(
+            c.get("k1", epoch, ANONYMOUS_CLIENT).is_none(),
+            "the coldest entry survived"
+        );
 
-        // And a body larger than the whole cache is never held: the bound is unconditional.
+        // And a body larger than the whole cache is never held: the bound is unconditional. A
+        // plain string of that length (rather than a huge numeric array) so the test builds and
+        // serializes it in memcpy time, not per-element formatting time, however big the bound is.
         let c = HotTileCache::default();
-        let huge = json!({ "grid": vec![-80.0f64; TILE_CACHE_MAX_BYTES / 4] });
+        let huge = json!({ "grid": "a".repeat(TILE_CACHE_MAX_BYTES + 1024) });
         c.put("huge".into(), &huge, epoch);
         let s = c.stats_json();
         assert_eq!(s["entries"], json!(0), "{s}");
@@ -5451,16 +5668,16 @@ mod tests {
         let c = HotTileCache::default();
         let body = json!({ "coverage": "observed" });
         c.put("t".into(), &body, (1, 0));
-        assert!(c.get("t", (1, 0)).is_some());
+        assert!(c.get("t", (1, 0), ANONYMOUS_CLIENT).is_some());
         // A record appended.
         assert!(
-            c.get("t", (2, 0)).is_none(),
+            c.get("t", (2, 0), ANONYMOUS_CLIENT).is_none(),
             "a new record left a stale coverage answer"
         );
         c.put("t".into(), &body, (2, 0));
         // A segment pruned.
         assert!(
-            c.get("t", (2, 1)).is_none(),
+            c.get("t", (2, 1), ANONYMOUS_CLIENT).is_none(),
             "retention left a stale coverage answer"
         );
         let s = c.stats_json();

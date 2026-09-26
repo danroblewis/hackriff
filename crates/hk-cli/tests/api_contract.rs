@@ -846,10 +846,14 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     ] {
         assert!(tc[field].is_u64(), "tile_cache.{field}: {tc}");
     }
-    assert_eq!(tc["max_entries"], json!(256), "{tc}");
-    assert_eq!(tc["max_bytes"], json!(32 * 1024 * 1024), "{tc}");
-    assert!(tc["entries"].as_u64().unwrap() <= 256, "{tc}");
-    assert!(tc["bytes"].as_u64().unwrap() <= 32 * 1024 * 1024, "{tc}");
+    // T-1020: sized in viewports (256 MiB / 600 entries), past the 135-290 tiles/screen the
+    // tile-latency review measured against the old 32 MiB / ~35-tile bound.
+    assert_eq!(tc["max_entries"], json!(600), "{tc}");
+    assert_eq!(tc["max_bytes"], json!(256 * 1024 * 1024), "{tc}");
+    assert!(tc["entries"].as_u64().unwrap() <= 600, "{tc}");
+    assert!(tc["bytes"].as_u64().unwrap() <= 256 * 1024 * 1024, "{tc}");
+    // T-1020: per-client hit/miss, so a pan-back over one pane's own viewport is measurable.
+    assert!(is_object(&tc["by_client"]), "tile_cache.by_client: {tc}");
 
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
@@ -2791,6 +2795,114 @@ fn tune_history_route_answers_as_documented() {
     let (st, e) = post(addr, "/api/tune-history", "{}");
     assert_eq!(st, 405, "read-only route: {e}");
     let (st, _) = call(addr, "GET", &url(t0, t1, ""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
+/// T-981: the front end's clip state — `/api/status`'s `frontend` block and
+/// `GET /api/frontend/events` — answers as `docs/api.md` documents it, on a live `hk serve` over
+/// the mock device. The blind end-to-end assertion (a saturating burst through the mock SDR is
+/// flagged on its row, counted, logged as one event and never stored as a detection) is
+/// `hk-pipeline/tests/frontend_overload.rs`; this pins the wire shape and the rule by value.
+#[test]
+fn frontend_status_block_and_events_route_answer_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    wait_for(
+        "spectrum rows measured by the front-end judgement",
+        Duration::from_secs(60),
+        || {
+            get(addr, "/api/status").1["frontend"]["rows"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let (st, v) = get(addr, "/api/status");
+    assert_eq!(st, 200, "{v}");
+    let fe = &v["frontend"];
+    for field in [
+        "rows",
+        "clipped_rows",
+        "event_rows",
+        "events",
+        "clipped_samples",
+        "samples",
+        "suppressed_detections",
+        "evicted_events",
+    ] {
+        assert!(fe[field].is_u64(), "frontend.{field}: {fe}");
+    }
+    assert!(fe["adc_peak_max"].is_number(), "{fe}");
+    assert!(
+        fe["clipped_rows"].as_u64() <= fe["rows"].as_u64(),
+        "a clipped row is a measured row: {fe}"
+    );
+    assert!(
+        fe["event_rows"].as_u64() <= fe["clipped_rows"].as_u64(),
+        "an event row is a clipped row: {fe}"
+    );
+    let last = &fe["last_row"];
+    for field in ["t", "clip_fraction", "adc_peak"] {
+        assert!(last[field].is_number(), "frontend.last_row.{field}: {fe}");
+    }
+    for field in ["clipped", "event"] {
+        assert!(last[field].is_boolean(), "frontend.last_row.{field}: {fe}");
+    }
+    assert!(
+        fe["last_event"].is_null() || fe["last_event"]["t0"].is_number(),
+        "{fe}"
+    );
+    assert_eq!(fe["log"]["capacity"], json!(1024), "{fe}");
+    assert_eq!(fe["rule"]["clip_fraction"], json!(1e-4), "{fe}");
+    assert_eq!(fe["rule"]["step_db"], json!(6.0), "{fe}");
+    assert_eq!(fe["rule"]["saturation_fraction"], json!(0.01), "{fe}");
+
+    // Every capture time there could be: a replay's clock is its recording's, not the wall's.
+    let (t0, t1) = (0.0_f64, 4.0e9_f64);
+    let url = |extra: &str| format!("/api/frontend/events?t0={t0}&t1={t1}{extra}");
+    let (st, e) = get(addr, &url(""));
+    assert_eq!(st, 200, "{e}");
+    for field in ["window", "events", "total", "limit", "truncated", "log"] {
+        assert!(
+            e.get(field).is_some(),
+            "frontend/events missing {field}: {e}"
+        );
+    }
+    assert_eq!(e["limit"], json!(256), "{e}");
+    assert_eq!(e["window"]["t0"].as_f64(), Some(t0), "{e}");
+    assert_eq!(e["log"]["capacity"], json!(1024), "{e}");
+    let events = e["events"].as_array().expect("events is an array");
+    assert_eq!(e["total"].as_u64(), Some(events.len() as u64), "{e}");
+    for ev in events {
+        assert_eq!(ev["kind"], json!("clip"), "{ev}");
+        let (c, r) = (
+            ev["center_hz"].as_f64().unwrap(),
+            ev["sample_rate_hz"].as_f64().unwrap(),
+        );
+        assert_eq!(ev["f_lo_hz"].as_f64(), Some(c - r / 2.0), "{ev}");
+        assert_eq!(ev["f_hi_hz"].as_f64(), Some(c + r / 2.0), "{ev}");
+        assert!(ev["t1"].as_f64() > ev["t0"].as_f64(), "{ev}");
+    }
+    let (st, d) = get(addr, &url("&device=no-such-radio&limit=5"));
+    assert_eq!(st, 200, "{d}");
+    assert_eq!(
+        (d["total"].clone(), d["limit"].clone()),
+        (json!(0), json!(5)),
+        "{d}"
+    );
+    for bad in [
+        format!("/api/frontend/events?t0={t0}"),
+        format!("/api/frontend/events?t0={t1}&t1={t0}"),
+        url("&limit=0"),
+        url("&limit=5000"),
+        url("&f_lo=1"),
+    ] {
+        let (st, e) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    let (st, e) = post(addr, "/api/frontend/events", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(""), None, None);
     assert_eq!(st, 401, "token-gated like every other route");
 
     stop_server(serving);
@@ -5507,6 +5619,9 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     assert!(header["audio"]["mode"].is_string(), "{header}");
     // T-874: a client that does not ask gets mono.
     assert_eq!(header["audio"]["channels"], json!(1), "{header}");
+    // T-987: `audio.wait` is only for a stream that opened waiting for its carrier; a station
+    // the probe recognised carries none.
+    assert!(header["audio"].get("wait").is_none(), "{header}");
 
     // At least one binary data record (type 1: 32-byte header + i16 LE PCM payload) within a
     // bounded number of messages (status records, type 3, interleave).
@@ -9553,20 +9668,27 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!(2),
         "(level_f 0, level_t 2) is node 0*8+2 of the 8x8 view lattice: {coarse_t}"
     );
-    // The node existing does not mean the read uses it: the rule is **finest affordable first**
-    // (T-438), and node (0, 0) is affordable here and finer in time, so it answers and its cells
-    // fold onto the tile's. Folding a finer source invents nothing and greys nothing — it is the
-    // only direction that is free. `exact_node: false` alongside a non-null `store_node` is that
-    // preference showing, not a missing node.
-    assert_eq!(
-        coarse_t["resolution"]["answered"]["exact_node"],
-        json!(false),
-        "{coarse_t}"
+    // **T-1018: the node answers once it holds every row level 0 does.** The view lattice's
+    // coarse nodes are maintained live, so node (0, 2) is read (`exact_node: true`, cells² source
+    // cells) for any tile whose rows have all folded up. But a closed level-0 row folds up only
+    // `seal_lag` after the clock leaves it, and this tile was pinned at the DATA EDGE of a server
+    // that is still capturing — so whether it still reaches into those held-back rows depends on
+    // how far capture has moved on since, and while it does the read keeps finest-first (node
+    // (0, 0), `exact_node: false`) rather than drop the newest rows. Either is right; nothing else
+    // is, and neither replicates.
+    let answered = coarse_t["resolution"]["answered"]["level"].as_u64();
+    let exact = coarse_t["resolution"]["answered"]["exact_node"].as_bool();
+    assert!(
+        matches!(
+            (answered, exact),
+            (Some(2), Some(true)) | (Some(0), Some(false))
+        ),
+        "node (0, 2) once folded, else finest-first at the live edge: {coarse_t}"
     );
-    assert_eq!(
+    assert_ne!(
         coarse_t["resolution"]["fold"]["time"]["direction"],
-        json!("folded"),
-        "a finer source folded onto a coarser tile invents nothing: {coarse_t}"
+        json!("replicated"),
+        "{coarse_t}"
     );
     assert!(
         coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,

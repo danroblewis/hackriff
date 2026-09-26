@@ -26,7 +26,7 @@
    Never faded, and never closeable to nothing: the tier/level and the scale are on the picture in
    every state. */
 .sf-status {
-  position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 110px) + 30px); /* clear of the HUD's frequency labels */
+  position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 0px) + 30px); /* clear of the HUD's frequency labels */
   /* Clear of the right-edge cluster at every width: at 420 px the zoom stack docks above the FAB
      (`chrome/phone.css`), and a line run to the window's edge put its own controls under it. */
   max-width: min(560px, calc(100% - 80px));
@@ -36,7 +36,7 @@
    chrome band — what changed is that they are not on the picture until they are asked for. */
 .sf-status-body {
   pointer-events: auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%;
-  max-height: max(60px, calc(50% - var(--map-strip, 110px) - 66px)); overflow-y: auto;
+  max-height: max(60px, calc(50% - var(--map-strip, 0px) - 66px)); overflow-y: auto;
 }
 .sf-status-body > * { flex: none; border: 1px solid var(--line); border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 82%, transparent); }
@@ -66,12 +66,10 @@
 /* Collapsed, the viewport row is ONE LINE: the level/tier it was drawn at, and its Retune. What is
    put away is either detail (the row's id, the frame's tile counts, the offer's sentence, the
    intermediate ruler, the width presets) or already stated elsewhere on the picture: the pane's
-   window is the HUD's own frequency and time labels (T-805), and the minimap's level — with the
-   sentence explaining why it legitimately differs from the pane's — belongs with the strip it
-   describes, which is an overview by construction. All of it is one press away. */
+   window is the HUD's own frequency and time labels (T-805). All of it is one press away. (The
+   minimap's row is gone with the minimap, T-995.) */
 .sf-status:not([data-open="true"]) .sf-chrome { max-height: 46px; } /* the level line, plus the offer's line when one is painted */
 .sf-status:not([data-open="true"]) .hk-surface-viewport { flex-wrap: nowrap; overflow: hidden; }
-.sf-status:not([data-open="true"]) .hk-surface-viewport[data-viewport="minimap"] { display: none; }
 .sf-status:not([data-open="true"]) .hk-surface-level-note { display: none; }
 .sf-status:not([data-open="true"]) .hk-surface-id { display: none; }
 .sf-status:not([data-open="true"]) .hk-surface-where { display: none; }
@@ -222,6 +220,33 @@
   border: 2px solid var(--text); border-radius: 2px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(0, 0, 0, .55);
 }
+/* T-1001 (MMAP split view): each pane's OWN Live/Freeze button, inside that pane's rectangle
+   (`centre/pane-live.ts` places them every render frame). The single follow-live FAB retired: with
+   two panes open, one corner button acting on the hidden active pane could not say which pane it
+   froze. The container never takes the pointer — a drag or wheel that starts on the picture still
+   pans and zooms — but the buttons do, because a control nobody can press is not one.
+   Colours are the retired FAB's, so the states read the same: teal = following the live edge,
+   amber = frozen on a past window, dashed = following live TIME off the tuned window (T-955). */
+.sf-pane-live { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
+.sf-pane-live-btn {
+  position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer;
+  display: flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 10px;
+  border-radius: 14px; box-sizing: border-box;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--line); color: var(--muted);
+  font: 600 11px/1 var(--ui); letter-spacing: .04em; text-transform: uppercase;
+  box-shadow: 0 4px 18px var(--shadow);
+}
+/* The state is a dot AND a word: never hue alone (docs/24 §14.2). */
+.sf-pane-live-btn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.sf-pane-live-btn.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft), 0 4px 18px var(--shadow); }
+.sf-pane-live-btn.frozen { color: var(--amber); border-color: var(--amber); }
+.sf-pane-live-btn.frozen::before { border-radius: 1px; }
+/* T-955: following live TIME over spectrum the radio has left — the press brings it to the tuned window. */
+.sf-pane-live-btn.following.off-tuned { color: var(--amber); border-color: var(--teal); border-style: dashed; box-shadow: 0 4px 18px var(--shadow); }
+.sf-pane-live-btn:hover { background: color-mix(in srgb, var(--panel) 92%, transparent); }
+.sf-pane-live-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .sf-pin {
   position: absolute; left: 0; top: 0; width: 24px; height: 24px; margin: -12px 0 0 -12px; padding: 0;
   border: 0; background: none; pointer-events: none; display: grid; place-items: center;
