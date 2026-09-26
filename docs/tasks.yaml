@@ -30965,7 +30965,7 @@ tasks:
   - id: T-1059
     milestone: M2-hardening
     title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
-    status: in-progress
+    status: done
     branch: task-t1059
     priority: medium
     deps: []
@@ -30981,6 +30981,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q <the task-CLI tests>`, `just lint-py`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-26 (T-1055 duplicate deps): task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys
+    commit: "69930016"
   - id: T-1060
     milestone: MUI
     title: "P1: Inventory reloads on every intermediate wheel/pointer view (100 of 264 requests per trackpad zoom) - one subscription, quantized material window key, 300 ms settle, one in flight per pane (latest-wins, the superseded request never issued)"
