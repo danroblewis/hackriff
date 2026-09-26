@@ -2,6 +2,7 @@
 // nav, toast. `device` is T-150's alone (the top bar's reduction of `/api/control/state`); T-155's
 // Device tab keeps the full control state it needs in its own review slice, never here.
 import type { CenterGrid, FftBounds } from "../navigation";
+import type { AttachedDevice } from "../surface/panedevice";
 import type { CaptureState, ScanState } from "../controls/model";
 import type { AppState } from "./state";
 
@@ -28,6 +29,16 @@ export interface DeviceSlice {
    * reports no identity. A retune is a device action recorded against this id, so the UI names the
    * radio it is about to move. Null means *nothing said*, never "some default device". */
   deviceId: string | null;
+  /**
+   * **Every live front end this run holds** (T-1006), from `/api/control/state`'s `devices[]`
+   * (T-511): `[]` on a replay, one entry on a single-SDR run, N when N are composed.
+   *
+   * Here rather than in the Device tab's own slice because it is not a device *setting* — it is the
+   * list a **pane** picks its coverage selector from and the list a retune names a `device_id` out
+   * of, so the surface needs it on the same 2 s poll as the rest of this slice. `deviceId` above
+   * stays the singular default (null with several, because then there is no "the" device).
+   */
+  devices: readonly AttachedDevice[];
   /** The centre axis of the achievable grid (T-341): the tunable bounds and the tuning step, from
    * `/api/control/state`'s `device`. Null before the state loads or on a run with no device; a
    * `center_step_hz` of null means the source cannot state a step, and then **nothing snaps**. */
@@ -95,7 +106,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
+  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, devices: [], centerGrid: null, fftBounds: null },
   nav: { gotoHz: null, gotoSpanHz: null, gotoTS: null, gotoSpanS: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,

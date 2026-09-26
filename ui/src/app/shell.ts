@@ -31,6 +31,20 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     sampleRateHz: cs.tuning?.sample_rate_hz ?? run?.sample_rate_hz ?? null,
     rowsPerS: run?.display?.rows_per_s ?? null, recording: !!run?.recording?.active,
     deviceId: cs.device?.device_id ?? null,
+    // T-1006: every live front end, reduced to what a pane's device pill, its picker and a retune's
+    // `device_id` need. An entry reporting NO identity is dropped rather than carried as a nameless
+    // one: the server holds at most one such handle and it cannot be addressed by any selector, so a
+    // row offering to pin a pane to it would offer an act that cannot be performed. On a run with
+    // only that one front end the pane stays on `any`, the retune sends no selector, and the route's
+    // own default is the unchanged single-device behaviour.
+    devices: (cs.devices ?? [])
+      .filter((d): d is typeof d & { device_id: string } => typeof d.device_id === "string" && d.device_id.length > 0)
+      .map((d) => ({
+        id: d.device_id,
+        driver: d.device?.driver ?? "",
+        centerHz: d.tuning?.center_hz ?? null,
+        sampleRateHz: d.tuning?.sample_rate_hz ?? null,
+      })),
     // T-341: the centre axis of the achievable grid, straight from the device's capabilities. A
     // `tuning_step_hz` of null is "the source cannot say" — carried through as null, never
     // defaulted to 1 Hz, so a snap against it refuses rather than inventing a centre.
