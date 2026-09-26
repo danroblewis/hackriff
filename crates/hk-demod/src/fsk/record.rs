@@ -46,6 +46,7 @@ use hk_model::{
 };
 use serde_json::{Value, json};
 
+use super::consensus::{RateConsensus, rate_consensus_members};
 use super::demod::FSK_DEMOD_VERSION;
 use super::receiver::{FrameEvidence, FskBurst};
 
@@ -189,15 +190,20 @@ fn decode_metadata(result: &FramingResult, burst: &FskBurst, index: usize) -> Va
     })
 }
 
-/// What framing found in burst `i` (T-614): the learned sync located, the CRC valid.
-fn frame_evidence(result: &FramingResult, i: usize) -> FrameEvidence {
-    result
+/// What is known about burst `i` independently of its trial: what framing found (T-614 — the
+/// learned sync located, the CRC valid) and whether the burst is in the population's agreeing
+/// cluster (T-953, `consensus[i]`).
+fn frame_evidence(result: &FramingResult, i: usize, consensus: &[bool]) -> FrameEvidence {
+    let mut e = result
         .frames
         .get(i)
         .map_or_else(FrameEvidence::default, |f| FrameEvidence {
             sync_found: result.model.sync.is_some() && f.sync_bit.is_some(),
             crc_valid: f.crc_valid == Some(true),
-        })
+            rate_consensus: false,
+        });
+    e.rate_consensus = consensus.get(i).copied().unwrap_or(false);
+    e
 }
 
 /// Writes the records. See the [module docs](self). `bursts[i]` must be the burst whose bits
@@ -231,11 +237,18 @@ pub fn write_framed_bursts(
     // (analogue FM demodulated at a standard-rate trial nothing confirmed) gets no `2fsk`
     // Demodulation row, and contributes nothing to the 2-FSK fingerprint: bits existing is not
     // evidence of symbols.
+    // T-953: what the *population* agrees on, before any per-burst question is asked. A burst
+    // below the C14 trust floor that no framing model fits is still a measurement of a symbol
+    // clock when the emitter's other bursts track the same rate (see `crate::fsk::consensus`).
+    let (consensus, in_consensus) = match rate_consensus_members(bursts) {
+        Some((c, members)) => (Some(c), members),
+        None => (None, vec![false; bursts.len()]),
+    };
     let measured: Vec<bool> = bursts
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            b.alphabet_evidence_framed(frame_evidence(result, i))
+            b.alphabet_evidence_framed(frame_evidence(result, i, &in_consensus))
                 .is_measured()
         })
         .collect();
@@ -273,8 +286,16 @@ pub fn write_framed_bursts(
         bandwidth_hz: bandwidth,
         fingerprint: Some(Fingerprint {
             family: any_measured.then(|| FSK_FAMILY.into()),
-            symbol_rate_hz: median(measured_symbols().map(|s| s.rate_bd).collect()),
-            deviation_hz: median(measured_symbols().filter_map(|s| s.deviation_hz).collect()),
+            // T-953: a population that agreed measured the clock better than any one burst did,
+            // so its median is the emitter's rate; without one, the measured bursts' median as
+            // before.
+            symbol_rate_hz: consensus
+                .map(|c| c.rate_bd)
+                .or_else(|| median(measured_symbols().map(|s| s.rate_bd).collect())),
+            deviation_hz: consensus
+                .and_then(|c: RateConsensus| c.deviation_hz)
+                .or_else(|| median(measured_symbols().filter_map(|s| s.deviation_hz).collect())),
+            burst_length_s: consensus.map(|c| c.burst_duration_s),
             ..Fingerprint::new(f_center, bandwidth)
         }),
         identity: identity.clone().map(|identity| IdentityClaim {
@@ -309,7 +330,7 @@ pub fn write_framed_bursts(
             detection_ref: ctx.detection_ref,
             recording_ref: ctx.recording_ref,
             mode: FSK_FAMILY.into(),
-            params: burst.estimated_params_framed(frame_evidence(result, i)),
+            params: burst.estimated_params_framed(frame_evidence(result, i, &in_consensus)),
             lock_quality: Some(sy.lock.lock_quality),
             evm_db: None,
             time: burst.time_range(),
