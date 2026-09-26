@@ -149,6 +149,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     // coarse-zoom event aggregate that a tile deliberately does not carry (docs/16 §5.3)
     ("GET", "/api/tiles"),
     ("GET", "/api/tiles/events"),
+    // T-1058: the last-known ledger over a pane's whole frequency window (the fog-of-war's source)
+    ("GET", "/api/lastknown"),
     // T-897: traced (t, f) paths - chirps, sweeps, hop sequences - over a viewport (the map's
     // `paths` layer, docs/23 §10.6 rule 2)
     ("GET", "/api/paths"),
@@ -1676,6 +1678,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared, conn_id: u64) {
         | "/api/coverage"
         | "/api/tiles"
         | "/api/tiles/events"
+        | "/api/lastknown"
         | "/api/report"
         | "/api/status"
         | "/api/health"
@@ -1746,6 +1749,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared, conn_id: u64) {
         // tile is immutable), so the coarse-zoom highlight layer is a count per cell, computed on
         // demand on the same address.
         "/api/tiles/events" => crate::tiles::tile_events_json(state, &req.query),
+        // T-1058: the fog-of-war's source as one array over a pane's window, read from the ledger
+        // the tile route's `shadow` plane reads — nothing searched, nothing re-rendered.
+        "/api/lastknown" => crate::lastknown::lastknown_json(state, &req.query),
         // T-351: `t` is the server's own wall clock at the instant this response was built — added
         // here, not inside the pipeline's opaque counter object, since every consumer of
         // `StatusFn` already answers without one and a caller needs it to tell a fresh read from a

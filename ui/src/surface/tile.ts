@@ -189,7 +189,8 @@ export interface ShadowSource {
   /** Runs carried from BEFORE the tile — the ones a search found. Runs from the tile's own grid
    * (`src = 0`, the carry and the backward fill) are not counted: their cell is the tile's. */
   readonly carried: number;
-  /** Of `carried`, those the route labelled `search: "own-level"` — the tile's own cell. */
+  /** Of `carried`, those the route labelled `search: "own-level"` — the tile's own cell — or, since
+   * T-1058, that came from the last-known ledger with `own_cell: true` (the same claim). */
   readonly ownLevel: number;
   /** Of `carried`, those labelled `search: "ladder"` — a coarser cell, which reads hotter. */
   readonly ladder: number;
@@ -271,7 +272,7 @@ export interface TileResponse {
     f: number[]; row: number[]; rows: number[]; last_db: number[]; last_t_s: number[]; src?: number[];
     /** The source table `src` indexes (T-911/T-916): entry 0 is this tile's own grid, the rest are
      * the store level a value before the tile came from, each naming the search that found it. */
-    sources?: { from?: string; search?: string; level?: number; f_cell_hz?: number; t_cell_s?: number }[];
+    sources?: { from?: string; search?: string; level?: number; f_cell_hz?: number; t_cell_s?: number; own_cell?: boolean }[];
   } | null;
 }
 
@@ -501,7 +502,9 @@ function shadowSourceOf(resp: TileResponse): ShadowSource | null {
     carried++;
     const e = Number.isInteger(i) ? table[i as number] : undefined;
     const search = e && typeof e.search === "string" ? e.search : null;
-    if (search === "own-level") { ownLevel++; continue; }
+    // T-1058: a value from the last-known LEDGER is the tile's own cell exactly when the answer
+    // says so (`own_cell`); otherwise it is counted like any source that did not say.
+    if (search === "own-level" || (e?.from === "ledger" && e.own_cell === true)) { ownLevel++; continue; }
     if (search === "ladder") ladder++; else unstated++;
     coarse = true;
     if (e) {

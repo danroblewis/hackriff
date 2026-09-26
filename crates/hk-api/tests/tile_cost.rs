@@ -526,15 +526,95 @@ fn stale_departed_band_fixture(dir: &std::path::Path) -> (ApiState, f64, i64) {
     (state, f_lo, tile_t0)
 }
 
-/// **T-916 (1) and (3).** A departure older than the own-level reach is answered by the ladder, the
-/// answer **says so per run**, and the two searches together stay inside the one T-523 budget.
+/// T-1058: reopens the fixture's spectrum history with its last-known ledger file removed — a store
+/// whose ledger began on older history (written before T-1058, or its file lost). Such a ledger is
+/// **incomplete**, so its "never observed" is no proof and the tile route falls back to the search:
+/// the migration window, and the only way left to reach the two-search case below.
+fn drop_ledger(state: &ApiState, dir: &std::path::Path) {
+    let h = state.history.as_ref().unwrap();
+    let mut p = h.lock().unwrap();
+    let cfg = p.config().clone();
+    let swap = hk_store::Pyramid::open(dir.join("swap"), cfg.clone()).unwrap();
+    let old = std::mem::replace(&mut *p, swap);
+    old.close().unwrap();
+    let ledger = dir
+        .join("history")
+        .join("history")
+        .join(format!("s{}", cfg.scheme))
+        .join("last_known.ledger");
+    std::fs::remove_file(&ledger).unwrap();
+    *p = hk_store::Pyramid::open(dir.join("history"), cfg).unwrap();
+    assert!(!p.ledger_stats().complete);
+}
+
+/// **T-1058: a departure older than the own-level reach is answered by the LEDGER, at the tile's
+/// own cell, and nothing is searched.** Before T-1058 only the ladder reached it — a 50 kHz × 3600 s
+/// max-hold, 10–15 dB hotter than the band's last row (T-916). The ledger keeps the newest value
+/// per finest cell as rows arrive, max-held over the store's own time cell, so the same departure
+/// carries exactly the cell its last row was drawn with, however long ago.
+#[test]
+fn a_departure_older_than_the_own_level_reach_is_answered_by_the_ledger_at_the_tiles_own_cell() {
+    let dir = TempDir::new("stale-ledger");
+    let (state, f_lo, t_ns) = stale_departed_band_fixture(&dir.0);
+    let (ms, v) = shadow_cost(&state, 0, f_lo, t_ns);
+    let sh = &v["shadow"];
+    assert!(sh["runs"].as_u64().unwrap_or(0) > 0, "{sh}");
+    let sources = sh["sources"].as_array().expect("a source table");
+    let carried: Vec<&Value> = sh["src"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i.as_u64())
+        .filter(|&i| i > 0)
+        .map(|i| &sources[i as usize])
+        .collect();
+    assert!(!carried.is_empty(), "{sh}");
+    for s in &carried {
+        assert_eq!(s["from"], serde_json::json!("ledger"), "{s}");
+        assert_eq!(s["own_cell"], serde_json::json!(true), "{s}");
+        assert_eq!(s["f_cell_hz"], v["axes"]["frequency"]["cell_hz"], "{s}");
+        assert_eq!(s["t_cell_s"], v["axes"]["time"]["cell_s"], "{s}");
+    }
+    assert_eq!(
+        sh["search"]["ran"],
+        serde_json::json!(false),
+        "{}",
+        sh["search"]
+    );
+    assert_eq!(sh["search"]["source_cells"], serde_json::json!(0));
+    assert_eq!(
+        sh["ledger"]["columns_searched"],
+        serde_json::json!(0),
+        "{}",
+        sh["ledger"]
+    );
+    eprintln!(
+        "\n=== T-1058: the same stale departure from the LEDGER ===\nroute {ms:.2} ms, shadow \
+         {:.3} ms, {} runs, {} ledger cells read, 0 source cells searched\n",
+        sh["search"]["build_ms"].as_f64().unwrap_or(0.0),
+        sh["runs"],
+        sh["ledger"]["cells_read"],
+    );
+}
+
+/// **T-916 (1) and (3), on the migration window (T-1058).** Where the ledger cannot answer — here a
+/// ledger begun on older history — a departure older than the own-level reach is answered by the
+/// ladder, the answer **says so per run**, and the two searches together stay inside the one T-523
+/// budget.
 #[test]
 fn a_departure_older_than_the_own_level_reach_is_labelled_ladder_and_costs_one_budget() {
     let dir = TempDir::new("stale-shadow");
     let (state, f_lo, t_ns) = stale_departed_band_fixture(&dir.0);
+    drop_ledger(&state, &dir.0);
     let (ms, v) = shadow_cost(&state, 0, f_lo, t_ns);
     let sh = &v["shadow"];
     let search = &sh["search"];
+    assert_eq!(
+        sh["ledger"]["complete"],
+        serde_json::json!(false),
+        "{}",
+        sh["ledger"]
+    );
     assert!(
         sh["runs"].as_u64().unwrap_or(0) > 0,
         "a band this far past the own-level reach must still carry a shadow — the ladder is what \
