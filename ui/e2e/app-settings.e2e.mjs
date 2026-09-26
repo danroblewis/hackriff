@@ -40,7 +40,12 @@ const VISIBLE_TABS = `JSON.stringify([...document.querySelectorAll('#review .rv-
 /** One pane's readout headline (frequency · time · the device whose coverage it reads). */
 // T-996 retired the per-viewport panel; the active pane's one-line readout (`.sf-where`) is where a
 // pane names the front end whose coverage decides its grey.
-const HEADLINE = `(document.querySelector('.sf-where')?.textContent ?? "")`;
+/** The pane's statement of whose coverage it reads: T-1006's device pill, on the pane's own scale
+ * block since T-996 retired the row it was on — the selector as state (`data-device`) and the pill's
+ * sentence (its title), which names the `device_id`. The status line no longer appends the bare id
+ * (T-1006: the pill states it), so this is where "the readout names the front end" is read now. */
+const PANE_DEVICE = `(document.querySelector('.sf-scale:not([hidden])')?.dataset.device ?? "")`;
+const PANE_DEVICE_WHY = `(document.querySelector('.sf-scale:not([hidden]) .sf-scale-device')?.title ?? "")`;
 
 for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px one small ⋯ holds every moved setting, and Review keeps only review`, async (t) => {
   const be = await backend();
@@ -137,10 +142,10 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px one small ⋯ h
     s.value = ${JSON.stringify(v)}; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`);
   assert.equal(await pick(devId), devId);
   await page.waitFor("the pane readout to name the front end it reads coverage from",
-    `${HEADLINE}.includes(${JSON.stringify(devId)})`, { timeoutMs: 30000 });
+    `${PANE_DEVICE} === ${JSON.stringify(devId)} && ${PANE_DEVICE_WHY}.includes(${JSON.stringify(devId)})`, { timeoutMs: 30000 });
   assert.equal(await pick("any"), "any");
   await page.waitFor("the readout to stop naming one front end",
-    `!${HEADLINE}.includes(${JSON.stringify(devId)})`, { timeoutMs: 30000 });
+    `${PANE_DEVICE} === "any"`, { timeoutMs: 30000 });
 
   // The capture window: the retention this server is configured with, in words — never a placeholder.
   const retention = await page.$text("#map-more-menu .map-capture-retention");

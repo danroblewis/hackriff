@@ -75,7 +75,7 @@ test("the ⋯ settings menu holds theme, colour scale, ruler, front ends and the
   }
   // The pane's coverage source is a select per pane, over `any` plus the front ends.
   assert.match(src, /"data-pane-device": p\.id/);
-  assert.match(src, /host\.setPaneDevice\(p\.id, sel\.value\)/);
+  assert.match(src, /host\.setDeviceOfPane\(p\.id, sel\.value\)/);
 });
 
 test("the settings host is view state only: no route, no client, no device action", () => {
@@ -89,7 +89,7 @@ test("the settings host is view state only: no route, no client, no device actio
   // label preference, and a pane's device is `PaneModel.setDevice` — three writes, none of them a call.
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.match(host, /setRulerMode: \(mode\) => \{[\s\S]*?setTimeLabelMode\(mode\);/);
-  assert.match(host, /setPaneDevice: \(paneId, device\) => \{[\s\S]*?pv\.view\.panes\.setDevice\(paneId, device\);/);
+  assert.match(host, /setDeviceOfPane: \(paneId, device\) => \{[\s\S]*?pv\.view\.panes\.setDevice\(paneId, device\);/);
   // The capture window is READ from the store's own capture clock (`GET /api/timeline`'s `window`),
   // and a null one is stated as unknown — never a default span (T-379).
   assert.match(host, /retention: w \? durationText\(w\.spanS\) : null/);
@@ -100,9 +100,12 @@ test("the settings host is view state only: no route, no client, no device actio
 
 test("the front-end list is the backend's, and an empty one is a replay — never one invented device", () => {
   const shell = readFileSync("src/app/shell.ts", "utf8");
-  assert.match(shell, /devices: \(cs\.devices \?\? \[\]\)\.map/, "the list is not read from /api/control/state's devices");
-  assert.doesNotMatch(shell, /devices: cs\.devices \?\? \[\{/, "a device list is synthesised from the singular device");
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
+  // Integration with T-1006: the settings menu's list is the store's `frontEnds` (T-1006's
+  // addressable-only reading of the same wire list is `devices`), still mapped from cs.devices.
+  assert.match(shell, /frontEnds: \(cs\.devices \?\? \[\]\)\.map/, "the list is not read from /api/control/state's devices");
+  assert.doesNotMatch(shell, /(devices|frontEnds): cs\.devices \?\? \[\{/, "a device list is synthesised from the singular device");
+  assert.match(host, /const devices = store\.get\(\)\.device\.frontEnds;/, "the settings menu does not read the full front-end list");
   assert.match(host, /empty: devices\.length === 0/);
   assert.match(host, /this run is a replay/);
 });

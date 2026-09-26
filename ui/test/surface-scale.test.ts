@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { fmtScaleHz, fmtScaleS, freqScaleBar, niceBar, paneScale, scaleBudgetPx, timeScaleBar } from "../src/surface/scale";
+import { fmtScaleHz, fmtScaleS, freqScaleBar, niceBar, paneScale, scaleBudgetPx, scaleMarkOf, timeScaleBar } from "../src/surface/scale";
 
 test("T-996: the bar's length times the pane's Hz/px IS the quantity it states", () => {
   for (const spanHz of [20e6, 2e6, 937e3, 125e3, 4e3, 300]) {
@@ -126,4 +126,20 @@ test("T-996: niceBar refuses a ladder it cannot fit rather than rounding up", ()
   assert.equal(niceBar(10, 1, [100, 200], String), null, "it took a step 10× its budget");
   const b = niceBar(1, 100, [1, 10, 100, 1000], String);
   assert.deepEqual(b, { px: 100, value: 100, label: "100" });
+});
+
+test("T-1006 x T-996: the pane's device pill rides its scale block, and the selector is STATE", () => {
+  // T-996 retired the per-viewport row T-1006 stated the pill on; the pane's own scale block is the
+  // per-pane "what am I looking at" place that remains, so the pill and `data-device` go there.
+  const pane = { id: "p1", f0Hz: 100e6, f1Hz: 102e6, t0Ns: 0, t1Ns: 10e9, rect: { x: 0, y: 0, w: 800, h: 600 } };
+  const base = { tier: "detail", following: true, tierLabel: "detail", levelLabel: "L0", freqLabel: "101 MHz", timeLabel: "LIVE", counts: "" };
+  const pinned = scaleMarkOf(pane, { ...base, device: { device: "mock:a", label: "mock a", why: "mock:a's coverage alone", stale: false } }, 600, 1)!;
+  assert.deepEqual(pinned.device, { device: "mock:a", label: "mock a", why: "mock:a's coverage alone", stale: false });
+  assert.equal(pinned.state.device, "mock:a", "the selector must be on the element, not only in the sentence");
+  assert.equal(pinned.state.deviceStale, "false");
+  const stale = scaleMarkOf(pane, { ...base, device: { device: "mock:gone", label: "gone", why: "not held", stale: true } }, 600, 1)!;
+  assert.equal(stale.state.deviceStale, "true", "a pin to a front end this run does not hold must be marked");
+  const none = scaleMarkOf(pane, base, 600, 1)!;
+  assert.equal(none.device, null, "a host that names no front end gets no pill, not an invented one");
+  assert.equal(none.state.device, "");
 });

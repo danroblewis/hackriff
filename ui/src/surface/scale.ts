@@ -162,7 +162,21 @@ export interface ScaleMark {
   readonly level: string;
   /** That statement in full, as the block's tooltip. */
   readonly title: string;
+  /** T-1006: whose coverage decides this pane's grey, or `null` when the host names none. */
+  readonly device: ScaleDevice | null;
   readonly state: Readonly<Record<string, string>>;
+}
+
+/**
+ * T-1006's device pill, carried to the scale block (T-996 retired the per-viewport row it was on).
+ * The same strings-and-a-bit shape as `chrome.ts`'s `RowDevice`: this file never interprets
+ * `device`, it states the host's words and marks the selector on the element.
+ */
+export interface ScaleDevice {
+  readonly device: string;
+  readonly label: string;
+  readonly why: string;
+  readonly stale: boolean;
 }
 
 /** The pane geometry a mark is placed from — the `box` and `rect` the frame drew the pane with. */
@@ -186,6 +200,8 @@ export interface ScaleReport {
   readonly freqLabel: string;
   readonly timeLabel: string;
   readonly counts: string;
+  /** T-1006: the pane's device pill (optional: a host that names no front end passes none). */
+  readonly device?: ScaleDevice | null;
 }
 
 const NS_PER_S = 1e9;
@@ -218,6 +234,7 @@ export function scaleMarkOf(
     tier: report.tier,
     level,
     title: report.tierLabel,
+    device: report.device ?? null,
     state: {
       pane: pane.id,
       following: report.following ? "true" : "false",
@@ -241,6 +258,10 @@ export function scaleMarkOf(
       where: report.freqLabel,
       when: report.timeLabel,
       counts: report.counts,
+      // T-1006: the selector as STATE (`data-device`, `data-device-stale`), as the retired row
+      // marked it — a `device_id` is exactly the kind of string a sentence mangles.
+      device: report.device?.device ?? "",
+      deviceStale: report.device?.stale ? "true" : "false",
     },
   };
 }
@@ -269,6 +290,12 @@ export class ScaleBars {
       bar(fRow, m.scale.freq, "width");
       bar(tRow, m.scale.time, "height");
       if (lvl.textContent !== m.level) lvl.textContent = m.level;
+      const dev = el.children[3] as HTMLElement;
+      if (dev.hidden !== !m.device) dev.hidden = !m.device;
+      if (m.device) {
+        if (dev.textContent !== m.device.label) dev.textContent = m.device.label;
+        if (dev.title !== m.device.why) dev.title = m.device.why;
+      }
       if (el.title !== m.title) el.title = m.title;
       for (const [k, v] of Object.entries(m.state)) if (el.dataset[k] !== v) el.dataset[k] = v;
     }
@@ -292,7 +319,11 @@ export class ScaleBars {
     }
     const lvl = doc.createElement("span");
     lvl.className = "sf-scale-level";
-    el.append(lvl);
+    // T-1006: the device pill, last, hidden until the host names a front end.
+    const dev = doc.createElement("span");
+    dev.className = "sf-scale-device";
+    dev.hidden = true;
+    el.append(lvl, dev);
     this.root.append(el);
     return el;
   }

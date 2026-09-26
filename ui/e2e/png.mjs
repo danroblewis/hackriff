@@ -98,3 +98,38 @@ export function census(img, rect = null) {
     top: ranked.slice(0, 6).map(([k, n]) => [`#${k.toString(16).padStart(6, "0")}`, n]),
   };
 }
+
+/**
+ * How much a rectangle CHANGED between two screenshots of the same page, per pixel (T-1031).
+ *
+ * The point is to ask a question about one place rather than about two places: "is what is painted
+ * here the canvas's?" is answered by hiding the chrome and re-photographing the SAME rectangle,
+ * not by photographing a different rectangle 60 px away and hoping it holds the same kind of
+ * pixels (it does not — a detection box, a guide line or an unobserved grey region lands there
+ * about one run in four). Canvas motion between the two shots shows up here too, so a caller
+ * calibrates against it by diffing two shots taken the same way with nothing changed.
+ *
+ * `meanAbs` is the mean absolute per-channel difference (0…255); `changedShare` is the share of
+ * pixels where any channel moved by more than `threshold`.
+ */
+export function pixelDiff(a, b, rect = null, threshold = 8) {
+  if (a.width !== b.width || a.height !== b.height) {
+    throw new Error(`pixelDiff on different sizes: ${a.width}x${a.height} vs ${b.width}x${b.height}`);
+  }
+  const x0 = rect ? Math.max(0, rect.x) : 0, y0 = rect ? Math.max(0, rect.y) : 0;
+  const x1 = rect ? Math.min(a.width, rect.x + rect.w) : a.width;
+  const y1 = rect ? Math.min(a.height, rect.y + rect.h) : a.height;
+  let total = 0, sum = 0, changed = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const d = (y * a.width + x) * 4;
+      const dr = Math.abs(a.data[d] - b.data[d]);
+      const dg = Math.abs(a.data[d + 1] - b.data[d + 1]);
+      const db = Math.abs(a.data[d + 2] - b.data[d + 2]);
+      sum += dr + dg + db;
+      if (dr > threshold || dg > threshold || db > threshold) changed++;
+      total++;
+    }
+  }
+  return { total, meanAbs: total ? sum / (3 * total) : 0, changedShare: total ? changed / total : 0 };
+}

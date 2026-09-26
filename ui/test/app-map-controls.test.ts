@@ -460,6 +460,79 @@ test("T-955: a painted Go-to offer is withdrawn when the radio retunes onto the 
   }
 });
 
+// ---------------------------------------------------------------------------
+// T-1006: the front-end picker in the viewport menu
+// ---------------------------------------------------------------------------
+
+test("T-1006: the viewport menu picks the pane's front end, and no press reaches a route", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window, fetch: g.fetch };
+  const fetched: unknown[] = [];
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("the picker must not reach the network")); };
+  const picked: string[] = [];
+  let perDevice = 0;
+  // Two front ends attached, the pane on the union — the case that makes the picker necessary.
+  let pane = "any";
+  try {
+    const acts = paneActions(model(), () => model().list()[0].id);
+    const host = {
+      ...acts,
+      measuring: () => false, setMeasuring() {}, goTo() {}, centreHz: () => null,
+      gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "pane 1 of 2", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+      deviceMenu: () => ({
+        pane: "pane 1 of 2",
+        rows: [
+          { id: "any", label: "Any front end", hint: "grey is the union of every radio; a retune must name one", on: pane === "any" },
+          { id: "hackrf:aaab", label: "HackRF · 2.4 Msps", hint: "hackrf:aaab", on: pane === "hackrf:aaab" },
+          { id: "rtlsdr:1", label: "RTL-SDR · 2.4 Msps", hint: "rtlsdr:1", on: pane === "rtlsdr:1" },
+        ],
+        note: "This viewport's grey is the union of every front end.",
+        offer: { label: "One viewport per front end", why: "2 viewports, one pinned to each front end", enabled: true },
+      }),
+      setPaneDevice: (id: string) => { picked.push(id); pane = id; },
+      splitPerDevice: () => { perDevice++; },
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const btn = root.find("map-pane-btn")!, menu = root.find("map-pane-menu")!;
+    const section = menu.find("map-pane-device")!;
+    assert.equal(section.hidden, true, "the picker is built on open, not before");
+    btn.fire("click");
+    assert.equal(section.hidden, false, "opening the viewport menu must state which front end this pane draws");
+    const rows = root.find("map-pane-devices")!;
+    assert.equal(rows.children.length, 3, "the union plus both front ends");
+    const inputs = rows.children.map((l) => l.children.find((x) => x.tag === "input")!);
+    assert.deepEqual(inputs.map((i) => i.getAttribute("data-pane-device")), ["any", "hackrf:aaab", "rtlsdr:1"]);
+    assert.deepEqual(inputs.map((i) => i.checked), [true, false, false], "the pane's own choice is marked");
+    // Pressing the second radio pins the pane to it — a view change, not a device call.
+    inputs[2].fire("change");
+    assert.deepEqual(picked, ["rtlsdr:1"]);
+    assert.deepEqual(rows.children.map((l) => l.children.find((x) => x.tag === "input")!.checked), [false, false, true],
+      "the picker re-states the pane's choice in the same press");
+    // …and the split offer.
+    const perBtn = section.children.find((x) => x.getAttribute("data-pane-act") === "per-device")!;
+    assert.equal(perBtn.disabled, false);
+    perBtn.fire("click");
+    assert.equal(perDevice, 1, "'one viewport per front end' must be pressable");
+    assert.deepEqual(fetched, [], "a front-end pick reached the network: choosing whose grey a pane draws is a view change");
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+    if (saved.fetch) g.fetch = saved.fetch; else delete g.fetch;
+  }
+});
+
 // ——— T-1028: retune mode's chip — the one control here whose STATE decides what a gesture does ———
 
 test("T-1028: the retune-mode chip states the mode, toggles it, and still reaches no route itself", () => {
