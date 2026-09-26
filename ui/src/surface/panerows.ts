@@ -83,7 +83,9 @@ export interface PaneRange {
   readonly tToNs: number | null;
 }
 
-const isNs = (x: unknown): x is number => typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
+// An absolute capture time in ns (~1.8e18) is past 2^53 as a double, but every double that large is an
+// integer and `String()` prints it in full, so "integer, non-negative, finite" is the honest test.
+const isNs = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 0;
 
 /**
  * The request this client builds for a pane subscription (ui/test asserts the request, not only the

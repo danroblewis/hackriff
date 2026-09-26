@@ -320,3 +320,39 @@ test("LSR-6 (review fix): a pane wider than the ring's band lands the ring's max
     "…which is exactly why folding a narrow-box answer into a pane-wide array by column index is " +
     "wrong: the same ring row lands in a different column depending on which box divided the columns");
 });
+
+// T-1044 / LSR-3: the resubscribe request carries the ring's last t1.
+import { GapResume } from "../src/surface/livering";
+import { panePath } from "../src/surface/panerows";
+
+test("LSR-3: after a dropped socket the resume range is [last t1, first new row) and builds the request", () => {
+  const ring = new LiveRing();
+  const last = fill(ring, 10);
+  const f = ring.frame()!;
+  const gap = new GapResume();
+  gap.noteClose(f);
+  const resumed = last + 50 * PERIOD; // 2 s dark
+  const r = gap.onRow(resumed, f.rowPeriodNs)!;
+  assert.equal(r.tFromNs, Math.floor(f.live!.t1Ns), "t_from is the last row's t1");
+  assert.equal(r.tToNs, resumed);
+  const path = panePath({ fLoHz: BAND.f0Hz, fHiHz: BAND.f1Hz, nf: NF < 8 ? 8 : NF }, r);
+  assert.match(path, new RegExp(`[?&]t_from=${r.tFromNs}(&|$)`));
+  assert.match(path, new RegExp(`[?&]t_to=${r.tToNs}(&|$)`));
+  // The ring itself keeps the gap a gap: the tile lane fills it, and there is no black.
+  ring.push(row(resumed));
+  ring.push(row(resumed + PERIOD));
+  assert.equal(ring.frame()!.spans.length, 2);
+  // One-shot.
+  assert.equal(gap.onRow(resumed + 2 * PERIOD, f.rowPeriodNs), null);
+});
+
+test("LSR-3: a contiguous resume (no rows missed) or an empty ring requests nothing", () => {
+  const ring = new LiveRing();
+  const last = fill(ring, 10);
+  const f = ring.frame()!;
+  const g = new GapResume();
+  g.noteClose(f);
+  assert.equal(g.onRow(last, f.rowPeriodNs), null);
+  g.noteClose(null);
+  assert.equal(g.onRow(last + 100 * PERIOD, f.rowPeriodNs), null);
+});
