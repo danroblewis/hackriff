@@ -662,6 +662,8 @@ export class Page {
       // are also excluded by their own rectangles: any column under a visible control whose box
       // meets [top, bot] is occluded, sampled row or not.
       const chrome = [...document.querySelectorAll('[data-band="chrome"] > *')]
+        // A control that is not drawn (\`visibility: hidden\`) covers nothing (T-1051).
+        .filter((c) => getComputedStyle(c).visibility !== "hidden")
         .map((c) => c.getBoundingClientRect())
         .filter((b) => b.width > 0 && b.height > 0 && b.bottom > top && b.top < bot);
       let best = { x: x0, w: 0 }, run = null, occluded = 0;

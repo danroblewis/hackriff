@@ -37,7 +37,7 @@ async function openApp() {
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the app's surface to finish addressing",
     `(document.querySelector('.sf-note')?.textContent ?? "").length > 0`, { timeoutMs: 60000 });
-  await page.waitFor("a viewport readout to exist", `document.querySelectorAll('.hk-surface-viewport').length > 0`);
+  await page.waitFor("a viewport readout to exist", `!!document.querySelector('.sf-scale')?.dataset.pane`);
   await page.frames(3);
   return page;
 }

@@ -28,7 +28,15 @@
 //!    three or more multiples of a sub-multiple `f/k` (not themselves harmonics of `f`) also
 //!    clear the guard, the answer is `none`, with the comb's spacing in the reason. The
 //!    explorer's window-3 capture at 461.125 MHz is exactly this: a 16.67 Hz comb, whose 100 Hz
-//!    and 233.3 Hz members an oracle and an agent each read as a tone.
+//!    and 233.3 Hz members an oracle and an agent each read as a tone. A member counts only
+//!    where it is a **line of its own**, clearing the guard over the ±3–12 Hz ring around it as
+//!    well as over the band median ([`Psd::is_line`], T-1069): measured against the band median
+//!    alone, a clean tone answered for two of its own members, because the 1 s Hann segment's
+//!    leakage skirt at ±`f/8` sits only ~64 dB under the peak. At 67.0 Hz — the lowest tone,
+//!    where the smallest spacing the guard tries, `f/8` ≈ 8.4 Hz, is still inside that skirt —
+//!    a station clean enough (≳ 74 dB of tone SNR, and the mock SDR's is 84 dB) therefore
+//!    started with two of the three members the guard needs, and one stray line read the tone
+//!    as its own comb.
 //! 5. **Second tone.** A second line clearing the guard, more than 8 Hz from the first (past the
 //!    analysis window's sidelobes), not its harmonic and within 30 dB of it, is reported too
 //!    (`tones[1]`): two tones present are both named.
@@ -81,6 +89,11 @@ const BAND_HZ: (f64, f64) = (55.0, 270.0);
 /// 33 Hz and 50 Hz members are evidence too).
 const COMB_LO_HZ: f64 = 20.0;
 const COMB_HI_HZ: f64 = 290.0;
+/// CFAR guard/reference cells for [`Psd::is_line`], Hz either side: the guard clears the 1 s
+/// Hann segment's main lobe (±2 Hz), the reference ring reaches far enough to be noise beside a
+/// comb whose spacing is as small as the guard looks for (`f1 / 8`, ≈ 8.4 Hz at 67.0 Hz).
+const LOCAL_LO_HZ: f64 = 3.0;
+const LOCAL_HI_HZ: f64 = 12.0;
 
 /// The 23-bit DCS code word for a 9-bit `code`, first-transmitted bit least significant:
 /// bits 0–8 the code, 9–11 the fixed `001`, 12–22 the Golay parity.
@@ -404,6 +417,32 @@ impl Psd {
         let b = (((f + half) / self.bin_hz).ceil() as usize).min(self.p.len() - 1);
         self.p[a..=b].iter().copied().fold(0.0, f64::max)
     }
+
+    /// A **local** floor for `f`: the median power of the ring `LOCAL_LO_HZ..LOCAL_HI_HZ` Hz
+    /// either side of it (CFAR reference cells, with the line's own main lobe as guard cells).
+    fn local_floor(&self, f: f64) -> f64 {
+        let cell = |lo: f64, hi: f64| {
+            let a = ((lo / self.bin_hz).ceil().max(0.0)) as usize;
+            let b = ((hi / self.bin_hz).floor() as usize).min(self.p.len().saturating_sub(1));
+            self.p.get(a..=b).unwrap_or_default()
+        };
+        let mut r: Vec<f64> = cell(f - LOCAL_HI_HZ, f - LOCAL_LO_HZ).to_vec();
+        r.extend_from_slice(cell(f + LOCAL_LO_HZ, f + LOCAL_HI_HZ));
+        if r.is_empty() {
+            return self.median;
+        }
+        r.sort_by(f64::total_cmp);
+        r[r.len() / 2].max(1e-30)
+    }
+
+    /// Whether `f` carries a **line of its own**, `min_snr_db` over both the band median and its
+    /// [local floor](Self::local_floor) — so a point on a strong line's leakage skirt, which
+    /// rises towards that line rather than standing over its own surroundings, is not one.
+    fn is_line(&self, f: f64, min_snr_db: f64) -> bool {
+        let p = self.line(f, 0.75);
+        self.snr_db(p) >= min_snr_db
+            && 10.0 * (p.max(1e-30) / self.local_floor(f)).log10() >= min_snr_db
+    }
 }
 
 /// The comb guard: `Some((spacing, further members))` when `f1` is one line of a comb.
@@ -418,7 +457,7 @@ fn comb(psd: &Psd, f1: f64, min_snr_db: f64) -> Option<(f64, usize)> {
             .take_while(|&f| f <= COMB_HI_HZ)
             .enumerate()
             .filter(|&(i, f)| (i + 1) % k != 0 && f >= COMB_LO_HZ)
-            .filter(|&(_, f)| psd.snr_db(psd.line(f, 0.75)) >= min_snr_db)
+            .filter(|&(_, f)| psd.is_line(f, min_snr_db))
             .count();
         if members >= 3 {
             return Some((f0, members));
@@ -658,6 +697,29 @@ mod tests {
     fn too_little_audio_is_measuring() {
         let x = disc(1.0, 3, 3_000.0, |t| 600.0 * (TAU * 100.0 * t).sin());
         assert_eq!(run(&x).kind, SubaudibleKind::Measuring);
+    }
+
+    /// T-1069: identification must not get WORSE as the station gets cleaner. Every standard
+    /// tone, over four decades of discriminator noise; red before the comb guard's members had
+    /// to be lines of their own (the lowest tones from ~95 dB of tone SNR, 27 of the 50 by
+    /// ~115 dB, each reported as a comb of its own leakage skirt).
+    #[test]
+    fn a_clean_tone_is_never_read_as_its_own_comb() {
+        for noise_hz in [3_000.0, 30.0, 0.3, 0.03] {
+            for (k, tone) in CTCSS_TONES_HZ.into_iter().enumerate() {
+                let x = disc(8.0, 31 + k as u64, noise_hz, |t| {
+                    600.0 * (TAU * tone * t).sin()
+                });
+                let r = run(&x);
+                assert_eq!(
+                    r.kind,
+                    SubaudibleKind::Ctcss,
+                    "{tone} Hz over {noise_hz} Hz of noise: {r:?}"
+                );
+                assert_eq!(r.tones[0].table_hz, Some(tone), "{r:?}");
+                assert_eq!(r.tones.len(), 1, "one tone present: {r:?}");
+            }
+        }
     }
 
     #[test]

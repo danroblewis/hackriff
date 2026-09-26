@@ -40,7 +40,11 @@ import { Browser } from "./harness.mjs";
 import { startBackend } from "./backend.mjs";
 
 const ART = path.join(path.dirname(fileURLToPath(import.meta.url)), "artifacts");
-const PANE_ROW = '.hk-surface-viewport[data-viewport="pane"]';
+// T-996 retired the per-viewport rows from the app: a pane states itself on its own scale block
+// (`.sf-scale`, one per pane, the frame's own report in its dataset), which is where T-1006's device
+// pill now rides; the capture controls (Retune, the width presets) are the floating cluster's, for
+// the ACTIVE pane (`.map-retune`). Same facts, read off the elements that now carry them.
+const PANE_ROW = '.sf-scale:not([hidden])';
 
 /** Two DIFFERENT recordings, because a mock's `device_id` is the recording's own and `hk serve`
  * refuses two front ends that report the same one. The second is tuned elsewhere with T-512's
@@ -53,17 +57,23 @@ const DEVICES = [
 /** Every pane row's device state, read off the element (`data-device`) rather than parsed out of a
  * sentence — the same reason `data-tier` exists: a `device_id` is exactly what prose mangles. */
 const PANES = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((r) => ({
-  id: r.querySelector('.hk-surface-id').textContent,
+  id: r.dataset.pane,
   device: r.dataset.device,
   stale: r.dataset.deviceStale,
-  pill: r.querySelector('.hk-surface-device').hidden ? null : r.querySelector('.hk-surface-device').textContent,
-  why: r.querySelector('.hk-surface-device').title,
-  action: r.querySelector('.hk-surface-action').hidden ? null : {
-    label: r.querySelector('.hk-surface-action').textContent,
-    enabled: !r.querySelector('.hk-surface-action').disabled,
-    why: r.querySelector('.hk-surface-why').textContent,
-  },
+  pill: r.querySelector('.sf-scale-device').hidden ? null : r.querySelector('.sf-scale-device').textContent,
+  why: r.querySelector('.sf-scale-device').title,
 })))`;
+/** The ACTIVE pane's capture control, off the floating cluster (T-996: one block, for the active pane). */
+const ACTION = `JSON.stringify((() => { const b = document.querySelector('.map-retune'), go = document.querySelector('.map-retune-go');
+  return !b || b.hidden || go.closest('[hidden]') ? null
+    : { label: go.textContent, enabled: !go.disabled, why: document.querySelector('.map-retune-why').textContent }; })())`;
+/** Make pane `n` (1-based) the active pane with the product's own key (T-1000), and wait for it. */
+async function activate(page, n, id) {
+  await page.key(String(n));
+  await page.waitFor(`pane ${n} to be the active pane`,
+    `document.querySelector('.sf-active-pane')?.dataset.paneId === ${JSON.stringify(id)}`, { timeoutMs: 10000 });
+  await page.frames(2);
+}
 
 /** Which `device=` values the page's OWN tile requests carried — the requests the browser really
  * made, off the resource timeline, not a client-side spy that could disagree with the network. */
@@ -112,7 +122,7 @@ test("two mock front ends: a device pill per pane, one pane per device, and each
     // The device list comes off the 2 s control-state poll, so wait for the page to have it rather
     // than asserting against whatever the first frame happened to know.
     await page.waitFor("the page to know about both front ends",
-      `document.querySelector('${PANE_ROW} .hk-surface-device')?.textContent === 'Any of 2'`, { timeoutMs: 30000 });
+      `document.querySelector('${PANE_ROW} .sf-scale-device')?.textContent === 'Any of 2'`, { timeoutMs: 30000 });
 
     // (2) THE PILL. One pane, on the union of two radios: it says so, and names neither.
     const one = JSON.parse(await page.eval(PANES));
@@ -122,8 +132,11 @@ test("two mock front ends: a device pill per pane, one pane per device, and each
     assert.equal(one[0].pill, "Any of 2", "the pill must state the union, not a made-up single radio");
     for (const id of ids) assert.ok(one[0].why.includes(id), `the union's sentence does not name ${id}: ${one[0].why}`);
     // …and the retune is refused, out loud, for exactly the reason the route would refuse it.
-    assert.equal(one[0].action.enabled, false, "a pane on the union offered a retune that the server must refuse");
-    assert.match(one[0].action.why, /pick a front end for it in the viewport menu/);
+    const oneAction = JSON.parse(await page.eval(ACTION));
+    t.diagnostic(`the one pane's capture control: ${JSON.stringify(oneAction)}`);
+    assert.ok(oneAction, "the active pane has no Retune control on the cluster");
+    assert.equal(oneAction.enabled, false, "a pane on the union offered a retune that the server must refuse");
+    assert.match(oneAction.why, /pick a front end for it in the viewport menu/);
     await page.shot(path.join(ART, "app-pane-device-1280-union.png"));
 
     // (3) ONE VIEWPORT PER FRONT END, from the viewport menu, as a user does it.
@@ -173,26 +186,24 @@ test("two mock front ends: a device pill per pane, one pane per device, and each
     // at the pane's own centre, so it is achievable whatever the pane is zoomed to; it reaches the
     // SAME `applyDeviceAction` gate through `paneWidthAction`, and it is the same question: does the
     // press name this pane's radio?
-    const widths = `[...document.querySelectorAll('${PANE_ROW}')].map((r) => [...r.querySelectorAll('.hk-surface-width')].find((b) => !b.disabled))`;
-    // The status panel is collapsed to one line by default (T-882), and with two panes the second
-    // pane's row is clipped out of it — a click at a clipped row's centre lands on whatever is over
-    // it. Expand it first, the way a user reading two panes' status does.
-    await page.click("document.querySelector('.sf-status-toggle')");
-    await page.waitFor("the status detail open", "document.querySelector('.sf-status').dataset.open === 'true'", { timeoutMs: 5000 });
-    await page.waitFor("each pane to offer an achievable capture width",
-      `${widths}.length === 2 && ${widths}.every(Boolean)`, { timeoutMs: 30000 });
-    t.diagnostic(`width presses: ${await page.eval(`JSON.stringify(${widths}.map((b) => [b.textContent, b.title]))`)}`);
+    // T-996: the width presets are the cluster's, for the ACTIVE pane — so each pane is made active
+    // with the product's own key (T-1000) and its preset pressed there, the way a user does it.
+    const width = `[...document.querySelectorAll('.map-retune .map-width')].find((b) => !b.disabled)`;
     const pressedIds = [];
+    const rowActions = [];
     for (const i of [0, 1]) {
+      await activate(page, i + 1, two[i].id);
+      await page.waitFor(`pane ${i + 1} to offer an achievable capture width`, `!!${width}`, { timeoutMs: 30000 });
+      t.diagnostic(`pane ${i + 1} width press: ${await page.eval(`JSON.stringify([${width}.textContent, ${width}.title])`)}`);
       // Pressable, then pressed: a control a user cannot reach is not a control (T-528's hit test).
-      const covered = await page.eval(`(() => { const e = ${widths}[${i}];
+      const covered = await page.eval(`(() => { const e = ${width};
         e.scrollIntoView({ block: "nearest", inline: "nearest" });
         const r = e.getBoundingClientRect();
         const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
         return top === e ? null : String(top && (top.className.baseVal ?? top.className) || top); })()`);
       assert.equal(covered, null, `pane ${i + 1}'s capture-width control is covered by ${covered}`);
       const before = auditedActions(backend.dataDir).length;
-      await page.click(`${widths}[${i}]`);
+      await page.click(width);
       // One press at a time, waited out on the SERVER's own record — two presses in flight at once
       // can reach the server in either order, and "which radio did pane 2's press move?" is not a
       // question a race may answer.
@@ -203,14 +214,15 @@ test("two mock front ends: a device pill per pane, one pane per device, and each
       assert.equal(now.length, before + 1, `pane ${i + 1}'s press reached no device route: ${JSON.stringify(now)}`);
       pressedIds.push(now.at(-1).id);
       await page.frames(2);
+      // The pane's own Retune control is on the cluster while it is active, and states what it
+      // would do, whatever the viewport is zoomed to — never absent (T-476).
+      rowActions.push(JSON.parse(await page.eval(ACTION))?.label ?? null);
     }
     t.diagnostic(`audited device actions: ${JSON.stringify(auditedActions(backend.dataDir))}`);
     assert.deepEqual(pressedIds, two.map((p) => p.device),
       "each pane's retune must name ITS OWN front end's device_id");
-    // And the pane row's own Retune control is on both panes and states what it would do, whatever
-    // the viewport is zoomed to — never absent (T-476: "nothing said is never permissive").
-    const rowActions = JSON.parse(await page.eval(
-      `JSON.stringify([...document.querySelectorAll('${PANE_ROW} .hk-surface-action:not([hidden])')].map((b) => b.textContent))`));
+    // And each pane's own Retune control was there while it was active, and states what it would
+    // do, whatever the viewport is zoomed to — never absent (T-476: "nothing said is never permissive").
     assert.deepEqual(rowActions, ["Retune", "Retune"], "a pane lost its retune control");
     await page.shot(path.join(ART, "app-pane-device-1280-retuned.png"));
 
@@ -220,7 +232,7 @@ test("two mock front ends: a device pill per pane, one pane per device, and each
     assert.equal(await narrow.goto(`${backend.origin}/#token=${backend.token}`), "load");
     await narrow.waitForSurfaceMounted({ timeoutMs: 60000 });
     await narrow.waitFor("the pill at 400 px",
-      `document.querySelector('${PANE_ROW} .hk-surface-device')?.textContent === 'Any of 2'`, { timeoutMs: 60000 });
+      `document.querySelector('${PANE_ROW} .sf-scale-device')?.textContent === 'Any of 2'`, { timeoutMs: 60000 });
     await narrow.shot(path.join(ART, "app-pane-device-400.png"));
   } finally {
     if (browser) await browser.close();

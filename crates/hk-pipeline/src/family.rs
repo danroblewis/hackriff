@@ -15,7 +15,9 @@
 //!   emitter.
 //! - **Decoders.** Built-in decoder ids and plugin manifest ids (e.g. `readsb`, `hk-rds`). A
 //!   chain stores them with [`record_decoder_evidence`] (see "Where it is wired").
-//! - **Occupancy.** Bandwidth, duty cycle and symbol rate, from a closed Track.
+//! - **Occupancy.** Bandwidth, duty cycle, symbol rate **and the analysis resolution they were
+//!   measured at**, from a closed Track. The resolution is what makes a width readable at all: see
+//!   [`CW_LINE_MAX_BINS`].
 //!
 //! Every mapping carries a confidence. Evidence that is unmapped, or below [`MIN_CONFIDENCE`],
 //! never sets a status. A name that is already a service family (`fm-broadcast`, `adsb`, `ism`,
@@ -30,8 +32,10 @@
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
 //! | `p25-tsbk`, `dmr-csbk`, `nxdn-cac` | decoder | `public-safety` | 0.97 | a CRC-valid trunked control channel; nothing else transmits one (T-546) |
+//! | `flex` | decoder | `paging` | 0.97 | FLEX frames whose sync and BCH(31,21)-checked frame information word both hold; FLEX is a paging protocol and nothing else (T-950) |
 //! | `dmr-tier2` | decoder | `public-safety` | 0.97 | DMR frame syncs plus an FEC-checked slot type: a **conventional** DMR repeater, which no control-channel hunt ever reaches (T-989) |
 //! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
+//! | continuous, OBW ≤ 4 analysis bins | occupancy | `unmodulated-carrier` | 0.7 | a carrier with nothing on it can only measure the window's own width ([`CW_LINE_MAX_BINS`]) |
 //! | `nbfm`, `nfm` | demod mode | — | — | land mobile, amateur, marine, public safety and FRS/GMRS share it |
 //! | `am` | demod mode | — | — | aviation, AM broadcast, CB and amateur share it |
 //! | `ssb`, `cw` | demod mode | — | — | amateur and HF utility share it |
@@ -254,6 +258,35 @@ pub const WIDEBAND_FM_OBW_HZ: [f64; 2] = [106e3, 400e3];
 /// Smallest duty cycle counted as continuous.
 pub const CONTINUOUS_DUTY: f64 = 0.9;
 
+/// The pseudo-service of a continuous emission that carries **no modulation**: an unmodulated
+/// carrier, which on this front end is as likely to be the receiver's own line (an LO relative, a
+/// reference or clock harmonic, a comb tooth, an image) as a transmitter (T-980).
+///
+/// It is deliberately **not** a band-plan service — [`hk_context::is_service_family`] does not know
+/// it and must not, because no allocation expects "a carrier". It is a ranked *suggestion* built
+/// from shape alone, so like every occupancy call it suggests and never sets a status.
+pub const UNMODULATED_CARRIER: &str = "unmodulated-carrier";
+
+/// Widest an unmodulated carrier can **measure**, in analysis bins, before it stops being a line
+/// (T-980, generalising [`TrackSummary::bin_hz`]'s rule and T-403's live-confirm clause).
+///
+/// A carrier with nothing on it has no bandwidth of its own: the only width it can show is the
+/// analysis window's. 99 % of a Hann-windowed tone's energy lies inside its 4-bin main lobe (the
+/// first sidelobe is 31 dB down), so an OBW99 of a pure tone cannot reach past 4 bins, and T-403
+/// measured 2–4 bins across 28 dB of level — **flat in level**, because that width is a property
+/// of the window and not of the tone. So a line cannot widen its way past this by being loud.
+///
+/// This is why the call is made **in bins and not in Hz**. The row this ticket came from read
+/// "55.2 kHz wide, unknown" — but it was measured on a coarse survey whose own bins are tens of
+/// kHz, where 55.2 kHz is a one-to-two-bin line and the 12 kHz "offset" is a fraction of a bin.
+/// Quoting 55.2 kHz as an occupied bandwidth states a measurement the resolution never made.
+pub const CW_LINE_MAX_BINS: f64 = 4.0;
+
+/// Confidence of the CW-line shape call. Shape evidence, never a demodulation: the emission is
+/// unresolved at the analysis resolution, which is a strong statement about what it is *not*
+/// (modulated) and a weak one about what it is.
+pub const CW_LINE_CONFIDENCE: f64 = 0.7;
+
 /// A service's channel raster inside a frequency range.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelRaster {
@@ -310,6 +343,9 @@ pub enum EvidenceKind {
     Modulation,
     /// A decoder id.
     Decoder,
+    /// A shape (occupancy) call this module makes itself, e.g. [`UNMODULATED_CARRIER`]. Shape
+    /// evidence ranks and suggests; it never sets a status.
+    Shape,
 }
 
 /// One row of the vocabulary.
@@ -343,7 +379,7 @@ const fn entry(
     }
 }
 
-use EvidenceKind::{Decoder, DemodMode, Modulation};
+use EvidenceKind::{Decoder, DemodMode, Modulation, Shape};
 
 const SHARED_NBFM: &str =
     "NBFM is shared by land mobile, amateur, marine, public safety and FRS/GMRS";
@@ -351,6 +387,10 @@ const SHARED_AM: &str = "AM voice is shared by aviation, AM broadcast, CB and am
 const SHARED_HF: &str = "SSB/CW are shared by amateur and HF utility services";
 const MODULATION_ONLY: &str = "a modulation names no service; a Part 15 / ISM status needs a \
      protocol decode (e.g. rtl_433) or a CRC-valid framing ground truth";
+const CW_LINE_NOTE: &str = "a continuous emission no wider than the analysis window's own main \
+     lobe carries no modulation the resolution can see: an unmodulated carrier, and on a front end \
+     with no preselector as likely the receiver's own line (LO relative, clock or reference \
+     harmonic, comb tooth, image) as a transmitter";
 const RDS_NOTE: &str = "RDS rides only on FM broadcast";
 /// Why a measured 8VSB pilot identifies television and nothing else (T-979).
 const ATSC_NOTE: &str = "a 5.381 MHz flat band with a CW pilot on its lower edge is ATSC 1.0 \
@@ -369,6 +409,13 @@ const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 /// Nothing else transmits a CRC-valid trunked control channel, so the decode names the service.
 const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
      raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
+
+/// Why a FLEX decode is paging evidence (T-950): the frame sync and the BCH-checked frame
+/// information word are the protocol's own, and FLEX carries pages and nothing else. The
+/// allocation (929–932 MHz paging, 47 CFR 22 / 24 / 90) then *agrees* or *disagrees* — it never
+/// decided the decoder.
+const FLEX_NOTE: &str = "FLEX frames decoded: sync-1 and a BCH(31,21)-checked frame information word. \
+     FLEX is a paging protocol";
 
 /// T-989: conventional DMR, which is not trunked and therefore never reaches the control-channel
 /// hunt. The evidence is the air interface itself — DMR's own frame sync words at 4800 Bd, and
@@ -415,6 +462,13 @@ pub const VOCABULARY: &[VocabEntry] = &[
     entry("ook", Modulation, None, 0.0, MODULATION_ONLY),
     entry("bpsk", Modulation, None, 0.0, MODULATION_ONLY),
     entry("qpsk", Modulation, None, 0.0, MODULATION_ONLY),
+    entry(
+        UNMODULATED_CARRIER,
+        Shape,
+        Some(UNMODULATED_CARRIER),
+        1.0,
+        CW_LINE_NOTE,
+    ),
     entry("hk-rds", Decoder, Some("fm-broadcast"), 0.99, RDS_NOTE),
     entry("rds", Decoder, Some("fm-broadcast"), 0.99, RDS_NOTE),
     entry("readsb", Decoder, Some("adsb"), 0.99, ADSB_NOTE),
@@ -453,6 +507,7 @@ pub const VOCABULARY: &[VocabEntry] = &[
         0.97,
         TRUNK_CC_NOTE,
     ),
+    entry("flex", Decoder, Some("paging"), 0.97, FLEX_NOTE),
     // T-989: the conventional-DMR identifier, which is not a control-channel decode.
     entry(
         "dmr-tier2",
@@ -515,9 +570,12 @@ const SERVICE_PASSTHROUGH: &[(&str, &str)] = &[
     // T-953: the 929-932 MHz paging allocation, and the frequency-hopping *behaviour* the
     // detector measures directly. `flex`/`pocsag` name the service because nothing else carries
     // those air interfaces; a bare `2fsk` at 929 MHz still names nothing (the rule above).
+    // `flex` is not here: since T-950 it is the FLEX decoder's own vocabulary entry (a
+    // BCH-checked frame decode, `FLEX_NOTE`), and a name is either a service or a label, never
+    // both.
     ("paging", "paging"),
-    ("flex", "paging"),
     ("pocsag", "paging"),
+    ("pager", "paging"),
     ("fhss", "fhss"),
     // T-979: UHF television and the Part 74 low power auxiliary use that shares its channels.
     ("tv-broadcast", "tv-broadcast"),
@@ -652,7 +710,7 @@ const SERVICE_SHAPES: &[ServiceShape] = &[
         "Part 15 covers a 20 kHz OOK remote, a 500 kHz LoRa chirp and a 20 MHz WLAN channel: no \
          width supports or contradicts the allocation",
     ),
-    // T-953: 929-932 MHz paging. FLEX (1600/3200/6400 bit/s, 2- or 4-level FSK at +/-4.8 kHz)
+    // T-950/T-953: 929-932 MHz paging. FLEX (1600/3200/6400 bit/s, 2- or 4-level FSK at +/-4.8 kHz)
     // and POCSAG (512-2400 bit/s 2-FSK at +/-4.5 kHz) sit in 25 kHz channels; a paging transmitter
     // keys up per batch, so it is not required to be continuous.
     shape(
@@ -755,6 +813,7 @@ pub fn service_label(service: &str) -> &'static str {
         "wireless-mic" => "Wireless microphone (Part 74)",
         UNIDENTIFIED => "Unidentified emission",
         RECEIVER_ARTEFACT => "Receiver artefact",
+        UNMODULATED_CARRIER => "unmodulated carrier (possible spur/LO)",
         _ => "Other service",
     }
 }
@@ -768,6 +827,22 @@ pub struct Occupancy {
     pub duty_cycle: Option<f64>,
     /// Symbol rate, Bd (maps nothing on its own today).
     pub symbol_rate_hz: Option<f64>,
+    /// The analysis resolution [`Self::bandwidth_hz`] was measured at, Hz
+    /// ([`TrackSummary::bin_hz`]) — the scale it has to be read against, and the only thing that
+    /// makes [`CW_LINE_MAX_BINS`] answerable. `None` is "resolution not known", which refuses the
+    /// CW-line call rather than guessing one.
+    pub bin_hz: Option<f64>,
+}
+
+impl Occupancy {
+    /// The occupied bandwidth in analysis bins, or `None` when the resolution is unusable (absent,
+    /// zero, negative or not a number) — a missing measurement refuses, never passes.
+    pub fn bandwidth_bins(&self) -> Option<f64> {
+        self.bin_hz
+            .filter(|b| b.is_finite() && *b > 0.0)
+            .filter(|_| self.bandwidth_hz.is_finite() && self.bandwidth_hz >= 0.0)
+            .map(|b| self.bandwidth_hz / b)
+    }
 }
 
 /// A measured frequency-hopping set (T-953): what the tracker linked, as evidence.
@@ -903,10 +978,29 @@ pub fn service_family(evidence: &Evidence<'_>) -> FamilyCall {
                         o.bandwidth_hz / 1e3
                     ),
                 }
+            } else if let Some(bins) = o.bandwidth_bins().filter(|_| continuous)
+                && bins <= CW_LINE_MAX_BINS
+            {
+                // Checked *after* the FM branch on purpose: a broadcast station measured on a
+                // coarse survey is a few bins wide too, and it has a width of its own.
+                FamilyCall {
+                    service: Some(UNMODULATED_CARRIER),
+                    confidence: CW_LINE_CONFIDENCE,
+                    reason: format!(
+                        "continuous emission unresolved at the analysis resolution \
+                         ({bins:.1} of {:.1} kHz bins, at most {CW_LINE_MAX_BINS:.0}): no \
+                         modulation this resolution can see",
+                        o.bin_hz.unwrap_or_default() / 1e3,
+                    ),
+                }
             } else {
                 FamilyCall::unmapped(format!(
-                    "occupancy {:.1} kHz, duty {:?}, symbol rate {:?} maps no service",
+                    "occupancy {:.1} kHz ({}), duty {:?}, symbol rate {:?} maps no service",
                     o.bandwidth_hz / 1e3,
+                    match o.bandwidth_bins() {
+                        Some(b) => format!("{b:.1} analysis bins"),
+                        None => "analysis resolution not known".to_owned(),
+                    },
                     o.duty_cycle,
                     o.symbol_rate_hz
                 ))
@@ -935,20 +1029,33 @@ pub fn hop_set_family(h: &HopSetSummary) -> FamilyCall {
     }))
 }
 
-/// The family evidence of a closed channel track: its occupancy. A mostly suspect track (spur,
-/// image, IMD, clipping) or a hop-set member maps nothing.
+/// The family evidence of a closed channel track: its occupancy. A hop-set member maps nothing,
+/// and a mostly suspect track (spur, image, IMD, clipping) maps no **service**.
+///
+/// **T-980: the suspect guard does not cover the unmodulated-carrier call, because that call is
+/// what a suspect line *is*.** The guard exists so an artefact is never offered as an emitter of
+/// some service — "this spur is an FM station" is the failure it prevents. `possible spur/LO` is
+/// the opposite claim, and the tracks that most need it are exactly the flagged ones: the row this
+/// ticket came from sat 12 kHz from the tuned centre, inside the detector's own DC rule, so every
+/// member carried a spur flag and the emitter was left saying `unknown` with a width in tens of
+/// kHz. Refusing to name a line a line leaves the reader with less, not more.
 pub fn track_family(summary: &TrackSummary) -> FamilyCall {
-    if summary.suspect_fraction > SUSPECT_FRACTION || summary.hop_set.is_some() {
-        return FamilyCall::unmapped("suspect or hop-set track");
+    if summary.hop_set.is_some() {
+        return FamilyCall::unmapped("hop-set member");
     }
     let duty = summary.track.timing.duty_cycle.or_else(|| {
         (summary.observed_s > 0.0).then(|| (summary.on_time_s / summary.observed_s).min(1.0))
     });
-    service_family(&Evidence::Occupancy(Occupancy {
+    let call = service_family(&Evidence::Occupancy(Occupancy {
         bandwidth_hz: summary.track.bandwidth_hz,
         duty_cycle: duty,
         symbol_rate_hz: None,
-    }))
+        bin_hz: Some(summary.bin_hz),
+    }));
+    if summary.suspect_fraction > SUSPECT_FRACTION && call.service != Some(UNMODULATED_CARRIER) {
+        return FamilyCall::unmapped("suspect track: no service");
+    }
+    call
 }
 
 /// The known-signal prior with the family vocabulary in front of hk-context's matcher: a stored
@@ -1260,10 +1367,13 @@ fn rank_all(
             return vec![artefact_explanation(a)];
         }
     }
+    // T-980: the emitter row carries no analysis resolution, so the CW-line call is refused
+    // here (`None` is "resolution not known"); it is made where the track's `bin_hz` is known.
     let occupancy = Occupancy {
         bandwidth_hz,
         duty_cycle,
         symbol_rate_hz: None,
+        bin_hz: None,
     };
     let new_slot = || Slot {
         miss: 1.0,
@@ -2039,6 +2149,7 @@ mod tests {
     use hk_context::{Region, is_service_family};
     use hk_demod::AnalogMode;
     use hk_demod::fsk::FSK_FAMILY;
+    use hk_detect::track::CloseCause;
     use hk_model::detection::SpurReason;
     use hk_model::{
         Detection, DetectionFlags, DetectionId, Fingerprint, FreqRange, LinkTarget, PlanRegion,
@@ -2257,6 +2368,14 @@ mod tests {
             assert_eq!(e.label, e.label.to_lowercase());
             assert!(!is_service_family(e.label), "{} shadows a service", e.label);
             match e.service {
+                // T-980: the unmodulated-carrier pseudo-service is deliberately unknown to the
+                // band plan — no allocation expects "a carrier" — so it is the one mapping target
+                // `is_service_family` must *not* accept. It still needs a label and a confidence.
+                Some(s) if s == UNMODULATED_CARRIER => {
+                    assert!(!is_service_family(s));
+                    assert_ne!(service_label(s), "Other service");
+                    assert!(e.confidence >= MIN_CONFIDENCE && e.confidence <= 1.0);
+                }
                 Some(s) => {
                     assert!(is_service_family(s), "{} → {s}", e.label);
                     assert!(e.confidence >= MIN_CONFIDENCE && e.confidence <= 1.0);
@@ -2296,6 +2415,7 @@ mod tests {
                 bandwidth_hz: bw,
                 duty_cycle: duty,
                 symbol_rate_hz: None,
+                bin_hz: None,
             }))
         };
         let fm = occ(333e3, Some(1.0));
@@ -2305,6 +2425,120 @@ mod tests {
         assert_eq!(occ(333e3, None).service, None, "duty unknown");
         assert_eq!(occ(2.0e6, Some(1.0)).service, None, "too wide");
         assert_eq!(occ(14e3, Some(1.0)).service, None, "narrow fragment");
+    }
+
+    /// T-980: a continuous emission no wider than the analysis window's own main lobe is an
+    /// unmodulated carrier, and the call is made **in bins**, never in Hz.
+    #[test]
+    fn a_continuous_line_of_a_few_bins_is_an_unmodulated_carrier() {
+        let occ = |bw: f64, duty: Option<f64>, bin: Option<f64>| {
+            service_family(&Evidence::Occupancy(Occupancy {
+                bandwidth_hz: bw,
+                duty_cycle: duty,
+                symbol_rate_hz: None,
+                bin_hz: bin,
+            }))
+        };
+        // The scene this ticket came from, at the detector's own 3906.2 Hz bins: 3 bins.
+        let cw = occ(11_718.8, Some(1.0), Some(3906.25));
+        assert_eq!(cw.confident_service(), Some(UNMODULATED_CARRIER));
+        assert!((cw.confidence - CW_LINE_CONFIDENCE).abs() < 1e-9);
+        assert!(cw.reason.contains("unresolved"), "{}", cw.reason);
+        // The field row: 55.2 kHz is a 1.4-bin line on a coarse survey, not a 55 kHz emission.
+        assert_eq!(
+            occ(55.2e3, Some(1.0), Some(39_062.5)).confident_service(),
+            Some(UNMODULATED_CARRIER),
+        );
+        // ... and the same 55.2 kHz measured finely is a real occupied bandwidth, not a line.
+        assert_eq!(occ(55.2e3, Some(1.0), Some(3906.25)).service, None);
+        assert_eq!(
+            occ(11_718.8, Some(0.2), Some(3906.25)).service,
+            None,
+            "bursty"
+        );
+        assert_eq!(
+            occ(11_718.8, Some(1.0), None).service,
+            None,
+            "no resolution"
+        );
+        assert_eq!(
+            occ(11_718.8, Some(1.0), Some(0.0)).service,
+            None,
+            "bad resolution"
+        );
+        // A broadcast station on a coarse survey is a few bins wide too, and FM wins.
+        assert_eq!(
+            occ(150e3, Some(1.0), Some(39_062.5)).confident_service(),
+            Some("fm-broadcast"),
+        );
+    }
+
+    /// T-980: a spur-flagged line is still named a line. The suspect guard stops an artefact
+    /// being offered as a *service*; it must not stop it being called what it is.
+    #[test]
+    fn a_suspect_line_is_still_an_unmodulated_carrier_but_never_a_service() {
+        let summary = |bandwidth_hz: f64, suspect_fraction: f64| TrackSummary {
+            track: Track {
+                id: TrackId::new(),
+                state: TrackState::Closed,
+                split_from: None,
+                time: TimeRange::new(t(0), t(120)),
+                f_center_hz: 314.988e6,
+                bandwidth_hz,
+                detection_count: 40,
+                timing: TimingFeatures::default(),
+                updated_at: t(120),
+            },
+            burst_count: 40,
+            on_time_s: 120.0,
+            observed_s: 120.0,
+            period: None,
+            burst_length: None,
+            inter_arrival_cv: None,
+            segments: 0,
+            hop_set: None,
+            inband_fragment: false,
+            suspect_fraction,
+            confirmed_detections: 40,
+            bin_hz: 3906.25,
+            artifact_detections: 0,
+            artifact_reason: None,
+            next_burst_eta: None,
+            closed: Some(CloseCause::Idle),
+        };
+        // Clean, and DC/spur-flagged, both read as the line they are.
+        let clean = track_family(&summary(11_718.8, 0.0));
+        assert_eq!(clean.confident_service(), Some(UNMODULATED_CARRIER));
+        let suspect = track_family(&summary(11_718.8, 1.0));
+        assert_eq!(suspect.confident_service(), Some(UNMODULATED_CARRIER));
+        // A suspect track wide enough to be a service is still refused one.
+        assert_eq!(track_family(&summary(333e3, 1.0)).service, None);
+        assert_eq!(
+            track_family(&summary(333e3, 0.0)).confident_service(),
+            Some("fm-broadcast"),
+        );
+    }
+
+    /// T-980: the carrier is *ranked and explained*, and shape alone still never sets a status.
+    #[test]
+    fn an_unmodulated_carrier_ranks_first_and_sets_no_status() {
+        let ranked = rank_explanations(
+            &table(),
+            &[ev(
+                UNMODULATED_CARRIER,
+                CW_LINE_CONFIDENCE,
+                FAMILY_MAP_VERSION,
+            )],
+            314.988e6,
+            11_718.8,
+        );
+        let top = &ranked[0];
+        assert_eq!(top.service, UNMODULATED_CARRIER);
+        assert_eq!(top.label, "unmodulated carrier (possible spur/LO)");
+        assert!((top.evidence_confidence - CW_LINE_CONFIDENCE).abs() < 1e-9);
+        assert_eq!(top.status_evidence_confidence, 0.0, "shape sets no status");
+        assert!(top.has_flag("shape-only"), "{:?}", top.flags);
+        assert_eq!(status_from(&ranked).0, KnownStatus::Unknown);
     }
 
     /// T-953: a ~25 kHz FSK burst at 929.6 MHz gets the paging allocation as a ranked

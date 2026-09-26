@@ -42,7 +42,9 @@
 //!    long (random NRZ ≈ 50 %; a trial at `k×` the true clock ≈ 0), the receiver's own harmonic
 //!    threshold. Without it a 1600 Bd population that locks every burst on the 4800 Bd table
 //!    entry agrees perfectly on the wrong rate;
-//! 2. the contributing rates are clustered at [`CONSENSUS_TOLERANCE`] relative spacing;
+//! 2. the contributing rates are clustered at [`CONSENSUS_TOLERANCE`] relative spacing, and a
+//!    cluster whose members lie further than that from its median is refused outright (a chain of
+//!    sub-tolerance steps is not one clock, T-1011);
 //! 3. the largest cluster measures the emitter's symbol rate when it holds at least
 //!    [`MIN_CONSENSUS_BURSTS`] bursts **and** at least [`CONSENSUS_FRACTION`] of the contributors.
 //!
@@ -212,6 +214,14 @@ pub fn consensus_of(samples: &[ClockSample]) -> Option<(RateConsensus, Vec<bool>
         .iter()
         .map(|&i| (samples[i].rate_bd / rate_bd - 1.0).abs())
         .fold(0.0_f64, f64::max);
+    // The split above compares each rate with its sorted predecessor, so rates each < 2 % apart
+    // chain into one cluster whose spread is far wider than one clock's jitter (T-1011:
+    // 4700…5100 Bd in 80 Bd steps is one "cluster" at ±4 %, and with enough bursts a chain could
+    // bridge the 15.2 % between two standard rates). A cluster that is not one clock measures
+    // nothing: refuse it rather than store its median as a rate.
+    if spread > CONSENSUS_TOLERANCE {
+        return None;
+    }
     let mut members = vec![false; samples.len()];
     for &i in &best {
         members[i] = true;
@@ -336,6 +346,25 @@ mod tests {
         rates.extend([2400.0, 4800.0]);
         let c = consensus(&rates).expect("12 of 14 agree");
         assert_eq!((c.bursts, c.contributors), (12, 14));
+    }
+
+    #[test]
+    fn a_chain_of_small_steps_is_not_one_clock() {
+        // T-1011: each step is 1.7 %, under the tolerance, so a predecessor-only split keeps all
+        // six in one cluster whose spread is ±4 %. That is not one clock's jitter; refuse it.
+        let rates = [4700.0, 4780.0, 4860.0, 4940.0, 5020.0, 5100.0];
+        assert!(
+            consensus(&rates).is_none(),
+            "a chained cluster must not be stored as a measured rate: {:?}",
+            consensus(&rates)
+        );
+        // A chain long enough to walk from one standard rate to the next (4800 → 9600 Bd in
+        // 1.9 % steps) must not merge the two either.
+        let mut chain = vec![4800.0];
+        while *chain.last().unwrap() < 9600.0 {
+            chain.push(chain.last().unwrap() * 1.019);
+        }
+        assert!(consensus(&chain).is_none(), "{} rates chained", chain.len());
     }
 
     #[test]

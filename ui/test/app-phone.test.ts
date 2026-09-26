@@ -46,7 +46,10 @@ test("fade reaches the Active-outputs strip — and the pills, by being in the c
   assert.ok(sels.some((s) => s.includes("> .out-strip")), "> .out-strip does not fade");
   assert.match(src("src/app/chrome/map-controls.ts"), /class: "map-glass map-inv map-fade"/,
     "the inventory pills must fade with the rest of the cluster");
-  const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side"];
+  // T-996: the surface's statements are the one status line, each pane's scale block and the two
+  // conditional notes; `.map-retune` is a device command with a stated destination. None may fade.
+  const NEVER = [".sheet", ".research", ".map-offer", ".map-retune", ".map-mode", ".map-layers", ".map-pane-menu",
+    ".sf-status", ".sf-scale", ".sf-fog", ".sf-readout", ".side"];
   for (const s of sels) for (const n of NEVER) assert.ok(!s.includes(n), `${s} fades ${n}, which §10.2 says never fades`);
   assert.ok(sels.every((s) => /:not\(:focus-(within|visible)\)/.test(s)), "a focused control must never fade");
   assert.ok(!sels.some((s) => s.includes("> .bar")), "T-993: the retired top bar has no rule over the map");

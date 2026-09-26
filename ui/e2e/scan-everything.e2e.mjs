@@ -9,9 +9,11 @@
 // end; this brings up its own `hk serve --device mock:…`, the way canvas-journey.e2e.mjs does.
 //
 // WHAT EACH ASSERTION IS A PROPERTY OF:
-//   1. REACHABLE  — the DOM the review drawer's Device tab actually renders, found by the same
-//                   click path a user takes (#review-btn -> the "Device" tab), never by source
-//                   inspection (that already exists in scan-control.test.ts's "mounted" tests).
+//   1. REACHABLE  — the DOM the device panel actually renders, found by the same click path a user
+//                   takes, never by source inspection (that already exists in scan-control.test.ts's
+//                   "mounted" tests). T-1007 moved that path: the device controls are SETTINGS now,
+//                   so it is the map's ⋯ menu -> "Device & display…", not Review -> "Device". Review
+//                   keeps only anomalies/alarms, and this spec asks for the panel where it now lives.
 //   2. FILLS LIVE — the server's OWN `/api/coverage` answer over the full 1 MHz-6 GHz range, and
 //                   the sweep's own `/api/control/scan` progress counter, before and after the
 //                   sweep has been running a while — never inferred from a single screenshot. The
@@ -99,10 +101,9 @@ async function open() {
 test("the Survey-sweep panel, and the one-click 'scan everything' beside it, are reachable from the app a new user opens", async () => {
   const { page } = await opened();
 
-  await page.click(`document.querySelector('#review-btn')`);
-  await page.waitFor("the review drawer's tab bar to render", `document.querySelectorAll('.rv-tab').length > 0`,
-    { timeoutMs: 10000 });
-  await page.click(`[...document.querySelectorAll('.rv-tab')].find(b => b.textContent.trim() === 'Device')`);
+  await page.click(`document.querySelector('.map-more-btn')`);
+  await page.waitFor("the settings menu to open", `!document.querySelector('#map-more-menu').hidden`, { timeoutMs: 10000 });
+  await page.click(`document.querySelector('#map-more-menu [data-panel="device"]')`);
   await page.waitFor("the Survey-sweep fieldset to mount",
     `[...document.querySelectorAll('.rv-fieldset legend')].some(l => l.textContent.trim() === 'Survey sweep')`,
     { timeoutMs: 10000 });

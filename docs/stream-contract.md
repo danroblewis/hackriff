@@ -506,9 +506,13 @@ prints a warning when it binds non-loopback.
 
 **Caps.** In addition to the per-stream `max_consumers` (§2) and per-consumer queue (§7), the HTTP
 server bounds request size and concurrency: request heads are capped at 16 KiB and must complete
-within `request_timeout` (default 10 s), and at most `ServerConfig::max_connections` (default 64)
-connection threads run at once, WebSocket consumers included — a further TCP connection is simply
-not accepted until one frees up. `/api/history` and `/api/floor` (below) additionally cap query
+within `request_timeout` (default 10 s), and connection threads run in **two capped pools**
+(T-1063): at most `ServerConfig::max_connections` (default 256) HTTP ones and
+`max_ws_connections` (default 128) WebSocket ones, a connection moving from the first pool to the
+second as soon as its handler sees a `/ws/…` `GET`, so long-lived stream sockets cannot exhaust the
+HTTP slots. Past a cap the connection is **answered** `503` with `Retry-After: 1` and
+`{"code": "overloaded"}` — a client should retry — and counted on `GET /api/health`; before
+T-1063 it was dropped unanswered, which behind a tunnel reads only as EOF. `/api/history` and `/api/floor` (below) additionally cap query
 result size.
 
 **Consumers never write.** As in §2: any byte a browser sends (a close frame included) or a hang-up
@@ -1150,6 +1154,99 @@ schema — so it changes nothing an existing reader reads, and the document stay
 - **Lifetime.** The stream ends after `done`. Opening it for a finished job yields exactly one `done`.
   An unknown id is refused `404 not_found`; a forgotten one `410 gone` (ADR-0021 §4.2: *we forgot* is
   not *it never ran*).
+
+## 17. The pane row block: `GET /ws/spectrum/rows` (T-1043, LSR-2)
+
+**Not a `hackriff.stream` stream.** It has no stream id, it is never offered on `/api/streams`, it
+does not go through the publisher, the gate or §5's 32-byte record, and it carries no content class
+of its own — it is a **read of the spectrum-history store over one pane**, pushed as it is recorded
+(`docs/api.md` ["GET /ws/spectrum/rows"](api.md), `crates/hk-api/src/spectrum_rows.rs`). It is
+documented here because it is a binary wire, and a binary wire that is not written down is a wire
+nobody can read twice. The document's version is unchanged: nothing an existing reader reads moved.
+
+One WebSocket connection carries:
+
+1. **one text message**, the `subscribed` header — the pane, the range, the record layout, the
+   coverage alphabet and the current epoch, stated back (`docs/api.md` has the fields);
+2. **one binary message per block**, below;
+3. **one text `end`** message, and only when a closed range completes (an open range never ends).
+
+A refusal completes the upgrade, sends `{"type":"refused","status","reason"}` and closes
+`4000 + status` — the `/ws/open/{name}` convention, because a browser cannot read an HTTP error body
+on a failed upgrade.
+
+### 17.1 Block header (48 bytes, little-endian)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `kind`: 1 = **rows** (measurements follow), 2 = **unobserved** (a stretch the coverage map calls uniformly unobserved: no payload, no trailer) |
+| 1 | u8 | `flags`: bit 0 `FINAL` (the watermark has passed this block's end, so no late frame can still land in it), bit 1 `DISCONTINUITY` (§17.3) |
+| 2 | u8 | `values`: 1 = little-endian IEEE **binary16**; `0` when there is no payload |
+| 3 | u8 | `level`: the store level that answered; `255` = none (an `unobserved` block) |
+| 4 | u8 | `tier`: the honesty tier of **this block** — 0 `live-iq`, 1 `spectrum-history`, 2 `survey-overview`; `255` = none |
+| 5 | u8 | `fold`: bits 0–1 the **frequency** axis, bits 2–3 the **time** axis — 0 `exact`, 1 `folded`, 2 `replicated` (the same three words `/api/tiles` states in `resolution.fold`) |
+| 6 | u16 | `nf`: the pane's columns; `0` when there is no payload |
+| 8 | u32 | `rows` in this block — always the rows the cursor advanced, never a clamp: a rows block is at most 64 and an `unobserved` one at most 2³⁰ (`hk_api::spectrum_rows::MAX_GAP_ROWS`), both inside the field, so `row0 + rows` is exactly the next row to expect |
+| 12 | u32 | `epoch`: the tuning configurations over the pane's window (§17.4) |
+| 16 | i64 | `t0_ns`: the start of `row0`, Unix ns — **exact**, a fixed-width `i64`, never a JSON number |
+| 24 | i64 | `t_cell_ns`: the row period |
+| 32 | i64 | `row0`: the row's address on the time axis from the Unix epoch (`t0_ns / t_cell_ns`) |
+| 40 | u32 | `trailer_bytes`: the coverage trailer's length, after the payload |
+| 44 | u32 | `observed_cells`: cells of this block that are a measurement |
+
+The payload is `rows × nf` binary16 values, **row-major, earliest row first, low frequency first** —
+the same order and the same quantisation `/api/tiles?planes=f16` serves (T-533), for the same reason:
+the destination is an R16F texture, so these are the bits that survive. **NaN is *not measured***,
+exactly as `null` is in the JSON spelling: never a zero, never a floor. A message's length is
+therefore exactly `48 + rows × nf × 2 + trailer_bytes` for a rows block and `48` for an unobserved
+one, and a reader that finds otherwise must refuse the block rather than guess at it.
+
+### 17.2 Coverage trailer (`run8`)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | encoding: 1 = `run8` |
+| 1 | u8 | states: **4**, never 2 |
+| 2 | u8 | bit 0 `present` (the selected device has a record over this block at all), bit 1 `aligned` (the plane is laid cell-for-cell on this block's own axes) |
+| 3 | u8 | reserved, 0 |
+| 4 | u32 | `runs` |
+| 8 + 8k | u32 | run `k`: cells |
+| 12 + 8k | u8 | run `k`: state — 0 `unobserved`, 1 `observed`, 2 `unknown`, 3 `excluded` |
+| 13 + 8k | u8[3] | reserved, 0 |
+
+The runs cover the block's cells in the payload's own order and sum to `rows × nf`. The alphabet is
+the four states of `/api/tiles`' coverage plane, in the same order and with the same rule: **grey a
+cell if and only if its state is `unobserved`** — `excluded` is sampled spectrum the analysis skipped
+(T-595) and its level is still drawn, and `unknown` is *we no longer know whether we looked* (T-423).
+No state carries a measurement of any kind, so there is nothing on this wire a client can read as a
+level of zero.
+
+### 17.3 `DISCONTINUITY`: the parts the store did not have
+
+**The flag marks every part of the range the row stream did not carry as a measurement**, which is
+exactly the part a client fills from [`GET /api/tiles`](api.md) — the authority for a row this stream
+has no value for. A block carries it when either:
+
+- the rows **before** it were not delivered as measurements on this subscription — the first block of
+  a range, or the far side of a gap; or
+- the block **itself** holds rows the store had no frame for: an `unobserved` stretch (always), or a
+  tuned band with nothing recorded over some of its rows (those rows' cells are all NaN).
+
+It is deliberately **not** "the row addresses skipped": the cursor always walks forward contiguously,
+so a flag computed that way could only ever fire on a subscription's first block. A client must not
+stitch across a marked part, and on a reconnect (`t_from` = the last row in hand) it is how the server
+tells it which rows of the gap it will never get values for.
+
+### 17.4 The epoch
+
+A `u32` that **increments when the set of tuning configurations over this pane's frequency window
+changes** — a retune under the pane. It does *not* change when a dwell goes on covering the same band
+(the observation log files that as record after record with one configuration), which is why it is a
+fold of the *configurations* and not of the spans. A client re-lays its coverage fog and re-reads
+what is under the pane when the epoch it sees changes; it is a **change** signal, never a value to
+interpret, and it wraps. It counts *changes seen by this subscription*, not retunes: a block that
+straddles a retune sees both configurations at once and the next sees only the new one, so one retune
+can advance it twice. Read it as "different from the last one", never as a retune count.
 
 ## Sources
 
