@@ -29052,7 +29052,7 @@ tasks:
   - id: T-987
     milestone: MAUTO
     title: Listen opens squelched on a bursty channel and waits for the carrier (today refused 422 unless keyed at that instant - blocks all LMR/GMRS/airband voice)
-    status: in-progress
+    status: done
     branch: task-t987
     priority: P1
     deps: []
@@ -29074,6 +29074,7 @@ tasks:
       Observed, not chased: T-988's subaudible Demodulation rows (mode nbfm) now count as history evidence, one per written session. That is intended, but a session that is re-listened to adds one observation per listen, not per burst.
       Use cases: SIGNAL-062
       Resources: 230 CPU-s, peak 3.7 GB
+    commit: 234d3785
   - id: T-988
     milestone: MAUTO
     title: Blind CTCSS/DCS tone identification on NBFM (row field + Listen header)
