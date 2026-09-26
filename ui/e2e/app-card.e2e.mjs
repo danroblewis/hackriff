@@ -30,9 +30,12 @@ import { settled } from "./app-chrome.mjs";
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const SHOTS = process.env.HK_E2E_SHOTS;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
-// The minimap strip along the canvas's bottom edge (`MINIMAP_PX` in `app/centre/surface.ts`): a click
-// there is a click on the minimap, not on bare map.
-const MINIMAP_PX = 110;
+// The panes' bottom edge: the canvas's own bottom inset (`canvas.dataset.insetBottom`, the lift
+// `surface.ts` states). A press below it is not on the map. T-995 retired the minimap strip that used
+// to sit above that inset (`MINIMAP_PX`, 110 device px) — the panes now run down to the inset, so the
+// map's bottom is the inset itself, read off the page rather than restated (integration of T-995).
+const PANE_BOTTOM = `(document.querySelector('.sf-canvas').getBoundingClientRect().bottom
+  - (Number(document.querySelector('.sf-canvas').dataset.insetBottom ?? 0) || 0))`;
 
 /** Everything about the card, in one read. */
 const CARD = `JSON.stringify((() => {
@@ -68,7 +71,7 @@ const BOX_AT = `(() => {
   let best = null;
   for (const p of document.querySelectorAll('.sf-pins .sf-pin.detection')) {
     const r = p.getBoundingClientRect();
-    const inside = r.x > c.x + 2 && r.right < c.right - 2 && r.y > c.y + 2 && r.bottom < c.bottom - ${MINIMAP_PX} / (window.devicePixelRatio || 1);
+    const inside = r.x > c.x + 2 && r.right < c.right - 2 && r.y > c.y + 2 && r.bottom <= ${PANE_BOTTOM} + 0.5;
     if (!inside) continue;
     const q = { id: p.dataset.pin, label: p.getAttribute('aria-label'), area: p.classList.contains('area'),
       x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
@@ -90,14 +93,14 @@ function pressPoint(box) {
 }
 
 /** A point on the canvas that is BARE MAP: no pin/box hit area, no floating chrome, no card, not the
- * minimap strip — and the browser's own hit test agrees the canvas is what is there. */
+ * inset below the panes — and the browser's own hit test agrees the canvas is what is there. */
 const BARE_AT = `(() => {
   const c = document.querySelector('.sf-canvas').getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const boxes = [...document.querySelectorAll('.sf-pins .sf-pin, .map-ctl > *, .sheet, .sf-readout, .sf-chrome, .sf-note, .sf-status-line, .sf-scale, .sf-maptip, .research:not([hidden])')]
     .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
   const free = (x, y) => !boxes.some((r) => x >= r.x - 8 && x <= r.right + 8 && y >= r.y - 8 && y <= r.bottom + 8);
-  const y1 = c.bottom - ${MINIMAP_PX} / dpr - 8;
+  const y1 = ${PANE_BOTTOM} - 8;
   for (let fy = 0.75; fy > 0.1; fy -= 0.05) {
     for (let fx = 0.5; fx < 0.98; fx += 0.04) {
       const x = c.x + c.width * fx, y = c.y + (y1 - c.y) * fy;
@@ -220,8 +223,7 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
       // one gesture that never changes meaning (shift+drag, docs/23 §10.4). It is a feature with its
       // own box, so it is the same swap.
       const r = await page.$rect(".sf-canvas");
-      const dpr = await page.eval("window.devicePixelRatio || 1");
-      const bottom = r.y + r.h - MINIMAP_PX / dpr - 40;
+      const bottom = (await page.eval(PANE_BOTTOM)) - 40;
       // The drag starts on the MAP: at phone width T-996's left column (Retune + widths, the offer)
       // spans the whole width a quarter of the way down, so the start moves below it — the first
       // point the canvas is what a press lands on.
