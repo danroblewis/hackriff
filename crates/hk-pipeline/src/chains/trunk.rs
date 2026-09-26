@@ -599,6 +599,10 @@ pub(crate) fn run(
     // T-977 review: the pass on which a detected-emitter reservation last looked at each channel,
     // so the slots occupancy leaves go round the unanswered emitters instead of to the same ones.
     let mut looked: HashMap<i64, u64> = HashMap::new();
+    // T-977 review: `filed` and `looked` are keyed by ABSOLUTE channel, counted on the raster from
+    // the first pass's fitted origin — the chain outlives an in-band retune, and a key relative to
+    // the tuned centre would hand one channel's verdict to whatever sits at the same offset after it.
+    let mut anchor_hz: Option<f64> = None;
     let (mut detach, mut closed) = (false, false);
     loop {
         match rx.try_recv() {
@@ -656,6 +660,7 @@ pub(crate) fn run(
                     &mut known,
                     &mut filed,
                     &mut looked,
+                    &mut anchor_hz,
                 );
                 passes += 1;
                 inc(&c.cc_passes);
@@ -689,6 +694,7 @@ fn hunt(
     known: &mut HashMap<i64, KnownCc>,
     filed: &mut HashMap<i64, CcOutcome>,
     looked: &mut HashMap<i64, u64>,
+    anchor_hz: &mut Option<f64>,
 ) {
     let Pass {
         buf,
@@ -757,6 +763,7 @@ fn hunt(
     let Some(fco) = occupancy(buf, fs, raster, grid_offset, &ks) else {
         return;
     };
+    let keys = channel_keys(*anchor_hz.get_or_insert(origin_hz), origin_hz, raster, &ks);
     add(&c.cc_channels, ks.len() as u64);
 
     // ---- Candidacy. A pure-FCO detector would stop here and be wrong.
@@ -783,6 +790,7 @@ fn hunt(
     let emitters = unanswered_emitters(
         emitter_channels(shared, &ks, &fco, origin_hz, raster, &cands),
         &ks,
+        &keys,
         filed,
         looked,
     );
@@ -794,7 +802,7 @@ fn hunt(
     add(&c.cc_admission_refused, refused.len() as u64);
     add(&c.cc_emitter_candidates, reserved.len() as u64);
     for &(i, _) in &reserved {
-        looked.insert(ks[i], pass_index);
+        looked.insert(keys[i], pass_index);
     }
     let work: Vec<(usize, f64, CcCandidacy)> = cands
         .iter()
@@ -874,9 +882,10 @@ fn hunt(
     let t_end = t_start.saturating_add_nanos((buf.len() as f64 * 1e9 / fs) as i64);
     for (i, fco_i, candidacy) in work {
         let k = ks[i];
-        // The raster index, kept under a name the confirmed branch's `known.entry(key)` binding
-        // does not shadow.
-        let channel_k = k;
+        // The ABSOLUTE channel `filed` is keyed by ([`channel_keys`]) — never the raster index `k`,
+        // which is relative to this pass's tuned centre and names a different channel after a
+        // retune the chain survives.
+        let channel_k = keys[i];
         let offset = k as f64 * raster + grid_offset;
         let center_hz = origin_hz + k as f64 * raster;
         // Every channel this loop reaches produces a verdict, whatever happens to it. `push` is
@@ -1514,18 +1523,38 @@ fn admit(
 /// ended without a filing (`not-demodulated`) cannot hold a slot against the others forever. With
 /// `s` leftover slots per pass, every one of `n` unanswered emitters is looked at within
 /// `ceil(n / s)` passes.
+///
+/// `ks` are this pass's raster indices (relative to the tuned centre, used only for the
+/// nearest-centre tie-break); `keys` the same channels' absolute keys ([`channel_keys`]), which is
+/// what `filed` and `looked` are keyed by.
 fn unanswered_emitters(
     emitters: Vec<(usize, f64)>,
     ks: &[i64],
+    keys: &[i64],
     filed: &HashMap<i64, CcOutcome>,
     looked: &HashMap<i64, u64>,
 ) -> Vec<(usize, f64)> {
     let mut out: Vec<(usize, f64)> = emitters
         .into_iter()
-        .filter(|&(i, _)| !filed.contains_key(&ks[i]))
+        .filter(|&(i, _)| !filed.contains_key(&keys[i]))
         .collect();
-    out.sort_by_key(|&(i, _)| (looked.get(&ks[i]).copied(), ks[i].abs(), ks[i]));
+    out.sort_by_key(|&(i, _)| (looked.get(&keys[i]).copied(), ks[i].abs(), ks[i]));
     out
+}
+
+/// The ABSOLUTE channel key of each raster index `ks` (T-977 review): the channel's count on the
+/// raster from `anchor_hz`, the first pass's fitted origin.
+///
+/// The raster index `k` is relative to `origin_hz = tune_center + grid_offset`, so it names a
+/// different channel after an in-band retune — which the chain survives. Anything that must
+/// remember a channel across passes (`filed`, `looked`, the confirmed stand-over) uses this key.
+/// Counting from a fitted anchor rather than rounding the frequency in hertz keeps the key stable
+/// against the grid fit moving by a few hundred hertz from pass to pass, and against a grid whose
+/// channel centres sit at a half-raster phase (where `f / raster` would round either way).
+fn channel_keys(anchor_hz: f64, origin_hz: f64, raster: f64, ks: &[i64]) -> Vec<i64> {
+    ks.iter()
+        .map(|&k| ((origin_hz + k as f64 * raster - anchor_hz) / raster).round() as i64)
+        .collect()
 }
 
 /// Raster channels of the swept set that **blind detection already has an emitter on**, minus the
@@ -3071,8 +3100,12 @@ mod tests {
     /// `emitters` the detected-emitter channels [`emitter_channels`] would return. Every reserved
     /// channel is marked looked-at, and filed unless it is in `never_files` (a look that ends
     /// `not-demodulated` files nothing).
+    // One simulated pass takes exactly the state `hunt` threads through it; bundling it into a
+    // struct only for the test would hide which map each assertion reads.
+    #[allow(clippy::too_many_arguments)]
     fn admission_pass(
         ks: &[i64],
+        keys: &[i64],
         cands: &[(usize, f64)],
         emitters: &[(usize, f64)],
         filed: &mut HashMap<i64, CcOutcome>,
@@ -3082,13 +3115,13 @@ mod tests {
     ) -> Admission {
         let adm = admit(
             cands.to_vec(),
-            unanswered_emitters(emitters.to_vec(), ks, filed, looked),
+            unanswered_emitters(emitters.to_vec(), ks, keys, filed, looked),
             8,
         );
         for &(i, _) in &adm.reserved {
-            looked.insert(ks[i], pass);
-            if !never_files.contains(&ks[i]) {
-                filed.insert(ks[i], CcOutcome::SyncWithoutCheck);
+            looked.insert(keys[i], pass);
+            if !never_files.contains(&keys[i]) {
+                filed.insert(keys[i], CcOutcome::SyncWithoutCheck);
             }
         }
         adm
@@ -3143,6 +3176,7 @@ mod tests {
             for pass in 1..=4u64 {
                 let adm = admission_pass(
                     &ks,
+                    &ks,
                     &cands,
                     &emitters,
                     &mut filed,
@@ -3182,7 +3216,16 @@ mod tests {
         let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
         for pass in 1..=10u64 {
             let before = filed.clone();
-            let adm = admission_pass(&ks, &cands, &emitters, &mut filed, &mut looked, &[], pass);
+            let adm = admission_pass(
+                &ks,
+                &ks,
+                &cands,
+                &emitters,
+                &mut filed,
+                &mut looked,
+                &[],
+                pass,
+            );
             for &(i, _) in &adm.reserved {
                 assert!(
                     !before.contains_key(&ks[i]),
@@ -3200,6 +3243,85 @@ mod tests {
         // And with no occupancy candidates at all, the emitters get the whole budget.
         let adm = admit(Vec::new(), emitters.clone(), 8);
         assert_eq!(adm.reserved.len(), emitters.len());
+    }
+
+    /// **T-977 review (fourth): a verdict belongs to a channel, not to an offset from the tuned
+    /// centre.** `filed` and `looked` live for the whole chain, and an in-band retune keeps the
+    /// chain; keyed by the raster index `k` (relative to `tune_center + grid_offset`), a NoSync
+    /// filed at 855.0375 MHz (k = +3 at 855 MHz) silenced the emitter at 857.0375 MHz after a
+    /// retune to 857 — also k = +3 — for the chain's life, and the confirmed stand-over applied to
+    /// whatever sat at that k.
+    ///
+    /// Pinned, through [`channel_keys`] as `hunt` computes it (anchor = the first pass's origin):
+    /// (1) after a retune the emitter at the same `k` is still reserved; (2) the channel filed
+    /// before the retune stays filed at its absolute frequency when a later tune puts it at a
+    /// different `k`, and the new channel at the old `k` is reserved — with the second tune's grid
+    /// fit landing 150 Hz off the first, as a real fit does.
+    ///
+    /// Red on 3dd426b9 (keys = the raster index): pass B reserves nothing, and pass C skips 855.05.
+    #[test]
+    fn a_verdict_stays_with_its_channel_across_a_retune() {
+        let raster = 12_500.0;
+        let ks: Vec<i64> = (-10..=10).collect();
+        let at = |k: i64| ks.iter().position(|&x| x == k).unwrap();
+        let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
+        let anchor = 855.0e6;
+        // Pass A at 855 MHz: the emitter at k = +3 (855.0375 MHz) is answered.
+        let keys_a = channel_keys(anchor, 855.0e6, raster, &ks);
+        let a = admission_pass(
+            &ks,
+            &keys_a,
+            &[],
+            &[(at(3), 0.2)],
+            &mut filed,
+            &mut looked,
+            &[],
+            1,
+        );
+        assert_eq!(a.reserved, vec![(at(3), 0.2)]);
+        // Pass B, retuned to 857 MHz (the chain survives): an emitter at k = +3 is 857.0375 MHz,
+        // a channel nothing was ever filed on.
+        let keys_b = channel_keys(anchor, 857.0e6, raster, &ks);
+        let b = admission_pass(
+            &ks,
+            &keys_b,
+            &[],
+            &[(at(3), 0.2)],
+            &mut filed,
+            &mut looked,
+            &[],
+            2,
+        );
+        assert_eq!(
+            b.reserved,
+            vec![(at(3), 0.2)],
+            "857.0375 MHz was refused a look because 855.0375 MHz was filed at the same offset",
+        );
+        // Pass C, back near 855 with the grid fit 150 Hz off: 855.0375 MHz is now k = +2 and
+        // stays filed; 855.05 MHz sits at the old k = +3 and is owed its own verdict.
+        let origin_c = 855.0125e6 + 150.0;
+        let keys_c = channel_keys(anchor, origin_c, raster, &ks);
+        let c = admission_pass(
+            &ks,
+            &keys_c,
+            &[],
+            &[(at(2), 0.2), (at(3), 0.2)],
+            &mut filed,
+            &mut looked,
+            &[],
+            3,
+        );
+        assert_eq!(
+            c.reserved,
+            vec![(at(3), 0.2)],
+            "855.0375 MHz (now k = +2) was re-reserved or 855.05 MHz (k = +3) was skipped",
+        );
+        assert_eq!(
+            keys_c[at(2)],
+            keys_a[at(3)],
+            "one channel, one key, across the retune"
+        );
+        assert_eq!(filed.len(), 3, "three channels, three verdicts");
     }
 
     /// Occupancy separates a continuous channel from a bursty one and from empty ones — which is
