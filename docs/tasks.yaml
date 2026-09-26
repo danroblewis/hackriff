@@ -31023,6 +31023,14 @@ tasks:
       FOUND BY user 2026-09-26 via supervisor (request-volume review): P1: Explore drawer rescopes on every intermediate view (~100 requests per trackpad zoom) - material-change rescope + settle; /api/observations and whole-range coverage on the 30 s timer only
 
       Review found a real race (attempt 1): lastRegionId was only set after refresh()'s answers landed, so a quick region select-then-deselect before the first request landed read the new region against a stale lastRegionId, treated it as a no-op view change, asked nothing, and let the superseded region answer land unopposed (its seq was still current) — drawing the wrong scope. Fixed by setting lastRegionId eagerly in the rescope handler at the moment a region change is detected, before refresh() is invoked. Added a Latch-based regression test reproducing the exact race; confirmed red without the fix, green with it. just test-ui: 109/109 test files passed.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 03:16).
+      Fix attempt 2: addressed the review's FAIL finding exactly. lastRegionId was only updated inside refresh() after its answers landed, so a quick region select-then-deselect arriving before the first request's answers came back read the new region against a stale lastRegionId, mistook it for an unmoved view, asked nothing, and let the superseded (stale) region answer land unopposed since its seq was still current -- drawing the wrong scope's rows. Fixed by setting lastRegionId eagerly in the rescope handler at the moment a region change is detected, before refresh() is invoked (ui/src/app/chrome/explore-drawer.ts). Added a Latch-based regression test reproducing the exact race (select region, hold its answers, deselect before they land, release the stale batch first then the fresh one); manually confirmed it fails without the fix (reverted the one-line eager assignment, reran, got the exact race, restored, reran green). Merged in the last gated main (2a63ee04) first per triage instructions; no conflicts. Also appended a task note recording the review finding and the fix.
+      Tests: just test-ui -> exit 0 (109/109 test files passed, including the new T-1061 review-fix regression test); npm test -- app-explore-drawer (with the eager lastRegionId assignment manually reverted) -> exit 1 (1 failed (the new regression test), 23 passed -- confirms the fix is load-bearing); npm test -- app-explore-drawer (fix restored) -> exit 0 (24/24 passed)
+      precheck exit 0
+      Commits: d0c8a454, 9a771e87, 2121a900, 9e6a359a
+      Use cases: AWARE-042
+      Resources: 3 CPU-s, peak 0.3 GB
   - id: T-1062
     milestone: MUI
     title: Fold window coverage into GET /api/inventory (window.coverage for the queried [t0,t1]x[f_lo,f_hi]) so the client's per-empty-page /api/coverage cells=1 round trip (48-77 per zoom gesture) disappears
