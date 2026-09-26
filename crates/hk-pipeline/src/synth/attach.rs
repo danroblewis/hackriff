@@ -27,14 +27,19 @@
 //!    [`CONFIRM_SYNTH_RULE`]) — never demotes, and a user delete wins.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use hk_context::Region as BandRegion;
+use hk_context::band_table::BandTable;
+use hk_context::synth_explain::{MeasuredEmission, References, explain_resolution};
 use hk_model::classify::{ArbRank, DECODER_RULES_PREFIX, Stage as ClassifyStage, TaxonomyRef};
 use hk_model::emitter::Classification as LegacyClassification;
 use hk_model::repo::LIFECYCLE_TEXT_MAX;
 use hk_model::repo::synthesis::{
-    EmitterSynthesis, Resolution as RowResolution, ResolutionKind as RowKind,
+    EmitterSynthesis, Explanation, Resolution as RowResolution, ResolutionKind as RowKind,
     ResolutionReason as RowReason, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage as RowStage,
-    StageEvidence as RowEvidence, SynthPipeline, SynthesisJob, Verdict as RowVerdict,
+    StageEvidence as RowEvidence, SuspectedStructure, SynthPipeline, SynthesisJob,
+    Verdict as RowVerdict,
 };
 use hk_model::signature::{
     DEFAULT_MIN_DISCRIMINATING, FieldExpect, FieldSpec, RecipeRef as SigRecipeRef,
@@ -192,8 +197,64 @@ fn row_resolution(r: &Resolution) -> RowResolution {
             Reason::BudgetExhausted => RowReason::BudgetExhausted,
             Reason::UnsupportedStructure => RowReason::UnsupportedStructure,
         }),
+        // ADR-0021 §7A.6/§9.4: the structure and its missing block ride on the row itself.
+        suspected: r.suspected.as_ref().map(|s| SuspectedStructure {
+            structure: s.structure.clone(),
+            missing_block: s.missing_block.clone(),
+        }),
         summary: r.summary.clone(),
+        // Sealed with none: a suggestion is attached afterwards, by the caller, and never here
+        // (ADR-0021 §9.3). Whatever the engine's own `explanations` held is not copied — the
+        // search is not a source of suggestions.
+        explanations: Vec::new(),
     }
+}
+
+/// The bundled allocation table, loaded **once** for the process.
+///
+/// ADR-0021 §9.3: the negative-result path opens *no new database read*. This is the same
+/// bundled table `hk_pipeline::inventory` and `hk_pipeline::class` already load for their
+/// explanations — not a new source, not a fetch, and never consulted before the resolution is
+/// sealed.
+fn reference_table() -> Option<&'static BandTable> {
+    static TABLE: OnceLock<Option<BandTable>> = OnceLock::new();
+    TABLE
+        .get_or_init(|| BandTable::bundled(BandRegion::Us).ok())
+        .as_ref()
+}
+
+/// Suggestions for a **sealed** resolution, from the emitter's measured centre, bandwidth and
+/// classified family (ADR-0021 §9.1). Returns nothing rather than guessing when the emitter or
+/// the table cannot be read: an absent suggestion costs a line of UI, a wrong one costs the
+/// blind-first rule.
+fn explanations_for(
+    repo: &Repository,
+    emitter: EmitterId,
+    sealed: &RowResolution,
+) -> Vec<Explanation> {
+    let Some(table) = reference_table() else {
+        return Vec::new();
+    };
+    let Ok(e) = repo.emitter(emitter) else {
+        return Vec::new();
+    };
+    let measured = MeasuredEmission {
+        center_hz: e.f_center_hz,
+        bandwidth_hz: e.bandwidth_hz,
+        family: e
+            .classifications
+            .first()
+            .map(|c| c.family.clone())
+            .filter(|f| !f.trim().is_empty() && f != "unknown"),
+    };
+    explain_resolution(
+        sealed,
+        &measured,
+        &References {
+            table,
+            data_age_days: None,
+        },
+    )
 }
 
 /// The recipe block that produced `stage`'s evidence on the ladder.
@@ -706,6 +767,30 @@ fn attach_in(
         },
     };
 
+    // ADR-0021 §9.3, in the order the rule demands: the resolution is **sealed** from the search
+    // alone, and only then explained. `explanations_for` is handed an immutable `&RowResolution`
+    // and hands back suggestions, which `attach_explanations` puts beside the sealed fields and
+    // never onto them — an `unknown` with three high-scoring explanations is still `unknown`, and
+    // a `tied` result is still `tied`.
+    let sealed = if r.verdict == Verdict::Solved {
+        None
+    } else {
+        let mut res = input
+            .resolution
+            .map(row_resolution)
+            .unwrap_or_else(|| RowResolution {
+                kind: RowKind::Unknown,
+                deepest_verdict: Some(row_verdict(r.verdict)),
+                reason: None,
+                suspected: None,
+                summary: "Searched and not identified.".into(),
+                explanations: Vec::new(),
+            });
+        let ex = explanations_for(ingest.repo(), emitter, &res);
+        res.attach_explanations(ex);
+        Some(res)
+    };
+
     let holdout = r.holdout.as_ref();
     let row = EmitterSynthesis {
         emitter_id: emitter,
@@ -738,21 +823,7 @@ fn attach_in(
             .collect(),
         // ADR-0021 §4.4: the node list lives for the job only; the summary persists.
         trace: Vec::new(),
-        resolution: if r.verdict == Verdict::Solved {
-            None
-        } else {
-            Some(
-                input
-                    .resolution
-                    .map(row_resolution)
-                    .unwrap_or_else(|| RowResolution {
-                        kind: RowKind::Unknown,
-                        deepest_verdict: Some(row_verdict(r.verdict)),
-                        reason: None,
-                        summary: "Searched and not identified.".into(),
-                    }),
-            )
-        },
+        resolution: sealed,
         receiver: None,
         job: Some(SynthesisJob {
             job_id: input.job_id.to_owned(),
@@ -898,6 +969,32 @@ mod tests {
         let mut r = solved();
         f(r.holdout.as_mut().unwrap());
         r
+    }
+
+    /// T-567 (ADR-0021 §7A.6): the sealed resolution's suspicion reaches the **row**, so an
+    /// `unsupported-structure` analysis names the block it is waiting on wherever it is read —
+    /// and `hk_model`'s row validation refuses the row if it does not (so a mapping that dropped
+    /// this field would refuse every such attach, not silently lose the name).
+    #[test]
+    fn an_unsupported_structure_row_carries_the_block_it_is_waiting_on() {
+        let mut r = Resolution::not_searched(None);
+        r.kind = ResolutionKind::UnsupportedStructure;
+        r.reason = Some(Reason::UnsupportedStructure);
+        r.suspected = Some(hk_synth::trace::Suspected {
+            structure: "css".into(),
+            missing_block: "css_dechirp".into(),
+            suspected_by: hk_synth::SuspectedBy::Classification,
+            posterior: Some(0.61),
+        });
+        let row = row_resolution(&r);
+        assert_eq!(row.kind, RowKind::UnsupportedStructure);
+        let s = row.suspected.expect("the row names what it is waiting on");
+        assert_eq!(s.structure, "css");
+        assert_eq!(s.missing_block, "css_dechirp");
+        // Every other kind names nothing: `unknown` may not borrow a missing block.
+        r.kind = ResolutionKind::Unknown;
+        r.suspected = None;
+        assert!(row_resolution(&r).suspected.is_none());
     }
 
     /// ADR-0022 §4.2's worked table: the frame count is a formula, not a constant.
@@ -1507,5 +1604,86 @@ mod tests {
             // Always at least the band's own occupied bandwidth.
             assert!(s.fields.contains_key(sig_field::OBW_HZ));
         }
+    }
+
+    /// **T-569 (ADR-0021 §9.3), the pipeline's end of the boundary.** The resolution the row
+    /// carries is sealed by the *search* alone; only then is `hk-context` handed an immutable
+    /// reference to it, and all it can hand back is a `Vec<Explanation>` for
+    /// [`RowResolution::attach_explanations`] to put **beside** the sealed fields.
+    ///
+    /// Run here over a real repository, on an emitter measured 50 kHz off the FM channel raster:
+    /// the suggestion is `unexpected` and the emitter **keeps its measured centre** — the
+    /// mismatch is the interesting case (CLAUDE.md), not an error to correct — and every field
+    /// the search decided reads back exactly as it was sealed.
+    #[test]
+    fn suggestions_are_computed_from_the_measured_emitter_and_change_nothing_sealed() {
+        use hk_model::LinkTarget;
+        use hk_model::cluster::{Fingerprint, Sighting};
+        use hk_model::ids::TrackId;
+        use hk_model::repo::synthesis::ExplanationStatus;
+
+        let mut repo = Repository::open_in_memory().unwrap();
+        let t = |s: i64| Timestamp::from_unix_nanos(s * 1_000_000_000);
+        // 88.65 MHz: inside the bundled 88-108 MHz FM allocation, 50 kHz from the nearest
+        // channel of the 200 kHz raster that starts at 88.1 MHz.
+        let measured_hz = 88.65e6;
+        let emitter = repo
+            .record_sighting(
+                &Sighting {
+                    source: LinkTarget::Track(TrackId::new()),
+                    seen: TimeRange::new(t(0), t(5)),
+                    count: 4,
+                    f_center_hz: measured_hz,
+                    bandwidth_hz: 180e3,
+                    fingerprint: Some(Fingerprint::new(measured_hz, 180e3)),
+                    identity: None,
+                    context: None,
+                    classification: None,
+                    tags: Vec::new(),
+                },
+                None,
+            )
+            .unwrap()
+            .emitter_id;
+
+        let sealed_by_the_search = RowResolution {
+            kind: RowKind::Unknown,
+            deepest_verdict: Some(RowVerdict::Demodulated),
+            reason: Some(RowReason::NothingScored),
+            suspected: None,
+            summary: "searched and not identified".into(),
+            explanations: Vec::new(),
+        };
+        let suggestions = explanations_for(&repo, emitter, &sealed_by_the_search);
+        assert!(
+            suggestions
+                .iter()
+                .any(|e| e.status == ExplanationStatus::Unexpected
+                    && e.distance_hz.is_some_and(|d| (d + 50e3).abs() < 1.0)),
+            "the off-raster measurement is flagged, with its distance: {suggestions:#?}"
+        );
+
+        let mut explained = sealed_by_the_search.clone();
+        explained.attach_explanations(suggestions);
+        assert_eq!(
+            (
+                explained.kind,
+                explained.deepest_verdict,
+                explained.reason,
+                explained.suspected.clone(),
+                explained.summary.clone(),
+            ),
+            (
+                sealed_by_the_search.kind,
+                sealed_by_the_search.deepest_verdict,
+                sealed_by_the_search.reason,
+                sealed_by_the_search.suspected.clone(),
+                sealed_by_the_search.summary.clone(),
+            ),
+            "an `unknown` explained by a band plan is still `unknown`"
+        );
+        assert!(!explained.explanations.is_empty());
+        // The emitter's measured centre is untouched: a flag, never a correction.
+        assert!((repo.emitter(emitter).unwrap().f_center_hz - measured_hz).abs() < 1.0);
     }
 }

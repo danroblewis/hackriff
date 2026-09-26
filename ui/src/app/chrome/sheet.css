@@ -3,7 +3,7 @@
    definition (`snapHeights`); only the width, dock position and look live here.
    NEVER MODAL: no backdrop, no overlay element, nothing outside `.sheet`'s own box — the canvas
    beneath keeps every pointer event that does not start on the sheet. Never faded (docs/23 §10.2). */
-.sheet { position: fixed; z-index: 6; bottom: var(--sheet-bottom, 70px); height: 56px; box-sizing: border-box;
+.sheet { position: fixed; z-index: 6; bottom: var(--sheet-bottom, 8px); height: 56px; box-sizing: border-box;
   display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(8px);
   border: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 30px var(--shadow);
@@ -30,12 +30,22 @@
 .sheet .sheet-body { flex: 1; min-height: 0; overflow: auto; }
 .sheet .sheet-body { display: flex; flex-direction: column; }
 .sheet .sheet-body > .focus { border: 0; background: none; overflow: visible; min-height: 0; order: 0; flex: none; }
-.sheet .sheet-body > .drawer { order: 1; flex: none; }
+.sheet .sheet-body > .drawer { flex: none; }
+/* T-997: the inventory lists and the selections under them are a SECTION of this sheet now, not a
+   floating left column with a mid-height chip over the time ruler. Order: what is selected leads
+   (T-943), then the lists a pill opens, then the drawer's places to go. The `.side` element keeps
+   its slot identity but none of the column's chrome — no border, no background, no grid rows: it is
+   content inside the one scrolling body. */
+.sheet .sheet-body > .side { order: 1; flex: none; display: block; border: 0; background: none; min-height: 0; }
+.sheet .sheet-body > .side > .side-inv, .sheet .sheet-body > .side > .side-sel { overflow: visible; min-height: 0; padding: 10px 16px 8px; }
+.sheet .sheet-body > .side > .side-sel { border-top: 1px solid var(--line-soft, var(--line)); }
+.sheet .sheet-body > .side .list, .sheet .sheet-body > .side .sel-list { overflow: visible; }
+.sheet .sheet-body > .drawer { order: 2; }
 .sheet[data-snap="peek"] .sheet-body { visibility: hidden; }
 .sheet[data-snap="peek"] .sheet-head { border-bottom-color: transparent; }
 /* Wide screens: width-capped and docked to the right (docs/23 §10.3), where the focus column it
-   replaces used to float; the inventory column still holds the left until MAP-14 moves it into
-   this sheet's Explore tab.
+   replaces used to float. T-997 moved the inventory lists in here too, so this is the one panel
+   over the map: nothing floats at the left edge any more.
    T-802 x T-803: it stops short of the right edge by `--sheet-gutter`, the column the floating
    zoom control and the follow-live FAB (`map-controls.css`: 8 px inset, the 48 px FAB the widest)
    sit in, plus a gap. The sheet grows upward, so any overlap at the bottom-right would hide the FAB

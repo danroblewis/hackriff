@@ -463,9 +463,16 @@ fn silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay() {
     };
 
     // A client that keeps reading answers the pings: still attached well past the peer timeout.
+    // T-934: the loop ends on the counted event - more than 20 records received AND at least
+    // 1.5 s (almost 4 peer timeouts) attached - not on a 1.5 s wall-clock window whose record
+    // count depended on load (9-11 seen at load ~28). The 60 s bound only catches a hang.
     let mut ws = connect(addr, &format!("/ws/open/listen?token={TOKEN}")).unwrap();
     let (t0, mut records) = (Instant::now(), 0);
-    while t0.elapsed() < Duration::from_millis(1500) {
+    while records <= 20 || t0.elapsed() < Duration::from_millis(1500) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "{records} records in 60 s"
+        );
         match ws.read() {
             Ok(Message::Binary(_)) => records += 1,
             Ok(_) => {}

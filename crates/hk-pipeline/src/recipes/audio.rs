@@ -35,6 +35,31 @@ use crate::run::Shared;
 /// `audio.mode_rules` of a recipe's audio: the mode is the recipe's declaration, not an estimate.
 pub const RECIPE_MODE_RULES: &str = "recipe-declared";
 
+/// What the Listen chooser measured on the channel a pipeline was started on (T-869, ADR-0015
+/// §12.2). A hand-started pipeline has none, and its header then says the mode is
+/// [`RECIPE_MODE_RULES`] at confidence 0 — a declaration, not a measurement. The `listen`
+/// opener's ephemeral pipeline *did* probe the channel, so it carries the probe's own answer
+/// here and the stream says exactly what Listen's own chain would say.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Measured {
+    /// Mode the selector chose (`wfm`, `nbfm`, …).
+    pub mode: String,
+    /// Its confidence, 0–1.
+    pub mode_confidence: f64,
+    /// The selector's rules version.
+    pub mode_rules: String,
+    /// Parameters estimated from the signal.
+    pub params: EstimatedParams,
+    /// Channel SNR over the probe, dB.
+    pub snr_db: Option<f64>,
+    /// The channel noise the squelch compares against, dBFS.
+    pub noise_dbfs: Option<f64>,
+    /// The output-driven refinement that locked, if any (T-070).
+    pub refinement: Option<hk_stream::audio::AudioRefinement>,
+    /// Provenance of the probed samples.
+    pub provenance_ref: Option<hk_model::ProvenanceId>,
+}
+
 /// Per-consumer queue of an audio output, bytes: ≈ 0.6 s of 20 ms records, as Listen's.
 const AUDIO_QUEUE_BYTES: usize = 64 * 1024;
 
@@ -91,21 +116,31 @@ pub fn audio_header(
         .or_else(|| num(node_params(recipe, "fm_demod"), "deemphasis_s"))
         .filter(|t| *t > 0.0);
     let recipe_ref = format!("{}@{}", recipe.id, recipe.version);
+    // A chooser-started pipeline reports the channel as it was *measured*; a hand-started one
+    // reports the recipe's declaration and says so (T-869).
+    let m = ctx.measured.as_deref();
+    h.provenance_ref = m.and_then(|m| m.provenance_ref);
     h.audio = Some(AudioInfo {
         channels: 1,
         frame_samples: AUDIO_FRAME_SAMPLES as u32,
-        mode: profile.mode.unwrap_or_else(|| "unknown".into()),
-        mode_confidence: 0.0,
-        mode_rules: RECIPE_MODE_RULES.into(),
-        params: EstimatedParams {
-            bandwidth_hz: Some(ctx.bandwidth_hz),
-            ..EstimatedParams::default()
-        },
-        snr_db: None,
+        mode: m.map_or_else(
+            || profile.mode.clone().unwrap_or_else(|| "unknown".into()),
+            |m| m.mode.clone(),
+        ),
+        mode_confidence: m.map_or(0.0, |m| m.mode_confidence),
+        mode_rules: m.map_or_else(|| RECIPE_MODE_RULES.into(), |m| m.mode_rules.clone()),
+        params: m.map_or_else(
+            || EstimatedParams {
+                bandwidth_hz: Some(ctx.bandwidth_hz),
+                ..EstimatedParams::default()
+            },
+            |m| m.params.clone(),
+        ),
+        snr_db: m.and_then(|m| m.snr_db),
         squelch: SquelchInfo {
             open_snr_db: num(sq, "open_snr_db").unwrap_or(if sq.is_some() { 6.0 } else { 0.0 }),
             hysteresis_db: num(sq, "hysteresis_db").unwrap_or(if sq.is_some() { 3.0 } else { 0.0 }),
-            noise_dbfs: num(sq, "noise_dbfs"),
+            noise_dbfs: num(sq, "noise_dbfs").or_else(|| m.and_then(|m| m.noise_dbfs)),
         },
         agc: AgcInfo {
             enabled: agc.is_some()
@@ -118,11 +153,12 @@ pub fn audio_header(
         },
         deemphasis_s,
         demod: format!("recipe:{recipe_ref}"),
-        refinement: None,
+        refinement: m.and_then(|m| m.refinement.clone()),
         pipeline_id: Some(ctx.pipeline_id.clone()),
         recipe: Some(recipe_ref),
         output_id: Some(spec.id.clone()),
         edit_rev: Some(edit_rev),
+        wait: None,
     });
     h
 }
@@ -193,13 +229,14 @@ impl AudioSink {
                 index = self.next_index;
                 discontinuity = true;
             }
+            let t = t_of(f.source_index);
             let flags = if discontinuity {
                 RecordFlags::DISCONTINUITY
             } else {
                 RecordFlags::empty()
             };
             if let Err(e) = self.publisher.publish_binary(BinaryRecord {
-                t: t_of(f.source_index),
+                t,
                 sample_index: index,
                 flags,
                 payload,
@@ -264,6 +301,7 @@ impl AudioSink {
             // A recipe's `audio` output is mono (hk-recipe; T-874 changed only Listen's opener).
             stereo: None,
             stereo_lock_losses: None,
+            ..AudioStatus::default()
         };
         let mut m = match status.to_value() {
             Value::Object(m) => m,

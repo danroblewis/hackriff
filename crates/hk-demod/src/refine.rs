@@ -940,6 +940,16 @@ pub struct WfmObjectiveConfig {
     pub pilot_search_hz: f64,
     /// Lock when the pilot C/N0 reaches this, dB-Hz.
     pub lock_pilot_cn0_dbhz: f64,
+    /// T-938: a **tracked** pilot also locks, down to this C/N0, dB-Hz. A validation measurement
+    /// whose stereo PLL reports the 19 kHz pilot present, within
+    /// [`Self::pilot_search_hz`] of nominal and with an uncertainty under
+    /// [`Self::lock_pilot_sigma_ppm`], has identified the carrier whatever the spectral C/N0 says:
+    /// on the explorer's 98.900 MHz capture the pilot tracks at 18999.85 Hz +/- 0.01 Hz with
+    /// C/N0 35.4 dB-Hz, and the refinement lands 355 Hz from the truth centre, while empty
+    /// spectrum in the same capture measures 18.6-27.2 dB-Hz and tracks no pilot at all.
+    pub lock_pilot_cn0_floor_dbhz: f64,
+    /// Largest pilot-frequency uncertainty that counts as tracked, ppm of the pilot.
+    pub lock_pilot_sigma_ppm: f64,
     /// MPX FFT length.
     pub fft_len: usize,
     /// DDC settling time skipped per measurement, s.
@@ -975,6 +985,11 @@ impl Default for WfmObjectiveConfig {
             pilot_hz: 19_000.0,
             pilot_search_hz: 60.0,
             lock_pilot_cn0_dbhz: 40.0,
+            // Measured on the explorer's two 2026-09-25 captures (T-938): a station's carrier
+            // tracks its pilot at 35-62 dB-Hz; off-carrier and empty spectrum in the same
+            // captures reach 27 dB-Hz and never track a pilot.
+            lock_pilot_cn0_floor_dbhz: 30.0,
+            lock_pilot_sigma_ppm: 1.0,
             fft_len: 4096,
             settle_s: 0.01,
             rds: true,
@@ -1029,8 +1044,13 @@ pub struct WfmMetrics {
 /// - **Quality:** the 19 kHz pilot's power over the MPX guard-band noise density (dB-Hz). A
 ///   filter that is too narrow or off-centre distorts, and the distortion products land in the
 ///   guard bands on either side of the pilot; noise and adjacent channels raise them too.
-/// - **Lock:** pilot C/N0 at or above [`WfmObjectiveConfig::lock_pilot_cn0_dbhz`]. A mono station
-///   without a pilot does not lock (not refined; its coarse tuning stays).
+/// - **Lock:** pilot C/N0 at or above [`WfmObjectiveConfig::lock_pilot_cn0_dbhz`], or (T-938) a
+///   validation measurement whose stereo PLL **tracks** the pilot — present, within
+///   [`WfmObjectiveConfig::pilot_search_hz`] of nominal, uncertainty under
+///   [`WfmObjectiveConfig::lock_pilot_sigma_ppm`] — with C/N0 at or above
+///   [`WfmObjectiveConfig::lock_pilot_cn0_floor_dbhz`]. A mono station without a pilot does not
+///   lock (not refined; its coarse tuning stays), and neither does empty spectrum, which tracks
+///   no pilot.
 /// - **Centre correction:** the MPX mean.
 /// - **Validation:** the full [`WfmDemod`] with RDS: PLL pilot frequency (`pilot_hz`), receiver
 ///   clock error from it (`clock_ppm`), peak deviation, RDS PI (label `rds_pi`) and block/group
@@ -1370,7 +1390,7 @@ impl Objective for WfmObjective {
                 "tuning outside the window or window too short",
             ));
         };
-        let locked = m.pilot_cn0_dbhz >= self.config.lock_pilot_cn0_dbhz;
+        let mut locked = m.pilot_cn0_dbhz >= self.config.lock_pilot_cn0_dbhz;
         let mut p = BTreeMap::new();
         p.insert("pilot_cn0_dbhz".to_owned(), m.pilot_cn0_dbhz);
         p.insert("audio_snr_db".to_owned(), m.audio_snr_db);
@@ -1393,6 +1413,13 @@ impl Objective for WfmObjective {
                         (f / self.config.pilot_hz - 1.0) * 1e6,
                     );
                 }
+                // T-938: a tracked pilot locks a weak station the spectral C/N0 alone would
+                // leave unlocked (and therefore unrefined: an unlocked outcome is never applied).
+                let tracked = (f - self.config.pilot_hz).abs() <= self.config.pilot_search_hz
+                    && r.pilot
+                        .sigma_hz
+                        .is_some_and(|sig| sig / f * 1e6 < self.config.lock_pilot_sigma_ppm);
+                locked |= tracked && m.pilot_cn0_dbhz >= self.config.lock_pilot_cn0_floor_dbhz;
             }
             p.insert("stereo".to_owned(), f64::from(u8::from(r.stereo)));
             if let Some(d) = r.peak_deviation_hz {

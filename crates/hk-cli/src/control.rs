@@ -86,6 +86,16 @@ impl RunControl for PipelineRunControl {
         RunState {
             live: s.live,
             content_class: s.content_class,
+            content_classes: s
+                .content_classes
+                .into_iter()
+                .map(|b| hk_api::ClassBand {
+                    lo_hz: b.lo_hz,
+                    hi_hz: b.hi_hz,
+                    content_class: b.content_class,
+                    source: b.source,
+                })
+                .collect(),
             center_hz: s.center_hz,
             sample_rate_hz: s.sample_rate_hz,
             segment: s.segment,
@@ -598,5 +608,46 @@ impl hk_api::PlaybackControl for PipelinePlayback {
             None => {}
         }
         Ok(self.0.state_json())
+    }
+}
+
+/// The C38 stage (T-844) for `/api/ml/*`: the model registry, the `(model, consumer)` modes and
+/// the durable shadow log, all owned by [`hk_pipeline::ml::MlStage`]. This adapter only maps
+/// shapes; it adds no path by which a model's output reaches a decision.
+pub struct PipelineMl(pub Arc<hk_pipeline::ml::MlStage>);
+
+fn ml_failure(f: hk_pipeline::ml::MlStageFailure) -> hk_api::MlFailure {
+    hk_api::MlFailure {
+        status: f.status,
+        code: f.code.to_owned(),
+        message: f.message,
+    }
+}
+
+impl hk_api::MlControl for PipelineMl {
+    fn models(&self) -> Result<Value, hk_api::MlFailure> {
+        Ok(self.0.models_json())
+    }
+
+    fn set_mode(&self, change: &hk_api::MlModeChange) -> Result<Value, hk_api::MlFailure> {
+        use hk_pipeline::ml::MlMode;
+        let mode = match change.mode {
+            hk_api::MlModeWanted::Off => MlMode::Off,
+            hk_api::MlModeWanted::Shadow => MlMode::Shadow,
+            hk_api::MlModeWanted::Active => MlMode::Active,
+        };
+        self.0
+            .set_mode(&hk_pipeline::ml::ModeRequest {
+                id: change.id.clone(),
+                version: change.version.clone(),
+                consumer: change.consumer.clone(),
+                mode,
+                force: change.force,
+            })
+            .map_err(ml_failure)
+    }
+
+    fn shadow(&self, q: &hk_store::ml::ShadowQuery) -> Result<Value, hk_api::MlFailure> {
+        self.0.shadow_json(q).map_err(ml_failure)
     }
 }

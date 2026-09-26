@@ -21,8 +21,8 @@ const cssImports = [...entryCss.matchAll(/@import "\.\/([^"]+)";/g)].map((m) => 
 const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n");
 // T-445's cutover replaced four centre slots — "live" (the waterfall), "axis" (the frequency tick
 // strip) and the two edge navigators "timenav"/"freqnav" — with ONE: "surface".
-// T-409's "nudge" stays: the tuning-nudge buttons in the top bar, beside the Go to control they sit
-// next to and the Centre readout they change.
+// T-409's "nudge" stays: the tuning-nudge buttons in the top bar (in Explore, since T-993, moved
+// under the map's floating Go-to — `chrome/top-chrome.ts`) and the Centre readout they change.
 // T-803's "sheet": the bottom sheet that wraps the focus slot (index.html nests "focus" inside it).
 // T-895's "side": the left column that wraps "inventory" and "selections" (its collapsed chip).
 const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "drawer", "side", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue", "research"];
@@ -169,4 +169,23 @@ test("device slice carries the run's capture state and its cause", () => {
   const oldEnded = { ...replayState, run: { ...replayState.run!, finished: true, capture: undefined, capture_note: undefined } };
   assert.equal(deviceFrom(oldEnded).capture, "ended", "an older server's finished run reads as ended");
   assert.equal(deviceFrom({ ...replayState, run: undefined } as unknown as ControlState).capture, null);
+});
+
+test("T-955: a #token= fragment navigation stores the token and genuinely reloads — it is not a reload by itself", async () => {
+  const { reloadOnTokenHash } = await import("../src/app/net");
+  const handlers: (() => void)[] = [];
+  let reloads = 0;
+  const stored: Record<string, string> = {};
+  const win = {
+    addEventListener: (_t: "hashchange", fn: () => void) => { handlers.push(fn); },
+    location: { hash: "", reload: () => { reloads++; } },
+  };
+  reloadOnTokenHash(win, { setItem: (k, v) => { stored[k] = v; } });
+  win.location.hash = "#section";
+  handlers.forEach((f) => f());
+  assert.equal(reloads, 0, "a fragment without a token is an ordinary in-page link");
+  win.location.hash = "#token=abc";
+  handlers.forEach((f) => f());
+  assert.equal(reloads, 1, "a token handed over the fragment left the old page (and its stale view/offer) running");
+  assert.equal(stored["hk-token"], "abc");
 });

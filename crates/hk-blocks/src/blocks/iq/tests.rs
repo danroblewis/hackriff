@@ -94,6 +94,68 @@ fn fsk_1200_with_offset_and_rate_error_recovers_hidden_bits() {
     assert!((meta.source_per_item - fs / rate).abs() < 1e-9);
 }
 
+/// T-951: the POCSAG recipe's rate is estimated, so 512 and 2400 Bd pages decode as 1200 does.
+#[test]
+fn pocsag_recipe_clock_estimates_512_and_2400_bd_from_the_waveform() {
+    let fs = 24_000.0;
+    for rate in [512.0, 1_200.0, 2_400.0] {
+        // Hidden truth: POCSAG's alternating preamble, then random bits.
+        let mut truth: Vec<u8> = (0..576).map(|i| u8::from(i % 2 == 0)).collect();
+        truth.extend(random_bits(3_000, rate as u64));
+        let x = PortVec::Iq(fsk_iq(&truth, fs, rate, 4_500.0, 0.0, 0.02, 3));
+        let clock = {
+            let path = format!(
+                "{}/../../recipes/pocsag.recipe.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let r: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            r["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"] == "clock")
+                .unwrap()["params"]
+                .clone()
+        };
+        assert!(
+            clock.get("symbol_rate_bd").is_none(),
+            "no fixed rate in the recipe"
+        );
+        // Rate acquisition applies at a chunk boundary, so this block is not chunk-invariant
+        // in candidate mode (documented); one chunk size.
+        let info = PortInfo {
+            ty: PortType::Iq,
+            rate_hz: fs,
+            max_items: 2048,
+            hold_items: 0,
+        };
+        let mut c = Chain::new(
+            vec![
+                build("fsk_demod", json!({"deviation_hz": 4500}), PortType::Iq),
+                build("clock_recovery", clock.clone(), PortType::Real),
+                build("slicer", json!({}), PortType::Soft),
+            ],
+            info,
+        );
+        c.run(&x, 2048);
+        let got = &c.out(2, 0).bits;
+        assert!(got.len() > 2_500, "{rate} Bd: {} bits", got.len());
+        // The stream's tail is recovered: align the last 2000 output bits to the truth's end.
+        let tail = 2_000;
+        let base = truth.len().saturating_sub(got.len());
+        let best = (base.saturating_sub(6)..=base + 6)
+            .map(|lag| {
+                (got.len() - tail..got.len() - 8)
+                    .filter(|&gi| truth.get(gi + lag).is_some_and(|&t| t != got[gi]))
+                    .count()
+            })
+            .min()
+            .unwrap();
+        assert_eq!(best, 0, "{rate} Bd: {best} errors in the last {tail} bits");
+    }
+}
+
 #[test]
 fn msk_2400_gardner_and_mueller_muller_recover_hidden_bits() {
     let truth = random_bits(4_000, 2400);

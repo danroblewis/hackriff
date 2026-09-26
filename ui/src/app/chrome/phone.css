@@ -5,19 +5,19 @@
 
 /* ---- 1. Immersive: ALL the floating chrome fades together ----------------------------------------
    The cluster over the canvas (Go-to, top-right, zoom, FAB) already faded on `IdleFade` (T-802);
-   the top bar, the dock and the lists' chip did not, so the "faded" map still wore a full-width bar.
+   the top bar and the dock did not, so the "faded" map still wore a full-width bar. (T-997: the
+   lists' chip is gone; its replacement, the inventory pills, is inside the cluster and carries
+   `map-fade`, so it fades with the rest by that rule and needs none here.)
+   (T-993: there is no top bar over the map any more — its controls are in the cluster and fade with
+   it, `map-controls.css`; the status pill stays solid while it states the stream is not live.)
    `IdleFade` now also states `chrome-idle` on <body> (map-controls.ts, IDLE_CLASS), and they follow it
    to the same ~35 % on the same timer, returning on any pointer, touch, key, wheel or focus event.
    Fade never applies (§10.2) to: the sheet, the Research slide-in, the OPEN lists or any open menu
    (none named here), a focused control (`:focus-within` / `:focus-visible`), or an honesty statement —
-   so the bar stays solid while its stream status says the picture is not live (`.conn` shown). Fade is
+   so the status pill stays solid while its stream status says the picture is not live (`.conn` shown). Fade is
    an idle courtesy, never a dismiss (§10.6 rule 1): every overlay keeps its own close (T-900). */
-.app:has(#view-explore:not([hidden])) > .bar,
-.app:has(#view-explore:not([hidden])) > .dock,
-#view-explore > .side.is-collapsed > .side-chip { transition: opacity .5s ease; }
-body.chrome-idle .app:has(#view-explore:not([hidden])) > .bar:not(:focus-within):not(:has(.conn:not([hidden]))),
-body.chrome-idle .app:has(#view-explore:not([hidden])) > .dock:not(:focus-within),
-body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visible) { opacity: .35; }
+.app:has(#view-explore:not([hidden])) > .out-strip { transition: opacity .5s ease; }
+body.chrome-idle .app:has(#view-explore:not([hidden])) > .out-strip:not(:focus-within) { opacity: .35; }
 
 /* ---- 2. Below the sheet breakpoint ---------------------------------------------------------------
    T-824 shortened the surface here (`padding-bottom: calc(70px + 56px + 8px)`) because the sheet's
@@ -32,26 +32,13 @@ body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visi
 
 /* ---- 3. Phone width (≤ 600 px) ------------------------------------------------------------------ */
 @media (max-width: 600px) {
-  /* The bar is ONE row that scrolls sideways inside itself, not three wrapped rows: at 400 px the
-     wrap took ~146 px — a fifth of the screen — from the map. Everything in it is still there (mode
-     switch first, device and centre next, nudges/Review/Theme a swipe away), and the page itself
-     never scrolls sideways. */
-  .app:has(#view-explore:not([hidden])) > .bar {
-    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; max-height: none; min-height: 40px;
-    gap: 10px; padding: 0 8px; scrollbar-width: none; overscroll-behavior-x: contain;
-  }
-  .app:has(#view-explore:not([hidden])) > .bar::-webkit-scrollbar { display: none; }
-  .app:has(#view-explore:not([hidden])) > .bar > * { flex: none; }
-  .app:has(#view-explore:not([hidden])) > .bar .brand { display: none; }
-  /* T-919: no `padding-top` here either — the bar FLOATS over the full-bleed canvas (§10.1) and
-     what keeps the panes' newest rows and the trace clear of it is the surface's own measured
-     `insetTopPx` (`centre/surface.ts` `fit()`, from the bar's real box at this width), not a
-     second, guessed copy of the bar's height in a media query. */
+  /* T-993: the bar that used to be one sideways-scrolling row here is gone; its controls are small
+     floating chrome (`map-controls.css`'s phone rules). */
 
   /* The zoom stack docks just above the follow-live FAB (the mockup's phone `.rightstack`) instead of
      at mid-height, where the short phone stage put its "−" under the FAB. Same edge, same order —
      one position per width, never user-placed (§10.6 rule 3) — and within a thumb of the FAB. */
-  .map-zoom { top: auto; transform: none; bottom: calc(var(--map-strip, 110px) + 4px + 48px + 8px); }
+  .map-zoom { top: auto; transform: none; bottom: calc(var(--map-strip, 0px) + 4px + 48px + 8px); }
 
   /* Research becomes a full-height panel (docs/23 §10.3); the sheet drops to peek when it opens
      (`focus-sheet.ts`). Still one fixed position and a visible close (§10.6 rules 1 and 3). It spans
@@ -59,14 +46,9 @@ body.chrome-idle #view-explore > .side.is-collapsed > .side-chip:not(:focus-visi
      everything in Explore's), and sits above the floating cluster (z 20) — a panel the cluster's
      zoom stack and FAB painted over would be neither readable nor the full-height panel §10.3 asks
      for. Its close (×) and the cluster's Research button both dismiss it. */
-  .research { top: 56px; bottom: 70px; left: 8px; right: 8px; width: auto; z-index: 25; }
-
-  /* The dock's own row scrolls sideways, never the page (§10.5). */
-  .app:has(#view-explore:not([hidden])) > .dock { overflow-x: auto; overflow-y: hidden; }
+  .research { top: 56px; bottom: 8px; left: 8px; right: 8px; width: auto; z-index: 25; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app:has(#view-explore:not([hidden])) > .bar,
-  .app:has(#view-explore:not([hidden])) > .dock,
-  #view-explore > .side.is-collapsed > .side-chip { transition: none; }
+  .app:has(#view-explore:not([hidden])) > .out-strip { transition: none; }
 }

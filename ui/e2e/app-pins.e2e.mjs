@@ -29,7 +29,7 @@ const PIN_AT = `(() => {
 const STATE = `JSON.stringify({
   pins: [...document.querySelectorAll('.sf-pins .sf-pin')].map((p) => [p.className, p.dataset.pin?.slice(0, 8), p.style.transform]),
   rows: [...document.querySelectorAll('.side-inv .row[data-id]')].map((r) => r.dataset.id.slice(0, 8)),
-  chip: document.querySelector('.side-chip')?.textContent ?? null,
+  pills: document.querySelector('.map-inv')?.textContent ?? null,
   sheet: document.querySelector('.sheet-title')?.textContent ?? null,
   chrome: document.querySelector('.sf-chrome')?.textContent?.slice(0, 300) ?? null,
   note: document.querySelector('.sf-note')?.textContent?.slice(0, 300) ?? null,

@@ -4,9 +4,10 @@
    offer. Mounted inside `.sf-stage`, so it floats over the picture only — never over the rows below
    the stage. Since T-882 it is the ONLY control surface over the canvas (no toolbar row).
 
-   `.map-ctl` is a pointer-transparent box inset 8 px from the stage (T-895: the inventory
-   column no longer shares its rows — collapsed it is a mid-height chip, open it starts below Go-to,
-   `map-layout.css`), so no control is ever drawn under a panel; only its children take the pointer, so every other pixel still reaches the canvas. */
+   `.map-ctl` is a pointer-transparent box inset 8 px from the stage (T-997: the inventory column is
+   gone from the map — its counts are two pills IN this cluster, `.map-inv` below, and its lists are
+   in the sheet), so no control is ever drawn under a panel; only its children take the pointer, so
+   every other pixel still reaches the canvas. */
 .map-ctl {
   position: absolute; z-index: 20; pointer-events: none;
   /* `--chrome-top` (T-882, set by the surface's `fit`): how far the app's top bar overlaps the
@@ -18,8 +19,15 @@
   /* T-824: the top-right cluster's real width (its 36 px buttons, their gaps, padding and border,
      plus Go-to's gap to it), so Go-to and the retune offer stop short of it at phone width rather
      than sliding under it (the old 132 px fallback was one button short). T-820 added Annotate and
-     Pin: six buttons = 6 × 36 + 5 × 4 + 4 + 2 + 8 = 250 px. */
-  --topright-w: 250px;
+     Pin; T-993 Review and the ⋯ menu. T-1025 dropped the cluster's shared box, so the width is now
+     the chips and the gaps between them; T-1028 added the retune-mode chip, so there are nine:
+     9 × 36 + 8 × 6 + 8 = 380 px. */
+  --topright-w: 380px;
+  /* T-1025: one knob for every floating chip's face. Translucent enough that the canvas reads
+     through it (the user's "the background is opaque, so it's still effectively a top bar"), with
+     the blur doing the legibility work instead of opacity. Text-heavy MENUS override it (below). */
+  --chip-bg: color-mix(in srgb, var(--panel) 62%, transparent);
+  --chip-line: color-mix(in srgb, var(--line) 70%, transparent);
 }
 /* T-803: no right-hand focus column any more (it became the bottom sheet, which leaves this
    cluster's right-edge column clear — `sheet.css`'s `--sheet-gutter`), so the right inset is fixed. */
@@ -27,10 +35,28 @@
 .map-ctl > [hidden] { display: none; }
 
 .map-glass {
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); border-radius: 8px;
-  box-shadow: 0 4px 18px var(--shadow);
+  background: var(--chip-bg);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--chip-line); border-radius: 8px;
+  /* T-1025: a tight shadow. The old 18 px blur smeared across the 4-8 px gaps between chips, so
+     what showed between them was the chrome's own shadow rather than the map. */
+  box-shadow: 0 2px 6px var(--shadow);
+}
+
+/* T-1025: a row of chips is NOT a box of controls. `.map-chips` (the status row and the top-right
+   cluster) paints nothing, takes no pointer and only spaces its children; each control inside it
+   wears the chip face itself, so canvas pixels show between them and a drag through a gap reaches
+   the map. Selectors are specific enough to beat the bar's own `.modes` / `#review-btn` faces,
+   which these elements still carry when they move back to the framed shell (`top-chrome.ts`). */
+.map-chips { display: flex; align-items: center; gap: 6px; pointer-events: none; background: none; border: 0; box-shadow: none; padding: 0; }
+.map-chips > *, .map-chips .map-review-home > * { pointer-events: auto; }
+.map-chips.map-topright .map-ibtn,
+.map-chips.map-topright #review-btn,
+.map-chips.map-status > *:not(.map-review-home) {
+  background: var(--chip-bg);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--chip-line); border-radius: 8px;
+  box-shadow: 0 2px 6px var(--shadow); box-sizing: border-box;
 }
 .map-fade { transition: opacity .5s ease; }
 .map-ctl.is-idle .map-fade:not(:focus-within) { opacity: .35; }
@@ -58,8 +84,8 @@
 .map-offer-go:disabled { opacity: .5; cursor: not-allowed; }
 .map-offer-x { min-width: 28px; min-height: 28px; border: 0; background: none; color: var(--muted); cursor: pointer; }
 
-/* Layers: top-right, its panel beneath it. */
-.map-topright { top: 0; right: 0; padding: 2px; display: flex; gap: 4px; }
+/* Layers: top-right, its panel beneath it. T-1025: eight chips in a row, not one box. */
+.map-topright { top: 0; right: 0; }
 /* An open menu paints over the zoom stack beside it (z-index), and scrolls rather than running off
    a short stage (T-882 made the layers menu taller by the colour-scale group). */
 /* T-918: the stage is full-bleed now, so it runs under the app's floating dock; `--chrome-bottom`
@@ -90,20 +116,37 @@
 /* T-882: measure mode's banner (the mockup's `#mode`), top-centre under Go-to's row. Never faded. */
 .map-mode { top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
 
+/* T-1028: retune mode's chip and its banner. The chip is lit like any pressed mode button; a HELD
+   key (the momentary form, `R` down) is marked as well as lit, because "this ends when I let go" is
+   a different promise from "this stays on" and the user has to be able to tell them apart. The
+   banner stacks under a tool mode's rather than replacing it: retune mode re-binds no gesture, so
+   both can legitimately be on at once. */
+.map-retune-btn.is-on { background: var(--amber-soft); color: var(--amber); }
+.map-retune-btn[data-held="true"] { outline: 1px dashed var(--amber); outline-offset: -3px; }
+.map-retune-mode { margin-top: 36px; border-color: var(--amber); }
+
 /* Zoom: right edge, vertically centred. */
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
 .map-sep { height: 1px; background: var(--line); margin: 2px 4px; }
 
-/* Follow-live FAB: bottom-right, above the map strip (`--map-strip`, set from the drawn height). */
-.map-fab {
-  right: 0; bottom: calc(var(--map-strip, 110px) + 4px); width: 48px; height: 48px; border-radius: 50%;
-  display: grid; place-items: center; padding: 0; cursor: pointer;
-  background: color-mix(in srgb, var(--panel) 72%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--line); color: var(--muted); box-shadow: 0 4px 18px var(--shadow);
+/* T-1001: the follow-live FAB is gone from the cluster — Live/Freeze is a button inside each
+   pane's rectangle (`centre/centre.css`'s `.sf-pane-live-btn`), one per pane. T-995's change to
+   the FAB's own bottom offset (the minimap strip it cleared is retired) went with it; the panes'
+   buttons are placed inside the picture and never needed that offset. */
+
+/* T-1000 (docs/23 §10.7): the number of the pane a per-pane control acts on, shown only while there
+   are two or more — the same number the outline on the canvas carries (`.sf-active-pane[data-pane]`). */
+.map-layers-btn { position: relative; }
+.map-pane-badge[hidden], .map-goto-pane[hidden] { display: none; }
+.map-pane-badge {
+  min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px;
+  background: var(--text); color: var(--panel); font: 600 10px/14px var(--mono); text-align: center;
+  pointer-events: none;
 }
-.map-fab svg { width: 22px; height: 22px; }
-.map-fab.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 4px var(--teal-soft), 0 4px 18px var(--shadow); }
-.map-fab.frozen { color: var(--amber); border-color: var(--amber); }
+.map-layers-btn .map-pane-badge { position: absolute; right: 1px; top: 1px; }
+.map-zoom-pane { align-self: center; margin: 2px 0; }
+@media (max-width: 600px) { .map-goto-pane .map-goto-word { display: none; } }
+.map-goto-pane { flex: none; font: 600 11px var(--mono); color: var(--text); padding: 1px 6px; border-radius: 7px; background: var(--raise); white-space: nowrap; }
 
 /* Below the breakpoint the side/focus columns drop to the bottom of the screen (`map-layout.css`),
    so the cluster uses the canvas's whole width. */
@@ -115,3 +158,87 @@
 .map-layer-key { list-style: none; margin: 2px 0 4px 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; font-size: 10.5px; color: var(--muted); }
 .map-layer-key li { display: flex; align-items: center; gap: 5px; }
 .map-key-swatch { width: 22px; height: 12px; flex: none; image-rendering: pixelated; border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); }
+
+/* ---- T-993: the retired top bar's controls, as floating chrome ------------------------------------
+   docs/23 §10 P1/P4. Moved into the cluster by `top-chrome.ts` while Explore is shown:
+     .map-status — the Explore/Decode/History switch + device, recording and stream state: top-centre
+                   when the row has room for it, else under the top-right cluster;
+     .map-nudge  — T-409's tuning nudges, under Go-to (device commands live beside Go-to, with the
+                   retune offer, which moves one row down to make room);
+     #review-btn — an icon button in the top-right cluster; Theme — in its ⋯ menu.
+   Each fades with the rest; the status pill never fades while it states the stream is not live. */
+.map-review-home { display: contents; }
+.map-topright #review-btn { position: relative; width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; background: none; color: var(--text); border-radius: 8px; cursor: pointer; font-size: 16px; line-height: 1; }
+.map-topright #review-btn:hover { background: var(--raise); }
+.map-topright #review-btn[aria-pressed="true"] { background: var(--amber-soft); color: var(--amber); }
+.map-topright #review-btn .rv-label { display: none; }
+.map-topright #review-btn .rv-n { position: absolute; top: 1px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: var(--coral); color: var(--ground); font: 600 9.5px/14px var(--ui); text-align: center; }
+.bar #review-btn .rv-ico { display: none; }
+.bar #review-btn .rv-n { margin-left: 4px; color: var(--coral); }
+.bar #review-btn .rv-n::before { content: "("; } .bar #review-btn .rv-n::after { content: ")"; }
+.map-more-menu { width: min(220px, 100%); }
+.map-more-body #theme-btn { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
+.map-more-body #theme-btn:hover { background: var(--raise); }
+.map-more-body { display: flex; flex-direction: column; gap: 4px; }
+
+/* T-1025: the mode switch, the device state, the recording pill, the readouts and the stream line
+   are five SEPARATE chips on a row that paints nothing — never one pill 470 px wide across the top
+   edge, which is the bar the user still saw after T-993. */
+.map-status { top: 0; left: 50%; transform: translateX(-50%); white-space: nowrap; max-width: calc(100% - 2 * min(300px, 100% - var(--topright-w)) - 16px); box-sizing: border-box; min-height: 36px; }
+.map-status .modes { padding: 2px; gap: 2px; }
+.map-status .mode { padding: 4px 9px; min-height: 30px; font-size: 12px; }
+.map-status #device, .map-status .rec-pill, .map-status .readouts, .map-status .conn { padding: 4px 10px; min-height: 34px; align-items: center; }
+.map-status .readouts { gap: 10px; }
+.map-status .ro { flex-direction: row; align-items: baseline; gap: 5px; }
+.map-ctl.is-idle .map-status:has(.conn:not([hidden])) { opacity: 1; }
+
+.map-nudge { top: 44px; left: 0; display: flex; align-items: center; padding: 3px 6px; min-height: 36px; box-sizing: border-box; }
+.map-nudge .nudge-btn { min-height: 28px; min-width: 28px; }
+
+/* ---- T-997: the inventory pills, the left stack's third row -------------------------------------
+   The lists' counts used to be a chip pinned at MID-HEIGHT on the left edge (T-895) — over each
+   pane's time ruler (`surface/hud.ts` prints the time labels down that edge), belonging to no
+   cluster. They are two small pills here instead: docked under Go-to and the nudge row, in one
+   fixed position at every width, fading with the rest of the cluster (`map-fade`), and each opening
+   the bottom sheet on its own list (`chrome/inv-pills.ts`). No hamburger glyph: the pills ARE the
+   affordance. Every row below them moves down by one row's height — the left stack is a stack. */
+.map-inv { top: 88px; left: 0; display: flex; align-items: center; gap: 2px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; }
+.map-pill { display: flex; align-items: baseline; gap: 4px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 7px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
+.map-pill:hover { background: var(--raise); }
+.map-pill:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.map-pill-n { font-family: var(--mono); font-weight: 600; }
+.map-pill-n.candidate { color: var(--lav); }
+.map-pill-n.confirmed { color: var(--teal); }
+.map-pill small { color: var(--muted); font-size: 11px; }
+.map-pill-sep { color: var(--dim); }
+.map-offer { top: 132px; }
+
+/* Not enough room for the pill between Go-to and the cluster: it drops under the cluster (right),
+   beside the nudges (left); the tool-mode banner moves below both rows. */
+@media (max-width: 1180px) {
+  .map-status { top: 44px; left: auto; right: 0; transform: none; max-width: calc(100% - 8px); }
+  .map-mode { top: 176px; }
+}
+@media (max-width: 900px) {
+  .map-status .readouts { display: none; }
+}
+/* Phone (T-824's breakpoint): the cluster's buttons narrow so Go-to keeps a usable width beside
+   eight of them, the nudges drop their label, and the pill states the device by its dot and label
+   on the row under the nudges. */
+@media (max-width: 600px) {
+  .map-ctl { --topright-w: 328px; } /* T-1025, +T-1028's chip: 9 × 32 + 8 × 4 + 8 */
+  .map-topright { gap: 4px; }
+  .map-status { gap: 4px; }
+  .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }
+  .map-hint { display: none; }
+  .map-nudge { padding: 3px 4px; }
+  .map-nudge .nudge-label { display: none; }
+  .map-nudge .nudge-btn { padding: 2px 4px; }
+  .map-status { top: 88px; gap: 6px; padding-right: 8px; }
+  .map-status .mode { padding: 4px 7px; font-size: 11.5px; }
+  /* T-997: the status pill takes the row at 88 px here and is as wide as the phone, so the pills
+     drop under it rather than beside it — one fixed position per width, never an overlap. */
+  .map-inv { top: 132px; }
+  .map-offer { top: 176px; }
+  .map-mode { top: 220px; }
+}

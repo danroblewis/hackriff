@@ -20,18 +20,20 @@ const hitTest = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.st
   return { label: (el.textContent ?? '').trim(), covered: top ? (top.className || top.tagName) : 'nothing',
            bySheet: !!top?.closest('.sheet'), ok: !!top && (top === el || el.contains(top)) };
 }).filter((b) => !b.ok))`;
-const TOP_CONTROLS = ".map-goto input, .map-topright button";
+// T-993: plus the retired top bar's controls, which now float as the nudge row and the status pill.
+const TOP_CONTROLS = ".map-goto input, .map-topright button, .map-nudge .nudge-btn, .map-status .mode";
 const UNCLICKABLE = hitTest(TOP_CONTROLS);
 /** The lowest bottom of the floating top chrome — what `focus-sheet.ts`'s `clearOf` measures. */
-const TOP_BOTTOM = `Math.max(...[...document.querySelectorAll('.map-ctl .map-goto, .map-ctl .map-topright')].map((e) => e.getBoundingClientRect().bottom))`;
+const TOP_BOTTOM = `Math.max(...[...document.querySelectorAll('.map-ctl .map-goto, .map-ctl .map-topright, .map-ctl .map-nudge, .map-ctl .map-status')].map((e) => e.getBoundingClientRect().bottom))`;
 // T-802's floating controls on the right edge: the sheet grows upward beside them (its gutter), so
 // they must be pressable at every snap height.
-const MAP_RIGHT = hitTest(".map-fab, .map-zoom-in, .map-zoom-out");
+// (T-1001 retired the FAB; each pane's Live button lives inside the pane, well clear of the sheet.)
+const MAP_RIGHT = hitTest(".map-zoom-in, .map-zoom-out");
 // ...and neither may sit over the sheet either (the cluster paints above it, so a hit test from the
 // control's side alone passes while the control hides the sheet's content): the boxes are disjoint.
 const OVERLAPS_SHEET = `JSON.stringify((() => {
   const s = document.querySelector('.sheet').getBoundingClientRect();
-  return [...document.querySelectorAll('.map-fab, .map-zoom')].map((el) => ({ cls: el.className, r: el.getBoundingClientRect() }))
+  return [...document.querySelectorAll('.map-zoom')].map((el) => ({ cls: el.className, r: el.getBoundingClientRect() }))
     .filter(({ r }) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top)
     .map(({ cls }) => cls);
 })())`;
@@ -57,12 +59,12 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   // (1) Peek is a title strip that states the (empty) selection.
   assert.ok((await height()) < 80, `peek is a strip, got ${await height()} px`);
   assert.match(await page.$text(".sheet-title"), /nothing yet/);
-  await page.waitFor("the floating controls to mount", "!!document.querySelector('.map-fab')", { timeoutMs: 30000 });
-  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at peek, the sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at peek, the FAB or zoom overlaps the sheet");
+  await page.waitFor("the floating controls to mount", "!!document.querySelector('.map-zoom-in')", { timeoutMs: 30000 });
+  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at peek, the sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at peek, the zoom stack overlaps the sheet");
 
   // (2) A real drag on the grab handle, released near the half-height mark, snaps to half.
-  // T-933 (review finding): the minimap's sheet clearance is anchored to the sheet's fixed bottom
+  // T-933 (review finding): the panes' sheet clearance is anchored to the sheet's fixed bottom
   // edge and the constant peek height, never its live top/height — a mid-drag regression would
   // show up as the canvas's own `insetBottom` (`centre/surface.ts`'s `fit`) tracking the sheet's
   // height as it rises toward full, which shifts every pane. Sampled through the drag itself,
@@ -80,17 +82,17 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
     if (i === Math.floor(steps / 2)) midInsets.push((await page.canvasInsets()).bottom);
   }
   await page.mouse("mouseReleased", g.x, g.y - dy, { buttons: 0, clickCount: 1 });
-  t.diagnostic(`minimap clearance through the drag: before ${insetBefore}, mid-drag ${JSON.stringify(midInsets)}`);
+  t.diagnostic(`pane clearance through the drag: before ${insetBefore}, mid-drag ${JSON.stringify(midInsets)}`);
   for (const mid of midInsets) {
-    assert.ok(Math.abs(mid - insetBefore) < 1, `the minimap's clearance moved mid-drag (${insetBefore} -> ${mid}) — it followed the sheet's rising height`);
+    assert.ok(Math.abs(mid - insetBefore) < 1, `the panes' clearance moved mid-drag (${insetBefore} -> ${mid}) — it followed the sheet's rising height`);
   }
   await waitSnap("half");
   assert.ok(Math.abs((await page.canvasInsets()).bottom - insetBefore) < 1,
-    "the minimap's clearance changed once the sheet settled at half");
+    "the panes' clearance changed once the sheet settled at half");
   const half = await height();
   assert.ok(half > vh * 0.3 && half < vh * 0.6, `half is ~45 vh, got ${half} of ${vh}`);
-  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at half, the sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at half, the FAB or zoom overlaps the sheet");
+  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at half, the sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at half, the zoom stack overlaps the sheet");
 
   // (3) Non-modal: beside the open sheet, the browser's own hit test lands on the surface, and a
   // drag there pans the view — with the sheet still open.
@@ -114,11 +116,13 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   await page.click("document.querySelector('.sheet-grab')");
   await waitSnap("full");
   const full = await page.$rect(".sheet");
-  const bar = await page.$rect(".app > .bar");
-  assert.ok(full.y >= bar.y + bar.h, `full stops below the top bar (${full.y} vs ${bar.y + bar.h})`);
+  // T-993: there is no top bar to stop below; the full sheet stops below the floating top chrome
+  // that replaced it (Go-to, nudges, the cluster, the mode/status pill).
+  const topBottom = await page.eval(TOP_BOTTOM);
+  assert.ok(full.y >= topBottom, `full stops below the top chrome (${full.y} vs ${topBottom})`);
   assert.deepEqual(JSON.parse(await page.eval(UNCLICKABLE)), [], "the full sheet covers a toolbar button");
-  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at full, the sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at full, the FAB or zoom overlaps the sheet");
+  assert.deepEqual(JSON.parse(await page.eval(MAP_RIGHT)), [], "at full, the sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "at full, the zoom stack overlaps the sheet");
 
   // (5) Per-viewer state: a reload comes back at full.
   // (A reload, not a goto: the app strips `#token=` from the address bar, so navigating back to the
@@ -158,9 +162,9 @@ for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sh
     + `unpressable top controls (not the sheet's doing unless bySheet): ${JSON.stringify(bad)}`);
   assert.deepEqual(bad.filter((b) => b.bySheet), [], "the full sheet covers a top control");
   const right = JSON.parse(await page.eval(MAP_RIGHT));
-  t.diagnostic(`FAB/zoom not pressable at ${width} px: ${JSON.stringify(right)}`);
-  assert.deepEqual(right.filter((b) => b.bySheet), [], "the full sheet covers the FAB or zoom");
-  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "the FAB or zoom overlaps the full sheet");
+  t.diagnostic(`zoom not pressable at ${width} px: ${JSON.stringify(right)}`);
+  assert.deepEqual(right.filter((b) => b.bySheet), [], "the full sheet covers the zoom stack");
+  assert.deepEqual(JSON.parse(await page.eval(OVERLAPS_SHEET)), [], "the zoom stack overlaps the full sheet");
   const edges = JSON.parse(await page.eval(`JSON.stringify({ sheet: document.querySelector('.sheet').getBoundingClientRect().top,
     bar: ${TOP_BOTTOM} })`));
   assert.ok(edges.sheet >= edges.bar, `the full sheet's top (${edges.sheet}) rises over the top controls (end ${edges.bar})`);
