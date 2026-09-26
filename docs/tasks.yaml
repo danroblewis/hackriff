@@ -29923,7 +29923,7 @@ tasks:
   - id: T-1010
     milestone: M2-hardening
     title: "On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame"
-    status: in-progress
+    status: done
     branch: task-t1010
     priority: normal
     deps:
@@ -29951,6 +29951,7 @@ tasks:
       Commits: a771d674, 6babfc21
       Observed, not chased: The pre-existing red reported in the first hand-back (hk-cli::api_contract::a_retune_keeps_connected_stream_consumers_connected, which reproduced on main at 54a22653) passes on the merged tree at d91603f4 - main's batch has fixed it. No ticket needed. | The api_contract close-code test still covers only the three codes a client can provoke against a live pipeline (4000+status, 1002, 1000); the two 1008s cannot be provoked there deterministically, because any consumer slow enough to be dropped has a full socket buffer - exactly the case the non-blocking write must skip. They are asserted by the hk-api unit test over a real socket, and docs/api.md says delivery is best effort.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 98c107db
   - id: T-1011
     milestone: M3
     title: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
