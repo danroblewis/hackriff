@@ -31553,6 +31553,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/accept_encoding/)'`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1021 + T-1058 workers 2026-09-26: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
+
+      2026-09-26 coordinator: queued UNPROVEN - the worker never saw its own target test green: every run timed out earlier at api_contract.rs:221 ('timed out waiting for the station's tile to be observed', a 60 s wait) at Mac load 60-100. The gate arbitrates; if the sealed+observed wait cannot be met on this fixture, the gate will show it - then re-open here.
   - id: T-1077
     milestone: MLIVE
     title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
@@ -31700,6 +31702,61 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands
+  - id: T-1085
+    milestone: M2-hardening
+    title: "listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-LISTEN-STEREO
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      SEEN BY T-1071's worker (2026-09-26 ~06:00, `just test-crate hk-pipeline`, load avg 26): hk-pipeline::listen_conformance `listen_stereo_is_opt_in_interleaved_and_reports_the_pilot` failed with 'sample_index jumped 0 -> 1920 with no DISCONTINUITY flag' (30 s); it passed alone twice (11.8 s, 10.1 s). Never seen red in a merge gate (0 FAIL lines in the merge-runner log).
+      WHY IT IS NOT JUST A LOAD FLAKE: under load the listen path may legitimately lose audio, but the stream contract (hk-stream; docs/api.md stream records) says a gap in sample_index is ALWAYS flagged DISCONTINUITY - an unflagged jump is a consumer-visible contract violation (a decoder downstream would splice across it silently). So either the stereo interleaved path advances sample_index without setting the flag when it drops/skips a block under backpressure (a PRODUCT defect that load exposes), or the test reads the index across a legitimate restart the product flags elsewhere (then say where, with evidence).
+      DELIVER (deflake-triage): reproduce under load deterministically - e.g. a slow consumer / delayed reader in the test harness (not a CPU-spinner) - and find where sample_index advances by 1920 (one block?) without DISCONTINUITY; fix the product so every gap is flagged; pin it with a test that is red without the fix. Never loosen the 'no unflagged jump' assertion.
+      ACCEPTANCE: the test green 10/10 alone and 5/5 inside `just test-crate hk-pipeline`; a new deterministic test (slow consumer) red on the pre-fix code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1071 worker 2026-09-26: listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag
+    high_effort_reason: stream-contract defect on the real-time listen path, only under load; hard debugging
+  - id: T-1086
+    milestone: M2-hardening
+    title: "An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-LIVENESS-HORIZON
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      PRODUCT FLAW (found by the coordinator's deflaker 2026-09-26 ~06:30 while triaging api_contract events_and_presence_serve_the_durable_catalogue; probe test, uncommitted): for the first ~70 ms of an on-air station's life it reads liveness `ended`, then `live`. Until the station's first follow report lands, its only presence-ledger rows are CLOSED ~1 s records that trail the capture edge, and the silence after them is measured off the IQ ring's SAMPLED time - which the detector has not analysed yet - so an end is reported that was never detected, and the next follow report revokes it. Probe: emitter ...6562 had one closed row at t+2.987 s and read `ended`; the follow report arrived at t+3.054 s and it read `live`. The first closed row comes from a separate writer, not from the pipeline's live offer (`file_inventory` in crates/hk-pipeline/src/detect.rs), so holding the offer + follow report under one lock does not close the window (draft dropped).
+      INVARIANT VIOLATED (CLAUDE.md, ADR-0017/0019): 'assume it continues to the live edge (end = null, ongoing) until an end is AFFIRMATIVELY detected'; silence may only count up to what the detector has actually analysed (T-940's observed-silence rule judges against the continuous floor - its sampled-vs-analysed horizon is the gap here). A premature `ended` also flickers the UI box (the T-388 jumpiness class) and the Candidate/Confirmed lists.
+      DELIVER: measure observed silence only up to the detector's ANALYSED horizon (not the ring's sampled edge), or treat an emitter whose newest row is closed but younger than one follow period as ongoing; whichever keeps one rule for every route (ObservedCoverage::track). Pin it: a deterministic test (mock SDR, pinned sample indices) where the first closed row lands before the first follow report -> liveness `live` at every instant, never `ended`.
+      ACCEPTANCE: the new test red on the pre-fix code, green 10/10; api_contract events_and_presence + inventory liveness tests green; T-940's observed-silence tests unchanged.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator deflaker 2026-09-26: An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)
+    high_effort_reason: liveness horizon on the detection/presence contract (ADR-0017/0019 end-is-affirmative invariant); cross-writer timing
+  - id: T-1087
+    milestone: M2-hardening
+    title: "events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: CLI-EVENTS-LIVE
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      FOLLOW-UP to the events_and_presence deflake (two fixes were made for one test on 2026-09-26: the pipeline manager's LANDED 0c0005d7 - brackets each comparison so a pair is only asserted while the store held still; and the coordinator's deflaker's branch task-fix-events-liveness fe122354, NOT landed). The coordinator's version found a gap the landed one may still have: without first WAITING until the station reads `live`, 3 of 5 runs compared two `ended` readings, so a route that applies ITS OWN liveness rule got through - measured with deliberate defects: 'the presence route closes the last interval by its own rule' was caught 5/5 WITH the live-wait, 2/5 without it; '/api/events does the same' caught 5/5 at events-vs-inventory.
+      DELIVER: on main (with 0c0005d7), re-inject those two deliberate defects and measure how often the landed test catches them; if < 5/5, add the wait-for-`live` precondition (see fe122354's read_across_a_still_store + live wait) to the landed bracket - same assertions, never looser. If the landed test already catches both 5/5, close this with the numbers.
+      ACCEPTANCE: both deliberate defects red 5/5; the unmodified test green 10/10 alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(events_and_presence)'`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator deflaker 2026-09-26: events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
