@@ -27674,6 +27674,8 @@ tasks:
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): SECOND DATA POINT (supervisor 07:17), FM/RDS unprompted re-measure 06:48 with the same 10 x 2.4 Msps windows as window 1's second pass (one server, retuned): 19 present / 12 with a WFM-width row / 1 PI unprompted (101.3, PI 1694) / 0 PS - vs the window-1 baseline 2/19 PI unprompted, 0 PS. CAVEAT: this run is INVALIDATED by T-941's new variant (marine -> FM retune: emitters_created 23 -> 24 while tracks_confirmed ~128 -> 494 - tracks confirm but no emitters are created, so no rows carry RDS). Re-measure after T-941 lands; the ratio target stays >= 90 %.
 
       2026-09-25 coordinator: the live-air verification (acceptance (1)/(2) on air) is split out as T-992 (blocked on a radio window); this ticket lands with the code fix, the fixtures and the guard once merged with main and deduplicated against T-935's explorer fixtures (Opus worker on it now).
+
+      2026-09-26 coordinator: fixed (27727df4) by lengthening SIGNAL-062's WFM scene to play once (6.5 s) instead of looping a 2 s scene - T-926's full-length windows now always crossed the loop seam, a real phase/bit jump; zero-error T-962 assertion unchanged. Worker's observation: other tests that loop a scene shorter than the WFM window (grep radio::looped) will hit the same seam; the SIGNAL-062 WFM test went 38 s -> 83 s.
     core_interface: true
     branch: task-t926
   - id: T-927
@@ -31293,6 +31295,41 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone/at 2 lanes on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1051 worker 2026-09-26: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
+  - id: T-1075
+    milestone: M2-hardening
+    title: api_contract a_retune_keeps_connected_stream_consumers_connected fails ALONE on main again in a worker worktree (load 5.3, 54a22653) - regression since T-974's fix; bisect and fix the product cause
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: CLI-RETUNE-STREAM
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FAILS ALONE ON MAIN AGAIN (T-1010's worker, handback 2026-09-26 ~00:40): hk-cli::api_contract `a_retune_keeps_connected_stream_consumers_connected` "fails in isolation at load 5.3 on an untouched detached worktree of main (54a22653) with the identical assertion". T-974 (done 2026-09-25 12:15, commit 333bc083/deebfca2) root-caused and fixed this test's red (retune 5/5 red alone in worker worktrees before its fix, 20/20 green after) - so this is a REGRESSION since, or T-974's fix did not cover a second cause. It has not shown in merge gates (0 FAIL lines in the merge-runner log), so something differs between the gate's environment and a worker worktree - T-974 found the same shape ('fail alone in worker worktrees but pass in the merge gate') and each had one deciding difference.
+      DELIVER (deflake-triage): reproduce alone on main's code in a worker worktree (loop the one test 10x: `cargo nextest run -p hk-cli -E 'binary(api_contract) & test(a_retune_keeps_connected_stream_consumers_connected)'`), record the assertion and where it fails, bisect main since 333bc083 for the commit that brought it back (git bisect run with that command), and fix the PRODUCT cause (a retune must keep connected stream consumers connected - CLAUDE.md: capture, ring and detection are always-on, and a retune is one gated DeviceAction). Never loosen the assertion; if it reads the wall clock to choose what to assert on, pin it to the wire instead (docs/10 §3.6).
+      ACCEPTANCE: the test green alone 10/10 in a worker worktree at load < 10, the bisected cause named, a test that is red without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1010 worker 2026-09-26: api_contract a_retune_keeps_connected_stream_consumers_connected fails ALONE on main again in a worker worktree (load 5.3, 54a22653) - regression since T-974's fix; bisect and fix the product cause
+    high_effort_reason: regression hunt (bisect) on the retune path of the always-on capture/stream contract; hard debugging
+  - id: T-1076
+    milestone: M2-hardening
+    title: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: CLI-TILE-ENC
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      NONDETERMINISTIC TEST (found by T-1021 and T-1058's workers 2026-09-26; $HACKRIFF_OPS/flaky.jsonl records it 2026-09-24, batch T-901, passes_alone 2): hk-cli::api_contract `tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding` failed at load ~23 with 'compact+gzip 57070 B against f16+gzip 56775 B' and 'compact+gzip 73025 B vs f16+gzip 66801 B'. It compares the encoded sizes of SEPARATE reads of a LIVE tile whose content changes between the reads (a ~300 B difference against ~1 KB of read-to-read noise), so the comparison is decided by what arrived in between, not by the encodings.
+      DELIVER: make the comparison deterministic - compare the encodings of the SAME tile content: read a SEALED tile (content can never change - T-572), or a frozen window of a finished replay, or request both encodings of one pinned read. Keep the intent exactly (the f16 plane + gzip is smaller than compact + gzip for the same content, and the route honours Accept-Encoding); never widen a tolerance to absorb the noise. Prove it would go red if the f16 plane stopped being smaller (e.g. force the compact plane in both and see the assertion fire).
+      ACCEPTANCE: the test green 10/10 alone and 5/5 inside the whole api_contract binary under load; the red proof stated.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/accept_encoding/)'`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1021 + T-1058 workers 2026-09-26: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
