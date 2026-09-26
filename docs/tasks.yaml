@@ -30511,7 +30511,7 @@ tasks:
   - id: T-1039
     milestone: MLIVE
     title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
-    status: in-progress
+    status: done
     branch: task-t1039
     priority: high
     deps:
@@ -30542,6 +30542,7 @@ tasks:
       Observed, not chased: Real-browser e2e for the SW reload-offline path is still not built: ui/e2e's harness.mjs/cdp.mjs have no Service Worker or offline-network support. Unchanged from the original handback's note -- a follow-up ticket for harness support would let this be closed with a browser-level proof. | The SW's sealed-tile cache (hk-sealed-tiles-v1) still grows without an eviction policy -- flagged by the reviewer as a non-blocking follow-up in review 1, left as-is per their own triage. | A co-occurring success in the same batch resets TileCache's whole silence ladder (T-499's pre-existing, deliberate 'one completion clears it' rule, general to the cache and not introduced by this ticket) -- costs at most one extra un-gated retry the first time an offline batch mixes a cached hit with an uncached miss, then self-corrects since the hit is resident and drops out of later requests. Asserted directly (not just described) in the new surface-tile-resilience.test.ts case. Not chased further: it is a deliberate, well-documented, general behavior outside this ticket's scope, not a defect this diff introduced.
       Use cases: AWARE-011
       Resources: 4 CPU-s, peak 0.4 GB
+    commit: 487b80a2
   - id: T-1040
     milestone: MLIVE
     title: coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
