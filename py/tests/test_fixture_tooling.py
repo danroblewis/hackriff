@@ -16,9 +16,12 @@ sys.path.insert(0, str(FIXTURE_TOOLS))
 
 import ais_ref  # noqa: E402
 import annotate  # noqa: E402
+import ctcss_ref  # noqa: E402
+import dmr_ref  # noqa: E402
 import fetch  # noqa: E402
 import flex_ref  # noqa: E402
 import fxlib  # noqa: E402
+import p25_ref  # noqa: E402
 import rds_ref  # noqa: E402
 import trim  # noqa: E402
 import verify  # noqa: E402
@@ -524,6 +527,184 @@ def test_flex_reference_oracle_finds_no_sync_in_noise():
     got = flex_ref.decode(x, fs)
     # random bits should essentially never match a specific 32-bit pattern within Hamming 3
     assert got["n_syncs"] <= 1
+
+
+def test_p25_reference_oracle_finds_synthetic_sync():
+    """A synthetic C4FM frame -- preamble + the 48-bit frame sync ``0x5575F5FF77FF`` sent as a
+    2-level (sign) pattern at its own outer C4FM deviation, followed by an NID-length run of
+    random 2-level symbols -- should be recovered at the natural bit order with zero Hamming
+    distance, at (about) the expected bit position."""
+    fs = 48_000.0
+    sps = fs / p25_ref.SYNC_RATE_BD  # 10, exact for a clean synthetic signal
+    dev = 1800.0  # C4FM outer deviation level
+    preamble = [i % 2 for i in range(48)]
+    sync_bits = [(p25_ref.P25_SYNC >> (p25_ref.SYNC_BITS - 1 - i)) & 1 for i in range(p25_ref.SYNC_BITS)]
+    nid_bits = int(round(0.18 * p25_ref.SYNC_RATE_BD))  # about one NID (64 bits) plus margin
+    rng = np.random.default_rng(7)
+    payload = rng.integers(0, 2, size=nid_bits).tolist()
+    bits = np.array(preamble + sync_bits + payload, dtype=np.uint8)
+    inst_freq = np.repeat(np.where(bits == 1, dev, -dev), int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+
+    got = p25_ref.decode(x, fs)
+    assert got["n_syncs"] >= 1
+    assert got["sync_hex"] == "5575F5FF77FF"
+    assert any(h["order"] == "natural" and h["hamming"] == 0 for h in got["syncs"])
+    natural_hits = [h["bit"] for h in got["syncs"] if h["order"] == "natural"]
+    assert min(abs(b - len(preamble)) for b in natural_hits) <= 1
+
+
+def test_p25_reference_oracle_reports_four_level_payload():
+    """A synthetic 4-level C4FM payload trace, sliced at the sync's own 4800 Bd symbol clock,
+    should be reported as (up to) 4 levels rather than 2."""
+    rng = np.random.default_rng(9)
+    fs = 48_000.0
+    sps = fs / p25_ref.SYNC_RATE_BD
+    n_sym = int(round(p25_ref.LEVEL_WINDOW_S * p25_ref.SYNC_RATE_BD)) + 50
+    levels = np.array([-1800.0, -600.0, 600.0, 1800.0])
+    symbols = levels[rng.integers(0, 4, size=n_sym)]
+    inst_freq = np.repeat(symbols, int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    freq = p25_ref.fm_discriminate(x, fs)
+
+    got = p25_ref.level_count(freq, syncs=[{"bit": 0}], off=0.0, sps=sps)
+    assert 2 <= got["n_levels"] <= 4
+    mags = sorted(abs(c) for c in got["level_centres_hz"])
+    assert abs(mags[-1] - 1800.0) < 500.0
+
+
+def test_p25_reference_oracle_finds_no_sync_in_noise():
+    """A pure-noise instantaneous-frequency trace should not spuriously report a sync (guards
+    against the Hamming tolerance being so loose it always fires)."""
+    rng = np.random.default_rng(13)
+    fs = 48_000.0
+    n_bits = 2000
+    sps = fs / p25_ref.SYNC_RATE_BD
+    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
+    inst_freq = np.repeat(np.where(bits == 1, 1800.0, -1800.0), int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    got = p25_ref.decode(x, fs)
+    # random bits should essentially never match a specific 48-bit pattern within Hamming 4
+    assert got["n_syncs"] <= 1
+
+
+def test_dmr_reference_oracle_finds_synthetic_sync():
+    """A synthetic 4-level 4FSK burst -- random preamble dibits + the 48-bit ``BS_data`` SYNC
+    pattern (sent using the full 4-level alphabet, unlike P25's 2-level sync) + a random-dibit
+    payload -- should be recovered at the natural bit order with zero Hamming distance."""
+    fs = 48_000.0
+    sps = fs / dmr_ref.SYNC_RATE_BD  # 10, exact for a clean synthetic signal
+    dev_map = {-3: -dmr_ref.OUTER_DEV_HZ, -1: -dmr_ref.INNER_DEV_HZ,
+              1: dmr_ref.INNER_DEV_HZ, 3: dmr_ref.OUTER_DEV_HZ}
+    rng = np.random.default_rng(3)
+    levels = [-3, -1, 1, 3]
+    preamble = [levels[rng.integers(0, 4)] for _ in range(30)]
+    payload = [levels[rng.integers(0, 4)] for _ in range(60)]
+    all_syms = preamble + dmr_ref.SYNC_SYMS["BS_data"] + payload
+    inst_freq = np.repeat([dev_map[s] for s in all_syms], int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+
+    got = dmr_ref.decode(x, fs)
+    assert got["n_syncs"] >= 1
+    assert got["syncs"][0]["pattern"] == "BS_data"
+    assert got["syncs"][0]["hamming"] == 0
+    assert got["syncs_by_pattern"] == {"BS_data": 1}
+    # the sync should land at (about) the expected symbol position
+    expected_sample = len(preamble) * sps
+    assert abs(got["syncs"][0]["sample"] - expected_sample) <= sps
+
+
+def test_dmr_reference_oracle_finds_no_sync_in_random_symbols():
+    """Pure random 4-level symbols (no embedded SYNC pattern) should essentially never corroborate
+    a chance alignment across enough timing phases to be reported -- guards the timing-phase
+    corroboration threshold against a noise floor that always fires."""
+    fs = 48_000.0
+    sps = fs / dmr_ref.SYNC_RATE_BD
+    dev_map = {-3: -dmr_ref.OUTER_DEV_HZ, -1: -dmr_ref.INNER_DEV_HZ,
+              1: dmr_ref.INNER_DEV_HZ, 3: dmr_ref.OUTER_DEV_HZ}
+    levels = [-3, -1, 1, 3]
+    worst = 0
+    for seed in range(10):
+        rng = np.random.default_rng(100 + seed)
+        n_syms = 5 * 4800
+        syms = [levels[rng.integers(0, 4)] for _ in range(n_syms)]
+        inst_freq = np.repeat([dev_map[s] for s in syms], int(round(sps)))
+        inst_freq = inst_freq + rng.normal(0, 300, size=inst_freq.shape)
+        phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+        x = np.exp(1j * phase)
+        got = dmr_ref.decode(x, fs)
+        worst = max(worst, got["n_syncs"])
+    # 4-level slicing's timing-phase corroboration is thinner-margin than P25's 2-level sign
+    # slice (dmr_ref.MIN_PHASE_CORROBORATION's docstring): an occasional chance corroboration on
+    # pure noise is expected, but never more than one in a 5 s clip.
+    assert worst <= 1
+
+
+def test_dmr_reference_oracle_reports_four_level_payload():
+    rng = np.random.default_rng(9)
+    fs = 48_000.0
+    sps = fs / dmr_ref.SYNC_RATE_BD
+    n_sym = int(round(dmr_ref.LEVEL_WINDOW_S * dmr_ref.SYNC_RATE_BD)) + 50
+    levels = np.array([-dmr_ref.OUTER_DEV_HZ, -dmr_ref.INNER_DEV_HZ, dmr_ref.INNER_DEV_HZ,
+                       dmr_ref.OUTER_DEV_HZ])
+    symbols = levels[rng.integers(0, 4, size=n_sym)]
+    inst_freq = np.repeat(symbols, int(round(sps)))
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+    freq = dmr_ref.fm_discriminate(x, fs)
+
+    got = dmr_ref.level_count(freq, syncs=[{"bit": 0}], off=0.0, sps=sps)
+    assert 2 <= got["n_levels"] <= 4
+    mags = sorted(abs(c) for c in got["level_centres_hz"])
+    assert abs(mags[-1] - dmr_ref.OUTER_DEV_HZ) < 500.0
+
+
+def test_ctcss_reference_oracle_measures_known_tone_to_tenth_hz():
+    """A synthetic NBFM signal with a 233.6 Hz sub-audible CTCSS tone plus wideband >300 Hz
+    "voice" noise: the oracle should measure the tone to within 0.1 Hz and match it to the EIA
+    table entry exactly."""
+    fs = 48_000.0
+    t = np.arange(int(8.0 * fs)) / fs
+    rng = np.random.default_rng(5)
+    voice = np.convolve(rng.normal(0, 2000, size=t.shape), np.ones(50) / 50, mode="same")
+    inst_freq = 500.0 * np.sin(2 * np.pi * 233.6 * t) + voice
+    phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+    x = np.exp(1j * phase)
+
+    got = ctcss_ref.decode(x, fs)
+    assert got["tone_hz_measured"] is not None
+    assert abs(got["tone_hz_measured"] - 233.6) < 0.1
+    assert got["ctcss"] is not None
+    assert got["ctcss"]["label"] == "233.6"
+    assert got["tone_snr_db"] > ctcss_ref.MIN_SNR_DB
+
+
+def test_ctcss_reference_oracle_finds_no_tone_in_noise():
+    """Pure sub-audible-band noise (no tone) should not spuriously match a CTCSS table entry --
+    the Welch-averaged noise guard this module's docstring explains is needed."""
+    fs = 48_000.0
+    t = np.arange(int(8.0 * fs)) / fs
+    worst_snr = -99.0
+    for seed in range(10):
+        rng = np.random.default_rng(2000 + seed)
+        inst_freq = rng.normal(0, 300, size=t.shape)
+        phase = 2 * np.pi * np.cumsum(inst_freq) / fs
+        x = np.exp(1j * phase)
+        got = ctcss_ref.decode(x, fs)
+        assert got["ctcss"] is None
+        if got["tone_snr_db"] is not None:
+            worst_snr = max(worst_snr, got["tone_snr_db"])
+    assert worst_snr < ctcss_ref.MIN_SNR_DB
+
+
+def test_ctcss_nearest_match_rejects_far_measurements():
+    assert ctcss_ref.nearest_ctcss(233.6)["label"] == "233.6"
+    assert ctcss_ref.nearest_ctcss(100.0)["delta_hz"] == 0.0
+    assert ctcss_ref.nearest_ctcss(300.0) is None  # nowhere near a table entry
 
 
 def committed_entries():
