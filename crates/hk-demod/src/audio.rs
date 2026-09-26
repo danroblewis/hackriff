@@ -13,7 +13,7 @@
 //! | Mode | Channel | Audio |
 //! |---|---|---|
 //! | WFM | 200 kHz at 240 kS/s | [`WfmDemod`] mono, 75 µs de-emphasis, deviation-scaled (no AGC) |
-//! | NBFM | OBW99 × 1.25, 6–25 kHz | discriminator / 5 kHz, 3.5 kHz low-pass, DC removed (no AGC) |
+//! | NBFM | OBW99 × 1.25, 6–25 kHz | discriminator / 5 kHz, 3.5 kHz low-pass, DC removed (no AGC); CTCSS/DCS identified blind on the discriminator ([`AudioDemod::subaudible`], T-988) |
 //! | AM | OBW99 × 1.1, 5–20 kHz | envelope, DC removed, 5 kHz low-pass, AGC |
 //! | SSB | OBW99, 2.4–4 kHz | sideband (from spectral symmetry) shifted to 0 Hz, real part, AGC |
 //! | CW | 500 Hz | carrier shifted to a 700 Hz tone, AGC |
@@ -33,11 +33,13 @@ use hk_estimate::{
     EstimatorConfig, Hints, ParamEstimator, ParameterSet, SnippetConfig, SnippetExtractor,
     SnippetRequest,
 };
+use hk_model::Subaudible;
 use num_complex::Complex32;
 
 use crate::dsp::{Discriminator, FirDecimator, lowpass_taps};
 use crate::mode::{AnalogMode, ModeDecision, ModeSelector};
 use crate::receiver::DemodError;
+use crate::subaudible::{SubaudibleConfig, SubaudibleDetector};
 use crate::wfm::{MPX_RATE_HZ, WfmConfig, WfmDemod};
 
 /// Audio output rate, Hz.
@@ -232,6 +234,10 @@ enum Kind {
         lp: FirDecimator<f32>,
         scale: f32,
         dc: f32,
+        /// Blind CTCSS/DCS identification on the discriminator (T-988).
+        sub: Box<SubaudibleDetector>,
+        /// Discriminator output of the current block, Hz (reused; no steady-state allocation).
+        hz: Vec<f32>,
     },
     Am {
         lp: FirDecimator<f32>,
@@ -253,6 +259,8 @@ pub struct AudioDemod {
     out: Vec<f32>,
     level: f64,
     level_init: bool,
+    audio_level: f64,
+    audio_level_init: bool,
     squelch_open: bool,
     env: f32,
     gain: f32,
@@ -292,6 +300,8 @@ impl AudioDemod {
                 ),
                 scale: (1.0 / cfg.nbfm_deviation_hz) as f32,
                 dc: 0.0,
+                sub: Box::new(SubaudibleDetector::new(SubaudibleConfig::default(), rate)?),
+                hz: Vec::new(),
             },
             (AnalogMode::Am, _) => Kind::Am {
                 lp: FirDecimator::new(
@@ -326,6 +336,8 @@ impl AudioDemod {
             out: Vec::new(),
             level: 0.0,
             level_init: false,
+            audio_level: 0.0,
+            audio_level_init: false,
             env: 0.0,
             gain: 1.0,
         })
@@ -391,14 +403,20 @@ impl AudioDemod {
                 lp,
                 scale,
                 dc,
+                sub,
+                hz,
             } => {
+                hz.clear();
                 for &s in x {
-                    let f = disc.push(s) * *scale;
-                    if let Some(y) = lp.push(f) {
+                    let f_hz = disc.push(s);
+                    hz.push(f_hz);
+                    if let Some(y) = lp.push(f_hz * *scale) {
                         *dc += 0.001 * (y - *dc);
                         self.out.push(y - *dc);
                     }
                 }
+                // Only on-air audio is analysed: squelch-closed noise would dilute a tone.
+                sub.push(hz, self.squelch_open);
             }
             Kind::Am { lp, dc } => {
                 for &s in x {
@@ -434,6 +452,23 @@ impl AudioDemod {
             for y in &mut self.out[start..] {
                 *y = y.clamp(-1.0, 1.0);
             }
+        }
+        // Delivered-audio power, smoothed the same way as the channel power above but over the
+        // samples that actually leave [`Self::take_audio`] / [`Self::drain_audio_into`] — after
+        // demod, AGC and the ±1 clamp — so [`Self::level_dbfs`] reports what a listener (or the
+        // stream's audio meter) gets, not the DDC's pre-demod channel power (T-966).
+        if !self.out[start..].is_empty() {
+            let alpha_audio = 1.0 - (-1.0 / (self.cfg.level_tau_s * AUDIO_RATE_HZ)).exp();
+            let mut audio_level = self.audio_level;
+            for &y in &self.out[start..] {
+                let p = f64::from(y) * f64::from(y);
+                if !self.audio_level_init {
+                    audio_level = p;
+                    self.audio_level_init = true;
+                }
+                audio_level += alpha_audio * (p - audio_level);
+            }
+            self.audio_level = audio_level;
         }
         Ok(())
     }
@@ -510,14 +545,37 @@ impl AudioDemod {
         out.append(&mut self.out);
     }
 
+    /// Blind sub-audible squelch identification (T-988): `Some` on an NBFM channel — a CTCSS
+    /// tone, a DCS code, `none` once enough on-air audio found neither, or `measuring` before —
+    /// and `None` on every other mode (nobody looked).
+    pub fn subaudible(&mut self) -> Option<Subaudible> {
+        match &mut self.kind {
+            Kind::Nbfm { sub, .. } => Some(sub.report()),
+            _ => None,
+        }
+    }
+
+    /// Carries the sub-audible analysis over from the demodulator this one replaces (a refined
+    /// retune of the same NBFM channel), so a rebuild does not restart the measurement.
+    pub fn inherit_subaudible(&mut self, old: &mut AudioDemod) {
+        if let (Kind::Nbfm { sub, .. }, Kind::Nbfm { sub: prev, .. }) =
+            (&mut self.kind, &mut old.kind)
+        {
+            std::mem::swap(sub, prev);
+        }
+    }
+
     /// Squelch state.
     pub fn squelch_open(&self) -> bool {
         self.squelch_open
     }
 
-    /// Smoothed channel power, dBFS.
+    /// Smoothed level of the **delivered audio**, dBFS — the same samples [`Self::take_audio`] /
+    /// [`Self::drain_audio_into`] yield, after demod, AGC and the ±1 clamp, so it never reads
+    /// above 0 dBFS and matches the RMS a consumer measures on the stream (T-966). Distinct from
+    /// the pre-demod DDC channel power squelch and [`Self::snr_db`] compare against.
     pub fn level_dbfs(&self) -> f64 {
-        10.0 * self.level.max(1e-20).log10()
+        10.0 * self.audio_level.max(1e-20).log10()
     }
 
     /// Channel SNR, dB, with a noise estimate.
@@ -831,6 +889,68 @@ mod tests {
         assert!(
             mid.chunks_exact(2).any(|lr| lr[0] != lr[1]),
             "stereo while locked"
+        );
+    }
+
+    /// T-966: a live capture reported `level_dbfs` of +1.3..+1.6 dBFS (above full scale) while
+    /// the delivered audio measured -9.4 dBFS RMS — `level_dbfs` was reading the pre-demod DDC
+    /// channel power, which is unrelated to the audio a listener or the stream's meter gets and
+    /// isn't bounded by full scale at all. Feed a carrier well above unity IQ amplitude (as an
+    /// unnormalized front-end gain would deliver) modulating an NBFM tone: the pre-demod channel
+    /// power alone would read `10*log10(2.0^2) ≈ +6 dBFS`, but the delivered audio (discriminator
+    /// output, always clamped to ±1) cannot exceed 0 dBFS. `level_dbfs` must track the delivered
+    /// audio's own RMS, not the channel power.
+    ///
+    /// Red on the pre-fix code (`level_dbfs` returning the channel-power `level`): a strong
+    /// carrier reads `level_dbfs` far above 0 dBFS and far from the delivered audio's RMS.
+    #[test]
+    fn level_dbfs_tracks_the_delivered_audio_not_the_pre_demod_channel_power() {
+        let n = (1.5 * FS) as usize;
+        let off = 90e3;
+        let mut iq = noise(n, 41, 0.002);
+        let (dev, tone) = (3_000.0, 700.0);
+        for (k, s) in iq.iter_mut().enumerate() {
+            let t = k as f64 / FS;
+            let ph = TAU * off * t + dev / tone * (TAU * tone * t).sin();
+            // Amplitude 2.0: well above unity, as raw unnormalized front-end IQ can be.
+            *s += Complex32::new(2.0 * ph.cos() as f32, 2.0 * ph.sin() as f32);
+        }
+        let plan = AudioPlan {
+            mode: AnalogMode::Nbfm,
+            sideband: None,
+            channel_center_hz: FC + off,
+            channel_bandwidth_hz: 20e3,
+            noise_power: None,
+            agc: false,
+            deemphasis_s: None,
+        };
+        let p = provenance();
+        let mut d = AudioDemod::new(plan, AudioConfig::default(), FS, FC).unwrap();
+        let mut audio = Vec::new();
+        let mut idx = 0;
+        for chunk in iq.chunks(8192) {
+            d.process(info(&p, idx as u64), chunk).unwrap();
+            d.drain_audio_into(&mut audio);
+            idx += chunk.len();
+        }
+        let reported = d.level_dbfs();
+        assert!(
+            reported <= 1e-6,
+            "level_dbfs must never read above full scale (clamped audio): got {reported}"
+        );
+        // The delivered audio's own RMS, measured independently over the settled tail (skip the
+        // smoothing filter's ~50 ms transient).
+        let tail = &audio[audio.len() / 4..];
+        let ms = tail
+            .iter()
+            .map(|&y| f64::from(y) * f64::from(y))
+            .sum::<f64>()
+            / tail.len() as f64;
+        let measured_dbfs = 10.0 * ms.max(1e-20).log10();
+        assert!(
+            (reported - measured_dbfs).abs() < 0.5,
+            "level_dbfs {reported} should be within 0.5 dB of the delivered audio's measured RMS \
+             {measured_dbfs}"
         );
     }
 

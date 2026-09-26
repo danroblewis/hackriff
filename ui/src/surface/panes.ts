@@ -146,6 +146,11 @@ export const following = (p: PaneState): boolean => p.time.live;
  * that re-laid-out on a change event rather than on every render frame is T-388's box-jump. The
  * minimap (T-443) and the chrome read [[list]] and [[views]] each frame, like the renderer does.
  */
+/** A tuned window worth acting on: finite centre, positive finite span. */
+function validTuned(t: { centerHz: number; spanHz: number } | null): t is { centerHz: number; spanHz: number } {
+  return !!t && Number.isFinite(t.centerHz) && Number.isFinite(t.spanHz) && t.spanHz > 0;
+}
+
 export class PaneModel {
   private readonly panes = new Map<string, PaneState>();
   private root: LayoutNode;
@@ -520,6 +525,42 @@ export class PaneModel {
 
   /** The play/pause toggle, as one control over one state (T-347's shape, per pane). */
   setFollowing(id: string, on: boolean): void { if (on) this.follow(id); else this.pause(id); }
+
+  /** Does this pane's frequency window overlap `[centerHz ± spanHz/2]`? View arithmetic only. */
+  overlapsFreq(id: string, centerHz: number, spanHz: number): boolean {
+    const p = this.panes.get(id);
+    if (!p) return false;
+    const lo = p.freq.centerHz - p.freq.spanHz / 2, hi = p.freq.centerHz + p.freq.spanHz / 2;
+    return lo < centerHz + spanHz / 2 && hi > centerHz - spanHz / 2;
+  }
+
+  /**
+   * **Is this pane at the live edge of the tuned window?** (T-955) — following in TIME *and*
+   * showing the tuned window in FREQUENCY. `tuned = null` (no front end reports one: a replay, a
+   * server with no device) reduces it to [[isFollowing]]. A pane following the live edge of
+   * spectrum the radio has left is NOT at the tuned live edge: it reads "LIVE" over nothing new.
+   *
+   * This is the state the follow-live control toggles on (the FAB today, T-1001's per-pane
+   * Live/Freeze later): at the tuned live edge a press freezes; anywhere else it brings the pane
+   * there with [[followTuned]] — so the control can never freeze a pane that is not at the edge.
+   */
+  atTunedLiveEdge(id: string, tuned: { centerHz: number; spanHz: number } | null): boolean {
+    if (!this.isFollowing(id)) return false;
+    return !validTuned(tuned) || this.overlapsFreq(id, tuned.centerHz, tuned.spanHz);
+  }
+
+  /**
+   * **Bring this pane to the live edge of the tuned window** (T-955): follow in time, and — only
+   * when the pane does not overlap the tuned window — move its frequency window onto it. A pane
+   * already overlapping the tuned window keeps its centre and span, so a user's zoom inside the
+   * tuned band survives the press. View state only; the radio is not asked anything.
+   */
+  followTuned(id: string, tuned: { centerHz: number; spanHz: number } | null): void {
+    this.follow(id);
+    if (validTuned(tuned) && !this.overlapsFreq(id, tuned.centerHz, tuned.spanHz)) {
+      this.setFreq(id, tuned.centerHz, tuned.spanHz);
+    }
+  }
 
   /**
    * **Is this pane following the live edge?** The *committed* state — which, mid-gesture, is not

@@ -53,13 +53,17 @@ test("the one window listener: only Escape, only when not already handled, preve
 
 test("every map overlay registers on the stack and has a visible dismiss; no private Escape handlers", () => {
   const src = (f: string) => readFileSync(`src/app/chrome/${f}`, "utf8");
-  for (const f of ["sheet.ts", "side-chip.ts", "map-controls.ts"]) {
+  // T-997: the left-hand lists overlay (`side-chip.ts`) is retired — the lists are sheet content
+  // and the pills that open them (`inv-pills.ts`) are chrome, not an overlay, so they register
+  // nothing and dismiss through the sheet's own close.
+  for (const f of ["sheet.ts", "map-controls.ts"]) {
     const s = src(f);
     assert.match(s, /trackOverlay\(/, `${f} does not register its overlay`);
     assert.doesNotMatch(s, /"Escape"/, `${f} handles Escape privately (it would close more than the topmost)`);
   }
   assert.match(src("sheet.ts"), /className = "sheet-close"/);
-  assert.match(src("side-chip.ts"), /class: "side-close"/);
+  const pills = src("inv-pills.ts");
+  assert.doesNotMatch(pills, /trackOverlay\(|"Escape"/, "the pills are chrome, not an overlay with its own Escape");
   assert.match(src("map-controls.ts"), /class: "map-layers-close"/);
   assert.match(src("map-controls.ts"), /class: "map-offer-x"/);
   assert.match(src("map-controls.ts"), /map-pane-close"/);

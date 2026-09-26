@@ -59,6 +59,19 @@ pub const FEATURES_VERSION_INDETERMINATE: u32 = 1;
 /// Maximum reported confidence: no call is certain.
 pub const MAX_CONFIDENCE: f64 = 0.999;
 
+/// Maximum posterior an **abstention** may carry (T-970).
+///
+/// `unknown` is a real outcome, not a claim about the world, and the two must not be reported on
+/// the same scale. Until T-970 a row the cascade could measure nothing on came out at
+/// [`MAX_CONFIDENCE`] — the explorer's 2026-09-25 window found broadcast stations with a locked
+/// 19 kHz pilot and a CRC-valid RDS decode reading `unknown 0.999`, drawn as "100 % unk" — which
+/// says the system is *more* sure it cannot name the emission than it is ever allowed to be that
+/// it can. An abstention exists because something could not be measured, so the residual belongs
+/// to the labels that were not ruled out, and the number reported is bounded below the cap a
+/// positive call may reach. `hk_classify::classifier` applies it; ADR-0016 §4.4's abstention
+/// conditions are unchanged, and nothing here turns an abstention into a family.
+pub const MAX_UNKNOWN_CONFIDENCE: f64 = 0.9;
+
 /// Minimum uniform weight λ₀ of a family prior (ADR-0016 §3).
 pub const LAMBDA0_MIN: f64 = 0.1;
 

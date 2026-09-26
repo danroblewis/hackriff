@@ -14,17 +14,25 @@
 //       Theme (2 clicks: the cluster's ⋯, then Theme — the button's own label changes);
 //       a tuning nudge (1 click, beside Go-to) reaches the device through the one gated DeviceAction
 //       path — against the MOCK SDR device, the only way a nudge is enabled without a radio.
-//  3. VIEW/DEVICE LINE — nothing but the nudge press reaches a device route.
+//  3. CHIPS, NOT A BAR (T-1025) — the user, on T-993's chrome: "The top bar *looks* like it's an
+//     overlay, but the background is opaque, so it's still effectively a top bar." So of the top
+//     EDGE band (anything whose box starts within 24 px of the top): no element that PAINTS a
+//     background is wider than a third of the window, the painted chips leave gaps between them,
+//     a press in a gap lands on the canvas (the row takes no pointer), and the gap's PIXELS are
+//     the canvas's, not chrome's — darker than the chip beside it, and a different dominant colour.
+//  4. VIEW/DEVICE LINE — nothing but the nudge press reaches a device route.
 //
 // `HK_E2E_SHOTS=<dir>` saves a screenshot per width (and one of the ⋯ menu open).
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser } from "./harness.mjs";
+import { Browser, census } from "./harness.mjs";
 import { startBackend } from "./backend.mjs";
 
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
+/** T-1025: "no element wider than ~1/3 of the pane spans the top edge", with a pixel of slack. */
+const innerThird = (w) => Math.round(w / 3) + 1;
 
 // Its own backend on the MOCK device (lane base + 24; the other second-backend specs use +16), so
 // the nudges are live and enabled; a plain `--replay` states them disabled and proves only that half.
@@ -51,6 +59,69 @@ const pressable = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.
     ok: !!top && (top === el || el.contains(top)) && r.width >= 24 && r.height >= 24 &&
         r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight };
 }).filter((b) => !b.ok))`;
+
+/** Everything that PAINTS a background in the top-edge band (a box starting within 24 px of the
+ * top), with the canvas's own ancestors excluded — they are the map, not chrome over it. Nested
+ * paint inside a chip (a pressed mode button, the device's live dot) is included on purpose: the
+ * width bound is about anything that reads as a surface across the top, whatever its nesting. */
+const TOP_EDGE_PAINT = `JSON.stringify([...document.querySelectorAll('body *')].map((e) => {
+  const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+  const a = (/rgba?\\(([^)]*)\\)/.exec(cs.backgroundColor)?.[1] ?? '').split(',')[3];
+  return { el: e, r, alpha: a === undefined ? (cs.backgroundColor === 'transparent' ? 0 : 1) : parseFloat(a),
+           hidden: cs.visibility === 'hidden' || cs.display === 'none' };
+}).filter((b) => b.r.width && b.r.height && b.r.top <= 24 && !b.hidden && b.alpha >= 0.05 &&
+                 !b.el.contains(document.querySelector('.sf-canvas')))
+  .map((b) => ({ sel: b.el.tagName + '.' + String(b.el.className?.baseVal ?? b.el.className ?? ''),
+                 x: Math.round(b.r.left), w: Math.round(b.r.width), y: Math.round(b.r.top), h: Math.round(b.r.height) })))`;
+
+/** (3) CHIPS, NOT A BAR — run in BOTH themes, since the theme decides which of chip and canvas is
+ * the darker and a guard that only holds in one of them is off half the time. */
+async function chipsNotABar(t, page, W, theme) {
+  const chips = JSON.parse(await page.eval(TOP_EDGE_PAINT));
+  t.diagnostic(`at ${W} (${theme}) top-edge paint: ${JSON.stringify(chips)}`);
+  assert.ok(chips.length >= 4, `the top edge holds ${chips.length} painted elements — the chips are missing`);
+  assert.deepEqual(chips.filter((c) => c.w > innerThird(W)), [],
+    `a painted element spans more than a third of the ${W} px window across the top edge`);
+
+  // The gaps between them, from the painted boxes' union: canvas, by construction.
+  const cov = chips.map((c) => [c.x, c.x + c.w]).sort((a, b) => a[0] - b[0]);
+  const gaps = [];
+  let reach = cov[0][1];
+  for (const [x0, x1] of cov.slice(1)) {
+    if (x0 - reach >= 4) gaps.push({ x: reach, w: x0 - reach });
+    reach = Math.max(reach, x1);
+  }
+  t.diagnostic(`at ${W} (${theme}) gaps: ${JSON.stringify(gaps)}`);
+  assert.ok(gaps.length >= 3, `only ${gaps.length} gaps between the top chips — they read as one strip`);
+
+  // A press in a gap reaches the MAP, so the rows holding the chips take no pointer of their own.
+  const rowY = Math.round(chips[0].y + chips[0].h / 2);
+  const hits = JSON.parse(await page.eval(`JSON.stringify(${JSON.stringify(gaps)}.map((g) => {
+    const el = document.elementFromPoint(g.x + g.w / 2, ${rowY});
+    return { x: g.x, hit: el ? String(el.className?.baseVal ?? el.className ?? el.tagName) : 'nothing' };
+  }).filter((h) => !/sf-canvas/.test(h.hit)))`));
+  assert.deepEqual(hits, [], "a press in a gap between the top chips is swallowed by chrome instead of reaching the canvas");
+
+  // And the gap's PIXELS are the canvas's, not chrome's: its colours differ from the chip's face
+  // beside it, and its mean luma is CLOSER to the canvas's own (sampled straight below the chrome,
+  // same x) than to that chip's.
+  const img = await page.shot();
+  const refY = Math.round(Math.max(...chips.map((c) => c.y + c.h)) + 60);
+  for (const g of gaps.filter((x) => x.w >= 6).slice(0, 4)) {
+    const band = { y: rowY - 6, h: 12 };
+    const gap = census(img, { x: g.x + 2, y: band.y, w: g.w - 4, h: band.h });
+    const left = chips.filter((c) => c.x + c.w <= g.x + 2).sort((a, b) => b.x - a.x)[0];
+    const chip = census(img, { x: left.x + 4, y: band.y, w: Math.max(4, Math.min(24, left.w - 8)), h: band.h });
+    const canvas = census(img, { x: g.x + 2, y: refY, w: g.w - 4, h: 24 });
+    t.diagnostic(`at ${W} (${theme}) gap@${g.x} ${JSON.stringify(gap)} vs chip ${left.sel} ${JSON.stringify(chip)} vs canvas@${refY} ${JSON.stringify(canvas)}`);
+    // The claim is "these pixels are the MAP's", not "they are a different colour from the chip":
+    // over a white patch of canvas a translucent white chip composites to the same white, and a
+    // guard that called that a bar would be asserting a falsehood. Distance decides instead.
+    assert.ok(Math.abs(gap.meanLuma - canvas.meanLuma) < Math.abs(gap.meanLuma - chip.meanLuma),
+      `the gap at x=${g.x} (${theme}, luma ${gap.meanLuma.toFixed(1)}) reads as the chip beside it ` +
+      `(${chip.meanLuma.toFixed(1)}), not as the canvas below it (${canvas.meanLuma.toFixed(1)}) — chrome, not map`);
+  }
+}
 
 for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the top bar is gone and every one of its actions is a click or two away`, async (t) => {
   const be = await backend();
@@ -89,7 +160,10 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the top bar is 
     assert.equal(await overlap(a, b), false, `${a} overlaps ${b}`);
   }
 
-  // (2) Review: one click on the cluster's icon button opens the drawer; its own Close shuts it.
+  // (3) CHIPS, NOT A BAR, in the theme this run started in (and again after Theme flips it, below).
+  await chipsNotABar(t, page, W, await page.eval("document.documentElement.dataset.theme ?? 'default'"));
+
+  // (4) Review: one click on the cluster's icon button opens the drawer; its own Close shuts it.
   await page.click("document.querySelector('.map-topright #review-btn')");
   await page.waitFor("the review drawer to open", "!document.querySelector('#review').hidden && !!document.querySelector('#review .rv-head button')", { timeoutMs: 5000 });
   await page.click("document.querySelector('#review .rv-head button')");
@@ -104,6 +178,22 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the top bar is 
   await page.waitFor("the theme to change", `document.querySelector('#theme-btn').textContent !== ${JSON.stringify(before)}`, { timeoutMs: 5000 });
   await page.click("document.querySelector('#map-more-menu .map-more-close')");
   await page.waitFor("the ⋯ menu to close", "document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
+  // (3, again) the chips hold in EVERY theme, not just the one the run happened to start in: Theme
+  // cycles system -> dark -> light, so keep pressing it and re-check until the light one has been
+  // seen too. The gap/chip contrast reverses between them, which is exactly why this repeats.
+  const seen = new Set();
+  for (let i = 0; i < 4; i++) {
+    await page.frames(3);
+    const theme = await page.eval("document.documentElement.dataset.theme ?? 'default'");
+    if (!seen.has(theme)) { seen.add(theme); await chipsNotABar(t, page, W, theme); }
+    if (seen.has("light") && seen.has("dark")) break;
+    await page.click("document.querySelector('.map-more-btn')");
+    await page.waitFor("the ⋯ menu to open", "!document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
+    await page.click("document.querySelector('#map-more-menu #theme-btn')");
+    await page.click("document.querySelector('#map-more-menu .map-more-close')");
+    await page.waitFor("the ⋯ menu to close", "document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
+  }
+  assert.ok(seen.has("light") && seen.has("dark"), `the chip guard never saw both themes (saw ${[...seen]})`);
 
   // Modes: one click each. In Decode/History the framed shell's bar carries the switch back.
   await page.click("document.querySelector('.map-status .mode[data-mode=decode]')");

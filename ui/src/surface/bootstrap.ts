@@ -51,7 +51,22 @@ export interface CoverageSlice {
     f_lo_hz?: number; f_cell_hz?: number;
     t0_s?: number; t_cell_s?: number;
   } | null;
-  any?: { cells?: readonly { state?: string }[] | null } | null;
+  any?: {
+    cells?: readonly { state?: string }[] | null;
+    /**
+     * T-964: the route's own **time-collapsed** census — `{cells, observed_cells, excluded_cells,
+     * unobserved_cells, unknown_cells}` over the frequency axis, where a cell counts as sampled if
+     * any row in the window sampled it. This is the survey question, and it is the only share a
+     * sentence about the survey may quote: see [[orientationNote]].
+     */
+    bands?: {
+      cells?: number;
+      observed_cells?: number;
+      excluded_cells?: number;
+      unobserved_cells?: number;
+      unknown_cells?: number;
+    } | null;
+  } | null;
   /**
    * The route's own display scale for this region (T-470): `range_db`, with a `normalisation` that
    * reads *"0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped"* — which is the
@@ -155,6 +170,24 @@ export interface CoverageCensus {
   readonly total: number;
   /** The bounding box of the `observed` cells, or `null` when nothing here was ever sampled. */
   readonly box: Box | null;
+  /**
+   * **The same census with the time axis collapsed** (T-964): one count per *frequency* cell, where
+   * a cell counts as sampled if any row in the window sampled it.
+   *
+   * A grid census counts (time × frequency) cells, and that is the wrong denominator for *"where has
+   * this radio ever looked"*: a front end sees one window at a time, so a **finished** 1 MHz–6 GHz
+   * survey pass occupies only a thin diagonal of the grid. T-964 measured a completed full-range
+   * pass reported as *"4.3 % of this surface was ever sampled (176 of 4096 coverage cells)"* — true
+   * of the 128 × 32 grid, and read (correctly, given the sentence) as *the survey lit nothing*.
+   *
+   * Taken from the route's own `any.bands` when it serves one, else folded here from the same cells.
+   */
+  readonly bands: {
+    readonly observed: number;
+    readonly unobserved: number;
+    readonly unknown: number;
+    readonly total: number;
+  };
 }
 
 /**
@@ -168,71 +201,122 @@ export interface CoverageCensus {
  * so opening the view on it would be opening on a guess.
  */
 export function observedExtent(cov: CoverageSlice | null | undefined): CoverageCensus {
-  return censusOver(cov, 0);
+  return censusOver(cov, 0, Infinity);
 }
 
 /**
- * How many of the coarse grid's time rows, counted back from the newest, [[recentObservedExtent]]
- * boxes (T-955). Small on purpose: it is a query-narrowing hint for the refinement pass in
- * `probeSurface`, not a claim of resolution — the fine pass re-asks the same route over whatever box
- * this returns, at the SAME cell cap but a far smaller extent, so a boundary this box still straddles
- * gets resolved there instead.
+ * How many of a grid's time rows, counted back from the NEWEST OBSERVED one, [[recentObservedExtent]]
+ * boxes by default (T-955). Small on purpose: it is a query-narrowing hint for the refinement pass in
+ * `probeSurface`, not a claim of resolution — the fine pass re-asks the same route over the box this
+ * returns (its frequency AND its rows' time), so a retune boundary this box still straddles is
+ * resolved there, where one row is an eighth of these four.
  */
 export const RECENT_ROWS = 4;
 
-/**
- * Like [[observedExtent]], but the box is built from only the most recently active rows (T-955).
- *
- * A session that tuned to one band for an hour and then retuned five minutes ago has BOTH bands in
- * one record horizon, and [[observedExtent]]'s box is a bounding rectangle over every observed cell
- * ever, so it spans the whole gap between them — measured live: a reload after 162.2 → 144.6 MHz
- * opened on a box still centred near 162.2 MHz, and a separate session opened on "100–1100 MHz ×
- * 1.6 h" with the actually-tuned 101.7 MHz band drawn as a sliver inside it. Neither the union nor
- * its centre is a window the radio ever captured in one configuration.
- *
- * This is what a view that opens on **the tuned window** (docs/16 §8, T-376) has to mean once a
- * session holds more than one tuning: not "everywhere ever observed", but "what is being observed
- * now" — read off the coverage map's own recency, never off `frequency.current` (CLAUDE.md's rule
- * against seeding the view from the front end rather than a measurement). `total`/`observed` etc.
- * count only the rows considered, so they are not a substitute for [[observedExtent]]'s whole-surface
- * census — callers needing "% of the surface ever sampled" still use that.
- */
-export function recentObservedExtent(cov: CoverageSlice | null | undefined, recentRows = RECENT_ROWS): CoverageCensus {
-  const nt = finite(cov?.grid?.rows) ? cov!.grid!.rows! : 0;
-  return censusOver(cov, Math.max(0, nt - Math.max(1, recentRows)));
-}
+/** Is this cell's state evidence the radio was there? `"excluded"` is sampled spectrum (the DC
+ * notch, T-595), so it counts; `unknown` is not evidence of anything. */
+const isSampled = (s: string | undefined): boolean => s === "observed" || s === "excluded";
 
-/** Shared cell walk behind [[observedExtent]] and [[recentObservedExtent]]: `sinceRow` (inclusive)
- * is the first time-row counted, so `0` is the whole-grid census and the recent variant is the same
- * arithmetic over a suffix of rows. */
-function censusOver(cov: CoverageSlice | null | undefined, sinceRow: number): CoverageCensus {
+/**
+ * The index of the newest time row holding any sampled cell, or `-1` (T-955).
+ *
+ * The anchor of "recent" has to be the newest thing actually OBSERVED, never the grid's last row:
+ * the grid ends at `navigation.time.latest_s`, which a live server was seen to report 34 min in
+ * the future (explorer 2026-09-25), and a coarse grid's last rows can be empty for other honest
+ * reasons (a capture that paused, a young ring). Counting back from the grid's end in either case
+ * finds nothing and falls back to the lifetime union — the reported bug.
+ */
+export function newestObservedRow(cov: CoverageSlice | null | undefined): number {
   const g = cov?.grid;
   const cells = cov?.any?.cells;
   const nf = finite(g?.cells) ? g!.cells! : 0;
   const nt = finite(g?.rows) ? g!.rows! : 0;
-  const empty: CoverageCensus = { observed: 0, unobserved: 0, unknown: 0, total: 0, box: null };
+  if (!Array.isArray(cells) || nf <= 0 || nt <= 0 || cells.length !== nf * nt) return -1;
+  for (let t = nt - 1; t >= 0; t--) {
+    for (let f = 0; f < nf; f++) if (isSampled(cells[t * nf + f]?.state)) return t;
+  }
+  return -1;
+}
+
+/**
+ * Like [[observedExtent]], but the box is built from only the `recentRows` rows ending at the
+ * NEWEST OBSERVED row (T-955) — what the radio is observing now, not everywhere it ever looked.
+ *
+ * A session that tuned to one band for an hour and then retuned has BOTH bands in one record
+ * horizon, and [[observedExtent]]'s box is a bounding rectangle over every observed cell ever, so it
+ * spans the whole gap between them — measured live as a page opening on "100–1100 MHz × 1.6 h" with
+ * the actually-tuned band drawn as a sliver inside it. Neither the union nor its centre is a window
+ * the radio ever captured in one configuration.
+ *
+ * Read off the coverage map's own recency, never off `frequency.current` (CLAUDE.md's rule against
+ * seeding the view from the front end rather than a measurement). **Use its FREQUENCY only for an
+ * opening**: its time extent is a few rows by construction, so opening on it would shrink the
+ * view's time span to minutes of an hour's history; `probeSurface` takes time from the whole census.
+ * `total`/`observed` count only the rows considered.
+ */
+export function recentObservedExtent(cov: CoverageSlice | null | undefined, recentRows = RECENT_ROWS): CoverageCensus {
+  const newest = newestObservedRow(cov);
+  if (newest < 0) return censusOver(cov, 0, Infinity); // nothing observed: the empty census, counted
+  return censusOver(cov, newest - Math.max(1, recentRows) + 1, newest);
+}
+
+/** Shared cell walk behind [[observedExtent]] and [[recentObservedExtent]]: rows `sinceRow ..=
+ * untilRow` are counted, so `(0, Infinity)` is the whole-grid census and the recent variant is the
+ * same arithmetic over a window of rows. */
+function censusOver(cov: CoverageSlice | null | undefined, sinceRow: number, untilRow: number): CoverageCensus {
+  const g = cov?.grid;
+  const cells = cov?.any?.cells;
+  const nf = finite(g?.cells) ? g!.cells! : 0;
+  const nt = finite(g?.rows) ? g!.rows! : 0;
+  const noBands = { observed: 0, unobserved: 0, unknown: 0, total: 0 } as const;
+  const empty: CoverageCensus = { observed: 0, unobserved: 0, unknown: 0, total: 0, box: null, bands: noBands };
   if (!Array.isArray(cells) || nf <= 0 || nt <= 0 || cells.length !== nf * nt) return empty;
   const fLo = finite(g?.f_lo_hz) ? g!.f_lo_hz! : 0;
   const fCell = finite(g?.f_cell_hz) ? g!.f_cell_hz! : 0;
   const t0 = finite(g?.t0_s) ? g!.t0_s! : 0;
   const tCell = finite(g?.t_cell_s) ? g!.t_cell_s! : 0;
   const floor = Math.min(Math.max(0, sinceRow), nt);
+  const ceil = Math.max(floor, Math.min(nt, untilRow + 1)); // exclusive
   let observed = 0, unobserved = 0, unknown = 0;
   let f0 = Infinity, f1 = -Infinity, t0i = Infinity, t1i = -Infinity;
-  for (let i = floor * nf; i < cells.length; i++) {
+  // T-964: the time-collapsed state per frequency cell, ranked so the strongest claim survives the
+  // fold - sampled beats forgotten beats grey, the route's own `bands` ordering. Over the rows this
+  // census counts (T-955: the whole grid, or the recent window).
+  const rank = new Uint8Array(nf);
+  for (let i = floor * nf; i < ceil * nf; i++) {
     const s = cells[i]?.state;
+    const f = i % nf, t = Math.floor(i / nf);
     if (s === "unobserved") { unobserved++; continue; }
-    if (s === "unknown") { unknown++; continue; }
+    if (s === "unknown") { unknown++; rank[f] = Math.max(rank[f], 1); continue; }
     // T-595: `"excluded"` is sampled spectrum (the DC notch), so it counts towards the observed
     // extent the view opens on — the radio was demonstrably there.
-    if (s !== "observed" && s !== "excluded") continue;
+    if (!isSampled(s)) continue;
     observed++;
-    const f = i % nf, t = Math.floor(i / nf);
+    rank[f] = 2;
     if (f < f0) f0 = f;
     if (f > f1) f1 = f;
     if (t < t0i) t0i = t;
     if (t > t1i) t1i = t;
   }
+  // The route's own count when it serves one (T-964), else the fold above of the same cells: one
+  // sentence, one rule, whichever end computed it.
+  const served = cov?.any?.bands;
+  const n = (v: unknown) => (finite(v) ? v : 0);
+  // The route's count describes the WHOLE grid, so it stands in only for a whole-grid census; the
+  // recent-rows variant (T-955) folds its own rows.
+  const bands = floor === 0 && ceil === nt && finite(served?.cells) && served!.cells! > 0
+    ? {
+      observed: n(served!.observed_cells) + n(served!.excluded_cells),
+      unobserved: n(served!.unobserved_cells),
+      unknown: n(served!.unknown_cells),
+      total: served!.cells!,
+    }
+    : {
+      observed: rank.reduce((a, r) => a + (r === 2 ? 1 : 0), 0),
+      unobserved: rank.reduce((a, r) => a + (r === 0 ? 1 : 0), 0),
+      unknown: rank.reduce((a, r) => a + (r === 1 ? 1 : 0), 0),
+      total: nf,
+    };
   const box: Box | null = observed > 0 && fCell > 0 && tCell > 0
     ? {
       f0Hz: fLo + f0 * fCell,
@@ -241,7 +325,7 @@ function censusOver(cov: CoverageSlice | null | undefined, sinceRow: number): Co
       t1Ns: (t0 + (t1i + 1) * tCell) * S_TO_NS,
     }
     : null;
-  return { observed, unobserved, unknown, total: cells.length - floor * nf, box };
+  return { observed, unobserved, unknown, total: (ceil - floor) * nf, box, bands };
 }
 
 /**
@@ -338,22 +422,43 @@ export function fmtShare(n: number, d: number): string {
  * It states the measured share, says which of the three coverage states the emptiness is, and says
  * where the view was opened — because T-437's 99.4 % is a true statement about a young pyramid and
  * the only defect available here is failing to say so.
+ *
+ * ## The share must answer the question the sentence asks (T-964)
+ *
+ * *"Ever sampled"* is a question about the **frequency axis**: did the radio ever look here in this
+ * window. The sentence used to quote the share of (time × frequency) **cells**, which answers a
+ * different question — *was it being looked at then* — and the two differ by the whole shape of a
+ * survey. A front end sees one window at a time, so a sweep is a thin diagonal across the grid: a
+ * **completed** 1 MHz–6 GHz pass came back as *"4.3 % of this surface was ever sampled (176 of 4096
+ * coverage cells)"*, which is true of the grid and false of the survey, and read as the fog-of-war
+ * map having nothing to show after the one feature that fills it.
+ *
+ * So both numbers are stated, each against its own question: the frequency share is what the survey
+ * achieved, the cell share is what the surface draws. Neither is dropped — a user who reads 100 %
+ * and then sees a mostly-grey canvas needs the second number to know why, which is the same honesty
+ * rule the sentence exists for.
  */
 export function orientationNote(c: CoverageCensus, opened: OpeningWindow): string {
   if (c.total === 0) {
     return "No coverage map was returned for this surface, so nothing here says whether the radio "
       + "ever looked. The view opens on the whole surface; anything drawn came from the pyramid.";
   }
-  const sampled = `${fmtShare(c.observed, c.total)} of this surface was ever sampled`;
-  const forgotten = c.unknown > 0
-    ? ` A further ${fmtShare(c.unknown, c.total)} is past the record horizon — hatched, not grey: we no longer know whether we looked.`
+  const b = c.bands;
+  const sampled = `${fmtShare(b.observed, b.total)} of this surface was ever sampled`;
+  // What the survey achieved, then what the canvas draws — a sweep occupies one window at a time,
+  // so the second share is always the smaller one and saying why is the point.
+  const counts = `${b.observed} of ${b.total} frequency cells ever sampled in this window; `
+    + `${fmtShare(c.observed, c.total)} of its ${c.total} time × frequency cells, which is what the `
+    + `surface draws — a radio sees one window at a time, so even a finished pass is a thin diagonal`;
+  const forgotten = b.unknown > 0
+    ? ` A further ${fmtShare(b.unknown, b.total)} of the frequency axis is past the record horizon — hatched, not grey: we no longer know whether we looked.`
     : "";
   if (!opened.onCoverage) {
-    return `${sampled} (${c.observed} of ${c.total} coverage cells), so the view opens on the whole `
+    return `${sampled} (${counts}), so the view opens on the whole `
       + `surface and is mostly grey. Grey is the claim that nothing ever looked there — it is not a `
       + `loading state and not a failure.${forgotten}`;
   }
-  return `${sampled} (${c.observed} of ${c.total} coverage cells). The view opens on the observed `
+  return `${sampled} (${counts}). The view opens on the observed `
     + `region with a margin, so the edge of coverage is on screen: inside it is measurement, outside `
     + `it is grey, and grey means nothing ever looked there.${forgotten}`;
 }

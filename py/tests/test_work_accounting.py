@@ -906,6 +906,7 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     (root / "linked" / "target").symlink_to(root / "idle" / "target")
     monkeypatch.setattr(R, "_target_written", lambda t: time.time() if "/fresh/" in t else old)
     monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 500.0)                    # plenty: the 2 h wait applies
     procs = f"node {root}/inuse/ui/e2e/run.mjs\n"                 # a process in inuse; none in t87 (t870 is a prefix trap)
     lsof = f"p1\nn{root}/t870\n"
     monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
@@ -921,6 +922,25 @@ def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
     assert len([m for m in said if m.startswith("RECLAIM")]) == 2
     assert (root / "linked").is_symlink() is False and os.path.islink(root / "linked" / "target")
+
+
+def test_short_of_disk_an_idle_target_goes_after_minutes_not_hours(tmp_path, monkeypatch):
+    """Supervisor 2026-09-25 13:31: free disk hit 22 GB (floor 20) and idle targets were reaped by hand."""
+    root = tmp_path / ".claude" / "worktrees"
+    ages = {"half-hour": 30 * 60, "five-min": 5 * 60}
+    for name in ages:
+        (root / name / "target" / "debug").mkdir(parents=True)
+    monkeypatch.setattr(R, "_target_written", lambda t: time.time() - next(a for n, a in ages.items() if f"/{n}/" in t))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "" if args[0] == "ps" else "p1\nn/elsewhere\n")
+    monkeypatch.setattr(R, "log", lambda m: None)
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 500.0)
+    R.reclaim_idle_targets({}, dry=False)
+    assert (root / "half-hour" / "target").exists()                         # plenty of disk: 2 h wait
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 40.0)
+    R.reclaim_idle_targets({}, dry=False)
+    assert not (root / "half-hour" / "target").exists()                     # short: 15 min is enough
+    assert (root / "five-min" / "target").exists()                          # a build that just paused is kept
 
 
 def test_an_idle_target_is_kept_when_lsof_says_nothing(tmp_path, monkeypatch):
@@ -1618,6 +1638,47 @@ def _finished_remote_claim(git_node2, monkeypatch):
                     "state": "running", "model": "opus", "host": "node2", "session_id": "s"}}, seen
 
 
+def test_a_remote_run_whose_mac_worktree_was_reaped_gets_it_back_before_its_review(git_node2, monkeypatch):
+    """2026-09-25 13:33: T-977 ran on node2 while its Mac worktree was reaped; the branch was synced, then
+    launch_review started in a directory that did not exist and the whole tick raised, every tick."""
+    import os
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker's commit")
+    assert not os.path.isdir(wt)
+    claims, seen = _finished_remote_claim(git_node2, monkeypatch)
+    claims["T-9"]["review"] = True
+    reviewed = []
+    monkeypatch.setattr(R, "launch_review", lambda c: reviewed.append(os.path.isdir(c["wt"])) or dict(c, pid=2, kind="review"))
+    R.reap(claims, dry=False)
+    assert reviewed == [True] and claims["T-9"]["kind"] == "review" and claims["T-9"]["state"] == "running"
+    assert git(wt, "rev-parse", "HEAD") == git(hwt, "rev-parse", "HEAD")
+
+
+def test_one_claim_that_raises_does_not_abort_the_tick(monkeypatch):
+    """The same incident: the exception escaped reap(), so save_claims never ran and T-970's reap (a result commit
+    and a review launch) was thrown away and redone 47 times; claims after the raising one were never reaped."""
+    calls, seen = [], []
+
+    def one(claims, tid, c, dry, killed):
+        calls.append(tid)
+        if tid == "T-1":
+            raise FileNotFoundError("[Errno 2] No such file or directory: '/wt/t1'")
+        return True
+    monkeypatch.setattr(R, "_reap_one", one)
+    monkeypatch.setattr(R, "handle_gate_failures", lambda claims, dry: False)
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "running"},
+              "T-2": {"ticket": "T-2", "branch": "task-t2", "state": "running"}}
+    assert R.reap(claims, dry=False) is True
+    assert calls == ["T-1", "T-2"]                                              # the next claim is still reaped
+    assert claims["T-1"]["state"] == "running" and seen == []                  # review: a one-off is retried
+    R.reap(claims, dry=False)
+    R.reap(claims, dry=False)                                                   # the third in a row stops it
+    assert claims["T-1"]["state"] == "reap-error" and "FileNotFoundError" in claims["T-1"]["reap_error"]
+    assert [a[2] for a in seen] == ["REAP_ERROR"]
+
+
 def test_a_withheld_push_is_a_sync_error_never_no_work(git_node2, monkeypatch):
     """The 2026-09-25 shape: the worker committed on node2, the commit never reached this Mac. Held and said - and
     judged, with its commits, the tick the refs agree."""
@@ -1824,6 +1885,7 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
     assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
     # invariant 29 on the dashboard: per host whether its refs agree, and per branch mirror / local / behind / ahead
+    assert st["hosts"]["node2"].pop("stats")["reachable"]                  # the probe's stats (test_host_stats.py)
     assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0, "refs_in_sync": False,
                                     "drifting": 1, "branches": {"task-t9": {"mirror": "b" * 40, "local": "a" * 40, "behind": 1,
                                                                             "ahead": 1, "state": "diverged"}}}
@@ -2090,3 +2152,128 @@ def test_a_fresh_deflake_never_checks_out_an_earlier_runs_commits(tmp_path, monk
     c = R.launch_deflake("deflake-a", _req("deflake-a", 600.0), {"branch": "task-deflake-a"}, dry=False)
     assert c["branch"] == "task-deflake-a-r2" and c["run"] == 2
     assert g("rev-parse", "task-deflake-a-r2") == g("rev-parse", "main")    # cut from the base, not from the WIP
+
+
+def _sleeper(cwd, *argv, deaf=False):
+    """A stand-in for a leftover e2e process: its own session (as the harness's Chrome and `hk serve` are), a cwd and
+    a cmdline of the test's choosing; `deaf` ignores SIGTERM."""
+    code = ("import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " if deaf else "") + "import time; time.sleep(300)"
+    return subprocess.Popen([sys.executable, "-c", code, *argv], cwd=cwd, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _ended(p, s=15):
+    for _ in range(s * 10):
+        if p.poll() is not None:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.fixture
+def node2_leftovers(remote_host):
+    """Incident 2026-09-25 16:17: T-1025 ended ~15:19; at 16:17 its e2e `hk serve` (ppid 1, cmdline naming the
+    worktree) and a headless Chrome tree (ppid 1, own session, cmdline naming only an hk-e2e-chrome user-data-dir, cwd
+    `<wt>/ui`) still ran on node2. Here: the host is this machine, the far worktrees are dirs under tmp_path."""
+    local_ops, local_repo, far = remote_host
+    wts = far / "repo" / ".claude" / "worktrees"
+    for n in ("t9/ui", "t92/ui", "t90", "t93"):
+        (wts / n).mkdir(parents=True)
+    procs = {
+        "chrome": _sleeper(wts / "t9" / "ui", f"--user-data-dir={far}/tmp/hk-e2e-chrome-SeSGdz", "--headless=new"),
+        "serve": _sleeper(far, "serve", "--replay", f"{wts}/t9/fixtures/fm.sigmf-meta", "--loop"),
+        # another running claim's e2e, whose cmdline happens to name this run's fixture: that claim's, never ours
+        "other_claim": _sleeper(wts / "t92" / "ui", "serve", "--replay", f"{wts}/t9/fixtures/fm.sigmf-meta"),
+        "prefix": _sleeper(wts / "t90"),                            # t9 is a string prefix of t90, not its directory
+        "user_chrome": _sleeper(far, f"--user-data-dir={far}/tmp/hk-e2e-chrome-Other", "--headless=new"),
+    }
+    claims = {"T-9": {"ticket": "T-9", "host": "node2", "branch": "task-t9", "state": "running", "kind": "work",
+                      "wt": f"{local_repo}/.claude/worktrees/t9"},
+              "T-92": {"ticket": "T-92", "host": "node2", "branch": "task-t92", "state": "running", "kind": "work",
+                       "wt": f"{local_repo}/.claude/worktrees/t92"}}
+    time.sleep(0.3)                      # the children have chdir'd and exec'd before the scan
+    yield local_ops, local_repo, far, procs, claims
+    for p in procs.values():
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+def test_a_finished_remote_runs_leftovers_are_stopped_on_the_host(node2_leftovers):
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    procs["deaf"] = _sleeper(far / "repo" / ".claude" / "worktrees" / "t9", "cargo", "nextest", deaf=True)  # TERM ignored
+    time.sleep(0.3)
+    found = R.remote_leaked(claims["T-9"], claims, dry=False)
+    assert sorted(r["pid"] for r in found) == sorted([procs["chrome"].pid, procs["serve"].pid, procs["deaf"].pid])
+    assert _ended(procs["chrome"]) and _ended(procs["serve"]) and _ended(procs["deaf"])
+    for k in ("other_claim", "prefix", "user_chrome"):
+        assert procs[k].poll() is None, k
+    assert R.remote_leaked(claims["T-9"], claims, dry=False) == []                    # nothing left the second time
+
+
+def test_a_process_with_a_terminal_is_a_persons_and_never_signalled(node2_leftovers):
+    """Review 2026-09-25: node2 is also the user's desktop. Their shell, editor or interactive claude cd'd into a
+    worktree matches by cwd, but it has a controlling terminal and no worker or e2e process does."""
+    import fcntl
+    import os
+    import termios
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    master, slave = os.openpty()
+    procs["person"] = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"],
+                                       cwd=far / "repo" / ".claude" / "worktrees" / "t9", stdin=slave, stdout=slave,
+                                       stderr=slave, start_new_session=True,
+                                       preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+    os.close(slave)
+    try:
+        time.sleep(0.3)
+        found = R.remote_leaked(claims["T-9"], claims, dry=False)
+        assert {r["pid"] for r in found} == {procs["chrome"].pid, procs["serve"].pid}
+        assert _ended(procs["chrome"]) and procs["person"].poll() is None
+    finally:
+        os.close(master)
+
+
+def test_a_dry_run_names_the_leftovers_and_stops_nothing(node2_leftovers):
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    ours = {procs[k].pid for k in ("chrome", "serve")}
+    assert {r["pid"] for r in R.remote_leaked(claims["T-9"], claims, dry=True)} == ours
+    # with no other claim on the host, the other e2e naming this worktree is this run's too - and the scan (whose own
+    # cmdline names the worktree) never names itself or the shell that ran it
+    assert {r["pid"] for r in R.remote_leaked(claims["T-9"], {"T-9": claims["T-9"]}, dry=True)} == ours | {procs["other_claim"].pid}
+    assert all(p.poll() is None for p in procs.values())
+
+
+def test_a_claim_sharing_the_worktree_protects_everything_in_it(node2_leftovers):
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    claims["T-9-fix"] = dict(claims["T-9"], ticket="T-9-fix")
+    assert R.remote_leaked(claims["T-9"], claims, dry=False) == []
+    assert all(p.poll() is None for p in procs.values())
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_the_reap_stops_a_remote_runs_leftovers_and_says_so(node2_leftovers, monkeypatch, dry):
+    """The wiring: a remote run the host reports gone, synced back - its leftovers there are killed, logged with host,
+    pid and cmdline, and one LEAKED attention names the host. A dry run says what it would do and signals nothing."""
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    (local_repo / ".claude" / "worktrees" / "t9").mkdir(parents=True)
+    c = dict(claims["T-9"], pid=1, started=0, deflake="d")          # a deflake claim: its own outcomes, stubbed below
+    claims["T-9"] = c
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "remote_run_state", lambda c: "gone")
+    monkeypatch.setattr(R, "sync_back", lambda c: True)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "reap_deflake", lambda claims, tid, c: None)
+    seen, logged = [], []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    monkeypatch.setattr(R, "log", logged.append)
+    R._reap_one(claims, "T-9", c, dry=dry, killed=[])
+    [a] = seen
+    assert a[2] == "LEAKED" and str(procs["serve"].pid) in a[3]
+    if dry:
+        assert "on node2 and would be killed there" in a[3] and procs["chrome"].poll() is None
+        return
+    assert "on node2 and were killed there" in a[3]
+    assert _ended(procs["chrome"]) and _ended(procs["serve"]) and procs["other_claim"].poll() is None
+    lines = [x for x in logged if x.startswith("LEAKED T-9 on node2")]
+    assert len(lines) == 2 and any(f"pid {procs['chrome'].pid} (cwd " in x and "/t9/ui)" in x for x in lines)
+    assert c["leaked"] == 2
