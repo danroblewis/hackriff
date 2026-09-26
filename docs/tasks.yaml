@@ -30448,6 +30448,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 22:58).
+      Added the child-level prefetch: each pane's viewport now also asks for the (levelF-1, levelT-1) tiles under its centre third, at lowest queue priority (back of the LIFO) and with the same survey/ring short-circuits. Viewport.child keeps them alive in TileCache.wants(), so cancellation does not drop them. Spy-client test: on a warm view a one-level zoom-in issues 0 requests at the target level under the centre third and draws 0 PENDING pixels; red proof with pinParents off shows it does request them. The parent pin and coarse stand-in (overview) were already there. NOT done: whole-retained-window overview-tier residency and separate byte-budget accounting (the child set is ~0.44 viewport of tiles, under the existing 96 MB budget); no e2e/screenshots run; the acceptance's 'no requests' means target-level tiles, since a new coarse stand-in set (T-1037) is still asked for on a zoom. Needs Opus review (rendering path).
+      Tests: node ui/test/run.mjs surface (44 files, incl. surface-child-prefetch) + tsc --noEmit -> exit 0 (44/44 test files passed; tsc clean)
+      precheck exit 0
+      Commits: 90bf841a
+      Observed, not chased: surface-child-prefetch: cold 3-frame render of a 16x12-tile pane shows cancelled=15 (queue overflow drop, pre-existing, unrelated to child)
+      Resources: 46 CPU-s, peak 0.7 GB
   - id: T-1039
     milestone: MLIVE
     title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
