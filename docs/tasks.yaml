@@ -28338,7 +28338,7 @@ tasks:
   - id: T-954
     milestone: M2-hardening
     title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
-    status: in-progress
+    status: done
     branch: task-t954
     priority: P2
     deps: []
@@ -28370,6 +28370,7 @@ tasks:
       Commits: d33493ba, ab934734, c899a95e, cc3c047f, 3331b798, be6a291d
       Observed, not chased: bridge.rs's watch_peer (/ws/{stream_id}, the always-on-stream bridge) has the same bare-shutdown-only close behaviour ondemand.rs had, on both the client-detected AND producer-initiated paths -- likely reads as 1006 too. Out of scope: the ticket named the shared /ws/open/<name> opener close path specifically.
       Resources: 11 CPU-s, peak 0.3 GB
+    commit: 01265b07
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
