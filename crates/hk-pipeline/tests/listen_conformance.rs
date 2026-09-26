@@ -45,9 +45,9 @@
 //!    `stereo_lock_losses`; the left and right programmes arrive on their own channels; anything
 //!    but `1`/`2` is `4400`.
 //! 10. **Nothing is published unheard (T-1085)** — the transport subscribes after the opener
-//!    returns, so the chain reads nothing until its listener has attached: the first listener's
-//!    first record is `sample_index` 0. Audio that did go out to nobody (a listener left and
-//!    another attached) is a jump flagged `DISCONTINUITY` on the next listener's first record.
+//!     returns, so the chain reads nothing until its listener has attached: the first listener's
+//!     first record is `sample_index` 0. Audio that did go out to nobody (a listener left and
+//!     another attached) is a jump flagged `DISCONTINUITY` on the next listener's first record.
 //!
 //! **Not frozen here:** the audio's *content* (level, SNR) and CPU cost, which stage 3's parity
 //! harness compares sample-wise; refinement convergence tolerances (T-070's own tests); emitter
@@ -1258,26 +1258,22 @@ fn local_consumer(o: &OpenedStream, label: &str) -> (ConsumerId, StreamReader<Pi
 
 /// The next record an in-process consumer reads, as the WebSocket client decodes it.
 fn next_local(r: &mut StreamReader<Pipe>) -> Option<Rec> {
-    loop {
-        match r.next_record().ok()?? {
-            Record::Binary(b) => {
-                let h = b.header;
-                return Some(match h.record_type {
-                    1 => Rec::Data {
-                        seq: h.seq,
-                        index: h.sample_index,
-                        t: h.t.as_unix_nanos(),
-                        discontinuity: h.flags.contains(RecordFlags::DISCONTINUITY),
-                        payload_len: b.payload.len(),
-                    },
-                    other => panic!("record type {other} on an audio stream"),
-                });
+    Some(match r.next_record().ok()?? {
+        Record::Binary(b) => {
+            let h = b.header;
+            assert_eq!(h.record_type, 1, "a data record on an audio stream");
+            Rec::Data {
+                seq: h.seq,
+                index: h.sample_index,
+                t: h.t.as_unix_nanos(),
+                discontinuity: h.flags.contains(RecordFlags::DISCONTINUITY),
+                payload_len: b.payload.len(),
             }
-            Record::Dropped(m) => return Some(Rec::Dropped { seq: m.first_seq }),
-            Record::Unknown(f) => return Some(rec_of(&f)),
-            Record::Message(_) => panic!("a message record on an audio stream"),
         }
-    }
+        Record::Dropped(m) => Rec::Dropped { seq: m.first_seq },
+        Record::Unknown(f) => rec_of(&f),
+        Record::Message(_) => panic!("a message record on an audio stream"),
+    })
 }
 
 /// Tone power at `f` relative to the total power of 48 kS/s `x`, dB (single-bin DFT).
