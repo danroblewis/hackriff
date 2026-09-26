@@ -26127,7 +26127,7 @@ tasks:
   - id: T-871
     milestone: MAUTO
     title: "MUI: one output model across the map-box outputs and the per-signal panels"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-869
@@ -26155,6 +26155,7 @@ tasks:
       Observed, not chased: LP-5 (T-869) still in-progress: pipeline_id in headers only appears once the flagged opener switch lands; UI is ready for it. | Dock still lists one entry per audio stream, not per output of a pipeline (messages siblings are not separate dock rows).
       Resources: 33 CPU-s, peak 1.0 GB
     branch: task-t871
+    commit: dedd9066
   - id: T-872
     milestone: MAUTO
     title: "LP-8: retire ChainKind::Listen for cut-over modes; listener-budget mapping"
