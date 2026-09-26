@@ -253,14 +253,43 @@ main_is_red(){
 # The probe for a CHECK red: exactly the gate suite that went red, over the whole workspace (as the merge gate runs
 # it - HK_GATE_CRATES empty is --workspace). `just lint` is fmt + clippy --all-targets + ruff, a compile check, no test run.
 check_probe(){ ( cd "$REPO" && HK_GATE_CRATES="" just "$TRIAGE_CHECK" ); }
+# A VERIFIED REWIND (incident 2026-09-26 03:07): bisect_red's `git reset -q --hard "$base"` after probe 3 did not take
+# (no reflog entry; its stderr went nowhere - likely another process's index.lock), the next probe gave up on "main
+# moved", SUITE_BROKEN logged "rewound" without rewinding, and the probe merge e88d6238 (T-940) stayed on main UNGATED
+# - the loop then skipped T-940 as "already merged". So: reset, CHECK HEAD, log git's own words, retry (a lock is
+# brief); still off base = MAIN_DIRTY for a person, and $S/main-dirty stops every gate and merge until one clears it.
+reset_to_base(){ # base why -> 0 = HEAD is base; 1 = it is not (flagged, alerted, $S/main-dirty written)
+  local base=$1 why=$2 i err head
+  for i in 1 2 3; do
+    err=$(git -C "$REPO" reset -q --hard "$base" 2>&1)
+    head=$(git -C "$REPO" rev-parse HEAD 2>/dev/null)
+    [ "$head" = "$base" ] && return 0
+    log "RESET: try $i of 3 to ${base:0:8} ($why) left HEAD at ${head:0:8}: ${err:-git said nothing}"
+    [ "$i" -lt 3 ] && sleep "${RESET_RETRY_S:-3}"
+  done
+  printf 'base=%s\nhead=%s\nwhy=%s\nsince=%s\n' "$base" "$head" "$why" "$(date '+%Y-%m-%d %H:%M:%S')" > "$S/main-dirty"
+  echo "$(date '+%m-%d %H:%M')  (main)  -  MAIN_DIRTY - main is at ${head:0:8}, not ${base:0:8} after '$why': an UNGATED commit sits on main; reset main to ${base:0:8} by hand, then rm $S/main-dirty (no gate or merge runs until then)" >> "$NEEDS"
+  alert red "main left on an ungated commit" "$why: git reset --hard ${base:0:8} failed 3 times, main is at ${head:0:8}. ${err:-} No gate or merge runs until a person resets main and removes $S/main-dirty." --key "main-dirty"
+  return 1
+}
 bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
   # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
   # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
   local base=$1; shift; local t rc=1
-  [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ] || { log "BISECT: main moved off $base during the bisect - giving up, nothing reset"; return 2; }
+  local head; head=$(git -C "$REPO" rev-parse HEAD)
+  if [ "$head" != "$base" ]; then
+    # Our own leftover probe (a reset that did not take) is ours to remove; anything else is a person's commit.
+    if [ "$(git -C "$REPO" rev-parse "HEAD^1" 2>/dev/null)" = "$base" ] \
+       && git -C "$REPO" log -1 --format=%s HEAD 2>/dev/null | grep -q ': bisect probe (automated, never kept)$'; then
+      log "BISECT: HEAD ${head:0:8} is this runner's own leftover probe on ${base:0:8} - resetting it and going on"
+      reset_to_base "$base" "leftover bisect probe ${head:0:8}" || return 2
+    else
+      log "BISECT: main moved off $base during the bisect - giving up, nothing reset"; return 2
+    fi
+  fi
   for t in "$@"; do
     if ! git -C "$REPO" merge -q --no-ff -m "Merge $(ticket_of "${t%%=*}") (${t%%=*}): bisect probe (automated, never kept)" "${t#*=}" >>"$LOG" 2>&1; then
-      git -C "$REPO" merge --abort 2>/dev/null; git -C "$REPO" reset -q --hard "$base"
+      git -C "$REPO" merge --abort 2>/dev/null; reset_to_base "$base" "bisect: ${t%%=*} did not merge" || return 2
       log "BISECT: ${t%%=*} does not merge onto $base with the others - giving up"; return 2
     fi
   done
@@ -270,10 +299,10 @@ bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + th
     ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1 || rc=0
   else
     ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
-      || { git -C "$REPO" reset -q --hard "$base"; log "BISECT: rebuild failed on ${*%%=*} - giving up"; return 2; }
+      || { reset_to_base "$base" "bisect: rebuild failed" || return 2; log "BISECT: rebuild failed on ${*%%=*} - giving up"; return 2; }
     ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1 || rc=0
   fi
-  git -C "$REPO" reset -q --hard "$base"
+  reset_to_base "$base" "after bisect probe $(printf '%s ' "${@%%=*}")" || return 2
   log "BISECT: base + $(printf '%s ' "${@%%=*}")-> $([ "$rc" = 0 ] && echo RED || echo green)"
   return $rc
 }
@@ -390,13 +419,13 @@ suite_red_alone(){ # base branch-or-sha "tests/x.py::a tests/y.py::b" -> 0 when 
   # pytest exits 1 (tests failed) or 2 (collection error) for a red; 4/5 (no such node / nothing collected) is not red -
   # a test the branch does not have cannot be red with it, and a test new in the batch is not main's red.
   local base=$1 b=$2 ids=$3 rc=0
-  git -C "$REPO" reset -q --hard "$base"
+  reset_to_base "$base" "suite probe ${b:-(base)}" || return 1
   if [ -z "$b" ] || git -C "$REPO" merge -q --no-ff -m "suite probe $b (never kept)" "$b" >>"$LOG" 2>&1; then
     ( cd "$REPO/py" && uv run --locked pytest -q -p no:cacheprovider $ids ) >>"$LOG" 2>&1; rc=$?
   else
     git -C "$REPO" merge --abort 2>/dev/null
   fi
-  git -C "$REPO" reset -q --hard "$base"
+  reset_to_base "$base" "after suite probe ${b:-(base)}" || return 1
   log "SUITE: ${b:-(base)} alone on ${base:0:8} -> pytest exit $rc"
   [ "$rc" = 1 ] || [ "$rc" = 2 ]
 }
@@ -416,6 +445,7 @@ process(){
   git rev-parse --verify "$branch" >/dev/null 2>&1 || { log "SKIP $branch: no such branch"; return 0; }
   [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || { log "WAIT $branch: HEAD not on main"; return 1; }
   [ -e "$REPO/.git/MERGE_HEAD" ] && { log "WAIT $branch: a merge is already in progress"; return 1; }
+  [ -e "$S/main-dirty" ] && { log "WAIT $branch: MAIN_DIRTY - main is not on a gated commit ($S/main-dirty)"; return 1; }
   git diff --quiet && git diff --cached --quiet || { log "WAIT $branch: main tree dirty (coordinator mid-commit)"; return 1; }
   local ahead; ahead=$(git rev-list --count "main..$branch" 2>/dev/null || echo 0)
   if [ "${ahead:-0}" -eq 0 ]; then log "SKIP $branch: nothing ahead of main (already merged?)"; return 0; fi
@@ -939,10 +969,20 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
 suite_broken_hold(){
   for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
   printf '%s' "$gated_sig" > "$S/suite-broken"
-  log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
+  local where="rewound to $base"; [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ] || where="main is NOT on $base (not rewound)"
+  log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> $where; batch re-queued in order, NOT isolated - main+batch needs a fix"
   echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
   notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued." "main+batch broken - fix needed"
   if [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ]; then rm -f "$BULKMARK"; fi
+}
+# MAIN_DIRTY mid-triage (reset_to_base failed): try_bulk's locals. The batch goes back in order, the marker stays (main
+# carries ungated commits), and the loop holds on $S/main-dirty - no isolation onto a main that is not base.
+bulk_dirty_stop(){
+  [ -e "$S/main-dirty" ] || return 1
+  rm -f "$S/isolate-remaining"
+  for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+  log "BULK gate FAILED -> main NOT rewound to $base (MAIN_DIRTY); batch re-queued in order, nothing gates until a person clears $S/main-dirty"
+  return 0
 }
 
 try_bulk(){
@@ -1038,7 +1078,7 @@ try_bulk(){
     return 0
   fi
   if [ "$(git -C "$REPO" rev-parse HEAD)" = "$after" ]; then
-    git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    if ! reset_to_base "$base" "bulk gate red"; then bulk_dirty_stop; return 0; fi
     # A red with NO test FAIL line is lint, a build error or the UI unit step - a property of
     # main+batch as a whole that every isolated gate would reproduce (2026-09-22 14:34: a
     # TypeScript type error on main itself; isolating 6 branches would have been 6 identical
@@ -1052,6 +1092,7 @@ try_bulk(){
         [ "$kind" = RED ] && culprits+=("$b"); [ "$kind" = GREEN ] && rest+=("${b%%=*}")
       done < <(suite_split "$base" "${TRIAGE_WHAT#pytest red: }" "${tips[@]}")
       rm -f "$S/isolate-remaining"
+      bulk_dirty_stop && return 0
       if [ "${#culprits[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0 ]; then
         { printf '%s\n' "${rest[@]}"; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
         for b in "${culprits[@]}"; do
@@ -1102,6 +1143,7 @@ try_bulk(){
         rm -f "$BULKMARK"
         return 0
       fi
+      bulk_dirty_stop && return 0
     fi
     # Only for a red that failed alone on its FIRST isolated run: one that passed alone and then
     # failed is flaky even alone, and a bisection over it would blame whichever branch it ended on.
@@ -1114,6 +1156,7 @@ try_bulk(){
       log "BULK gate FAILED -> rewound to $base; the batch introduced it - bisecting before any isolate. BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-${TRIAGE_SPECS:-just ${TRIAGE_CHECK:-}}}) alone (instead of ${#branches[@]} serial gates)"
       local tips=("${gated[@]}") b culprit tip side=""
       culprit=$(bisect_culprit "$base" "${tips[@]}"); tip=${culprit#*=}; culprit=${culprit%%=*}
+      bulk_dirty_stop && return 0
       # The single-branch path's main-side question (process): a spec failing alone on 2+ other
       # branches within a day is main's intermittent defect - then no blame here; isolation decides.
       [ -n "$culprit" ] && side=$(main_side_of "$culprit" | sed 's/^main-side //')
@@ -1325,6 +1368,13 @@ while true; do
     fi
   fi
   HOLD_SAID=""
+  # MAIN_DIRTY (reset_to_base): main carries an ungated commit the runner could not remove. No gate, merge or RC on it;
+  # the alert and the attention line went out when it was written. A person resets main and removes the marker.
+  if [ -e "$S/main-dirty" ]; then
+    [ -z "${DIRTY_SAID:-}" ] && { log "HOLD: MAIN_DIRTY - $(tr '\n' ' ' < "$S/main-dirty") - no gate or merge until a person resets main and removes $S/main-dirty"; DIRTY_SAID=1; }
+    sleep 8; continue
+  fi
+  DIRTY_SAID=""
   if rc_due && [ ! -e "$BULKMARK" ] && main_ready && workers_drained; then run_rc; continue; fi
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main

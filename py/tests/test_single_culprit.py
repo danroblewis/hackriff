@@ -64,10 +64,12 @@ TRIAGE_KIND=test; TRIAGE_CHECK=""; TRIAGE_WHAT=""; TRIAGE_FILTER="{filt}"; TRIAG
 TRIAGE_TESTS="hk-pipeline::listen listen_identifies_ctcss_67p0"; TRIAGE_ALONE_FIRST={alone_first}
 {_function("main_is_red")}
 {_function("main_side_of")}
+{_function("reset_to_base")}
 {_function("bisect_red")}
 {_function("bisect_fact")}
 {_function("bisect_culprit")}
 {_function("suite_broken_hold")}
+{_function("bulk_dirty_stop")}
 fail(){{
 local branches=({' '.join(branches)}) gated=({gated}) base=base after=base tickets="{' '.join(branches)}" b wt rc tip
 local gated_sig="SIG {' '.join(branches)}"
