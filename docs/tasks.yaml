@@ -29744,7 +29744,7 @@ tasks:
   - id: T-1020
     milestone: MLIVE
     title: "Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache"
-    status: in-progress
+    status: done
     priority: medium
     deps:
     - T-1019
@@ -29774,6 +29774,7 @@ tasks:
       Commits: 13a5cdb0
       Observed, not chased: cargo nextest run -p hk-cli -E 'binary(api_contract) and test(/tile/)': tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell failed once with an as_of_s vs oldest_record_s/recording_began_s wall-clock timing assertion (left: Null, right: String("unobserved")), then passed on retry. This test does not touch tile_cache sizing or hit/miss code and the failure mode is a wall-clock race in the as_of/unknown-rows logic, not my change; flagging for deflake-triage rather than fixing in scope.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 4f2c89ea
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
