@@ -32002,7 +32002,8 @@ tasks:
   - id: T-1091
     milestone: MLIVE
     title: live-edge spec test 4 (T-890 following pane keeps its rows across a row boundary) red 4/12 on main at 2 lanes - re-measure after T-1077's zstd fix, then deflake or fix
-    status: todo
+    status: in-progress
+    branch: task-t1091
     priority: high
     deps: []
     parallel_group: UI-LIVE-EDGE
@@ -32036,7 +32037,8 @@ tasks:
   - id: T-1093
     milestone: M2-hardening
     title: "hk-pipeline under load: data_path never-ready plugin chain hits its 120 s watchdog, and signal_001_readsb's unpaced replay DROPS (352) instead of waiting for readsb - both pass alone; deflake, and fix the drop if lossless back-pressure fails under load"
-    status: todo
+    status: in-progress
+    branch: task-t1093
     priority: high
     deps: []
     parallel_group: PIPE-LOAD-FLAKES
