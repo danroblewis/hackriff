@@ -30609,7 +30609,7 @@ tasks:
   - id: T-1049
     milestone: MMAP
     title: "app-outputs-map (T-994) reported red 3x at 400 px ('no pressable box in 60 s') - triage on main with a FRESH hk: close as stale-binary or fix"
-    status: in-progress
+    status: done
     priority: medium
     deps: []
     parallel_group: UI-OUTPUTS-MAP-TRIAGE
@@ -30631,6 +30631,7 @@ tasks:
       Commits: 5597cd3e
       Observed, not chased: UNEXPLAINED, 3 of 9 runs on main at 6f38fbb8 with a fresh hk (runs 1, 5, 11 of this triage): app-outputs-map step 3 failed 'the GL overlay drew no active halo outside the box (0 -> 0)' while the DOM said the box was active and carried the audio badge. Run 11's message (after I added the area to it) shows the sampled band was the FULL box height - area before {x0:802,y0:527.9,x1:850.4,y1:726}, now {x0:802,y0:98,x1:850.3,y1:726} - so an empty band is ruled out; a separate probe of the same box while listening counted 949-3045 near-ACTIVE_MARK pixels in exactly that band, so the halo does normally land there. Not reproduced in the 6 green runs since. The committed haloScan now prints the whole-frame near-mark total and bbox, which will say next time whether the halo was absent from the frame (total 0, i.e. a real product/GL-frame race) or drawn outside the band. Worth a ticket if it recurs in a gate. | Two runs (2 and 3 of this triage) aborted before any assertion with 'hk serve did not come up on 127.0.0.1:9216 in 20 s' and an EMPTY captured stderr, at load average 57. The same binary and fixture started fine by hand seconds later. If this shape shows up in gate logs it is a readiness-timeout under load, not a product red; ui/e2e/backend.mjs's 20 s budget may be short for a loaded 28-core box.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 2b76cfd6
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
