@@ -33,6 +33,7 @@
 //! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |
 //! | `/api/anomalies[?f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`, `/api/anomalies/<id>[/dismiss\|/reopen]` | GET, POST | token (header only for mutating) | T-122 anomalies and novelty alarms with explanations; dismiss/reopen ([`crate::anomalies`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
+//! | `/api/frontend/events?t0&t1[&device][&limit]` | GET | token | T-981 front-end events (clipped rows with a whole-span energy step) over a window ([`crate::frontend`]) |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/collections[/<id>[/markers]]`, `/api/markers[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-817 marker collections ([`crate::collections`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -47,6 +48,7 @@
 //! | `/api/taxonomy` | GET | token | T-218 the modulation taxonomy `hk-mod@1` and `thresholds@1`, as data ([`crate::taxonomy`]). Reference data, never a measurement |
 //! | `/api/signatures/match` | GET | token | T-201 an emitter's C18 signature match and its history ([`crate::signatures`]). Ranked evidence, never an identity |
 //! | `/api/clusters[/<id>[/promote]]` | GET, POST | token (header only for mutating) | T-202 C18 clusters of unknown emissions — "the same thing I saw before" ([`crate::clusters`]). A *type* above emitters; evidence, never an identity |
+//! | `/api/ml/models`, `/api/ml/models/<id>/mode`, `/api/ml/shadow[?…]` | GET, PUT | token (header only for mutating) | T-844 C38 model registry and `(model, consumer)` modes (audited; `active` needs §4.6 evidence or `force`), and the durable shadow log's per-SNR agreement ([`crate::ml`]). Shadow never decides |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
@@ -151,6 +153,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/playback"),
     ("POST", "/api/playback"),
     ("GET", "/api/status"),
+    // T-981: front-end events - runs of clipped spectrum rows whose energy stepped across the
+    // whole tuned window - over a time window, for the canvas's front-end mark
+    ("GET", "/api/frontend/events"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
     ("POST", "/api/control/rate"),
@@ -238,6 +243,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/clusters"),
     ("GET", "/api/clusters/{id}"),
     ("POST", "/api/clusters/{id}/promote"),
+    // T-844 C38 model registry, modes and the durable shadow log (ADR-0016 §6, §9)
+    ("GET", "/api/ml/models"),
+    ("PUT", "/api/ml/models/{id}/mode"),
+    ("GET", "/api/ml/shadow"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
     // T-859: an analyze job's `hackriff.analyze/1` stream (the `analyze` on-demand opener)
@@ -309,6 +318,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/anomalies/{id}/reopen"),
     // T-273 trunking load index (metadata only, AWARE-067)
     ("GET", "/api/trunking/load"),
+    // T-977 the control-channel hunt's last pass, with the verdict on every channel it looked at
+    ("GET", "/api/trunking/cc-candidates"),
     // T-891 VLF/LF science on the accessory-fed source (SPACE-001, SPACE-041, PROP-019)
     ("GET", "/api/vlf"),
 ];
@@ -427,6 +438,13 @@ pub struct ApiState {
     /// T-891: the run's accessory-fed VLF services behind `GET /api/vlf` ([`crate::vlf`]); `None`
     /// answers 503, an attached-but-empty set answers an empty `accessories` list.
     pub vlf: Option<Arc<dyn crate::vlf::VlfControl>>,
+    /// T-977: the run's control-channel hunt behind `GET /api/trunking/cc-candidates`
+    /// ([`crate::trunk_cc`]); `None` on a server with no pipeline, which answers `503` rather than
+    /// an empty channel list.
+    pub cc_hunt: Option<Arc<dyn crate::trunk_cc::CcHuntControl>>,
+    /// T-981: the run's front-end event log behind `GET /api/frontend/events`
+    /// ([`crate::frontend`]); `None` answers 503.
+    pub frontend: Option<Arc<dyn crate::frontend::FrontEndControl>>,
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
@@ -440,6 +458,8 @@ pub struct ApiState {
     /// T-205: labelled-capture dataset export for `/api/datasets*` ([`crate::datasets`]); `None`
     /// answers 503.
     pub datasets: Option<Arc<dyn crate::datasets::DatasetControl>>,
+    /// T-844: the C38 stage for `/api/ml/*` ([`crate::ml`]); `None` answers 503.
+    pub ml: Option<Arc<dyn crate::ml::MlControl>>,
     /// T-469: the persisted IQ recordings behind `GET /api/recordings`
     /// ([`crate::recordings`]) - the half of the audio horizon the IQ ring is not. `None`
     /// answers 503.
@@ -1313,6 +1333,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::analyze::route(state, &ctl)) // T-190, T-859
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         .or_else(|| crate::datasets::route(state, &ctl)) // T-205
+        .or_else(|| crate::ml::route(state, &ctl)) // T-844
         .or_else(|| crate::recordings::route(state, &ctl)) // T-469
         .or_else(|| crate::playback::route(state, &ctl)) // T-463
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
@@ -1327,7 +1348,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::schedule::route(state, &ctl)) // T-120
         .or_else(|| crate::reports::route(state, &ctl)) // T-121
         .or_else(|| crate::trunking::route(state, &ctl)) // T-273
+        .or_else(|| crate::trunk_cc::route(state, &ctl)) // T-977
         .or_else(|| crate::vlf::route(state, &ctl)) // T-891
+        .or_else(|| crate::frontend::route(state, &ctl)) // T-981
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122
     {

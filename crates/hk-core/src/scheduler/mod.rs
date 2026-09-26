@@ -129,6 +129,7 @@ pub use plan::{
 pub use scan::{
     DEFAULT_DWELL_NS, IterativeScan, MAX_DWELL_NS, RECOMMENDED_MAX_DWELL_NS,
     RECOMMENDED_MIN_DWELL_NS, ScanBudget, ScanStep, coarse_step_rate, is_scan_step,
+    measured_step_overhead_ns,
 };
 pub use step::{GainSlot, PoiKey, Purpose, ScheduleStep};
 pub use survey::{MemorySurveyLog, SurveyEvent, SurveyLog};

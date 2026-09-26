@@ -1,6 +1,7 @@
 //! What the tracker emits: [`TrackEvent`]s (appended, never overwritten) and the summaries they
 //! carry.
 
+use hk_model::detection::SpurReason;
 use hk_model::{BurstLengths, ProvenanceId, SegmentKind, TimeRange, Timestamp, Track, TrackId};
 
 pub use super::stats::Periodicity;
@@ -151,6 +152,19 @@ pub struct TrackSummary {
     pub inband_fragment: bool,
     /// Share of member detections with a suspect flag (spur, image, IMD, compressed, clipped).
     pub suspect_fraction: f64,
+    /// T-948: member detections the in-capture rules attributed to the **receiver** rather than
+    /// to the air — a DC/LO-leakage spike at the tuned centre, a reference or clock harmonic, a
+    /// comb tooth, a listed spur-map entry. A DC flag a clean twin from another tuning refuted
+    /// ([`super::Tracker::refute_dc`], T-174) is **subtracted** here, so a real emission the
+    /// receiver happened to be tuned on top of is not counted.
+    ///
+    /// Compared against `track.detection_count` by
+    /// [`super::inventory::receiver_artifact`], which is where the admission rule lives.
+    pub artifact_detections: u64,
+    /// The reason of the first member counted in [`Self::artifact_detections`] — what to *say*
+    /// when the track is refused admission, so a receiver line is explained rather than dropped
+    /// silently.
+    pub artifact_reason: Option<SpurReason>,
     /// Member detections confirmed as emitter candidates (at emission or later).
     pub confirmed_detections: u64,
     /// T-403: the analysis resolution the track's members were measured at, Hz — the detector's own

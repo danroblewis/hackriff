@@ -35,8 +35,15 @@ use serde_json::json;
 
 /// Where the carrier really is: the tuned centre plus the scene's offset. The pipeline is never
 /// told either — it is served the blinded recording and has to find the line itself.
+///
+/// The field carrier sat 12 kHz from the tuned centre, inside the detector's 15 kHz DC tolerance.
+/// Since T-948 a CW-narrow track whose every member is DC-flagged is the receiver's own line and
+/// gets **no** inventory entry at all, so a carrier there can no longer be asked what it is
+/// explained as. The scene therefore puts the carrier well clear of the DC notch (120 kHz, ~31
+/// bins): the question here is how an on-air unmodulated carrier is explained and whether it
+/// mints bursts, not what the DC rule does to one parked on the receiver's own centre.
 const CENTER_HZ: f64 = 315e6;
-const OFFSET_HZ: f64 = -12e3;
+const OFFSET_HZ: f64 = -120e3;
 const CARRIER_HZ: f64 = CENTER_HZ + OFFSET_HZ;
 
 /// The `tone` scene: one unmodulated carrier for the whole recording, in white noise.

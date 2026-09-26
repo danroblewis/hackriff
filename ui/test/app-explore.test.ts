@@ -19,6 +19,7 @@ import {
   setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
   type Classification, type Row, FALLBACK_ROWS,
 } from "../src/app/explore/inventory";
+import { rasterText } from "../src/app/explore/format";
 import { ARTIFACT_MARK, CANDIDATE_MARK, CONFIRMED_MARK, signalMarkBoxes } from "../src/surface/marks";
 import * as ax from "../src/axis";
 
@@ -100,6 +101,25 @@ test("rowChips: known family, unknown family, off-raster flag", () => {
   );
   const flagged = makeRow({ explanations: [{ rank: 1, service: "fm-broadcast", label: "FM broadcast, off raster", score: 0.7, evidence_confidence: 0.7, status_evidence_confidence: 0, status: "known", prior_ref: null, flags: ["off-raster"], evidence: [] }] });
   assert.deepEqual(rowChips(flagged), [{ cls: "known", text: "wfm-broadcast" }, { cls: "flag", text: "off raster" }]);
+});
+
+// T-990: an emission with nothing measured behind it is now topped by `unidentified`, so the
+// backend carries the raster verdict it displaced onto that rank-1 row. The client reads
+// `explanations[0]` for both the chip and the Channel raster line, and the product rule is that a
+// mismatch is flagged, never dropped -- so this pins the wire shape the chip depends on.
+test("rowChips / rasterText: an off-raster station keeps its flag when rank 1 is `unidentified` (T-990)", () => {
+  const unidentified = {
+    rank: 1, service: "unidentified", label: "Unidentified emission", score: 1,
+    evidence_confidence: 0, status_evidence_confidence: 0, status: "unknown", prior_ref: null,
+    flags: ["no-measured-support", "off-raster"],
+    evidence: [
+      { kind: "occupancy", bandwidth_hz: 183_000, support: "measurement-unavailable", reason: "nothing measured about this emission names a service" },
+      { kind: "raster", raster_hz: 200_000, nearest_channel_hz: 101_300_000, offset_hz: -47_000, tolerance_hz: 2_000, on_raster: false, source: "47 CFR 73.201", center_source: "detected" },
+    ],
+  };
+  const row = makeRow({ family: null, classification: null, explanations: [unidentified] as Row["explanations"] });
+  assert.deepEqual(rowChips(row), [{ cls: "unknown", text: "unknown" }, { cls: "flag", text: "off raster" }]);
+  assert.equal(rasterText(row.explanations[0]?.evidence ?? []), "47 kHz off raster");
 });
 
 test("clusterChip: names the group and says the rows measure alike — never 'duplicate' (T-320)", () => {
@@ -910,10 +930,17 @@ test("T-386/T-389: the sidebar list and the surface's marks come from ONE collec
   // T-522 moved the composition into `paneMarkBoxes` (so the found-signal toggle has one place to
   // gate), but the rows and selections still flow straight from the store, through it, to
   // `signalMarkBoxes`/`selectionMarkBoxes` — no second filter appeared.
-  assert.match(src, /paneMarkBoxes\(Object\.values\(s\.inventory\.rows\).*s\.selections\.list/,
-    "the marks are composed from the store's rows and selections, straight through");
-  assert.match(src, /signalMarkBoxes\(rows, focusId\)/, "…into the same signalMarkBoxes…");
-  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox\)/, "…and the same selectionMarkBoxes");
+  // T-1002 named WHICH rows without adding a filter: `paneRows(s.inventory, pane.id)` is the
+  // pane's own answer from the store (`inventory.panes[id]`, written by that pane's own query), and
+  // it still flows straight through the one composition. The invariant is unchanged and stricter —
+  // the boxes and the list are one collection *per pane* — so a second, client-side window filter
+  // over the rows would still be the regression this test exists to catch.
+  assert.match(src, /paneMarkBoxes\(Object\.values\(paneRows\(s\.inventory, pane\.id\)\).*s\.selections\.list/,
+    "the marks are composed from this pane's rows and the store's selections, straight through");
+  // T-1004 added the linked-focus flag (a pane that does not own the selection draws its ghost); the
+  // rows and the focus still go straight through to the one `signalMarkBoxes`.
+  assert.match(src, /signalMarkBoxes\(rows, focusId, undefined, undefined, linkedFocus\)/, "…into the same signalMarkBoxes…");
+  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox, linkedFocus\)/, "…and the same selectionMarkBoxes");
   assert.match(src, /markQuads\(boxesFor\(pane\), edge, pane\.box, pane\.rect\)/,
     "placed in the pane's own box and rect — the renderer's mapping, not a second one");
   // And the sidebar's window is the pane's window: `mirror()` is the ONE writer of `live.view`
@@ -950,7 +977,12 @@ test("T-386 CLOCK GUARD: no clock of the browser's own reaches the Explore sideb
   const inv = bare("src/app/explore/inventory.ts");
   for (const word of clocks.slice(1)) assert.ok(!inv.includes(word), `inventory.ts must not contain "${word}"`);
   assert.equal(inv.match(/Date\.now/g)?.length, 1, "the one page-lifecycle stamp, and no second clock");
-  assert.match(inv, /setInventoryRows\(rows, Date\.now\(\) \/ 1000\)/, "and it is that one");
+  // T-1002: read once per load and handed to each pane's write-back, so N panes are still one
+  // stamp — and still not a capture time. The pane windows themselves come from `liveEdgeS`/the
+  // pane's own frozen instant, which is what the rest of this guard protects.
+  assert.match(inv, /const loadedAtS = Date\.now\(\) \/ 1000;/, "and it is that one");
+  assert.match(inv, /setInventoryRows\(rows, loadedAtS\)/, "…passed to the row writer, never re-read");
+  assert.match(inv, /setPaneInventory\(spec\.id, \{ rows, window \}, loadedAtS\)/, "…and to each pane's");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----

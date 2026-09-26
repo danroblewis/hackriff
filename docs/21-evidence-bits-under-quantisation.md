@@ -246,8 +246,9 @@ Read against [ADR-0022 §9](adr/0022-false-confirm-budget.md)'s table, this is t
 row. Its consequence for T-575's `ConfirmPolicy`:
 
 1. **Nothing changes without an explicit amendment.** `min_analytic_holdout_bits = 24`,
-   `hard_check_floor_bits = 16`, `min_check_width = 8` and §4.2's formula all stand; none reads a
-   calibrated metric. This note does not amend the ADR, deliberately: §9 says the amendment is a
+   `hard_check_floor_bits = 16`, `min_check_width = 16` (T-577, measured; re-measured on the
+   shipped count by T-921 and kept at 16 — ADR-0022 §4.3.2, never below 8) and §4.2's formula all stand;
+   none reads a calibrated metric. This note does not amend the ADR, deliberately: §9 says the amendment is a
    decision to be taken openly rather than "under pressure later", and a measurement ticket
    should not take it on the ADR's behalf.
 2. **If the amendment is written**, the conditioning key to name is **ADC fill**

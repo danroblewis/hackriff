@@ -80,6 +80,26 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 1
 fi
 
+# The session id this launch runs as (user ask 2026-09-25 09:45): the dashboard names a role ONLY
+# from $HACKRIFF_OPS/role-session/<role>, and decides it is live from a process carrying this id.
+# A fresh launch picks the id itself (`--session-id`); a resume keeps the resumed id (`--resume
+# <id>` / `-r <id>` reuse it), so that is what is written. `--continue` and a bare `-r` (the
+# picker) resume an id this script cannot know: the file is left as it was, and it says so.
+SID=""; RESUMING=0; PREV=""
+for a in "$@"; do
+  case "$PREV" in --resume|-r) case "$a" in -*) ;; *) SID="$a" ;; esac ;; esac
+  case "$a" in
+    --resume=*) RESUMING=1; SID="${a#--resume=}" ;;
+    --resume|-r|--continue|-c) RESUMING=1 ;;
+  esac
+  PREV="$a"
+done
+if [ "$RESUMING" = 0 ]; then
+  SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  # the explorer's pane is ops/explorer-window.sh, which passes it on to the claude it starts
+  PANE_CMD="$PANE_CMD --session-id $SID"
+fi
+
 EXTRA="$*"
 # The role session is bounded too, descendants included (its Agent-tool subagents, their cargo
 # and hk serve runs): the HiGarfield cpulimit fork at ROLE_CPU_PCT (default 800 = 8 cores of the
@@ -123,6 +143,15 @@ tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
 tmux send-keys -t "$SESSION" -l \
   "exec env HACKRIFF_ROLE=$ROLE $KNOBPREFIX $PANE_CMD $EXTRA"
 tmux send-keys -t "$SESSION" Enter
+if [ -n "$SID" ]; then
+  mkdir -p "$S/role-session"
+  printf '%s\n' "$SID" > "$S/role-session/$ROLE"
+  # coordinator-session is the older pointer (ops/worklog.py seeds its registry from it)
+  [ "$ROLE" = coordinator ] && printf '%s\n' "$SID" > "$S/coordinator-session"
+  echo "  session id: $SID  ($S/role-session/$ROLE)"
+else
+  echo "warning: resumed with no session id on the command line - $S/role-session/$ROLE left as it was" >&2
+fi
 if [ -n "$CPULIMIT_BIN" ]; then
   # After the exec the pane's pid is claude itself; wait for that before attaching, so a launch
   # that never reached claude says so instead of claiming a bound.

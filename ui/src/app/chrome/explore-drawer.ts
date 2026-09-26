@@ -12,10 +12,10 @@
 // docs/23 §10.6 P4 (size inversely proportional to influence): the drawer is a big panel, so a bare
 // click / Enter on a row only SELECTS it — highlights the row and, for an emitter, focuses its box on
 // the map (`focusSignal`, view state). It never pans, zooms or jumps the view. Jumping is the small,
-// explicit per-row "go to" button, which writes `requestGoto` (and `reviewAt` for a past window).
+// explicit per-row "go to" button, which writes `requestGoto` (carrying the time window too, for a
+// past survey row — T-999).
 import type { AppContext, MountFn } from "../context";
 import { requestGoto } from "../shell-slice";
-import { reviewAt } from "../centre/capture-slice";
 import { focusSignal } from "../explore/slice";
 import { bindContextTrigger, openSignalMenu } from "../menu";
 import type { AppState } from "../state";
@@ -44,11 +44,18 @@ export const itemKey = (it: DrawerItem): string => it.emitterId ?? `${it.group}:
 export const selectItem = (it: DrawerItem) => (s: AppState): Partial<AppState> =>
   it.emitterId !== undefined ? focusSignal(it.emitterId)(s) : {};
 
-/** What the small per-row "go to" button writes: view arithmetic only, never a device route. */
-export const gotoItem = (it: DrawerItem) => (s: AppState): Partial<AppState> => ({
-  ...(it.time ? reviewAt(it.time.t1, it.time.t1 - it.time.t0)() : {}),
-  ...requestGoto(it.hz, it.spanHz)(s),
-});
+/** What the small per-row "go to" button writes: view arithmetic only, never a device route.
+ *
+ * T-999: a past-survey row's time is carried on the SAME `requestGoto` write as its frequency, not
+ * written separately through `reviewAt`. `reviewAt` only ever set the store's OWN `time` field; it
+ * named nowhere for a pane to be moved to, so the active pane's time stayed exactly where it was and
+ * the very next `mirror()` (running every frame off the pane, `centre/surface.ts`) wrote the pane's
+ * unmoved time straight back over what this had just set — the jump was overwritten before a frame
+ * ever painted it. Folding the time into `nav` puts it through the one subscriber that actually
+ * moves a pane (`centre/surface.ts`'s `store.select((s) => s.nav, ...)`), so the pane freezes on the
+ * survey's window and `mirror()`'s next pass publishes THAT, instead of clobbering it. */
+export const gotoItem = (it: DrawerItem) => (s: AppState): Partial<AppState> =>
+  requestGoto(it.hz, it.spanHz, it.time ? { t0S: it.time.t0, t1S: it.time.t1 } : undefined)(s);
 export const GROUP_TITLE: Record<DrawerGroup, string> = {
   unknown: "Unknown & unexplained — the priority", strongest: "Strongest right now",
   quiet: "Quiet but active", surveys: "Past surveys — jump to a coverage window",
@@ -82,6 +89,11 @@ export interface DrawerScope {
 
 /** How far back the drawer's own questions reach when the scope is the pane's view. */
 export const HISTORY_S = 1800;
+
+/** The device's whole tunable range, for the two "where have I looked at all" questions (the
+ * coverage plane of an unscoped view, and the past-surveys observations pages). Hz. */
+export const WHOLE_RANGE_LO_HZ = 1_000_000;
+export const WHOLE_RANGE_HI_HZ = 6_000_000_000;
 
 /**
  * The drawer's scope for `s`, or null when nothing places it yet (no live edge, and no region).
@@ -152,6 +164,37 @@ export interface CoverageResp {
   window: { t0_s: number; t1_s: number };
   grid: { cells: number; f_lo_hz: number; f_cell_hz: number };
   any?: { cells: { state: string }[] };
+}
+
+/**
+ * The four windowed GETs the drawer asks per refresh, as paths (T-825/MAP-25: docs/23 §11 rule 3 —
+ * the guard is the request the client BUILDS, so the paths are built by a named function a test can
+ * call, not inline in the poll). Every one is scoped to `sc`, the drawer's own (time x frequency)
+ * window, region first when one is selected (T-943).
+ *
+ * The coverage plane alone stays the device's whole range for an unscoped view (the surveys group is
+ * "where have I looked at all"); scoped to a region it is that region, like every other question.
+ */
+export function drawerRequests(sc: DrawerScope): { events: string; strongest: string; scheduler: string; coverage: string } {
+  const { t0, t1 } = sc;
+  const band = `f_lo=${sc.loHz}&f_hi=${sc.hiHz}`;
+  const covBand = sc.region ? band : `f_lo=${WHOLE_RANGE_LO_HZ}&f_hi=${WHOLE_RANGE_HI_HZ}`;
+  return {
+    events: `/api/events?${band}&t0=${t0}&t1=${t1}&limit=200`,
+    strongest: `/api/analysis/strongest?${band}&window_s=30`,
+    // `schedulerQuery` returns the whole path. Until T-825 this read `/api/scheduler${…}` and so
+    // asked for `/api/scheduler/api/scheduler?…`: a well-formed request for a route that does not
+    // exist, which the drawer swallowed (`get` returns null on a failure), silently emptying the
+    // "quiet but active" group. Exactly the T-367 shape the request-shape guard exists to catch.
+    scheduler: schedulerQuery({ fLoHz: sc.loHz, fHiHz: sc.hiHz, t0, t1 }),
+    coverage: `/api/coverage?${covBand}&cells=64&t0=${t0}&t1=${t1}`,
+  };
+}
+
+/** The past-surveys page the drawer asks for, over the whole tunable range (T-825: a named builder,
+ * so the request a test sees is the request the client sends). */
+export function observationsRequest(t0: number, t1: number, limit: number, cursor: number | string): string {
+  return `/api/observations?f_lo=${WHOLE_RANGE_LO_HZ}&f_hi=${WHOLE_RANGE_HI_HZ}&t0=${t0}&t1=${t1}&limit=${limit}&cursor=${cursor}`;
 }
 
 export function unknownItems(r: EventsResp | null, max = 4): DrawerItem[] {
@@ -341,7 +384,7 @@ export class SurveyLog {
       while (cursor !== null && cursor !== undefined) {
         const overBudget = budget.pages >= this.maxPages;
         const r: ObservationsResp | null = overBudget ? null : await get<ObservationsResp>(
-          `/api/observations?f_lo=1000000&f_hi=6000000000&t0=${t0}&t1=${t1}&limit=${this.pageLimit}&cursor=${cursor}`);
+          observationsRequest(t0, t1, this.pageLimit, cursor));
         if (!r) {
           // The newest slice failed outright: keep what we had and read it again next refresh.
           if (newest && t1 === to && budget.pages === 0) return false;
@@ -501,16 +544,12 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
     // T-943: every question below is asked about THIS window, region first when one is selected.
     const sc = drawerScope(s);
     if (sc === null || edge === null) return;
-    const { t0, t1 } = sc;
-    const band = `f_lo=${sc.loHz}&f_hi=${sc.hiHz}`;
-    // The coverage plane stays the device's whole range for the view (the surveys group is "where
-    // have I looked at all"); scoped to a region it is that region, like every other question here.
-    const covBand = sc.region ? band : "f_lo=1000000&f_hi=6000000000";
+    const req = drawerRequests(sc);
     const [ev, st, sch, cov] = await Promise.all([
-      get<EventsResp>(`/api/events?${band}&t0=${t0}&t1=${t1}&limit=200`),
-      get<StrongestResp>(`/api/analysis/strongest?${band}&window_s=30`),
-      get<SchedulerResponse>(`/api/scheduler${schedulerQuery({ fLoHz: sc.loHz, fHiHz: sc.hiHz, t0, t1 })}`),
-      get<CoverageResp>(`/api/coverage?${covBand}&cells=64&t0=${t0}&t1=${t1}`),
+      get<EventsResp>(req.events),
+      get<StrongestResp>(req.strongest),
+      get<SchedulerResponse>(req.scheduler),
+      get<CoverageResp>(req.coverage),
       surveys.refresh(get, edge),
     ]);
     if (my !== seq) return;

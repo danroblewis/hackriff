@@ -48,8 +48,8 @@ Without it, a city inventory fills with ghosts and narrowband rasters are misrea
 - **Image level:** IRR ≈ 10·log10(4/(ε²+θ²)), ~40 dB at 1% / 1° (docs/02 §1.5 "DC offset, IQ imbalance, image rejection, harmonic responses").
 - **Gain** (docs/04 §10.4 "Dynamic range management"):
   - Target −6 to −10 dBFS peak.
-  - Clip fraction >1e-4 → gain down and flag suspect IM.
-  - Periodic gain-step tests in dense bands; learned per-band sweep tables.
+  - Clip fraction >1e-4 → **flag** suspect IM. It is *not* on its own a reason to reduce gain: T-945 ([docs/28](../28-front-end-gain-management.md)) measured, in the field and on the mock, states that clip and decode better than the clean states below them, so the clip fraction is one term of a score whose first term is the **processed output**, not the objective. The loop lives in `hk_core::gain` and is off by default.
+  - Periodic gain-step tests in dense bands; learned per-band sweep tables (the table is what would let a gain run start from the last good state for a band instead of from wherever the radio was — docs/28 §6).
 
 ## Platform constraints
 - HackRF One: plain crystal, no TCXO; "±20 ppm" unverified (docs/01 §1.2 "Specifications"). 20 ppm would be 48 kHz at 2.4 GHz (derived). Uncompensated crystals are 10–50 ppm and drift with temperature (docs/04 §10.1).
@@ -102,7 +102,7 @@ Regenerated from `use-cases.yaml` (primary, then notable secondary):
 - The C05 ↔ C09 relationship is resolved in docs/06 §5 as a **bootstrap loop**: seed a factory/terminated-input spur map first, then refine with C09 detections at runtime. C05's calibration state is Layer A; its artefact tests need C07/C09 and C04 scheduling.
 - A one-person setup likely has no signal generator. Is a known-ENR noise source or Sun/sky (C33) the default power reference?
 - Firmware clock correction vs host resampling: ADR (Phase 3).
-- Is a switched filter bank/FM notch in the base BOM? That changes which tests run by default.
+- Is a switched filter bank/FM notch in the base BOM? That changes which tests run by default. (T-945's field evidence says yes for an urban FM site: with no preselector, every gain state is a compromise and RDS on all but the two strongest stations was front-end limited.)
 
 ## Reading list
 1. docs/04 §10.3 "Spur identification and removal"
