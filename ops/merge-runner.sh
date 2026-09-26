@@ -187,7 +187,7 @@ flip_done(){ # ticket merge_sha
           && git add docs/tasks.yaml && HK_MERGE_RUNNER=1 git commit -q -m "Board: $t result from handback.json (merge runner)"); then
         rm -f "$S/work/$t/result.pending"; log "RESULT $t -> written on main"
       else
-        (cd "$REPO" && git checkout -q -- docs/tasks.yaml 2>/dev/null)
+        (cd "$REPO" && git checkout -q HEAD -- docs/tasks.yaml 2>/dev/null)
         log "RESULT $t on main FAILED - it stays in $S/work/$t/result.txt; needs reconcile"
       fi
     fi

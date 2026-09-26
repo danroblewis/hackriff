@@ -1289,6 +1289,8 @@ def write_result(c, hb):
         # main; the log showed only uv's banner), and 7 landed with no result until the coordinator wrote them by hand.
         open(f"{WORKDIR}/{tid}/result.pending", "w").close()
         return
+    if os.path.exists(f"{WORKDIR}/{tid}/result.pending"):   # an earlier run's failure; this run's result is on the branch
+        os.remove(f"{WORKDIR}/{tid}/result.pending")
     subprocess.run(["git", "add", "docs/tasks.yaml"], cwd=wt, capture_output=True)
     r = subprocess.run(["git", "commit", "-q", "-m", f"{tid}: result and status from handback.json (work-runner)"], cwd=wt, capture_output=True, text=True)
     log(f"RESULT {tid}: board {'written on the branch' if r.returncode == 0 else 'commit failed: ' + r.stderr.strip()[:100]}")

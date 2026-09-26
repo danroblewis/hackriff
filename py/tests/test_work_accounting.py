@@ -2447,8 +2447,7 @@ def test_a_result_the_branch_board_cannot_take_is_left_pending_for_the_landing(t
     R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
     assert any("no such ticket: T-1" in m for m in said)
     assert (d / "result.pending").exists() and "x" in (d / "result.txt").read_text()
-    # a write that works leaves nothing pending
-    (d / "result.pending").unlink()
+    # a later run whose write works clears the earlier run's marker (else the landing would re-write and cry FAILED)
     monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, "", ""))
     R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
     assert not (d / "result.pending").exists()
