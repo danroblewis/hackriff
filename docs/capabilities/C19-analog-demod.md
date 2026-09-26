@@ -31,6 +31,7 @@ Turns a channelized analog emission into audio with **no manual mode, squelch or
 - **Tones** (docs/04 §6.2):
   - CTCSS: ~50 tones, 67.0–254.1 Hz. LPF <300 Hz, decimate to ~1–2 kHz, Goertzel bank; decide within 150–250 ms with persistence.
   - DCS: 134.4 bps Golay(23,12). Correlate all codewords in both polarities.
+  - **Built (T-988, `hk_demod::subaudible`, SIGNAL-090):** LPF <300 Hz → ~1 kS/s; DCS first (16 bit phases, format + Golay check against the 105-code table, both polarities, aliases named); then a Welch-averaged tone estimate to ~0.1 Hz snapped to the EIA table within 1 Hz, with a noise guard and a **comb guard** (a periodic buzz's harmonic comb is not a tone — the explorer's 461.125 MHz "233.6 Hz" was a 16.67 Hz comb). Needs ~2 s of squelch-open audio, not 150–250 ms; served on Listen status and `estimated_params.subaudible`.
 - **AGC** (docs/04 §6.3):
   - Log domain `g[n+1] = g[n] + μ(L_ref − L[n])`, attack 1–10 ms, decay 0.2–0.5 s (AM), hang 0.5–2 s (SSB).
   - FM: no pre-demod AGC, loudness normalisation after demod.

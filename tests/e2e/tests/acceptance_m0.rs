@@ -80,5 +80,7 @@ mod tutorial_rds;
 mod tutorial_acars;
 #[path = "acceptance/tutorial_adsb.rs"]
 mod tutorial_adsb;
+#[path = "acceptance/tutorial_aprs.rs"]
+mod tutorial_aprs;
 #[path = "acceptance/tutorial_pocsag.rs"]
 mod tutorial_pocsag;

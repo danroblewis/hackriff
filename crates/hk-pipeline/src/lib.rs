@@ -37,6 +37,9 @@
 //!   channel class; spectrum is gated by the publisher.
 //! - **Observability:** [`stats::Counters`], the [`RunSummary`] and `/api/status`.
 
+pub mod atsc; // T-979: the 8VSB television survey
+pub mod audio; // T-869 (ADR-0015 §12.2): the Listen chooser
+pub mod ccverdict; // T-977: the control-channel hunt's per-channel verdicts
 pub mod chains;
 pub mod characterise; // T-242
 pub mod class;
@@ -46,9 +49,11 @@ pub mod config;
 pub mod control;
 pub mod events;
 pub mod family;
+pub mod frontend; // T-981: per-row front-end clip state and events
 pub mod gate;
 pub mod gnss; // T-322 (ADR-0018): the C36 L1-dwell caller
 pub mod inventory;
+pub mod ml; // T-844: the C38 shadow stage and its durable sink (ADR-0016 §6)
 pub mod recipes;
 pub mod refine;
 /// T-265 (ADR-0017 TM-10, ADR-0015 §14): the **incremental region-decode contract** — Rule I's
@@ -65,6 +70,7 @@ pub mod attention; // T-119
 pub mod candidates; // T-128
 pub mod observe; // T-115
 pub mod occupancy; // T-118
+pub mod overlap; // T-978: the spectrum hand-off behind the overlap re-analysis
 pub mod presence; // T-388
 pub mod reports; // T-121
 pub mod retention; // T-904
@@ -118,10 +124,11 @@ pub use recorder::{
 pub use refine::RefineSettings;
 pub use run::{
     CaptureState, ControlFailure, ControlStats, ControlStatus, DeviceReplay, ExtraSource,
-    MAX_RECOVERY_ATTEMPTS, MAX_START_SKEW, Pipeline, PipelineController, PipelineHandle,
-    REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunDevice, RunSummary, SegmentHold,
-    SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT, open_mock_replay,
-    open_mock_replay_with_block_len, open_replay, recovery_backoff, replay_block_len, replay_once,
+    InventoryHold, MAX_RECOVERY_ATTEMPTS, MAX_START_SKEW, Pipeline, PipelineController,
+    PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunDevice,
+    RunSummary, SegmentHold, SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT,
+    open_mock_replay, open_mock_replay_with_block_len, open_replay, recovery_backoff,
+    replay_block_len, replay_once,
 };
 pub use stats::Counters;
 pub use survey::{ReceiverSurvey, SurveyCadence, SurveyCounts};

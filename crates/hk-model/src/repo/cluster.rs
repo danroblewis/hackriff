@@ -848,6 +848,106 @@ fn fingerprint_candidates(
     Ok(out)
 }
 
+/// Rule 2b of [`crate::cluster`] (T-961): the live entry whose **(t, f) region** a decoded
+/// identity came from, or `None`.
+///
+/// A decode is made *from* a region of the spectrum somebody was already watching. When its
+/// identity is held by nobody and the producer named no context emitter — a recipe run on a band
+/// or a selection resolves no `emitter_id` ([`crate::cluster`] rule 3 has nothing to work with) —
+/// rule 5 used to mint a second entry on top of the detection row the decode was made from: the
+/// 106.1 MHz case, an `rds-pi:1323` entry 200 kHz wide beside the blind detection's 160 kHz one,
+/// two boxes for one station. Attaching is what the evidence says: the identity belongs to
+/// whatever was transmitting there, and if that is already an entry, it is *that* entry.
+///
+/// The pairing is the one `same_emission` uses, so a decode resolves to the entry a later merge
+/// would have joined it to anyway — except that no second box is ever drawn:
+/// - the scheme does not [share a channel](crate::emitter::IdentityScheme::shares_channel), so
+///   one channel means one transmitter (today: `rds-pi` alone). Without that, every ADS-B
+///   squitter in a 2 MHz window would land on one aircraft;
+/// - the candidate is live, listed and **holds no identity** — another transmitter's entry is not
+///   this one, and rule 2 has already looked for the holder;
+/// - centres within [`Fingerprint::center_tolerance_hz`] of the decode's channel;
+/// - an observation of the candidate covers the decode's own time: it was on air when this was
+///   decoded.
+///
+/// Closest centre wins, then the most recently seen. Overlapping candidates are themselves the
+/// error signal the inventory's overlap resolution acts on (CLAUDE.md); attaching to the closest
+/// leaves that one region to be re-analysed, where creating would have added a third box to it.
+fn region_target(
+    conn: &Connection,
+    s: &Sighting,
+    tol: &Tolerances,
+) -> Result<Option<(EmitterId, f64)>, RepoError> {
+    // No channel width is no region: `Sighting::decode` folds a missing channel to 0 Hz rather
+    // than failing the decode, and a decode that cannot say where it came from must not be
+    // attached to whatever happens to sit near DC.
+    if s.bandwidth_hz <= 0.0 {
+        return Ok(None);
+    }
+    let probe = Fingerprint::new(s.f_center_hz, s.bandwidth_hz);
+    let reach = (tol.center_ppm * 1e-6 * s.f_center_hz.abs())
+        .max(tol.center_min_hz)
+        .max(s.bandwidth_hz / 2.0);
+    if !reach.is_finite() {
+        return Ok(None);
+    }
+    let region = Region::new(
+        FreqRange::new(s.f_center_hz - reach, s.f_center_hz + reach),
+        ANY_TIME,
+    );
+    let b = region_bounds(conn, "emitter", &region)?;
+    let found: Vec<EmitterId> = conn
+        .prepare_cached(
+            "SELECT emitter_id FROM emitter WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 \
+             AND merged_into IS NULL AND lifecycle_state != 'deleted' \
+             AND identity_scheme IS NULL",
+        )?
+        .query_map(params![b.f_lo_min, b.hi, b.lo], |r| r.get::<_, [u8; 16]>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(eid)
+        .collect();
+    let seen = [Span {
+        track: false,
+        t0: s.seen.start.as_unix_nanos(),
+        t1: s.seen.end.as_unix_nanos(),
+        count: 0,
+    }];
+    let mut best: Option<(EmitterId, f64, i64)> = None;
+    for id in found {
+        let row = load_row(conn, id)?;
+        if row.merged || row.deleted || row.identity.is_some() {
+            continue;
+        }
+        let mut err = (row.f_center - s.f_center_hz).abs();
+        if let Some(refined) = refined_center(conn, id)? {
+            err = err.min((refined - s.f_center_hz).abs());
+        }
+        let f_tol = probe.center_tolerance_hz(&Fingerprint::new(row.f_center, row.bandwidth), tol);
+        // NaN (incomparable) counts as out of tolerance, as in `same_emission_score`.
+        if !matches!(
+            err.partial_cmp(&f_tol),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) {
+            continue;
+        }
+        if !spans_overlap(&observation_spans(conn, id)?, &seen) {
+            continue;
+        }
+        let score = err / f_tol;
+        let better = match &best {
+            None => true,
+            Some((_, best_score, best_last)) => {
+                score < *best_score || (score == *best_score && row.last > *best_last)
+            }
+        };
+        if better {
+            best = Some((id, score, row.last));
+        }
+    }
+    Ok(best.map(|(id, score, _)| (id, score)))
+}
+
 /// Rules 2–5 of [`crate::cluster`]: the target (`None` = create) and how it was chosen.
 fn decide(
     conn: &Connection,
@@ -900,6 +1000,14 @@ fn decide(
                 (None, Assignment::Created)
             }
             (None, Some(c)) => (Some(c), Assignment::Context),
+            // Rule 2b (T-961): nobody holds this identity and no producer named a context, so
+            // ask the spectrum where the decode came from before minting a second entry there.
+            (None, None) if !claim.identity.scheme.shares_channel() => {
+                match region_target(conn, s, tol)? {
+                    Some((id, score)) => (Some(id), Assignment::Region { score }),
+                    None => (None, Assignment::Created),
+                }
+            }
             (None, None) => (None, Assignment::Created),
         });
     }

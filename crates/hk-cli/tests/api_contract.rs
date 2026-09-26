@@ -63,7 +63,25 @@ fn start_server() -> (TempDataDirGuard, Serving, SocketAddr) {
 /// [`start_server`] with an explicit IQ-ring retention (T-338), so a test can reconfigure the
 /// capture window and watch the timeline follow it.
 fn start_server_retaining(retention_s: Option<f64>) -> (TempDataDirGuard, Serving, SocketAddr) {
-    let dir = temp_data_dir();
+    start_server_in(temp_data_dir(), retention_s)
+}
+
+/// [`start_server_retaining`] over a data directory the test has already seeded.
+fn start_server_in(
+    dir: PathBuf,
+    retention_s: Option<f64>,
+) -> (TempDataDirGuard, Serving, SocketAddr) {
+    start_server_fft(dir, retention_s, 1024)
+}
+
+/// [`start_server_in`] at an explicit display FFT length — which sets the view lattice's finest
+/// frequency cell, and with it how much spectrum one store block spans (T-1034: `hk serve`'s own
+/// default is 4096).
+fn start_server_fft(
+    dir: PathBuf,
+    retention_s: Option<f64>,
+    fft_len: usize,
+) -> (TempDataDirGuard, Serving, SocketAddr) {
     let guard = TempDataDirGuard::new(dir.clone());
     let serving = start(&ServeOptions {
         source: ServeSource::HackRf {
@@ -74,7 +92,7 @@ fn start_server_retaining(retention_s: Option<f64>) -> (TempDataDirGuard, Servin
         data_dir: Some(dir),
         bind: "127.0.0.1:0".parse().unwrap(),
         ui_dist: None,
-        fft_len: 1024,
+        fft_len,
         rows_per_s: 25.0,
         calibration: None,
         token: Some(TOKEN.into()),
@@ -839,10 +857,14 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     ] {
         assert!(tc[field].is_u64(), "tile_cache.{field}: {tc}");
     }
-    assert_eq!(tc["max_entries"], json!(256), "{tc}");
-    assert_eq!(tc["max_bytes"], json!(32 * 1024 * 1024), "{tc}");
-    assert!(tc["entries"].as_u64().unwrap() <= 256, "{tc}");
-    assert!(tc["bytes"].as_u64().unwrap() <= 32 * 1024 * 1024, "{tc}");
+    // T-1020: sized in viewports (256 MiB / 600 entries), past the 135-290 tiles/screen the
+    // tile-latency review measured against the old 32 MiB / ~35-tile bound.
+    assert_eq!(tc["max_entries"], json!(600), "{tc}");
+    assert_eq!(tc["max_bytes"], json!(256 * 1024 * 1024), "{tc}");
+    assert!(tc["entries"].as_u64().unwrap() <= 600, "{tc}");
+    assert!(tc["bytes"].as_u64().unwrap() <= 256 * 1024 * 1024, "{tc}");
+    // T-1020: per-client hit/miss, so a pan-back over one pane's own viewport is measurable.
+    assert!(is_object(&tc["by_client"]), "tile_cache.by_client: {tc}");
 
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
@@ -2789,6 +2811,114 @@ fn tune_history_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-981: the front end's clip state — `/api/status`'s `frontend` block and
+/// `GET /api/frontend/events` — answers as `docs/api.md` documents it, on a live `hk serve` over
+/// the mock device. The blind end-to-end assertion (a saturating burst through the mock SDR is
+/// flagged on its row, counted, logged as one event and never stored as a detection) is
+/// `hk-pipeline/tests/frontend_overload.rs`; this pins the wire shape and the rule by value.
+#[test]
+fn frontend_status_block_and_events_route_answer_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    wait_for(
+        "spectrum rows measured by the front-end judgement",
+        Duration::from_secs(60),
+        || {
+            get(addr, "/api/status").1["frontend"]["rows"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let (st, v) = get(addr, "/api/status");
+    assert_eq!(st, 200, "{v}");
+    let fe = &v["frontend"];
+    for field in [
+        "rows",
+        "clipped_rows",
+        "event_rows",
+        "events",
+        "clipped_samples",
+        "samples",
+        "suppressed_detections",
+        "evicted_events",
+    ] {
+        assert!(fe[field].is_u64(), "frontend.{field}: {fe}");
+    }
+    assert!(fe["adc_peak_max"].is_number(), "{fe}");
+    assert!(
+        fe["clipped_rows"].as_u64() <= fe["rows"].as_u64(),
+        "a clipped row is a measured row: {fe}"
+    );
+    assert!(
+        fe["event_rows"].as_u64() <= fe["clipped_rows"].as_u64(),
+        "an event row is a clipped row: {fe}"
+    );
+    let last = &fe["last_row"];
+    for field in ["t", "clip_fraction", "adc_peak"] {
+        assert!(last[field].is_number(), "frontend.last_row.{field}: {fe}");
+    }
+    for field in ["clipped", "event"] {
+        assert!(last[field].is_boolean(), "frontend.last_row.{field}: {fe}");
+    }
+    assert!(
+        fe["last_event"].is_null() || fe["last_event"]["t0"].is_number(),
+        "{fe}"
+    );
+    assert_eq!(fe["log"]["capacity"], json!(1024), "{fe}");
+    assert_eq!(fe["rule"]["clip_fraction"], json!(1e-4), "{fe}");
+    assert_eq!(fe["rule"]["step_db"], json!(6.0), "{fe}");
+    assert_eq!(fe["rule"]["saturation_fraction"], json!(0.01), "{fe}");
+
+    // Every capture time there could be: a replay's clock is its recording's, not the wall's.
+    let (t0, t1) = (0.0_f64, 4.0e9_f64);
+    let url = |extra: &str| format!("/api/frontend/events?t0={t0}&t1={t1}{extra}");
+    let (st, e) = get(addr, &url(""));
+    assert_eq!(st, 200, "{e}");
+    for field in ["window", "events", "total", "limit", "truncated", "log"] {
+        assert!(
+            e.get(field).is_some(),
+            "frontend/events missing {field}: {e}"
+        );
+    }
+    assert_eq!(e["limit"], json!(256), "{e}");
+    assert_eq!(e["window"]["t0"].as_f64(), Some(t0), "{e}");
+    assert_eq!(e["log"]["capacity"], json!(1024), "{e}");
+    let events = e["events"].as_array().expect("events is an array");
+    assert_eq!(e["total"].as_u64(), Some(events.len() as u64), "{e}");
+    for ev in events {
+        assert_eq!(ev["kind"], json!("clip"), "{ev}");
+        let (c, r) = (
+            ev["center_hz"].as_f64().unwrap(),
+            ev["sample_rate_hz"].as_f64().unwrap(),
+        );
+        assert_eq!(ev["f_lo_hz"].as_f64(), Some(c - r / 2.0), "{ev}");
+        assert_eq!(ev["f_hi_hz"].as_f64(), Some(c + r / 2.0), "{ev}");
+        assert!(ev["t1"].as_f64() > ev["t0"].as_f64(), "{ev}");
+    }
+    let (st, d) = get(addr, &url("&device=no-such-radio&limit=5"));
+    assert_eq!(st, 200, "{d}");
+    assert_eq!(
+        (d["total"].clone(), d["limit"].clone()),
+        (json!(0), json!(5)),
+        "{d}"
+    );
+    for bad in [
+        format!("/api/frontend/events?t0={t0}"),
+        format!("/api/frontend/events?t0={t1}&t1={t0}"),
+        url("&limit=0"),
+        url("&limit=5000"),
+        url("&f_lo=1"),
+    ] {
+        let (st, e) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    let (st, e) = post(addr, "/api/frontend/events", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
@@ -2821,9 +2951,24 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     };
 
     // GET one entry: same shape as a list row.
+    //
+    // T-972: the row that comes back is the **live** entry the id resolves to, and its `id` is the
+    // survivor's, not necessarily the one asked for (docs/api.md, "Inventory entry"). Under a live
+    // inventory that is not pedantry: detection is "fast, continuous and self-cleaning" (CLAUDE.md,
+    // ADR-0019), so the near-duplicate merge can re-key this station between the list call above and
+    // this one, and asserting the two ids are equal was a race in the *test's* choice of row — it
+    // failed once at ~load 23 with a 200 and a different id, which is reachable only through that
+    // resolution. So read the live id back off the server and use it from here on, exactly as a
+    // client holding a list id must. The resolution itself is pinned by value against a seeded
+    // repository in `crates/hk-api/tests/inventory_api.rs`
+    // (`the_entry_route_resolves_a_merged_id_to_its_survivor`), where the merge is made to happen
+    // rather than waited for.
     let (st, row) = get(addr, &format!("/api/inventory/{id}"));
     assert_eq!(st, 200, "{row}");
-    assert_eq!(row["id"], json!(id));
+    let id = row["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an entry row carries its id: {row}"))
+        .to_owned();
     for field in [
         "state",
         "lifecycle",
@@ -2856,6 +3001,7 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
             "bandwidth_hz",
             "roll_off",
             "pilot_hz",
+            "subaudible",
             "source_recording",
         ] {
             assert!(
@@ -2863,6 +3009,9 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
                 "estimated_params missing {field}: {row}"
             );
         }
+        // T-988: `subaudible` is `null` (nobody looked) or the CTCSS/DCS/none object.
+        let sub = &p["subaudible"];
+        assert!(sub.is_null() || sub["kind"].is_string(), "{row}");
     }
     let (st, v) = get(addr, "/api/inventory/not-a-uuid");
     assert_eq!(st, 404, "{v}");
@@ -2890,6 +3039,31 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
             row["source_session"].is_null() || row["source_session"].is_string(),
             "{row}"
         );
+        // T-962: every vote-gated identity row states its vote, the bar and its window, and
+        // `provisional` is exactly "the bar has not yet fallen within the window" — a rate, not
+        // a lifetime count (docs/api.md, "Provisional identity").
+        let f = &row["fields"];
+        if row["frame_model"] == json!("rds-pi") {
+            assert!(f["pi_provisional"].is_boolean(), "{row}");
+            assert_eq!(f["pi_provisional"], f["identity_provisional"], "{row}");
+        }
+        if let Some(provisional) = f.get("identity_provisional") {
+            let votes = f["identity_votes"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let needed = f["identity_votes_needed"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let in_window = f["identity_votes_in_window"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let window_s = f["identity_votes_window_s"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{row}"));
+            assert!(in_window <= votes.min(needed), "{row}");
+            assert!(window_s > 0.0, "{row}");
+            assert_eq!(provisional, &json!(in_window < needed), "{row}");
+        }
     }
     let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
     assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
@@ -2942,6 +3116,18 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     assert_eq!(st, 200, "{v}");
     assert!(v.get("entry").is_some(), "{v}");
     assert_eq!(v["entry"]["state"], json!("confirmed"), "{v}");
+    // T-972, again from the server's own answer: `entry` is the live row, so this both re-anchors
+    // the id for the band/delete calls below and settles it — a same-emission merge keeps the
+    // confirmed entry's id over a candidate's (`merge_same_emission_rows`), so from here the id a
+    // client holds is the one the user accepted.
+    let id = v["entry"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a promoted entry carries its id: {v}"))
+        .to_owned();
+    // ...and the band block below must validate against *that* row's measured band, not the one
+    // read before the promote: the user band is checked against the live entry's `[f_lo_hz,
+    // f_hi_hz]`, which a merge moves.
+    let row = v["entry"].clone();
     let (st, v) = post(
         addr,
         &format!("/api/inventory/{id}/promote"),
@@ -3777,6 +3963,12 @@ fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searche
         json!(null),
         "an aborted-or-absent look rules nothing out: {v}"
     );
+    // T-567 (ADR-0021 §7A.6): `suspected` belongs to `unsupported-structure` and to no other
+    // kind. A look that never happened suspects nothing, and must not appear to.
+    assert!(
+        v["resolution"].get("suspected").is_none(),
+        "not-searched names no missing block: {v}"
+    );
     // T-884 item 6 (docs/api.md): this is also the shape a **withheld-identity** emitter gets,
     // whatever storage holds for it — the same withholding `/api/inventory` applies to
     // `synthesis` (T-159/T-163), and with no marker that anything was held back, since such a
@@ -4490,6 +4682,208 @@ fn dataset_export_and_manifest_lookup_answer_as_documented() {
     stop_server(serving);
 }
 
+/// T-844: `GET /api/ml/models`, `PUT /api/ml/models/{id}/mode` and `GET /api/ml/shadow`, over a
+/// data directory seeded with an installed probe model and one record already in the durable
+/// shadow log — so the served shapes are asserted on real content, not on empty arrays — and the
+/// documented refusals: `active` without §4.6 evidence is 409 `needs_evidence`, a forced one is
+/// recorded and audited, an unauthenticated change is 401, bad queries are 400.
+#[test]
+fn ml_models_modes_and_the_shadow_log_answer_as_documented() {
+    let dir = temp_data_dir();
+    // Guarded from creation (T-232), not only from `start_server_in` below: the probe model and the
+    // seeded shadow record are written into it first.
+    let _setup_guard = TempDataDirGuard::new(dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let probe = hk_pipeline::ml::install_probe_model(&dir, "fsk", &["2fsk", "gfsk", "msk", "4fsk"])
+        .unwrap();
+    let t_ns = 1_789_300_820_000_000_000_i64;
+    {
+        use hk_store::ml::*;
+        let store = ShadowStore::open(hk_pipeline::ml::shadow_dir(&dir)).unwrap();
+        store
+            .append(&ShadowRecord {
+                schema: SHADOW_SCHEMA,
+                t: hk_model::Timestamp::from_unix_nanos(t_ns),
+                model: probe.to_string(),
+                consumer: hk_pipeline::ml::DL_CONSUMER.into(),
+                subject: ShadowSubject {
+                    kind: "detection".into(),
+                    detection: "det-contract".into(),
+                },
+                snr_db: Some(22.0),
+                snr_bin_db: snr_bin_db(Some(22.0)),
+                prediction: ShadowPrediction {
+                    label: "gfsk".into(),
+                    p: 0.6,
+                    energy: -3.0,
+                    unknown_score: 0.2,
+                    provider: "cpu-mlp".into(),
+                    precision: "fp32".into(),
+                    latency_ms: 0.1,
+                    batch_size: 1,
+                    mode: "shadow".into(),
+                },
+                classical: ClassicalDecision {
+                    family: "fsk".into(),
+                    class: Some("2fsk".into()),
+                    class_p: Some(0.7),
+                    confidence: 0.8,
+                    open_set_score: 0.1,
+                    stage: "feature-tree".into(),
+                },
+            })
+            .unwrap();
+    }
+    let (_dir_guard, serving, addr) = start_server_in(dir.clone(), None);
+
+    let (st, v) = get(addr, "/api/ml/models");
+    assert_eq!(st, 200, "{v}");
+    let models = v["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1, "{v}");
+    let m = &models[0];
+    assert_eq!(m["id"], json!("probe-fsk"), "{m}");
+    assert_eq!(m["family"], json!("fsk"), "{m}");
+    assert_eq!(m["consumer"], json!("hk-classify/dl"), "{m}");
+    assert_eq!(m["format"], json!("hk-mlp@1"), "{m}");
+    assert_eq!(m["enable_evidence"], Value::Null, "{m}");
+    assert_eq!(
+        (m["loaded"].as_bool(), m["modes"].clone()),
+        (Some(false), json!([]))
+    );
+    assert_eq!(v["hosts"].as_array().unwrap().len(), 2, "{v}");
+    assert!(v["hosts"][0]["stats"]["shadow_records"].is_u64(), "{v}");
+    assert_eq!(v["producer"]["consumer"], json!("hk-classify/dl"), "{v}");
+    assert!(v["producer"]["offered"].is_u64(), "{v}");
+    assert!(is_array(&v["restore_errors"]), "{v}");
+
+    // Installed is not on: a change of mode is the operator's act, and it is authenticated.
+    let path = "/api/ml/models/probe-fsk/mode";
+    let (st, _) = call(addr, "PUT", path, None, Some(r#"{"mode":"shadow"}"#));
+    assert_eq!(st, 401);
+    let (st, v) = put(addr, path, r#"{"mode":"shadow"}"#);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["mode"]["mode"], json!("shadow"), "{v}");
+    assert_eq!(v["mode"]["previous"], json!("off"), "{v}");
+    assert_eq!(v["mode"]["forced"], json!(false), "{v}");
+    assert_eq!(v["mode"]["provider"], json!("cpu-mlp"), "{v}");
+    let (_, v) = get(addr, "/api/ml/models");
+    assert_eq!(v["models"][0]["loaded"], json!(true), "{v}");
+    assert_eq!(
+        v["models"][0]["modes"],
+        json!([{"consumer": "hk-classify/dl", "mode": "shadow", "forced": false}])
+    );
+
+    // `active` needs the §4.6 evidence; `force` gets past it and says so.
+    let (st, v) = put(addr, path, r#"{"mode":"active"}"#);
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (409, Some("needs_evidence")),
+        "{v}"
+    );
+    let (st, v) = put(addr, path, r#"{"mode":"active","force":true}"#);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (v["mode"]["mode"].clone(), v["mode"]["forced"].clone()),
+        (json!("active"), json!(true))
+    );
+    let (st, v) = put(addr, path, r#"{"mode":"off"}"#);
+    assert_eq!(st, 200, "{v}");
+    let audit = std::fs::read_to_string(dir.join("control-audit.jsonl")).unwrap();
+    let ml: Vec<Value> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["action"] == json!("ml_mode"))
+        .collect();
+    assert_eq!(
+        ml.len(),
+        4,
+        "every change, refused or not, is audited: {audit}"
+    );
+    assert!(
+        ml.iter()
+            .any(|e| e["new"]["forced"] == json!(true) && e["result"] == json!("ok")),
+        "the forced change is in the audit log: {ml:?}"
+    );
+
+    for (body, status, code) in [
+        (r#"{}"#, 400, "invalid"),
+        (r#"{"mode":"on"}"#, 400, "invalid"),
+        (r#"{"mode":"shadow","evidence":"trust me"}"#, 400, "invalid"),
+        (
+            r#"{"mode":"shadow","consumer":"someone-else"}"#,
+            400,
+            "invalid",
+        ),
+    ] {
+        let (st, v) = put(addr, path, body);
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (status, Some(code)),
+            "{body}: {v}"
+        );
+    }
+    let (st, v) = put(
+        addr,
+        "/api/ml/models/no-such-model/mode",
+        r#"{"mode":"shadow"}"#,
+    );
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+
+    // The durable log, served with its per-SNR agreement.
+    let (st, v) = get(addr, "/api/ml/shadow");
+    assert_eq!(st, 200, "{v}");
+    let r = &v["records"][0];
+    assert_eq!(r["model"], json!(probe.to_string()), "{r}");
+    assert_eq!(r["subject"]["detection"], json!("det-contract"), "{r}");
+    assert_eq!(r["prediction"]["mode"], json!("shadow"), "{r}");
+    assert_eq!(r["classical"]["class"], json!("2fsk"), "{r}");
+    assert_eq!(r["agrees"], json!(false), "{r}");
+    assert_eq!(r["t_s"].as_f64(), Some(t_ns as f64 / 1e9), "{r}");
+    assert_eq!(r["t_ns"].as_i64(), Some(t_ns), "{r}");
+    assert!(
+        r.get("t").is_none(),
+        "nanoseconds are served under `_ns` only: {r}"
+    );
+    let a = &v["aggregates"][0];
+    assert_eq!(
+        (
+            a["family"].clone(),
+            a["snr_bin_db"].clone(),
+            a["n"].clone(),
+            a["compared"].clone(),
+            a["agree"].clone()
+        ),
+        (json!("fsk"), json!(20), json!(1), json!(1), json!(0)),
+        "{a}"
+    );
+    assert_eq!(v["store"]["records"], json!(1), "{v}");
+    assert_eq!(v["store"]["max_bytes"], json!(256_u64 << 20), "{v}");
+    let (_, v) = get(addr, "/api/ml/shadow?family=analog");
+    assert_eq!(
+        (v["records"].clone(), v["aggregates"].clone()),
+        (json!([]), json!([])),
+        "{v}"
+    );
+    let (_, v) = get(
+        addr,
+        "/api/ml/shadow?model=probe-fsk&t0=1789300800&t1=1789300900&limit=5",
+    );
+    assert_eq!(v["records"].as_array().unwrap().len(), 1, "{v}");
+    for q in ["t0=abc", "t0=20&t1=10", "limit=0", "limit=5000", "model="] {
+        let (st, v) = get(addr, &format!("/api/ml/shadow?{q}"));
+        assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{q}: {v}");
+    }
+
+    let (st, _) = post(addr, "/api/ml/models", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = put(addr, "/api/ml/shadow", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = get(addr, "/api/ml/models/probe-fsk/mode");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 // --- WebSocket routes -----------------------------------------------------------------------------
 
 fn connect_ws(addr: SocketAddr, path: &str) -> Result<Ws, tungstenite::Error> {
@@ -4594,8 +4988,9 @@ fn ws_stream_header_matches_the_stream_contract() {
 /// One thing a stream consumer saw, in arrival order.
 #[derive(Debug)]
 enum Saw {
-    /// A data record and its capture time (ns).
-    Row(i64),
+    /// A data record: its capture time (ns), its stream sample index, and whether it carries
+    /// `DISCONTINUITY` (the rows before it are not contiguous with it).
+    Row(i64, u64, bool),
     /// A text message that parsed as JSON — on a binary stream, a stream header.
     Header(Value),
 }
@@ -4609,7 +5004,10 @@ struct Seen {
 
 impl Seen {
     fn rows(&self) -> usize {
-        self.saw.iter().filter(|s| matches!(s, Saw::Row(_))).count()
+        self.saw
+            .iter()
+            .filter(|s| matches!(s, Saw::Row(..)))
+            .count()
     }
 
     /// Everything seen after the first header satisfying `pick` (none if no such header arrived).
@@ -4627,7 +5025,7 @@ impl Seen {
     /// The capture time of the last row seen.
     fn last_row(&self) -> Option<i64> {
         self.saw.iter().rev().find_map(|s| match s {
-            Saw::Row(t) => Some(*t),
+            Saw::Row(t, ..) => Some(*t),
             _ => None,
         })
     }
@@ -4646,8 +5044,11 @@ fn drain_ws(ws: &mut Ws, deadline: Instant, done: impl Fn(&Seen) -> bool) -> See
         match ws.read() {
             Ok(Message::Binary(b)) => {
                 if b.len() >= 32 && b[0] == 1 {
-                    seen.saw
-                        .push(Saw::Row(i64::from_le_bytes(b[16..24].try_into().unwrap())));
+                    seen.saw.push(Saw::Row(
+                        i64::from_le_bytes(b[16..24].try_into().unwrap()),
+                        u64::from_le_bytes(b[24..32].try_into().unwrap()),
+                        b[1] & hk_api::stream::RecordFlags::DISCONTINUITY.0 != 0,
+                    ));
                 }
             }
             Ok(Message::Text(t)) => {
@@ -4729,8 +5130,9 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
             .is_some_and(|c| (c - moved_to).abs() < 1.0)
     };
     let after = drain_ws(&mut ws, Instant::now() + Duration::from_secs(30), |s| {
-        s.after_header(new_centre)
-            .is_some_and(|(_, rest)| rest.iter().filter(|x| matches!(x, Saw::Row(_))).count() >= 10)
+        s.after_header(new_centre).is_some_and(|(_, rest)| {
+            rest.iter().filter(|x| matches!(x, Saw::Row(..))).count() >= 10
+        })
     });
     assert!(
         after.closed.is_none(),
@@ -4743,7 +5145,7 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     assert_eq!(hd["stream_id"], json!("spectrum/live"), "{hd}");
     assert_eq!(hd["schema"], json!("hackriff.stream"), "{hd}");
     assert!(
-        rest.iter().any(|s| matches!(s, Saw::Row(_))),
+        rest.iter().any(|s| matches!(s, Saw::Row(..))),
         "rows of the new window after its header: {after:?}"
     );
 
@@ -4754,8 +5156,9 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
 
     let new_rate = |h: &Value| h["bandwidth_hz"].as_f64() == Some(4.8e6);
     let across = drain_ws(&mut ws, Instant::now() + Duration::from_secs(60), |s| {
-        s.after_header(new_rate)
-            .is_some_and(|(_, rest)| rest.iter().filter(|x| matches!(x, Saw::Row(_))).count() >= 10)
+        s.after_header(new_rate).is_some_and(|(_, rest)| {
+            rest.iter().filter(|x| matches!(x, Saw::Row(..))).count() >= 10
+        })
     });
     assert!(
         across.closed.is_none(),
@@ -4769,7 +5172,7 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     let rows_after: Vec<i64> = rest
         .iter()
         .filter_map(|s| match s {
-            Saw::Row(t) => Some(*t),
+            Saw::Row(t, ..) => Some(*t),
             _ => None,
         })
         .collect();
@@ -4822,7 +5225,7 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
         .saw
         .iter()
         .filter_map(|s| match s {
-            Saw::Row(t) => Some(*t),
+            Saw::Row(t, ..) => Some(*t),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -4841,31 +5244,75 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     );
     // And the hole is at the seam and nowhere else: no row is a held or repeated one (capture time
     // strictly advances everywhere, seam included — a held last frame would show as a repeated or
-    // non-advancing timestamp), and no row after the seam lands *earlier* than one row period
-    // after its predecessor, which is what back-filling the hole with squeezed rows would look
-    // like. Only the "never shorter" half is asserted: rows lost in delivery lengthen a step and
-    // never shorten one, so this stays true under any load.
+    // non-advancing timestamp), and no row after the seam is moved to fill the hole (below).
     for (a, b) in std::iter::once(&last_before)
         .chain(rows_after.iter())
         .zip(rows_after.iter())
     {
         assert!(b > a, "row timestamps strictly advance: {a} then {b}");
     }
-    let mut steps: Vec<i64> = rows_after.windows(2).map(|w| w[1] - w[0]).collect();
-    steps.sort_unstable();
-    // The new window has its own row period (192 000 samples at 4.8 MHz = 40.0 ms, against the old
-    // window's 40.107 ms), so it is measured here rather than carried over from `period_ns`.
-    let new_period_ns = steps[steps.len() / 2];
-    for w in rows_after.windows(2) {
-        // ±2 ns: row times are sample_index / rate rounded to whole nanoseconds.
+    // T-974: the window's own row period comes from its header, not from the median step. The
+    // steps after a re-plumb are not all whole rows: a front end that is losing blocks (the mock's
+    // real-time pacing drops them whenever the capture thread falls behind 4.8 Msps, which on a
+    // loaded box is every few blocks — `source_dropped` 4.2 M samples in one failing run) resets
+    // the STFT at each gap, and since T-915 a reset in a freshly retuned stream emits the averaging
+    // in progress as a partial row with its true `n_avg` (T-139). Those rows are real measurements
+    // of real samples and shorter than a row; the median of a window of them is not the row
+    // period, and "no step shorter than the median" failed 5 runs of 5 on a busy worker while
+    // holding everywhere the source kept up. What a back-filled or squeezed seam breaks is not
+    // step length, it is **where a row sits**: a row's time is its sample index on the capture
+    // clock, and a row pulled earlier to close a hole no longer is. So each step is checked on
+    // exactly that, and a step shorter than one row is legal only where the stream itself
+    // declares the break (`DISCONTINUITY` on the later row) — between rows it calls contiguous,
+    // a step is a whole number of row periods (more than one only when rows were lost in delivery,
+    // which lengthens a step and never shortens one).
+    let fs_new = hd["bandwidth_hz"].as_f64().expect("bandwidth_hz");
+    assert_eq!(
+        hd["content_class"],
+        json!("unrestricted"),
+        "an ungated class declares its actual row rate, so the header gives the row period: {hd}"
+    );
+    let new_period_ns = 1e9
+        / hd["sample_rate_hz"]
+            .as_f64()
+            .expect("the declared row rate");
+    let recs: Vec<(i64, u64, bool)> = rest
+        .iter()
+        .filter_map(|s| match s {
+            Saw::Row(t, i, d) => Some((*t, *i, *d)),
+            _ => None,
+        })
+        .collect();
+    let (mut contiguous, mut declared_breaks) = (0, 0);
+    for w in recs.windows(2) {
+        let ((t0, i0, _), (t1, i1, cut)) = (w[0], w[1]);
+        assert!(i1 > i0, "sample indices strictly advance: {recs:?}");
+        let step = (t1 - t0) as f64;
+        let from_samples = (i1 - i0) as f64 / fs_new * 1e9;
+        // Each time is rounded to whole nanoseconds from one clock, so two differ by < 1 ns.
         assert!(
-            w[1] - w[0] >= new_period_ns - 2,
-            "a row after the seam is {} ns after the one before it, shorter than the new window's \
-             {new_period_ns} ns row period — the hole belongs at the seam, not squeezed back into \
-             the window: {rows_after:?}",
-            w[1] - w[0]
+            (step - from_samples).abs() <= 1.0,
+            "a row after the seam is placed {step} ns after the one before it, but its samples \
+             start {from_samples} ns after them — a row's time is its sample index on the capture \
+             clock, and a row moved to fill the hole breaks exactly that: {recs:?}"
         );
+        if cut {
+            declared_breaks += 1;
+        } else {
+            contiguous += 1;
+            let periods = (step / new_period_ns).round();
+            assert!(
+                periods >= 1.0 && (step - periods * new_period_ns).abs() <= 2.0,
+                "rows the stream calls contiguous are whole row periods apart: {step} ns against \
+                 the new window's {new_period_ns} ns row period — the hole belongs at the seam, \
+                 not squeezed back into the window: {recs:?}"
+            );
+        }
     }
+    assert!(
+        contiguous + declared_breaks >= 9,
+        "{contiguous} contiguous + {declared_breaks} declared-break steps checked: {recs:?}"
+    );
 
     let _ = ws.close(None);
     stop_server(serving);
@@ -5057,7 +5504,7 @@ fn one_clients_pause_never_freezes_another_clients_stream() {
         seen.saw
             .iter()
             .filter_map(|s| match s {
-                Saw::Row(t) => Some(*t),
+                Saw::Row(t, ..) => Some(*t),
                 _ => None,
             })
             .collect()
@@ -5183,6 +5630,9 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     assert!(header["audio"]["mode"].is_string(), "{header}");
     // T-874: a client that does not ask gets mono.
     assert_eq!(header["audio"]["channels"], json!(1), "{header}");
+    // T-987: `audio.wait` is only for a stream that opened waiting for its carrier; a station
+    // the probe recognised carries none.
+    assert!(header["audio"].get("wait").is_none(), "{header}");
 
     // At least one binary data record (type 1: 32-byte header + i16 LE PCM payload) within a
     // bounded number of messages (status records, type 3, interleave).
@@ -7228,23 +7678,37 @@ fn the_band_collapsed_activity_series_is_measured_and_states_its_fold() {
     // describe the **same** window for the comparison to mean anything — the live edge advances
     // between requests — so the pair is re-taken until both report the same capture window, and the
     // test refuses to compare otherwise rather than comparing across a moved window.
+    //
+    // T-974: and the live edge is **stopped** first. `window.t1_s` is the ring's newest sample and
+    // moves every 20-100 ms (measured: 40 distinct values in 1.8 s of back-to-back requests), while
+    // one pair of these requests took 30-40 ms on a quiet box and longer on a busy one — so whether
+    // any of 40 re-takes landed inside one step was a race against the machine's load, and a
+    // worker under load lost it (T-920: "two timeline answers over the same capture window").
+    // Nothing below is about liveness: the fold, the unobserved steps and the budget are properties
+    // of whatever the ring holds. Stopping the run freezes that — the capture window is still the
+    // ring's retention, the retained capture is still drawn on it, and the answer no longer depends
+    // on how fast this machine serves two requests.
+    serving.handle.stop();
     let pair = || {
         let (sa, a) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=4"));
         let (sb, b) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=1"));
         assert_eq!((sa, sb), (200, 200), "{a} {b}");
         (a, b)
     };
+    // The stop lands at the capture thread's next block, so the edge may still take a last step;
+    // after that every pair agrees. Bounded by the run's end, not by a count of attempts.
     let mut same = None;
-    for _ in 0..40 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while same.is_none() && Instant::now() < deadline {
         let (a, b) = pair();
         if a["window"]["t1_s"] == b["window"]["t1_s"] && a["window"]["t0_s"] == b["window"]["t0_s"]
         {
             same = Some((a, b));
-            break;
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    let (rows4, rows1) = same.expect("two timeline answers over the same capture window");
+    let (rows4, rows1) = same.expect("two timeline answers over the same (stopped) capture window");
 
     let g1 = &rows1["grid"];
     let g4 = &rows4["grid"];
@@ -8806,6 +9270,11 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     // T-630: the cap is server-wide, the SHARE is this client's, and an undeclared caller shares
     // the anonymous bucket — so `curl` and the CLI meet exactly the route they met before.
     assert_eq!(probe["cost"]["in_flight_share"], json!(4), "{probe}");
+    // T-959: and what THIS client holds — this read's own slot, and nothing else, for a serial
+    // caller. It is the number a client corrects its abandoned-read accounting against (an aborted
+    // read holds its slot until the route finishes producing it), and the number that tells a `503`
+    // over its own reads (`held >= share`, named in the body) from one over another client's.
+    assert_eq!(probe["cost"]["in_flight_held"], json!(1), "{probe}");
     assert_eq!(probe["cost"]["clients"], json!(1), "{probe}");
     assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
     assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
@@ -8818,6 +9287,8 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(mine["cost"]["clients"], json!(2), "{mine}");
     assert_eq!(mine["cost"]["in_flight_share"], json!(2), "{mine}");
     assert_eq!(mine["cost"]["in_flight_limit"], json!(4), "{mine}");
+    // Held is per client, not server-wide: this named client holds only its own read.
+    assert_eq!(mine["cost"]["in_flight_held"], json!(1), "{mine}");
     // An id that is not one is not an error: it shares the anonymous bucket.
     let (st, odd) = get(addr, &format!("{}&client=not%20an%20id", tile(0, 0, 0, 0)));
     assert_eq!(st, 200, "{odd}");
@@ -9208,20 +9679,27 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!(2),
         "(level_f 0, level_t 2) is node 0*8+2 of the 8x8 view lattice: {coarse_t}"
     );
-    // The node existing does not mean the read uses it: the rule is **finest affordable first**
-    // (T-438), and node (0, 0) is affordable here and finer in time, so it answers and its cells
-    // fold onto the tile's. Folding a finer source invents nothing and greys nothing — it is the
-    // only direction that is free. `exact_node: false` alongside a non-null `store_node` is that
-    // preference showing, not a missing node.
-    assert_eq!(
-        coarse_t["resolution"]["answered"]["exact_node"],
-        json!(false),
-        "{coarse_t}"
+    // **T-1018: the node answers once it holds every row level 0 does.** The view lattice's
+    // coarse nodes are maintained live, so node (0, 2) is read (`exact_node: true`, cells² source
+    // cells) for any tile whose rows have all folded up. But a closed level-0 row folds up only
+    // `seal_lag` after the clock leaves it, and this tile was pinned at the DATA EDGE of a server
+    // that is still capturing — so whether it still reaches into those held-back rows depends on
+    // how far capture has moved on since, and while it does the read keeps finest-first (node
+    // (0, 0), `exact_node: false`) rather than drop the newest rows. Either is right; nothing else
+    // is, and neither replicates.
+    let answered = coarse_t["resolution"]["answered"]["level"].as_u64();
+    let exact = coarse_t["resolution"]["answered"]["exact_node"].as_bool();
+    assert!(
+        matches!(
+            (answered, exact),
+            (Some(2), Some(true)) | (Some(0), Some(false))
+        ),
+        "node (0, 2) once folded, else finest-first at the live edge: {coarse_t}"
     );
-    assert_eq!(
+    assert_ne!(
         coarse_t["resolution"]["fold"]["time"]["direction"],
-        json!("folded"),
-        "a finer source folded onto a coarser tile invents nothing: {coarse_t}"
+        json!("replicated"),
+        "{coarse_t}"
     );
     assert!(
         coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,
@@ -9781,6 +10259,11 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         assert!(own["store"].is_string(), "{own}");
         assert!(own["level"].is_u64(), "{own}");
         assert!(own["stages"].is_array(), "{own}");
+        // T-1034: the tune record's bound on the search, or null when the record made no claim.
+        assert!(
+            own["record_bound_s"].is_null() || own["record_bound_s"].is_f64(),
+            "{own}"
+        );
         let (found, used) = (
             own["columns_found"].as_u64().unwrap(),
             own["columns_used"].as_u64().unwrap(),
@@ -9803,6 +10286,226 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         sh["rule"]
             .as_str()
             .is_some_and(|s| s.contains("GREY IS UNCHANGED"))
+    );
+    stop_server(serving);
+}
+
+/// T-1034, **the user's bug, through the mock SDR: after a nudge of half a span, the departed
+/// band's newest half is fog — never blank — at the finest level, and at every level above it.**
+///
+/// The user: "If I have the waterfall going for a while, then I nudge it +1/2 to the right, the
+/// fog-of-war applies correctly for the 99.5 to 100.2 tiles, but the 100.2 to 100.8 tiles do not
+/// load. [...] The issue goes away if I zoom out." Staging answered those finest tiles
+/// `shadow.runs = 0` with one store time block `unsearched`: the tile's own-level search skips a
+/// time block that holds no tile over its frequency, but a store block spans 600 kHz, the new
+/// window's edge bin lands in the departed half's block in every block after the retune, and each
+/// was read in full until the budget ran out ~20 s short of the band's last live row.
+///
+/// Driven through the generic device route (`POST /api/control/center`), with every instant read
+/// off the wire in capture time: the band is measured at the data edge (`armed`), the radio moves
+/// half a span up, and the data edge is let run more than ten store blocks past it. Then every
+/// live-edge tile over the departed band, at (0, 0), (1, 0) and (2, 1): no window unsearched,
+/// every column of every row before the data edge either measured or carried by a shadow run, and
+/// every carried value last seen at the band's last live row — at or after `armed`, and no later
+/// than one row past the new band's first measured row.
+#[test]
+fn a_nudged_away_band_is_fog_at_the_finest_level_up_to_its_last_live_row() {
+    // `hk serve`'s default display FFT, as staging ran: 586 Hz cells, so one store block spans
+    // 600 kHz and the new window's edge bin lands in the departed half's block in every time
+    // block after the nudge. At this file's usual 1024 a block spans the whole 2.4 MHz window and
+    // the edge bin lands in the NEXT block — the case never arises there.
+    let (_dir_guard, serving, addr) = start_server_fft(temp_data_dir(), None, 4096);
+    const N: u64 = 32;
+    let n = N as usize;
+    let tile = |lf: u32, lt: u32, fi: u64, ti: u64| {
+        format!("/api/tiles?level_f={lf}&level_t={lt}&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let (st, probe) = get(addr, &tile(0, 0, 0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let geom = |lf: u32, lt: u32| {
+        (
+            f_cell * f64::from(1u32 << lf) * N as f64,
+            t_cell * f64::from(1u32 << lt) * N as f64,
+        )
+    };
+    let (w0, h0) = geom(0, 0);
+    // The departed band: the fixture window's lower half, which the nudge leaves. The half nearest
+    // the new window is where staging went blank.
+    let (band_lo, band_hi) = (FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0, FIXTURE_CENTER_HZ);
+    let probe_fi = ((band_lo + band_hi) / 2.0 / w0) as u64;
+    // The store's newest frame, or `None` before the first one is folded.
+    let edge_now = || {
+        get(addr, &tile(0, 0, probe_fi, (unix_now() / h0) as u64)).1["shadow"]["edge_s"].as_f64()
+    };
+    let grid_of = |fi: u64, ti: u64| {
+        let v = get(addr, &tile(0, 0, fi, ti)).1;
+        let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+        v["grid"]["max_db"].as_array().cloned().map(|g| (t0, g))
+    };
+    // Armed: the departed band measured at the data edge, read off the wire.
+    let mut armed = 0.0f64;
+    wait_for(
+        "the band to be measured at the data edge",
+        Duration::from_secs(60),
+        || {
+            let Some(e) = edge_now() else {
+                return false;
+            };
+            let Some((t0, g)) = grid_of(probe_fi, (e / h0) as u64) else {
+                return false;
+            };
+            match (0..n).rev().find(|&r| !g[r * n + n / 2].is_null()) {
+                Some(r) => {
+                    armed = t0 + r as f64 * t_cell;
+                    true
+                }
+                None => false,
+            }
+        },
+    );
+    // The nudge: half a span up, through the device route.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * ((FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0) / step).round();
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // Let capture run well past ten blocks of the view lattice's finest node (64 rows each), so
+    // the live edge sits past what the budget could read block by block. Waited on the DATA edge,
+    // never the wall clock.
+    let blocks_s = 10.5 * 64.0 * t_cell;
+    wait_for(
+        "the data edge to run ten store blocks past the nudge",
+        Duration::from_secs(180),
+        || edge_now().is_some_and(|e| e > armed + blocks_s),
+    );
+    // The new band's first measured row after `armed`: the departure is before it.
+    let new_fi = ((moved + FIXTURE_RATE_HZ / 4.0) / w0) as u64;
+    let edge = edge_now().expect("the edge ran past the nudge");
+    let arrived = ((armed / h0) as u64..=(edge / h0) as u64)
+        .find_map(|ti| {
+            let (t0, g) = grid_of(new_fi, ti)?;
+            (0..n)
+                .map(|r| (r, t0 + r as f64 * t_cell))
+                .find(|&(r, t)| t > armed && (0..n).any(|c| !g[r * n + c].is_null()))
+                .map(|(_, t)| t)
+        })
+        .expect("the band moved to is measured after the nudge");
+
+    let new_lo = moved - FIXTURE_RATE_HZ / 2.0;
+    let mut checked = 0usize;
+    for (lf, lt) in [(0u32, 0u32), (1, 0), (2, 1)] {
+        let (w, h) = geom(lf, lt);
+        let dt = h / N as f64;
+        // The live-edge tile, whole tiles over the departed band only.
+        let ti = ((edge - dt) / h) as u64;
+        let fis = (band_lo / w).ceil() as u64..(band_hi / w).floor() as u64;
+        assert!(!fis.is_empty(), "({lf}, {lt}): {band_lo}..{band_hi} / {w}");
+        for fi in fis {
+            let (st, v) = get(addr, &tile(lf, lt, fi, ti));
+            assert_eq!(st, 200, "{v}");
+            let sh = &v["shadow"];
+            let at = format!(
+                "({lf}, {lt}) tile {fi} ({:.3}-{:.3} MHz)",
+                fi as f64 * w / 1e6,
+                (fi + 1) as f64 * w / 1e6
+            );
+            assert_eq!(
+                sh["search"]["unsearched"],
+                json!([]),
+                "{at}: the departed band's past is searched, never left: {}",
+                sh["search"]
+            );
+            let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+            let tile_edge = sh["edge_s"].as_f64().unwrap();
+            let reach = sh["reach_s"].as_f64().unwrap_or(tile_edge).max(tile_edge);
+            let grid = v["grid"]["max_db"].as_array();
+            let mut covered = vec![false; n * n];
+            let arr = |k: &str| sh[k].as_array().unwrap().clone();
+            let (f, row, rows, t) = (arr("f"), arr("row"), arr("rows"), arr("last_t_s"));
+            for i in 0..f.len() {
+                let c = f[i].as_u64().unwrap() as usize;
+                let r0 = row[i].as_u64().unwrap() as usize;
+                let last_t = t[i].as_f64().unwrap();
+                let measured_now = grid.is_some_and(|g| (0..n).any(|r| g[r * n + c].is_number()));
+                // The column right below the new window's tuned edge takes its edge bin, which
+                // reaches half a bin past the edge: live data from the new window, not the
+                // departed band's (staging's tile 671 showed the same one column).
+                let cell = w / N as f64;
+                let edge_bin = fi as f64 * w + (c + 1) as f64 * cell > new_lo - cell / 2.0;
+                if !measured_now && !edge_bin {
+                    // A column the new window never reaches: its value is the band's last live
+                    // row, which is after `armed` and before the new band's first row.
+                    assert!(
+                        last_t >= armed - dt && last_t <= arrived + dt,
+                        "{at} column {c}: last seen {last_t}, not the band's last live row \
+                         (armed {armed}, new band from {arrived}): {sh}"
+                    );
+                }
+                for r in r0..r0 + rows[i].as_u64().unwrap() as usize {
+                    covered[r * n + c] = true;
+                }
+            }
+            // What a client following docs/api.md draws as THE grey: a row the answer's record
+            // reaches (`coverage.horizon.as_of_s`), a cell the selected plane calls `unobserved`,
+            // and no shadow run over it. Over a departed band there must be none: the radio
+            // looked here, then left, and that is fog. (A cell the plane calls `observed` past the
+            // fold edge is the pending mark, never grey.)
+            let cov = &v["coverage"];
+            let states: Vec<&str> = cov["states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap())
+                .collect();
+            let sel = cov["selected"]["plane"].as_u64().unwrap() as usize;
+            let plane: Vec<&str> = cov["planes"][sel]["runs"]
+                .as_array()
+                .unwrap()
+                .chunks(2)
+                .flat_map(|p| {
+                    std::iter::repeat_n(
+                        states[p[0].as_u64().unwrap() as usize],
+                        p[1].as_u64().unwrap() as usize,
+                    )
+                })
+                .collect();
+            assert_eq!(plane.len(), n * n, "{cov}");
+            let as_of = cov["horizon"]["as_of_s"].as_f64();
+            for c in 0..n {
+                for r in 0..n {
+                    let start = t0 + r as f64 * dt;
+                    if as_of.is_some_and(|a| start >= a) || start >= reach {
+                        continue;
+                    }
+                    let measured = grid.is_some_and(|g| g[r * n + c].is_number());
+                    assert!(
+                        measured || covered[r * n + c] || plane[r * n + c] != "unobserved",
+                        "{at} column {c} row {r} is BLANK: unobserved, not measured, no fog \
+                         (armed {armed}, edge {tile_edge}): {}",
+                        sh["search"]
+                    );
+                    // Before the fold edge nothing is pending: every departed cell is fog.
+                    if start < tile_edge {
+                        assert!(
+                            measured || covered[r * n + c],
+                            "{at} column {c} row {r}, before the fold edge {tile_edge}, carries \
+                             no fog: {}",
+                            sh["search"]
+                        );
+                    }
+                }
+            }
+            checked += 1;
+        }
+    }
+    eprintln!(
+        "T-1034: {checked} departed tiles fogged edge to edge; armed {armed:.2}, new band from \
+         {arrived:.2}, edge {edge:.2}"
     );
     stop_server(serving);
 }
@@ -11384,6 +12087,81 @@ fn trunking_load_index_answers_documented_shape_and_carries_no_content() {
 }
 
 // ---------------------------------------------------------------------------
+// T-977 control-channel candidates and their verdicts
+
+/// T-977, SIGNAL-085: `/api/trunking/cc-candidates` answers the documented shape on a fresh run.
+///
+/// The interesting assertion is the **empty state**: a run whose hunt has not completed a pass
+/// answers `pass: null`, not `{"channels": []}`. Un-looked-at and looked-at-and-chose-nothing are
+/// different facts (ADR-0021 §7A.4), and this route exists precisely to keep them apart — the same
+/// rule the canvas's grey obeys. A shape-only assertion would pass either way, so this one asserts
+/// the value.
+#[test]
+fn cc_candidates_answers_pass_null_before_a_hunt_has_completed_one() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/trunking/cc-candidates");
+    assert_eq!(st, 200, "{v}");
+    assert!(v.get("pass").is_some(), "missing pass: {v}");
+    assert!(
+        v["pass"].is_null() || v["pass"].is_object(),
+        "pass is either null (no pass completed) or the pass object: {v}"
+    );
+    if let Some(pass) = v["pass"].as_object() {
+        for field in [
+            "pass",
+            "t_start",
+            "t_end",
+            "device_id",
+            "tune_center_hz",
+            "raster_hz",
+            "grid_offset_hz",
+            "channels_swept",
+            "channels",
+        ] {
+            assert!(pass.contains_key(field), "missing {field}: {v}");
+        }
+        assert!(is_array(&v["pass"]["channels"]), "{v}");
+        for ch in v["pass"]["channels"].as_array().unwrap() {
+            for field in ["k", "center_hz", "fco", "candidacy", "outcome", "reason"] {
+                assert!(ch.get(field).is_some(), "channel missing {field}: {ch}");
+            }
+            let outcome = ch["outcome"].as_str().unwrap_or_default();
+            assert!(
+                [
+                    "confirmed",
+                    "sync-without-check",
+                    "no-sync",
+                    "not-demodulated",
+                    "admission-refused",
+                ]
+                .contains(&outcome),
+                "outcome outside the documented enum: {ch}"
+            );
+        }
+    }
+
+    // Metadata only, exactly like `/api/trunking/load`: a verdict about a channel is not its
+    // traffic.
+    let body = v.to_string().to_lowercase();
+    for banned in ["audio", "vocoder", "pcm"] {
+        assert!(!body.contains(banned), "must never carry {banned:?}: {v}");
+    }
+
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/trunking/cc-candidates",
+        Some(&auth),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
+// ---------------------------------------------------------------------------
 // T-349: every absolute time on the wire declares its unit in its own name.
 //
 // `docs/api.md` "Conventions": times are Unix seconds by default, and a field that departs from
@@ -11416,6 +12194,27 @@ const NOT_A_TIME: &[&str] = &[
     "id",
     "sample_index",
     "seq",
+    // **Elapsed-time counters: ns SINCE THE RUN STARTED, never an instant** (T-510, T-939).
+    //
+    // These are the same kind of entry as `bytes` above — a count that reaches 10^9 — and a
+    // nanosecond duration reaches it after **one second** of the thing it measures. This sweep's
+    // only evidence is magnitude, and magnitude cannot tell a duration from an instant: both are
+    // ns under an `_ns` name, and the seconds band (10^9 … 10^10) is 1 s … 10 s of accumulated
+    // time. `wait_ns` crosses it within a second of any run, and `cpu_ns` — here since T-510 —
+    // would cross it in any run long enough for one reader to spend a CPU-second, which the
+    // 5 s replay this sweep sets up happens not to reach. So the exemption is by name and is
+    // exhaustive: these ten are the `ReaderCounters` / `SourceCounters` time accumulators
+    // (`crates/hk-pipeline/src/stats.rs`), nothing serves an instant under any of them, and a new
+    // *instant* must still not be given one of these names.
+    "cpu_ns",
+    "wait_ns",
+    "clip_ns",
+    "burst_ns",
+    "stft_ns",
+    "frame_ns",
+    "floor_ns",
+    "detector_ns",
+    "track_ns",
 ];
 
 fn looks_like_a_time(key: &str) -> bool {
@@ -11501,6 +12300,9 @@ fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> 
         "/api/scheduler/arms",
         "/api/scheduler/leases",
         "/api/datasets",
+        // T-844: the C38 models, modes and the durable shadow log
+        "/api/ml/models",
+        "/api/ml/shadow",
         // T-469: the persisted IQ recordings that extend the audio horizon past the ring
         "/api/recordings",
         "/api/captures",
@@ -11858,7 +12660,17 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     assert_eq!(p["budget"]["step_span_hz"], json!(1.8e6), "{p}");
     let duty = p["budget"]["duty"].as_f64().unwrap_or_default();
     assert!((duty - 1.0 / 12.0).abs() < 1e-9, "duty is dwell/pass: {p}");
+    // T-965: nothing has retuned this front end under a scan yet, so there is no measurement of
+    // what a step pays beyond its dwell — and `null` is not zero. The pass length is the dwells,
+    // and the statement says in words that it is a floor rather than implying it is the answer.
+    assert_eq!(p["budget"]["dwell_total_s"], json!(144.0), "{p}");
+    assert_eq!(p["budget"]["step_overhead_s"], Value::Null, "{p}");
+    assert_eq!(p["budget"]["overhead_measured"], json!(false), "{p}");
     let statement = p["budget"]["statement"].as_str().unwrap_or_default();
+    assert!(
+        statement.contains("a floor, not the answer"),
+        "an unmeasured per-step cost must be admitted, not priced at zero: {statement:?}"
+    );
     assert!(
         statement.contains("12 steps") && statement.contains("144.0 s pass"),
         "the statement must carry this plan's own numbers: {statement:?}"
@@ -11925,6 +12737,44 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     assert!(
         (88e6..=108e6).contains(&swept),
         "a step must land inside the range asked for: {v}"
+    );
+
+    // T-965: **a step has now been timed, so the stated pass length includes what it cost.**
+    // The live defect this closes: `Scan everything (fast)` priced 418 steps x 0.3 s as 125.4 s
+    // and took 237 s, because the price counted the listening and not the retuning. The served
+    // budget is repriced from this scan's own retunes, and `pass_s` is the listening plus the
+    // measured per-step cost, once per step.
+    let b = &v["scan"]["budget"];
+    assert_eq!(b["overhead_measured"], json!(true), "{b}");
+    let overhead_s = b["step_overhead_s"]
+        .as_f64()
+        .expect("a measured per-step cost once a step has been timed");
+    assert!(
+        (0.0..30.0).contains(&overhead_s),
+        "a measured retune cost, not a guess: {b}"
+    );
+    let dwell_total_s = b["dwell_total_s"].as_f64().expect("dwell total");
+    let steps = b["steps"].as_f64().expect("steps");
+    let pass_s = b["pass_s"].as_f64().expect("pass");
+    assert!(
+        (pass_s - (dwell_total_s + steps * overhead_s)).abs() < 1e-6,
+        "pass_s must be the listening plus the measured per-step cost: {b}"
+    );
+    // And the progress block states the same measurement, so the stated pass and the measured one
+    // can be compared without recomputing either.
+    let pr = &v["scan"]["progress"];
+    assert_eq!(
+        pr["measured_step_overhead_s"].as_f64(),
+        Some(overhead_s),
+        "{pr}"
+    );
+    assert!(
+        (pr["measured_pass_s"].as_f64().expect("measured pass") - pass_s).abs() < 1e-6,
+        "{pr}"
+    );
+    assert!(
+        pr["elapsed_s"].as_f64().unwrap_or(-1.0) >= 0.0,
+        "a running scan states how long it has been going: {pr}"
     );
 
     // **Coverage honesty, which is the whole point of the feature.** T-406's finding was that a
@@ -12572,7 +13422,80 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     let (st, e) = get(addr, &tile(f_index, settled, "&planes=f8"));
     assert_eq!(st, 400, "{e}");
     let msg = e["error"].as_str().unwrap_or_default();
-    assert!(msg.contains("f8") && msg.contains("json, f16"), "{msg}");
+    assert!(
+        msg.contains("f8") && msg.contains("json, f16, compact"),
+        "{msg}"
+    );
+
+    // ---- T-1019: `compact`, the other three planes -------------------------------------------
+    //
+    // The same grid again: `max_db` byte-identical to `f16`'s plane, `frames` exact at whatever
+    // width this tile's counts need, and `grid.coverage` NOT SENT — `coverage.planes[].runs`
+    // beside the grid already carries per-cell coverage, which is the duplication this spelling
+    // exists to stop.
+    let (st, compact) = get(addr, &tile(f_index, settled, "&planes=compact"));
+    assert_eq!(st, 200, "{compact}");
+    assert_eq!(compact["grid"]["encoding"]["planes"], json!("compact"));
+    for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+        assert!(
+            compact["grid"][k].is_null(),
+            "grid.{k} is still spelled per cell under `compact`: {}",
+            compact["grid"][k]
+        );
+    }
+    assert!(
+        !compact["coverage"]["planes"]
+            .as_array()
+            .map(|p| p.is_empty())
+            .unwrap_or(true),
+        "the grey authority must still be served: {}",
+        compact["coverage"]
+    );
+    assert_eq!(
+        compact["grid"]["planes"]["max_db"], packed["grid"]["planes"]["max_db"],
+        "one spelling of the measurement plane, not two"
+    );
+    let occ = &compact["grid"]["planes"]["occupancy_max"];
+    assert_eq!(occ["type"], json!("f16"), "{occ}");
+    assert_eq!(occ["scale"], json!("fraction"), "{occ}");
+    assert_eq!(occ["absent"], json!("nan"), "{occ}");
+    let want_occ = plain["grid"]["occupancy_max"].as_array().unwrap();
+    let occ_bytes = b64_decode(occ["data"].as_str().unwrap());
+    assert_eq!(occ_bytes.len(), want_occ.len() * 2, "{occ}");
+    for (i, cell) in want_occ.iter().enumerate() {
+        let v = f16_to_f32(u16::from_le_bytes([occ_bytes[i * 2], occ_bytes[i * 2 + 1]]));
+        match cell.as_f64() {
+            None => assert!(
+                !v.is_finite(),
+                "occupancy cell {i}: null in JSON, {v} packed"
+            ),
+            Some(w) => assert!(
+                (v as f64 - w).abs() <= 1e-3 + w.abs() * 1e-3,
+                "occupancy cell {i}: {w} in JSON, {v} packed"
+            ),
+        }
+    }
+    let fr = &compact["grid"]["planes"]["frames"];
+    let want_frames = plain["grid"]["frames"].as_array().unwrap();
+    assert!(
+        ["u8", "u16", "u32", "u64"].contains(&fr["type"].as_str().unwrap_or_default()),
+        "{fr}"
+    );
+    let width = fr["bytes"].as_u64().unwrap() as usize / want_frames.len();
+    let fr_bytes = b64_decode(fr["data"].as_str().unwrap());
+    assert_eq!(fr_bytes.len(), want_frames.len() * width, "{fr}");
+    let mut counted = 0usize;
+    for (i, cell) in want_frames.iter().enumerate() {
+        let mut got = [0u8; 8];
+        got[..width].copy_from_slice(&fr_bytes[i * width..(i + 1) * width]);
+        let want = cell.as_u64().expect("frames is a count, never null");
+        assert_eq!(u64::from_le_bytes(got), want, "frames cell {i}");
+        counted += usize::from(want > 0);
+    }
+    assert!(
+        counted > 0,
+        "no cell carried a frame count, so the comparison above would pass on an empty grid"
+    );
 
     // ---- the transfer coding ------------------------------------------------------------------
     let path = tile(f_index, settled, "&planes=f16");
@@ -12640,16 +13563,19 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     let (gz_enc, json_gz_b) = read("&planes=json", Some("gzip"));
     let (_, f16_b) = read("&planes=f16", None);
     let (f16_gz_enc, f16_gz_b) = read("&planes=f16", Some("gzip"));
+    let (_, compact_b) = read("&planes=compact", None);
+    let (_, compact_gz_b) = read("&planes=compact", Some("gzip"));
     let build_ms = |extra: &str| {
         get(addr, &format!("{big}{extra}")).1["cost"]["build_ms"]
             .as_f64()
             .unwrap_or(f64::NAN)
     };
     eprintln!(
-        "T-700 / T-533 re-measured (256x256 tile, one address, four spellings):\n           json              {json_b} B   build_ms {:.1}\n           json + gzip       {json_gz_b} B\n           f16               {f16_b} B\n           f16 + gzip        {f16_gz_b} B   build_ms {:.1}   -> {:.1}x",
+        "T-700 / T-533 / T-1019 re-measured (256x256 tile, one address, six spellings):\n           json              {json_b} B   build_ms {:.1}\n           json + gzip       {json_gz_b} B\n           f16               {f16_b} B   build_ms {:.1}\n           f16 + gzip        {f16_gz_b} B\n           compact           {compact_b} B   build_ms {:.1}\n           compact + gzip    {compact_gz_b} B   -> {:.1}x off json",
         build_ms("&planes=json"),
         build_ms("&planes=f16"),
-        json_b as f64 / f16_gz_b as f64,
+        build_ms("&planes=compact"),
+        json_b as f64 / compact_gz_b as f64,
     );
     assert_eq!(gz_enc.as_deref(), Some("gzip"));
     assert_eq!(f16_gz_enc.as_deref(), Some("gzip"));
@@ -12665,6 +13591,16 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     assert!(
         f16_gz_b < json_gz_b && f16_gz_b < f16_b,
         "packed+gzipped {f16_gz_b} B must beat gzip alone ({json_gz_b} B) and f16 alone ({f16_b} B)"
+    );
+    // T-1019: the spelling that packs the other three planes and stops sending `grid.coverage`
+    // twice must beat the one that packs only `max_db`, uncompressed and gzipped alike.
+    assert!(
+        compact_b < f16_b,
+        "compact {compact_b} B against f16 {f16_b} B"
+    );
+    assert!(
+        compact_gz_b < f16_gz_b,
+        "compact+gzip {compact_gz_b} B against f16+gzip {f16_gz_b} B"
     );
     // The headline claim, asserted rather than quoted: an order of magnitude off the wire.
     assert!(

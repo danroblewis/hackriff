@@ -280,12 +280,73 @@ fn hops_params(recipe: &Recipe) -> Result<(f64, usize), RuntimeError> {
     }
 }
 
-/// Resolves the channel set of a follow-hops `recipe` on `target` (extent `(lo, hi)`, Hz).
+/// A blind detection offered to [`rank_detections`].
+#[derive(Clone, Debug)]
+pub struct Detection {
+    pub f_center_hz: f64,
+    pub bandwidth_hz: f64,
+    /// Sightings.
+    pub count: u64,
+    pub fingerprint: Value,
+}
+
+/// Steadier than this is a carrier or a spur, not a burst net (T-951).
+const STEADY_DUTY: f64 = 0.95;
+/// Clearance either side of the tuned centre (the DC point), beyond the detection's own half width.
+const DC_GUARD_HZ: f64 = 5_000.0;
+
+/// True if `d` is a capture-chain artefact rather than an emission worth a channel (T-951):
+/// the DC point of the tuned window, a detection another stage already marked as a spur / DC /
+/// artefact (`fingerprint.artifact_of`, `spur`, `dc`; the mask of T-948 sets these), or a steady
+/// carrier when the recipe follows bursty nets (`duty_cycle` ≥ 0.95).
+pub fn is_artefact(d: &Detection, dc_hz: Option<f64>, bursty: bool) -> bool {
+    if let Some(dc) = dc_hz
+        && (d.f_center_hz - dc).abs() <= DC_GUARD_HZ + 0.5 * d.bandwidth_hz.max(0.0)
+    {
+        return true;
+    }
+    let f = &d.fingerprint;
+    let flagged = |k: &str| match f.get(k) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(_) => true,
+    };
+    if flagged("artifact_of") || flagged("spur") || flagged("dc") {
+        return true;
+    }
+    bursty
+        && f.get("duty_cycle")
+            .and_then(Value::as_f64)
+            .is_some_and(|x| x >= STEADY_DUTY)
+}
+
+/// Channel centres from `found`, best evidence first: artefacts dropped ([`is_artefact`]), the
+/// rest by sightings (then frequency), only those within `2 × cbw` wide.
+pub fn rank_detections(
+    found: &[Detection],
+    cbw: f64,
+    dc_hz: Option<f64>,
+    bursty: bool,
+) -> Vec<f64> {
+    let mut ranked: Vec<&Detection> = found
+        .iter()
+        .filter(|d| d.bandwidth_hz <= 2.0 * cbw && !is_artefact(d, dc_hz, bursty))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then(a.f_center_hz.total_cmp(&b.f_center_hz))
+    });
+    ranked.into_iter().map(|d| d.f_center_hz).collect()
+}
+
+/// Resolves the channel set of a follow-hops `recipe` on `target` (extent `(lo, hi)`, Hz);
+/// `dc_hz` is the tuned window's centre, whose DC point is never a channel.
 pub(crate) fn resolve_channels(
     shared: &Shared,
     recipe: &Recipe,
     target: &Target,
     extent: (f64, f64),
+    dc_hz: Option<f64>,
 ) -> Result<ChannelSet, RuntimeError> {
     let (cbw, max) = hops_params(recipe)?;
     let ChannelsSpec::FollowHops {
@@ -336,20 +397,29 @@ pub(crate) fn resolve_channels(
         .repo()
         .query_inventory(&q)
         .map_err(|_| RuntimeError::new(500, "failed", "reading the inventory"))?;
-    let mut ranked: Vec<(u64, f64)> = page
+    let found_dets: Vec<Detection> = page
         .entries
         .iter()
         .map(|x| &x.emitter)
-        .filter(|e| {
-            (lo..=hi).contains(&e.f_center_hz)
-                && e.bandwidth_hz <= 2.0 * cbw
-                && hop_set_of(&e.fingerprint).is_empty()
+        .filter(|e| (lo..=hi).contains(&e.f_center_hz) && hop_set_of(&e.fingerprint).is_empty())
+        .map(|e| Detection {
+            f_center_hz: e.f_center_hz,
+            bandwidth_hz: e.bandwidth_hz,
+            count: e.count,
+            fingerprint: e.fingerprint.clone(),
         })
-        .map(|e| (e.count, e.f_center_hz))
         .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)));
     found(
-        normalize(ranked.into_iter().map(|(_, f)| f), sep, max),
+        normalize(
+            rank_detections(
+                &found_dets,
+                cbw,
+                dc_hz,
+                recipe.match_hints.bursty == Some(true),
+            ),
+            sep,
+            max,
+        ),
         "detections",
     )
 }
@@ -481,7 +551,7 @@ pub(crate) fn prepare(
 ) -> Result<Prepared, RuntimeError> {
     let (cbw, max_channels) = hops_params(recipe)?;
     let Split { up, down } = split(recipe, registry)?;
-    let set = resolve_channels(shared, recipe, target, extent)?;
+    let set = resolve_channels(shared, recipe, target, extent, Some(tune.0))?;
     let (up, down) = (Arc::new(up), Arc::new(down));
     let mut lanes = Vec::with_capacity(set.channels_hz.len());
     let mut first = None;
@@ -1377,5 +1447,60 @@ mod tests {
         let reg = Registry::builtin();
         s.up.validate(&reg).unwrap();
         s.down.validate(&reg).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rank_tests {
+    use super::*;
+
+    fn det(f: f64, bw: f64, count: u64, fp: Value) -> Detection {
+        Detection {
+            f_center_hz: f,
+            bandwidth_hz: bw,
+            count,
+            fingerprint: fp,
+        }
+    }
+
+    /// T-951: the DC point and a steady comb outrank three real bursty channels by sightings,
+    /// yet none of them takes a slot.
+    #[test]
+    fn dc_and_spur_comb_do_not_take_channel_slots() {
+        let tuned = 930.8e6;
+        let steady = json!({"duty_cycle": 1.0});
+        let bursty = json!({"duty_cycle": 0.1});
+        let mut scene = vec![det(tuned + 500.0, 8_500.0, 900, json!({}))];
+        for k in 0..3 {
+            scene.push(det(
+                930.884e6 + f64::from(k) * 37_500.0,
+                14_000.0,
+                800,
+                steady.clone(),
+            ));
+        }
+        scene.push(det(929.883e6, 12_500.0, 5, bursty.clone()));
+        scene.push(det(931.158e6, 12_500.0, 9, bursty.clone()));
+        scene.push(det(931.733e6, 12_500.0, 3, bursty));
+        let got = normalize(
+            rank_detections(&scene, 12_500.0, Some(tuned), true),
+            6_250.0,
+            8,
+        );
+        assert_eq!(got, vec![929.883e6, 931.158e6, 931.733e6]);
+        // Ranked by evidence: the strongest real channel is first before sorting.
+        let ranked = rank_detections(&scene, 12_500.0, Some(tuned), true);
+        assert_eq!(ranked[0], 931.158e6);
+    }
+
+    #[test]
+    fn a_detection_the_mask_marked_is_skipped() {
+        let d = det(915.0e6, 10_000.0, 50, json!({"artifact_of": "spur"}));
+        assert!(is_artefact(&d, None, false));
+        assert!(!is_artefact(
+            &det(915.0e6, 10_000.0, 50, json!({"spur": false})),
+            None,
+            false
+        ));
     }
 }

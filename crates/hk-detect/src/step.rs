@@ -76,16 +76,35 @@
 //! Outside the width band nothing changes: a narrower span fits inside the cell under test's guard
 //! band and biases no reference cell, and a wider one already has a homogeneous OS reference.
 //!
-//! Two rules keep a real emission out of it. A bin must classify floor-like for `persist_frames`
-//! consecutive frames before the guard acts there; and a span that classifies **signal-like even
-//! once** is disqualified for the rest of the segment, because this guard is only ever about a
-//! *stationary* noise feature and one signal-like verdict refutes that premise. The asymmetry is
+//! Three rules keep a real emission out of it. A span whose **median** running mean stands
+//! `narrow_feature_max_db` (10 dB) or more above the reference is never classified at all — it is
+//! too loud to be raised noise and is vetoed outright (T-937; see below). A bin must classify
+//! floor-like for `persist_frames` consecutive frames before the guard acts there; and a span that
+//! classifies **signal-like even once** is disqualified for the rest of the segment, because this
+//! guard is only ever about a *stationary* noise feature and one signal-like verdict refutes that
+//! premise. The asymmetry is
 //! measured: on the 2026-09-15 FM capture every one of the three noise shelves reads floor-like in
 //! 100.0 % of frames, while the three measured emissions read floor-like in 33 %, 3.0 % and 0.1 %
 //! — a WFM station reads floor-like through a quiet passage of its programme audio. Neither a
 //! longer time constant nor a timed hold separates them (at 512 frames the 99.6999 MHz station
 //! still reads floor-like in 7.8 % of frames); latching the signal-like verdict does, and it fails
 //! in the safe direction — a noise shelf misjudged once is merely detected as it was before.
+//!
+//! **The level cap (T-937).** The width band above is measured in *bins*, so it scales with the
+//! resolution: at the 2.4 Msps fine sweep the pipeline picks 512 bins (4.69 kHz) and a 180 kHz
+//! broadcast-FM station is ~38 of them — inside the band, and handed to the variance test like a
+//! noise shelf. Programme audio is noise-like at 2 ms / 4.7 kHz cells, so a station reads
+//! floor-like, and from the segment's `stat_min_frames`-th frame the guard made the station its
+//! own floor and the station stopped being detected: the live FM survey of 2026-09-25 reported 349
+//! candidates for ~19 stations, one station appearing as 13 boxes of 9–47 kHz — the loudest
+//! excursions still clearing its own mean — with no WFM-width box for a chain to attach to. The
+//! signal-like veto could not rescue it, because a sweep restarts the segment at every retune.
+//! So the guard now refuses any span whose median elevation reaches `narrow_feature_max_db`
+//! (10 dB, the SNR at which `Rules::marginal_snr_db` stops calling a detection marginal): raised
+//! noise is a few dB — the case this guard was built on is 4.6 dB — and deleting a non-marginal
+//! emission on a statistic measured to read a real emission floor-like in up to a third of its
+//! frames is the wrong trade. The median rather than the peak, because a few bins 10 dB up are
+//! what a noise shelf's own fluctuation looks like.
 //!
 //! **Limits.** A stationary noise-like emission (Gaussian at the bin level: OFDM, a wideband noise
 //! jammer) has the floor's statistics and is taken for a floor feature: its edges are OS-only and,
@@ -170,6 +189,16 @@ pub struct StepGuardConfig {
     /// reason: it is the residual the floor model already admits it cannot explain, not a
     /// detection threshold.
     pub narrow_feature_db: f64,
+    /// T-937: the guard never acts on a span whose running mean sits, in the **median** over the
+    /// span, this far above the floor reference, dB (10). *Raised noise* is what this guard is for, and raised
+    /// noise is a few dB: the case it was built on is a 75 kHz shelf 4.6 dB above the band floor.
+    /// A span standing 10 dB clear of the reference is an emission by the detector's own
+    /// published standard — [`crate::Rules::marginal_snr_db`] is the SNR at which a detection
+    /// stops being `marginal` — and suppressing a non-marginal emission on a variance statistic
+    /// that reads a real emission floor-like in up to a third of its frames (see the asymmetry
+    /// measured below) is the wrong trade in the wrong direction. Above the cap the span is
+    /// **vetoed** for the segment, exactly as a signal-like verdict vetoes it.
+    pub narrow_feature_max_db: f64,
     /// The detector's OS-CFAR window: the narrow-feature width band is derived from it — wider
     /// than the guard band (`2G+1`, so from `2G+2`) and narrower than the reference span
     /// (`2(G+R)+1`). Outside that band the OS branch is sound and nothing is done.
@@ -196,6 +225,7 @@ impl Default for StepGuardConfig {
             wide_min_frames: 32,
             blocks: BlockConfig::default(),
             narrow_feature_db: 1.5,
+            narrow_feature_max_db: 10.0,
             cfar_window: CfarWindow::default(),
         }
     }
@@ -268,6 +298,16 @@ struct Stats<'a> {
     lo: f32,
     hi: f32,
     min_bins: usize,
+}
+
+/// Median of `v` (reorders it); `None` when empty or all-NaN.
+fn median_of(v: &mut [f32]) -> Option<f32> {
+    if v.is_empty() {
+        return None;
+    }
+    let mid = v.len() / 2;
+    let (_, &mut m, _) = v.select_nth_unstable_by(mid, f32::total_cmp);
+    (!m.is_nan()).then_some(m)
 }
 
 impl Stats<'_> {
@@ -833,6 +873,7 @@ impl StepGuard {
             let min_bins = 2 * w.guard_per_side + 2;
             let max_bins = 2 * (w.guard_per_side + w.reference_per_side) + 1;
             let thr = ratio_of(cfg.narrow_feature_db);
+            let cap = ratio_of(cfg.narrow_feature_max_db);
             let reference = frame.reference;
             // A span of at most `2G+1` bins fits inside the cell under test's guard band and
             // reaches no reference cell, so it cannot bias `Z` and is a target by construction;
@@ -856,6 +897,30 @@ impl StepGuard {
                 // the opposite of the block-scale guard's convention, where acting means being
                 // more careful and `Undecided` is handled as floor-like.
                 if (min_bins..=max_bins).contains(&(b - lo)) {
+                    // T-937: too loud to be raised noise. A span whose median elevation reaches
+                    // `narrow_feature_max_db` above the reference is an emission the detector
+                    // would report non-marginal, so it is vetoed rather than classified. The
+                    // median, not the peak: a few loud bins are what a noise shelf's own
+                    // fluctuation looks like (the +8 dB shelf in `false_alarm.rs` has bins 10 dB
+                    // up), while a broadcast station is elevated across its whole span. Before this cap the
+                    // fine-sweep geometry (2.4 Msps, 512 bins: a 180 kHz broadcast-FM station is
+                    // ~38 bins, inside the width band) put every FM station in the band through
+                    // the variance test, and a station whose programme audio is noise-like reads
+                    // floor-like: the guard took the station's own running mean as the floor from
+                    // the 16th frame of the segment and the station stopped being detected
+                    // altogether, leaving only the sporadic narrow boxes its loudest excursions
+                    // still made. A sweep restarts the segment at every retune, so the veto latch
+                    // below never got the signal-like frame that would have saved it.
+                    scratch.clear();
+                    scratch.extend(
+                        (lo..b)
+                            .filter(|&k| reference[k] > 0.0)
+                            .map(|k| mean[k] / reference[k]),
+                    );
+                    if median_of(scratch).is_some_and(|m| m > cap) {
+                        narrow_veto[lo..b].fill(true);
+                        continue;
+                    }
                     match nstats.class(lo..b, |k, m| m > reference[k] * thr, scratch) {
                         Class::FloorLike => {
                             narrow[lo..b].fill(true);

@@ -33,7 +33,7 @@ export type LayerPlane = "data" | "overlay" | "dom";
 
 export type LayerId =
   | "base" | "coverage" | "tier"
-  | "detections" | "density" | "paths" | "tune" | "artifacts" | "priors" | "rules" | "research"
+  | "detections" | "density" | "paths" | "tune" | "frontend" | "artifacts" | "priors" | "rules" | "research"
   | `collection:${string}`
   | "pins";
 
@@ -75,6 +75,9 @@ export const LAYER_DEFS: readonly LayerDef[] = [
   // T-898 (docs/23 §10.6 rule 2): the DEVICE's own route through frequency - a directions line per
   // front end, from the recorded tune intervals. Above the measured paths, under the user's marks.
   { id: "tune", plane: "overlay", z: 26, visibleByDefault: true, label: "Retune history", hint: "where each radio has been tuned" },
+  // T-981: front-end events — rows where the ADC clipped and the whole window lifted — marked as the
+  // radio's own energy, never a signal. On by default: hiding it would let the stripe read as signal.
+  { id: "frontend", plane: "overlay", z: 27, visibleByDefault: true, label: "Front-end overload", hint: "clipped rows · the radio's energy, not a signal" },
   { id: "research", plane: "overlay", z: 30, visibleByDefault: false, label: "Research", hint: "measurements · annotations" },
   { id: "artifacts", plane: "overlay", z: 50, visibleByDefault: false, label: "Artifacts", hint: "image · harmonic · IMD" },
   { id: "priors", plane: "overlay", z: 60, visibleByDefault: false, label: "Band-plan priors", hint: "suggestions, never truth" },
