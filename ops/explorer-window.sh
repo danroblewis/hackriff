@@ -174,10 +174,17 @@ cleanup(){
     kill -KILL "$SERVER_PID" 2>/dev/null
     log "stopped the window's hk serve (pid $SERVER_PID)"
   fi
-  if pkill -f "hk serve.*127\.0\.0\.1:$PORT" 2>/dev/null; then
+  # The fallback matches an `hk serve` INVOCATION on this port - the program itself, `hk` at the start
+  # of the command line or after a `/` - never a mere mention of one. The agent's own command line
+  # carries the prompt, which says "hk serve at http://127.0.0.1:$PORT": the old unanchored
+  # `hk serve.*127.0.0.1:$PORT` matched it, so one window's exit TERMed any other process naming the
+  # server - a second window's agent (exit 143; T-1029: the test suite's concurrent runs on one box
+  # killed each other's agents), a shell or an editor with that line in it.
+  local leftover="(^|/)hk serve .*127\.0\.0\.1:$PORT([^0-9]|\$)"
+  if pkill -f "$leftover" 2>/dev/null; then
     log "stopped a leftover hk serve on :$PORT"
-    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "hk serve.*127\.0\.0\.1:$PORT" >/dev/null || break; sleep 1; done
-    pkill -9 -f "hk serve.*127\.0\.0\.1:$PORT" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$leftover" >/dev/null || break; sleep 1; done
+    pkill -9 -f "$leftover" 2>/dev/null
   fi
   reap_rings
   # shellcheck disable=SC2086

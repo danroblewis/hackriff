@@ -6,7 +6,7 @@ Standard control sets of [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus),
 |---|---|---|
 | Centre frequency (digit-scroll / entry, all three) | `POST /api/control/center` | Entry with units (`101.3M`, `433.92 MHz`, `+25k`); a retune into another content class re-plumbs (≤ 30 s, spinner) |
 | Tuning step, shift ◀ ▶ (SDR++ snap interval) | client → `center` | Fixed steps snap to their grid; ½-span/span steps walk a band |
-| Scroll-zoom, drag the spectrum (SDR++ FFT, SDRangel spectrum) | client (`surface/input.ts` → `surface/panes.ts`) | Display zoom is client-side, on the unified surface; see **Navigating the surface** below. Panning a viewport onto un-tuned spectrum *offers* an explicit retune (T-444) and never performs one |
+| Scroll-zoom, drag the spectrum (SDR++ FFT, SDRangel spectrum) | client (`surface/input.ts` → `surface/panes.ts`) | Display zoom is client-side, on the unified surface; see **Navigating the surface** below. Panning a viewport onto un-tuned spectrum *offers* an explicit retune (T-444) and never performs one — unless **retune mode** is on (T-1028, below), the one state in which a settled pan/zoom commands the radio |
 | Sample rate / span (all; SDRangel adds decimation) | `POST /api/control/rate` | Choices from `device.sample_rates_hz`; decimation stays inside the pipeline |
 | Gains LNA/VGA/amp (HackRF source in all three) | `POST /api/control/gains` | Named stages from `device.gain_stages`; generic names for other devices |
 | Bias tee (SDR++, SDRangel HackRF source) | `POST /api/control/bias_tee` | Confirm with a DC-on-antenna warning |
@@ -20,8 +20,8 @@ Standard control sets of [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus),
 ## Navigating the surface (T-456)
 
 Google-Maps navigation, with the two axes still independently reachable. Every one of these is a view
-change: nothing here reaches a device route (T-340's control), and the pyramid levels stay
-independent per axis (T-434) — a uniform gesture applies one factor to two windows, never one level
+change: nothing here reaches a device route (T-340's control) **unless retune mode is explicitly on**
+(T-1028, stated under the table), and the pyramid levels stay independent per axis (T-434) — a uniform gesture applies one factor to two windows, never one level
 to two axes.
 
 | Gesture | Effect |
@@ -37,6 +37,23 @@ to two axes.
 | `]` / `[` | Next / previous pane becomes active |
 | `1`–`9` | Pane N becomes active |
 | `L` | Toggles Live on the active pane (the follow-live FAB's press) |
+| `R` (tap) | Latches **retune mode**; tap again to turn it off (the chip in the map controls says which) |
+| `R` (held) | Retune mode for one gesture — release restores the default |
+
+**Retune mode (T-1028), the one exception to "no gesture commands the radio".** Off by default, and
+off means the rule above exactly: every gesture in this table is view arithmetic and the spy-client
+call list stays empty. Turned on — deliberately, and visibly (a lit chip, a banner, a status line on
+the pane) — the view's frequency window *is* the tune request: a pan or zoom that **settles** (the
+pointer released, a pinch ended, or ~150 ms of stillness for a wheel) issues **one** retune through
+the one gated `DeviceAction` path. **A click is not a gesture**: a press that never moved the view —
+a click to focus a signal, a touch tap, a long-press, a Pin-mode tap, a cancelled press — reaches
+nothing, mode or no mode. The latest settled view wins, a request already in flight is never
+cancelled, and the next one waits the settle gap. A view **wider than one capture window** tunes the
+largest achievable span centred on it (clamped into the tunable range at the band edges) rather than
+refusing — the pane keeps showing the wider view, and the coverage fog shows which part of it the
+radio took. Frequency only: time, a pane's frozen state, the ring and detection are never touched, so
+a frozen pane retunes and stays frozen. `R` was chosen because T-456 already spends Shift, Alt and
+Ctrl/Cmd on the zoom/region gestures, and it is the one spare form that can be both held and tapped.
 
 **Why Alt/Option and not Ctrl for the time axis.** Ctrl+scroll is macOS's own zoom gesture
 (Accessibility → Zoom, *"Use scroll gesture with modifier keys to zoom"*, whose default modifier is
