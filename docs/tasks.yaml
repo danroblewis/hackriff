@@ -29636,6 +29636,8 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost
 
       Conflict fix (2026-09-25, CONFLICT_ESCALATE): merged gated base e80e080b (T-1002 per-pane rows, T-1005 split layout) as ebc31d3e. surface.ts: T-1002's paneRows(s.inventory, pane.id) kept in marks/detections/pins with T-1004's !ownsSelection(pane.id) linked-ghost flag and pinLayer's selected-pane arg, so output badges ride the per-pane rows. app-explore.test.ts: T-1002's per-pane-rows assertion plus T-1004's linkedFocus assertions (no loosening). test-ui 100/100, tsc clean, app-split-frozen + app-active-pane e2e green on fresh hk (ports 9216+).
+
+      2026-09-25 coordinator, from T-1004's conflict merge: app-split-frozen's per-pane badge check only exercises ONE pane ('drawn on [pane1], badged on [pane1]') since T-1002 draws only each pane's own rows and the live pane 2 lacks that signal. It passes, but it does not prove both panes; a follow-up should set the spec so both panes contain the row (e.g. pane 2 frozen over the same window).
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 21:08).
       Split view: the four controls that lied on a frozen pane now say what they will do, with pane 1 frozen and pane 2 live. (1) Go-to on a frozen pane no longer paints a disabled "past" offer — surface/retune.ts re-reads the same offer as a GO-LIVE (isGoLiveOffer / goLiveOfferLabel / acceptGoLive) labelled "Go live here": the pane returns to the live edge (view arithmetic, no route) and only then is the capture taken through the existing single gated DeviceAction path (acceptPaneWidth), guarded before (T-407; a refusal leaves the pane frozen) and after (the re-derived offer must be unblocked, following, and name the same capture). The offer carries `following` beside `block`, so a pane frozen exactly at the live edge is a go-live too. (2) Record IQ records forward from now: on a frozen viewport it reads "Record IQ (live)", states band, pane and reason in its title and repeats it in a toast, re-stated each frame. (3) T-994's output badges are keyed per (pane, feature). (4) A selected feature is THE selection only in the pane that owns it; every other pane draws a linked ghost — ordinary symbology plus the selection's brackets at LINKED_ALPHA, `linked` on the pin and "linked: selected in another viewport" in its accessible name. Covered by ui/e2e/app-split-frozen.e2e.mjs at 1280x800 and 400 px over the mock SDR, plus unit tiers in surface-retune, surface-features, app-capture-window and app-map-controls. TWO MERGES OF MAIN, both keeping main's landed change whole: d710aaa2 (main 4720410a) kept T-1006's per-pane front end (retuneDeviceId, block widened to device_required/device_gone) beside this ticket's `following`, so a go-live is refused for an ambiguous or departed radio exactly as a retune is, and kept T-1006's retuneDeviceId check in the T-407 re-derivation (moved into samePlannedCapture, the half acceptGoLive reuses); its test-file conflict was resolved by taking main's file whole and re-appending this ticket's test, so T-1006's picker test, T-1028's retune-mode test and T-1004's button-word test all exist. 4913314c (main a3ee7d20) hit map-controls.ts's tuningChanged, where main has since retired the cluster's follow FAB: main's early-return shape is kept exactly (no syncFollow restored) and T-1004's `offerGo.textContent = shown.label ?? "Retune"` re-applied inside it, so the button's WORD is re-derived on a retune, not only the sentence. No backend change in this branch.
@@ -30647,6 +30649,42 @@ tasks:
       Observed, not chased: UNEXPLAINED, 3 of 9 runs on main at 6f38fbb8 with a fresh hk (runs 1, 5, 11 of this triage): app-outputs-map step 3 failed 'the GL overlay drew no active halo outside the box (0 -> 0)' while the DOM said the box was active and carried the audio badge. Run 11's message (after I added the area to it) shows the sampled band was the FULL box height - area before {x0:802,y0:527.9,x1:850.4,y1:726}, now {x0:802,y0:98,x1:850.3,y1:726} - so an empty band is ruled out; a separate probe of the same box while listening counted 949-3045 near-ACTIVE_MARK pixels in exactly that band, so the halo does normally land there. Not reproduced in the 6 green runs since. The committed haloScan now prints the whole-frame near-mark total and bbox, which will say next time whether the halo was absent from the frame (total 0, i.e. a real product/GL-frame race) or drawn outside the band. Worth a ticket if it recurs in a gate. | Two runs (2 and 3 of this triage) aborted before any assertion with 'hk serve did not come up on 127.0.0.1:9216 in 20 s' and an EMPTY captured stderr, at load average 57. The same binary and fixture started fine by hand seconds later. If this shape shows up in gate logs it is a readiness-timeout under load, not a product red; ui/e2e/backend.mjs's 20 s budget may be short for a loaded 28-core box.
       Resources: 0 CPU-s, peak 0.0 GB
     commit: 2b76cfd6
+  - id: T-1050
+    milestone: MMAP
+    title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+    status: todo
+    priority: high
+    deps:
+    - T-1041
+    parallel_group: UI-TRACE-COLOUR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOLLOW-UP OF T-1041 (trace strip removed; the trace is now an OFF-by-default layer drawn translucently OVER the pane's top rows). The product and T-1041's acceptance pass; ONE e2e instrument no longer measures what it claims: ui/e2e/app-trace.e2e.mjs T-475 'the SAME dB is the SAME COLOUR' reads 89/154 columns = 57.8 % against the file's 80 % threshold (the threshold was NOT lowered; it read 9.1 % before T-1041's worker rebuilt the core read).
+      MEASURED BY T-1041's worker (handback ~/.hackriff-ops/work/T-1041/handback.json): (a) where the property HOLDS, the core pixel is identical to the trace-off baseline, so a difference mask cannot find the core - use it only to locate the stroke; (b) the bloom is achromatic by construction, so over a cell it is a lightened, desaturated copy of that cell - which is why 'the brightest pixel in the stroke' now returns the bloom, not the core. Its last, unverified variant takes the most saturated ramp pixel in the core's own rows (bloom excluded).
+      DELIVER: make the instrument read the trace CORE colour deterministically over ramp-coloured cells (e.g. the page exposes the core's per-column colour it drew - as T-475's own honesty instrument - or the spec renders the trace over a flat known cell, or reads the core from the layer's own framebuffer pass), then re-run the SAME-COLOUR property at the unchanged 80 % (or better). If the property genuinely fails over cells, fix the product (the trace's colour must be the same dB->colour as the cells). Never lower the threshold.
+      ACCEPTANCE: app-trace T-475 green 3/3 alone on a quiet-ish box against a FRESH hk; red-proof: a deliberately mismatched trace colour ramp turns it red.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1041 worker 2026-09-25: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+  - id: T-1051
+    milestone: MMAP
+    title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI-TRACE-HOLD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-25 by T-1041's worker, who built main's ui and ran main's own ui/e2e/app-trace.e2e.mjs against the same hk binary: 3 of 6 red on main): the heldObservation() tests fail with 'the page would not hold still in the state under test' - including the trace extent test - under load 30-55. The browser-e2e tier runs only in the daily RC, so this red sits on main unseen by the merge gate.
+      DELIVER (deflake-triage rules): run app-trace alone 5x on main with a FRESH hk (main's seeded target/debug/hk has been stale all day - that caused most of the day's false browser reds; rule it out first). If it is green alone and red only under load, make heldObservation deterministic - hold on a state the PAGE reports (a frame counter / render-settled flag the surface exposes for tests, or the server's capture clock) instead of comparing screenshots over a wall-clock window; never a longer timeout or fewer attempts. If it fails alone, it is a product defect (the page never settles - e.g. a re-render loop on the trace/layer path, or T-1035's backoff/refresh interplay): find and fix it with a red-on-regression proof.
+      ACCEPTANCE: app-trace (all tests except T-475's colour check, which is its own follow-up) green 5/5 alone and 3/3 at 2 lanes on a fresh hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
