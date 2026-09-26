@@ -229,6 +229,37 @@ impl Repository {
         .next())
     }
 
+    /// The emitter's demodulation sessions **however they were attached** (by the session's own
+    /// `emitter_id` or by an `emitter_link`, following merges, as
+    /// [`Self::latest_linked_demodulation_for_emitter`]), newest first, at most `limit`.
+    ///
+    /// Each row is one probe of one emission — a burst, for an intermittent emitter — with the
+    /// mode and parameters it measured, declined windows included (T-416). T-987 reads them as
+    /// the emitter's accumulated evidence when Listen opens between its bursts.
+    pub fn demodulations_for_emitter(
+        &self,
+        emitter: EmitterId,
+        limit: usize,
+    ) -> Result<Vec<Demodulation>, RepoError> {
+        let id = self.live_emitter_id(emitter)?;
+        bodies::<Demodulation, _>(
+            &self.conn,
+            "WITH RECURSIVE absorbed(id) AS ( \
+                 SELECT ?1 \
+                 UNION SELECT e.emitter_id FROM emitter e JOIN absorbed a ON e.merged_into = a.id \
+             ) \
+             SELECT body FROM demodulation \
+             WHERE emitter_id IN (SELECT id FROM absorbed) \
+                OR demod_id IN ( \
+                     SELECT target_id FROM emitter_link \
+                     WHERE target_kind = 'demodulation' \
+                       AND emitter_id IN (SELECT id FROM absorbed) \
+                   ) \
+             ORDER BY t_end DESC, demod_id DESC LIMIT ?2",
+            params![blob(id), i64::try_from(limit).unwrap_or(i64::MAX)],
+        )
+    }
+
     /// Appends a decode. Refuses `content: Some` under a class that does not permit content
     /// ([`RepoError::GatedContent`]); the metadata-only decode is accepted.
     pub fn insert_decode(&mut self, d: &Decode) -> Result<(), RepoError> {
