@@ -31021,6 +31021,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
     notes: |
       FOUND BY user 2026-09-26 via supervisor (request-volume review): P1: Explore drawer rescopes on every intermediate view (~100 requests per trackpad zoom) - material-change rescope + settle; /api/observations and whole-range coverage on the 30 s timer only
+
+      Review found a real race (attempt 1): lastRegionId was only set after refresh()'s answers landed, so a quick region select-then-deselect before the first request landed read the new region against a stale lastRegionId, treated it as a no-op view change, asked nothing, and let the superseded region answer land unopposed (its seq was still current) — drawing the wrong scope. Fixed by setting lastRegionId eagerly in the rescope handler at the moment a region change is detected, before refresh() is invoked. Added a Latch-based regression test reproducing the exact race; confirmed red without the fix, green with it. just test-ui: 109/109 test files passed.
   - id: T-1062
     milestone: MUI
     title: Fold window coverage into GET /api/inventory (window.coverage for the queried [t0,t1]x[f_lo,f_hi]) so the client's per-empty-page /api/coverage cells=1 round trip (48-77 per zoom gesture) disappears
