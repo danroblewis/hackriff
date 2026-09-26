@@ -400,7 +400,11 @@ This is an extension, and it holds the existing guards:
   coordinate with the open **T-458** binding (drag pans, so a selection gesture needs a modifier or a
   mode) and **T-456** (wheel zooms; a modifier gives one axis), so a single canvas keeps one gesture
   grammar. A pan or wheel still **never commands the radio** (the spy-client empty-call-list assertion);
-  only an explicit region-select offers/commits a retune through the one gated `DeviceAction` path.
+  only an explicit region-select offers/commits a retune through the one gated `DeviceAction` path —
+  **unless `retune mode` is explicitly on** (T-1028, ADR-0023 §4's amendment), when a *settled*
+  pan/zoom commits one through that same path, and a view too wide to capture tunes the largest
+  achievable span centred on it instead of refusing. The mode is off by default and the empty-call-list
+  assertion is exactly the control its tests are written against.
 - **Thin client throughout.** All four durable research stores (§ below), band-plan priors (§7), and
   every layer's data live in the backend behind `docs/api.md` and its contract tests. `ui/src` renders,
   maps pixels↔(Hz, time), and calls routes — it holds no signal logic.

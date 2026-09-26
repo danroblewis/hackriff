@@ -17,9 +17,9 @@
 //   2. FILLS LIVE — the server's OWN `/api/coverage` answer over the full 1 MHz-6 GHz range, and
 //                   the sweep's own `/api/control/scan` progress counter, before and after the
 //                   sweep has been running a while — never inferred from a single screenshot. The
-//                   minimap viewport (T-443: "nearly always 6 GHz wide", the one on-screen surface
-//                   that already shows the whole range with no navigation) is read too, as
-//                   corroborating pixel evidence, reported alongside the server's own numbers.
+//                   pane, zoomed out to the whole 1 MHz-6 GHz range with the cluster's own Zoom-out
+//                   (the minimap that used to show it with no navigation is retired, T-995), is read
+//                   too, as corroborating pixel evidence, reported alongside the server's own numbers.
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -28,9 +28,9 @@ import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
-/** The minimap strip's device-pixel height (`MINIMAP_PX` in `app/centre/surface.ts`), the same
- * constant `canvas-journey.e2e.mjs` reads pixels against. */
-const MINIMAP_PX = 110;
+/** Zoom-out presses that take a pane from the opening window to the whole device range (at 1/0.6
+ * a press, ~16 do it from 2.4 MHz; the rest are margin — a press at the bound changes nothing). */
+const ZOOM_OUT_PRESSES = 30;
 
 /** `GET` against the backend, retrying `/api/*`'s `503` backpressure rather than reading it as a
  * refusal (T-454) — the same shape as `canvas-journey.e2e.mjs`'s `get`. */
@@ -140,13 +140,17 @@ test("pressing 'scan everything' starts a coarse, fast full-range sweep that vis
   const before = await observedOverWholeRange(backend, 512);
   const canvasRect = await page.$rect(".sf-canvas");
   assert.ok(canvasRect && canvasRect.w > 200 && canvasRect.h > 100, `no usable canvas box: ${JSON.stringify(canvasRect)}`);
-  const dpr = await page.eval("window.devicePixelRatio || 1");
-  const mapRect = {
+  // The whole range is reached by zooming the pane out (T-995 retired the minimap that showed it).
+  // Pressed through the element (the review drawer test 1 opened may sit over the cluster).
+  await page.eval(`(() => { for (let i = 0; i < ${ZOOM_OUT_PRESSES}; i++) document.querySelector('.map-zoom-out')?.click(); })()`);
+  await page.frames(4);
+  const ins = await page.canvasInsets();
+  const paneRect = {
     x: Math.round(canvasRect.x), w: Math.round(canvasRect.w),
-    y: Math.round(canvasRect.y + canvasRect.h - MINIMAP_PX / dpr), h: Math.round(MINIMAP_PX / dpr),
+    y: Math.round(canvasRect.y + ins.top), h: Math.round(canvasRect.h - ins.top - ins.bottom),
   };
-  const beforeShot = await page.shot(path.join(ART, "scan-everything-minimap-before.png"));
-  const beforeCensus = census(beforeShot, mapRect);
+  const beforeShot = await page.shot(path.join(ART, "scan-everything-zoomed-out-before.png"));
+  const beforeCensus = census(beforeShot, paneRect);
 
   // The press itself: the same click path test 1 just proved reaches a real, enabled button.
   await page.click(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Scan everything (fast)')`);
@@ -194,15 +198,14 @@ test("pressing 'scan everything' starts a coarse, fast full-range sweep that vis
     `the coverage map did not visibly grow in ${WINDOW_MS} ms: before ${before}/512, after ${last.observed}/512 ` +
     `(${JSON.stringify(series)})`);
 
-  // Corroborating pixel evidence from the minimap — the one on-screen surface that already shows
-  // the whole 1 MHz-6 GHz range with no navigation. Reported with numbers either way: a widening
+  // Corroborating pixel evidence from the pane, zoomed out to the whole 1 MHz-6 GHz range. Reported with numbers either way: a widening
   // server-side coverage map that produces no new pixels anywhere on screen would itself be a
   // finding (data present, never rendered — the "we have it but didn't render it" bug CLAUDE.md
   // names), so this is read and reported, not silently skipped once the sharp assertions above hold.
   await page.frames(4);
-  const afterShot = await page.shot(path.join(ART, "scan-everything-minimap-after.png"));
-  const afterCensus = census(afterShot, mapRect);
-  t.diagnostic(`minimap census before: ${beforeCensus.distinct} distinct, dominant ${beforeCensus.dominant} ` +
+  const afterShot = await page.shot(path.join(ART, "scan-everything-zoomed-out-after.png"));
+  const afterCensus = census(afterShot, paneRect);
+  t.diagnostic(`zoomed-out pane census before: ${beforeCensus.distinct} distinct, dominant ${beforeCensus.dominant} ` +
     `at ${(beforeCensus.dominantShare * 100).toFixed(1)} %; after: ${afterCensus.distinct} distinct, dominant ` +
     `${afterCensus.dominant} at ${(afterCensus.dominantShare * 100).toFixed(1)} %`);
 });

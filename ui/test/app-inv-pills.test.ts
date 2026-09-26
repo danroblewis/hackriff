@@ -148,9 +148,10 @@ test("layout: the pills are a row of the top-left stack, and nothing of the left
   assert.match(ctl, /@media \(max-width: 600px\) \{[\s\S]*\.map-ctl > \.map-stack \{ margin-top: 132px; \}/);
   assert.doesNotMatch(ctl.replace(/\/\*[\s\S]*?\*\//g, ""), /\.map-inv[^{]*\{[^}]*top:/, "the pills are in flow, never at a fixed top (least of all 50%)");
   // The rows below it follow it down: the capture block, the offer and the measure banner are the
-  // stack's later blocks, in that order, so each starts where the pills end.
+  // stack's later blocks, in that order, so each starts where the pills end. T-1028's retune-mode
+  // banner is the last block, under the tool-mode banner (it may be on beside a tool mode).
   const pills = readFileSync("src/app/chrome/map-controls.ts", "utf8");
-  assert.match(pills, /h\("div", \{ class: "map-stack" \}, invHome, retune, offer, modeBanner\)/);
+  assert.match(pills, /h\("div", \{ class: "map-stack" \}, invHome, retune, offer, modeBanner, retuneBanner\)/);
   // It fades with the rest of the cluster by being IN the cluster (`map-fade`), not by a rule of
   // its own in phone.css.
   assert.match(pills, /class: "map-glass map-inv map-fade"/);

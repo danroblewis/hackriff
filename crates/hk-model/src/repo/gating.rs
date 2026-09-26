@@ -317,6 +317,26 @@ fn refused(reason: &'static str) -> RepoError {
 }
 
 impl Repository {
+    /// The decodes linked to identity-less emitter `id` that carry a **provisional** identity
+    /// (`identity_provisional: true` in their metadata, T-962), oldest first, each read through
+    /// [`Self::decode`] - so gated at [`IdentityAccess::Standard`]: a restricted row reads with
+    /// metadata `{}`, fails the provisional filter and is not returned. Lives here, not in hk-api,
+    /// because hk-api never walks the ungated link table itself (the `emitter_links` guard).
+    pub fn provisional_decodes_of_emitter(&self, id: EmitterId) -> Result<Vec<Decode>, RepoError> {
+        let mut out = Vec::new();
+        for link in self.emitter_links(id)? {
+            let crate::emitter::LinkTarget::Decode(d) = link.target else {
+                continue;
+            };
+            let d = self.decode(d)?;
+            if d.identity.is_none() && d.metadata["identity_provisional"] == Value::Bool(true) {
+                out.push(d);
+            }
+        }
+        out.sort_by(|a, b| a.t.cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
     /// One decode, gated at [`IdentityAccess::Standard`] (T-036, [`crate::cluster`]): a withheld
     /// row reads with `identity: None`, metadata `{}` and identifier-bearing labels withheld.
     /// See [`Self::decode_with_access`].

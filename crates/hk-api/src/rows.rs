@@ -62,8 +62,8 @@ use tungstenite::protocol::{Role, WebSocket};
 use crate::http::ApiState;
 use crate::query::{ApiError, Params, Region, bad, param};
 use crate::tiles::{
-    TileKey, TileStore, affordable_levels, axis_fold, chunk_rows, num, parse_key, servable,
-    store_name, tier_of, tile_store, with_tile_history, with_tile_history_built,
+    TileKey, TileStore, affordable_levels, axis_fold, chunk_rows, num, parse_key, read_order_until,
+    servable, store_name, tier_of, tile_store, with_tile_history, with_tile_history_built,
 };
 
 /// Rows in one `rows` message at most. Small enough that a block's coverage plane is always laid
@@ -166,6 +166,9 @@ pub fn parse_subscription(state: &ApiState, q: &Params) -> Result<RowSubscriptio
                  `axes.*.max_level` on /api/tiles states how far up the lattice can be read",
             ));
         }
+        // The affordable set, finest first. The ORDER a block walks it in is decided per block,
+        // when the block is read (`read_order_until`, T-1018): whether the coarse nodes have
+        // folded a block's rows yet changes as the run goes on.
         let c: Vec<u8> = affordable_levels(p, &key)
             .into_iter()
             .map(|l| l as u8)
@@ -451,12 +454,18 @@ impl RowCursor {
             nrows,
             key.cells,
         );
-        // The tile read's rule: finest affordable level first, walk coarser only when a level holds
-        // nothing, and say which answered.
+        // The tile read's rule: `read_order` (the exact node, else the cheapest level that folds),
+        // walk on only when a level holds nothing, and say which answered.
         let mut tried = Vec::new();
         let mut first: Option<(u8, Overview)> = None;
         let mut answered: Option<(u8, Overview)> = None;
-        for &level in &s.candidates {
+        let order: Vec<u8> = with_tile_history(state, s.store, |p| {
+            Ok(read_order_until(p, &key, s.row_ns(b))
+                .into_iter()
+                .map(|l| l as u8)
+                .collect())
+        })?;
+        for &level in &order {
             let o = read_rows(state, s.store, &key, level, self.window(a, b), nrows)?;
             tried.push(level);
             if o.observed_cells > 0 {
