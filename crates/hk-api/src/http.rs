@@ -33,6 +33,7 @@
 //! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |
 //! | `/api/anomalies[?f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`, `/api/anomalies/<id>[/dismiss\|/reopen]` | GET, POST | token (header only for mutating) | T-122 anomalies and novelty alarms with explanations; dismiss/reopen ([`crate::anomalies`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
+//! | `/api/frontend/events?t0&t1[&device][&limit]` | GET | token | T-981 front-end events (clipped rows with a whole-span energy step) over a window ([`crate::frontend`]) |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/collections[/<id>[/markers]]`, `/api/markers[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-817 marker collections ([`crate::collections`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -152,6 +153,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/playback"),
     ("POST", "/api/playback"),
     ("GET", "/api/status"),
+    // T-981: front-end events - runs of clipped spectrum rows whose energy stepped across the
+    // whole tuned window - over a time window, for the canvas's front-end mark
+    ("GET", "/api/frontend/events"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
     ("POST", "/api/control/rate"),
@@ -438,6 +442,9 @@ pub struct ApiState {
     /// ([`crate::trunk_cc`]); `None` on a server with no pipeline, which answers `503` rather than
     /// an empty channel list.
     pub cc_hunt: Option<Arc<dyn crate::trunk_cc::CcHuntControl>>,
+    /// T-981: the run's front-end event log behind `GET /api/frontend/events`
+    /// ([`crate::frontend`]); `None` answers 503.
+    pub frontend: Option<Arc<dyn crate::frontend::FrontEndControl>>,
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
@@ -1343,6 +1350,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::trunking::route(state, &ctl)) // T-273
         .or_else(|| crate::trunk_cc::route(state, &ctl)) // T-977
         .or_else(|| crate::vlf::route(state, &ctl)) // T-891
+        .or_else(|| crate::frontend::route(state, &ctl)) // T-981
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122
     {

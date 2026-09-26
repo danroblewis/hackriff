@@ -275,15 +275,29 @@ pub struct ChannelRaster {
 /// 73.201, channels 200–300; unverified this session). The 20 kHz tolerance is 10 % of the
 /// raster; the detector's centre error on the fixture station is about 3 kHz. Every entry is keyed
 /// by its region; other regions' rasters (e.g. 100 kHz FM steps in ITU Region 1) are future work.
-pub const CHANNEL_RASTERS: &[ChannelRaster] = &[ChannelRaster {
-    region: Region::Us,
-    service: "fm-broadcast",
-    range_hz: [87.8e6, 108.0e6],
-    raster_hz: 200e3,
-    offset_hz: 100e3,
-    tolerance_hz: 20e3,
-    source: "47 CFR 73.201 (US FM channels, 200 kHz on odd tenths)",
-}];
+pub const CHANNEL_RASTERS: &[ChannelRaster] = &[
+    ChannelRaster {
+        region: Region::Us,
+        service: "fm-broadcast",
+        range_hz: [87.8e6, 108.0e6],
+        raster_hz: 200e3,
+        offset_hz: 100e3,
+        tolerance_hz: 20e3,
+        source: "47 CFR 73.201 (US FM channels, 200 kHz on odd tenths)",
+    },
+    // T-979: US UHF television, channels 14-36, 6 MHz each, centres at 473 MHz + 6 MHz·k. The
+    // tolerance is ~40 ppm at 600 MHz: wide enough for any receiver clock error (the explorer's
+    // was 4 ppm), tight enough that a station genuinely off the raster is flagged, not snapped.
+    ChannelRaster {
+        region: Region::Us,
+        service: "tv-broadcast",
+        range_hz: [470e6, 608e6],
+        raster_hz: 6e6,
+        offset_hz: 5e6,
+        tolerance_hz: 25e3,
+        source: "47 CFR 73.603(a), 73.699 Fig. 1 (US TV channels 14-36, 6 MHz)",
+    },
+];
 
 /// Kind of a vocabulary entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -336,6 +350,9 @@ const SHARED_HF: &str = "SSB/CW are shared by amateur and HF utility services";
 const MODULATION_ONLY: &str = "a modulation names no service; a Part 15 / ISM status needs a \
      protocol decode (e.g. rtl_433) or a CRC-valid framing ground truth";
 const RDS_NOTE: &str = "RDS rides only on FM broadcast";
+/// Why a measured 8VSB pilot identifies television and nothing else (T-979).
+const ATSC_NOTE: &str = "a 5.381 MHz flat band with a CW pilot on its lower edge is ATSC 1.0 \
+     8VSB (A/53 Part 2 §5.1.2); no other service emits that pair";
 const ADSB_NOTE: &str = "CRC-checked Mode S / ADS-B frames";
 const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 /// Why a decoded trunking control channel is public-safety / land-mobile evidence, and why it is
@@ -364,6 +381,17 @@ pub const VOCABULARY: &[VocabEntry] = &[
         Some("fm-broadcast"),
         0.9,
         "200 kHz wideband FM is the broadcast service (47 CFR 73 subpart B)",
+    ),
+    // T-979. `Modulation` is the nearest kind, but this label is never a bare modulation call:
+    // `hk_estimate::atsc` writes it only when a 5.381 MHz flat band AND a CW pilot on its lower
+    // edge were both measured, which is a positive identification of ATSC 1.0 and of nothing
+    // else. It is therefore status-setting evidence, not shape.
+    entry(
+        "atsc-8vsb",
+        Modulation,
+        Some("tv-broadcast"),
+        0.97,
+        ATSC_NOTE,
     ),
     entry("nbfm", DemodMode, None, 0.0, SHARED_NBFM),
     entry("nfm", DemodMode, None, 0.0, SHARED_NBFM),
@@ -466,6 +494,12 @@ const SERVICE_PASSTHROUGH: &[(&str, &str)] = &[
     ("fsk-ism", "ism"),
     ("ook-ism", "ism"),
     ("lora", "lora"),
+    // T-979: UHF television and the Part 74 low power auxiliary use that shares its channels.
+    ("tv-broadcast", "tv-broadcast"),
+    ("atsc", "tv-broadcast"),
+    ("dtv", "tv-broadcast"),
+    ("wireless-mic", "wireless-mic"),
+    ("low-power-auxiliary", "wireless-mic"),
 ];
 
 /// Canonical services the band plan can suggest as allocation-only candidates.
@@ -481,6 +515,8 @@ const ALLOCATION_SERVICES: &[&str] = &[
     "cellular",
     "public-safety",
     "ism",
+    "tv-broadcast",
+    "wireless-mic",
 ];
 
 /// What a real emission of a service **measures like**: the occupied-bandwidth window the
@@ -590,6 +626,24 @@ const SERVICE_SHAPES: &[ServiceShape] = &[
         "Part 15 covers a 20 kHz OOK remote, a 500 kHz LoRa chirp and a 20 MHz WLAN channel: no \
          width supports or contradicts the allocation",
     ),
+    // T-979: the two services the 470-608 MHz rows added. Both are strongly discriminating, and
+    // against each other: a 6 MHz DTV channel is not a wireless microphone, and a 200 kHz mic is
+    // not a television station. That is exactly the discrimination T-990 exists to disclose, and
+    // it is why the fragments the explorer saw inside channels 29/30 could never be either.
+    shape(
+        "tv-broadcast",
+        Some([4.5e6, 6.5e6]),
+        true,
+        "8VSB occupies the 5.381 MHz Nyquist band of its 6 MHz channel (ATSC A/53 Part 2 §5.1.2; \
+         47 CFR 73.603 for the channel), and a DTV transmitter is on air continuously",
+    ),
+    shape(
+        "wireless-mic",
+        Some([10e3, 200e3]),
+        false,
+        "47 CFR 74.861(e): a low power auxiliary station in the TV bands is authorised 200 kHz, \
+         and an analogue mic at +/-15-75 kHz deviation occupies a fraction of it",
+    ),
 ];
 
 /// Whether an emitter's measured occupancy supports a service (T-990).
@@ -659,6 +713,8 @@ pub fn service_label(service: &str) -> &'static str {
         "public-safety" => "Public safety / land mobile",
         "ism" => "ISM / Part 15 device",
         "lora" => "LoRa (Part 15)",
+        "tv-broadcast" => "TV broadcast",
+        "wireless-mic" => "Wireless microphone (Part 74)",
         UNIDENTIFIED => "Unidentified emission",
         RECEIVER_ARTEFACT => "Receiver artefact",
         _ => "Other service",
@@ -870,6 +926,37 @@ pub enum ExplanationEvidence {
         /// Why.
         reason: String,
     },
+    /// A pilot tone measured from the signal that identifies a channelised service (T-979).
+    ///
+    /// This is the evidence an ATSC 8VSB explanation rests on: a CW line on the lower edge of the
+    /// emission's own 5.381 MHz flat band, which the standard puts 309.440 559 kHz above the
+    /// 6 MHz channel's lower edge. The measurement comes first; [`Self::nominal_hz`] and the ppm
+    /// exist only when the measured channel landed on a known grid.
+    Pilot {
+        /// Standard the pilot belongs to, e.g. `atsc-8vsb`.
+        standard: String,
+        /// Measured pilot frequency, Hz.
+        measured_hz: f64,
+        /// One-sigma uncertainty of the measurement, Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sigma_hz: Option<f64>,
+        /// Where the standard puts the pilot of the channel the measurement landed on, Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nominal_hz: Option<f64>,
+        /// Measured minus nominal, Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_hz: Option<f64>,
+        /// Receiver clock error that offset implies, ppm (C05 offset convention).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ppm: Option<f64>,
+        /// Channel number on the grid, when it landed on one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<u32>,
+        /// Pilot over the emission's own plateau, dB.
+        excess_db: f64,
+        /// Source of the nominal offset.
+        source: String,
+    },
     /// T-990: how the emitter's own measured occupancy reads against the shape a real emission
     /// of this service has to have. This is what stops a band-plan allocation from explaining,
     /// by itself, an emission whose measurements contradict it.
@@ -913,6 +1000,39 @@ pub enum ExplanationEvidence {
         #[serde(default = "detected_center")]
         center_source: String,
     },
+}
+
+/// Metadata key under which [`crate::atsc`] stores a measured channel pilot (T-979).
+pub const PILOT_METADATA_KEY: &str = "pilot";
+
+/// The service a [`PILOT_FINGERPRINT_KEY`] measurement is evidence for.
+pub const PILOT_SERVICE: &str = "tv-broadcast";
+
+/// The [`ExplanationEvidence::Pilot`] row in a pilot annotation's `metadata`, if it carries one.
+///
+/// Reading it back here is what makes an ATSC explanation *cite the pilot it was measured from*
+/// instead of asserting a family and leaving the reader to trust it.
+pub fn pilot_evidence(metadata: &serde_json::Value) -> Option<ExplanationEvidence> {
+    let p = metadata.get(PILOT_METADATA_KEY)?;
+    let f = |k: &str| p.get(k).and_then(serde_json::Value::as_f64);
+    Some(ExplanationEvidence::Pilot {
+        standard: p.get("standard")?.as_str()?.to_owned(),
+        measured_hz: f("measured_hz")?,
+        sigma_hz: f("sigma_hz"),
+        nominal_hz: f("nominal_hz"),
+        offset_hz: f("offset_hz"),
+        ppm: f("ppm"),
+        channel: p
+            .get("channel")
+            .and_then(serde_json::Value::as_u64)
+            .map(|c| c as u32),
+        excess_db: f("excess_db")?,
+        source: p
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ATSC A/53 Part 2 §5.1.2")
+            .to_owned(),
+    })
 }
 
 /// `Raster.center_source` of the emitter's detected centre.
@@ -1731,6 +1851,12 @@ pub fn explain_emitter(
         artefact.as_ref(),
         coincidence.as_ref(),
     );
+    // T-979: the explanation cites the pilot the family was measured from.
+    if let Some(pilot) = crate::atsc::pilot_evidence(repo, id)? {
+        if let Some(c) = all.iter_mut().find(|c| c.service == PILOT_SERVICE) {
+            c.evidence.insert(0, pilot);
+        }
+    }
     if refined.is_some() {
         for ev in all.iter_mut().flat_map(|x| x.evidence.iter_mut()) {
             if let ExplanationEvidence::Raster { center_source, .. } = ev {

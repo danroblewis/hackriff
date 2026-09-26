@@ -444,6 +444,8 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
                 ev.crc_valid(),
                 ev.crc_checked(),
             ),
+            // Sealed with none (ADR-0021 §9.3); the trunk chain does not consult a band plan.
+            explanations: Vec::new(),
         }
     });
     let pipeline = obs.structure.and_then(|s| {
@@ -617,6 +619,8 @@ fn unconfirmed(
             deepest_verdict: Some(verdict),
             reason: Some(ResolutionReason::NothingScored),
             summary,
+            // Filled after sealing by the post-seal attachment (T-569), like every other resolution.
+            explanations: Vec::new(),
         }),
         receiver: obs.receiver,
         job: None,
