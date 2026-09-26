@@ -31854,6 +31854,8 @@ tasks:
       FOUND BY T-1065 worker 2026-09-26: hk-api shutdown_leaves_no_thread_writing_under_the_handlers_directory fails ALONE on main a9f82aa1 ('no handler ever ran'), green on d91603f4 - bisect (T-1063's accept-loop 503 is the prime suspect)
 
       2026-09-26 coordinator: it RUNS AND PASSES in the merge gate (06:34 batch on base 4bdd4115: PASS 0.335 s) while failing alone 3/3 in a worker worktree at a9f82aa1 - so the deciding factor is the environment (gate-target dir/profile, env vars, TMPDIR/handlers-dir location, ports), not the code alone. Find that difference first; a test that passes only in the gate's environment hides a real defect in others (a user's hk serve runs in neither).
+
+      2026-09-26 coordinator: CONFLICTING evidence - T-1017's worker (~07:00) saw it fail inside a full 'cargo nextest run -p hk-api' at load ~50 (0.092 s) but PASS ALONE 3/3 (0.206 s, 'binary(shutdown)'), while T-1065's worker saw it fail alone 3/3 at a9f82aa1. So it is NOT deterministic: load- or environment-dependent (and passes in the gate). Treat it as a race under load first (deflake-triage: passes alone sometimes -> find the race the load exposes, e.g. the handler thread not scheduled before shutdown is asserted, or the 503 cap hit by the test's own connections under contention) - still a product question if a request under the cap can fail to reach its handler.
     high_effort_reason: regression bisect on the HTTP accept path (connection pools) + the gate-vs-worktree environment difference; hard debugging
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
