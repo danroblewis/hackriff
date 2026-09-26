@@ -129,7 +129,8 @@ const MINIMAP_PX = 0;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
  * control's `"past"` block (T-444/T-476). One frame at 60 Hz, generously. */
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
-/** Height of the spectrum-trace strip above each pane, device px (T-457). */
+/** Height of the spectrum-trace band over each pane's top rows, device px (T-457, T-1041: a
+ * layer over the waterfall, not a strip carved off it — no space is reserved either way). */
 const TRACE_PX = 96;
 /** The capture-width presets offered directly (T-496) — round numbers a HackRF-class front end
  * commonly captures at. A host decision, not an RF fact: `retune.ts` re-derives none of its own
@@ -259,7 +260,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
-  const traceEl = h("div", { class: "sf-trace", role: "status" });
+  // T-1041: hidden until the trace layer is switched on (it is off by default).
+  const traceEl = h("div", { class: "sf-trace", role: "status", hidden: true });
   // T-506: the IQ horizon and the retention bound, said in words beside the two rules that draw
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
@@ -822,7 +824,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // than a hand-set scale: it still colours from a measurement, just from the visible one. The honest
   // part is unchanged — the range is **said**, by the readout below and by the label in the bar, so a
   // surprising picture is diagnosable instead of paintable-over.
-  let traceOn = true;
+  // **T-1041: OFF by default.** The trace used to be on, and to pay for itself with a reserved
+  // band above every pane — which is the black bar the user saw at the top of a full-bleed map
+  // ("the top bar looks like it's actually the phosphor display … we can remove it entirely for
+  // now", 2026-09-25). It is now a layer like any other: no reserved space, drawn over the pane's
+  // top rows when it is on, and nothing at all when it is off. T-457's invariant — viewport-wide,
+  // time-addressable, per pane — is a property of that layer, not of a band.
+  let traceOn = false;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
@@ -945,8 +953,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
     return out;
   };
-  // The trace strip's switch — the layers menu's "Every pane" row since T-882 (it was the toolbar's
-  // `Trace` button). Presentation only: the strip's height and whether the readout is written.
+  // The trace layer's switch — the layers menu's "Every pane" row since T-882 (it was the toolbar's
+  // `Trace` button). Presentation only: whether the layer is drawn and whether the readout is
+  // written. Since T-1041 it moves no geometry: the pane is the same rectangle either way.
   const setTrace = (on: boolean) => {
     traceOn = on;
     if (preview) preview.view.tracePx = traceOn ? TRACE_PX : 0;
@@ -1449,7 +1458,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
             ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
           ];
         },
-        trace: traceFor, tracePx: TRACE_PX,
+        trace: traceFor, tracePx: traceOn ? TRACE_PX : 0,
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
@@ -1799,7 +1808,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
             on: collectionVisibleOn(reg, c),
             key: undefined,
           } }))).sort((a, b) => PLANE_ORDER.indexOf(a.plane) - PLANE_ORDER.indexOf(b.plane) || a.z - b.z).map((x) => x.row),
-          viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceOn }],
+          viewWide: [{ id: "trace", label: "Spectrum trace", hint: "over every pane's top rows", on: traceOn }],
           scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
         };
       },

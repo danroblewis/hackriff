@@ -102,16 +102,23 @@ export interface SurfaceViewOptions {
    * fog is shown everywhere, which is every host before T-807. */
   fog?: ((paneId: string) => boolean) | null;
   /**
-   * **The instantaneous spectrum trace** (T-457, `./trace.ts`): quads for the strip carved off the
-   * top of each pane, in that strip's own clip space.
+   * **The instantaneous spectrum trace** (T-457, `./trace.ts`): paths for the band the trace is
+   * drawn across, in that band's own clip space.
    *
    * It is given the pane's `PaneView` *and the `PaneReport` the data pass just produced*, because a
-   * trace reduced from a different pyramid level than the picture it sits above would be a second
-   * opinion about one window — the same reason the chrome states the level it was **drawn** with.
+   * trace reduced from a different pyramid level than the picture it is drawn over would be a
+   * second opinion about one window — the same reason the chrome states the level it was **drawn**
+   * with.
    *
-   * The strip is taken out of the pane's **rectangle**, never painted over it: an overlay covering
-   * the newest rows would make "the top of the pane is the newest row" false, which is the one thing
-   * every mark on this surface is placed through.
+   * **T-1041: the band is a LAYER OVER the pane's own top rows, not a strip carved off it.** T-457
+   * reserved the space so that "the top of the pane is the newest row" stayed true of the pixels;
+   * the user's full-bleed ruling (2026-09-25) is that the reserved band reads as a black bar above
+   * the map and costs the waterfall its first rows, which is a worse failure of the same rule — the
+   * newest row was not on the screen's first pixel at all. So the pane keeps every pixel it has,
+   * the trace is **off by default** (a layer the user switches on, `layers.ts`), and when it is on
+   * it is blended over the rows it is a spectrum of. The property T-457 protected survives in the
+   * place it is actually checked: the pane's `rect` — the mapping every mark, gesture and box on
+   * this surface is placed through — now runs to the pane's top edge whatever the trace is doing.
    *
    * Since T-475 it returns [[TracePath]]s for `./tracepass.ts` rather than overlay quads, because the
    * series are coloured **by amplitude from the one ramp** and `overlay.ts`'s program is — and stays
@@ -119,7 +126,7 @@ export interface SurfaceViewOptions {
    * header of `./tracepass.ts` for the two properties it re-establishes structurally.
    */
   trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
-  /** Height of that strip, device px. 0 (the default) draws no trace and takes no space. */
+  /** Height of that band, device px. 0 (the default) draws no trace. It takes no space either way. */
   tracePx?: number;
   /**
    * **HUD axes** (T-805, `./hud.ts`): a frequency ruler along each pane's bottom edge and a time
@@ -147,7 +154,9 @@ export interface SurfaceViewOptions {
   dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
 }
 
-/** One pane's trace strip this frame: where it is, and the window it is a trace across. */
+/** One pane's trace band this frame: where it was drawn, and the window it is a trace across.
+ * Since T-1041 the band lies INSIDE the pane's own rectangle (its top `tracePx` device px), so it
+ * is never a region of the canvas a pane does not own. */
 export interface TraceRect {
   readonly id: string;
   readonly rect: PaneRect;
@@ -166,7 +175,7 @@ export interface SurfaceFrame {
   readonly overlaysDrawn: number;
   readonly mapRect: PaneRect | null;
   readonly mapBox: Box | null;
-  /** The trace strips drawn this frame, one per pane; empty when no trace is configured. */
+  /** The trace bands drawn this frame, one per pane; empty when the trace layer is off. */
   readonly traces: readonly TraceRect[];
   readonly readout: Readout;
   /** The HUD rulers laid out this frame, one per pane; empty when HUD axes are off (T-805). */
@@ -187,7 +196,7 @@ export class SurfaceView {
    * docks over (the app's floating top bar and status dock). The canvas is full-bleed (docs/23
    * §10.1) and that chrome is drawn OVER it, but it is not an overlay the user can close, so the
    * content keeps clear of it: the map strip is lifted above the bottom band and the panes (their
-   * newest rows and trace strip on top) stop below the top one. Closeable overlays — the sheet, the
+   * newest rows on top) stop below the top one. Closeable overlays — the sheet, the
    * side column, the menus — get no inset: they cover map pixels and give them back on close.
    * 0 (the default) draws edge to edge, as before.
    */
@@ -213,7 +222,7 @@ export class SurfaceView {
   fog: ((paneId: string) => boolean) | null;
   /** Per-pane spectrum trace, re-derived every frame. See [[SurfaceViewOptions.trace]]. */
   trace: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
-  /** Height of the trace strip above each pane, device px. 0 hides it and returns the space. */
+  /** Height of the trace band over each pane's top rows, device px. 0 draws no trace (T-1041). */
   tracePx: number;
   /** Draw the HUD rulers (T-805). */
   hudAxes: boolean;
@@ -281,14 +290,15 @@ export class SurfaceView {
     // T-486's dead zone is a number of *device pixels*, so a viewport that does not know its own
     // height has no pixel to measure in (and, per `PaneModel.zoneNs`, no dead zone at all).
     this.minimap.setViewport(w, mapH);
-    // T-457's strip, taken off the **top** of each pane's rectangle rather than painted over it.
-    // Capped at a third of the pane area for the same reason the map is capped at half: the thing
-    // you are looking at must not become the thing beside it. Per pane, so a split shows one trace
-    // per frequency window instead of one strip trying to be true of two.
+    // T-1041: the trace's band, drawn OVER the top of each pane's rectangle — no longer carved out
+    // of it. Nothing below reads `traceH` as layout: the pane rectangle is the full pane, the band
+    // is only where the trace pass is scissored to. Still capped at a third of the pane, so the
+    // layer cannot cover the thing it is a trace of. Per pane, so a split shows one trace per
+    // frequency window instead of one band trying to be true of two.
     const traceH = this.trace ? Math.max(0, Math.min(Math.floor(this.tracePx), Math.floor(paneH / 3))) : 0;
     const paneViews = this.panes.views(edgeNs, w, paneH)
       .map((v) => ({
-        ...v, rect: { ...v.rect, y: v.rect.y + inset + mapH, h: Math.max(1, v.rect.h - traceH) },
+        ...v, rect: { ...v.rect, y: v.rect.y + inset + mapH },
         // T-807: the pane's coverage-fog layer, asked every frame like `marks`. The minimap is not
         // asked: it is where coverage is surveyed at a glance, so its fog is always shown.
         ...(this.fog ? { fog: this.fog(v.id) } : {}),
@@ -331,9 +341,10 @@ export class SurfaceView {
         if (q.length) paneQuads.push({ rect: v.rect, quads: q });
       }
     }
-    // 2b. the trace strips: the same overlay program, into the rectangle carved off each pane's top.
-    //     Scissored to that strip, so a trace cannot reach the measurement it is a trace of, and
-    //     handed the report the data pass produced so its reduction is at the level that was drawn.
+    // 2b. the trace layer (T-1041): the trace pass, into the top `traceH` px OF each pane — over
+    //     the rows it is a spectrum of, blended, never instead of them. Scissored to that band, so
+    //     a trace cannot reach further down the measurement than the band it states, and handed the
+    //     report the data pass produced so its reduction is at the level that was drawn.
     const traces: TraceRect[] = [];
     const tracePaths: { rect: PaneRect; paths: readonly TracePath[] }[] = [];
     if (this.trace && traceH > 0) {
@@ -341,7 +352,10 @@ export class SurfaceView {
       for (const v of paneViews) {
         const report = byId.get(v.id);
         if (!report) continue;
-        const rect: PaneRect = { x: v.rect.x, y: v.rect.y + v.rect.h, w: v.rect.w, h: traceH };
+        const rect: PaneRect = {
+          x: v.rect.x, y: v.rect.y + Math.max(0, v.rect.h - traceH), w: v.rect.w,
+          h: Math.min(traceH, v.rect.h),
+        };
         traces.push({ id: v.id, rect, box: v.box });
         const q = this.trace(v, edgeNs, report, rect);
         if (q.length) tracePaths.push({ rect, paths: q });
@@ -352,7 +366,7 @@ export class SurfaceView {
       if (mapRect) overlaysDrawn += this.overlay.draw(mapRect, mapQuads);
       for (const p of paneQuads) overlaysDrawn += this.overlay.draw(p.rect, p.quads);
     }
-    // The trace is not an overlay preference: it is a series in a rectangle of its own, so it draws
+    // The trace is not an overlay preference: it is its own layer, switched on its own, so it draws
     // whether or not the map's outlines and the in-pane marks are switched off.
     for (const p of tracePaths) this.tracePass.draw(p.rect, p.paths);
     const quads = paneQuads.length ? [...mapQuads, ...paneQuads.flatMap((p) => p.quads)] : mapQuads;

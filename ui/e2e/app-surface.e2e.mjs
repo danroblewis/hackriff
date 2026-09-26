@@ -34,7 +34,7 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
  * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
- * rows outside it: the coverage-fog row (T-807), the trace strip and the three colour-scale rows
+ * rows outside it: the coverage-fog row (T-807), the spectrum-trace row and the three colour-scale rows
  * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
@@ -314,6 +314,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     bases: [...document.querySelectorAll('#map-layers input[data-base]')].map((i) => [i.value, i.checked]),
     overlays: [...document.querySelectorAll('#map-layers [data-axis=overlays] input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
     signals: String(document.querySelector('#map-layers input[data-layer="detections"]').checked),
+    trace: String(document.querySelector('#map-layers input[data-view-layer="trace"]').checked),
     registry: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? 'null'),
   })`;
   /** The menu's expected overlay rows for one snapshot: `[id, visibleByDefault]` in paint order. */
@@ -348,6 +349,13 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   assert.match(one.head[0], /Base style · this pane/);
   assert.ok(one.head.some((t) => /^Overlays · this pane/.test(t)), `no overlays axis: ${one.head}`);
   assert.equal(one.signals, "true");
+  // T-1041: the spectrum trace is a layer, OFF by default — it reserves no band above the pane.
+  assert.equal(one.trace, "false", "the spectrum-trace layer must be off by default");
+  // Switch it on for the rest of this check: the trace's readout (`.sf-trace`) is written only
+  // while the layer is drawn, and the phosphor assertions below read that readout.
+  await page.click(`document.querySelector('#map-layers input[data-view-layer="trace"]')`);
+  await page.waitFor("the trace layer to draw and state its slice",
+    `!!document.querySelector('.sf-trace').textContent`, { timeoutMs: 30000 });
 
   // Split (the viewport menu since T-882, which closes the layers menu while it is open): the new
   // pane is active, inherits pane 1's registry, and the reopened layers menu says which pane it is.
