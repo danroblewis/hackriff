@@ -115,6 +115,40 @@ test("THE ACCEPTANCE: each pane's Candidate query carries ITS OWN window, and ea
   }
 });
 
+test("T-1081: a GET the server never answers cannot silence the lists — the load gives up and the next poll asks about BOTH panes again", async () => {
+  // RC 2026-09-26 (`app-pane-inventory.e2e.mjs`): with two panes, the page asked NO inventory
+  // question for 40 s. The poll is serial (`startPoll` schedules the next ask only when the last
+  // load settles), and the list GETs carried no deadline, so one unanswered GET held every later
+  // ask, for every pane. Here the first round is never answered — and this client ignores its
+  // abort signal too, so only the load's own deadline can end the wait.
+  const { ctx, store, paths } = paneCtx();
+  const answering = ctx.client.get.bind(ctx.client);
+  let hang = true;
+  const signals: (AbortSignal | undefined)[] = [];
+  (ctx.client as { get: unknown }).get = <T>(path: string, opts?: { signal?: AbortSignal }): Promise<T> => {
+    signals.push(opts?.signal);
+    if (hang) { paths.push(path); return new Promise<T>(() => {}); }
+    return answering<T>(path);
+  };
+  store.set(setInventoryPanes(SPLIT, named("p2", 2, 2)));
+
+  const first = loadInventoryRows(ctx, () => {}, 30).then(() => "resolved", (e: Error) => `rejected: ${e.message}`);
+  const outcome = await Promise.race([first, new Promise((r) => setTimeout(() => r("still waiting"), 1000))]);
+  assert.match(String(outcome), /^rejected: .*timed out/, "a load waiting on an unanswered GET never settled, so the poll behind it never asks again");
+  assert.equal(signals.length, 4, "each pane's two list GETs were made");
+  assert.ok(signals.every((s) => s?.aborted), "the abandoned GETs were not aborted — they would go on holding a connection");
+
+  // The next poll: both panes' windows are asked about again, and their answers land.
+  hang = false;
+  const before = paths.length;
+  await loadInventoryRows(ctx, () => {});
+  const asked = paths.slice(before).filter((p) => p.includes("state=candidate"))
+    .map((p) => Number(new URLSearchParams(p.slice(p.indexOf("?") + 1)).get("t1"))).sort((a, b) => a - b);
+  assert.deepEqual(asked, [PAST, EDGE], "two panes must be two windows on the poll after a stall");
+  assert.deepEqual(Object.keys(paneRows(store.get().inventory, "p1")).sort(), ["old-candidate", "old-confirmed"]);
+  assert.deepEqual(Object.keys(paneRows(store.get().inventory, "p2")).sort(), ["now-candidate", "now-confirmed"]);
+});
+
 test("with no pane registry published there is exactly one window, asked about once (the pre-split behaviour)", async () => {
   const { ctx, queries } = paneCtx();
   await loadInventoryRows(ctx, () => {});

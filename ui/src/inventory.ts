@@ -162,7 +162,9 @@ export function inventoryQuery(state: "candidate" | "confirmed", f: Filters, cur
 /** Minimal server surface the table needs: list rows, promote a candidate, delete an entry — all
  * Bearer-authenticated by the client (controls/client.ts `ControlClient`, which this matches). */
 export interface InventoryClient {
-  get<T = unknown>(path: string): Promise<T>;
+  /** `opts.signal` is the caller's own deadline (T-1081): a list poll that can be left hanging on
+   * one unanswered GET passes one, as `ControlClient.get` accepts. */
+  get<T = unknown>(path: string, opts?: { signal?: AbortSignal }): Promise<T>;
   post<T = unknown>(path: string, body?: unknown): Promise<T>;
   del<T = unknown>(path: string): Promise<T>;
 }
