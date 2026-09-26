@@ -1415,20 +1415,20 @@ def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_h
     d = f"{local_ops}/work/T-9"
     w = R.to_remote("node2", R.remote_wrapper(str(local_repo), "task-t9", "exec sleep 60", {}, d, "out.json"))
     p = subprocess.Popen(["bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(50):
-        if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
-            break
+    # Hang detectors, not latency budgets (docs/10 3.6): the pgid file is written before the fixture's python setsid
+    # shim has called setsid(), and every remote_run_state call spawns a shell - at load 40-60 (2026-09-26 07:1x, a
+    # board-only gate went red on this) that took longer than the old fixed 5 s + 10 s. Wait on the condition itself,
+    # up to a minute each; what is asserted is unchanged. The host's util-linux setsid has no gap.
+    deadline = time.monotonic() + 60
+    while not (far / "ops" / "work" / "T-9" / "remote.pgid").exists() and time.monotonic() < deadline:
         time.sleep(0.1)
-    # The pgid file is written before the fixture's python setsid shim has called setsid() - under load (1-min 39,
-    # 2026-09-25 06:00) longer than a fixed 0.3 s. Wait for the group, bounded; the host's util-linux setsid has no gap.
-    for _ in range(100):
-        if R.remote_run_state(c) == "running":
-            break
-        time.sleep(0.1)
+    deadline = time.monotonic() + 60
+    while R.remote_run_state(c) != "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
     assert R.remote_run_state(c) == "running"
     assert R.remote_stop(c, wait_s=5)
     assert R.remote_run_state(c) == "gone"
-    p.wait(timeout=10)
+    p.wait(timeout=60)
 
 
 @pytest.fixture
