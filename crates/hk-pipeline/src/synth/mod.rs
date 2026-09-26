@@ -65,6 +65,23 @@ pub fn decoder_id(framing: CcFraming) -> &'static str {
     }
 }
 
+/// The `Decoder` evidence id for a framing whose **frame sync** was seen with no check behind it
+/// (T-977): an air interface recognised without a control channel.
+///
+/// P25's 48-bit frame sync is the same on an LDU voice frame as on a TSBK control frame, so a
+/// voice or data channel of a P25 system produces sync hits at the expected spacing and no
+/// CRC-valid TSBK. That is a positive, measured finding — 24 bits per hit against chance
+/// ([`sync_bits`]) — and before T-977 it was thrown away, leaving the emitter reading `unknown`.
+/// It is deliberately a **different id** from [`decoder_id`], and maps to the same service family
+/// at a lower confidence in [`crate::family`]: "P25-like" is not "P25 control channel decoded".
+pub fn resemblance_id(framing: CcFraming) -> &'static str {
+    match framing {
+        CcFraming::P25Phase1 => "p25-frame-sync",
+        CcFraming::DmrBsData => "dmr-frame-sync",
+        CcFraming::NxdnCac => "nxdn-frame-sync",
+    }
+}
+
 /// What one framing scored when it was tried, for the trace's "why not that one".
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FramingScore {
@@ -94,8 +111,10 @@ pub struct CcObservation<'a> {
     pub structure: Option<FmStructure>,
     /// Every framing the catalogue offers, with what it scored.
     pub framings: &'a [FramingScore],
-    /// The framing that confirmed.
-    pub confirmed: &'a ConfirmedCc,
+    /// The framing that confirmed, `None` when nothing did (T-977). An unconfirmed observation is
+    /// still an observation: the channel was demodulated and every framing was scanned, and the
+    /// row this produces is what moves the emitter off `resolution: not-searched`.
+    pub confirmed: Option<&'a ConfirmedCc>,
     /// The protocol the decoded messages named, if any.
     pub protocol: TrunkProtocol,
     /// What the receiver itself contributed.
@@ -105,9 +124,31 @@ pub struct CcObservation<'a> {
 }
 
 impl CcObservation<'_> {
-    /// The evidence of the confirming framing.
-    fn evidence(&self) -> &CcEvidence {
-        self.confirmed.evidence()
+    /// The evidence of the confirming framing, when one confirmed.
+    fn evidence(&self) -> Option<&CcEvidence> {
+        self.confirmed.map(ConfirmedCc::evidence)
+    }
+
+    /// The framing that confirmed, when one did.
+    fn confirming(&self) -> Option<CcFraming> {
+        self.confirmed.map(ConfirmedCc::framing)
+    }
+
+    /// The framing this emission **resembles** without confirming: frame sync at the expected
+    /// spacing, too few CRC-valid blocks to be a control channel (T-977).
+    ///
+    /// Only meaningful on an unconfirmed observation — a confirmed one has a decode, which is a
+    /// strictly stronger statement — so it answers `None` there rather than competing with it.
+    /// Ties go to the framing with the most sync hits, then the most valid blocks: deterministic,
+    /// and decided from measurements alone.
+    pub fn resembling(&self) -> Option<&FramingScore> {
+        if self.confirmed.is_some() {
+            return None;
+        }
+        self.framings
+            .iter()
+            .filter(|f| f.sync_hits >= MIN_SYNC_HITS)
+            .max_by_key(|f| (f.sync_hits, f.crc_valid))
     }
 }
 
@@ -140,7 +181,8 @@ pub fn estimated_params(obs: &CcObservation<'_>) -> Option<(&'static str, Estima
 /// no client does it (ADR-0015 §3.4).
 pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis {
     let ev = obs.evidence();
-    let confirming = obs.confirmed.framing();
+    let confirming = obs.confirming();
+    let resembling = obs.resembling().copied();
     let mut trace = Vec::new();
     let mut evidence = Vec::new();
 
@@ -234,7 +276,10 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
 
     // ---- S4/S5. Framing and check: every framing in the catalogue, and what each scored.
     for (i, f) in obs.framings.iter().enumerate() {
-        let won = f.framing == confirming;
+        let won = Some(f.framing) == confirming;
+        // Sync without a check is neither a win nor a plain loss, and flattening it into one was
+        // the T-977 defect: the sentence below says which of the two floors it fell at.
+        let resembles = resembling.is_some_and(|r| r.framing == f.framing);
         let bits = sync_bits(f.sync_hits);
         trace.push(
             TraceNode::at(
@@ -247,7 +292,7 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
             .child_of("n1")
             .evaluations(1)
             .tried(
-                if won {
+                if won || resembles {
                     Outcome::Survived
                 } else {
                     Outcome::PrunedFloor
@@ -267,6 +312,20 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
                         f.crc_valid,
                         f.crc_checked,
                     )
+                } else if resembles {
+                    format!(
+                        "{}: {} frame syncs at the expected spacing, but only {} of {} blocks \
+                         CRC-valid (floor {}). The air interface is RECOGNISED and this channel \
+                         is not a control channel — on {} that is what a voice or data channel \
+                         looks like, since its frame sync is the same pattern a control frame \
+                         carries.",
+                        f.framing.name(),
+                        f.sync_hits,
+                        f.crc_valid,
+                        f.crc_checked,
+                        MIN_CRC_VALID,
+                        f.framing.name(),
+                    )
                 } else {
                     format!(
                         "{}: {} frame syncs, {} of {} blocks CRC-valid — below the floor of {} \
@@ -283,30 +342,59 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
             ),
         );
     }
+    // The S4/S5 evidence is stated from whichever framing got furthest: the confirming one when
+    // there is one, the resembling one when sync held without a check, and the best-scoring one
+    // otherwise. All three are real measurements over the same window; what differs is how far up
+    // the ladder they reached, which is exactly what `verdict` below says.
+    let (sync_hits, crc_valid, crc_checked, framing_name) = match (ev, resembling) {
+        (Some(ev), _) => (
+            ev.sync_hits(),
+            ev.crc_valid(),
+            ev.crc_checked(),
+            confirming.map_or("none", CcFraming::name),
+        ),
+        (None, Some(r)) => (r.sync_hits, r.crc_valid, r.crc_checked, r.framing.name()),
+        (None, None) => obs
+            .framings
+            .iter()
+            .max_by_key(|f| (f.sync_hits, f.crc_valid))
+            .map_or((0, 0, 0, "none"), |f| {
+                (f.sync_hits, f.crc_valid, f.crc_checked, f.framing.name())
+            }),
+    };
     evidence.push(StageEvidence {
         stage: Stage::S4Framing,
         metric: "sync_excess".into(),
-        raw: f64::from(ev.sync_hits()),
-        n: u64::from(ev.crc_checked()),
-        bits: sync_bits(ev.sync_hits()),
-        summary: format!(
-            "{} {} frame syncs at the expected spacing",
-            ev.sync_hits(),
-            confirming.name(),
-        ),
+        raw: f64::from(sync_hits),
+        n: u64::from(crc_checked),
+        bits: sync_bits(sync_hits),
+        summary: if sync_hits == 0 {
+            format!(
+                "no frame sync from any of the {} framings tried, at any spacing",
+                obs.framings.len(),
+            )
+        } else {
+            format!("{sync_hits} {framing_name} frame syncs at the expected spacing")
+        },
     });
     evidence.push(StageEvidence {
         stage: Stage::S5Check,
         metric: "check_distinct_valid".into(),
-        raw: f64::from(ev.crc_valid()),
-        n: u64::from(ev.crc_checked()),
-        bits: check_bits(ev.crc_valid()),
-        summary: format!(
-            "{} of {} blocks CRC-valid: the check is what confirms, and it is what makes this a \
-             decode rather than a resemblance",
-            ev.crc_valid(),
-            ev.crc_checked(),
-        ),
+        raw: f64::from(crc_valid),
+        n: u64::from(crc_checked),
+        bits: check_bits(crc_valid),
+        summary: if ev.is_some() {
+            format!(
+                "{crc_valid} of {crc_checked} blocks CRC-valid: the check is what confirms, and \
+                 it is what makes this a decode rather than a resemblance",
+            )
+        } else {
+            format!(
+                "{crc_valid} of {crc_checked} blocks CRC-valid, below the floor of \
+                 {MIN_CRC_VALID}: a resemblance, not a decode — which is the finding, not the \
+                 absence of one",
+            )
+        },
     });
 
     // ---- The choice, and what the absence of a fuller one means.
@@ -316,6 +404,14 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
     // get different sentences rather than one shrug.
     let named = obs.protocol != TrunkProtocol::Unknown;
     let alphabet = obs.structure.and_then(|s| s.levels.order());
+    let Some(confirming) = confirming else {
+        // ---- T-977: the channel was looked at and is NOT a control channel. That is a result,
+        // and the row exists to say so: an emitter with no `emitter_synthesis` row reads
+        // `resolution: not-searched`, and rendering a searched channel as un-looked-at is the
+        // decode-side form of painting unobserved spectrum as quiet (ADR-0021 §7A.4).
+        return unconfirmed(emitter, obs, resembling, alphabet, evidence, trace);
+    };
+    let ev = ev.expect("a confirmed observation carries its evidence");
     let verdict = match (named, alphabet.is_some()) {
         (true, true) => Verdict::Solved,
         (true, false) | (false, false) => Verdict::Framed,
@@ -396,6 +492,141 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
     }
 }
 
+/// The analysis row for a channel the hunt looked at and did **not** confirm (T-977).
+///
+/// Split out of [`analysis`] rather than folded into it because the two say different things and
+/// sharing one `if` ladder is how the unconfirmed case came to say nothing at all. The evidence and
+/// the trace are the caller's — every stage that ran, with what it measured — and what this decides
+/// is only the three sealed fields: how far up the ladder it got, why nothing won, and which
+/// pipeline (if any) the measurements would bind.
+///
+/// **The resolution is always `unknown`, never `structured-unidentified`.** ADR-0021 §7A.5 reserves
+/// the latter for *framed and check-valid* with no identity; sync without a check is framed and
+/// **not** check-valid, and the two must stay distinguishable in the served object rather than by
+/// inference. What the resemblance buys is the `summary` (which air interface, how many syncs, how
+/// many valid blocks, and the floor it fell at) and, separately, the family evidence [`attach`]
+/// records.
+fn unconfirmed(
+    emitter: EmitterId,
+    obs: &CcObservation<'_>,
+    resembling: Option<FramingScore>,
+    alphabet: Option<u32>,
+    evidence: Vec<StageEvidence>,
+    trace: Vec<TraceNode>,
+) -> EmitterSynthesis {
+    let verdict = match (resembling.is_some(), alphabet.is_some()) {
+        (true, _) => Verdict::Framed,
+        (false, true) => Verdict::Clocked,
+        (false, false) => Verdict::Energy,
+    };
+    let summary = match (resembling, obs.structure) {
+        (Some(r), Some(s)) => format!(
+            "{:.4} MHz was demodulated and scanned: {} frame syncs under {} at the expected \
+             spacing, {} of {} blocks CRC-valid (floor {}). So the air interface is RECOGNISED and \
+             this is NOT a control channel — on {} a voice or data channel carries the same frame \
+             sync as a control frame and no CRC-valid control block, which is exactly this. \
+             Measured blind: {} discrete levels at {:.0} Bd, ±{:.0} Hz over {} symbols.",
+            obs.center_hz / 1e6,
+            r.sync_hits,
+            r.framing.name(),
+            r.crc_valid,
+            r.crc_checked,
+            MIN_CRC_VALID,
+            r.framing.name(),
+            s.levels.order().map_or("no".to_owned(), |o| o.to_string()),
+            s.symbol_rate_bd,
+            s.outer_deviation_hz,
+            s.symbols,
+        ),
+        (Some(r), None) => format!(
+            "{:.4} MHz was demodulated and scanned: {} frame syncs under {}, {} of {} blocks \
+             CRC-valid (floor {}) — the air interface is recognised and this is not a control \
+             channel. The modulation alphabet was not measurable from this window, so nothing \
+             says what it is modulated with.",
+            obs.center_hz / 1e6,
+            r.sync_hits,
+            r.framing.name(),
+            r.crc_valid,
+            r.crc_checked,
+            MIN_CRC_VALID,
+        ),
+        (None, Some(s)) => format!(
+            "{:.4} MHz was demodulated and scanned against all {} framings in this build: none \
+             found frame sync at the expected spacing (floor {}), so it is not a control channel \
+             of any air interface known here. Measured blind: {} discrete levels at {:.0} Bd, \
+             ±{:.0} Hz over {} symbols — structure without an identity.",
+            obs.center_hz / 1e6,
+            obs.framings.len(),
+            MIN_SYNC_HITS,
+            s.levels.order().map_or("no".to_owned(), |o| o.to_string()),
+            s.symbol_rate_bd,
+            s.outer_deviation_hz,
+            s.symbols,
+        ),
+        (None, None) => format!(
+            "{:.4} MHz was demodulated and scanned against all {} framings in this build: no \
+             frame sync and no measurable symbol alphabet. Energy at {:.0} % occupancy and \
+             nothing structured came out of it.",
+            obs.center_hz / 1e6,
+            obs.framings.len(),
+            obs.fco * 100.0,
+        ),
+    };
+    // A pipeline is what the measurements WOULD bind, and without a check there is nothing to
+    // bind a decoder to — so the demodulator is named and the decode stays `None`. Naming a
+    // decoder here would be the resemblance presented as a decode.
+    let pipeline = obs.structure.and_then(|s| {
+        let demod = s.levels.label()?;
+        Some(SynthPipeline {
+            demod: demod.into(),
+            decode: None,
+            params: vec![
+                ("symbol_rate_bd".into(), s.symbol_rate_bd),
+                ("outer_deviation_hz".into(), s.outer_deviation_hz),
+                ("bandwidth_hz".into(), obs.bandwidth_hz),
+                ("residual_cfo_hz".into(), s.residual_cfo_hz),
+            ],
+            summary: format!(
+                "{demod} at {:.0} Bd: the emission measured {} discrete levels at ±{:.0} Hz on a \
+                 {:.1} kHz channel. No decode is bound — of the {} framings tried, {} produced \
+                 frame sync and none produced CRC-valid blocks.",
+                s.symbol_rate_bd,
+                s.levels.order().unwrap_or(0),
+                s.outer_deviation_hz,
+                obs.bandwidth_hz / 1e3,
+                obs.framings.len(),
+                resembling.map_or("none".to_owned(), |r| r.framing.name().to_owned()),
+            ),
+        })
+    });
+    EmitterSynthesis {
+        emitter_id: emitter,
+        provenance: SYNTHESIZED_BY_OUTPUT_ANALYSIS.into(),
+        engine: TRUNK_SYNTH_ENGINE.into(),
+        t: obs.t,
+        verdict,
+        stage_reached: Stage::S5Check,
+        pipeline,
+        evidence,
+        trace,
+        resolution: Some(Resolution {
+            kind: ResolutionKind::Unknown,
+            // ADR-0021 §7A.6, enforced by `EmitterSynthesis::validate`: only
+            // `unsupported-structure` names a suspected structure, and it must. This channel was
+            // demodulated and every framing in the build was scanned against it, so nothing here
+            // is a structure this build cannot reach — it is one that did not check out.
+            suspected: None,
+            deepest_verdict: Some(verdict),
+            reason: Some(ResolutionReason::NothingScored),
+            summary,
+            // Filled after sealing by the post-seal attachment (T-569), like every other resolution.
+            explanations: Vec::new(),
+        }),
+        receiver: obs.receiver,
+        job: None,
+    }
+}
+
 /// The S1 trace nodes.
 ///
 /// Both level hypotheses were **tried** — one measurement decides both — so both carry what they
@@ -426,8 +657,8 @@ fn level_nodes(obs: &CcObservation<'_>) -> Vec<TraceNode> {
                         n: 0,
                         bits: 0.0,
                     },
-                    "no symbol alphabet could be measured: the emission framed and checked, but \
-                     what it is modulated with was not established",
+                    "no symbol alphabet could be measured: the channel was demodulated and \
+                     scanned, but what it is modulated with was not established",
                 ),
             unsupported,
         ];
@@ -562,7 +793,7 @@ pub fn attach(
     repo: &mut Repository,
     emitter: Option<EmitterId>,
     obs: &CcObservation<'_>,
-) -> Result<Attached, RepoError> {
+) -> Result<Option<Attached>, RepoError> {
     let measured = estimated_params(obs);
     // The demodulation is real whether or not the blind structure measurement committed: the
     // four-level demodulator ran and its dibits CRC-checked. What is conditional is the
@@ -576,6 +807,11 @@ pub fn attach(
 
     let (emitter, created) = match emitter {
         Some(e) => (repo.live_emitter_id(e)?, false),
+        // T-977: only a CONFIRMED channel is its own detector. A rejected candidate is a verdict
+        // about an emission something else found, so with no emitter to file it against there is
+        // nothing to say and nothing is written — minting a row for every occupied raster channel
+        // a pass demodulates would fill the inventory with boxes the detector never drew.
+        None if obs.confirmed.is_none() => return Ok(None),
         None => {
             let sighting = Sighting {
                 source: LinkTarget::Demodulation(demod_id),
@@ -620,16 +856,39 @@ pub fn attach(
 
     // The decode as family evidence. A CRC-valid trunked control channel is not a probabilistic
     // call, so the confidence is the vocabulary's own.
-    let id = decoder_id(obs.confirmed.framing());
-    let classified =
-        crate::family::record_decoder_evidence(repo, emitter, id, 1.0, obs.t)?.is_some();
-    Ok(Attached {
+    //
+    // T-977: a channel whose frame sync held with no check behind it earns evidence too, under a
+    // DIFFERENT id and at [`RESEMBLANCE_CONFIDENCE`]. A P25 voice channel carries P25's frame sync
+    // and no CRC-valid TSBK, so "P25-like" is what was measured; saying nothing, which is what
+    // happened before, left the row reading `unknown` next to 24 bits per sync hit of evidence
+    // that it is not.
+    let evidence = match (obs.confirming(), obs.resembling()) {
+        (Some(f), _) => Some((decoder_id(f), 1.0)),
+        (None, Some(r)) => Some((resemblance_id(r.framing), RESEMBLANCE_CONFIDENCE)),
+        (None, None) => None,
+    };
+    let classified = match evidence {
+        Some((id, conf)) => {
+            crate::family::record_decoder_evidence(repo, emitter, id, conf, obs.t)?.is_some()
+        }
+        None => false,
+    };
+    Ok(Some(Attached {
         emitter,
         created,
         demodulation: demod_id,
         classified,
-    })
+    }))
 }
+
+/// The confidence a **frame sync without a check** earns as family evidence (T-977).
+///
+/// Below the 1.0 a CRC-valid decode earns and deliberately so: the sync pattern is 48 bits at a
+/// known spacing (~2⁻²⁴ per frame by chance, so several hits are not luck), but nothing about it
+/// says the channel carries the *system's* traffic rather than one of its voice channels, and no
+/// payload was checked. It is the same service family at less certainty, which is what "P25-like"
+/// means.
+pub const RESEMBLANCE_CONFIDENCE: f64 = 0.8;
 
 /// The `mode` of a session whose blind structure measurement abstained: **what actually ran**.
 ///
@@ -641,7 +900,13 @@ const DEMODULATED_AS: &str = "c4fm";
 /// The Classification a confirmed control channel warrants, for callers that want it without the
 /// repository write.
 pub fn classification(obs: &CcObservation<'_>, t: Timestamp) -> Option<Classification> {
-    crate::family::decoder_evidence(decoder_id(obs.confirmed.framing()), 1.0, t)
+    match (obs.confirming(), obs.resembling()) {
+        (Some(f), _) => crate::family::decoder_evidence(decoder_id(f), 1.0, t),
+        (None, Some(r)) => {
+            crate::family::decoder_evidence(resemblance_id(r.framing), RESEMBLANCE_CONFIDENCE, t)
+        }
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -727,7 +992,7 @@ mod tests {
     fn obs<'a>(
         s: Option<FmStructure>,
         f: &'a [FramingScore],
-        c: &'a ConfirmedCc,
+        c: Option<&'a ConfirmedCc>,
         protocol: TrunkProtocol,
     ) -> CcObservation<'a> {
         CcObservation {
@@ -752,7 +1017,7 @@ mod tests {
         let o = obs(
             Some(structure(Levels::Four, 0.49)),
             &f,
-            &c,
+            Some(&c),
             TrunkProtocol::P25Phase1,
         );
         let row = analysis(EmitterId::new(), &o);
@@ -795,7 +1060,7 @@ mod tests {
         let o = obs(
             Some(structure(Levels::Four, 0.49)),
             &f,
-            &c,
+            Some(&c),
             TrunkProtocol::P25Phase1,
         );
         let row = analysis(EmitterId::new(), &o);
@@ -847,7 +1112,7 @@ mod tests {
         let o = obs(
             Some(structure(Levels::Four, 0.49)),
             &f,
-            &c,
+            Some(&c),
             TrunkProtocol::Unknown,
         );
         let row = analysis(EmitterId::new(), &o);
@@ -865,7 +1130,7 @@ mod tests {
     fn an_unmeasurable_alphabet_yields_no_estimated_params_and_a_capped_verdict() {
         let c = confirmed();
         let f = framings(c.framing());
-        let o = obs(None, &f, &c, TrunkProtocol::P25Phase1);
+        let o = obs(None, &f, Some(&c), TrunkProtocol::P25Phase1);
         assert!(estimated_params(&o).is_none());
         let row = analysis(EmitterId::new(), &o);
         row.validate().unwrap();
@@ -876,7 +1141,7 @@ mod tests {
         let o = obs(
             Some(structure(Levels::Indeterminate, 0.35)),
             &f,
-            &c,
+            Some(&c),
             TrunkProtocol::P25Phase1,
         );
         assert!(estimated_params(&o).is_none());
@@ -892,7 +1157,7 @@ mod tests {
         let o = obs(
             Some(structure(Levels::Four, 0.49)),
             &f,
-            &c,
+            Some(&c),
             TrunkProtocol::P25Phase1,
         );
         let (mode, p) = estimated_params(&o).expect("a measured alphabet");
@@ -900,5 +1165,209 @@ mod tests {
         assert_eq!(p.mod_order, Some(4));
         assert_eq!(p.symbol_rate_hz, Some(4800.4));
         assert_eq!(p.deviation_hz, Some(1806.0));
+    }
+
+    /// Scores for a channel that FRAMED under `winner` and produced no CRC-valid block: a P25
+    /// voice or data channel, which carries the control channel's own 48-bit frame sync.
+    fn sync_only(winner: CcFraming) -> Vec<FramingScore> {
+        hk_detect::trunk::CC_FRAMINGS
+            .iter()
+            .map(|&f| FramingScore {
+                framing: f,
+                sync_hits: if f == winner { 9 } else { 0 },
+                crc_valid: 0,
+                crc_checked: if f == winner { 9 } else { 0 },
+            })
+            .collect()
+    }
+
+    /// **T-977: a channel that was looked at and rejected resolves to a FINISHED search.**
+    ///
+    /// The field row's defect in one assertion: an emitter the chain demodulated read
+    /// `resolution: not-searched`, which is *un-looked-at*. A row exists here, so the served
+    /// resolution cannot be `not-searched` at all (the store refuses it), and the kind it does
+    /// carry is `unknown` with a reason — looked, and found no control channel.
+    #[test]
+    fn a_rejected_channel_resolves_unknown_with_a_reason_rather_than_not_searched() {
+        let f = sync_only(CcFraming::P25Phase1);
+        let o = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &f,
+            None,
+            TrunkProtocol::Unknown,
+        );
+        let row = analysis(EmitterId::new(), &o);
+        row.validate().unwrap();
+        let res = row.resolution.expect("a rejected channel resolves");
+        assert_eq!(res.kind, ResolutionKind::Unknown);
+        assert_eq!(res.reason, Some(ResolutionReason::NothingScored));
+        assert_eq!(row.verdict, Verdict::Framed, "sync held; the check did not");
+        assert!(
+            res.summary.contains("9 frame syncs") && res.summary.contains("0 of 9"),
+            "the verdict must carry the numbers it was made from: {:?}",
+            res.summary
+        );
+    }
+
+    /// **`structured-unidentified` stays reserved for framed AND check-valid** (ADR-0021 §7A.5).
+    ///
+    /// Sync without a check is framed and *not* check-valid, and the two must be distinguishable in
+    /// the served object rather than by inference. A confirmed channel with no system name is the
+    /// one that earns `structured-unidentified`; this one must not.
+    #[test]
+    fn sync_without_a_check_is_never_structured_unidentified() {
+        let f = sync_only(CcFraming::P25Phase1);
+        let rejected = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &f,
+            None,
+            TrunkProtocol::Unknown,
+        );
+        assert_eq!(
+            analysis(EmitterId::new(), &rejected)
+                .resolution
+                .unwrap()
+                .kind,
+            ResolutionKind::Unknown,
+        );
+
+        let c = confirmed();
+        let fc = framings(c.framing());
+        let confirmed_unnamed = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &fc,
+            Some(&c),
+            TrunkProtocol::Unknown,
+        );
+        assert_eq!(
+            analysis(EmitterId::new(), &confirmed_unnamed)
+                .resolution
+                .unwrap()
+                .kind,
+            ResolutionKind::StructuredUnidentified,
+            "a CRC-valid decode with no system name is the case that kind is FOR",
+        );
+    }
+
+    /// **No sync at all is a different finding from sync without a check**, and both are findings.
+    /// The verdict ladder separates them: `clocked` (a measured alphabet, nothing framed) against
+    /// `framed`.
+    #[test]
+    fn no_sync_and_sync_without_a_check_are_different_verdicts() {
+        let quiet: Vec<FramingScore> = hk_detect::trunk::CC_FRAMINGS
+            .iter()
+            .map(|&framing| FramingScore {
+                framing,
+                sync_hits: 0,
+                crc_valid: 0,
+                crc_checked: 0,
+            })
+            .collect();
+        let st = Some(structure(Levels::Four, 0.49));
+        let o = obs(st, &quiet, None, TrunkProtocol::Unknown);
+        let row = analysis(EmitterId::new(), &o);
+        row.validate().unwrap();
+        assert_eq!(row.verdict, Verdict::Clocked);
+        assert!(
+            row.resolution
+                .unwrap()
+                .summary
+                .contains("none found frame sync"),
+            "the sentence must say nothing framed, not that something nearly did",
+        );
+
+        // And with nothing measurable at all: energy, and an honest full stop.
+        let o = obs(None, &quiet, None, TrunkProtocol::Unknown);
+        let row = analysis(EmitterId::new(), &o);
+        row.validate().unwrap();
+        assert_eq!(row.verdict, Verdict::Energy);
+    }
+
+    /// **The four-level estimate does not need a confirmation.** The field row read `mod: 2fsk` on
+    /// a C4FM emission; the level count is a blind measurement of the same baseband the dibits came
+    /// from, and it is persisted whether or not anything CRC-checked.
+    #[test]
+    fn a_rejected_channel_still_carries_the_four_level_measurement() {
+        let f = sync_only(CcFraming::P25Phase1);
+        let o = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &f,
+            None,
+            TrunkProtocol::Unknown,
+        );
+        let (mode, p) = estimated_params(&o).expect("a measured alphabet needs no confirmation");
+        assert_eq!(mode, "c4fm");
+        assert_eq!(p.mod_order, Some(4));
+        assert_eq!(p.symbol_rate_hz, Some(4800.4));
+        let pipeline = analysis(EmitterId::new(), &o)
+            .pipeline
+            .expect("a measured alphabet binds a demodulator");
+        assert_eq!(pipeline.demod, "c4fm");
+        assert_eq!(
+            pipeline.decode, None,
+            "no check held, so nothing may be presented as a decode",
+        );
+    }
+
+    /// **P25 frame sync without a check is "P25-like" evidence, under its own id and below a
+    /// decode's certainty.** Saying nothing is what left the field row reading `unknown` beside a
+    /// measurement that says it is not.
+    #[test]
+    fn frame_sync_without_a_check_identifies_p25_like_at_less_than_a_decodes_certainty() {
+        let f = sync_only(CcFraming::P25Phase1);
+        let o = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &f,
+            None,
+            TrunkProtocol::Unknown,
+        );
+        let c = classification(&o, Timestamp::UNIX_EPOCH).expect("a recognised air interface");
+        assert_eq!(c.family, "p25-frame-sync");
+        assert_eq!(c.confidence, RESEMBLANCE_CONFIDENCE);
+        assert!(
+            c.confidence < 1.0,
+            "a resemblance must not carry a CRC-valid decode's certainty",
+        );
+
+        // A confirmed channel still earns the decode's id at 1.0: this added a sibling, not a
+        // replacement.
+        let cc = confirmed();
+        let fc = framings(cc.framing());
+        let solved = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &fc,
+            Some(&cc),
+            TrunkProtocol::P25Phase1,
+        );
+        let c = classification(&solved, Timestamp::UNIX_EPOCH).unwrap();
+        assert_eq!(c.family, "p25-tsbk");
+        assert_eq!(c.confidence, 1.0);
+    }
+
+    /// **Nothing recognised claims nothing.** A channel that framed under no air interface earns no
+    /// family evidence at all — the honest answer, and the one that keeps `p25-frame-sync` worth
+    /// reading.
+    #[test]
+    fn a_channel_that_framed_under_nothing_claims_no_family() {
+        let quiet: Vec<FramingScore> = hk_detect::trunk::CC_FRAMINGS
+            .iter()
+            .map(|&framing| FramingScore {
+                framing,
+                sync_hits: 1,
+                crc_valid: 0,
+                crc_checked: 1,
+            })
+            .collect();
+        let o = obs(
+            Some(structure(Levels::Four, 0.49)),
+            &quiet,
+            None,
+            TrunkProtocol::Unknown,
+        );
+        assert!(
+            o.resembling().is_none(),
+            "one sync hit is below MIN_SYNC_HITS and must not be a resemblance",
+        );
+        assert!(classification(&o, Timestamp::UNIX_EPOCH).is_none());
     }
 }

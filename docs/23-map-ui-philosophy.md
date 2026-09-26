@@ -789,12 +789,15 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST /api/measurements`, `PUT`/`DELETE /api/measurements/{id}`** - cursors only, never a `value` |
 | Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST /api/annotations`, `PUT`/`DELETE /api/annotations/{id}`** |
 | Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST /api/views`, `PUT`/`DELETE /api/views/{id}`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
+| Scan plan overlay (small Scan button in the Go-to cluster; plan panel; the `scan` layer) | T-1008 | `map.scan` (the controller's plan/draft; progress from the shell's existing control-state poll, `device.scan`) | `GET /api/control/scan?windows=1` (the price of the plan as drawn **and the steps the engine will take** — the client draws them, never tiles a range itself) | `POST /api/control/scan` **only on the panel's explicit Start/Resume press** (commissions retunes, T-452), `POST /api/control/scan/stop` (surrenders the radio; never refused) |
 | Export menu | MAP-23 | `research` | **`GET /api/research/export`** (T-823: one read-only GET, optionally narrowed to a collection - the bundle is the server's) | - (the client only names and saves the file; a share link is a later addition) |
 
 **Three rules this table encodes.**
 
-1. **Only two rows in the whole table reach a device route**, and both need an explicit press on a
-   **small** control: Go-to, and the Selected tab's compact action cluster (§10.6 rule 4). A per-row
+1. **Only three rows in the whole table reach a device route**, and each needs an explicit press on a
+   **small** control: Go-to, the Selected tab's compact action cluster (§10.6 rule 4), and the scan
+   plan's Start (T-1008 — a *commission* of retunes, T-452, taken on its own press; opening, dragging
+   and pricing the plan are reads). A per-row
    **Go** button in the Explore drawer or Research may *raise* the gated retune offer, which is itself
    the band-4 transient that needs its own press. Everything else is a view change or a durable-state write.
 2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client

@@ -46,12 +46,102 @@ import { UI_DIR } from "./backend.mjs";
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
-/** Height of the trace strip, device px — `TRACE_PX` in ui/src/app/centre/surface.ts. */
+/** Height of the trace BAND, device px — `TRACE_PX` in ui/src/app/centre/surface.ts. Since T-1041
+ * the band is drawn OVER the pane's own top rows: the pane reserves nothing for it, and the layer
+ * is off until a test switches it on. */
 const TRACE_PX = 96;
 /** `TRACE_COLUMNS` in ui/src/surface/trace.ts. */
 const TRACE_COLUMNS = 256;
 /** `GLOW_PX` in ui/src/surface/trace.ts: the bloom's stroke width, which also hugs the line. */
 const GLOW_PX = 7;
+
+/** The surface's backdrop, `rgb(10,10,13)` — what a pixel nothing has drawn into comes back as. */
+const isBackdrop = (r, g, b) => Math.abs(r - 10) <= 3 && Math.abs(g - 10) <= 3 && Math.abs(b - 13) <= 3;
+
+/**
+ * **How deep the top of the pane is before the picture starts**: the shallowest row at which at
+ * least `share` of the columns the surface is on top at are something other than the backdrop.
+ *
+ * A *share* rather than any one column, deliberately, because that is what tells a reserved band
+ * from a drawn one. A band carved off the pane is backdrop in every column except the two or three
+ * a stroke passes through, so its share stays near zero for the whole band and steps to ~1 at the
+ * pane's first row. A pane drawn to its own top edge is at ~1 within a few rows — the newest sliver
+ * has been sampled and not yet folded, and the surface honestly draws nothing there (T-441) rather
+ * than colouring it, which is a handful of device px, not ninety-six.
+ */
+function firstDrawnRow(img, rect, vis, { share = 0.8, depth = TRACE_PX + 8 } = {}) {
+  const x0 = Math.round(rect.x), y0 = Math.round(rect.y);
+  const at = (x, y) => ((y0 + y) * img.width + (x0 + x)) * 4;
+  const drawnSomewhere = (x) => {
+    for (let y = 0; y < depth; y++) {
+      const d = at(x, y);
+      if (!isBackdrop(img.data[d], img.data[d + 1], img.data[d + 2])) return true;
+    }
+    return false;
+  };
+  // Only columns where the pane drew SOMETHING in this depth. A column that is backdrop all the way
+  // down carries no picture to be above (the canvas's own edge column, a frequency nothing has been
+  // captured at and no rule crosses), so it can neither show a reserved band nor deny one — at
+  // 400 px, where floating chrome leaves 8 columns of the top uncovered, two of them are that. It
+  // is not a way out of the claim: under a reserved band EVERY column carries picture below it and
+  // so is eligible, and the shallowest row where `share` of them are drawn is the band's own depth.
+  const cols = [];
+  for (let x = vis.lo; x <= vis.hi; x++) if (drawnSomewhere(x)) cols.push(x);
+  const fills = [];
+  for (let y = 0; y < depth; y++) {
+    let drawn = 0;
+    for (const x of cols) {
+      const d = at(x, y);
+      if (!isBackdrop(img.data[d], img.data[d + 1], img.data[d + 2])) drawn++;
+    }
+    fills.push(cols.length ? drawn / cols.length : 0);
+  }
+  return { at: cols.length ? fills.findIndex((f) => f >= share) : -1, fills, cols: cols.length };
+}
+
+/**
+ * **Switch the view-wide spectrum-trace layer on or off** (T-1041), through the layers menu the
+ * user would use — never through a test hook.
+ *
+ * The trace is a LAYER now, off by default: the band it used to reserve above every pane was the
+ * black bar the user asked to be rid of (2026-09-25), so it draws over the pane's top rows or not
+ * at all. Every claim in this file is about the trace, so every test here switches it on first; the
+ * menu is closed again afterwards because it is chrome floating over the canvas these tests read.
+ */
+async function setTraceLayer(page, on = true) {
+  const box = `document.querySelector('#map-layers input[data-view-layer="trace"]')`;
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 15000 });
+  if ((await page.eval(`${box}.checked`)) !== on) await page.click(box);
+  await page.waitFor(`the spectrum-trace layer to be ${on ? "on" : "off"}`, `${box}.checked === ${on}`,
+    { timeoutMs: 15000 });
+  await page.key("Escape");
+  await page.waitFor("the layers menu to close", `document.querySelector('#map-layers').hidden`, { timeoutMs: 15000 });
+  await page.frames(3);
+}
+
+/**
+ * **Switch the active pane's base style** (`ramp` | `phosphor`), through the same menu.
+ *
+ * Why a test would: with the band drawn over the waterfall rather than over an empty strip, the
+ * ramp-coloured slice is, by construction, painted in the same colours as the cells behind it — so
+ * "which pixels are the trace" cannot be answered from one frame while both are on the ramp. The
+ * PHOSPHOR style draws the slice and its afterglow in one flat green ink **off the ramp**
+ * (`PHOSPHOR_INK`, ui/src/app/centre/surface.ts), which is exactly the separation this file already
+ * relies on for the magenta max-hold, and it changes nothing else: `tracePaths` is the same
+ * function over the same samples, so every geometric claim below — where the trace is drawn, which
+ * column its peak is in, where it stops — is the same claim about the same curve.
+ */
+async function setBaseStyle(page, id) {
+  const box = `document.querySelector('#map-layers input[data-base="${id}"]')`;
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 15000 });
+  if ((await page.eval(`${box}.checked`)) !== true) await page.click(box);
+  await page.waitFor(`the base style to be ${id}`, `${box}.checked === true`, { timeoutMs: 15000 });
+  await page.key("Escape");
+  await page.waitFor("the layers menu to close", `document.querySelector('#map-layers').hidden`, { timeoutMs: 15000 });
+  await page.frames(3);
+}
 
 /**
  * The tap. Observes the wire, and — only when a check asks it to — **holds** the page's view of it.
@@ -275,6 +365,35 @@ async function traceMatching(page, what, re, { timeoutMs = 90000, everyMs = 100 
  * the middle.
  */
 const CHROMA = (r, g, b) => Math.max(r, g, b) - Math.min(r, g, b);
+/**
+ * **The slice's ink in PHOSPHOR style, and why it is readable over the waterfall** (T-1041).
+ *
+ * With the band over the pane's own rows, a ramp-coloured slice is painted from the same ramp as
+ * the cells behind it — indistinguishable in one frame, by construction. `PHOSPHOR_INK` is
+ * `[0.35, 1, 0.45]`, i.e. `min(g - r, g - b) = 140/255` at full coverage, and **no point on the
+ * ramp reaches 80** (`CMAP_STOPS`, greenest at `x ≈ 0.578` → `[124, 205, 125]`; asserted over the
+ * whole ramp in `ui/test/surface-trace.test.ts`). So a 100-unit floor names the phosphor stroke and
+ * can name nothing the waterfall drew, whatever cell is under it — the same *ordering* argument
+ * T-532 established for the magenta max-hold, with the margin taken from the two palettes rather
+ * than from a run.
+ *
+ * It is a floor on COVERAGE as well as on hue: blended over cyan cells the stroke clears 100 only
+ * in its core (≈ 0.79 coverage and up). That narrows what this reads to the core of the line, which
+ * is what every claim here is about, and it is a narrowing, never a widening.
+ */
+const isPhosphorInk = (r, g, b) => Math.min(g - r, g - b) >= 100;
+/**
+ * **A pixel that differs from the same pixel of a trace-OFF baseline** — the other way to say which
+ * ink is the trace's, used where the picture can be held still enough for the two shots to be the
+ * same frame (a FROZEN viewport with the stream held; see [[traceOffBaseline]]). 12 is well above
+ * the compositor's own wobble between two shots of one still frame and far below the difference a
+ * stroke makes.
+ */
+const CHANGED = 12;
+const changedAt = (img, base, d) => !base || Math.max(
+  Math.abs(img.data[d] - base.data[d]),
+  Math.abs(img.data[d + 1] - base.data[d + 1]),
+  Math.abs(img.data[d + 2] - base.data[d + 2])) >= CHANGED;
 /** Well under the `b - g ≈ 22` a pixel has by the time it is bright enough to be ramp ink. */
 const HOLD_MARGIN = 8;
 const isHoldInk = (r, g, b) => r - g >= HOLD_MARGIN && b - g >= HOLD_MARGIN;
@@ -284,7 +403,7 @@ const isGreyInk = (r, g, b) => r + g + b >= 60 && CHROMA(r, g, b) < 12;
 /** What the retired ratio rule called the max-hold. Kept only to count what it used to leak. */
 const wasHoldInk = (r, g, b) => r > g * 1.3 && b > g * 1.3 && r + g + b > 150;
 
-function strip(img, rect) {
+function strip(img, rect, { base = null, sliceInk = isRampInk } = {}) {
   const x0 = Math.round(rect.x), y0 = Math.round(rect.y), w = Math.round(rect.w);
   const cols = new Array(w).fill(-1);       // topmost slice pixel per column, -1 = none
   const ink = new Array(w).fill(null);      // and the colour it was drawn in
@@ -293,6 +412,10 @@ function strip(img, rect) {
     for (let y = 0; y < TRACE_PX; y++) {
       const d = ((y0 + y) * img.width + (x0 + x)) * 4;
       const r = img.data[d], g = img.data[d + 1], b = img.data[d + 2];
+      // T-1041: the band lies over the waterfall, so a pixel is only the trace's if the caller's
+      // discriminator says so — an off-ramp ink, or a difference from a trace-off baseline of the
+      // same still frame. `isHoldInk` needs neither: magenta is off the ramp outright.
+      if (!changedAt(img, base, d)) continue;
       if (isHoldInk(r, g, b)) {
         holdPx++;
         // The pixels the ratio rule used to hand to the slice: max-hold ink whose feather had
@@ -301,7 +424,7 @@ function strip(img, rect) {
         if (!wasHoldInk(r, g, b) && r + g + b >= 120 && CHROMA(r, g, b) >= 30) rescued++;
         continue;
       }
-      if (isRampInk(r, g, b)) {
+      if (sliceInk(r, g, b)) {
         slicePx++;
         if (cols[x] < 0) { cols[x] = y; ink[x] = [r, g, b]; }
       } else if (isGreyInk(r, g, b)) greyPx++;
@@ -318,7 +441,15 @@ function strip(img, rect) {
 }
 
 /**
- * The colours the WATERFALL painted just under the strip, across one **pooled trace column**.
+ * The colours the WATERFALL painted in **the cells the slice is a slice of**, across one pooled
+ * trace column — read from a trace-OFF baseline of the same still frame (T-1041).
+ *
+ * Until T-1041 these were the rows just BELOW the reserved strip, which were the pane's first rows
+ * and so the top cell. With the band drawn over those same rows, the honest place to read them is
+ * unchanged — the pane's own top rows — and the honest *image* to read them from is the one with
+ * the trace switched off, which is why every caller passes the baseline here. Reading them from the
+ * trace's own frame would compare the line against itself wherever it crosses, and reading them
+ * further down the pane would compare the slice against a different instant.
  *
  * Two extents, and both are the honest ones rather than conveniences:
  *
@@ -330,7 +461,7 @@ function strip(img, rect) {
  *    of the pane. A few rows of pixels covers it at any of the tiers this view resolves to.
  */
 function cellColours(img, rect, x, halfPx, rows) {
-  const y0 = Math.round(rect.y) + TRACE_PX;
+  const y0 = Math.round(rect.y);
   const out = [];
   for (let dx = -halfPx; dx <= halfPx; dx++) {
     const x0 = Math.round(rect.x) + x + dx;
@@ -353,15 +484,33 @@ function cellColours(img, rect, x, halfPx, rows) {
  * slice, and grey at the top of the ramp's scale is brighter than the ramp's own dark end, so
  * "the brightest pixel in the stroke" alone would sometimes return a shadow.
  */
+/** The bloom's own edge above the core: `(GLOW_PX − SLICE_PX) / 2`, from the product's constants. */
+const BLOOM_EDGE = 2;
+
 function coreInk(img, rect, x, top) {
   const x0 = Math.round(rect.x) + x, y0 = Math.round(rect.y);
-  let best = null, bestSum = -1;
-  for (let y = top; y <= top + 3 && y < TRACE_PX; y++) {
+  // **The core's row is GEOMETRY, not "the brightest pixel in the stroke"** (T-1041). The brightest
+  // rule worked while the band was empty: the bloom was 18 % grey over `rgb(10,10,13)`, darker than
+  // any ramp ink, so the core always won. Over the cells the bloom is 18 % grey over a cyan cell —
+  // a lightened, desaturated version of that cell, brighter than a dark-blue core — and the rule
+  // returned the bloom for most columns (measured: `ink [69,170,194]` against cells `[20,183,213]`,
+  // 15.6 % matching). The stroke's own geometry does not move: `tracepass.ts` strokes the bloom
+  // `GLOW_PX` wide and the slice `SLICE_PX` wide about the same centre, so the core begins
+  // `BLOOM_EDGE` px below the bloom's top edge and is `SLICE_PX` px thick. This takes the ramp ink
+  // in exactly those rows.
+  // Within those rows it takes the MOST SATURATED ramp pixel, for the same structural reason: the
+  // bloom is achromatic (`shade: "mono"`), so blending it over a cell can only pull that cell's
+  // chroma DOWN, while the core is the ramp colour itself at full coverage. A bloom pixel therefore
+  // never out-saturates the core it hugs — measured on the misses this replaced: bloom
+  // `[76,169,193]` chroma 117 against a cell `[31,185,203]` chroma 172.
+  let best = null, bestChroma = -1;
+  for (let y = top + BLOOM_EDGE - 1; y <= top + BLOOM_EDGE + 3 && y < TRACE_PX; y++) {
+    if (y < 0) continue;
     const d = ((y0 + y) * img.width + x0) * 4;
     const c = [img.data[d], img.data[d + 1], img.data[d + 2]];
     if (!isRampInk(c[0], c[1], c[2])) continue;
-    const sum = c[0] + c[1] + c[2];
-    if (sum > bestSum) { bestSum = sum; best = c; }
+    const ch = CHROMA(c[0], c[1], c[2]);
+    if (ch > bestChroma) { bestChroma = ch; best = c; }
   }
   return best ?? [0, 0, 0];
 }
@@ -705,6 +854,127 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
     `  state still held at the capture: ${last?.accepted}\n  before: ${last?.before}\n  after:  ${last?.after}`);
 }
 
+/**
+ * **The same frame with the trace layer OFF** — the baseline that says which pixels are the trace's
+ * (T-1041).
+ *
+ * The trace no longer has a strip of its own, so "what did the trace draw" cannot be answered by
+ * "what is bright in an otherwise empty band". Where the picture can be held still — a FROZEN
+ * viewport with the stream held, which is the state both scrubbed checks already establish — it can
+ * be answered exactly instead: shoot the band with the layer on, switch the layer off, shoot it
+ * again, and the difference is the layer. That is a stronger instrument than the old backdrop rule,
+ * not a weaker one: it names the trace's own pixels rather than everything that is not the backdrop.
+ *
+ * **It verifies its own premise.** The two shots are only one frame if nothing else moved between
+ * them, so this measures the pane BELOW the band — rows the trace never touches at either setting —
+ * and fails, saying so, if that region did not come back the same. A live (following) viewport
+ * cannot pass that: at the default zoom its rows scroll hundreds of pixels a second, which is why
+ * the live-edge checks in this file use the phosphor ink instead.
+ */
+async function traceOffBaseline(page, obs, shotPath) {
+  await setTraceLayer(page, false);
+  const snap = JSON.parse(await page.eval(SNAPSHOT));
+  const base = await page.shot(shotPath);
+  await setTraceLayer(page, true);
+  assert.ok(sameBox(snap.rect, obs.rect),
+    `the canvas moved while the baseline was taken (${JSON.stringify(obs.rect)} -> ${JSON.stringify(snap.rect)}), ` +
+    "so the two shots are not one frame");
+  // Stillness, over the pane BELOW the band: every 4th pixel of 120 rows under it.
+  const x0 = Math.round(obs.rect.x), y0 = Math.round(obs.rect.y), w = Math.round(obs.rect.w);
+  const h = Math.min(120, Math.round(obs.rect.h) - TRACE_PX - 8);
+  let seen = 0, moved = 0;
+  for (let y = TRACE_PX + 8; y < TRACE_PX + 8 + h; y += 2) {
+    for (let x = 0; x < w; x += 4) {
+      const d = ((y0 + y) * base.width + (x0 + x)) * 4;
+      seen++;
+      if (changedAt(obs.img, base, d)) moved++;
+    }
+  }
+  const stillness = seen ? 1 - moved / seen : 0;
+  assert.ok(seen > 1000 && stillness >= 0.97,
+    `the picture below the band moved between the two shots (${(stillness * 100).toFixed(1)}% of ` +
+    `${seen} sampled pixels unchanged) — a frozen viewport with the stream held should be still, so ` +
+    "this baseline cannot be used to say which ink is the trace's");
+  return { base, stillness, sampled: seen };
+}
+
+/**
+ * **T-1041: no band is reserved above the waterfall, at any width.**
+ *
+ * The user's ruling, 2026-09-25: *"the waterfall map is still currently not full bleed. There are
+ * still black bars on the bottom and top. The top bar looks like it's actually the phosphor display
+ * … We can remove it entirely for now."* The top bar was T-457's trace strip — 96 device px carved
+ * off every pane's rectangle, backdrop wherever the stroke was not, reserved whether or not anyone
+ * wanted a trace.
+ *
+ * The claim here is about the PANE, not about the trace: its first pixel row is picture. It is read
+ * as a *share of columns* (see [[firstDrawnRow]]) because that is exactly what separates the two
+ * cases — a reserved band is backdrop in all but the two or three columns a stroke crosses, so it
+ * would score `at ≈ 96` however the trace is drawn, while a pane drawn to its own top edge scores
+ * within a few rows of zero. Both states are checked, because "remove the band" must not mean
+ * "remove it until someone switches the trace on": with the layer ON the trace is blended over the
+ * pane's top rows and the picture underneath is still there.
+ */
+for (const [width, height] of [[1280, 800], [400, 800]]) {
+  test(`at ${width}×${height} the pane's FIRST ROW is the waterfall — no reserved trace band, layer off or on`, async (t) => {
+    const browser = await Browser.open();
+    t.after(() => browser.close());
+    const page = await browser.page(undefined, { width, height });
+    assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+    await page.waitForSurfaceMounted({ timeoutMs: 60000 });
+    await page.waitForCanvas(".sf-canvas", (c) => c.distinct >= 16 && c.dominantShare < 0.97,
+      { timeoutMs: 90000 });
+    await page.waitFor("the layers control to mount", `!!document.querySelector('.map-layers-btn')`,
+      { timeoutMs: 60000 });
+    await page.frames(4);
+
+    const rect = await page.$rect(".sf-canvas");
+    const ins = await page.canvasInsets();
+    const dpr = await page.eval("window.devicePixelRatio || 1");
+    // The pane's own rectangle: the full-bleed canvas minus the floating chrome's stated insets
+    // (T-918) — and nothing else, which is the whole point of this check.
+    const top = { x: rect.x, y: rect.y + ins.top, w: rect.w, h: rect.h - ins.top - ins.bottom };
+    const unocc = await page.unoccludedColumns(".sf-canvas",
+      { y0: top.y, y1: top.y + (TRACE_PX + 8) / dpr });
+    const vis = unocc && unocc.w > 0
+      ? { lo: Math.round((unocc.x - rect.x) * dpr), hi: Math.round((unocc.x - rect.x) * dpr) + Math.round(unocc.w * dpr) - 1 }
+      : { lo: 0, hi: Math.round(rect.w * dpr) - 1 };
+    const dev = { x: top.x * dpr, y: top.y * dpr, w: top.w * dpr, h: top.h * dpr };
+    // At 400 px the floating panels and chips cover nearly the whole of these rows — 8 columns of
+    // 400 on this fixture — and that is the honest sample: a pixel under a panel is the panel's.
+    // The claim is per column and the metric is a share of them, so a handful still separates a
+    // reserved band (backdrop for 96 rows in EVERY column) from a pane drawn to its own top edge.
+    t.diagnostic(`measuring columns ${vis.lo}..${vis.hi} of ${Math.round(rect.w * dpr)} ` +
+      `(${unocc?.occluded ?? 0} under floating chrome)`);
+    assert.ok(vis.hi - vis.lo >= 3, `only ${vis.hi - vis.lo + 1} columns of the pane are uncovered at ${width} px`);
+
+    const off = await page.shot(path.join(ART, `app-trace-band-off-${width}x${height}.png`));
+    const a = firstDrawnRow(off, dev, vis);
+    t.diagnostic(`layer OFF: ${a.cols} of ${vis.hi - vis.lo + 1} uncovered columns carry a picture; it fills ${(a.fills[0] * 100).toFixed(0)}% of the pane's row 0, ` +
+      `${(a.fills[4] * 100).toFixed(0)}% of row 4, ${(a.fills[TRACE_PX] * 100).toFixed(0)}% of row ${TRACE_PX}; ` +
+      `first row drawn across the pane: ${a.at}`);
+    assert.ok(a.at >= 0 && a.at <= 12,
+      `the pane's picture does not start until row ${a.at < 0 ? `beyond ${TRACE_PX + 8}` : a.at} of its own ` +
+      `rectangle at ${width}×${height}: rows 0..${TRACE_PX} are backdrop across the pane, which is a ` +
+      `reserved band above the waterfall — exactly what T-1041 removed. Fill by row: ` +
+      `${a.fills.slice(0, 16).map((f) => f.toFixed(2)).join(" ")}`);
+
+    // …and with the layer ON: the trace draws OVER those rows, it does not take them back.
+    await setTraceLayer(page, true);
+    await page.waitFor("the trace to state its slice", `!!document.querySelector('.sf-trace').textContent`,
+      { timeoutMs: 60000 });
+    await page.frames(4);
+    const on = await page.shot(path.join(ART, `app-trace-band-on-${width}x${height}.png`));
+    const b = firstDrawnRow(on, dev, vis);
+    t.diagnostic(`layer ON: first row drawn across the pane: ${b.at} (fill by row: ` +
+      `${b.fills.slice(0, 8).map((f) => f.toFixed(2)).join(" ")})`);
+    assert.ok(b.at >= 0 && b.at <= 12,
+      `switching the spectrum trace on pushed the pane's first drawn row to ${b.at}: the trace must be ` +
+      "a layer over the waterfall's top rows, never a band that reserves them again");
+    assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the pane's top rows");
+  });
+}
+
 test("the trace is the spectrum at the viewport's time position, and its numbers are the socket's own", async (t) => {
   const browser = await Browser.open();
   t.after(() => browser.close());
@@ -720,6 +990,13 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   // The tap has to be the thing that sees the stream, or everything below is vacuous.
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
+  // T-1041: the trace is a layer, off by default, and drawn over the waterfall rather than into a
+  // strip of its own — so this switches it on, and puts the pane in the phosphor style whose ink is
+  // off the ramp (see [[isPhosphorInk]]), which is what makes the render half below readable on a
+  // FOLLOWING viewport, whose rows are scrolling too fast for a two-shot baseline.
+  await page.waitFor("the layers control to mount", `!!document.querySelector('.map-layers-btn')`, { timeoutMs: 60000 });
+  await setTraceLayer(page, true);
+  await setBaseStyle(page, "phosphor");
 
   const { census, rect } = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97,
@@ -782,7 +1059,7 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
     "the trace must say which measured range it is drawn against, and how that range was decided");
 
   // ---- (2) the render path: the pixels agree with the statement, IN THE SAME FRAME ----
-  const s = strip(obs.img, obs.rect);
+  const s = strip(obs.img, obs.rect, { sliceInk: isPhosphorInk });
   assert.ok(s.slicePx > 20, `the slice series drew ${s.slicePx} pixels in the strip — that is not a trace`);
   // The max-hold's pixels are DIAGNOSTIC, not asserted. Whether it draws depends on a tile being
   // resident for this pane's window, which is a claim about when the pyramid materialises a node —
@@ -872,6 +1149,10 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   // below are indexed by comes back with them, from `heldObservation` — see the note there.
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+  // T-1041, as above: the trace is an off-by-default layer over the waterfall, and this check reads
+  // it on a following viewport, so it is drawn in the phosphor ink that no cell can wear.
+  await setTraceLayer(page, true);
+  await setBaseStyle(page, "phosphor");
   // **Both band edges and a control region on each side must be where the SURFACE is on top**
   // (T-801). Since MAP-01 the canvas is full-bleed and the app's inventory panel (and the focus
   // panel, when something is focused) float over its sides by design — and the view opens on the
@@ -889,7 +1170,7 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   });
   const img = obs.img;
   const snap = obs.snap;
-  const s = strip(img, obs.rect);
+  const s = strip(img, obs.rect, { sliceInk: isPhosphorInk });
   const win = windowOf(snap.headline);
   const geom = snap.tap.geom;
   assert.ok(geom && geom.bandwidthHz > 0, "the tap never saw a stream header to take the band from");
@@ -987,6 +1268,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // As above: the box that indexes the pixels is the observation's own, not this one.
   const opened = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+  // T-1041: the trace is a layer, off by default. This check needs it on the RAMP (it is about the
+  // ramp), and the band now lies over the cells — so which pixels are the trace's is settled by a
+  // trace-off baseline of the same still frame ([[traceOffBaseline]]) rather than by an empty band.
+  await setTraceLayer(page, true);
 
   // Freeze the viewport. "Pause freezes the view, not the capture", so the live row keeps arriving
   // and walks out of the frozen top cell on its own — at which point the slice comes from the
@@ -1009,13 +1294,24 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   t.diagnostic(`the canvas moved ${drift} px vertically and ${Math.round(obs.rect.h - opened.rect.h)} px ` +
     "in height between the first real render and this observation; the pixels below are indexed by " +
     "the box this observation itself reported");
-  const s = strip(obs.img, obs.rect);
+  // The baseline: the same frozen, held frame with the layer off. Its band is the CELLS the slice
+  // is a slice of — the comparison this check is about — and the difference between the two shots
+  // is the trace's own ink.
+  const { base, stillness, sampled } = await traceOffBaseline(page, obs, path.join(ART, "app-trace-colour-off.png"));
+  t.diagnostic(`trace-off baseline taken on the same frozen frame: ${(stillness * 100).toFixed(1)}% of ` +
+    `${sampled} sampled pixels below the band came back identical`);
+  const s = strip(obs.img, obs.rect, { base });
   t.diagnostic(`readout: ${obs.snap.trace}`);
   t.diagnostic(`strip ink: ${s.slicePx} ramp px, ${s.holdPx} max-hold px, ${s.greyPx} afterglow/bloom px`);
+  {
+    const at = s.cols.map((v, i) => (v >= 0 ? i : -1)).filter((i) => i >= 0);
+    t.diagnostic(`drawn columns ${at[0]}..${at[at.length - 1]} (${at.length} of ${s.w})`);
+  }
   assert.ok(s.drawn > 20, `only ${s.drawn} of ${s.w} columns carry ramp ink — nothing to compare`);
 
   // Column by column: the colour the TRACE drew, against the colours the WATERFALL drew in that same
-  // screen column, in the top rows of the pane — the cell the slice is a slice of.
+  // screen column, in the top rows of the pane — the cell the slice is a slice of, read off the
+  // baseline because the trace is now drawn over it.
   const halfPx = Math.max(1, Math.round(s.w / TRACE_COLUMNS / 2) + 1);
   const ROWS = 6;
   let compared = 0, matched = 0, worst = 0;
@@ -1042,8 +1338,15 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
+    // **The core is read WITHOUT the baseline mask, and that is not an oversight.** The property
+    // under test is that the trace's core is *the same colour* as the cell under it — so exactly
+    // where it holds, the core pixel is IDENTICAL to the baseline's and the mask would throw it
+    // away, leaving only the columns where the claim fails. (Measured: 14 of 154 columns compared,
+    // 9.1 % matched, with the misses' "ink" being the bloom's feather rather than the core.) The
+    // mask is used for what it can say — where the stroke IS, `s.cols[x]` above — and the core is
+    // then the fullest-coverage ramp pixel within a stroke of that top, as it always was.
     const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
-    const cells = cellColours(obs.img, obs.rect, x, halfPx, ROWS);
+    const cells = cellColours(base, obs.rect, x, halfPx, ROWS);
     const d = nearestDist(ink, cells);
     if (d <= 8) { matched++; worst = Math.max(worst, d); }
     else {
@@ -1081,7 +1384,7 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
     if (s.cols[x] < 0) continue;
     // A third of the UNCOVERED span away, wrapping inside it, so the control never reads the panel.
     const far = vis.lo + ((x - vis.lo + Math.floor(visW / 3)) % visW);
-    if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(obs.img, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
+    if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(base, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
   t.diagnostic(`negative control: ${shuffled}/${compared} = ${(shuffledRate * 100).toFixed(1)}% match a ` +
@@ -1094,28 +1397,32 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   assert.deepEqual(page.exceptions, [], "uncaught exception while comparing trace and cell colours");
 });
 
-test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a readout, not a hole", async (t) => {
-  // The T-457 × T-458 merge break, in the tier that would have caught it end to end. The strip is
-  // carved off the top of the pane's rectangle; before the fix, `paneAt` walked only the drawn pane
-  // rects, so a pointer down in the strip resolved to no pane and `input.ts` dropped the gesture —
-  // not just T-458's region stroke, but plain and alt drags, which T-456 had settled.
+test("a drag that STARTS OVER THE TRACE pans the pane — the trace is a readout, not a hole", async (t) => {
+  // The T-457 × T-458 merge break, in the tier that would have caught it end to end. T-457 carved
+  // the trace's band off the top of the pane's rectangle; `paneAt` walked only the drawn pane rects,
+  // so a pointer down in the band resolved to no pane and `input.ts` dropped the gesture — not just
+  // T-458's region stroke, but plain and alt drags, which T-456 had settled.
   //
-  // The rule now: the strip belongs to its pane for every pointer purpose. `ui/test/surface-trace
-  // .test.ts` asserts that as a property of a frame; this asserts the whole chain — a real pointer
-  // stream, through `input.ts`, into the view — which is the part a pure function cannot speak for.
+  // T-1041 removes the carve-out, which is what makes the property structural — but the property is
+  // about any decoration over a pane, not about this one, so it is still asserted here with the
+  // trace switched on and the pointer starting on it. `ui/test/surface-trace.test.ts` asserts it of
+  // a frame; this asserts the whole chain — a real pointer stream, through `input.ts`, into the
+  // view — which is the part a pure function cannot speak for.
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
+  await page.waitFor("the layers control to mount", `!!document.querySelector('.map-layers-btn')`, { timeoutMs: 60000 });
+  await setTraceLayer(page, true);
   await page.waitFor("the trace to draw",
     `/slice [\\d:]+Z/.test(document.querySelector('.sf-trace')?.textContent ?? "")`, { timeoutMs: 90000 });
   const rect = await page.$rect(".sf-canvas");
 
-  // Inside the strip: the top `TRACE_PX` device px of the canvas, at dpr 1.
+  // Inside the band the trace is drawn in: the top `TRACE_PX` device px of the canvas, at dpr 1.
   const y = rect.y + TRACE_PX / 2;
-  assert.ok(TRACE_PX / 2 < rect.h, "the canvas is shorter than the strip — this test is not aimed at it");
+  assert.ok(TRACE_PX / 2 < rect.h, "the canvas is shorter than the band — this test is not aimed at it");
   // T-996: `.sf-where` — the kept centre/span/LIVE line — is where the viewport states itself.
   const before = (await page.$text(".sf-where")) ?? "";
   await page.drag({ x: rect.x + rect.w * 0.65, y }, { x: rect.x + rect.w * 0.3, y });
@@ -1129,8 +1436,8 @@ test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a rea
   // T-340's control, unchanged: a pan is a pan. A gesture that began over the trace must be no more
   // able to reach the radio than one that began over the waterfall.
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
-  assert.deepEqual(control.map((r) => r.url), [], "a drag begun in the trace strip reached the front end");
-  assert.deepEqual(page.exceptions, [], "uncaught exception while dragging from the strip");
+  assert.deepEqual(control.map((r) => r.url), [], "a drag begun over the trace reached the front end");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while dragging from the trace");
 });
 
 test("a viewport scrubbed into the past traces THAT instant, from the pyramid, and says so", async (t) => {
@@ -1145,6 +1452,8 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
+  await page.waitFor("the layers control to mount", `!!document.querySelector('.map-layers-btn')`, { timeoutMs: 60000 });
+  await setTraceLayer(page, true);   // T-1041: a layer, off by default
   // The pre-scrub reading, captured by the read that matched it (see `traceMatching`): this line
   // used to wait for a peak and then read the readout again, and the second read is a later frame
   // which need not still have one. It is a *baseline*, not the claim — the claim below is stated
@@ -1224,6 +1533,7 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+  await setTraceLayer(page, true);   // T-1041: a layer, off by default
   const LAG_S = 2;
   const parked = await scrubOntoCell(page, LAG_S);
   // **The rows before the slice must be IN HAND before the afterglow is judged** (the deflake,
@@ -1291,10 +1601,14 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
 
   // ---- and what the pixels show ----
   //
-  // The afterglow and the bloom are the only ACHROMATIC ink in the strip (`TraceStyle.shade`), so a
-  // grey pixel there is a shadow and a chromatic one is the current slice. That separation is what
-  // lets this count them without a second copy of the ramp.
-  const s = strip(obs.img, obs.rect);
+  // The afterglow and the bloom are the only ACHROMATIC ink the TRACE draws (`TraceStyle.shade`), so
+  // among the pixels the trace put there a grey one is a shadow and a chromatic one is the current
+  // slice. That separation is what lets this count them without a second copy of the ramp — and
+  // since T-1041 "the pixels the trace put there" is itself measured, by differencing the same
+  // frozen, held frame against one with the layer off.
+  const { base, stillness } = await traceOffBaseline(page, obs, path.join(ART, "app-trace-afterglow-off.png"));
+  t.diagnostic(`trace-off baseline: ${(stillness * 100).toFixed(1)}% of the pane below the band unchanged`);
+  const s = strip(obs.img, obs.rect, { base });
   t.diagnostic(`strip: ${s.slicePx} ramp px (current slice), ${s.greyPx} achromatic px ` +
     `(afterglow + bloom), ${s.holdPx} max-hold px`);
   assert.ok(s.slicePx > 20, "the current slice is not drawn, so there is nothing for a glow to be behind");
@@ -1336,7 +1650,7 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
     for (let y = 0; y < TRACE_PX && topGrey < 0; y++) {
       const d = ((y0 + y) * obs.img.width + (x0 + x)) * 4;
       const r = obs.img.data[d], g = obs.img.data[d + 1], b = obs.img.data[d + 2];
-      if (isGreyInk(r, g, b)) topGrey = y;
+      if (changedAt(obs.img, base, d) && isGreyInk(r, g, b)) topGrey = y;
     }
     if (topGrey >= 0) offsets.push(s.cols[x] - topGrey);
   }

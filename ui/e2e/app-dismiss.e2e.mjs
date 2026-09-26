@@ -79,21 +79,29 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   // T-995: the minimap is retired (user, 2026-09-25) — no map viewport row, at any width.
   assert.equal(await page.$count('.hk-surface-viewport[data-viewport="minimap"]'), 0,
     `a minimap viewport is still drawn at ${width} px`);
-  // T-933 x T-1026, carried to the panes by T-995: what used to be the minimap's lift is now the
-  // panes' bottom edge, and it must clear the card's peek strip at every width. Two cases, because
-  // the card is hidden until something is clicked:
-  //   (a) CLOSED — the no-interaction case: the card is not on screen at all, so it can cover nothing;
+  // T-996's full-bleed amendment (user, 2026-09-25 20:20): "nothing reserves a band at the top or
+  // bottom of the canvas". It supersedes T-933's rule that the panes stop short of the card's strip:
+  // the panes run to the canvas's own edges (both insets 0, `canvas.dataset.inset*`, read the way the
+  // surface states them) and the card floats OVER map pixels like every other overlay. What T-933
+  // protected still holds and is asserted: the card covers none of the picture's honesty statements
+  // (the status line, each pane's scale block). Two cases, because the card (T-1026) is hidden until
+  // something is clicked:
+  //   (a) CLOSED — the no-interaction case: the card is not on screen at all (0 px);
   //   (b) OPEN at its strip — the case T-933 measured, reached the way a viewer reaches it (a pill,
   //       then two cycles of the handle: half -> full -> peek).
-  // `insetBottom` is `surface.ts`'s own lift, read off the canvas the way the surface itself states
-  // it (`canvas.dataset.insetBottom`), never a second guess at it.
-  const paneBottomNow = async () => {
+  const fullBleed = async (state) => {
     const insets = await page.canvasInsets();
-    const b = await page.$rect(".sf-canvas");
-    return b.y + b.h - insets.bottom;
+    const peek = await page.$rect(".sheet");
+    t.diagnostic(`at ${width} px (${state}) insets ${JSON.stringify(insets)}, card y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
+    assert.deepEqual([insets.top, insets.bottom], [0, 0], `a band is reserved at the canvas's edge at ${width} px (${state}): ${JSON.stringify(insets)}`);
+    const covered = await page.eval(`(() => { const s = document.querySelector('.sheet').getBoundingClientRect();
+      return [...document.querySelectorAll('.sf-status-line, .sf-scale:not([hidden])')].map((e) => [e.className, e.getBoundingClientRect()])
+        .filter(([, r]) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top).map(([c]) => c); })()`);
+    assert.deepEqual(covered, [], `the card covers an honesty statement at ${width} px (${state})`);
   };
   const shutCard = await page.$rect(".sheet");
   assert.equal(Math.round(shutCard.h), 0, `a closed card still takes ${shutCard.h} px at ${width} px`);
+  await fullBleed("card closed");
   await page.click(`document.querySelector(${JSON.stringify(OVERLAYS[0].open)})`);
   await page.waitFor("the card to open", OVERLAYS[0].isOpen, { timeoutMs: 5000 });
   await settled(page, OVERLAYS[0], "opening");
@@ -106,11 +114,7 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     await page.waitFor(`the card at ${want}`, `document.querySelector('.sheet').dataset.snap === ${JSON.stringify(want)}`, { timeoutMs: 5000 });
     await settled(page, OVERLAYS[0], `the cycle to ${want}`);
   }
-  const paneBottom = await paneBottomNow();
-  const peek = await page.$rect(".sheet");
-  t.diagnostic(`at ${width} px pane bottom y ${Math.round(paneBottom)}, card strip y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
-  assert.ok(paneBottom <= peek.y + 0.5,
-    `the panes' bottom edge (y ${Math.round(paneBottom)}) runs under the card's strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) at ${width} px`);
+  await fullBleed("card open at its strip");
   await page.click("document.querySelector('.sheet-close')");
   await page.waitFor("the card closed again", `!(${OVERLAYS[0].isOpen})`, { timeoutMs: 5000 });
   await settled(page, OVERLAYS[0], "the close");

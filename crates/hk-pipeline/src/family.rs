@@ -368,6 +368,11 @@ const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
      raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
 
+/// T-977: what a frame sync without a check actually says.
+const TRUNK_SYNC_NOTE: &str = "frame sync at the expected spacing with no CRC-valid control block: the air interface is \
+     recognised, the channel is not a control channel (a voice or data channel of the same system \
+     looks exactly like this)";
+
 /// The vocabulary (see the module table).
 pub const VOCABULARY: &[VocabEntry] = &[
     entry(
@@ -437,6 +442,30 @@ pub const VOCABULARY: &[VocabEntry] = &[
         Some("public-safety"),
         0.97,
         TRUNK_CC_NOTE,
+    ),
+    // T-977: frame sync at the expected spacing with NO CRC-valid control block. The same service
+    // family, at less certainty, under its own id — a P25 voice or data channel carries P25's
+    // 48-bit frame sync and no TSBK, so this is what "P25-like" is measured as.
+    entry(
+        "p25-frame-sync",
+        Decoder,
+        Some("public-safety"),
+        0.8,
+        TRUNK_SYNC_NOTE,
+    ),
+    entry(
+        "dmr-frame-sync",
+        Decoder,
+        Some("public-safety"),
+        0.8,
+        TRUNK_SYNC_NOTE,
+    ),
+    entry(
+        "nxdn-frame-sync",
+        Decoder,
+        Some("public-safety"),
+        0.8,
+        TRUNK_SYNC_NOTE,
     ),
 ];
 

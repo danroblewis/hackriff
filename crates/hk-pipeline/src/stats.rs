@@ -355,6 +355,18 @@ counter_group!(
         cc_demods,
         /// Candidates the per-pass admission cap refused a demodulation.
         cc_admission_refused,
+        /// T-977: channels demodulated because **blind detection already has an emitter** there,
+        /// not because occupancy made them control-channel candidates. An intermittent burst train
+        /// never reaches `MIN_CC_FCO` and never will — it is not a control channel — but the run
+        /// has already committed an emitter at that frequency, so a demodulation spent saying
+        /// *what it is* is spent on a question that has an answer. Counted apart from
+        /// `cc_candidates` because it is a different admission rule, and it shares one budget with
+        /// them: `cc_demods` still never exceeds the spec's `max_demods` per pass.
+        cc_emitter_candidates,
+        /// T-977: per-channel verdicts filed onto an inventory emitter for a channel that was
+        /// demodulated and **not** confirmed. The row is what moves that emitter off
+        /// `resolution: not-searched`; before it, a rejected candidate left no trace but a counter.
+        cc_verdicts,
         /// T-546: hunt passes where the receiver's own offset from the channel grid was **fitted
         /// and found to exceed the raster tolerance** (docs/19 §7.6a). It is a property of the
         /// receiver, not of any signal, so one pass counts once however many channels it

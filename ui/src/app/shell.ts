@@ -57,6 +57,7 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     fftBounds: cs.display_limits
       ? { fft_size_min: cs.display_limits.fft_size_min, fft_size_max: cs.display_limits.fft_size_max }
       : null,
+    scan: cs.scan ?? null,
   };
 }
 
