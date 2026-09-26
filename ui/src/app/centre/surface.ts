@@ -921,6 +921,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * lane. Written from the `PaneReport` the data pass just produced, in the pass that produced it,
    * and only when the numbers change. Presentation metadata: commands nothing, and absent entirely
    * with the flag off.
+   *
+   * **Wired off `SurfacePreview`'s `onReports`, not off `trace`** (T-1052). It used to be the first
+   * line of `traceFor` below, which only runs when the trace LAYER is on (`tracePx > 0`) — so T-1041
+   * defaulting that layer off (2026-09-25) silently stopped this diagnostic from ever being written,
+   * an unrelated layer's toggle deciding a fact the ring lane, not the trace, reports. `onReports`
+   * fires every frame regardless of the trace layer.
    */
   let ringDiag = "";
   const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number }>();
@@ -934,7 +940,6 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
-    if (flags().liveRing) stateRing(report);
     const s = p.view.surface;
     const dev = pane.device ?? "any";
     // **The pane's OWN lattice, off the report the data pass just produced** (T-505). Since the
@@ -1561,6 +1566,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // FOLLOWING pane paints its live edge from, read in the render pass. Off, this is `null` and
         // the surface is drawn from tiles exactly as before — one flag, one lane, no second picture.
         liveRing: flags().liveRing ? () => liveRing.frame() : null,
+        // T-1052: the ring diagnostic above, off every frame's reports regardless of the trace
+        // layer's on/off state (see `stateRing`'s doc comment for why it moved here from `trace`).
+        onReports: flags().liveRing ? (reports) => { for (const r of reports) stateRing(r); } : null,
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,
