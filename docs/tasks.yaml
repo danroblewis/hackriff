@@ -30202,7 +30202,7 @@ tasks:
   - id: T-1035
     milestone: MLIVE
     title: "Canvas client hammers a dead backend (40-49 failed requests per 5 s, no backoff): canvas-journey #4 red on main 3/3 - bounded backoff after connection failures, no re-render thrash"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI-DEAD-BACKEND
@@ -30224,6 +30224,7 @@ tasks:
       Commits: 57e4f7de
       Observed, not chased: PRE-EXISTING AND REPRODUCED ON MAIN, worth a ticket: run the WHOLE canvas-journey spec in sequence (node e2e/canvas-journey.e2e.mjs, no name filter) and test 4 fails BEFORE the kill on its own premise - '1014 magenta pixels were already on screen BEFORE the stream was killed (e.g. {x:568,y:468,rgb:[255,64,217]})' - identical count and colour with main's bundle (/tmp/t1035-full-main.log, port 9280) and with mine (/tmp/t1035-full.log, port 9260). rgb(255,64,217) is not the surface's `unknown` ink (112,77,133), so it is a value off the ramp reaching the compositor after the journey's own retunes in tests 1-3 - i.e. T-499's actual purple, exposed only by the sequential journey. It is why the coordinator's triage (and mine) had to run test 4 alone to see the hammering assertion at all. Not caused by this ticket's change and not in its scope. | ui/e2e canvas-journey holdPort: a SIGKILLed hk blocked in an uninterruptible read kept its listening port EADDRINUSE for 4.4 s with no browser attached at load 41 (measured directly, /tmp/t1035-holdtest.mjs), which failed test 4 on its port-holding assertion before reaching its subject. Widened the grace 5 s -> 20 s in this commit with the measurement written down; the claim is unweakened (both windows still begin at the page's own observed socket close). | Two load-flakes seen while measuring, both in harness setup and neither reaching a subject: page.goto returned 'timeout' instead of 'load' at load 43.7, and 'chrome did not publish DevToolsActivePort' in the main-bundle full run. Box was at load 23-44 throughout (another agent's e2e loop).
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 0b5c0030
   - id: T-1036
     milestone: M2-hardening
     title: "hk-model detection_write_throughput_is_reported asserts a wall-clock throughput bound in the default tier (fails under load, passes alone; 173 gate-log mentions): split - correctness in default, the bound to the timing tier"
