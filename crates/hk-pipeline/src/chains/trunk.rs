@@ -596,6 +596,9 @@ pub(crate) fn run(
     // row per rejected channel per pass would grow the database without bound to say the same
     // thing over and over. A CHANGED verdict is written, which is the part worth keeping.
     let mut filed: HashMap<i64, CcOutcome> = HashMap::new();
+    // T-977 review: the pass on which a detected-emitter reservation last looked at each channel,
+    // so the slots occupancy leaves go round the unanswered emitters instead of to the same ones.
+    let mut looked: HashMap<i64, u64> = HashMap::new();
     let (mut detach, mut closed) = (false, false);
     loop {
         match rx.try_recv() {
@@ -652,6 +655,7 @@ pub(crate) fn run(
                     },
                     &mut known,
                     &mut filed,
+                    &mut looked,
                 );
                 passes += 1;
                 inc(&c.cc_passes);
@@ -684,6 +688,7 @@ fn hunt(
     pass: &Pass<'_>,
     known: &mut HashMap<i64, KnownCc>,
     filed: &mut HashMap<i64, CcOutcome>,
+    looked: &mut HashMap<i64, u64>,
 ) {
     let Pass {
         buf,
@@ -691,7 +696,7 @@ fn hunt(
         t_start,
         prov,
         track,
-        index: _,
+        index: pass_index,
     } = *pass;
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
@@ -775,22 +780,22 @@ fn hunt(
     // blind detection, the channel it maps to is the receiver's own fitted grid, and such a channel
     // can never be *confirmed* here (`CcCandidate::new` refuses below the occupancy floor, and this
     // module cannot manufacture a `ConfirmedCc`). What it earns is a verdict.
-    let reserved = emitter_channels(shared, &ks, &fco, origin_hz, raster, &cands)
-        .into_iter()
-        .take(node.max_demods.div_ceil(2))
-        .collect::<Vec<_>>();
+    let emitters = unanswered_emitters(
+        emitter_channels(shared, &ks, &fco, origin_hz, raster, &cands),
+        &ks,
+        filed,
+        looked,
+    );
+    let Admission {
+        occupancy: cands,
+        refused,
+        reserved,
+    } = admit(cands, emitters, node.max_demods);
+    add(&c.cc_admission_refused, refused.len() as u64);
     add(&c.cc_emitter_candidates, reserved.len() as u64);
-    // One budget, not two: the pass still runs at most `max_demods` down-conversions, so the a
-    // priori cost in this module's header is unchanged. The reservation is only about *which*
-    // channels get the slots when both rules want more than there are.
-    let occupancy_budget = node.max_demods.saturating_sub(reserved.len());
-    let refused = if cands.len() > occupancy_budget {
-        let r = cands.split_off(occupancy_budget);
-        add(&c.cc_admission_refused, r.len() as u64);
-        r
-    } else {
-        Vec::new()
-    };
+    for &(i, _) in &reserved {
+        looked.insert(ks[i], pass_index);
+    }
     let work: Vec<(usize, f64, CcCandidacy)> = cands
         .iter()
         .map(|&(i, f)| (i, f, CcCandidacy::Occupancy))
@@ -1460,6 +1465,68 @@ fn keyed_span(baseband: &[Complex32]) -> std::ops::Range<usize> {
 /// Below this the split is measuring something too short to be a symbol alphabet, and the honest
 /// answer is the window — whose measurement will then abstain or read low, which is a *result*.
 const MIN_KEYED_FRACTION_PCT: usize = 20;
+
+/// Which channels a pass demodulates, and which it refuses (T-977).
+struct Admission {
+    /// Occupancy candidates admitted, highest occupancy first.
+    occupancy: Vec<(usize, f64)>,
+    /// Occupancy candidates the cap refused — reported as `admission-refused`.
+    refused: Vec<(usize, f64)>,
+    /// Detected-emitter channels given a slot occupancy left unused.
+    reserved: Vec<(usize, f64)>,
+}
+
+/// Splits one pass's `max_demods` slots between the two reasons to demodulate (T-977).
+///
+/// **Occupancy keeps its whole budget.** Control-channel discovery (SIGNAL-085) is what the chain
+/// exists for, and a detected-emitter channel can never be confirmed here, so an emitter verdict
+/// takes only the slots the occupancy candidates leave unused — never one a control channel
+/// needed. The T-977 review's defect was the opposite: half the slots were reserved first, so an
+/// occupancy candidate ranked 5th–8th was refused on every pass on a band with enough emitters.
+///
+/// One budget, not two: at most `max_demods` down-conversions per pass, so the a priori cost in
+/// this module's header is unchanged. `cands` must already be in admission order and `emitters`
+/// in the order they should be answered ([`unanswered_emitters`]).
+fn admit(
+    mut cands: Vec<(usize, f64)>,
+    mut emitters: Vec<(usize, f64)>,
+    max_demods: usize,
+) -> Admission {
+    let refused = if cands.len() > max_demods {
+        cands.split_off(max_demods)
+    } else {
+        Vec::new()
+    };
+    emitters.truncate(max_demods - cands.len());
+    Admission {
+        occupancy: cands,
+        refused,
+        reserved: emitters,
+    }
+}
+
+/// The detected-emitter channels still owed a verdict, in the order they should get one (T-977).
+///
+/// **A channel whose verdict is already filed is skipped**: `filed` holds it and an unchanged
+/// answer is not re-written, so demodulating it again spends a slot to learn nothing. The rest
+/// are ordered least-recently-looked-at first (never looked at before any), then nearest the tuned
+/// centre — so the leftover slots go round every unanswered emitter in turn, and one whose look
+/// ended without a filing (`not-demodulated`) cannot hold a slot against the others forever. With
+/// `s` leftover slots per pass, every one of `n` unanswered emitters is looked at within
+/// `ceil(n / s)` passes.
+fn unanswered_emitters(
+    emitters: Vec<(usize, f64)>,
+    ks: &[i64],
+    filed: &HashMap<i64, CcOutcome>,
+    looked: &HashMap<i64, u64>,
+) -> Vec<(usize, f64)> {
+    let mut out: Vec<(usize, f64)> = emitters
+        .into_iter()
+        .filter(|&(i, _)| !filed.contains_key(&ks[i]))
+        .collect();
+    out.sort_by_key(|&(i, _)| (looked.get(&ks[i]).copied(), ks[i].abs(), ks[i]));
+    out
+}
 
 /// Raster channels of the swept set that **blind detection already has an emitter on**, minus the
 /// ones occupancy candidacy has already admitted (T-977).
@@ -2914,8 +2981,6 @@ mod tests {
         out
     }
 
-    /// Occupancy separates a continuous channel from a bursty one and from empty ones — which is
-    /// candidacy, and candidacy alone. Nothing here confirms anything.
     /// **T-977 review: a confirmation is never walked back by a window that failed to confirm.**
     ///
     /// The defect this pins: `filed` was compared with `!=`, so `Confirmed` followed by `NoSync`
@@ -3002,6 +3067,127 @@ mod tests {
         assert_eq!(keyed_span(&blip), 0..n);
     }
 
+    /// One simulated pass of the admission rule over a fixed band: `cands` in admission order,
+    /// `emitters` the detected-emitter channels [`emitter_channels`] would return. Every reserved
+    /// channel is marked looked-at, and filed unless it is in `never_files` (a look that ends
+    /// `not-demodulated` files nothing).
+    fn admission_pass(
+        ks: &[i64],
+        cands: &[(usize, f64)],
+        emitters: &[(usize, f64)],
+        filed: &mut HashMap<i64, CcOutcome>,
+        looked: &mut HashMap<i64, u64>,
+        never_files: &[i64],
+        pass: u64,
+    ) -> Admission {
+        let adm = admit(
+            cands.to_vec(),
+            unanswered_emitters(emitters.to_vec(), ks, filed, looked),
+            8,
+        );
+        for &(i, _) in &adm.reserved {
+            looked.insert(ks[i], pass);
+            if !never_files.contains(&ks[i]) {
+                filed.insert(ks[i], CcOutcome::SyncWithoutCheck);
+            }
+        }
+        adm
+    }
+
+    /// A busy band: six occupancy candidates, the control channel ranked **6th** (k = 9), and
+    /// seven intermittent detected emitters nearer the tuned centre than any of them (k = ±1…±3,
+    /// 4). `max_demods` is the built-in 8.
+    fn busy_band() -> (Vec<i64>, Vec<(usize, f64)>, Vec<(usize, f64)>) {
+        let ks: Vec<i64> = (-10..=10).collect();
+        let at = |k: i64| ks.iter().position(|&x| x == k).unwrap();
+        let cands = [(-9, 0.97), (-8, 0.95), (7, 0.93), (8, 0.91), (-7, 0.90), (9, 0.88)]
+            .iter()
+            .map(|&(k, f)| (at(k), f))
+            .collect();
+        let emitters = [1, -1, 2, -2, 3, -3, 4]
+            .iter()
+            .map(|&k| (at(k), 0.2))
+            .collect();
+        (ks, cands, emitters)
+    }
+
+    /// **T-977 review (third): the emitter reservation starved both the emitters and the control
+    /// channel.** Half of `max_demods` was reserved first for the emitters nearest the centre and
+    /// never moved on once they were answered, so (1) the 5th-nearest emitter and beyond stayed
+    /// `not-searched` for ever, and (2) an occupancy candidate ranked 5th–8th was
+    /// `admission-refused` on every pass — a control channel main confirms, never confirmed.
+    ///
+    /// Pinned: the control channel ranked 6th is admitted for demodulation on **every** pass (so
+    /// confirmation is reached exactly as on main), and all seven emitters have a verdict within
+    /// **N = 4 passes** — `ceil(7 / 2)`, the two slots occupancy leaves. Also with one emitter
+    /// whose look never files (`not-demodulated`): it cannot hold a slot against the others.
+    ///
+    /// Red on c66d349c's rule (reserve `div_ceil(2)` first, ignore `filed`): the control channel
+    /// is refused on pass 1 and emitters 5–7 are never looked at.
+    #[test]
+    fn busy_band_answers_every_emitter_and_never_refuses_the_control_channel() {
+        let (ks, cands, emitters) = busy_band();
+        let cc = ks.iter().position(|&k| k == 9).unwrap();
+        for never_files in [&[][..], &[1][..]] {
+            let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
+            for pass in 1..=4u64 {
+                let adm = admission_pass(
+                    &ks,
+                    &cands,
+                    &emitters,
+                    &mut filed,
+                    &mut looked,
+                    never_files,
+                    pass,
+                );
+                assert!(
+                    adm.occupancy.iter().any(|&(i, _)| i == cc),
+                    "pass {pass}: the control channel (occupancy rank 6 of 6) was not admitted; \
+                     refused {:?}",
+                    adm.refused.iter().map(|&(i, _)| ks[i]).collect::<Vec<_>>(),
+                );
+                assert!(adm.refused.is_empty(), "pass {pass}: nothing needs refusing");
+                assert!(adm.occupancy.len() + adm.reserved.len() <= 8, "one budget");
+            }
+            for &(i, _) in &emitters {
+                let answered = filed.contains_key(&ks[i]) || never_files.contains(&ks[i]);
+                assert!(
+                    answered && looked.contains_key(&ks[i]),
+                    "emitter at k = {} got no verdict within 4 passes (never_files {never_files:?})",
+                    ks[i],
+                );
+            }
+        }
+    }
+
+    /// **A filed emitter is never re-reserved**: `filed` already holds its answer and an unchanged
+    /// verdict is not re-written, so a slot spent on it learns nothing. Once every emitter is
+    /// answered the reservation is empty, and occupancy has every slot it had on main.
+    #[test]
+    fn a_filed_emitter_is_never_reserved_again() {
+        let (ks, cands, emitters) = busy_band();
+        let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
+        for pass in 1..=10u64 {
+            let before = filed.clone();
+            let adm = admission_pass(&ks, &cands, &emitters, &mut filed, &mut looked, &[], pass);
+            for &(i, _) in &adm.reserved {
+                assert!(
+                    !before.contains_key(&ks[i]),
+                    "pass {pass}: k = {} was reserved again after its verdict was filed",
+                    ks[i],
+                );
+            }
+            if pass > 4 {
+                assert!(adm.reserved.is_empty(), "pass {pass}: nothing left to answer");
+            }
+        }
+        // And with no occupancy candidates at all, the emitters get the whole budget.
+        let adm = admit(Vec::new(), emitters.clone(), 8);
+        assert_eq!(adm.reserved.len(), emitters.len());
+    }
+
+    /// Occupancy separates a continuous channel from a bursty one and from empty ones — which is
+    /// candidacy, and candidacy alone. Nothing here confirms anything.
     #[test]
     fn occupancy_separates_continuous_from_bursty_and_empty() {
         let (fs, raster) = (500_000.0, 12_500.0);
