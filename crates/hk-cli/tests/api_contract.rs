@@ -223,6 +223,46 @@ fn wait_for(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// Two routes read over **one state of the store**, for a test that compares what they serve
+/// about the same emitter while the live pipeline is still writing it.
+///
+/// Two HTTP calls are two instants, and a mock-SDR run keeps filing the station between them — a
+/// new detection span extends its interval, a tracker report reopens it (T-940). Comparing reads
+/// that straddle such a write compares two different states, which is a race in the test, not a
+/// disagreement between the surfaces (hk-cli::api_contract, MAIN RED 2026-09-26). So `a` is read
+/// on both sides of `b`, and the pair is used only when both readings of `a` agree on `key` —
+/// everything the comparison depends on — which proves no write the comparison could see landed
+/// in between. A write that lands flips the bracket and the pair is read again, never asserted.
+///
+/// This narrows *which* reads are compared, never *what* is asserted about them: surfaces that
+/// genuinely disagree disagree on every consistent pair, so the caller's assertion goes red on
+/// the first one. Bounded: a store that never holds still for three GETs is reported, not waited
+/// out. Returns the pair and how many brackets it took.
+fn read_one_state(
+    what: &str,
+    mut a: impl FnMut() -> Value,
+    mut b: impl FnMut() -> Value,
+    key: impl Fn(&Value) -> Value,
+) -> (Value, Value, usize) {
+    const MAX_BRACKETS: usize = 50;
+    let mut last = None;
+    for attempt in 1..=MAX_BRACKETS {
+        let before = a();
+        let between = b();
+        let after = a();
+        let (k0, k1) = (key(&before), key(&after));
+        if k0 == k1 {
+            return (after, between, attempt);
+        }
+        last = Some((k0, k1));
+    }
+    let (k0, k1) = last.expect("at least one bracket was read");
+    panic!(
+        "{what}: the store changed under every one of {MAX_BRACKETS} bracketed reads, so no pair \
+         read from one state exists to compare; last bracket {k0} vs {k1}"
+    );
+}
+
 fn is_object(v: &Value) -> bool {
     v.is_object()
 }
@@ -2208,14 +2248,30 @@ fn events_and_presence_serve_the_durable_catalogue() {
     // `IdleGap::conservative()` (60 s) while `/api/inventory` measured the gap off the band's tune
     // history (T-410), and they disagreed. Asserted over EVERY emitter the catalogue listed, with
     // the count reported — a comparison of zero emitters would be vacuous.
-    let (st, inv) = get(
-        addr,
-        &format!("/api/inventory?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=500"),
+    //
+    // Both answers are read from ONE state of the store ([`read_one_state`]): the mock run keeps
+    // filing the station between two GETs, and a detection or tracker report landing in between
+    // made the two routes answer about two different states (MAIN RED 2026-09-26: `ended` vs
+    // `live`, 1 in 20 runs alone). The bracket is keyed on everything the comparison reads — the
+    // listed emitters with their liveness, and the events that derive it.
+    let ok = |path: &str| {
+        let (st, body) = get(addr, path);
+        assert_eq!(st, 200, "{path}: {body}");
+        body
+    };
+    let events_path = format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}");
+    let inventory_path =
+        format!("/api/inventory?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=500");
+    let (v_state, inv, brackets) = read_one_state(
+        "/api/events around /api/inventory",
+        || ok(&events_path),
+        || ok(&inventory_path),
+        |e| json!([e["emitters"], e["events"]]),
     );
-    assert_eq!(st, 200, "{inv}");
+    eprintln!("T-591: one-state read of /api/events + /api/inventory took {brackets} bracket(s)");
     let rows = inv["entries"].as_array().expect("inventory entries");
     let mut compared = 0usize;
-    for m in emitters {
+    for m in v_state["emitters"].as_array().expect("emitters") {
         let id = m["id"].as_str().unwrap();
         let Some(row) = rows.iter().find(|r| r["id"] == json!(id)) else {
             continue;
@@ -2230,10 +2286,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
     }
     assert!(
         compared > 0,
-        "liveness was compared for {compared} emitters — a vacuous comparison: events {v}, \
+        "liveness was compared for {compared} emitters — a vacuous comparison: events {v_state}, \
          inventory {inv}"
     );
-    eprintln!("T-591: liveness compared across both surfaces for {compared} emitters");
+    eprintln!(
+        "T-591: liveness compared across both surfaces for {compared} emitters: {}",
+        v_state["emitters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| format!("{}={}", m["id"], m["liveness"]))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     // Coverage always answers, and always in words a client can show beside an empty list: an
     // unobserved stretch is never reported as a quiet band (C26).
     let statement = v["coverage"]["statement"]
@@ -2260,15 +2325,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
         "an unobserved period must never read as a quiet band: {past_statement}"
     );
 
-    // Paging and validation.
-    let (st, one) = get(
-        addr,
-        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=1"),
+    // Paging and validation. The page and the unpaged answer are read from one state of the store
+    // too: the mock run can file a second emitter in the box between two GETs, which changes the
+    // total without any page having changed it.
+    let (all, one, brackets) = read_one_state(
+        "/api/events around one page of it",
+        || ok(&events_path),
+        || ok(&format!("{events_path}&limit=1")),
+        |e| e["total"].clone(),
     );
-    assert_eq!(st, 200, "{one}");
+    eprintln!("paging: one-state read of /api/events + limit=1 took {brackets} bracket(s)");
     assert!(one["events"].as_array().unwrap().len() <= 1, "{one}");
     assert_eq!(
-        one["total"], v["total"],
+        one["total"], all["total"],
         "a page never changes the total: {one}"
     );
     // `limit`'s documented range is 1..=2000 (T-592: `events_json` used to re-validate the same
@@ -2372,8 +2441,15 @@ fn events_and_presence_serve_the_durable_catalogue() {
     // Now the gap is *measured* off the run's tune history (ADR-0019 §3), so on a continuously
     // dwelt band it is 1 s, a few-second silence is genuinely decayed, and a few milliseconds of
     // clock between two calls moves it. Equality here would now be asserting the 60 s default back.
-    let (st, one) = get(addr, &format!("/api/inventory/{id}"));
-    assert_eq!(st, 200, "{one}");
+    //
+    // And both are read from ONE state of the store ([`read_one_state`]). The clock is not the only
+    // thing that moves between two calls: the mock run keeps filing this station, so a detection
+    // span or a tracker report (T-940) landing between them made the two routes project two
+    // different states — `ended` beside `live` over the very same interval (MAIN RED 2026-09-26,
+    // failed alone on main). The track route is read on both sides of the row, keyed on its
+    // intervals and its projection less the clock-read fields, so the comparison below only ever
+    // sees a row read while the track stood still; a genuine disagreement is still a disagreement
+    // on that pair.
     let clock_read = |p: &serde_json::Value| {
         let mut p = p.clone();
         let o = p.as_object_mut().expect("presence is an object");
@@ -2381,6 +2457,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
         o.remove("confidence");
         p
     };
+    let track_path = format!("/api/inventory/{id}/presence");
+    let row_path = format!("/api/inventory/{id}");
+    let (track, one, brackets) = read_one_state(
+        "/api/inventory/{id}/presence around /api/inventory/{id}",
+        || ok(&track_path),
+        || ok(&row_path),
+        |t| json!([t["intervals"], clock_read(&t["presence"])]),
+    );
+    eprintln!(
+        "T-264: one-state read of the track route + the row took {brackets} bracket(s); \
+         liveness {}",
+        track["presence"]["liveness"]
+    );
     assert_eq!(
         clock_read(&track["presence"]),
         clock_read(&one["presence"]),
@@ -9396,6 +9485,20 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
     assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
     assert_eq!(probe["cost"]["fair_share"], json!(true), "{probe}");
+    // T-1021: every history-lock hold this request took, timed — at least the address lookup's,
+    // and no single hold longer than all of them together.
+    let lock = &probe["cost"]["lock"];
+    assert!(lock["holds"].as_u64().is_some_and(|n| n >= 1), "{probe}");
+    let (total, max, cpu) = (
+        lock["hold_ms_total"].as_f64().unwrap(),
+        lock["hold_ms_max"].as_f64().unwrap(),
+        lock["hold_cpu_ms_total"].as_f64().unwrap(),
+    );
+    assert!(max >= 0.0 && max <= total && cpu >= 0.0, "{probe}");
+    assert!(
+        lock["yielded_ms"].as_f64().is_some_and(|y| y >= 0.0),
+        "{probe}"
+    );
     // A client that names itself is a client of its own, and two of them halve the share. The
     // second client here has never been served, so it is also what arms the bootstrap reserve.
     let (st, mine) = get(addr, &format!("{}&client=tab-one", tile(0, 0, 0, 0)));

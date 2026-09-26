@@ -29717,7 +29717,8 @@ tasks:
   - id: T-1003
     milestone: MMAP
     title: "Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes"
-    status: todo
+    status: in-progress
+    branch: task-t1003
     priority: medium
     deps:
     - T-1001
@@ -30155,7 +30156,7 @@ tasks:
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
-    status: in-progress
+    status: done
     branch: task-t1021
     priority: normal
     deps:
@@ -30171,6 +30172,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile latency review): After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 02:07).
+      MERGE FIX (attempt 2): merged main be720339 into task-t1021 as a3a66d98. The only conflict was hk-cli/src/pipeline.rs's ApiState literal: main (T-1009) re-indented it and replaced `scan` with `scans` and added `iq_buffers`. Main's version is kept whole, with this ticket's single `view_ingest_backlog` field re-added after `view_history`. docs/tasks.yaml was taken from main, with the T-1021 result re-applied via `just task result`. The earlier merge (10ef281e, main 8ac9cfb9) kept both sides' nextest timing-tier entries. ORIGINAL RESULT: MEASURED after T-1018 with a new timing-tier test, hk-pipeline/tests/tile_lock_hold.rs. It drives a paced 2.4 Msps mock SDR with 180 s of history and reads a 220-tile /api/tiles viewport over (0,0)..(6,1) on the route's 4 readers, with hk serve's observations and hot cache, while a probe times the view mutex and the live-edge lag. FINDINGS: the capture thread and ring readers never take the view lock. Every run had 0 gate waits, 0 ring samples lost and 0 view rows dropped. The view writer takes the lock once per display row, and tile reads starved it: the view lattice's live edge fell ~2.0 s behind capture at load ~15 and 14-31 s at load ~33-37 (fold rate 10-23 rows/s against 25/s arriving). The baseline lag with no tile reads is ~0.1 s. Per request, after T-1018: 16-21 holds (the read is now 1 chunk for on-node tiles; the shadow search takes up to 10 steps), single holds 20-660 ms wall, of which only ~25-30 % is CPU at load ~37 and ~85 % at load ~15. So the problem is occupancy plus an unfair mutex, not chunk length. CHANGE: before each hold of the view lattice, a tile request waits (at most 50 ms per hold, TILE_INGEST_YIELD_MAX) while the writer has rows waiting. This uses a new history.view_backlog gauge, wired by hk serve as ApiState.view_ingest_backlog. Every /api/tiles answer now carries cost.lock {holds, yielded_ms, hold_ms_total, hold_ms_max, hold_cpu_ms_total}, stripped from the ETag; docs/api.md and api_contract are updated together. AFTER: ~0.2 s lag at load ~12 (vs ~2 s without) and 1.3-1.5 s at load ~20-32 (vs 18 s). A variant with a 500 ms per-request budget did worse under load (3.9 s), because the writer was then short of CPU rather than the lock; it was reverted.
+      Tests: just precheck hk-api hk-pipeline hk-cli -> exit 0 (clean on the merged tree); cargo nextest run -p hk-api -E 'binary(/^tile_/) | kind(lib)' -> exit 0 (240 passed (merged tree)); cargo nextest run -p hk-pipeline -E 'binary(live_edge_tiles) | binary(tile_lock_hold) | (kind(lib) & test(/history/))' -> exit 0 (12 passed (merged tree)); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/tile/)' -> exit 100 (4 passed, 1 failed at load ~23: tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding, 'compact+gzip 57070 B against f16+gzip 56775 B'. It compares separate reads of a LIVE tile whose content changes between reads (a 300 B difference against ~1 KB read-to-read noise). It passes alone twice (next entry); nothing here touches plane encoding, and cost.lock is the same in every spelling.); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding)' -> exit 0 (alone x2: compact+gzip 53293 vs f16+gzip 54561 B; 57823 vs 58928 B); T1021_NO_YIELD=1 cargo nextest run -p hk-pipeline -E 'binary(tile_lock_hold)' --no-capture --ignore-default-filter -> exit 100 (pre-merge: without the yield the live edge fell 18243 ms behind (load ~33)); cargo nextest run -p hk-pipeline -E 'binary(tile_lock_hold)' --no-capture --ignore-default-filter -> exit 0 (pre-merge: with the yield, worst lag 1487 ms (baseline 93 ms))
+      precheck exit 0
+      Commits: 22b952a0, 10ef281e, a3a66d98
+      Observed, not chased: Residual: the worst remaining hold is a LIVE-EDGE coarse tile. T-1018's live-edge exception reads it finest-first from level 0: (3,1) = 1,048,576 cells in 4 chunks of ~262k (chunk = whole output rows under TILE_MAX_SOURCE_CELLS = MAX_API_CELLS = 500k). One such hold was 663 ms wall / 540 ms CPU and caused the 1.5 s spike in the green run. The lever is a per-hold cell cap decoupled from the servability budget (chunk_rows is shared with servable/materialize_cost_bound, so shrinking the constant would move which levels are affordable). Not changed here. | The shadow last-known search takes up to 10 lock holds per tile, including tiles the coverage map already answered (answered level -1), which makes it the largest hold COUNT per request (16-21 holds/tile). A per-step lock cost worth measuring separately. | Sealed tiles are decoded from disk inside the history lock (hk-store store.rs read_sealed -> codec::decode -> fs::read). On a loaded box, part of the off-CPU hold time is plausibly this I/O; reading the file outside the lock would be the 'read nodes without the ingest lock' option. Not measured separately. | At load >~30 the view writer can fall below 25 rows/s from CPU starvation alone, even with priority (a per-request-budget variant still lagged 3.9 s). The timing-tier test is honest only on a quiet box, as the tier says. | Load flake for the deflaker, seen twice in two merges: hk-cli api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding (T-700/T-1019) orders the gzipped sizes of six separate reads of a LIVE, growing tile. Under load it failed with f16+gzip 82503 > json+gzip 79506 B, then compact+gzip 57070 > f16+gzip 56775 B; alone it passes (e.g. 53293 < 54561 B). Reading a sealed tile would make it deterministic.
+      Resources: 374 CPU-s, peak 4.5 GB
+    commit: 04316e64
   - id: T-1022
     milestone: MMAP
     title: "app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)"
@@ -30293,7 +30303,7 @@ tasks:
   - id: T-1027
     milestone: MMAP
     title: "Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge"
-    status: todo
+    status: done
     priority: high
     deps:
     - T-1026
@@ -30312,6 +30322,16 @@ tasks:
       2026-09-25 20:20 supervisor (user): priority raised to P1 - 'The bottom bar looks like it should be gone.' Staging 336a12db lacks this ticket. Dispatch now.
 
       2026-09-25 coordinator: FIRST STEP - screenshot staging (and main) at 1280x800 and 400 px with the harness and NAME the bottom band element (expected: this Selected strip; if it is something else - time ruler, sheet peek, a dock remnant - report it with the element's selector before changing anything). Dispatched manually by the coordinator stacked on task-t1026 (the card this ticket moves selection into) as soon as the T-996/T-1026/T-1007 re-integration hands back.
+    branch: task-t1027
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 06:30).
+      First step, as asked: I screenshotted the current tree at 1280x800 and 400 px and named the bottom band. The opaque 'Selected — nothing yet' strip was the detail sheet (section.sheet) collapsed to its peek. T-1026 (landed 6a433ecb) had already made that card hidden until a feature is clicked, removed its 'nothing yet' wording, and dropped the panes' clearance of it (cbe32c84). T-994 had already retired the Outputs dock. On current main nothing spans the bottom edge: the canvas runs to the page's last pixel (screenshots bottom-edge-1280.png and bottom-edge-400.png in this dir). This ticket pins that down with a new e2e spec, ui/e2e/app-bottom-edge.e2e.mjs, run at both sizes. It checks four things: (1) the canvas ends at innerHeight, is full-bleed, and has data-inset-bottom 0; (2) no element reaches the bottom 24 px across half the width or more (layers laid over the map are excluded); (3) at least 75% of the points probed across the bottom zone are the canvas; (4) the retired wording is gone. Red proof: with the always-on sheet re-injected, the spec fails at both sizes (red-injected-sheet-400.png). The empty-state hint now lives in the Go-to glass's tooltip (GOTO_HINT in map-controls.ts), asserted in both the unit tier and the e2e spec. Every action the strip offered is on the card, because the strip was the card; opening the card by clicking a box is covered in app-card.e2e.mjs.
+      Tests: just test-ui -> exit 0 (117/117 test files passed); cd ui && HK_E2E_PORT=9216 HK_E2E_CONCURRENCY=1 node e2e/run.mjs app-bottom-edge -> exit 0 (2 passed (1280x800, 400x800)); cd ui && HK_E2E_PORT=9216 HK_E2E_CONCURRENCY=1 node e2e/run.mjs app-bottom-edge (always-on sheet re-injected in focus-sheet.ts) -> exit 1 (2 failed: 1280 'only 88/120 points of the bottom edge zone are the map'; 400 'section.sheet spans the bottom edge'); cd ui && npx tsc --noEmit -p . -> exit 0 (clean)
+      precheck exit 0
+      Commits: 359378bc
+      Observed, not chased: Screenshots are in ~/.hackriff-ops/work/T-1027/ (bottom-edge-1280.png, bottom-edge-400.png, red-injected-sheet-400.png). | No crates were touched, so precheck was cargo fmt --all --check (clean) plus tsc; clippy was not run.
+      Resources: 139 CPU-s, peak 2.6 GB
+    commit: "49809503"
   - id: T-1028
     milestone: MMAP
     title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
@@ -30777,7 +30797,7 @@ tasks:
   - id: T-1044
     milestone: MLIVE
     title: "LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles"
-    status: todo
+    status: in-progress
     priority: medium
     deps:
     - T-1042
@@ -30800,6 +30820,7 @@ tasks:
       Commits: ac9f3c52
       Observed, not chased: e2e drop-the-socket-for-2s spec not written/run; walked-gap blocks are counted, not painted (tile lane fills) | ui/node_modules absent in worktree; used a temporary symlink to main's (test runner writes bundles there)
       Resources: 35 CPU-s, peak 0.8 GB
+    branch: task-t1044
   - id: T-1045
     milestone: MLIVE
     title: "LSR-4: per-device live publishers spectrum/live/<device>; a pane's device selects its stream"
@@ -31475,8 +31496,7 @@ tasks:
   - id: T-1073
     milestone: MUI
     title: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
-    status: in-progress
-    branch: task-t1073
+    status: done
     priority: P1
     parallel_group: UI-TOPCHROME-FLAKE
     needs: none
@@ -31490,10 +31510,21 @@ tasks:
       FOUND BY UI-stack integrator 2026-09-26: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
 
       2026-09-26 coordinator: now RED ON MAIN in the release candidate (rc-20260926, 170bf91a) - not T-1007-only - in THREE specs with one message: app-top-chrome, app-split-frozen and live-ring-metrics all fail 'hiding the chips changed the face of FORM.map-glass map-goto map-fade by 25.29, no more than the canvas moved by itself (36.53) - the chips were not hidden'. The shared instrument (hide the chips, compare faces against the canvas's own motion) is either not hiding FORM.map-goto (the Go-to box) or the canvas's self-motion baseline is too large (a following pane scrolls). Deps on T-1007 dropped; P1 (RC rule). Fix the one shared helper for all three specs; if the chips really do not hide, fix the product.
+    branch: task-t1073
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 06:06).
+      app-top-chrome's chips-not-a-bar pixel guard was deciding on the MAP rather than on the chrome, in three ways, all fixed in the instrument (no assertion loosened, no tolerance widened, every new check exact equality). (1) The chrome-hide reached the map's OWN overlay layers - .sf-hud (detection boxes), .sf-annos, .sf-priors-labels, .sf-pins are siblings of .sf-canvas inside .sf-stage, so 'not an ancestor of the canvas' classed them as chrome; hiding a box the map had drawn in the band changed the gap by 82.16 at 74 % with the map still to the pixel. Only the control cluster inside the stage is chrome now. (2) A pane FOLLOWING the live edge scrolls between shots, which is the RC's 'canvas moved by itself (36.53)' beating the 25.29 a glass chip's own face changed - the three shots are now taken with every pane frozen (a view act; the spec's own end assertion still proves no device route is reached) and the panes restored to following. Frozen, successive shots differ by exactly 0.00. (3) The theme flip repaints the waterfall some frames after dataset.theme already reads 'light'; a repaint mid-sequence reads exactly like chrome in the gap (112.71 at 99 %). The sequence now starts from a still photograph and is bracketed - re-shot with the chrome back and retaken unless the gap pixels are identical, up to 10 times, then it fails saying so. Green 10/10 alone at 1280x800 and 400x820 under box load 54-77; non-vacuity proved by making chrome paint in the gap via .map-ctl::before (invisible to any DOM scan), which turns the guard red with its own message.
+      Tests: npm run e2e app-top-chrome (unchanged spec, before the fix) -> exit 1 (1280 px: 'the gap at x=308 changed by 82.16 ... nearer the chip's own 132.98 than the canvas's own motion 0.00' - the defect reproduced on main); npm run e2e app-top-chrome x10 (both widths, all three themes, each run alone) -> exit 0 (10/10 passed at load 54-77; the 12 attempts also produced 1 backend-start timeout (env) and 1 unrelated red, 'the nudge press reached no device route'); npm run e2e app-top-chrome with chrome injected into the gap via .map-ctl::before -> exit 1 (non-vacuity: the guard fires with 'chrome paints in the gap, so the chips read as a bar' (133.10 vs chip 28.09 vs motion 0.00)); just test-ui -> exit 0 (112/112 test files passed); cargo fmt --all --check -> exit 0 (clean (no Rust touched))
+      precheck exit 0
+      Commits: 65544910
+      Observed, not chased: The coordinator's note that app-split-frozen and live-ring-metrics fail with the SAME 'the chips were not hidden' message is not supported by the code: at the RC sha 170bf91a, `git grep -l 'the chips were not hidden' 170bf91a -- ui/e2e` returns only ui/e2e/app-top-chrome.e2e.mjs, and neither of the other two specs imports the instrument (it is file-local, not in app-chrome.mjs). Run here alone on main: live-ring-metrics GREEN (1/1); app-split-frozen RED for its own, different reason - "right-clicking box 01a0ddcd-72eb-75f8-a286-e2b9d4ffcca1 never opened its menu" (its 1280 px test; the 400 px one passed). That is a separate defect and needs its own ticket. | app-top-chrome has two other load-sensitive assertions, both seen red at box load 50-77 and neither touched by this fix: page.goto returning 'timeout' instead of 'load' (harness deadline 30 s, ui/e2e/harness.mjs:485) and 'the nudge press reached no device route' (15 s deadline after the click). 1 of 12 runs here. | ui/e2e/backend.mjs gives `hk serve` 20 s to come up (400 x 50 ms). With a DEBUG hk on this box at load 25+ it took over 55 s, so every e2e run failed before reaching a test; with the release binary it is ~3-8 s. 4 of 16 attempts still lost the whole run to it at load 45-57.
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: 82dd6bd5
   - id: T-1074
     milestone: MUI
     title: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
-    status: todo
+    status: in-progress
+    branch: task-t1074
     priority: high
     deps:
     - T-1051
@@ -31548,6 +31579,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/accept_encoding/)'`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1021 + T-1058 workers 2026-09-26: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
+
+      2026-09-26 coordinator: queued UNPROVEN - the worker never saw its own target test green: every run timed out earlier at api_contract.rs:221 ('timed out waiting for the station's tile to be observed', a 60 s wait) at Mac load 60-100. The gate arbitrates; if the sealed+observed wait cannot be met on this fixture, the gate will show it - then re-open here.
   - id: T-1077
     milestone: MLIVE
     title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
@@ -31695,6 +31728,63 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands
+  - id: T-1085
+    milestone: M2-hardening
+    title: "listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag"
+    status: in-progress
+    branch: task-t1085
+    priority: high
+    deps: []
+    parallel_group: PIPE-LISTEN-STEREO
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      SEEN BY T-1071's worker (2026-09-26 ~06:00, `just test-crate hk-pipeline`, load avg 26): hk-pipeline::listen_conformance `listen_stereo_is_opt_in_interleaved_and_reports_the_pilot` failed with 'sample_index jumped 0 -> 1920 with no DISCONTINUITY flag' (30 s); it passed alone twice (11.8 s, 10.1 s). Never seen red in a merge gate (0 FAIL lines in the merge-runner log).
+      WHY IT IS NOT JUST A LOAD FLAKE: under load the listen path may legitimately lose audio, but the stream contract (hk-stream; docs/api.md stream records) says a gap in sample_index is ALWAYS flagged DISCONTINUITY - an unflagged jump is a consumer-visible contract violation (a decoder downstream would splice across it silently). So either the stereo interleaved path advances sample_index without setting the flag when it drops/skips a block under backpressure (a PRODUCT defect that load exposes), or the test reads the index across a legitimate restart the product flags elsewhere (then say where, with evidence).
+      DELIVER (deflake-triage): reproduce under load deterministically - e.g. a slow consumer / delayed reader in the test harness (not a CPU-spinner) - and find where sample_index advances by 1920 (one block?) without DISCONTINUITY; fix the product so every gap is flagged; pin it with a test that is red without the fix. Never loosen the 'no unflagged jump' assertion.
+      ACCEPTANCE: the test green 10/10 alone and 5/5 inside `just test-crate hk-pipeline`; a new deterministic test (slow consumer) red on the pre-fix code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1071 worker 2026-09-26: listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag
+    high_effort_reason: stream-contract defect on the real-time listen path, only under load; hard debugging
+  - id: T-1086
+    milestone: M2-hardening
+    title: "An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)"
+    status: in-progress
+    branch: task-t1086
+    priority: high
+    deps: []
+    parallel_group: PIPE-LIVENESS-HORIZON
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      PRODUCT FLAW (found by the coordinator's deflaker 2026-09-26 ~06:30 while triaging api_contract events_and_presence_serve_the_durable_catalogue; probe test, uncommitted): for the first ~70 ms of an on-air station's life it reads liveness `ended`, then `live`. Until the station's first follow report lands, its only presence-ledger rows are CLOSED ~1 s records that trail the capture edge, and the silence after them is measured off the IQ ring's SAMPLED time - which the detector has not analysed yet - so an end is reported that was never detected, and the next follow report revokes it. Probe: emitter ...6562 had one closed row at t+2.987 s and read `ended`; the follow report arrived at t+3.054 s and it read `live`. The first closed row comes from a separate writer, not from the pipeline's live offer (`file_inventory` in crates/hk-pipeline/src/detect.rs), so holding the offer + follow report under one lock does not close the window (draft dropped).
+      INVARIANT VIOLATED (CLAUDE.md, ADR-0017/0019): 'assume it continues to the live edge (end = null, ongoing) until an end is AFFIRMATIVELY detected'; silence may only count up to what the detector has actually analysed (T-940's observed-silence rule judges against the continuous floor - its sampled-vs-analysed horizon is the gap here). A premature `ended` also flickers the UI box (the T-388 jumpiness class) and the Candidate/Confirmed lists.
+      DELIVER: measure observed silence only up to the detector's ANALYSED horizon (not the ring's sampled edge), or treat an emitter whose newest row is closed but younger than one follow period as ongoing; whichever keeps one rule for every route (ObservedCoverage::track). Pin it: a deterministic test (mock SDR, pinned sample indices) where the first closed row lands before the first follow report -> liveness `live` at every instant, never `ended`.
+      ACCEPTANCE: the new test red on the pre-fix code, green 10/10; api_contract events_and_presence + inventory liveness tests green; T-940's observed-silence tests unchanged.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator deflaker 2026-09-26: An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)
+    high_effort_reason: liveness horizon on the detection/presence contract (ADR-0017/0019 end-is-affirmative invariant); cross-writer timing
+  - id: T-1087
+    milestone: M2-hardening
+    title: "events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: CLI-EVENTS-LIVE
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      FOLLOW-UP to the events_and_presence deflake (two fixes were made for one test on 2026-09-26: the pipeline manager's LANDED 0c0005d7 - brackets each comparison so a pair is only asserted while the store held still; and the coordinator's deflaker's branch task-fix-events-liveness fe122354, NOT landed). The coordinator's version found a gap the landed one may still have: without first WAITING until the station reads `live`, 3 of 5 runs compared two `ended` readings, so a route that applies ITS OWN liveness rule got through - measured with deliberate defects: 'the presence route closes the last interval by its own rule' was caught 5/5 WITH the live-wait, 2/5 without it; '/api/events does the same' caught 5/5 at events-vs-inventory.
+      DELIVER: on main (with 0c0005d7), re-inject those two deliberate defects and measure how often the landed test catches them; if < 5/5, add the wait-for-`live` precondition (see fe122354's read_across_a_still_store + live wait) to the landed bracket - same assertions, never looser. If the landed test already catches both 5/5, close this with the numbers.
+      ACCEPTANCE: both deliberate defects red 5/5; the unmodified test green 10/10 alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(events_and_presence)'`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator deflaker 2026-09-26: events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
