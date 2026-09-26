@@ -59,18 +59,47 @@ pub const FEATURES_VERSION_INDETERMINATE: u32 = 1;
 /// Maximum reported confidence: no call is certain.
 pub const MAX_CONFIDENCE: f64 = 0.999;
 
-/// Maximum posterior an **abstention** may carry (T-970).
+/// Maximum reported confidence of the **`unknown`** label — an abstention (T-953, T-970).
 ///
-/// `unknown` is a real outcome, not a claim about the world, and the two must not be reported on
-/// the same scale. Until T-970 a row the cascade could measure nothing on came out at
-/// [`MAX_CONFIDENCE`] — the explorer's 2026-09-25 window found broadcast stations with a locked
-/// 19 kHz pilot and a CRC-valid RDS decode reading `unknown 0.999`, drawn as "100 % unk" — which
-/// says the system is *more* sure it cannot name the emission than it is ever allowed to be that
-/// it can. An abstention exists because something could not be measured, so the residual belongs
-/// to the labels that were not ruled out, and the number reported is bounded below the cap a
-/// positive call may reach. `hk_classify::classifier` applies it; ADR-0016 §4.4's abstention
-/// conditions are unchanged, and nothing here turns an abstention into a family.
+/// `unknown` is a real outcome, not a measurement or a claim about the world, and the two must not
+/// be reported on the same scale. Two routes reached `unknown` at [`MAX_CONFIDENCE`] — the same
+/// number a CRC-valid decode would carry — and the explorer's 2026-09-25 windows measured both:
+///
+/// - **A saturated open set (T-953).** `unknown`'s fused posterior is
+///   `max(open_set_score, L[unknown])` ([`fuse`](fuse::fuse)), and `open_set_score` is
+///   `1 − max_c P(χ²_k ≥ d²_c)` over class-conditional densities fitted on the **synthetic dev
+///   grid** (ADR-0016 §4.4, §7). That tail underflows: any emission a few σ outside every fitted
+///   envelope scores a hard `1.0`, so an emission the shipped densities have never seen is
+///   indistinguishable from one that is genuinely out of taxonomy. FLEX pager bursts came back
+///   `unknown` at 0.999 with the known families at exactly 0 — the UI's "100 % unk".
+/// - **An abstention on what could not be measured (T-970).** Broadcast stations with a locked
+///   19 kHz pilot and a CRC-valid RDS decode read `unknown 0.999`, which says the system is *more*
+///   sure it cannot name the emission than it is ever allowed to be that it can.
+///
+/// Reporting near-certainty of novelty from an uncalibrated distance is the overconfidence
+/// ADR-0016 rejects softmax for ("Options considered"). So `unknown` is capped strictly below a
+/// family's cap. `0.9` is chosen, not measured: it is the largest round value that keeps `unknown`
+/// visibly separate from a confident family call. It bounds only the **reported number** — a
+/// saturated open set still wins the label, ADR-0016 §4.4's abstention conditions are unchanged,
+/// nothing here turns an abstention into a family, and [`Classification::open_set_score`] still
+/// carries the raw score, uncapped, which is the explicit open-set output.
+///
+/// It is applied in two places, with one rule: [`fuse`](fuse::fuse) caps the fused posterior
+/// (the residual follows the likelihood's order, and is spread **uniformly** over the families at
+/// `open_set = 1.0`, where every known likelihood is 0 — the cap does **not** recover a ranking),
+/// and `hk_classify::classifier` holds any abstention the cascade builds outside the fusion at the
+/// same cap, moving the excess to the families its decision tree left admissible.
 pub const MAX_UNKNOWN_CONFIDENCE: f64 = 0.9;
+
+/// The confidence cap of `label`: [`MAX_UNKNOWN_CONFIDENCE`] for `unknown`, else
+/// [`MAX_CONFIDENCE`].
+pub fn max_confidence_of(label: &str) -> f64 {
+    if label == UNKNOWN {
+        MAX_UNKNOWN_CONFIDENCE
+    } else {
+        MAX_CONFIDENCE
+    }
+}
 
 /// Minimum uniform weight λ₀ of a family prior (ADR-0016 §3).
 pub const LAMBDA0_MIN: f64 = 0.1;
@@ -266,7 +295,8 @@ pub struct Classification {
     pub prior: Option<PriorUse>,
     /// Top posterior label (may be `unknown`).
     pub family: String,
-    /// Posterior of `family`, ≤ [`MAX_CONFIDENCE`].
+    /// Posterior of `family`, ≤ [`max_confidence_of`] that family ([`MAX_CONFIDENCE`], or
+    /// [`MAX_UNKNOWN_CONFIDENCE`] when the family is `unknown` — T-953).
     pub confidence: f64,
     /// Within-family class call, `None` below its gate.
     pub class: Option<ClassCall>,
@@ -411,11 +441,9 @@ impl Classification {
         if (self.confidence - p_family).abs() > 1e-9 {
             return bad("confidence differs from the family's posterior");
         }
-        if self.confidence > MAX_CONFIDENCE {
-            return bad(format!(
-                "confidence {} exceeds {MAX_CONFIDENCE}",
-                self.confidence
-            ));
+        let cap = max_confidence_of(&self.family);
+        if self.confidence > cap {
+            return bad(format!("confidence {} exceeds {cap}", self.confidence));
         }
         if self.family != UNKNOWN && tax.coarse_of(&self.family) != Some(self.coarse) {
             return bad(format!(
