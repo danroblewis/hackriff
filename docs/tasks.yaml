@@ -31487,7 +31487,7 @@ tasks:
   - id: T-1066
     milestone: MUI
     title: "Client pollers become watchers: net.ts startWatch(route, fetch, fallbackMs = 30_000) fetches on a `changed` version bump and on the slow fallback only; steady state following live <= 1 req/s besides WS"
-    status: in-progress
+    status: done
     branch: task-t1066
     priority: high
     deps:
@@ -31513,6 +31513,7 @@ tasks:
       Commits: 23e03428, daad1702
       Observed, not chased: Drag-panning goes through input.ts's own `settle`, not chromeAction.viewChanged, so a drag-pan does not itself re-fetch centre/surface.ts's paths/tune-history/frontend/annotations layer routes; only chromeAction.viewChanged (Go-to, zoom buttons) does. A panned-then-idle view's overlay layers can lag up to the 30s fallback if nothing else bumps their /ws/changes version in that window. Left out of scope for this ticket's budget.
       Resources: 4 CPU-s, peak 0.3 GB
+    commit: 0729fed1
   - id: T-1067
     milestone: MUI
     title: "Request-budget browser e2e (ui/e2e/request-budget.e2e.mjs, CDP page.requests): idle following live <= 30 API requests / 30 s; a 24-event trackpad burst <= 14 non-tile + <= 8 tile requests; a 300 px drag the same; freeze + scrub <= 10; connectionReused >= 90 %"
