@@ -20,6 +20,54 @@ fn hex_bits(s: &str) -> Vec<u8> {
     bytes_bits(&bytes)
 }
 
+/// The block's S5 `check_distinct_valid` record (ADR-0015 §2.2), if it emitted one.
+fn check_evidence(b: &dyn crate::block::Block) -> Option<hk_model::synth::Evidence> {
+    let mut set = hk_model::synth::EvidenceSet::new();
+    b.evidence(&mut set);
+    set.iter()
+        .find(|e| e.metric == hk_model::synth::MetricId::CheckDistinctValid)
+        .copied()
+}
+
+/// T-928 (T-575's review; ADR-0022 §4.3.1): the degenerate-frame guard runs over the bits the
+/// check **covers**, not the whole frame. A CRC-32 with `init = FFFFFFFF` and `span.start_bit =
+/// 8` is satisfied by an idle frame whose *covered* data opens with `1^32` (those bits cancel
+/// the register, the rest is idle fill): `1^40 ‖ 0^56` is valid, and none of the whole-frame
+/// guard's four trims is short-periodic, so one idle frame used to count as an independent
+/// trial — enough to clear the confirm gate at w = 32 (T-577's hole A, ~2e-2 per decision on
+/// N2). Over the covered span `bits[8..96]` the guard sees `1^32 ‖ 0^56` and trims to idle.
+#[test]
+fn an_init_cancel_idle_frame_is_degenerate_when_the_covered_span_starts_late() {
+    let params = json!({"width": 32, "poly": "0x04C11DB7", "init": "0xFFFFFFFF",
+        "span": {"start_bit": 8, "end_trim_bits": 0}, "strip": false});
+    let mut idle = vec![1u8; 40];
+    idle.extend(std::iter::repeat_n(0u8, 56));
+    let mut b = build("crc", params, PortType::Frames);
+    let out = run_frames(b.as_mut(), &[frame(&idle)], 1, false);
+    assert_eq!(
+        out[0].info.check,
+        CrcStatus::Valid,
+        "the covered data cancels an all-ones register: the frame passes"
+    );
+    let e = check_evidence(b.as_ref()).expect("check_distinct_valid");
+    assert_eq!(e.n, 1, "one frame tested");
+    assert_eq!(
+        e.raw, 0.0,
+        "an init-cancel idle frame is no independent trial"
+    );
+    assert_eq!(e.bits, 0.0, "and pays no confirm bits");
+
+    // The same frame with the span starting at 0 is not valid at all (bits 0..8 enter the
+    // register), so the covered-span guard is the only thing standing between hole A and the
+    // gate here.
+    let at_zero = json!({"width": 32, "poly": "0x04C11DB7", "init": "0xFFFFFFFF",
+        "span": {"start_bit": 0, "end_trim_bits": 0}, "strip": false});
+    let mut b = build("crc", at_zero, PortType::Frames);
+    let out = run_frames(b.as_mut(), &[frame(&idle)], 1, false);
+    assert_eq!(out[0].info.check, CrcStatus::Invalid);
+    assert_eq!(check_evidence(b.as_ref()).expect("record").raw, 0.0);
+}
+
 #[test]
 fn crc24_mode_s_known_frame_checks_and_corrects_one_bit() {
     // DF17 identification of KLM1023 (ICAO 4840D6): parity 0x576098 = CRC-24 of the 88-bit body.

@@ -129,6 +129,8 @@ pub(super) enum SmallFile {
     SourceStates,
     /// When this store began recording (T-507).
     RecordingBegan,
+    /// This store's edge: newest frame end and watermark (T-942).
+    Edge,
 }
 
 #[derive(Debug)]

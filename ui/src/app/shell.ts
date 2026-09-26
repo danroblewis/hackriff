@@ -1,8 +1,10 @@
 // MUI shell (skeleton, T-149; T-150 owns it from here): top bar (brand, Explore/Decode toggle,
-// device + recording state, centre/span readouts, Go to, Review, theme), view switching, theme
+// device + recording state, centre/span readouts, Go to, Review, theme — in Explore these float over
+// the map instead, T-993 `chrome/top-chrome.ts`), view switching, theme
 // stamping, toast, the token dialog, and the `GET /api/control/state` poll feeding `device`.
 import { formatFrequency, parseFrequency } from "../controls/freq";
 import type { ControlState } from "../controls/model";
+import { placeTopChrome } from "./chrome/top-chrome";
 import type { AppContext } from "./context";
 import { byId, h } from "./dom";
 import { apiConnFor, startPoll, storeToken } from "./net";
@@ -54,6 +56,8 @@ export function mountShell(ctx: AppContext) {
   store.select((s) => s.mode, (mode) => {
     document.querySelectorAll<HTMLButtonElement>(".mode[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
     for (const [m, id] of Object.entries(VIEWS)) byId(id)!.hidden = mode !== m;
+    // T-993: Explore has no top bar — its controls float over the map; Decode/History get them back.
+    placeTopChrome(mode === "explore");
   }, { immediate: true });
 
   // Theme: "system" stamps nothing (prefers-color-scheme decides); dark/light stamp data-theme.
@@ -107,8 +111,15 @@ export function mountShell(ctx: AppContext) {
   }, { immediate: true });
 
   // Review badge (§4.1): open anomaly count, polled independently of the drawer's own tabs (T-155).
+  // T-993: the button keeps its icon and label (the label is hidden when it sits in the map's
+  // top-right cluster as an icon button), so the count is its own badge and the accessible name
+  // carries it wherever the button is.
   store.select((s) => s.openAlarms, (n) => {
-    byId("review-btn")!.textContent = n > 0 ? `Review (${n > 99 ? "99+" : n})` : "Review";
+    const btn = byId("review-btn")!;
+    const badge = btn.querySelector<HTMLElement>(".rv-n");
+    const count = n > 99 ? "99+" : String(n);
+    if (badge) { badge.textContent = n > 0 ? count : ""; badge.hidden = n <= 0; }
+    btn.setAttribute("aria-label", n > 0 ? `Review (${count})` : "Review");
   }, { immediate: true });
   startPoll(async () => {
     const r = await client.get<{ anomalies: readonly unknown[] }>("/api/anomalies?status=open&limit=100");

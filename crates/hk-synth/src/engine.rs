@@ -91,7 +91,8 @@ use crate::stage::{Stage, default_cap_bits, default_floor_bits};
 use crate::trace::{
     BeamCause, BlockVersion, BudgetCoverage, Coverage, FamilyCoverage, FamilyState,
     MIN_NULL_MARGIN_BITS, Measured, NullControl, Outcome, OutcomeKind, Reason, ReplayBudget,
-    ReplayKey, SkeletonCoverage, Spent, Swept, TraceBounds, TraceHypothesis, TraceNode,
+    ReplayKey, RuledOut, SkeletonCoverage, Spent, Suspected, SuspectedBy, Swept, TraceBounds,
+    TraceHypothesis, TraceNode,
 };
 use crate::trace_sink::{Trace, TraceSink};
 
@@ -181,6 +182,12 @@ pub struct Evaluated<O> {
     /// Decoded frames, when this stage produces them. Read only from the rank-1 prefix's
     /// hold-out run (the attach step's stored decodes, ADR-0015 §5.5); ignored elsewhere.
     pub frames: Vec<HoldoutFrame>,
+    /// ADR-0021 §7A.5's characterisation of a **framed, check-valid and unidentified** result —
+    /// framing, check, payload — as the evaluator measured it. The engine keeps the deepest
+    /// stage's on the **hold-out** run only (the window that solves or confirms), carries it onto
+    /// the result, and reads its presence as `structured-unidentified`. The engine never inspects
+    /// it: what is inside is the evaluator's measurement, not the search's opinion.
+    pub characterisation: Option<Value>,
 }
 
 /// Why an evaluation could not run.
@@ -302,6 +309,9 @@ pub struct UnsupportedStructure {
     pub family: Option<String>,
     /// The slot the block would fill.
     pub slot: Stage,
+    /// Who suspected it (ADR-0021 §7A.6). Seeding sets it; an unattributed suspicion says so
+    /// rather than borrowing a classifier's authority.
+    pub suspected_by: SuspectedBy,
     /// The posterior of the suspicion, if a classification made it.
     pub posterior: Option<f64>,
 }
@@ -489,6 +499,10 @@ pub struct SearchOutcome {
     /// The engine's reading of why nothing won, when nothing solved and the job finished
     /// (ADR-0021 §7A.3). M-9 seals the `Resolution` from it.
     pub reason: Option<Reason>,
+    /// The structure the search suspected and has no block for (ADR-0021 §7A.6), set exactly
+    /// when [`Self::reason`] is [`Reason::UnsupportedStructure`]. Named here, so the sealed
+    /// resolution states it rather than leaving a client to infer it from prose.
+    pub suspected: Option<Suspected>,
     /// Resources used.
     pub used: Used,
     /// The trace's cost.
@@ -533,7 +547,7 @@ impl SearchOutcome {
         replay_key: Option<Value>,
         ended: &str,
     ) -> Option<crate::trace::Resolution> {
-        use crate::trace::{Resolution, ResolutionKind};
+        use crate::trace::{MIN_RETRY_INTERVAL_S, Resolution, ResolutionKind, Retry};
         if self.state != JobState::Done {
             return Some(Resolution::not_searched(Some(ended.to_owned())));
         }
@@ -542,12 +556,33 @@ impl SearchOutcome {
         }
         let deepest = self.results.iter().map(|r| r.verdict).max();
         let null_control = self.null_control();
-        let (kind, text) = if self.reason == Some(Reason::UnsupportedStructure) {
+        // ADR-0021 §8.2 first: a capped result is `unknown` / `tied`, whatever else it carries.
+        // The control exists to stop a manufactured verdict, so nothing below it may outrank it.
+        let capped = null_control.filter(|n| n.capped);
+        let (kind, text) = if let Some(n) = capped {
+            (
+                ResolutionKind::Unknown,
+                format!(
+                    "Searched and not identified: the best candidate met the solve rule on \
+                     hold-out, but the null windows came within {:.1} bits of it, under the \
+                     {MIN_NULL_MARGIN_BITS}-bit margin.",
+                    n.margin_bits
+                ),
+            )
+        } else if let Some(u) = &self.suspected {
             (
                 ResolutionKind::UnsupportedStructure,
-                "The structure this looks like has no block to decode it yet.".to_owned(),
+                format!(
+                    "Suspected {} structure, which has no `{}` block in this build: nothing here \
+                     could decode it.",
+                    u.structure, u.missing_block
+                ),
             )
-        } else if self.results.iter().any(|r| r.characterisation.is_some()) {
+        } else if self
+            .results
+            .first()
+            .is_some_and(|r| r.characterisation.is_some())
+        {
             (
                 ResolutionKind::StructuredUnidentified,
                 "Framed and check-valid, but no known format matches.".to_owned(),
@@ -556,14 +591,8 @@ impl SearchOutcome {
             let why = match self.reason {
                 Some(Reason::NoSignal) => "no signal measured above the floor".to_owned(),
                 Some(Reason::NothingScored) => "every hypothesis measured below its floor".into(),
-                Some(Reason::Tied) => match null_control.filter(|n| n.capped) {
-                    Some(n) => format!(
-                        "the best candidate met the solve rule on hold-out, but the null windows \
-                         came within {:.1} bits of it, under the {MIN_NULL_MARGIN_BITS}-bit margin",
-                        n.margin_bits
-                    ),
-                    None => "the best candidates tied within the margin".to_owned(),
-                },
+                // A cap is handled above; this is the genuine tie of §7A.3.
+                Some(Reason::Tied) => "the best candidates tied within the margin".to_owned(),
                 Some(Reason::BudgetExhausted) => {
                     "the budget ran out before the space was covered".to_owned()
                 }
@@ -574,21 +603,52 @@ impl SearchOutcome {
                 format!("Searched and not identified: {why}."),
             )
         };
+        let not_before = ended
+            .parse::<f64>()
+            .ok()
+            .map(|t| (t + MIN_RETRY_INTERVAL_S).to_string());
         Some(Resolution {
             kind,
             deepest_verdict: deepest,
             reason: self.reason,
             coverage: Some(self.coverage.clone()),
-            suspected: None,
+            suspected: self.suspected.clone(),
             null_control,
-            ruled_out: Vec::new(),
-            retry: None,
+            ruled_out: self.ruled_out(),
+            retry: Some(Retry::of(kind, self.reason, not_before)),
             trace_summary,
             replay_key,
             explanations: Vec::new(),
             last_attempt: None,
             summary: text,
         })
+    }
+
+    /// The templates this search tried and did not solve (ADR-0021 §7A.2), best result per
+    /// template. A negative result about a named format is the durable half of "unknown": it is
+    /// what stops the next look re-trying what this one ruled out.
+    fn ruled_out(&self) -> Vec<RuledOut> {
+        let mut out: Vec<RuledOut> = Vec::new();
+        for r in self.results.iter().filter(|r| r.verdict != Verdict::Solved) {
+            let Some(t) = &r.template else { continue };
+            match out
+                .iter_mut()
+                .find(|o| o.template == t.id && o.version == t.version)
+            {
+                Some(o) if r.evidence_bits > o.best_bits => {
+                    o.deepest_stage = r.stage_reached;
+                    o.best_bits = r.evidence_bits;
+                }
+                Some(_) => {}
+                None => out.push(RuledOut {
+                    template: t.id.clone(),
+                    version: t.version,
+                    deepest_stage: r.stage_reached,
+                    best_bits: r.evidence_bits,
+                }),
+            }
+        }
+        out
     }
 }
 
@@ -615,6 +675,8 @@ struct Holdout {
     /// ADR-0021 §8.2 capped the verdict at `framed`.
     capped: bool,
     frames: Vec<HoldoutFrame>,
+    /// ADR-0021 §7A.5, measured on the hold-out window.
+    characterisation: Option<Value>,
 }
 
 /// One chain run over one window (hold-out or a null).
@@ -628,6 +690,7 @@ struct ChainRun {
     differences: u32,
     check: Option<CheckSummary>,
     frames: Vec<HoldoutFrame>,
+    characterisation: Option<Value>,
 }
 
 struct Node {
@@ -2703,6 +2766,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             differences: 0,
             check: None,
             frames: Vec::new(),
+            characterisation: None,
         };
         for &c in &chain {
             let (cand, range) = self.candidate(c);
@@ -2750,6 +2814,10 @@ impl<'a, E: Evaluator> Engine<'a, E> {
                 // `width` and `differences` from one block (T-575 review): the summary's node.
                 run.differences = differences(&ev.evidence, check.node.as_deref());
                 run.check = Some(check);
+            }
+            if window == EvalWindow::Holdout && ev.characterisation.is_some() {
+                // The deepest stage that characterises wins, for the same reason frames do.
+                run.characterisation = ev.characterisation;
             }
             if window == EvalWindow::Holdout && !ev.frames.is_empty() {
                 // The deepest stage that decodes wins: its frames carry the most structure.
@@ -2864,6 +2932,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             solved,
             capped,
             frames: run.frames,
+            characterisation: run.characterisation,
         });
         if solved && self.solved.is_none() {
             self.solved = Some(id);
@@ -3066,7 +3135,17 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             analytic_holdout_bits: n.holdout.as_ref().map(|h| h.ev.analytic_bits),
             check,
             frames_preview: Vec::new(),
-            characterisation: None,
+            // ADR-0021 §7A.5: only a hold-out characterisation counts, and only on an unsolved
+            // result — a solved one is identified, so there is nothing left uncharacterised.
+            // **Never on a capped one** (§8.2): the characterisation asserts "framed and
+            // check-valid", which is precisely the claim the null control just said it could not
+            // tell from chance. Carrying it would let the control's own cap create a durable
+            // positive finding, and the control may only cap.
+            characterisation: n
+                .holdout
+                .as_ref()
+                .filter(|h| !h.solved && !h.capped)
+                .and_then(|h| h.characterisation.clone()),
             holdout: n.holdout.as_ref().map(|h| h.ev.clone()),
         }
     }
@@ -3106,6 +3185,32 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         }
     }
 
+    /// The suspicion that makes this `unsupported-structure` (ADR-0021 §7A.3, §7A.6): the
+    /// highest-posterior structure with no block, when it outranks every skeleton actually
+    /// seeded and the family really is `unsupported` in the coverage map. `None` means the
+    /// absence of a decode is not explained by a missing block, and saying so would be a guess.
+    fn top_suspicion(&self, cov: &Coverage) -> Option<&'a UnsupportedStructure> {
+        // Roots carry their prior in bits; 2^prior is the posterior it came from.
+        let top_root = self
+            .spec
+            .roots
+            .iter()
+            .map(|r| 2f64.powf(f64::from(r.prior_bits)))
+            .fold(0.0f64, f64::max);
+        self.spec
+            .unsupported
+            .iter()
+            .filter_map(|u| u.posterior.map(|p| (p, u)))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .filter(|(p, u)| {
+                *p > top_root
+                    && cov.families.iter().any(|f| {
+                        Some(&f.family) == u.family.as_ref() && f.state == FamilyState::Unsupported
+                    })
+            })
+            .map(|(_, u)| u)
+    }
+
     /// ADR-0021 §7A.3, read mechanically from what the engine did.
     fn reason(
         &self,
@@ -3127,26 +3232,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         {
             return None;
         }
-        // The highest-posterior suspicion has no block.
-        let top_suspicion = self
-            .spec
-            .unsupported
-            .iter()
-            .filter_map(|u| u.posterior.map(|p| (p, u)))
-            .max_by(|a, b| a.0.total_cmp(&b.0));
-        // Roots carry their prior in bits; 2^prior is the posterior it came from.
-        let top_root = self
-            .spec
-            .roots
-            .iter()
-            .map(|r| 2f64.powf(f64::from(r.prior_bits)))
-            .fold(0.0f64, f64::max);
-        if let Some((p, u)) = top_suspicion
-            && p > top_root
-            && cov.families.iter().any(|f| {
-                Some(&f.family) == u.family.as_ref() && f.state == FamilyState::Unsupported
-            })
-        {
+        if self.top_suspicion(cov).is_some() {
             return Some(Reason::UnsupportedStructure);
         }
         let deepest = results.first().map(|r| r.stage_reached);
@@ -3292,6 +3378,15 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             .unwrap_or_default();
         let coverage = self.coverage(stop.unwrap_or(StopReason::Exhausted));
         let reason = stop.and_then(|s| self.reason(s, &results, &coverage));
+        let suspected = (reason == Some(Reason::UnsupportedStructure))
+            .then(|| self.top_suspicion(&coverage))
+            .flatten()
+            .map(|u| Suspected {
+                structure: u.structure.clone(),
+                missing_block: u.missing_block.clone(),
+                suspected_by: u.suspected_by,
+                posterior: u.posterior,
+            });
         let wall = self.start.elapsed();
         self.used.wall_s = wall.as_secs_f64();
         self.used.cpu_s = self.cpu.as_secs_f64();
@@ -3320,6 +3415,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             trace,
             coverage,
             reason,
+            suspected,
             used: self.used,
             trace_cost,
             nondeterministic: self.nondeterministic,

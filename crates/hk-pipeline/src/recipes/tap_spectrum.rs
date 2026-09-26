@@ -208,6 +208,7 @@ mod tests {
             bandwidth_hz: 240_000.0,
             emitter_id: None,
             channels: Vec::new(),
+            measured: None,
         }
     }
 

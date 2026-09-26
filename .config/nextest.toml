@@ -204,7 +204,11 @@ fail-fast = false
 # T-913 a fifth beside it: what the DETECT WRITER pays while that pass runs (the figure the
 # pass's own report cannot give). T-901
 # added the /ws/tiles/rows push-cadence bound, whose deterministic half is hk-store's
-# deferred-seal tests. T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
+# deferred-seal tests. T-939 added the detection reader's 20 Msps throughput bound — it streams a
+# paced 20 Msps front end for 10 s of wall clock and asserts the reader is never lapped and
+# analyses essentially all of it, which is a property of the box's headroom above all; its
+# deterministic halves gate normally (hk-core's ring reader-independence tests and
+# hk-pipeline::waterfall_survives_drops). T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
 # audio branch against the legacy Listen chain, same IQ); its audio/RDS/refinement parity half
 # gates normally (hk-pipeline::listen_recipe_parity).
 default-filter = '''
@@ -217,6 +221,7 @@ not (
   or test(the_retention_index_build_is_measured_per_row)
   or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
   or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
+  or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 )
 '''
 
@@ -272,6 +277,17 @@ test-group = 'e2e-bounded'
 
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'
+test-group = 'heavy-serial'
+
+# T-869 (ADR-0015 LP-5): the opener-switch tests each drive a whole mock-SDR run with an audio
+# pipeline attached — the same class as the hk-pipeline listen tests above, which the filter
+# already catches two of BY NAME (`two_listeners…`, `…serves_the_station…`). Pinning the binary
+# serialises the file as one instead of half of it: the unpinned half was load the serialised
+# tests around it still paid for (the group runs one at a time, but shares the box with
+# everything outside it), and it was measured turning `listen_recipe_parity` — whose audio
+# correlation bound is what LP-4 froze — red beside it while that test passed alone.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(listen_pipeline_switch)'
 test-group = 'heavy-serial'
 
 # T-SDET (2026-09-22): the blanket `package(hk-api) or package(hk-cli)` this replaces cost 244 s of
@@ -484,4 +500,5 @@ or test(a_detect_writer_waits_at_most_one_batch_behind_a_prune_pass)
 or test(the_retention_index_build_is_measured_per_row)
 or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
 or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
+or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
 '''

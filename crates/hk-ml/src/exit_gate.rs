@@ -16,8 +16,10 @@
 //! [`crate::host::ModelHost::decide`] refuses anything but `active`). This is the **gate-level**
 //! statement: whatever the system ended up in, does it satisfy the row?
 //!
-//! It is **not** a test that passes today because ML is off. With the host dormant (T-363) the
-//! modes list is empty and no row names a model, so the gate is satisfied — but it is satisfied
+//! It is **not** a test that passes because ML is off. On a run with no model in a non-`off` mode
+//! (the default: T-844 wired the host, but a run's stage is idle until an operator installs a
+//! model and puts it in `shadow`) the modes list is empty and no row names a model, so the gate is
+//! satisfied — but it is satisfied
 //! *by a measurement over a real run*, and the same predicate goes red the day an ML-attributed
 //! `Classification` row appears without an `active` model with evidence behind it. That is the
 //! property T-366 asked for: a check that **fails the day ML becomes active without its
@@ -155,7 +157,7 @@ impl MlGateSnapshot {
     ///
     /// On means *anything* ran or could have: a mode above `off`, a shadow record written, or a
     /// classification attributed to a model. `None` means ML was off, which is the honest state
-    /// while the host is dormant (T-363) and is reported as such rather than counted as a pass.
+    /// of a run whose ML stage is idle and is reported as such rather than counted as a pass.
     pub fn ml_on(&self) -> Option<String> {
         let live: Vec<_> = self
             .modes
@@ -252,9 +254,8 @@ impl MlGateSnapshot {
     /// The snapshot a **live host** is in: its modes, the evidence on each loaded manifest and its
     /// shadow-record counter, plus the rows and lost samples the caller measured elsewhere.
     ///
-    /// This is the seam the wiring change takes: once a host exists in the pipeline, the
-    /// acceptance gate builds its snapshot here instead of asserting the dormant state, and every
-    /// clause above starts biting on real modes.
+    /// The pipeline's ML stage (T-844) builds its snapshot here, one host at a time
+    /// (`hk_pipeline::ml::MlStage::gate_snapshot`), so the acceptance gate reads real modes.
     pub fn from_host(host: &ModelHost, rows: Vec<MlAttributedRow>, lost_samples: u64) -> Self {
         let evidence: Vec<(String, Option<String>)> = host
             .loaded()
@@ -306,7 +307,7 @@ mod tests {
         }
     }
 
-    /// The state the system is in today (T-363: the host is dormant), measured rather than
+    /// The state of a run whose ML stage is idle, measured rather than
     /// declared: nothing loaded, no ML-attributed row, no sample lost. The gate passes — and
     /// [`MlGateSnapshot::summary`] says clause 3 was not exercised rather than claiming it held.
     #[test]
