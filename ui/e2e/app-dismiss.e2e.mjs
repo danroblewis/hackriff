@@ -80,6 +80,14 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   assert.equal(insets.bottom, 0, `the panes are lifted ${insets.bottom} px above the page's bottom edge at ${width} px with no output strip open`);
   assert.ok(peek.y < paneBottom,
     `the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) sits below the panes' bottom edge (y ${Math.round(paneBottom)}) at ${width} px — the panes were lifted clear of it`);
+  // T-996 (the user's 2026-09-25 20:20 full-bleed amendment): nothing is reserved at the TOP either,
+  // and what T-933's lift protected still holds — the strip covers none of the picture's honesty
+  // statements (the status line, each pane's scale block), which float clear of it instead.
+  assert.equal(insets.top, 0, `a band is reserved at the canvas's top at ${width} px`);
+  const covered = await page.eval(`(() => { const s = document.querySelector('.sheet').getBoundingClientRect();
+    return [...document.querySelectorAll('.sf-status-line, .sf-scale:not([hidden])')].map((e) => [e.className, e.getBoundingClientRect()])
+      .filter(([, r]) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top).map(([c]) => c); })()`);
+  assert.deepEqual(covered, [], `the sheet's peek strip covers an honesty statement at ${width} px`);
 
   // (1) Each overlay alone: open from its small control, visible close, map back after.
   for (const o of OVERLAYS) {

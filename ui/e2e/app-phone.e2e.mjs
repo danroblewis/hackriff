@@ -43,8 +43,9 @@ const overlap = (a, b) => `(() => {
     .filter((B) => A && B.width > 0 && B.height > 0 && A.left < B.right && A.right > B.left && A.top < B.bottom && A.bottom > B.top).length;
 })()`;
 const opacity = (sel) => `Number(getComputedStyle(document.querySelector(${JSON.stringify(sel)})).opacity)`;
-// The active pane's frequency span, as the pane's own row states it ("115.200 MHz ± 53.8 MHz").
-const PANE_SPAN = `(() => { const m = /±\\s*([\\d.]+)\\s*(k|M|G)?Hz/.exec(document.querySelector('.sf-chrome')?.textContent ?? '');
+// The active pane's frequency span, as the kept status line states it ("115.200 MHz ± 53.8 MHz").
+// T-996: `.sf-where` — the per-viewport panel that used to carry this sentence is retired.
+const PANE_SPAN = `(() => { const m = /±\\s*([\\d.]+)\\s*(k|M|G)?Hz/.exec(document.querySelector('.sf-where')?.textContent ?? '');
   return m ? Number(m[1]) * ({ k: 1e3, M: 1e6, G: 1e9 }[m[2]] ?? 1) : null; })()`;
 
 test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to the view/device line`, async (t) => {
@@ -61,7 +62,7 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   await page.waitFor("the floating controls, the sheet and the inventory pills",
     `!!document.querySelector('.map-ctl .map-zoom-in') && !!document.querySelector('.sf-pane-live-btn') &&
      document.querySelector('.sheet')?.dataset.snap === 'peek' &&
-     !!document.querySelector('.map-inv .map-pill') && !!document.querySelector('.sf-chrome')`, { timeoutMs: 240000 });
+     !!document.querySelector('.map-inv .map-pill') && !!document.querySelector('.sf-where')?.textContent`, { timeoutMs: 240000 });
   await page.frames(5);
   await shot("1-open");
 
@@ -87,8 +88,9 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   assert.equal(await page.eval(overlap(".map-zoom", ".map-topright")), 0, "the zoom stack collides with the top-right cluster");
   assert.equal(await page.eval(overlap(".sf-pane-live-btn", ".map-zoom, .map-topright, .map-goto")), 0,
     "the pane's Live button collides with the floating chrome");
-  assert.equal(await page.eval(overlap(".sheet", ".sf-note, .sf-chrome, .sf-ring")), 0,
-    "the sheet's peek strip covers one of the surface's honesty statements");
+  // T-996: what is ON the picture at the bottom is the one status line and each pane's scale block.
+  assert.equal(await page.eval(overlap(".sheet", ".sf-status-line, .sf-scale")), 0,
+    "the sheet's peek strip covers the status line or a pane's scale bar");
 
   // (2) Idle fade, and back on a touch.
   await page.waitFor("the chrome to go idle (~6 s)", "document.body.classList.contains('chrome-idle')", { timeoutMs: 15000 });
@@ -101,13 +103,14 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   const idle = JSON.parse(await page.eval(`JSON.stringify({
     status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, zoom: ${opacity(".map-zoom")},
     live: ${opacity(".sf-pane-live-btn")}, pills: ${opacity(".map-inv")}, sheet: ${opacity(".sheet")},
-    chrome: ${opacity(".sf-chrome")}, note: ${opacity(".sf-note")} })`));
+    where: ${opacity(".sf-status-line")}, scale: ${opacity(".sf-scale")} })`));
   t.diagnostic(`idle opacities: ${JSON.stringify(idle)}`);
   // T-994: the dock bar is retired, so there is no bottom bar left to fade.
   for (const k of ["status", "nudge", "zoom", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
   // T-1001: a pane's Live button is also its statement of whether what it shows is live, and an
   // honesty statement never fades (docs/23 §10.2) — it is on the picture, not in the cluster.
-  for (const k of ["sheet", "chrome", "note", "live"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
+  // T-996: the one status line and each pane's scale block are the honesty statements on the picture.
+  for (const k of ["sheet", "where", "scale", "live"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
   // T-1025: the wake-up touch lands on the DEVICE chip, found by its own box, not on a fixed
   // (200, 110) that happened to be over the Explore button while the status pill was one wide box.
   // The chips made that point "Decode" — the touch switched view, and everything after it was
