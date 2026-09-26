@@ -72,6 +72,12 @@ export function apiConnFor(e: unknown): { api: ApiConn; message: string } {
   const { reaction, message } = reactionTo(e);
   if (reaction === "reauth") return { api: "unauthorized", message };
   if (reaction === "offline") return { api: "offline", message };
+  // T-1063: `503 overloaded` is the server ANSWERING at its connection cap, with `Retry-After`.
+  // A 5xx normally means the server is not coping and the UI says offline; this one means it is
+  // coping — it refused one connection and told us when to come back. The caller (every poller
+  // here) retries on its own cadence, so the connection state stays `ok` rather than painting the
+  // whole UI offline for a single refused socket.
+  if (e instanceof ControlError && e.code === "overloaded") return { api: "ok", message };
   return { api: e instanceof ControlError && e.status >= 500 ? "offline" : "ok", message };
 }
 

@@ -21,7 +21,8 @@
 - **Methods.** `GET`, `POST`, `PUT`, `DELETE`, `OPTIONS` are parsed; anything else is `405`. A *known* path with the wrong method is `405` with an `Allow` header listing the methods it does accept. An *unknown* `/api/*` path is `404`.
 - **Errors.** Every non-2xx JSON body is `{"error": "<message>"}`; every route reached through the control dispatcher (`control.rs`/`selections.rs`/`outputs.rs`/`inventory.rs` — everything except the five read-only endpoints in the first table below and `/ws/*`) additionally carries a stable machine `"code"`: `{"error", "code"}`. Error messages never echo raw request values. Common codes: `invalid` (400, malformed/out-of-range field), `not_found` (404), `unauthorized` (401), `forbidden`/cross-origin (403), `not_live` (409, device settings on a replayed recording), `device_required` (400, a device route on a run with several front ends and no `device_id` selector — T-511), `unknown_device` (404, a `device_id` selector naming no front end this run holds), `conflict` (409, a re-plumb or another operation is in progress), `refused` (409, legal/content-class gate said no), `finished` (409, the run has ended), `timeout` (504), `out_of_range` (400, a device value outside its capabilities), `unsupported` (501, the device lacks the capability, e.g. no bias tee), `not_implemented` (501, a route is defined but its engine isn't built yet), `busy`/`quota` (503/507, output-recording admission), `unavailable` (503, the server has no audit log / bookmark store / output recorder / etc. for this feature).
 - **Audit.** Every **mutating** request to `/api/control/*`, `/api/bookmarks*`, `/api/collections*`, `/api/markers*`, `/api/selections*`, `/api/outputs*` or `/api/inventory/{id}*` is written to the run's audit log (`<data dir>/control-audit.jsonl`, mode `0600`) once authenticated: time, token id (never the token), peer, method, path, action name, request body, old/new values, status, result. A request that reaches the front end also carries `device: {action, id}` (T-343), so the log distinguishes the requests that changed the radio from the ones that changed the view, and says which radio. Unauthenticated mutating attempts are logged too, coalesced per client to bound disk use. **`GET` requests are never audited**, on any route. Without an audit log every mutating endpoint answers `503 unavailable`. See `crates/hk-api/src/control.rs` module docs for the exact schema.
-- **Bounded resources.** At most `ServerConfig::max_connections` (default 64) connection threads at once (WebSocket consumers included); request heads ≤ 16 KiB, bodies ≤ 64 KiB, both within `request_timeout` (default 10 s); `/api/history`/`/api/floor`/`/api/inventory` cap result size (below).
+- **Bounded resources, in two pools (T-1063).** At most `ServerConfig::max_connections` (default **256**) HTTP connection threads and `ServerConfig::max_ws_connections` (default **128**) WebSocket ones. A connection is counted as HTTP from the moment it is accepted — nothing has been read from it yet — and moves to the WebSocket pool as soon as its handler sees a `/ws/…` `GET`, so a tab's 17–19 long-lived stream sockets cannot exhaust the HTTP slots its own requests need. Request heads ≤ 16 KiB, bodies ≤ 64 KiB, both within `request_timeout` (default 10 s); `/api/history`/`/api/floor`/`/api/inventory` cap result size (below).
+- **At a cap the server answers; it never drops the connection (T-1063).** A connection past either cap gets `503 Service Unavailable` with `Retry-After: 1`, `Connection: close` and `{"error", "code": "overloaded"}` — written from the accept thread as canned bytes, with no handler thread, so a server at its cap does the least work per refused connection and still says so. It is counted per pool on `GET /api/health` and logged at most once a second with the number refused since the last line. **A client must treat `overloaded` as retryable**, like any other `503` on this API: the server is alive and asking for a moment, which is exactly what the old silent drop could not express — behind cloudflared it surfaced only as the tunnel's "Unable to reach the origin service: EOF" (8 622 in 15 minutes, 2026-09-26), with no response, no log and no counter anywhere on this side.
 - **Receive only.** No route reaches a transmit path; `transmit.available` is always `false` (C37 stays gated at the type level, not just by convention — there is no transmit operation to call).
 
 ## Read-only query routes
@@ -40,6 +41,7 @@
 | GET | `/api/timeline` | token | `f_lo`+`f_hi`? (Hz, together), `columns`? (1…4096, default 96), `rows`? (1…512, default 1). **No `t0`/`t1`** — the time extent is the ring's, not the caller's | T-338 the capture window (the IQ ring's configured retention), the compressed overview waterfall drawn on it, and T-423 the record-derived per-cell coverage plane beside it (below) | 400 unknown parameter, a half-given band, or a column/row budget out of range; 404 no spectrum history on this server |
 | GET | `/api/coverage` | token | `f_lo`+`f_hi` (Hz, **required**), `cells`? (1…4096, default 256), `rows`? (1…4096, default 1), `t0`+`t1`? (Unix s, together; default the capture window) | T-368 the coverage map: which front end actually sampled which frequency **and when** (T-423's time axis), so a view greys only what was **never observed** (below) | 400 unknown parameter, a missing or half-given band, a half-given window, or a cell/row budget out of range; 404 no capture window and no `t0`/`t1` given |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
+| GET | `/api/health` | token | – | T-1063 the server's own connection health: pool occupancy, caps and connections refused at a cap (below) | 401 |
 
 None of these are audited (`GET` requests never are). All are capped in result size as noted per route.
 
@@ -1502,6 +1504,28 @@ WebSocket; token as for every `/ws/` route; no other query parameter (anything e
 - **What it means for a client:** every tile intersecting `[f_lo, f_hi] × [t, ∞)` holds coverage that is now out of date — from `t` the band left is `unobserved` (the departed band's fog) and the band arrived at is observed — and **no other tile changed**. So the client re-asks its coverage survey at once and re-fetches exactly those tiles it holds, in one batch (`ui/src/surface/changefeed.ts`, `TileCache.coverageChanged`); the survey timer and the live-edge refresh lane become the fallback for a socket that is not open, until LSR-5 retires the lane. By the time the event is sent the coverage map already answers `unobserved` over the band left between `t` and `as_of_s` (contract: `api_contract.rs::coverage_changed_is_pushed_once_per_retune_and_the_departed_fog_is_already_served`).
 - **Where the band comes from:** the same tune records the coverage map rasterises — the IQ ring's journal (the tuned window, `center ± rate/2`) and, for a front end the ring holds nothing for (the ring refused, T-588/T-596), the observation log's dwell in flight (its analysed extent, the hull of a notched dwell's spans). **One source per front end, never a mix**: alternating between a tuned and an analysed extent would report moves that never happened. Nothing new is recorded.
 - **Cost and cap:** each tick reads the ring's 64 newest segments and the dwells in flight, both in memory. At most **16** change subscriptions are open per server; the seventeenth is refused `4503`. Refusals complete the upgrade and close with `4000 + status`, as `/ws/tiles/rows` does; a request that is not an upgrade is `426`. Anything the client sends other than a close or a ping is ignored.
+
+### `GET /api/health` — connection health (T-1063)
+
+What the server is doing about its own connection limits. **Separate from `/api/status`**, which is the *pipeline's* counters and answers `404` on a server with no run: this is a fact about the server process itself and is always answerable, including on a server that is refusing connections and serving nothing else.
+
+```json
+{"t": 1790000000.5,
+ "connections": {
+   "http": {"open": 12, "max": 256, "refused": 0},
+   "websocket": {"open": 18, "max": 128, "refused": 0},
+   "refused_last_t": null}}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | number | The server's wall clock when the response was built, Unix seconds (as `/api/status`) |
+| `connections.<pool>.open` | integer | Connections the pool is holding right now (the request making this call is itself one of `http.open`) |
+| `connections.<pool>.max` | integer | The pool's cap: `ServerConfig::max_connections` / `max_ws_connections` |
+| `connections.<pool>.refused` | integer | Connections answered `503 overloaded` at that pool's cap since the server started — cumulative, never reset, and never rate-limited (the log line is; this is the authoritative number) |
+| `connections.refused_last_t` | number \| null | When the most recent refusal happened, Unix seconds; `null` if there has been none |
+
+A non-zero `refused` is not an error to hide: it is the measurement that says the caps, or the client's request volume, need attention. `http.refused` rising while `websocket.open` sits near its own cap is the shape of the defect T-1063 fixed.
 
 ### `GET /api/status` — pipeline counters (T-027)
 

@@ -486,9 +486,13 @@ prints a warning when it binds non-loopback.
 
 **Caps.** In addition to the per-stream `max_consumers` (§2) and per-consumer queue (§7), the HTTP
 server bounds request size and concurrency: request heads are capped at 16 KiB and must complete
-within `request_timeout` (default 10 s), and at most `ServerConfig::max_connections` (default 64)
-connection threads run at once, WebSocket consumers included — a further TCP connection is simply
-not accepted until one frees up. `/api/history` and `/api/floor` (below) additionally cap query
+within `request_timeout` (default 10 s), and connection threads run in **two capped pools**
+(T-1063): at most `ServerConfig::max_connections` (default 256) HTTP ones and
+`max_ws_connections` (default 128) WebSocket ones, a connection moving from the first pool to the
+second as soon as its handler sees a `/ws/…` `GET`, so long-lived stream sockets cannot exhaust the
+HTTP slots. Past a cap the connection is **answered** `503` with `Retry-After: 1` and
+`{"code": "overloaded"}` — a client should retry — and counted on `GET /api/health`; before
+T-1063 it was dropped unanswered, which behind a tunnel reads only as EOF. `/api/history` and `/api/floor` (below) additionally cap query
 result size.
 
 **Consumers never write.** As in §2: any byte a browser sends (a close frame included) or a hang-up
