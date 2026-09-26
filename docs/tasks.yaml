@@ -30482,7 +30482,7 @@ tasks:
   - id: T-1042
     milestone: MLIVE
     title: "LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)"
-    status: in-progress
+    status: done
     branch: task-t1042
     priority: high
     deps: []
@@ -30497,6 +30497,7 @@ tasks:
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)
     high_effort_reason: the live-edge rendering path (the user's live waterfall) is replaced by a ring; per-row cost on the render loop must stay honest
+    commit: 8e8f6928
   - id: T-1043
     milestone: MLIVE
     title: "LSR-2: GET /ws/spectrum/rows - per-pane folded, quantised binary row subscription with t_from (store walk -> live), epoch and coverage trailer"
