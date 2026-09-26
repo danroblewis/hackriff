@@ -80,25 +80,61 @@ export interface SelectionsSlice { list: readonly Selection[]; sync: string }
  * band override rewrites what the user is shown about a specific emitter, so which emitter must be
  * something the user said rather than something the gesture inferred.
  */
-export interface ExploreState { focus: Focus; bandEdit: string | null; inventory: InventorySlice; selections: SelectionsSlice }
+/**
+ * Whether the **detail card** — the bottom sheet (T-803) that shows what is selected, the lists a
+ * pill opens and the Explore drawer — is on screen at all (T-1026, user 2026-09-25).
+ *
+ * The card is a Google-Maps place card: **hidden until the viewer clicks something.** It opens when a
+ * feature is selected ([[focusSignal]], [[focusSelection]] — a box, a pin, a marker, a list row) or
+ * when an inventory pill asks for a list ([[openCardOnList]]); it closes on a click on bare map, on
+ * its ×, and on Escape ([[closeCard]]). Openness is view state and nothing else: it reaches no route,
+ * and — unlike the sheet's peek/half/full *size*, which is a per-viewer `localStorage` preference —
+ * it is never persisted, because it belongs to the current selection and not to the browser profile.
+ */
+export interface CardSlice { open: boolean }
+
+export interface ExploreState { card: CardSlice; focus: Focus; bandEdit: string | null; inventory: InventorySlice; selections: SelectionsSlice }
 
 export const exploreInitial = (): ExploreState => ({
+  // T-1026: hidden. The first paint of the map has no card on it.
+  card: { open: false },
   focus: { kind: "none" },
   bandEdit: null,
   inventory: { tab: "confirmed", sort: { key: "freq", dir: 1 }, rows: {}, window: null, panes: {}, active: null, loadedAtS: null, error: null },
   selections: { list: [], sync: "" },
 });
 
-/** Focus a signal; switches the inventory tab to the row's state so the row is visible. */
+/** Focus a signal; switches the inventory tab to the row's state so the row is visible, and opens
+ * the detail card on it (T-1026: selecting a feature is what puts the card on screen). */
 export const focusSignal = (id: string) => (s: AppState): Partial<AppState> => {
   const row = s.inventory.rows[id];
   const tab: InventoryTab | null = row && (row.state === "confirmed" || row.state === "candidate") ? row.state : null;
   return tab && tab !== s.inventory.tab
-    ? { focus: { kind: "signal", id }, inventory: { ...s.inventory, tab } }
-    : { focus: { kind: "signal", id } };
+    ? { card: { open: true }, focus: { kind: "signal", id }, inventory: { ...s.inventory, tab } }
+    : { card: { open: true }, focus: { kind: "signal", id } };
 };
 
-export const focusSelection = (id: string) => (): Partial<AppState> => ({ focus: { kind: "selection", id } });
+export const focusSelection = (id: string) => (): Partial<AppState> => ({ card: { open: true }, focus: { kind: "selection", id } });
+
+/**
+ * Put the card on screen showing one of the inventory lists — what an inventory pill does (T-997's
+ * pills, T-1026's card): the list is chosen here, so a pill needs one write and the card can never
+ * open on a list other than the one the pill named. No selection is invented: the card opens on the
+ * list, with whatever (or nothing) was focused still focused.
+ */
+export const openCardOnList = (tab: InventoryTab) => (s: AppState): Partial<AppState> => ({
+  card: { open: true }, inventory: s.inventory.tab === tab ? s.inventory : { ...s.inventory, tab },
+});
+
+/**
+ * Close the card and clear the selection — a click on bare map, the ×, or Escape (T-1026).
+ *
+ * The selection goes with it deliberately: a card closed over a still-selected box would leave the
+ * map with a highlighted feature and no card, and clicking that same box again would then change
+ * nothing to re-open it. "Click the back of the map and it goes away" means the selection went away.
+ */
+export const closeCard = () => (s: AppState): Partial<AppState> =>
+  (s.card.open === false && s.focus.kind === "none" ? {} : { card: { open: false }, focus: { kind: "none" } });
 
 /** Arms (or disarms, with `null`) the next region stroke as a band override for that row — see
  * [[ExploreState.bandEdit]]. */
