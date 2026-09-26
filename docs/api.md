@@ -792,6 +792,8 @@ It is served with its semantics **on the wire**, in `grid.semantics`, because a 
 
 Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `cells` (1…4096, default 256), `rows` (1…4096, default 1 — the **time** axis, T-423), `t0`&`t1` (Unix s, given together; default the capture window this server holds).
 
+**Asking with no `t0`/`t1` asks about the capture window, which is the IQ ring's span — not about all of history (T-1055).** The default window is `GET /api/timeline`'s `window` (`crates/hk-api/src/coverage.rs`, `window_of` → `timeline::capture_window`): `t1` is the live edge and `t0` is `t1 − retention_s`, minutes, not days. `window.source` says which it was — `"capture-window"` or `"requested"` — so the answer always states the span it is of. The consequence is the one an explorer measured on 2026-09-25: a survey pass that had swept 1 MHz–6 GHz over the previous half hour read back as *observed only for the step in progress*, because everything before the ring's retention was outside the window asked about, and the un-timed query never said which half hour it meant. **A client asking about a pass, a scan or any past interval passes that interval's own `t0`/`t1`** — the observation log reaches 180 days, so the records are there to find; only the default is short. Every product caller already does (`ui/src/surface/survey.ts`'s `surveyUrl`, `ui/src/navigators.ts`'s `coverageRequest` — T-379 fixed exactly this bug one surface earlier, `ui/src/app/explore/inventory.ts`, `ui/src/app/chrome/explore-drawer.ts`); the scan panel and the map's scan overlay read `/api/control/scan`, whose `progress.started_s` is the pass's own `t0`.
+
 **The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view"):
 
 > **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** The view renders whatever samples are actually available for the current time-and-frequency selection, and greys only cells that were truly never observed — never a fixed-size grey placeholder. … This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage.
@@ -803,19 +805,23 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   "region": { "lo_hz": 88000000.0, "hi_hz": 108000000.0 },
   "window": { "t0_s": 1789300320.0, "t1_s": 1789300920.0, "span_s": 600.0,
               "source": "capture-window" },   // or "requested" when t0/t1 were given
-  "grid":   { "cells": 4, "rows": 1, "requested_rows": 1,     // `rows` is the REALISED time axis
-              "f_lo_hz": 88000000.0, "f_cell_hz": 5000000.0,
+  "grid":   { "cells": 5, "rows": 1, "requested_rows": 1,     // `rows` is the REALISED time axis
+              "f_lo_hz": 88000000.0, "f_cell_hz": 4000000.0,
               "t0_s": 1789300320.0, "t_cell_s": 600.0,
               "order": "row-major: cells[t * cells + f], earliest row first, low frequency first" },
   "devices": [{                                // one entry per front end that actually sampled here
     "device": "hackrf:0000000000000000a06063c8234e925f",
     "named": true,                             // false for the "unknown" and "any" labels
-    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "excluded_cells": 1,
-    "observed_fraction": 0.5,
+    // The five cells below, counted: three `observed`, one `excluded`, one `unobserved`. The states
+    // are counted separately and always sum to `grid.cells` (T-1055 fixed this example, which
+    // summed to 5 over a grid it called 4 cells wide).
+    "observed_cells": 3, "unobserved_cells": 1, "unknown_cells": 0, "excluded_cells": 1,
+    "observed_fraction": 0.6,
     // T-964: the same census with the TIME AXIS COLLAPSED — one entry per frequency cell, sampled
-    // if ANY row sampled it. The survey question; see below.
-    "bands": { "cells": 4, "observed_cells": 2, "excluded_cells": 1, "unobserved_cells": 1,
-               "unknown_cells": 0, "observed_fraction": 0.75, "rule": "collapsed over time: …" },
+    // if ANY row sampled it. The survey question; see below. With `rows: 1` it equals the grid
+    // census above, cell for cell.
+    "bands": { "cells": 5, "observed_cells": 3, "excluded_cells": 1, "unobserved_cells": 1,
+               "unknown_cells": 0, "observed_fraction": 0.6, "rule": "collapsed over time: …" },
     "cells": [
       // 1. observed, and there was energy
       { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
@@ -840,7 +846,7 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
     ]
   }],
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
-           "unknown_cells": 0, "bands": { "…": "…" }, "cells": [ … ] },
+           "unknown_cells": 0, "excluded_cells": 1, "bands": { "…": "…" }, "cells": [ … ] },
   "horizon": { "oldest_record_s": 1789214520.0,  // null when nothing here holds a tune record
                "recording_began_s": 1789214400.0, // T-507: null when nothing here ever recorded
                "forgotten": null,                 // or why the past before it is unbounded
@@ -850,12 +856,13 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
                "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", and must be drawn as neither grey nor a level …" },
   "sources": [
     // T-920: `available` never travels alone - `state`/`reason` say WHICH negative a false is.
+    // T-1055: `truncated` says whether THIS source answered with fewer records than it holds.
     { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true,
-      "state": "open", "reason": null },
+      "truncated": false, "state": "open", "reason": null },
     { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true,
-      "state": "open", "reason": null },
+      "truncated": false, "state": "open", "reason": null },
     { "kind": "open-dwell",      "spans":  1, "named_spans":  1, "device_known": true, "available": true,
-      "state": "open", "reason": null }  // T-596: the dwell in flight
+      "truncated": false, "state": "open", "reason": null }  // T-596: the dwell in flight
   ],
   "shade": { "fold": "max-hold", "rule": "max-hold: a cell is the maximum of the source cells folded into it, … the max of nothing is unobserved, not zero",
              "statistic": "max-hold over the whole window, per frequency cell",
@@ -933,6 +940,19 @@ sampled, that `bands` equals the fold of the cells served beside it, that the (t
 is **not** sampled everywhere (a sweep visits one window at a time), and that a band the pass never
 reached stays `unobserved`. The client half — the orientation sentence quoting this share — is
 `ui/test/surface-preview.test.ts`.
+
+#### How many records one answer reads, and `sources[].truncated` (T-1034, paged by T-1055)
+
+The spans are read from two tune histories, and **each read is bounded** — a coverage answer is on the interactive path, one per viewport. The observation log is read in pages of 10 000 records (`MAX_RECORD_LIMIT`), at most **4 of them** (`MAX_RECORD_PAGES`, 40 000 records); the IQ ring's segment list is capped at 10 000 (`RING_SEGMENTS`).
+
+A bound that binds silently is the problem this field exists to prevent. The log answers **oldest-first**, so a cut read loses the **newest** records — exactly the ones that answer *when was this band last looked at* — and every cell they would have marked comes back `"unobserved"`, which is this route's strongest claim. One `Scan everything` pass writes one record per step (~418 for a coarse 1 MHz–6 GHz pass, far more for a fine one), so before T-1055 a window holding a couple of dozen passes reached the single-page limit and dropped the rest without a word; `bands` (T-964) under-counted with it.
+
+So every `sources[]` row carries **`truncated`**, always, `false` included:
+
+- `truncated: true` means *this source answered with fewer records than it holds over this window*. The spans are then not every span, and **"no span here" is not evidence of anything** — a reader may not draw grey from it, the same way it may not draw grey past `horizon.as_of_s`.
+- The `open-dwell` source is read whole (one dwell per front end) and is always `false`.
+- It is a statement about the **read**, never about the data: nothing was forgotten, and a narrower window or band answers in full.
+- `GET /api/tiles`'s shadow search reads the same evidence and already refuses to use a cut read as a quiet bound (`tiles::record_quiet_after` returns no bound at all when either source is truncated), so a truncated answer never becomes a skipped tile read.
 
 #### The time axis: `rows` (T-423)
 
