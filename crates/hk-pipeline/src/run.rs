@@ -595,6 +595,21 @@ pub fn open_mock_replay(
     pacing: Pacing,
     end: hk_core::MockEnd,
 ) -> anyhow::Result<DeviceReplay> {
+    open_mock_replay_with_block_len(path, pacing, end, None)
+}
+
+/// [`open_mock_replay`] delivering `block_len`-sample transfers instead of
+/// [`replay_block_len`]'s 5 ms blocks (`None`: those).
+///
+/// T-926: a live HackRF delivers 65 536-sample transfers, and a 5 ms block divides every
+/// half-second a chain collects in stages (0.5 s is 100 of them at 2.4 Msps) where a live
+/// transfer never does — so a replay could hide a defect that live air showed on every station.
+pub fn open_mock_replay_with_block_len(
+    path: &Path,
+    pacing: Pacing,
+    end: hk_core::MockEnd,
+    block_len: Option<usize>,
+) -> anyhow::Result<DeviceReplay> {
     let fs = SigmfMeta::read(path)
         .with_context(|| format!("reading {}", path.display()))?
         .global
@@ -603,7 +618,7 @@ pub fn open_mock_replay(
     let driver = hk_core::MockSdrDriver::new(
         path,
         hk_core::MockOptions {
-            block_len: replay_block_len(fs),
+            block_len: block_len.unwrap_or_else(|| replay_block_len(fs)),
             pacing,
             end,
             ..hk_core::MockOptions::default()
@@ -1281,6 +1296,15 @@ impl Pipeline {
             Err(e) => {
                 eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}")
             }
+        }
+        // T-940: for the same reason, no track of an earlier process is being followed any more.
+        // A run that was killed never stopped following its open tracks, and a row still marked
+        // followed reads as ongoing on the report it last got — so each is released to the closed
+        // reading, where the silence after it is whatever the receiver has watched since.
+        match repo.stop_following_all() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("hk-pipeline: released {n} track report(s) left by an earlier run"),
+            Err(e) => eprintln!("hk-pipeline: cannot release earlier track reports: {e}"),
         }
         repo.insert_survey(&survey)?;
         store_calibrations(&mut repo, &cfg.calibrations)?;

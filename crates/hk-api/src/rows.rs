@@ -599,12 +599,12 @@ fn read_rows(
 // ---------------------------------------------------------------------------------------------
 
 /// Counts open subscriptions against [`MAX_ROW_FEEDS`]; released on drop.
-struct FeedSlot<'a>(&'a AtomicUsize);
+pub(crate) struct FeedSlot<'a>(&'a AtomicUsize);
 
 impl<'a> FeedSlot<'a> {
-    fn take(n: &'a AtomicUsize) -> Option<Self> {
+    pub(crate) fn take(n: &'a AtomicUsize, max: usize) -> Option<Self> {
         n.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-            (v < MAX_ROW_FEEDS).then_some(v + 1)
+            (v < max).then_some(v + 1)
         })
         .ok()
         .map(|_| Self(n))
@@ -629,7 +629,7 @@ fn http_error(stream: &mut TcpStream, status: u16, message: &str) {
     let _ = stream.flush();
 }
 
-fn close(ws: &mut WebSocket<TcpStream>, code: u16, reason: &str) {
+pub(crate) fn close(ws: &mut WebSocket<TcpStream>, code: u16, reason: &str) {
     let mut end = reason.len().min(120);
     while !reason.is_char_boundary(end) {
         end -= 1;
@@ -646,7 +646,7 @@ fn close(ws: &mut WebSocket<TcpStream>, code: u16, reason: &str) {
 /// Completes the upgrade, sends `{"type":"refused",…}` and closes with `4000 + status` — the
 /// `/ws/open/{name}` convention, because a browser cannot read an HTTP error body on a failed
 /// upgrade.
-fn refuse(mut ws: WebSocket<TcpStream>, e: &ApiError) {
+pub(crate) fn refuse(mut ws: WebSocket<TcpStream>, e: &ApiError) {
     let _ = ws.send(Message::Text(
         json!({ "type": "refused", "status": e.status, "reason": e.message })
             .to_string()
@@ -655,12 +655,12 @@ fn refuse(mut ws: WebSocket<TcpStream>, e: &ApiError) {
     close(&mut ws, 4000 + e.status, &e.message);
 }
 
-fn send(ws: &mut WebSocket<TcpStream>, v: &Value) -> bool {
+pub(crate) fn send(ws: &mut WebSocket<TcpStream>, v: &Value) -> bool {
     ws.send(Message::Text(v.to_string().into())).is_ok()
 }
 
 /// `true` while the peer is still there. Reads (and so answers pings) for at most `wait`.
-fn peer_alive(ws: &mut WebSocket<TcpStream>, wait: Duration) -> bool {
+pub(crate) fn peer_alive(ws: &mut WebSocket<TcpStream>, wait: Duration) -> bool {
     let _ = ws.get_mut().set_read_timeout(Some(wait));
     match ws.read() {
         Ok(Message::Close(_)) => false,
@@ -678,13 +678,13 @@ fn peer_alive(ws: &mut WebSocket<TcpStream>, wait: Duration) -> bool {
     }
 }
 
-/// Serves one `/ws/tiles/rows` request (token already verified).
-pub(crate) fn serve(
+/// Completes a WebSocket upgrade on `stream` (T-1040: shared by `/ws/tiles/rows` and
+/// `/ws/tiles/changes`). A request that is not an upgrade is answered `426` (or `400` without a
+/// key) and `None` is returned.
+pub(crate) fn accept(
     mut stream: TcpStream,
-    state: &ApiState,
-    query: &Params,
     headers: &[(String, String)],
-) {
+) -> Option<WebSocket<TcpStream>> {
     let header = |n: &str| {
         headers
             .iter()
@@ -695,13 +695,16 @@ pub(crate) fn serve(
         header(n).is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(want)))
     };
     if !has("upgrade", "websocket") || !has("connection", "upgrade") {
-        return http_error(&mut stream, 426, "WebSocket upgrade required");
+        http_error(&mut stream, 426, "WebSocket upgrade required");
+        return None;
     }
     if header("sec-websocket-version") != Some("13") {
-        return http_error(&mut stream, 426, "WebSocket version 13 required");
+        http_error(&mut stream, 426, "WebSocket version 13 required");
+        return None;
     }
     let Some(key) = header("sec-websocket-key") else {
-        return http_error(&mut stream, 400, "missing Sec-WebSocket-Key");
+        http_error(&mut stream, 400, "missing Sec-WebSocket-Key");
+        return None;
     };
     let handshake = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
@@ -709,11 +712,23 @@ pub(crate) fn serve(
         tungstenite::handshake::derive_accept_key(key.as_bytes())
     );
     if stream.write_all(handshake.as_bytes()).is_err() {
-        return;
+        return None;
     }
     let _ = stream.set_write_timeout(Some(Duration::from_secs(20)));
-    let mut ws = WebSocket::from_raw_socket(stream, Role::Server, None);
-    let Some(_slot) = FeedSlot::take(&state.row_feeds) else {
+    Some(WebSocket::from_raw_socket(stream, Role::Server, None))
+}
+
+/// Serves one `/ws/tiles/rows` request (token already verified).
+pub(crate) fn serve(
+    stream: TcpStream,
+    state: &ApiState,
+    query: &Params,
+    headers: &[(String, String)],
+) {
+    let Some(mut ws) = accept(stream, headers) else {
+        return;
+    };
+    let Some(_slot) = FeedSlot::take(&state.row_feeds, MAX_ROW_FEEDS) else {
         return refuse(
             ws,
             &ApiError::new(

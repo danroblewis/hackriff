@@ -185,7 +185,7 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
 test("T-919: the status box is a collapsed line by default, with a toggle and a dismiss that never hides the honesty statements", () => {
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
   // The paragraphs — the ones that made it tall — are the BODY, and the body starts hidden.
-  assert.match(host, /class: "sf-status-body", id: "sf-status-body", hidden: true \},\s*\n?\s*traceEl, ringEl, fogEl, priorsEl, note\)/,
+  assert.match(host, /class: "sf-status-body", id: "sf-status-body", hidden: true \},\s*\n?\s*traceEl, ringEl, metricsEl, fogEl, priorsEl, note\)/,
     "the sentences are not the collapsible body, or the body does not start closed");
   // The line is always on the picture, and carries the per-viewport level/tier row (§10.2: an
   // honesty statement is never hidden) and the colour-scale sentence (T-470).
