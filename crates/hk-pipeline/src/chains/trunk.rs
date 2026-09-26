@@ -3094,16 +3094,26 @@ mod tests {
         adm
     }
 
+    /// Raster offsets, occupancy candidates in admission order, detected-emitter channels.
+    type Band = (Vec<i64>, Vec<(usize, f64)>, Vec<(usize, f64)>);
+
     /// A busy band: six occupancy candidates, the control channel ranked **6th** (k = 9), and
     /// seven intermittent detected emitters nearer the tuned centre than any of them (k = ±1…±3,
     /// 4). `max_demods` is the built-in 8.
-    fn busy_band() -> (Vec<i64>, Vec<(usize, f64)>, Vec<(usize, f64)>) {
+    fn busy_band() -> Band {
         let ks: Vec<i64> = (-10..=10).collect();
         let at = |k: i64| ks.iter().position(|&x| x == k).unwrap();
-        let cands = [(-9, 0.97), (-8, 0.95), (7, 0.93), (8, 0.91), (-7, 0.90), (9, 0.88)]
-            .iter()
-            .map(|&(k, f)| (at(k), f))
-            .collect();
+        let cands = [
+            (-9, 0.97),
+            (-8, 0.95),
+            (7, 0.93),
+            (8, 0.91),
+            (-7, 0.90),
+            (9, 0.88),
+        ]
+        .iter()
+        .map(|&(k, f)| (at(k), f))
+        .collect();
         let emitters = [1, -1, 2, -2, 3, -3, 4]
             .iter()
             .map(|&k| (at(k), 0.2))
@@ -3146,7 +3156,10 @@ mod tests {
                      refused {:?}",
                     adm.refused.iter().map(|&(i, _)| ks[i]).collect::<Vec<_>>(),
                 );
-                assert!(adm.refused.is_empty(), "pass {pass}: nothing needs refusing");
+                assert!(
+                    adm.refused.is_empty(),
+                    "pass {pass}: nothing needs refusing"
+                );
                 assert!(adm.occupancy.len() + adm.reserved.len() <= 8, "one budget");
             }
             for &(i, _) in &emitters {
@@ -3178,7 +3191,10 @@ mod tests {
                 );
             }
             if pass > 4 {
-                assert!(adm.reserved.is_empty(), "pass {pass}: nothing left to answer");
+                assert!(
+                    adm.reserved.is_empty(),
+                    "pass {pass}: nothing left to answer"
+                );
             }
         }
         // And with no occupancy candidates at all, the emitters get the whole budget.
