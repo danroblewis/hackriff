@@ -442,6 +442,144 @@ fn acars_terminator_lsb_characters_and_crc16_kermit() {
     }
 }
 
+// ---- AIS (T-963, SIGNAL-015): 0x7E flags, zero-bit destuffing, CRC-16/X-25 ----
+
+/// Bit-by-bit HDLC zero-insertion (ISO/IEC 13239 §4.4.2): a 0 stuffed after every 5 consecutive
+/// 1s — what a real AIS transmitter sends.
+fn hdlc_stuff(bits: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bits.len() + bits.len() / 5 + 1);
+    let mut ones = 0u32;
+    for &b in bits {
+        out.push(b);
+        if b == 1 {
+            ones += 1;
+            if ones == 5 {
+                out.push(0);
+                ones = 0;
+            }
+        } else {
+            ones = 0;
+        }
+    }
+    out
+}
+
+/// Octets in HDLC transmission order: each one LSB first (ISO/IEC 13239 §4.3, ITU-R M.1371-5
+/// Annex 2) — AX.25's wire order too: every octet, including the flag (shared by the AIS and
+/// APRS tests).
+fn lsb_first_bits(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .flat_map(|&b| (0..8).map(move |k| (b >> k) & 1))
+        .collect()
+}
+
+/// A published AIS message: the payload of GPSD's worked `!AIVDM` example
+/// (`!AIVDM,1,1,,B,177KQJ5000G?tO`K>RA1wUbN0TKH,0*5C`, https://gpsd.gitlab.io/gpsd/AIVDM.html:
+/// type 1, MMSI 477553000), de-armoured from its 6-bit characters into 21 octets. Cross-checked
+/// field by field in `py/tests/test_fixture_tooling.py::test_ais_published_aivdm_vector_*`.
+const GPSD_AIVDM_OCTETS: [u8; 21] = [
+    0x04, 0x71, 0xDB, 0x85, 0xA1, 0x40, 0x00, 0x05, 0xCF, 0xF1, 0xFA, 0x1B, 0x3A, 0x24, 0x41, 0xFE,
+    0x5A, 0x9E, 0x02, 0x46, 0xD8,
+];
+
+#[test]
+fn ais_hdlc_sync_destuff_and_crc16_x25() {
+    let x25 = CATALOGUE
+        .iter()
+        .find(|e| e.name == "CRC-16/IBM-SDLC")
+        .unwrap()
+        .params;
+    let flag = bits_of(0x7E, 8);
+    let has_flag = |bits: &[u8]| bits.windows(8).any(|w| w == flag.as_slice());
+
+    // The frame content on air: octets LSB first, then the FCS low-order octet first.
+    let air = |data: &[u8]| -> Vec<u8> {
+        let fcs = x25.compute(data) as u16;
+        let mut on = data.to_vec();
+        on.extend(fcs.to_le_bytes());
+        lsb_first_bits(&on)
+    };
+    // A random 21-octet message whose destuffed on-air content DOES contain 01111110 — the case
+    // a flag search after destuffing cuts short. Common (about 40 % of random position
+    // reports), found by scanning seeds, never hand-tuned.
+    let with_flag = (96_300u64..)
+        .map(|seed| {
+            noise(168, seed)
+                .chunks(8)
+                .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b))
+                .collect::<Vec<u8>>()
+        })
+        .find(|d| has_flag(&air(d)))
+        .unwrap();
+    let messages = [GPSD_AIVDM_OCTETS.to_vec(), with_flag];
+    assert!(
+        has_flag(&air(&messages[1])),
+        "the second message holds 0x7E after destuffing"
+    );
+
+    // On air: idle ones, then two independent AIS bursts (own flag pair each, idle between).
+    let mut stream = vec![1u8; 40];
+    for m in &messages {
+        stream.extend(&flag);
+        stream.extend(hdlc_stuff(&air(m)));
+        stream.extend(&flag);
+        stream.extend(vec![1u8; 40]);
+    }
+
+    let sync_params = recipe_node("ais", "sync");
+    let destuff_params = recipe_node("ais", "destuff");
+    let crc_params = recipe_node("ais", "crc");
+
+    for chunk in [1, 7, 1000] {
+        // Flags are searched on the still-stuffed line, then each frame is destuffed on its own.
+        let mut sync = build("sync_search", sync_params.clone(), PortType::Bits);
+        let stuffed = run_bits(sync.as_mut(), &stream, chunk, false);
+        assert_eq!(stuffed.len(), 2, "two independent bursts, chunk {chunk}");
+        let mut destuff = build("bitstuff", destuff_params.clone(), PortType::Frames);
+        let frames = run_frames(destuff.as_mut(), &stuffed, chunk.min(2), false);
+        assert_eq!(frames.len(), 2, "chunk {chunk}");
+        for (f, m) in frames.iter().zip(&messages) {
+            // Packed octets (LSB-first characters reassembled), FCS low octet first, then the
+            // closing flag `sync_search`'s terminator keeps (a bit palindrome).
+            let fcs = x25.compute(m) as u16;
+            let mut want = m.clone();
+            want.extend(fcs.to_le_bytes());
+            want.push(0x7E);
+            assert_eq!(f.bits, bytes_bits(&want), "chunk {chunk}");
+        }
+
+        let mut bad = frames[1].clone();
+        bad.bits[100] ^= 1;
+        let mut crc = build("crc", crc_params.clone(), PortType::Frames);
+        let out = run_frames(
+            crc.as_mut(),
+            &[frames[0].clone(), frames[1].clone(), bad],
+            2,
+            false,
+        );
+        for (k, m) in messages.iter().enumerate() {
+            assert_eq!(
+                out[k].info.check,
+                CrcStatus::Valid,
+                "message {k}, chunk {chunk}"
+            );
+            // Stripped: data, then the trimmed trailing flag (padding past the field map).
+            let mut want = bytes_bits(m);
+            want.extend(&flag);
+            assert_eq!(
+                out[k].bits, want,
+                "FCS stripped, message {k}, chunk {chunk}"
+            );
+        }
+        assert_eq!(
+            out[2].info.check,
+            CrcStatus::Invalid,
+            "corrupted, chunk {chunk}"
+        );
+    }
+}
+
 // ---- length_from: ADS-B DF decides 56/112 ----
 
 #[test]
@@ -554,14 +692,6 @@ fn ax25_bit_stuff(bits: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-/// AX.25's wire order: every octet, including the flag, least-significant-bit first.
-fn lsb_first_bits(bytes: &[u8]) -> Vec<u8> {
-    bytes
-        .iter()
-        .flat_map(|&b| (0..8).map(move |k| (b >> k) & 1))
-        .collect()
 }
 
 /// The bug T-952 found and fixed: `bitstuff` must destuff the *whole continuous line* before
