@@ -30910,7 +30910,7 @@ tasks:
     priority: high
     deps:
     - T-1060
-    parallel_group: API-INV-COVERAGE
+    parallel_group: API-HTTP
     needs: none
     model: opus
     effort: medium
@@ -30929,7 +30929,7 @@ tasks:
     status: todo
     priority: P1
     deps: []
-    parallel_group: HTTP-CONN
+    parallel_group: API-HTTP
     needs: none
     model: opus
     effort: high
@@ -30949,7 +30949,7 @@ tasks:
     priority: P1
     deps:
     - T-1063
-    parallel_group: HTTP-CONN
+    parallel_group: API-HTTP
     needs: none
     model: opus
     effort: high
@@ -30968,7 +30968,7 @@ tasks:
     status: todo
     priority: high
     deps: []
-    parallel_group: API-CHANGES
+    parallel_group: API-HTTP
     needs: none
     model: opus
     effort: high
@@ -31031,7 +31031,7 @@ tasks:
     deps:
     - T-1063
     - T-1064
-    parallel_group: WS-ROWS-MUX
+    parallel_group: API-HTTP
     needs: none
     model: opus
     effort: high
