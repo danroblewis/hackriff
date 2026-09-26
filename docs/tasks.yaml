@@ -29927,7 +29927,6 @@ tasks:
     milestone: M3
     title: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
     status: in-progress
-    branch: task-t1011
     priority: normal
     deps:
     - T-953
@@ -29947,6 +29946,16 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p <crate> -E 'binary(<name>)'; just precheck <crates>), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY review of T-953 2026-09-25: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
+    branch: task-t1011
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 04:09).
+      Items 1, 2, 4, 5 fixed here; 3, 6, 7 handed to the tickets that already own them (see observed_but_not_chased). (1) hk_demod::fsk::consensus_of now refuses a cluster whose largest distance from its median is over CONSENSUS_TOLERANCE. The old split only compared each rate with the one before it, so 4700..5100 Bd in 1.7 % steps chained into one ±4 % 'clock'. New unit test a_chain_of_small_steps_is_not_one_clock: red without the guard, green with it. It also covers a 1.9 %-step chain from 4800 to 9600 Bd. (2) New blind test a_fast_pager_population_never_stores_a_sub_harmonic_of_its_clock. At 9600 and 19200 Bd the true rate wins over its table sub-harmonics. At 14400 and 3600 Bd only the 1/3 rate is in the table: every burst fails the Gardner lock gate, the consensus is None and no rate is stored, so the abstention is honest. (4) UI classificationDistribution puts adjacent labels with exactly equal posteriors into one entry marked tied, shown as 'analog · css · fsk · noise-like 1% each (tied)'. This is presentation only, and posteriors that merely round to the same percentage are not merged. (5) ADR-0016 §3's 'No C17 data' line now carries the 0.9 unknown-cap qualification.
+      Tests: cargo nextest run -p hk-demod -E 'test(/a_chain_of_small_steps/)' (with the spread guard disabled) -> exit 100 (red proof: the chained cluster was accepted as a consensus); cargo nextest run -p hk-demod -E 'test(/consensus/)' -> exit 0 (7 passed, including the new chain test); cargo nextest run -p hk-demod -E 'binary(t953_burst_population_params)' -> exit 0 (3 passed, including the new sub-harmonic test); just test-ui -> exit 0 (112/112 test files passed, including the new tie-collapse test)
+      precheck exit 0
+      Commits: 35e1bbc6
+      Observed, not chased: Item 3 (FLEX 1600/3200/6400 Bd in STANDARD_RATES_BD): left to T-950 (the FLEX decoder, in progress), which owns rate estimation for FLEX. Until then, 1600 Bd FLEX abstains and does not store the 4800 harmonic (T-953 test). | Item 6 (NBFM voice / DMR 4FSK get classification: null): owned by T-986 (in progress; its member (a) asserts 'classified NBFM voice (not null)' and (b) DMR identification), with T-989 (done) supplying DMR Tier II identification. Not duplicated here. | Item 7 (a mock-SDR e2e over the FLEX fixture): the fixture is external (57.6 MB, Mac-only fetch). T-950's brief already requires the blind mock-SDR member over flex-pagers-930p8 with 'FSK params estimated'. That member should also assert the population's rate or an honest abstention, so the coordinator may want to add that to T-950's acceptance rather than a separate test here. | The 14400/3600 Bd cases show the receiver has no trial for non-table rates, so such emitters store nothing. That is honest, but it is a gap: the same class of case as item 3.
+      Use cases: SIGNAL-088
+      Resources: 44 CPU-s, peak 1.0 GB
   - id: T-1012
     milestone: M2-hardening
     title: "Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix"
