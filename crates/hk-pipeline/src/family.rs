@@ -32,6 +32,7 @@
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
 //! | `p25-tsbk`, `dmr-csbk`, `nxdn-cac` | decoder | `public-safety` | 0.97 | a CRC-valid trunked control channel; nothing else transmits one (T-546) |
+//! | `flex` | decoder | `paging` | 0.97 | FLEX frames whose sync and BCH(31,21)-checked frame information word both hold; FLEX is a paging protocol and nothing else (T-950) |
 //! | `dmr-tier2` | decoder | `public-safety` | 0.97 | DMR frame syncs plus an FEC-checked slot type: a **conventional** DMR repeater, which no control-channel hunt ever reaches (T-989) |
 //! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
 //! | continuous, OBW ≤ 4 analysis bins | occupancy | `unmodulated-carrier` | 0.7 | a carrier with nothing on it can only measure the window's own width ([`CW_LINE_MAX_BINS`]) |
@@ -409,6 +410,13 @@ const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
      raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
 
+/// Why a FLEX decode is paging evidence (T-950): the frame sync and the BCH-checked frame
+/// information word are the protocol's own, and FLEX carries pages and nothing else. The
+/// allocation (929–932 MHz paging, 47 CFR 22 / 24 / 90) then *agrees* or *disagrees* — it never
+/// decided the decoder.
+const FLEX_NOTE: &str = "FLEX frames decoded: sync-1 and a BCH(31,21)-checked frame information word. \
+     FLEX is a paging protocol";
+
 /// T-989: conventional DMR, which is not trunked and therefore never reaches the control-channel
 /// hunt. The evidence is the air interface itself — DMR's own frame sync words at 4800 Bd, and
 /// the FEC-checked slot type behind them — so it stands beside the trunking decoders rather than
@@ -499,6 +507,7 @@ pub const VOCABULARY: &[VocabEntry] = &[
         0.97,
         TRUNK_CC_NOTE,
     ),
+    entry("flex", Decoder, Some("paging"), 0.97, FLEX_NOTE),
     // T-989: the conventional-DMR identifier, which is not a control-channel decode.
     entry(
         "dmr-tier2",
@@ -561,9 +570,12 @@ const SERVICE_PASSTHROUGH: &[(&str, &str)] = &[
     // T-953: the 929-932 MHz paging allocation, and the frequency-hopping *behaviour* the
     // detector measures directly. `flex`/`pocsag` name the service because nothing else carries
     // those air interfaces; a bare `2fsk` at 929 MHz still names nothing (the rule above).
+    // `flex` is not here: since T-950 it is the FLEX decoder's own vocabulary entry (a
+    // BCH-checked frame decode, `FLEX_NOTE`), and a name is either a service or a label, never
+    // both.
     ("paging", "paging"),
-    ("flex", "paging"),
     ("pocsag", "paging"),
+    ("pager", "paging"),
     ("fhss", "fhss"),
     // T-979: UHF television and the Part 74 low power auxiliary use that shares its channels.
     ("tv-broadcast", "tv-broadcast"),
@@ -698,7 +710,7 @@ const SERVICE_SHAPES: &[ServiceShape] = &[
         "Part 15 covers a 20 kHz OOK remote, a 500 kHz LoRa chirp and a 20 MHz WLAN channel: no \
          width supports or contradicts the allocation",
     ),
-    // T-953: 929-932 MHz paging. FLEX (1600/3200/6400 bit/s, 2- or 4-level FSK at +/-4.8 kHz)
+    // T-950/T-953: 929-932 MHz paging. FLEX (1600/3200/6400 bit/s, 2- or 4-level FSK at +/-4.8 kHz)
     // and POCSAG (512-2400 bit/s 2-FSK at +/-4.5 kHz) sit in 25 kHz channels; a paging transmitter
     // keys up per batch, so it is not required to be continuous.
     shape(
