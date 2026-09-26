@@ -2451,3 +2451,66 @@ def test_a_result_the_branch_board_cannot_take_is_left_pending_for_the_landing(t
     monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, "", ""))
     R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
     assert not (d / "result.pending").exists()
+
+
+def test_a_landed_remote_claims_worktree_is_removed_on_its_host_and_nothing_else_is(remote_host, monkeypatch):
+    """2026-09-26 08:23: node2 held 115 worktrees of landed branches (408 GB) and fell to 8 GB free - nothing removed a
+    remote worktree after landing. A `merged` remote claim's worktree goes, once; one with commits main lacks, one a
+    live claim shares, and a running claim's stay."""
+    import time
+    local_ops, local_repo, far = remote_host
+    g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                       check=True, capture_output=True, text=True).stdout.strip()
+    g(local_repo, "init", "-q", "-b", "main")
+    g(local_repo, "commit", "-q", "--allow-empty", "-m", "main")
+    wts = {}
+    (local_repo / "f").write_text("a\n")
+    g(local_repo, "add", "f")
+    g(local_repo, "commit", "-q", "-m", "f")
+    subprocess.run(["rm", "-rf", str(far / "repo")], check=True)
+    subprocess.run(["git", "clone", "-q", str(local_repo), str(far / "repo")], check=True)
+    for t, extra in (("t1", ""), ("t2", "commit"), ("t3", ""), ("t4", ""), ("t6", "edit"), ("t7", "")):
+        w = far / "repo" / ".claude" / "worktrees" / t
+        g(far / "repo", "worktree", "add", "-q", "-b", f"task-{t}", str(w))
+        if extra == "commit":
+            g(w, "commit", "-q", "--allow-empty", "-m", "not on main")
+        if extra == "edit":
+            (w / "f").write_text("an uncommitted edit\n")
+        wts[t] = f"{local_repo}/.claude/worktrees/{t}"
+    (local_ops / "hosts").mkdir()
+    (local_ops / "hosts" / "node2.json").write_text(json.dumps({"reachable": True, "at": time.time()}))
+    monkeypatch.setattr(R, "BULKMARK", str(local_ops / "bulk-in-progress"))
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-1": {"ticket": "T-1", "host": "node2", "wt": wts["t1"], "state": "merged"},
+              "T-2": {"ticket": "T-2", "host": "node2", "wt": wts["t2"], "state": "merged"},
+              "T-3": {"ticket": "T-3", "host": "node2", "wt": wts["t3"], "state": "merged"},
+              "T-5": {"ticket": "T-5", "host": "node2", "wt": wts["t3"], "state": "running"},   # a fix run shares t3
+              "T-4": {"ticket": "T-4", "host": "node2", "wt": wts["t4"], "state": "running"},
+              "T-6": {"ticket": "T-6", "host": "node2", "wt": wts["t6"], "state": "merged"},
+              "T-7": {"ticket": "T-7", "host": "node2", "wt": wts["t7"], "state": "merged"},
+              "T-8": {"ticket": "T-8", "host": "node2", "wt": wts["t7"], "state": "error", "started": time.time()}}
+    (local_ops / "bulk-in-progress").write_text("base=x\n")
+    assert R.reap_remote_worktrees(claims, dry=False) is False            # main is provisional: nothing
+    (local_ops / "bulk-in-progress").unlink()
+    assert R.reap_remote_worktrees(claims, dry=False) is True
+    left = {p.name for p in (far / "repo" / ".claude" / "worktrees").iterdir()}
+    assert left == {"t2", "t3", "t4", "t6", "t7"}, said       # t6: tracked edit; t7: a recent error claim's resume
+    assert claims["T-1"].get("wt_removed") and not claims["T-2"].get("wt_removed")
+    assert any("t2" in m and "commits main lacks" in m for m in said)
+    assert claims["T-2"]["wt_kept_main"] and any("t6" in m and "tracked edits" in m for m in said)
+    visits = []
+    monkeypatch.setattr(R, "remote_leaked", lambda c, cl, dry: visits.append(c["ticket"]) or [])
+    assert R.reap_remote_worktrees(claims, dry=False) is False            # nothing new until main moves
+    assert visits == [] and sum("t2" in m for m in said) == 1
+
+
+def test_a_host_under_the_disk_floor_takes_no_work(remote_host, monkeypatch):
+    import time
+    local_ops, _, _ = remote_host
+    (local_ops / "hosts").mkdir()
+    probe = {"reachable": True, "at": time.time(), "load1": 1.0, "disk_free_gb": 8}
+    (local_ops / "hosts" / "node2.json").write_text(json.dumps(probe))
+    assert R.host_room({}, "node2") == f"8 GB free < {R.DISK_MIN_GB} GB floor"
+    (local_ops / "hosts" / "node2.json").write_text(json.dumps(dict(probe, disk_free_gb=311)))
+    assert R.host_room({}, "node2") is None
