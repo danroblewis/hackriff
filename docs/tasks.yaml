@@ -26159,13 +26159,13 @@ tasks:
   - id: T-872
     milestone: MAUTO
     title: "LP-8: retire ChainKind::Listen for cut-over modes; listener-budget mapping"
-    status: in-progress
+    status: blocked
     branch: task-t872
     priority: normal
     deps:
     - T-869
     parallel_group: LP
-    needs: none
+    needs: user
     model: opus
     effort: medium
     acceptance: |
@@ -26179,6 +26179,9 @@ tasks:
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
 
       2026-09-25 coordinator, from T-868's parity harness (task-t868, listen_recipe_parity): the LEGACY Listen chain's audio is stamped -1020 ms off the capture time it was demodulated from, while the recipe path is right. Before retiring ChainKind::Listen for cut-over modes, confirm the recipe path's stamps are the reference and that nothing downstream (recordings, stream-out, the shared time axis) still consumes legacy-stamped audio; if the legacy chain survives for any mode, fix its stamp.
+
+      2026-09-25 19:2x coordinator: the worker committed LP-8 groundwork (572559ab on task-t872) and stopped at the ADR's own gate - ADR-0015 §12.9 stage 7 runs 'only after stage 5 has been live-tested, and only for those modes'. Stage 5 = flip HK_LISTEN_PIPELINE's default for WFM/NBFM/AM, which the USER must live-test on the radio. Asked via the supervisor. When the user reports stage 5 good (per mode), unblock this ticket for exactly those modes; task-t872 keeps the committed work.
+    blocked_on: "user: live-test ADR-0015 §12.9 stage 5 (HK_LISTEN_PIPELINE default flip for WFM/NBFM/AM) on the real HackRF; stage 7 (this ticket) is gated on it"
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
