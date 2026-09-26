@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
+import { settled } from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
@@ -33,8 +34,10 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the sheet to mount collapsed",
     "document.querySelector('.sheet')?.dataset.snap === 'peek'", { timeoutMs: 60000 });
-  // T-895: the lists are a chip by default; a real click on a row needs them open.
-  await page.click("document.querySelector('.side-chip')");
+  // T-997: the lists live in the sheet, opened by an inventory pill in the map's top-left chrome
+  // (the T-895 chip at mid-height is retired); a real click on a row needs them open.
+  await page.waitFor("the inventory pills", "!!document.querySelector('.map-inv .map-pill')", { timeoutMs: 60000 });
+  await page.click("document.querySelector('.map-inv .map-pill[data-list=\"confirmed\"]')");
   await page.waitFor("blind detection to list a signal", ROW_PRESENT, { timeoutMs: 120000, everyMs: 1000 });
 
   const rowF = (await page.$text(".side-inv .row[data-id] .f")) ?? "";
@@ -45,6 +48,11 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   await page.waitFor("the sheet to rise to half with the signal's detail",
     `document.querySelector('.sheet')?.dataset.snap === 'half' && !!document.querySelector('.focus .detail .bigf')`,
     { timeoutMs: 15000 });
+  // T-958: `dataset.snap` flips at the START of the .28 s height transition, so the sheet's head is
+  // still ~300 px from where it is going. Everything below reads the sheet's box or presses a
+  // button inside it (the close ×, whose rect `page.click` reads one round-trip before it presses),
+  // and a rect read mid-move is not where the press lands.
+  await settled(page, ".sheet", "the sheet's rise");
   assert.match((await page.$text(".focus .detail .bigf")) ?? "", new RegExp(`^${mhz.replace(".", "\\.")}`),
     "the sheet's big frequency is the selected row's");
   assert.match((await page.$text(".sheet-title")) ?? "", /^Selected signal · [\d.]+ MHz$/, "the peek strip names it");

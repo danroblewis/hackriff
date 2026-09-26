@@ -9,7 +9,7 @@ use hk_recipe::{BlockDescriptor, PortSpec};
 
 use crate::Registry;
 use crate::blocks::iq::common;
-use crate::schema::{ParamExt, boolean, descriptor, float, one_of, param};
+use crate::schema::{ParamExt, boolean, descriptor, float, list, one_of, param};
 
 pub mod bitstuff;
 mod clock;
@@ -34,9 +34,16 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 param(
                     "symbol_rate_bd",
                     float(0.01, 10e6, "Bd"),
-                    "Nominal symbol rate (tracked within max_deviation_ppm).",
-                )
-                .required(),
+                    "Nominal symbol rate (tracked within max_deviation_ppm). Required unless \
+                     symbol_rate_candidates_bd is given.",
+                ),
+                param(
+                    "symbol_rate_candidates_bd",
+                    list(float(0.01, 10e6, "Bd"), 2),
+                    "Estimate the rate from the signal instead (T-951): the lowest of these \
+                     whose symbol period explains the waveform's zero-crossing spacings. \
+                     Not with pulse rrc.",
+                ),
                 param(
                     "pulse",
                     one_of(&["nrz", "biphase", "rrc"]),

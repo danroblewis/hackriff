@@ -5,6 +5,13 @@
 //!   copies disagree, or whose block-3 offset (C vs C') contradicts the version bit, is rejected
 //!   as a bad synchronisation. The station PI is a vote over CRC-valid PI blocks and is only
 //!   reported with at least `pi_min_votes` votes and a `pi_min_share` majority.
+//! - **A reported PI is not yet a committed identity (T-962).** Reporting and *committing* are
+//!   two bars, and [`PiDecision::provisional`] is the gap between them: below
+//!   `pi_commit_votes` agreeing CRC-valid PI blocks **within `hk_model::RDS_PI_COMMIT_WINDOW_NS`
+//!   (5 s) of stream time** the PI is reported **provisionally** — good
+//!   enough to show ("PI 1704, 3 groups, provisional"), not good enough to write as a
+//!   transmitter identity or to rest a lifecycle change on. See [`GroupConfig::pi_commit_votes`]
+//!   for the bound and why it is a vote count rather than ADR-0022's bits budget.
 //! - **PS** is sent in 4 two-character segments by groups 0A/0B. A frame completes when
 //!   segments 0, 1, 2, 3 arrive in order (repeats allowed), under one PI, each within
 //!   `ps_max_gap_s` of the previous. Stations scroll PS (song/artist text), so PS is the list of
@@ -14,6 +21,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use hk_model::{RDS_PI_COMMIT_WINDOW_NS, VoteWindow};
 use serde::{Deserialize, Serialize};
 
 use super::block::{BlockEvent, BlockSync, Offset, SyncConfig};
@@ -30,6 +38,59 @@ pub struct GroupConfig {
     pub pi_min_votes: u32,
     /// Share of all PI votes the reported PI must hold.
     pub pi_min_share: f64,
+    /// **T-962: agreeing CRC-valid PI blocks needed before the PI is a *committed* identity**
+    /// rather than a provisional reading. Default [`hk_model::RDS_PI_COMMIT_VOTES`] (10) — the
+    /// one bar every RDS producer shares, the `rds` recipe's `messages` outputs included. The
+    /// record writer (`crate::record`) also refuses an identity below that constant, so a
+    /// config set lower here cannot weaken it.
+    ///
+    /// **Which bound applies, and the citation.** ADR-0022 §6's `analytic_holdout_bits` budget
+    /// governs `ConfirmPolicy.synthesized` — the confirm route for a *synthesized* pipeline whose
+    /// check stage was discovered by a search, where the engine can price the look-elsewhere it
+    /// spent (§5.1–§5.2). RDS takes none of that path: it is a shipped, template-fixed decoder
+    /// confirming through `ConfirmPolicy`'s route A (decoded identity), and no `analytic_holdout_
+    /// bits` is computed for it. So the bound here is the ticket's other option — **N agreeing
+    /// CRC-valid groups** — and ADR-0022 §1.3 is why it exists at all: a confirm is a lifecycle
+    /// change and no rule demotes, so the confirm gate binds, always.
+    ///
+    /// **Why a count and not a bits sum.** The naive arithmetic says three agreeing blocks are
+    /// overwhelming — each block passes a 10-bit check (`L_check = 0`, the generator is in the
+    /// standard), and each block after the first must also agree on a 16-bit PI, so three
+    /// independent blocks are 3 × 10 + 2 × 16 = 62 bits against ADR-0022's 24. That sum assumes
+    /// the draws are **independent**, and a mis-synchronised block lattice is exactly where they
+    /// are not: one wrong lock re-reads correlated bits, so the same wrong PI can repeat without
+    /// costing 16 bits a time. ADR-0022 §5.3 answers that case empirically, with a shuffled-null
+    /// control this decoder does not run. Absent the control, the honest guard is the rate a real
+    /// station transmits at.
+    ///
+    /// **Why 10.** A synchronised RDS stream carries one PI-bearing block per group at
+    /// 1187.5 Bd / 104 bits = **11.4 groups/s**, so 10 agreeing votes is **0.9 s of genuine
+    /// lock** — and still under two seconds at a 50 % block error rate. The observed false commit
+    /// (T-962: 98.085 MHz, PI 1704, an independent oracle finding no RDS at all on the same clip)
+    /// reached ~3 votes in **45 s**, two orders of magnitude off that rate. The bound is set by
+    /// what a chance lock cannot reach, not by what today's caller happens to supply.
+    ///
+    /// **Measured on both sides, not assumed.** The bound is chosen to sit in a gap that was
+    /// measured rather than argued:
+    ///
+    /// | Scene | Groups | Votes | Block errors |
+    /// |---|---|---|---|
+    /// | Real 101.3 MHz HackRF capture, 4.8 s (`hk-demod::signal_062_real`) | 55 | **52** | 13/222 |
+    /// | Dense synthetic scene, 3 stations 400 kHz apart (`signal_062_dense_fm_pipeline`) | 3 | **3** | 0/15 |
+    /// | The T-962 false commit: 98.085 MHz, PI 1704, 45 s, oracle saw no RDS | — | **~3** | — |
+    ///
+    /// A real station on real air clears 10 by a factor of five, so the bound costs the case it
+    /// must not break nothing at all. The two 3-vote cases fall below it — and the important
+    /// point is that **the true one and the false one are indistinguishable by count**, which is
+    /// exactly why the answer is a provisional state rather than a cleverer threshold: the dense
+    /// scene's PI is still decoded, recorded and shown with its vote, it is simply not yet an
+    /// identity. An FM station whose RDS stays provisional still confirms on `ConfirmPolicy`'s
+    /// route C (a verified emission — the pilot lock), which needs no RDS at all, so no
+    /// confirmation is lost anywhere; only the identity claim waits for evidence.
+    ///
+    /// Raising it is safe; lowering it is the one-way door. Below the bound nothing is lost — the
+    /// PI is still reported, still shown, still in the decode row's metadata with its vote count.
+    pub pi_commit_votes: u32,
     /// Longest gap between consecutive PS segments of one frame, s.
     pub ps_max_gap_s: f64,
 }
@@ -40,6 +101,7 @@ impl Default for GroupConfig {
             sync: SyncConfig::default(),
             pi_min_votes: 3,
             pi_min_share: 0.6,
+            pi_commit_votes: hk_model::RDS_PI_COMMIT_VOTES,
             ps_max_gap_s: 2.0,
         }
     }
@@ -77,7 +139,7 @@ pub struct PsFrame {
     pub text: String,
 }
 
-/// The accepted station PI and its vote.
+/// The reported station PI, its vote, and whether that vote has cleared the commit bound.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PiDecision {
     /// Programme identification code.
@@ -88,12 +150,32 @@ pub struct PiDecision {
     pub total_votes: u32,
     /// `votes / total_votes`.
     pub share: f64,
+    /// **T-962 (round 2):** the most of those votes that fell within one
+    /// [`hk_model::RDS_PI_COMMIT_WINDOW_NS`] span of stream time, counted up to
+    /// `pi_commit_votes` ([`hk_model::VoteWindow`]). The bar is a rate: a PI commits only when
+    /// this reaches `pi_commit_votes`, so a long session of sparse chance agreements stays
+    /// provisional however many votes it accumulates.
+    #[serde(default)]
+    pub window_votes: u32,
+    /// **T-962: the vote has not reached [`GroupConfig::pi_commit_votes`] within one
+    /// [`hk_model::RDS_PI_COMMIT_WINDOW_NS`] span of stream time** ([`Self::window_votes`]).
+    ///
+    /// A provisional PI is a reading, not an identity: show it with its vote count, do not write
+    /// it as a transmitter identity and do not rest a lifecycle change on it. `hk_demod::record`
+    /// is the enforcement point for the first two; `ConfirmPolicy`'s route A never sees a
+    /// provisional PI because no identity is written for one.
+    pub provisional: bool,
 }
 
 impl PiDecision {
     /// Uppercase 4-digit hex, e.g. `C0DE`.
     pub fn hex(&self) -> String {
         format!("{:04X}", self.pi)
+    }
+
+    /// The vote cleared [`GroupConfig::pi_commit_votes`]: this PI may be written as an identity.
+    pub fn committed(&self) -> bool {
+        !self.provisional
     }
 }
 
@@ -183,6 +265,8 @@ pub struct RdsDecoder {
     ps: PsAssembler,
     frames: Vec<PsFrame>,
     pi_votes: BTreeMap<u16, u32>,
+    /// T-962: each PI's votes over stream time, the windowed commit rule.
+    pi_windows: BTreeMap<u16, VoteWindow>,
     pty: BTreeMap<u8, u32>,
     tp: [u32; 2],
     ta: [u32; 2],
@@ -212,6 +296,7 @@ impl RdsDecoder {
             ps: PsAssembler::default(),
             frames: Vec::new(),
             pi_votes: BTreeMap::new(),
+            pi_windows: BTreeMap::new(),
             pty: BTreeMap::new(),
             tp: [0; 2],
             ta: [0; 2],
@@ -325,8 +410,16 @@ impl RdsDecoder {
             ps_segment: None,
             blocks_ok,
         };
+        // Stream time of the group, ns (positions are in units of `RDS_BITRATE_BD /
+        // bits_per_unit` per second): the vote's capture time, never the wall clock.
+        let t_ns = (position * self.bits_per_unit / RDS_BITRATE_BD * 1e9) as i64;
         for p in [pi_a, pi_c].into_iter().flatten() {
             *self.pi_votes.entry(p).or_default() += 1;
+            self.pi_windows.entry(p).or_default().vote(
+                t_ns,
+                self.config.pi_commit_votes,
+                RDS_PI_COMMIT_WINDOW_NS,
+            );
         }
         if let Some(b) = b {
             let gtype = (b >> 12) as u8;
@@ -405,15 +498,25 @@ impl RdsDecoder {
             Some((_, v)) if f64::from(v) < self.config.pi_min_share * f64::from(total_votes) => {
                 (None, Some(PiAbstain::NoMajority))
             }
-            Some((p, v)) => (
-                Some(PiDecision {
-                    pi: p,
-                    votes: v,
-                    total_votes,
-                    share: f64::from(v) / f64::from(total_votes),
-                }),
-                None,
-            ),
+            Some((p, v)) => {
+                let window = self.pi_windows.get(&p);
+                let window_votes = window.map_or(0, VoteWindow::window_votes);
+                let committed = window.is_some_and(|w| w.committed(self.config.pi_commit_votes));
+                (
+                    Some(PiDecision {
+                        pi: p,
+                        votes: v,
+                        total_votes,
+                        share: f64::from(v) / f64::from(total_votes),
+                        window_votes,
+                        // T-962: reported from `pi_min_votes`, committed only once
+                        // `pi_commit_votes` of them fell within `RDS_PI_COMMIT_WINDOW_NS` of
+                        // stream time. The gap is the provisional state.
+                        provisional: !committed,
+                    }),
+                    None,
+                )
+            }
         };
         let mut counts: Vec<(String, u32, usize)> = Vec::new();
         for (i, f) in self.frames.iter().enumerate() {
@@ -551,6 +654,98 @@ pub(crate) mod tests {
         assert!(r.frame_log.iter().all(|f| f.text == "HACKRIFF"));
         assert!(r.blocks_total > r.blocks_ok, "errors counted");
         assert!(r.bit_slips >= 2, "slips {}", r.bit_slips);
+    }
+
+    /// T-962: four groups (the first partial: sync acquires on the second block) give three
+    /// agreeing CRC-valid PI blocks — the exact evidence 98.085 MHz committed PI 1704 on, while
+    /// an independent oracle found no RDS at all on the same clip. The PI is **reported**, so the
+    /// UI can show "PI C0DE (3 groups, provisional)", and it is **not committed**, so nothing
+    /// identity-bearing may be written from it.
+    #[test]
+    fn t962_three_agreeing_groups_are_provisional_not_committed() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        // Five groups: block sync acquires on three consecutive offset-consistent blocks, so the
+        // first two groups pay for the lock and three CRC-valid PI blocks are left.
+        let bits = stream(&[b"HACKRIFF"], 2);
+        feed(&mut dec, &bits[..5 * 104]);
+        let r = dec.report();
+        let pi = r.pi.expect("the PI is still reported, with its vote");
+        assert_eq!(
+            pi.votes, 3,
+            "[T-962] the scene is three agreeing groups: {r:?}"
+        );
+        assert_eq!(pi.hex(), "C0DE");
+        assert!(
+            (3..GroupConfig::default().pi_commit_votes).contains(&pi.votes),
+            "[T-962] this scene is meant to sit in the reported-but-not-committed band; \
+             votes {} of a {}-vote bound",
+            pi.votes,
+            GroupConfig::default().pi_commit_votes
+        );
+        assert!(
+            pi.provisional && !pi.committed(),
+            "[T-962] {} agreeing CRC-valid groups is not a committed identity: RDS's block check \
+             is 10 bits, and a mis-synchronised lattice re-reads correlated bits, so a handful of \
+             agreeing blocks can be one wrong lock rather than one station. {pi:?}",
+            pi.votes
+        );
+        assert_eq!(r.pi_abstain, None, "abstaining would hide the reading");
+    }
+
+    /// T-962: a station transmitting for a second clears the bound — 11.4 groups/s is the rate a
+    /// real RDS stream runs at, so the bound costs a real station under a second of lock.
+    #[test]
+    fn t962_a_second_of_a_real_station_commits_the_pi() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        // 12 groups ~ 1.05 s of air.
+        feed(&mut dec, &stream(&[b"HACKRIFF"], 3));
+        let r = dec.report();
+        let pi = r.pi.expect("PI");
+        assert_eq!(pi.hex(), "C0DE");
+        assert!(
+            pi.votes >= GroupConfig::default().pi_commit_votes,
+            "[T-962] a second of clean air should clear the bound; votes {}",
+            pi.votes
+        );
+        assert!(pi.committed() && !pi.provisional, "[T-962] {pi:?}");
+    }
+
+    /// T-962 round 2: the commit bar is a **rate** over stream time, so a long session cannot
+    /// accumulate its way to an identity. The same clean groups, once spaced one per 15 s of
+    /// stream time (a chance lock's rate, 98.085 MHz), stay provisional however many agree; back
+    /// to back (a real station's 11.4 groups/s) they commit.
+    #[test]
+    fn t962_sparse_votes_over_a_long_session_stay_provisional() {
+        let bits = stream(&[b"HACKRIFF"], 6); // 24 groups
+        let spaced = |gap_s: f64| {
+            let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+            let extra = gap_s * RDS_BITRATE_BD - 104.0;
+            for (i, &b) in bits.iter().enumerate() {
+                let group = (i / 104) as f64;
+                dec.push_bit(b, i as f64 + group * extra);
+            }
+            dec.report().pi.expect("the PI is reported")
+        };
+        let sparse = spaced(15.0);
+        let n = GroupConfig::default().pi_commit_votes;
+        assert!(
+            sparse.votes >= 2 * n,
+            "the scene has twice the bar in lifetime votes: {sparse:?}"
+        );
+        assert!(
+            sparse.provisional && !sparse.committed(),
+            "[T-962] {} agreeing groups one per 15 s ({} s of stream) committed the PI: the bar \
+             is a rate ({n} within {} s), not a lifetime count. {sparse:?}",
+            sparse.votes,
+            sparse.votes * 15,
+            hk_model::RDS_PI_COMMIT_WINDOW_NS / 1_000_000_000
+        );
+        assert_eq!(sparse.window_votes, 1, "{sparse:?}");
+        let dense = spaced(104.0 / RDS_BITRATE_BD);
+        assert!(
+            dense.committed() && dense.window_votes == n,
+            "[T-962] {dense:?}"
+        );
     }
 
     #[test]

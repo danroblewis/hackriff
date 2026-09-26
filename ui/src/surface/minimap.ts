@@ -182,9 +182,12 @@ export interface OverlayQuad {
    * edge/bracket (`./priors.ts`); `density-cell` is T-810's coarse-zoom features-per-cell hatch
    * (`./density.ts`) — the map's "density, not clustering" rule, drawn only where a box there would
    * already generalize to a symbol; `annotation` is T-820's human-authored note (`./annotations.ts`,
-   * dashed); the remaining two are the map's own.
+   * dashed); `frontend-event` is T-981's front-end overload band (`./frontend.ts`) — the radio's own
+   * energy, hatched between two edges, never a signal's box; `scan-plan` is T-1008's scan
+   * overlay (`./scanplan.ts`: a sweep's region, its served steps and its progress, hatched); the
+   * remaining two are the map's own.
    * All are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "annotation" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "path-stroke" | "prior-band" | "density-cell";
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "annotation" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "path-stroke" | "prior-band" | "density-cell" | "frontend-event" | "scan-plan";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
   /** T-910: a screen-door pattern the overlay shader cuts into this quad (a dashed outline, a hatch
@@ -192,9 +195,10 @@ export interface OverlayQuad {
    * `onPx / periodPx` of its rectangle — [[inkFraction]] — and is still a stroke, never a wash. */
   readonly pattern?: OverlayPattern;
   /** T-910: which part of a feature's symbology this quad is — its outline (`edge`), its light
-   * `fill`, a selected feature's corner `handle`, or its generalized `symbol`. Absent on every
-   * other mark. Descriptive only: the pass draws every part the same way. */
-  readonly part?: "edge" | "fill" | "handle" | "symbol";
+   * `fill`, a selected feature's corner `handle`, or its generalized `symbol`; T-994's `active`
+   * ring is the halo drawn OUTSIDE a feature whose output (Listen/decode/record/stream) is open.
+   * Absent on every other mark. Descriptive only: the pass draws every part the same way. */
+  readonly part?: "edge" | "fill" | "handle" | "symbol" | "active";
 }
 
 /** The mark for "a pane is looking here". Amber: nowhere near any cell mark or any ramp stop. */

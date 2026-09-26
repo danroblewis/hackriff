@@ -72,6 +72,27 @@
 .hk-surface-width:not(:disabled):hover { color: #fad340; border-color: #fad340; }
 .hk-surface-width:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* T-1006: the device pill — WHOSE coverage decides this viewport's grey (docs/16 §8). Appended last
+   in the DOM (the cells' positions are part of the row's contract) and pulled back beside the
+   headline with `order`, so it reads as part of "where am I looking" rather than as an action.
+   A pane pinned to a front end this run does not hold is marked, not reset. */
+.hk-surface-viewport > * { order: 2; }
+.hk-surface-id { order: 0; }
+
+.hk-surface-device {
+  order: 1;
+  padding: 0 6px;
+  border: 1px solid #6b7488;
+  border-radius: 999px;
+  color: var(--hk-text, #dde3ec);
+  white-space: nowrap;
+}
+
+.hk-surface-viewport[data-device-stale="true"] .hk-surface-device {
+  color: #e8a33d;
+  border-color: #e8a33d;
+}
+
 .hk-surface-why {
   flex-basis: 100%;
   opacity: 0.8;
@@ -92,6 +113,16 @@
   flex-basis: 100%;
   opacity: 0.7;
   font: 10.5px/1.45 system-ui, sans-serif;
+}
+
+/* T-1028: what is happening to this viewport NOW — a retune the mode has pending, settling or in
+   flight. Its own line like the ruler, but marked (not dimmed): it is the one line on this surface
+   that reports the radio being moved by a gesture, and a user in retune mode has to be able to see
+   at a glance that their pan did something. */
+.hk-surface-status {
+  flex-basis: 100%;
+  font: 10.5px/1.45 system-ui, sans-serif;
+  color: #fad340;
 }
 
 /* A row's control and sentence are hidden by `el.hidden`; these are flex children, so the UA's

@@ -30,26 +30,22 @@ import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
-// The canvas is one drawing buffer with three tenants, and this test measures the middle one. Both
-// numbers are `app/centre/surface.ts`'s own, in device px; the arithmetic below is `view.ts`'s.
-/** The minimap strip along the BOTTOM of the canvas (`MINIMAP_PX`). */
-const MINIMAP_PX = 110;
-/** The spectrum-trace strip carved off the TOP of each pane (`TRACE_PX`, T-457). */
-const TRACE_PX = 96;
-
 /**
  * The rectangle a pane draws its MEASUREMENT into, in page coordinates.
  *
- * Not the canvas: the trace strip is taken out of the pane's rectangle rather than painted over it
- * (T-457), so the pane's data starts below it. Getting this wrong would be the T-457 composition
- * failure again — a decoration changing the geometry another ticket's assertions were measured in —
- * except here it would make the test *pass* on the trace's own colours, which is worse than red.
+ * Not the canvas: the panes sit between the floating chrome's stated insets (T-918). Getting this
+ * wrong would be the T-457 composition failure again — a decoration changing the geometry another
+ * ticket's assertions were measured in — except here it would make the test *pass* on some other
+ * tenant's colours, which is worse than red. Since T-1041 the trace is not such a tenant: it
+ * reserves no rows and is off by default.
  */
 function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
-  const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
-  return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
+  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
+  // them since T-995 retired the minimap).
+  // T-1041: the trace reserves nothing any more (it is a layer over the pane's top rows, off by
+  // default), so the pane's measurement starts at the inset — its own first row.
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
+  return { x: rect.x, w: rect.w, y: rect.y + ins.top, h: paneH / dpr };
 }
 
 /**

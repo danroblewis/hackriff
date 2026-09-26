@@ -1,8 +1,10 @@
 // MUI shell (skeleton, T-149; T-150 owns it from here): top bar (brand, Explore/Decode toggle,
-// device + recording state, centre/span readouts, Go to, Review, theme), view switching, theme
+// device + recording state, centre/span readouts, Go to, Review, theme — in Explore these float over
+// the map instead, T-993 `chrome/top-chrome.ts`), view switching, theme
 // stamping, toast, the token dialog, and the `GET /api/control/state` poll feeding `device`.
 import { formatFrequency, parseFrequency } from "../controls/freq";
 import type { ControlState } from "../controls/model";
+import { placeTopChrome } from "./chrome/top-chrome";
 import type { AppContext } from "./context";
 import { byId, h } from "./dom";
 import { apiConnFor, startPoll, storeToken } from "./net";
@@ -29,6 +31,20 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     sampleRateHz: cs.tuning?.sample_rate_hz ?? run?.sample_rate_hz ?? null,
     rowsPerS: run?.display?.rows_per_s ?? null, recording: !!run?.recording?.active,
     deviceId: cs.device?.device_id ?? null,
+    // T-1006: every live front end, reduced to what a pane's device pill, its picker and a retune's
+    // `device_id` need. An entry reporting NO identity is dropped rather than carried as a nameless
+    // one: the server holds at most one such handle and it cannot be addressed by any selector, so a
+    // row offering to pin a pane to it would offer an act that cannot be performed. On a run with
+    // only that one front end the pane stays on `any`, the retune sends no selector, and the route's
+    // own default is the unchanged single-device behaviour.
+    devices: (cs.devices ?? [])
+      .filter((d): d is typeof d & { device_id: string } => typeof d.device_id === "string" && d.device_id.length > 0)
+      .map((d) => ({
+        id: d.device_id,
+        driver: d.device?.driver ?? "",
+        centerHz: d.tuning?.center_hz ?? null,
+        sampleRateHz: d.tuning?.sample_rate_hz ?? null,
+      })),
     // T-341: the centre axis of the achievable grid, straight from the device's capabilities. A
     // `tuning_step_hz` of null is "the source cannot say" — carried through as null, never
     // defaulted to 1 Hz, so a snap against it refuses rather than inventing a centre.
@@ -41,6 +57,7 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     fftBounds: cs.display_limits
       ? { fft_size_min: cs.display_limits.fft_size_min, fft_size_max: cs.display_limits.fft_size_max }
       : null,
+    scan: cs.scan ?? null,
   };
 }
 
@@ -54,6 +71,8 @@ export function mountShell(ctx: AppContext) {
   store.select((s) => s.mode, (mode) => {
     document.querySelectorAll<HTMLButtonElement>(".mode[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
     for (const [m, id] of Object.entries(VIEWS)) byId(id)!.hidden = mode !== m;
+    // T-993: Explore has no top bar — its controls float over the map; Decode/History get them back.
+    placeTopChrome(mode === "explore");
   }, { immediate: true });
 
   // Theme: "system" stamps nothing (prefers-color-scheme decides); dark/light stamp data-theme.
@@ -107,8 +126,15 @@ export function mountShell(ctx: AppContext) {
   }, { immediate: true });
 
   // Review badge (§4.1): open anomaly count, polled independently of the drawer's own tabs (T-155).
+  // T-993: the button keeps its icon and label (the label is hidden when it sits in the map's
+  // top-right cluster as an icon button), so the count is its own badge and the accessible name
+  // carries it wherever the button is.
   store.select((s) => s.openAlarms, (n) => {
-    byId("review-btn")!.textContent = n > 0 ? `Review (${n > 99 ? "99+" : n})` : "Review";
+    const btn = byId("review-btn")!;
+    const badge = btn.querySelector<HTMLElement>(".rv-n");
+    const count = n > 99 ? "99+" : String(n);
+    if (badge) { badge.textContent = n > 0 ? count : ""; badge.hidden = n <= 0; }
+    btn.setAttribute("aria-label", n > 0 ? `Review (${count})` : "Review");
   }, { immediate: true });
   startPoll(async () => {
     const r = await client.get<{ anomalies: readonly unknown[] }>("/api/anomalies?status=open&limit=100");

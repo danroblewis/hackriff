@@ -22,10 +22,17 @@
 //! 4. Validation over frames **distinct across all classes** (a repeated frame is one piece of
 //!    evidence); init/xorout solved over GF(2) from two lengths (a linear system in `I`), else
 //!    the standard settings, else `init 0` with the constant as xorout.
-//! 5. Claim only when the independent differences `D = validated − constants − structured`
-//!    (differences from the group's first frame that repeat with a period ≤ 16 bits are not
-//!    random multiples of the generator) are ≥ 2, `validated / tested ≥ 0.5` and the evidence
-//!    `w·D − log2(hypotheses)` is ≥ 16 bits.
+//! 5. Claim only when the independent differences `D = validated − constants − uncredited` are
+//!    ≥ 2, `validated / tested ≥ 0.5` and the evidence `w·D − log2(hypotheses)` is ≥ 16 bits.
+//!    *Uncredited* is two things: a difference from the group's first frame that repeats with a
+//!    period ≤ 16 bits (not a random multiple of the generator), **and** a span that ADR-0022
+//!    §4.3.1's count refuses as an independent trial — the real `CheckTally`, called as the check
+//!    blocks call it and **trimmed at the width under test**, not at the cell's widest (T-921;
+//!    see [`credit_mask`], which records the difference from a block's call and why the trim
+//!    width matters). A refused span is still *tested*, so the look-elsewhere denominator is
+//!    unchanged: fewer bits, never more. Without it every zero-padded shift of one no-code burst
+//!    counted as its own difference, and a single 2⁻ʷ event confirmed at **every** width
+//!    (T-577 §2.5).
 //! 6. Ambiguity: every divisor of a fitting generator fits too, and with few differences the GCD
 //!    carries chance factors (3 Mode-S frames: CRC-24 × a small factor fits). The fits of one
 //!    cell compete: each gets its posterior share (weight `2^((D−1)·w)`, the odds of a multiple
@@ -54,6 +61,8 @@ use super::{
     BchFragment, BlockFragment, Budget, CrcBlocks, CrcFragment, CrcSpan, FragmentParams, Meter,
     ParityFragment, WorkReport, hex_bits,
 };
+use hk_model::synth::tally::CheckTally;
+
 use crate::framing::bits::{BitOrder, pack};
 use crate::framing::crc::{CATALOGUE, CrcParams, Endianness, read_field};
 
@@ -192,7 +201,8 @@ pub struct CodeSuggestion {
     /// Distinct frames tested.
     pub tested: usize,
     /// Independent frame differences behind the claim: validated distinct frames minus the
-    /// constants, not counting differences that repeat with a short period.
+    /// constants, not counting differences that repeat with a short period, nor spans ADR-0022
+    /// §4.3.1's count refuses as independent trials (T-921 — see the module header, step 5).
     pub differences: usize,
     /// `w·differences − log2(hypotheses)`.
     pub evidence_bits: f64,
@@ -292,6 +302,9 @@ struct Covered {
     class: usize,
     len: usize,
     poly: Poly,
+    /// The covered span itself, kept because ADR-0022 §4.3.1's count has to be taken **per
+    /// candidate width** ([`credit_mask`]) and the guard reads bits, not the trimmed polynomial.
+    bits: Vec<u8>,
 }
 
 /// Searches CRC / cyclic codes and parity over `frames` (bits, one `u8` per bit), in order (the
@@ -320,6 +333,9 @@ pub(crate) fn search_indexed(
     meter: &mut Meter,
 ) -> (Vec<CodeSuggestion>, Vec<ParitySuggestion>) {
     let parity = search_parity(frames, cfg, meter);
+    // One tally for the whole search: its GF(2) arena is allocated here and rewound per cell
+    // (T-928 — a `CheckTally` reserves ~11.7 KiB, and a cell list runs to hundreds).
+    let mut tally = CheckTally::default();
     let min_w = usize::from(cfg.min_width.clamp(3, 32));
     let max_w = usize::from(cfg.max_width.clamp(cfg.min_width.clamp(3, 32), 32));
     let min_len = frames.iter().map(|f| f.1.len()).min().unwrap_or(0);
@@ -386,7 +402,9 @@ pub(crate) fn search_indexed(
                 break 'stages;
             }
             meter.hypothesis();
-            search_cell(frames, *cell, min_w, max_w, log2_h, cfg, meter, &mut found);
+            search_cell(
+                frames, *cell, min_w, max_w, log2_h, cfg, meter, &mut tally, &mut found,
+            );
         }
         if !found.is_empty() {
             break;
@@ -476,6 +494,7 @@ fn search_cell(
     log2_h: f64,
     cfg: &CodeSearchConfig,
     meter: &mut Meter,
+    tally: &mut CheckTally,
     found: &mut Vec<CodeSuggestion>,
 ) {
     // Distinct covered frames: a frame repeated (in any class) is one piece of evidence.
@@ -486,7 +505,7 @@ fn search_cell(
             continue;
         };
         // Copy, pack bit by bit, hash the words.
-        meter.charge(bits.len() as u64 * 2 + 64);
+        meter.charge(bits.len() as u64 * 3 + 128);
         if bits.len() < 2 * min_w {
             continue;
         }
@@ -498,6 +517,7 @@ fn search_cell(
             class: idx % cell.classes,
             len: bits.len(),
             poly,
+            bits,
         });
     }
     drop(seen);
@@ -513,17 +533,26 @@ fn search_cell(
     if deg < min_w {
         return;
     }
-    let structured = structured_differences(&covered, cross_length, meter);
+    // A difference pays for the claim only when it is both a random multiple of the generator
+    // (not a short-period difference from its group's first frame) **and** an independent trial
+    // under ADR-0022 §4.3.1's count. The first half does not depend on the width; the second
+    // does, so it is taken inside the loop, per candidate width.
+    let short_period = structured_differences(&covered, cross_length, meter);
     let mut fits: Vec<Fit> = Vec::new();
+    let mut uncredited: Vec<bool> = Vec::new();
     for w in (min_w..=max_w.min(deg)).rev() {
         if !meter.ok() {
             break;
         }
         let (cands, method) = divisors_of_degree(&g, w, meter);
+        if cands.is_empty() {
+            continue;
+        }
+        credit_mask(&covered, w, tally, meter, &short_period, &mut uncredited);
         for gen_full in cands {
             if let Some(f) = check(
                 &covered,
-                &structured,
+                &uncredited,
                 gen_full,
                 w,
                 cross_length,
@@ -647,6 +676,52 @@ fn fit_log_weight(k: usize, w: usize, repeated_factor: bool) -> f64 {
 /// Per covered frame: its difference from the first frame of its group repeats with a short
 /// period (constant, alternating, …). Such differences are not the random multiples of the
 /// generator the evidence assumes (they are divisible by many cyclotomic factors).
+/// ADR-0022 §4.3.1's count over one cell's spans **at the width being tested**, OR-ed into
+/// `short_period` to give the mask of differences that may not pay for the claim.
+///
+/// A span the count refuses — idle fill under the degenerate guard, a shift/doubling/repeat of
+/// one already-counted burst, or a frame inside the others' affine span — is still *tested*,
+/// which keeps the look-elsewhere denominator honest; it just may not pay, because it is valid
+/// by construction once the others are. Without this the searched path credited every
+/// zero-padded shift of one burst as its own difference and a single 2⁻ʷ event confirmed at
+/// **every** width, worst at 32 where ADR-0021 §8.2's null control cannot see it (T-577 §2.5).
+///
+/// **The trim is `w`, the width actually being tested, and this is why the mask cannot be
+/// hoisted out of the width loop.** T-921's first attempt recorded each span once with the
+/// cell's *widest* width on the reasoning that a span which is idle fill under the widest trim
+/// is idle fill under every narrower one. That is backwards: a wider trim leaves a *shorter*
+/// span, and a short span reads constant or two-period far more often, so the widest trim is
+/// the *strictest*. Measured on random spans (T-921 review), trimming at 32 instead of at the
+/// real width refused **75 % of 34-bit, 44 % of 36-bit and 16 % of 40-bit** frames that the
+/// block path counts — exactly the short ISM sensor frames with a byte-wide check that the
+/// search exists to find. Trimmed at its own width the search refuses what the block path
+/// refuses and nothing more.
+///
+/// It mirrors the block path's call but is not identical to it in one respect, deliberately:
+/// a block records `ok && upstream_clean`, having a generator to validate against, whereas here
+/// the generator is what is being searched for, so every distinct span is recorded. That is the
+/// permissive direction for the dedup and the rank cap, and `check` then intersects this mask
+/// with the spans that actually validate.
+fn credit_mask(
+    covered: &[Covered],
+    w: usize,
+    tally: &mut CheckTally,
+    meter: &mut Meter,
+    short_period: &[bool],
+    out: &mut Vec<bool>,
+) {
+    tally.clear();
+    out.clear();
+    for (c, &s) in covered.iter().zip(short_period) {
+        // The periodicity scan is O(bits x SHORT_PERIOD_MAX_BITS) over four trims, plus the
+        // affine insert; charged per width because it is now paid per width.
+        meter.charge(c.bits.len() as u64 * 24 + 64);
+        let before = tally.independent();
+        tally.record(&c.bits, true, w as f64, w);
+        out.push(s || tally.independent() == before);
+    }
+}
+
 fn structured_differences(covered: &[Covered], cross_length: bool, meter: &mut Meter) -> Vec<bool> {
     let mut first: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     covered
@@ -819,11 +894,15 @@ fn known_name(gen_full: u64, w: usize) -> Option<String> {
 }
 
 /// Whether `gen_full` satisfies the covered frames: modal remainder per (class, length), the
-/// independent differences behind it (validated − constants − structured) and the evidence.
+/// independent differences behind it (validated − constants − uncredited) and the evidence.
+///
+/// `uncredited[i]` marks a span that validates but may not pay for the claim — a short-period
+/// difference from its group's first frame, or one ADR-0022 §4.3.1's count refuses at this `w`
+/// ([`credit_mask`]).
 #[allow(clippy::too_many_arguments)]
 fn check(
     covered: &[Covered],
-    structured: &[bool],
+    uncredited: &[bool],
     gen_full: u64,
     w: usize,
     cross_length: bool,
@@ -831,9 +910,9 @@ fn check(
     log2_h: f64,
     meter: &mut Meter,
 ) -> Option<Fit> {
-    // Constant per (class, length): modal remainder; (count, structured count) per remainder.
+    // Constant per (class, length): modal remainder; (count, uncredited count) per remainder.
     let mut consts: BTreeMap<(usize, usize), BTreeMap<u64, (usize, usize)>> = BTreeMap::new();
-    for (c, &s) in covered.iter().zip(structured) {
+    for (c, &s) in covered.iter().zip(uncredited) {
         meter.charge(c.poly.words() * 64 + 8);
         let r = c.poly.rem_small(gen_full);
         let key = if cross_length {
@@ -846,7 +925,7 @@ fn check(
         e.1 += usize::from(s);
     }
     let tested = covered.len();
-    let (mut validated, mut structured_validated) = (0, 0);
+    let (mut validated, mut uncredited_validated) = (0, 0);
     let mut modal: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     for (key, hist) in &consts {
         let (&r, &(n, s)) = hist.iter().max_by_key(|(_, (n, _))| *n).expect("non-empty");
@@ -855,7 +934,7 @@ fn check(
         }
         if n >= 2 {
             validated += n;
-            structured_validated += s;
+            uncredited_validated += s;
         }
     }
     let n_consts = consts
@@ -865,7 +944,7 @@ fn check(
     if validated < n_consts + 2 || validated * 2 < tested {
         return None;
     }
-    let differences = (validated - n_consts).saturating_sub(structured_validated);
+    let differences = (validated - n_consts).saturating_sub(uncredited_validated);
     if differences < 2 {
         return None;
     }

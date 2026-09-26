@@ -6,11 +6,21 @@
 // the viewer put it. Presentation only: it reads the store's `focus`, never the client.
 import type { MountFn } from "../context";
 import type { Focus } from "../explore/slice";
-import { mountSheet } from "./sheet";
+import { mountSheet, type SheetController, type SheetSnap } from "./sheet";
+
+// T-997: the one handle other chrome has on this sheet. The inventory pills (`inv-pills.ts`) open
+// the sheet on a list, and the lists live in its body, so they need to raise it — and nothing more.
+// `reveal` never lowers a taller state the viewer chose, so this cannot shrink the sheet either.
+let controller: SheetController | null = null;
+
+/** Raise the Selected sheet to at least `snap`. No-op before it mounts. */
+export function revealFocusSheet(snap: SheetSnap): void {
+  controller?.reveal(snap);
+}
 
 /** The sheet's persisted-snap key (per viewer; see `sheet.ts`). */
 export const FOCUS_SHEET_KEY = "hk-mui-sheet-selected";
-/** Top chrome (the bar + the floating Go-to / top-right cluster) plus the dock the sheet floats
+/** Top chrome (the floating Go-to / nudges / top-right cluster / status pill) plus the dock the sheet floats
  * above, in CSS px. Must agree with `map-layout.css`'s `--sheet-bottom` and the chrome it keeps
  * clear of. (T-882 retired the surface's toolbar row, `.sf-bar`, which this used to name.) */
 export const FOCUS_SHEET_RESERVED_PX = 170;
@@ -27,8 +37,10 @@ export function focusSheetTitle(f: Focus, centerHz?: number | null): string {
 }
 
 /** The floating controls the sheet's `full` snap must never cover (T-528's rule, carried to the
- * floating chrome by T-882): Go-to and the top-right cluster (Layers, Measure, Viewport). */
-export const TOP_FLOATING = [".map-ctl .map-goto", ".map-ctl .map-topright"];
+ * floating chrome by T-882): Go-to and the top-right cluster (Layers, Measure, Viewport, Review, ⋯),
+ * and — since T-993 retired the top bar — the nudge row and the mode/status pill it left behind.
+ * A hidden one (`display: none`) measures a bottom of 0 and so never lowers the bound. */
+export const TOP_FLOATING = [".map-ctl .map-goto", ".map-ctl .map-topright", ".map-ctl .map-nudge", ".map-ctl .map-status"];
 
 /** The lowest bottom among `TOP_FLOATING`, or null before the surface has mounted them. */
 export function floatingChromeBottom(doc: Pick<Document, "querySelector"> = document): number | null {
@@ -72,6 +84,7 @@ export const mountFocusSheet: MountFn = (el, ctx) => {
     // `full` is bounded by where the floating top chrome actually ends, not by a fixed estimate.
     clearOf: () => floatingChromeBottom(),
   });
+  controller = sheet;
   watchToolbar(() => sheet.relayout());
   // The heading follows the focused row's served centre (refined when the server has refined it),
   // which can arrive after the focus does; only a change of focus ever raises the sheet.

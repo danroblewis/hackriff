@@ -891,6 +891,8 @@ struct ReaderState {
     provenance_cache: Option<(u64, ProvenanceHandle)>,
     samples_read: u64,
     lost_samples: u64,
+    shed_samples: u64,
+    sheds: u64,
     gap_samples: u64,
     overruns: u64,
     /// `meta_head` when the last read found nothing; waits park until it moves.
@@ -914,6 +916,8 @@ impl<T: RingSample> RingReader<T> {
                 provenance_cache: None,
                 samples_read: 0,
                 lost_samples: 0,
+                shed_samples: 0,
+                sheds: 0,
                 gap_samples: 0,
                 overruns: 0,
                 seen_head: 0,
@@ -953,6 +957,44 @@ impl<T: RingSample> RingReader<T> {
     /// Number of overruns reported.
     pub fn overruns(&self) -> u64 {
         self.state.overruns
+    }
+
+    /// Samples this reader **chose** to skip through [`RingReader::shed_to_latest`] (T-939).
+    /// Never counted in [`RingReader::lost_samples`]: nothing was taken from this reader.
+    pub fn shed_samples(&self) -> u64 {
+        self.state.shed_samples
+    }
+
+    /// Times [`RingReader::shed_to_latest`] moved this reader forward.
+    pub fn sheds(&self) -> u64 {
+        self.state.sheds
+    }
+
+    /// **Sheds the backlog: resumes at the newest committed block, deliberately** (T-939).
+    ///
+    /// An overrun is loss *suffered* — the writer overwrote samples this reader still wanted, a
+    /// whole ring at a time, and until it happens the reader's analysis runs further and further
+    /// behind the live edge. This is the same skip made *on purpose*, on a bound the caller sets,
+    /// before the ring decides it: a real-time consumer that cannot keep up at this rate is going
+    /// to miss samples either way, and the honest arrangement is a small, regular, attributable
+    /// hole close to the live edge rather than a ring-sized blackout at an unpredictable moment
+    /// (measured on a 20 Msps HackRF: 39 overruns in 4 minutes, each losing ~a full ring, and a
+    /// detector up to 4 s stale in between — T-939).
+    ///
+    /// The skipped span is counted in [`RingReader::shed_samples`], **not** in
+    /// [`RingReader::lost_samples`]: the two answer different questions, and a caller that sheds
+    /// must be able to say so rather than hide inside the ring's loss counter. Source-gap indices
+    /// inside the span are still gaps ([`RingReader::gap_samples`]).
+    ///
+    /// The next chunk therefore starts at a sample index the caller did not expect, which is
+    /// exactly the condition every stage already resets on (`StftProcessor::push` raises
+    /// `Discontinuity::GAP` on an index jump, and the burst detector re-anchors), so no frame and
+    /// no burst spans the hole.
+    ///
+    /// Returns the samples skipped (0 when the reader is unresolved, already at the newest block,
+    /// or the ring is empty).
+    pub fn shed_to_latest(&mut self) -> u64 {
+        self.state.shed_to_latest(&self.shared)
     }
 
     /// Copies the next available samples into `out` without waiting. A chunk never spans a
@@ -1274,6 +1316,36 @@ impl ReaderState {
         Some(self.report_overrun(skipped - gap, gap, target))
     }
 
+    /// See [`RingReader::shed_to_latest`].
+    fn shed_to_latest<T: RingSample>(&mut self, shared: &Shared<T>) -> u64 {
+        let Cursor::At { sample, gaps, .. } = self.cursor else {
+            return 0;
+        };
+        let head = shared.meta_head.load(SEQ);
+        let Some(block) = head.checked_sub(1) else {
+            return 0;
+        };
+        let Some(m) = shared.read_meta(block) else {
+            // The newest block went while we looked at it; the next read resyncs as an overrun.
+            return 0;
+        };
+        if m.first_sample <= sample {
+            return 0;
+        }
+        let skipped = m.first_sample - sample;
+        // Indices the source never produced are gaps wherever they are passed, not shed samples.
+        let gap = m.gaps_total.saturating_sub(gaps).min(skipped);
+        self.cursor = Cursor::At {
+            sample: m.first_sample,
+            block,
+            gaps: m.gaps_total,
+        };
+        self.gap_samples += gap;
+        self.shed_samples += skipped - gap;
+        self.sheds += 1;
+        skipped - gap
+    }
+
     fn report_overrun(&mut self, lost: u64, gap: u64, resume_at: u64) -> ReadOutcome {
         self.lost_samples += lost;
         self.gap_samples += gap;
@@ -1374,6 +1446,93 @@ mod tests {
             sample_capacity: samples,
             block_capacity: blocks,
         })
+    }
+
+    /// **T-939: the ring never lets one reader cost another, or the writer, anything.**
+    ///
+    /// The live failure this pins: at 20 Msps the detection reader read about a third of the
+    /// stream while the history reader lost nothing — and the suspicion raised with it was that a
+    /// reader that cannot keep up somehow pushes back on capture (`source_dropped` was non-zero).
+    /// There is no such path, and this is where that is true or not: the writer takes no reader's
+    /// lock, waits on no cursor and returns `Ok` however far behind the slowest reader is. (The
+    /// lossless flow gate, which *does* hold capture, lives in `hk-pipeline` and is off for any
+    /// source that cannot be paused.) Whatever couples a slow reader to the front end is CPU
+    /// contention on the box, not backpressure in the data path.
+    #[test]
+    fn a_reader_that_never_reads_costs_the_writer_and_the_other_readers_nothing() {
+        let (mut w, ring) = ring(1024, 8);
+        let p = provenance(100e6);
+        let mut keeping_up = ring.reader();
+        // Attached, and never read from: the worst case a reader can be.
+        let mut stalled = ring.reader();
+        let mut buf = vec![Complex32::default(); 128];
+        let mut read = 0u64;
+        for b in 0..64u64 {
+            // The writer laps the stalled reader eight times over and never fails or waits.
+            w.push(&header(b * 128, &p), &counter(b * 128, 128))
+                .expect("the ring never refuses a block because a reader is behind");
+            while let ReadOutcome::Data(c) = keeping_up.read(&mut buf) {
+                assert_eq!(decode(buf[0]), c.first_sample());
+                read += c.len as u64;
+            }
+        }
+        assert_eq!(read, 64 * 128, "the reader that kept up read every sample");
+        assert_eq!(keeping_up.lost_samples(), 0, "and lost none of them");
+        assert_eq!(keeping_up.overruns(), 0);
+        // The stalled reader pays for itself, alone: its first read is one overrun that resyncs it
+        // to the newest block, and the samples it missed are ITS loss, counted.
+        let (lost, _, resume) = overrun(stalled.read(&mut buf));
+        assert!(
+            lost > 0 && resume >= 64 * 128 - 128,
+            "{lost} lost, resume {resume}"
+        );
+        assert_eq!(
+            stalled.shed_samples(),
+            0,
+            "it was lapped, it did not choose"
+        );
+    }
+
+    /// **T-939: a shed is loss chosen, and is never reported as loss suffered.**
+    #[test]
+    fn shedding_to_the_live_edge_is_counted_as_chosen_not_lost() {
+        let (mut w, ring) = ring(4096, 16);
+        let p = provenance(100e6);
+        let mut r = ring.reader();
+        for b in 0..8u64 {
+            push(&mut w, b * 128, 128, &p);
+        }
+        let mut buf = vec![Complex32::default(); 64];
+        let c = data(r.read(&mut buf));
+        assert_eq!(c.first_sample(), 0);
+
+        // Everything between here and the newest block is given up deliberately.
+        let skipped = r.shed_to_latest();
+        assert_eq!(
+            skipped,
+            7 * 128 - 64,
+            "up to the newest block's first sample"
+        );
+        assert_eq!(r.shed_samples(), skipped);
+        assert_eq!(r.sheds(), 1);
+        assert_eq!(r.lost_samples(), 0, "nothing was taken from this reader");
+        assert_eq!(r.overruns(), 0, "and it was not lapped");
+        // The next chunk starts at an index the caller did not expect, which is what every stage
+        // downstream resets on: no frame and no burst spans the hole.
+        let c = data(r.read(&mut buf));
+        assert_eq!((c.first_sample(), c.block_start), (7 * 128, true));
+        assert_eq!(decode(buf[0]), 7 * 128);
+
+        // A reader already at the newest block sheds nothing rather than skipping the block it is
+        // reading: shedding must not be able to run the reader forward past live data.
+        assert_eq!(r.shed_to_latest(), 0);
+        assert_eq!(r.sheds(), 1);
+        // Nor before the stream has anything in it.
+        let (_w, empty) = ring_buffer::<Complex32>(RingConfig {
+            sample_capacity: 1024,
+            block_capacity: 8,
+        });
+        assert_eq!(empty.reader().shed_to_latest(), 0);
     }
 
     #[test]

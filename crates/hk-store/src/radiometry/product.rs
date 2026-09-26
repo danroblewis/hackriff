@@ -527,6 +527,14 @@ impl FloorProduct {
         self.runs.flush()
     }
 
+    /// T-942: forces every open tile of both pyramids shut, leaving the watermark at `t` — the
+    /// end-of-run gesture (see [`Pyramid::seal_all`]).
+    pub fn seal_all(&mut self, t: Timestamp) -> Result<(), StoreError> {
+        self.calibrated.seal_all(t)?;
+        self.uncalibrated.seal_all(t)?;
+        self.runs.flush()
+    }
+
     /// Checkpoints both pyramids and writes the state log.
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
         self.calibrated.checkpoint()?;

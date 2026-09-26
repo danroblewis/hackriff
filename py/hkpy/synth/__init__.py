@@ -10,7 +10,8 @@ Scenarios (use cases): ``tone`` (building block), ``fsk_burst_train`` (AWARE-036
 (AWARE-042), ``occupancy_markov_scene`` (AWARE-042/AWARE-044/PROP-023, T-117), ``fm_broadcast_rds``
 (SIGNAL-062), ``adsb_squitter`` (SIGNAL-001), ``pocsag_pagers`` (SIGNAL-062, M1 tutorial fixture
 T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only -- see
-:mod:`hkpy.synth.acars`), ``trunk_control_channel`` (C23, T-267), ``lora_ism_burst``
+:mod:`hkpy.synth.acars`), ``aprs_message`` (SIGNAL-089, T-952, synthetic-only -- see
+:mod:`hkpy.synth.ax25`), ``trunk_control_channel`` (C23, T-267), ``lora_ism_burst``
 (SIGNAL-062/AWARE-053, T-255: chirps with no stable frequency in 902-928 MHz US ISM -- see
 :mod:`hkpy.synth.lora_scene`), ``mismatched_hypothesis`` (SIGNAL-052/RESEARCH-002, T-626: the N5 mismatched-hypothesis negative
 population -- see :mod:`hkpy.synth.mismatch`), ``retune_diversity`` (AWARE-011, T-586: one region at several
@@ -91,6 +92,10 @@ SCENARIOS: dict[str, ScenarioSpec] = {
                                   "multi-channel 2-FSK POCSAG (512/1200/2400 Bd), BCH(31,21)+parity"),
     "acars_message": ScenarioSpec(scenarios.acars_message, scenarios.ACARS_DEFAULTS, ("SIGNAL-062",),
                                   "AM+MSK 2400 Bd VHF ACARS, SYN/SOH..ETX framing, CRC-16/KERMIT incl parity (acarsdec convention)"),
+    "aprs_message": ScenarioSpec(
+        scenarios.aprs_message, scenarios.APRS_DEFAULTS, ("SIGNAL-089",),
+        "NBFM-carried Bell 202 AFSK 1200 AX.25 UI frame (APRS): zero-bit-stuffed HDLC between "
+        "0x7E flags, NRZI, CRC-16/X-25 FCS (T-952)"),
     "trunk_control_channel": ScenarioSpec(
         trunk_scene.trunk_control_channel, trunk_scene.TRUNK_CC_DEFAULTS, (),
         "continuous C4FM trunking control channel (frame sync + CRC) beside an unframed "

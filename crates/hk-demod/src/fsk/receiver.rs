@@ -417,6 +417,7 @@ impl FskBurst {
             roll_off: None,
             bandwidth_hz: self.params.obw99_hz.value(),
             pilot_hz: None,
+            subaudible: None,
         }
     }
 }

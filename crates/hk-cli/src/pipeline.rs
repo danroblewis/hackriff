@@ -857,6 +857,17 @@ fn alarm_control(
     Ok(Arc::new(service))
 }
 
+/// T-977: the run's control-channel hunt behind the API's
+/// [`hk_api::trunk_cc::CcHuntControl`]. The pass renders itself (`CcPass::to_json`), so this
+/// adapter is the seam and nothing more.
+pub struct PipelineCcHunt(pub std::sync::Arc<hk_pipeline::ccverdict::CcVerdictLog>);
+
+impl hk_api::trunk_cc::CcHuntControl for PipelineCcHunt {
+    fn last_pass(&self) -> Option<serde_json::Value> {
+        self.0.last_pass().map(|p| p.to_json())
+    }
+}
+
 /// T-122: the novelty alarm service behind the API's [`hk_api::anomalies::AnomalyControl`].
 pub struct PipelineAnomalies(pub Arc<hk_pipeline::alarms::AlarmService>);
 
@@ -1176,8 +1187,12 @@ pub fn serve_api(
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::clone(&db)),
         trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
+        // T-977: the hunt's last pass, with the verdict on every channel it looked at.
+        cc_hunt: Some(Arc::new(PipelineCcHunt(handle.cc_verdicts()))),
         // T-891: the run's accessory-fed VLF services (an empty list without an accessory).
         vlf: Some(Arc::new(PipelineVlf(handle.vlf()))),
+        // T-981: the front-end events the spectrum reader judged, for the canvas's mark.
+        frontend: Some(Arc::new(PipelineFrontEnd(handle.counters()))),
         status: Some(Arc::new(move || {
             let mut v = counters.to_json();
             if let Some(o) = v.as_object_mut() {
@@ -1236,6 +1251,10 @@ pub fn serve_api(
             handle.iq_buffer(),
             handle.data_dir(),
         ))), // T-205
+        // T-844: the C38 models, modes and durable shadow log (`None` answers 503).
+        ml: handle
+            .ml()
+            .map(|m| Arc::new(crate::control::PipelineMl(m)) as Arc<dyn hk_api::MlControl>),
         // T-469: the persisted IQ recordings that extend the audio horizon past the ring.
         recordings: Some(Arc::new(PipelineRecordings::new(
             handle.data_dir().join("hackriff.db"),
@@ -1397,6 +1416,31 @@ impl hk_api::vlf::VlfControl for PipelineVlf {
             .iter()
             .map(|s| serde_json::to_value(s.report(include_points)).unwrap_or_default())
             .collect()
+    }
+}
+
+/// `GET /api/frontend/events` over the run's front-end event log (T-981).
+struct PipelineFrontEnd(Arc<hk_pipeline::stats::Counters>);
+
+impl hk_api::frontend::FrontEndControl for PipelineFrontEnd {
+    fn events(&self, t0_s: f64, t1_s: f64) -> Vec<serde_json::Value> {
+        self.0
+            .frontend
+            .events_between(t0_s, t1_s)
+            .iter()
+            .map(hk_pipeline::frontend::FrontEndEvent::to_json)
+            .collect()
+    }
+
+    fn log(&self) -> serde_json::Value {
+        let s = self.0.frontend.to_json();
+        serde_json::json!({
+            "capacity": s["log"]["capacity"],
+            "retained": s["log"]["retained"],
+            "oldest_s": s["log"]["oldest_s"],
+            "evicted": s["evicted_events"],
+            "rule": s["rule"],
+        })
     }
 }
 
@@ -2502,14 +2546,21 @@ mod tests {
         let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 3.0);
         // Paced (T-072): the control thread ticks the scheduler on wall time with the stream
-        // time, so an unpaced replay could outrun it under load and apply too few steps (a
-        // flake). Paced, the step count follows stream time.
+        // time, so an unpaced replay could outrun it and apply too few steps.
+        //
+        // T-934: even paced, how many steps fit in ONE pass of a 3 s recording depends on how
+        // often a loaded box lets the control thread sample the stream clock (a starved thread
+        // folds several steps into one), so "> 10 steps by the end of the pass" was a
+        // wall-clock race (9-10 seen at load ~28). The replay loops instead, and the test waits
+        // on the counted event - the step counter passing 10 - then stops the run; the deadline
+        // only bounds a hang (a scheduler that never steps).
         let mut args = daemon_args(
             format!("sigmf:{}", fixture.display()),
             dir.clone(),
             Some(TOKEN),
         );
         args.unpaced = false;
+        args.loop_replay = true;
         let Daemon { server, handle, .. } = start_daemon(&args).unwrap();
         let addr = server.local_addr();
         let (unauth, _) = get(addr, "/api/status", None);
@@ -2519,6 +2570,21 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.pointer("/readers/detect/lost_samples").is_some(), "{v}");
         assert!(v.pointer("/chains/attached").is_some(), "{v}");
+        let counters = handle.counters();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while counters
+            .scheduler
+            .steps
+            .load(std::sync::atomic::Ordering::Relaxed)
+            <= 10
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the scheduler is not being driven"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        handle.stop();
         let summary = handle.wait().unwrap();
         // The scheduler really retunes the device (T-057), and the spectrum stream is re-offered
         // under the same id at each new centre. The registry keeps offered streams after the run,
