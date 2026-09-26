@@ -28896,7 +28896,7 @@ tasks:
   - id: T-975
     milestone: MAUTO
     title: Explorer P25 capture into fixtures/ with hidden truth (852.859 MHz intermittent C4FM, 2.4 Msps) + a P25 sync reference oracle
-    status: in-progress
+    status: done
     branch: task-t975
     priority: P1
     deps: []
@@ -28912,7 +28912,10 @@ tasks:
       MAC ONLY (capture in ~/.hackriff-ops). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 recovery: T-975's commit (9672ba74 on task-t985, 432aad8a on task-t975) lands through task-t985, which was brought up to gated main; queue task-t985 only, not task-t975.
+
+      2026-09-26 coordinator: landed via T-985's merge 6839a5fb (every file of 432aad8a is on main: fixtures/hackrf/explorer-2026-09-25/p25-852p86-2p4M.*, py/fixtures/p25_ref.py, build_explorer_2026_09_25.py, manifest, tooling test); branch task-t975 is redundant.
     dispatch: manual
+    commit: 6839a5fb
   - id: T-976
     milestone: MAUTO
     title: "All captured signals decode: the P25 member (one region, C4FM 4-level, P25-like identified with evidence; decode marginal) - failing-first blind test"
@@ -29042,6 +29045,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): another carrier case: 146.561 MHz is a continuous UNMODULATED carrier with mains hum; the app detected it blind and Listen chose nbfm 0.75, but it is never classed as a carrier. Include it: an unmodulated carrier (with or without hum) is classified CW/carrier.
+
+      2026-09-26 coordinator (recovery merge e539c7a5): after main's T-948 (a narrow line inside the 15 kHz DC tolerance gets no inventory entry), cw_carrier_is_not_a_burst_train's carrier moved 12 kHz -> -120 kHz off centre; the scene still yields one 'unmodulated carrier (possible spur/LO)' row and 0 FSK bursts. Consequence stated for the record: the field case that started T-980 (a carrier 12 kHz off centre) is now dropped by T-948 as DC, not explained - T-948's rule, accepted.
     model_reason: "opus/medium: estimator and burst-chain changes on the detection path"
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 13:38).
