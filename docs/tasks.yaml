@@ -29796,7 +29796,7 @@ tasks:
   - id: T-1009
     milestone: MMAP
     title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-1008
@@ -29822,6 +29822,7 @@ tasks:
       Observed, not chased: The two-device e2e backend needs longer than backend.mjs's fixed 20 s readiness loop under load: on a box at load average ~41 `hk serve` with two mock front ends failed to come up twice in a row (ui/e2e/backend.mjs:254 'hk serve did not come up ... in 20 s', both mock devices logged as opened), then came up in ~2-4 s once the box quietened. app-pane-device.e2e.mjs uses the same two-device startup and the same fixed timeout, so it is exposed to the same load-flake; the readiness loop has no knob. | A measurement box is laid out in capture time, so on a FOLLOWING pane it rises off the pointer position between the drag that draws it and a right-click on it (the e2e freezes the pane first, which is view state and reaches no device route). That is the invariant working, not a bug, but it does mean a user right-clicking a just-drawn box on a fast-scrolling live pane can miss it. | GET /api/iqbuffer still reports the run's DEFAULT front end's ring only; T-1009 added the device_id selector to the clip route alone, so a client cannot yet read a further front end's ring status (extent, segments) to know whether a Record IQ of a past region will find samples there.
       Use cases: AWARE-011, AWARE-042, RESEARCH-003
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: e2f6d06c
   - id: T-1010
     milestone: M2-hardening
     title: "On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame"
