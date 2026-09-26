@@ -31757,7 +31757,7 @@ tasks:
   - id: T-1081
     milestone: MUI
     title: "RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-INV-REQ
@@ -31780,6 +31780,7 @@ tasks:
       Commits: d2fb7f9a
       Observed, not chased: Other e2e specs still read T-996's retired .hk-surface-viewport / .hk-surface-id rows and will time out the same way on current main. app-split-frozen.e2e.mjs:45 is confirmed by reading it; grep -l 'hk-surface-viewport' ui/e2e also lists app-status, app-no-minimap, surface-nav, surface-address, surface-colour, surface-retune, app-dismiss, live-ring, app-split-layout, ledger-fog, shadow-level, app-trace, surface-region and nudge-fog, some of which may only mention the name in comments. The replacement state is on each pane's .sf-scale (data-pane, data-t0-ns, data-t1-ns, data-following). | T-1060 (queued) rewrites the explore reload subscription (ui/src/app/explore/index.ts:182-194). This change touches loadInventoryRows only, not the subscription, so the two should compose; the fix does not depend on T-1060.
       Resources: 446 CPU-s, peak 2.7 GB
+    commit: 17f5705e
   - id: T-1082
     milestone: MLIVE
     title: "RC P1: shadow-level - the LSR-7 dashboard tile reports fold samples but zero sample->pixel latency samples (latency n=0)"
