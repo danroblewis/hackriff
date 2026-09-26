@@ -861,6 +861,29 @@ export class SurfacePreview {
     return true;
   }
 
+  /**
+   * **The radio was retuned: everything this host caches about the growing edge is now about a tuning
+   * that no longer exists** (T-437 §5.2, extended by T-1057).
+   *
+   * The one client-side act of a committed retune, in one place, because it is three things that must
+   * happen together and were not:
+   *
+   *  1. **Drop the edge tiles** — T-444's rule: a cached edge tile is an observation claim about the
+   *     old tuning. Returns how many were dropped, which is what the retune sites report.
+   *  2. **Stop the coverage survey vetoing requests about the new tuning** ([[Surface.noteRetune]]).
+   *     A retune is exactly where "never sampled" stops being true, so the survey in hand is stale
+   *     from this instant on — and a stale veto is a place that is neither drawn nor requested.
+   *  3. **Ask for a fresh survey now**, rather than at the ordinary cadence — and this is the half
+   *     that a following pane hid: for a surface with nothing following the live edge the cadence is
+   *     `POSITIVE_INFINITY` (one survey is the whole answer), so without this the suspension in (2)
+   *     would never be lifted and the saving never regained.
+   */
+  retuned(): number {
+    this.view.surface.noteRetune(this.edgeNs);
+    this.surveyNextAt = 0;
+    return this.view.surface.cache.invalidateEdge(this.view.surface.lat, this.edgeNs);
+  }
+
   /** Draw one frame. With no `windows` supplier the list is empty — the preview reads no live edge,
    * and a lit segment placed from a fixed historical instant would be a live claim with no live
    * evidence. */

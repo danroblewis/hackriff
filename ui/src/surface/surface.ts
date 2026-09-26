@@ -604,6 +604,9 @@ export class Surface {
   /** One `UNOBSERVED` cell, uploaded once: what a surveyed place is drawn from, so its grey still
    * comes out of a coverage state byte and out of nothing else. */
   private greyTex: TilePlanes | null = null;
+  /** From which instant the current survey is stale, ns on the capture clock (T-1057). See
+   * [[noteRetune]]; `null` means the survey speaks for its whole window. */
+  private surveyStaleFromNs: number | null = null;
 
   /**
    * **The live ring, per pane** (T-1042 / LSR-1, `./livering.ts`): the published `spectrum/live`
@@ -659,9 +662,53 @@ export class Surface {
   get lat(): Lattice { return this.lattices.detail; }
   get tiers(): LatticeSet { return this.lattices; }
 
-  /** Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580). */
-  setSurvey(s: Survey | "awaiting" | null): void { this.survey = s; }
+  /**
+   * Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580).
+   *
+   * **A fresh answer is also what lifts a retune's suspension** ([[noteRetune]], T-1057) — but only
+   * when its evidence actually reaches past the retune, because a survey already in flight when the
+   * radio was retuned lands *after* it while describing the tuning before it. That answer is not
+   * evidence about the new tuning and must not be allowed to veto requests over it.
+   */
+  setSurvey(s: Survey | "awaiting" | null): void {
+    this.survey = s;
+    if (s === null) this.surveyStaleFromNs = null;
+    else if (s !== "awaiting" && this.surveyStaleFromNs !== null && s.throughNs >= this.surveyStaleFromNs) {
+      this.surveyStaleFromNs = null;
+    }
+  }
   get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /**
+   * **A retune happened at `atNs`: the survey may not veto a request about anything from that instant
+   * on, until a survey whose evidence reaches past it lands** (T-1057, the user's rule that "a retune
+   * refreshes the survey before it may veto a request").
+   *
+   * A retune is the one event that changes the answer to "was this ever sampled?" — it is where
+   * never-sampled spectrum starts being sampled — so a survey taken before it is, from that instant
+   * forward, a statement about a tuning that no longer exists. Left unchecked, that stale answer made
+   * the newly tuned band's own tiles *unrequestable*: the survey settled them, so no lane would start
+   * a request, and the renderer had nothing to draw but its PENDING ground. On a surface with nothing
+   * following the live edge the next survey never comes at all (`preview.ts`'s cadence is
+   * `POSITIVE_INFINITY` for a historical surface), so "until the next survey" was "for the session" —
+   * the black bars the user reported, arrived at from the coverage side rather than from the fetch side.
+   *
+   * **Bounded rather than dropped, deliberately.** The old survey is still perfectly good about every
+   * instant *before* the retune — the radio cannot retroactively have sampled a band it was not tuned
+   * to — and that past is most of a 6 GHz canvas. Discarding the whole survey would send a burst of
+   * requests over never-swept spectrum (the very cost T-580/T-905 exist to avoid, and what
+   * `ui/e2e/fog-of-war` pins) for no honesty gain. So the suspension reaches exactly the places that
+   * **extend past** the retune: the live row and anything after it, which is where the new tuning's
+   * rows are arriving and where the black bars were.
+   */
+  noteRetune(atNs: number): void {
+    const at = Number.isFinite(atNs) ? atNs : Number.NEGATIVE_INFINITY;
+    this.surveyStaleFromNs = this.surveyStaleFromNs === null ? at : Math.min(this.surveyStaleFromNs, at);
+  }
+
+  /** The instant from which the current survey is stale, or `null` when it speaks for the whole
+   * window. Read by a test and by a readout; set by [[noteRetune]], cleared by [[setSurvey]]. */
+  get surveyStaleFrom(): number | null { return this.surveyStaleFromNs; }
 
   /**
    * **Where each pane's live rows come from** (T-1042), or `null` for none — which is the renderer's
@@ -688,13 +735,39 @@ export class Surface {
     if (s === "awaiting") return true;
     const { detail, overview } = this.lattices;
     const lat = a.scheme === detail.scheme ? detail : a.scheme === overview.scheme ? overview : null;
-    return lat !== null && s.unobservedThrough(extentOf(lat, a)) !== null;
+    return lat !== null && this.surveySettles(lat, a);
   }
 
-  /** When the survey settles `region` as never sampled, the instant it is grey up to; else null. */
+  /**
+   * **May the survey answer this place instead of a request?** (T-580, narrowed by T-1057.)
+   *
+   * The one derivation, read by [[settledBySurvey]] (the cache's gate for every miss lane) and by
+   * every lane inside [[render]] — the pane's own tiles, the parent pin, the child prefetch and the
+   * coarse stand-in set. It is `true` only when the survey will actually **draw grey** for the place:
+   * the user's rule is that the survey may turn a place grey and may never leave it pending, and a
+   * skip that draws nothing leaves it pending with nothing coming.
+   */
+  private surveySettles(lat: Lattice, a: TileAddr): boolean {
+    const region = extentOf(lat, a);
+    const through = this.surveyedThrough(region);
+    return through !== null && through > region.t0Ns;
+  }
+
+  /**
+   * When the survey settles `region` as never sampled, the instant it is grey up to; else null.
+   *
+   * **Nothing, for a place that reaches past the last retune** ([[noteRetune]], T-1057): a survey
+   * taken before the radio was retuned cannot speak for any instant after it, so such a place is owed
+   * a request rather than settled — the tile's own coverage plane is then what says which of its rows
+   * were sampled, which is the honest answer and the only one available. A place that ends **before**
+   * the retune is untouched: the radio cannot retroactively have sampled a band it was not tuned to,
+   * so the old survey is still exactly right about the past, and the past is most of a 6 GHz canvas.
+   */
   private surveyedThrough(region: Box): number | null {
     const s = this.survey;
-    return s && s !== "awaiting" ? s.unobservedThrough(region) : null;
+    if (!s || s === "awaiting") return null;
+    if (this.surveyStaleFromNs !== null && region.t1Ns > this.surveyStaleFromNs) return null;
+    return s.unobservedThrough(region);
   }
 
   /**
@@ -911,7 +984,16 @@ export class Surface {
           if (!this.cache.isResident(a)) {
             if (awaiting) { resolved.push({ addr: a, region, kind: "awaiting" }); continue; }
             const through = this.surveyedThrough(region);
-            if (through !== null) { resolved.push({ addr: a, region, kind: "surveyed", through }); continue; }
+            // **A survey may turn a place GREY; it may never leave it PENDING** (T-1057, the user's
+            // rule). `through <= region.t0Ns` is the survey settling the place as never sampled while
+            // having no evidence that reaches *into* it — all it could draw is nothing, and a skip
+            // then means the place is neither drawn nor requested: black, for as long as the survey
+            // stays that far behind, which on a surface with nothing following is forever. So the
+            // short-circuit is granted only when it actually puts grey on the screen.
+            if (through !== null && through > region.t0Ns) {
+              resolved.push({ addr: a, region, kind: "surveyed", through });
+              continue;
+            }
           }
           const res = this.cache.acquire(a);
           if (res.kind === "resident") { resolved.push({ addr: a, region, kind: "resident", entry: res.entry }); continue; }
@@ -937,12 +1019,13 @@ export class Surface {
         for (const p of resolved) {
           if (p.kind === "awaiting") { pending++; continue; }
           if (p.kind === "surveyed") {
+            // `through > region.t0Ns` is the resolve pass's own precondition for this branch
+            // (T-1057), so this always draws: a surveyed place that would draw nothing is not
+            // surveyed, it is requested.
             const through = p.through;
-            if (through > p.region.t0Ns) {
-              const shownTo = through >= p.region.t1Ns ? p.region : { ...p.region, t1Ns: through };
-              this.drawSurveyed(pane, shownTo, r);
-              drawnToNs = Math.max(drawnToNs, shownTo.t1Ns);
-            }
+            const shownTo = through >= p.region.t1Ns ? p.region : { ...p.region, t1Ns: through };
+            this.drawSurveyed(pane, shownTo, r);
+            drawnToNs = Math.max(drawnToNs, shownTo.t1Ns);
             surveyed++;
             continue;
           }
@@ -1007,14 +1090,14 @@ export class Surface {
         for (const a of tilesFor(lat, pane.box, levelF + 1, Math.min(levelT + 1, lat.levelsT - 1), pane.device ?? "any")) {
           // The same short-circuit as the pane's own tiles: a parent over never-sampled spectrum
           // is not worth a request either (T-580).
-          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          if (!this.cache.isResident(a) && this.surveySettles(lat, a)) continue;
           this.cache.prefetch(a);
         }
       }
       // The child prefetch: lowest priority (back of the LIFO), and the same short-circuits.
       if (child) {
         for (const a of tilesFor(lat, child.box, child.levelF, child.levelT, pane.device ?? "any")) {
-          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          if (!this.cache.isResident(a) && this.surveySettles(lat, a)) continue;
           if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) continue;
           this.cache.prefetch(a, undefined, true);
         }
@@ -1024,7 +1107,7 @@ export class Surface {
       // batching source sends the whole set as one request and it reveals as one picture.
       if (coarse) {
         for (const a of coarse.addrs) {
-          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          if (!this.cache.isResident(a) && this.surveySettles(lat, a)) continue;
           // The ring's extent short-circuits this lane too (T-1042's rule, applied to T-1037's set):
           // a stand-in for a place the published rows already paint stands in for nothing, and the
           // cheapest answer is the one that costs no request at all.

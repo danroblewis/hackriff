@@ -1111,8 +1111,12 @@ test("a retune still wins over a refresh in flight", async () => {
 const httpError = (status: number, msg = "bad node") =>
   Object.assign(new Error(msg), { status, code: "bad_request" });
 
-test("a 400 is fetched at most ONCE per place, however many frames ask for it", async () => {
-  const h = harness({ inFlight: 4 });
+test("a 400 is fetched at most ONCE PER WAIT, however many frames ask for it", async () => {
+  // **T-479's assertion, kept, with T-1057's correction to what happens next.** The flood is still
+  // the defect: sixty frames of a render loop must cost ONE request. What is no longer true is that
+  // the place is never asked again — see the test below for why the user's screen depended on it.
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
   const bad = addr(9, 218471, 10, 0);
   h.cache.beginFrame();
   h.cache.acquire(bad);
@@ -1130,20 +1134,89 @@ test("a 400 is fetched at most ONCE per place, however many frames ask for it", 
     assert.equal(res.kind === "pending" && res.failed, true,
       "…and the caller is told WHICH not-loaded it is: asked and refused, not never-sampled");
   }
-  assert.deepEqual(h.calls, [keyOf(bad)], `the 400 was re-asked ${h.calls.length - 1} more times`);
-  assert.equal(h.cache.stats.terminalFailures, 1);
-  assert.equal(h.cache.terminalPlaces, 1);
+  assert.deepEqual(h.calls, [keyOf(bad)], `the 400 was re-asked ${h.calls.length - 1} more times inside its wait`);
+  assert.equal(h.cache.stats.retryScheduled, 1, "the place is owed another request, not written off");
+  assert.equal(h.cache.retryingPlaces, 1);
+  assert.equal(h.cache.terminalPlaces, 0,
+    "a 400 is not the route saying the place does not exist — it says that with a 404 (T-1057)");
+  assert.equal(h.cache.retryingIn(bad), 500, "the first wait is the ladder's base, unjittered here");
   assert.match(h.cache.refusalFor(bad) ?? "", /HTTP 400/, "the route's own words are kept for the readout");
 });
 
-test("NO status the ROUTE can emit is ever asked twice — the enumeration, not a list of special cases", async () => {
-  // The guard the ticket asked for, stated over the statuses rather than over the one that bit us.
-  // T-523 narrows "every status" to "every status `/api/tiles` can answer with": every 4xx, plus
-  // the three 5xx `hk-api` emits (500, the T-190 501, and T-454's 503 — which arrives as a
-  // TileBusyError and is the test below). 501 is here because it is a real refusal that a proxy
-  // could be mistaken for: it must stay terminal.
-  for (const status of [400, 401, 403, 404, 405, 410, 413, 422, 429, 431, 500, 501]) {
-    const h = harness({ inFlight: 4 });
+test("T-1057: a VISIBLE place that failed is ASKED AGAIN, on a doubling jittered ladder, for ever", async () => {
+  // The user, 2026-09-25: *"Sometimes there are black bars in the waterfall … sometimes those never
+  // load. If a tile fails to load at all it should be re-requested. Left alone long enough, all
+  // tiles on the screen should load. I don't think we should ever see the black tiles."*
+  //
+  // T-479 made every status the route could emit terminal, and the route uses **400** for two
+  // incompatible things: an address that can never exist, and a tile whose level `materialize`
+  // cannot fold *yet* (`crates/hk-api/src/tiles.rs`: "this tile's level cannot be built from the
+  // levels below it"). One frame of the second meaning cost that place for the rest of the session.
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+  const a = addr(3);
+  const askAFrame = async () => {
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame(); await flush();
+  };
+
+  // Five refusals, each followed by frames inside and then past the wait: 500, 1000, 2000, 4000,
+  // 8000 ms. The doubling is the whole reason a permanent refusal cannot become the T-479 flood.
+  const waits: number[] = [];
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const before = h.calls.length;
+    await askAFrame();
+    assert.equal(h.calls.length, before + 1, `attempt ${attempt} never reached the wire`);
+    await h.fail(a, httpError(400, "this tile's level cannot be built from the levels below it"));
+    waits.push(h.cache.retryingIn(a) ?? -1);
+    // Just inside the wait: nothing, whatever the render loop does.
+    clock += (h.cache.retryingIn(a) ?? 0) - 1;
+    for (let frame = 0; frame < 5; frame++) await askAFrame();
+    assert.equal(h.calls.length, before + 1, `attempt ${attempt} was re-asked INSIDE its own wait`);
+    clock += 1;
+  }
+  assert.deepEqual(waits, [500, 1000, 2000, 4000, 8000], "the ladder doubles per consecutive refusal");
+  assert.equal(h.cache.stats.terminalFailures, 0, "nothing here is terminal: the place is still owed");
+  assert.equal(h.cache.retryAttempts(a), 5);
+
+  // And it is SERVED in the end, which is the user's sentence: left alone long enough, the tile loads.
+  await askAFrame();
+  await h.settle(a);
+  assert.equal(h.cache.residentTiles, 1, "the sixth attempt landed — the place was never abandoned");
+  assert.equal(h.cache.retryingPlaces, 0, "and the streak is forgotten, so a later blip starts at 500 ms");
+});
+
+test("T-1057: the jitter is additive — a herd that failed together does not come back on one tick", async () => {
+  // A whole batch (T-573) fails on one dropped connection and a whole viewport's tiles fail on one
+  // retune, so an unjittered ladder would re-create the burst that failed. Additive, so it can only
+  // ever wait LONGER than the ladder says: a spread that could shorten the wait would be a way to
+  // arrive earlier than the backoff allows.
+  let clock = 0;
+  const spread = [0, 0.5, 0.999];
+  let i = 0;
+  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => spread[i++ % spread.length] });
+  const due: number[] = [];
+  for (let k = 0; k < 3; k++) {
+    const a = addr(20 + k);
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame(); await flush();
+    await h.fail(a, httpError(500, "history store poisoned"));
+    due.push(h.cache.retryingIn(a) ?? -1);
+  }
+  assert.equal(due[0], 500, "no jitter is the ladder's own step, never less");
+  assert.ok(due[1] > 500 && due[1] <= 750, `half the spread is half a step later: ${due[1]}`);
+  assert.ok(due[2] > due[1] && due[2] <= 750, `the top of the spread is one half-step later: ${due[2]}`);
+  assert.equal(new Set(due).size, 3, "three places that failed together are not all due at one instant");
+});
+
+test("only a 404/410 ends the asking — the route STATING the place does not exist (T-1057)", async () => {
+  // T-479's enumeration, corrected at one point. Every status the route can emit still costs exactly
+  // one request per wait; what separates them is whether asking again can ever change the answer.
+  // `hk-api` says "there is no such node" with a 404 (`tiles.rs`: "scheme … has no node at (level_f …,
+  // level_t …)"), and that is the user's only stopping condition. Everything else — a 400 for a level
+  // not yet foldable, a 500 for a poisoned store, a 401 before a token is renewed — is about this
+  // moment, and a place refused for a moment is a place still owed a request.
+  for (const status of [400, 401, 403, 405, 413, 422, 429, 431, 500, 501]) {
+    let clock = 0;
+    const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
     const a = addr(status % 7);
     h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
     await flush();
@@ -1152,7 +1225,30 @@ test("NO status the ROUTE can emit is ever asked twice — the enumeration, not 
       h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
       await flush();
     }
-    assert.deepEqual(h.calls, [keyOf(a)], `HTTP ${status} was re-asked: terminal is supposed to be the DEFAULT`);
+    assert.deepEqual(h.calls, [keyOf(a)], `HTTP ${status} was re-asked inside its wait: that is the T-479 flood`);
+    assert.equal(h.cache.terminalPlaces, 0, `HTTP ${status} is not the route saying the place does not exist`);
+    clock += 500;
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    assert.equal(h.calls.length, 2, `HTTP ${status}: the place must be asked again once its wait passes`);
+  }
+  for (const status of [404, 410]) {
+    let clock = 0;
+    const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
+    const a = addr(status % 7);
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    await h.fail(a, httpError(status, "scheme \"view\" has no node at (level_f 10, level_t 0)"));
+    assert.equal(h.cache.terminalPlaces, 1, `HTTP ${status} IS the route stating the place does not exist`);
+    assert.equal(h.cache.stats.terminalFailures, 1);
+    assert.equal(h.cache.retryingPlaces, 0);
+    clock += 60_000;
+    for (let frame = 0; frame < 10; frame++) {
+      h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+      await flush();
+    }
+    assert.deepEqual(h.calls, [keyOf(a)],
+      `HTTP ${status} was asked again: "there is no such node" is the one answer that ends the asking`);
   }
 });
 
@@ -1342,13 +1438,19 @@ test("a place with no usable answer is told apart from one that is merely not lo
     "bar that never finishes, the same defect as AWAITING promising arrival (T-441)");
 });
 
-test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async () => {
+test("an unreadable 200 is an ANSWER: never at frame rate, and never written off either", async () => {
   // Found by merging T-467, not by argument. Its new coverage encoding made a stale fixture's `200`
   // responses undecodable; `TileDecodeError` carries no HTTP status, so the rule above read it as
   // "the server said nothing" and the place was re-asked on every frame — 157 times in 700 ms. The
-  // server had said plenty. A body this client cannot read is an answer, and asking again gets the
-  // same bytes back.
-  const h = harness({ inFlight: 4 });
+  // server had said plenty.
+  //
+  // **T-1057 keeps the flood fixed and drops the "same bytes back" assumption**, which is false for
+  // the two ways a body actually arrives unreadable in the field: a response truncated by an unstable
+  // connection, and a batch answer that named no entry for this address (`tilebatch.ts`). Both are
+  // this moment's accident, not a property of the place — so it goes on the ladder like any other
+  // refusal, one request per wait.
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock, retryJitter: () => 0 });
   const a = addr(2);
   h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
   await flush();
@@ -1358,8 +1460,15 @@ test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async (
     await flush();
   }
   assert.deepEqual(h.calls, [keyOf(a)], `an undecodable response was re-asked ${h.calls.length} times`);
-  assert.equal(h.cache.stats.terminalFailures, 1);
+  assert.equal(h.cache.stats.terminalFailures, 0, "an unreadable body is not a place that cannot exist");
+  assert.equal(h.cache.retryingPlaces, 1);
   assert.match(h.cache.refusalFor(a) ?? "", /coverage has no plane/, "the decoder's own words survive");
+  clock += 500;
+  h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, 2, "…and the place is asked again once its wait passes");
+  await h.settle(a);
+  assert.equal(h.cache.residentTiles, 1, "a readable answer the second time is how this recovers");
 });
 
 // ——— T-490: the refresh lane is PER COST CLASS, so a cheap tenant is not charged an expensive one ———

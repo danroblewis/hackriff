@@ -1289,7 +1289,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow,
       // T-437 §5.2: the growing edge's tiles were computed from the tuning that has just ended, so
       // a cached one is an observation claim about a tuning that no longer exists.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1341,7 +1341,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow: widthOfferNow,
       // T-437 §5.2, same as the retune control: the growing edge's tiles described the tuning that
       // has just ended.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1371,7 +1371,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (isGoLiveOffer(lastPaintedGoto)) {
       void acceptGoLive(ctx, {
         offerNow: widthOfferNow,
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, lastPaintedGoto, (paneId) => {
         p.view.panes.follow(paneId);
         lastMirror = ""; mirror(); renderLive(); viewMoved();
@@ -1386,7 +1386,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // nothing); if the current/default span has since changed that is `sameWidthTarget`'s job to
       // catch, not this function's.
       offerNow: widthOfferNow,
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, lastPaintedGoto).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1420,7 +1420,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = await commitRetuneMode(ctx, {
         targetNow: retuneTargetNow,
         // T-437 §5.2, as everywhere else: the growing edge's tiles describe the tuning that ended.
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, paneId);
       // What the pane says afterwards. A refusal is said too: in this mode the user did not press a
       // button, so silence would read as "my pan did nothing" rather than "the front end said no" —
