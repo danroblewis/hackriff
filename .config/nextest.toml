@@ -210,7 +210,13 @@ fail-fast = false
 # deterministic halves gate normally (hk-core's ring reader-independence tests and
 # hk-pipeline::waterfall_survives_drops). T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
 # audio branch against the legacy Listen chain, same IQ); its audio/RDS/refinement parity half
-# gates normally (hk-pipeline::listen_recipe_parity).
+# gates normally (hk-pipeline::listen_recipe_parity). T-1036 added hk-model's batched
+# detection-insert floor (ADR-0006's write-throughput risk): it was 173 of the gate log's
+# mentions - 9.6 s and green alone, 37.7 s with four agents on the box, 59.3 s at load 30, and
+# 234 rows/s against a 1000 rows/s floor here with a single other test beside it. The bound is
+# unchanged and nothing is #[ignore]d: the run was SPLIT, and its deterministic half
+# (hk-model::detection_writes_are_all_readable_and_the_rate_is_reported - every written row read
+# back through the region query, the rate computed from those rows and stated) gates normally.
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
@@ -222,6 +228,7 @@ not (
   or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
   or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
   or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
+  or test(the_detection_write_rate_clears_its_floor)
 )
 '''
 
@@ -501,4 +508,5 @@ or test(the_retention_index_build_is_measured_per_row)
 or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
 or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
+or test(the_detection_write_rate_clears_its_floor)
 '''

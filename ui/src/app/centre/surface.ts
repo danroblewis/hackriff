@@ -104,6 +104,7 @@ import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { activePaneName, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
+import { PaneLiveLayer, paneLiveActions, type ChromeRect } from "./pane-live";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
 import {
@@ -254,6 +255,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // the frame was drawn with (and at once when the active pane changes), shown only while there are
   // two or more panes. Never takes the pointer: a press goes through it to the pane underneath.
   const activeEl = h("div", { class: "sf-active-pane", "aria-hidden": "true", hidden: true });
+  // T-1001 (MMAP split view): **each pane's own Live/Freeze button**, inside its own rectangle —
+  // the retired follow-live FAB acted on the hidden active pane, so with two panes open it could
+  // not say which one it froze. One button per pane, placed every render frame from that frame's
+  // pane rectangles (`centre/pane-live.ts`). The container never takes the pointer; the buttons do.
+  const liveEl = h("div", { class: "sf-pane-live", role: "group", "aria-label": "Per-viewport Live / Freeze" });
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -274,7 +280,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, liveEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -350,6 +356,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   el.replaceChildren(stage);
 
   let preview: SurfacePreview | null = null;
+  /** T-1001: the panes' own Live/Freeze buttons, built once the surface (and so the panes) exist.
+   * The render frame's `dom` hook places them; until then there is nothing on screen to place. */
+  let liveButtons: PaneLiveLayer | null = null;
+  /** The floating cluster's boxes in CSS px from the canvas's top-left, so a pane's Live button can
+   * be placed clear of whatever chrome is over its corner (`chromeClearance`). Measured when the
+   * layout changes, never per frame. */
+  let chromeBoxes: ChromeRect[] = [];
   /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
   let renderFollow: () => void = () => {};
   let viewMoved: () => void = () => {};
@@ -1485,7 +1498,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
         hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
-        dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); },
+        dom: (panes, edge, hPx, dpr) => {
+          pinsFrame(panes, edge, hPx, dpr);
+          placeActive(panes, hPx, dpr);
+          // T-1001: each pane's Live button, from THIS frame's rectangles — the same pass as the
+          // data and the outline, never a poll (docs/16 §8's one shared mapping).
+          liveButtons?.update(panes, hPx, dpr, chromeBoxes);
+        },
       });
     } catch (e) {
       const why = `WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`;
@@ -1639,32 +1658,65 @@ function mount(el: HTMLElement, ctx: AppContext) {
     });
 
     // ---- the floating control cluster (T-802 / MAP-02), docked over the canvas's edges ----
-    // Go-to, the layers button, zoom and the follow-live FAB. All view arithmetic on the active
+    // Go-to, the layers button and zoom (T-1001: follow/freeze is each pane's own button, below).
+    // All view arithmetic on the active
     // pane through `paneActions` (the code `ui/test/app-map-controls.test.ts` drives against a
     // fetch spy); the only press that can reach the radio is the Go-to's retune OFFER, which goes
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
-    // T-995: no minimap toggle on the FAB any more (the minimap is retired), so `onFollow` is not
-    // passed: follow/freeze is the active pane's alone.
-    const acts = paneActions(pv.view.panes, () => pv.activePane, undefined,
-      // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
-      // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
-      // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
-      // T-1006: **the ACTIVE PANE's own front end's window**, not a run-wide one. With two radios
-      // `frequency.current` is the primary's tuned state (docs/api.md: the `frequency` block is one
-      // device's, which `windows` is the enumeration of), so a pane pinned to the second radio was
-      // being brought to the FIRST radio's live edge — the follow-live control moving a pane onto a
-      // window its own device never looked through. A pane naming a device reads that device's entry
-      // in `windows`; a pane on `any` keeps the run-wide answer, which is what `any` means.
-      () => {
-        const pane = pv.view.panes.get(pv.activePane);
-        if (pane && pane.device !== ANY_DEVICE) {
-          const w = windows.find((x) => x.deviceId === pane.device);
-          return w ? { centerHz: w.centerHz, spanHz: w.spanHz } : null;
-        }
-        const cur = store.get().navGrid.grid?.frequency?.current;
-        return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
-      });
+    const acts = paneActions(pv.view.panes, () => pv.activePane);
+    // T-1001: follow/freeze is PER PANE — every method below is told which pane it acts on, so a
+    // press on pane 1's button cannot reach pane 2. Nothing here is a device call.
+    // T-995: the minimap is retired, so a press has no second viewport to bring with it.
+    // T-955: the states are relative to the TUNED window's live edge, and a press from anywhere
+    // else brings the pane there (frequency too, only if it does not overlap) — the same
+    // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
+    // T-1006: **the PRESSED pane's own front end's window**, not a run-wide one. With two radios
+    // `frequency.current` is the primary's tuned state (docs/api.md: the `frequency` block is one
+    // device's, which `windows` is the enumeration of), so a pane pinned to the second radio was
+    // being brought to the FIRST radio's live edge — the follow-live control moving a pane onto a
+    // window its own device never looked through. A pane naming a device reads that device's entry
+    // in `windows`; a pane on `any` keeps the run-wide answer, which is what `any` means. The pane
+    // is the one whose button was pressed (T-1001), never the active one.
+    const liveActs = paneLiveActions(pv.view.panes, (id) => {
+      const pane = pv.view.panes.get(id);
+      if (pane && pane.device !== ANY_DEVICE) {
+        const w = windows.find((x) => x.deviceId === pane.device);
+        return w ? { centerHz: w.centerHz, spanHz: w.spanHz } : null;
+      }
+      const cur = store.get().navGrid.grid?.frequency?.current;
+      return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
+    });
+    liveButtons = new PaneLiveLayer(liveEl, {
+      state: (id) => liveActs.state(id),
+      press: (id) => {
+        liveActs.press(id);
+        // A follow-live press can move the pane's frequency too, so a painted Go-to offer now
+        // describes a window the pane has left — withdrawn, exactly as a zoom withdraws it.
+        viewMoved();
+        lastMirror = "";
+        mirror();
+        renderLive();
+      },
+      paneNumber: (id) => activePaneName(pv.view.panes.list().map((x) => x.id), id)?.n ?? null,
+    });
+    // The cluster's boxes, in the canvas's own CSS pixels: a pane at the top of the canvas puts its
+    // Live button below whatever is over that corner. Measured when the layout changes (`fit`),
+    // never per frame — `getBoundingClientRect` on every child of the cluster is a layout read.
+    const measureChrome = () => {
+      const ctl = stage.querySelector<HTMLElement>(".map-ctl");
+      const base = canvas.getBoundingClientRect();
+      chromeBoxes = ctl
+        ? Array.from(ctl.children).map((c) => {
+          const r = c.getBoundingClientRect();
+          return {
+            left: r.left - base.left, right: r.right - base.left,
+            top: r.top - base.top, bottom: r.bottom - base.top,
+            width: r.width, height: r.height,
+          };
+        })
+        : [];
+    };
     // A read-only statement of the overlay layers this build draws, each as its REGISTRY def
     // (plane, z, default) — never the menu's rendering of them — so a check can derive what the
     // layers menu must offer from the registry itself rather than a literal every new renderer
@@ -1834,7 +1886,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // A collection created, renamed or deleted in the panel re-states an open layers menu.
     store.select((s) => s.research.collections, () => { stateOverlays(); controls.syncLayers(); });
     stage.append(controls.el);
-    renderFollow = controls.syncFollow;
+    // T-1001: "the follow state may have changed" is now each pane's own button re-stating itself.
+    renderFollow = () => liveButtons?.sync();
+    measureChrome();
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
@@ -1857,7 +1911,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     store.select((s) => {
       const c = s.navGrid.grid?.frequency?.current;
       return c ? `${c.center_hz}/${c.span_hz}` : "";
-    }, () => controls.tuningChanged());
+    }, () => { controls.tuningChanged(); liveButtons?.sync(); });
 
     // ---- the active pane, made visible (T-1000, docs/23 §10.7) ----
     // Whatever made a pane active — a press, a right-click, a wheel, a split, a close, a key — the
@@ -1884,7 +1938,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     document.addEventListener("keydown", (e) => {
       const k = paneKeyIntent(e);
       if (!k) return;
-      if (k.kind === "live") { e.preventDefault(); controls.toggleFollow(); return; }
+      // `L` presses the ACTIVE pane's own Live button — the very element the user sees, so the key
+      // and the button cannot do different things (T-1000's rule, kept with the per-pane control).
+      if (k.kind === "live") { e.preventDefault(); liveButtons?.buttonFor(pv.activePane)?.click(); return; }
       const ids = pv.view.panes.list().map((x) => x.id);
       const next = k.kind === "step" ? stepPane(ids, pv.activePane, k.step) : ids[k.n - 1] ?? null;
       if (!next) return;
@@ -1897,6 +1953,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
+      // T-1001: the chrome a pane's Live button clears is measured, so it is re-measured whenever
+      // the layout changes — here, not on the frame.
+      measureChrome();
       // T-918: the canvas runs under the floating chrome at the bottom (full-bleed, docs/23 §10.1),
       // so the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
       // T-994: the dock bar is retired; what can sit there now is the Active-outputs strip, and only

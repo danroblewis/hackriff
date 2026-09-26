@@ -14,9 +14,9 @@
 // way this tier drives a "device" — CLAUDE.md), waits for the sweep to leave at least one band
 // behind (a genuine PAST survey window, not a synthesized one), presses the row's "Go" button in
 // the real DOM, and reads the pane's post-click state back from the browser with no debug hook:
-// (a) the Live/frozen FAB (`map-controls.ts`'s `.map-fab`), which reads the pane's own `time.live`
-// directly — the one thing the pre-fix bug got wrong (the pane never froze, so the FAB stayed lit
-// "following"); and (b) the periodic `GET /api/annotations` poll, which every render frame keeps
+// (a) the pane's own Live/frozen button (T-1001's `.sf-pane-live-btn`, inside the pane's
+// rectangle), which reads that pane's own `time.live` directly — the one thing the pre-fix bug got
+// wrong (the pane never froze, so the button stayed lit "following"); and (b) the periodic `GET /api/annotations` poll, which every render frame keeps
 // pointed at the union of the panes' own (rendered) boxes (`centre/surface.ts`, T-820) — checked
 // across two polls a few seconds apart to prove the frozen window HOLDS STILL rather than sliding
 // back toward "live" (a following pane would advance every poll; a frozen one does not).
@@ -175,17 +175,17 @@ test("pressing 'Go' on a past-survey row moves the pane to that window, and it s
   const row = await findSurveyRow(page, 30000);
   t.diagnostic(`row: ${JSON.stringify(row)}`);
 
-  // THE load-bearing discriminator: the Live/frozen FAB (`map-controls.ts`'s `.map-fab`, ADR-0013
-  // §3.1's "each pane's own Live button" — the exact control this whole ticket's parent SET
-  // ACCEPTANCE names). It is driven by `host.isFollowing()` -> `preview.view.panes.isFollowing`,
-  // which reads the pane's OWN `time.live` — so unlike a network-timing heuristic, this is a direct
-  // window onto "did the pane actually freeze", the one thing the pre-fix bug got wrong: `gotoItem`
-  // wrote the STORE's `time` field (`reviewAt`) but never moved the pane, so the pane stayed
-  // following and the FAB stayed lit "following" — a jump the user could not tell had failed short
-  // of watching the canvas not move. Sweeping keeps the active pane's box addressed at whichever
-  // band is currently tuned (`renderFollow`), so before the press the pane is following live.
-  await page.waitFor("the map FAB to show 'following' before the Go press",
-    `document.querySelector('.map-fab')?.classList.contains('following') === true`, { timeoutMs: 15000 });
+  // THE load-bearing discriminator: the pane's OWN Live/frozen button (T-1001's
+  // `.sf-pane-live-btn`, inside the pane's rectangle — ADR-0013 §3.1's "each pane's own Live
+  // button", the exact control this whole ticket's parent SET ACCEPTANCE names). It is re-stated
+  // from `PaneModel.isFollowing` on every render frame, so unlike a network-timing heuristic this
+  // is a direct window onto "did the pane actually freeze", the one thing the pre-fix bug got
+  // wrong: `gotoItem` wrote the STORE's `time` field (`reviewAt`) but never moved the pane, so the
+  // pane stayed following and the button stayed lit "following" — a jump the user could not tell
+  // had failed short of watching the canvas not move. Sweeping keeps the pane's box addressed at
+  // whichever band is currently tuned, so before the press the pane is following live.
+  await page.waitFor("the pane's Live button to show 'following' before the Go press",
+    `document.querySelector('.sf-pane-live-btn')?.classList.contains('following') === true`, { timeoutMs: 15000 });
 
   // A CSS expression re-evaluated at press time (`page.click`), not the coordinates captured a
   // moment ago: the drawer re-renders on its own poll and on every scope change, so a coordinate
@@ -195,18 +195,18 @@ test("pressing 'Go' on a past-survey row moves the pane to that window, and it s
     !!li.querySelector('button.go'))?.querySelector('button.go')`;
   await page.click(rowExpr);
 
-  await page.waitFor("the map FAB to switch to 'frozen' after Go on a past survey",
-    `document.querySelector('.map-fab')?.classList.contains('frozen') === true`, { timeoutMs: 10000 });
-  const fabAfter = JSON.parse(await page.eval(`JSON.stringify({
-    frozen: document.querySelector('.map-fab').classList.contains('frozen'),
-    following: document.querySelector('.map-fab').classList.contains('following'),
-    ariaPressed: document.querySelector('.map-fab').getAttribute('aria-pressed'),
-    title: document.querySelector('.map-fab').title,
+  await page.waitFor("the pane's Live button to switch to 'frozen' after Go on a past survey",
+    `document.querySelector('.sf-pane-live-btn')?.classList.contains('frozen') === true`, { timeoutMs: 10000 });
+  const liveAfter = JSON.parse(await page.eval(`JSON.stringify({
+    frozen: document.querySelector('.sf-pane-live-btn').classList.contains('frozen'),
+    following: document.querySelector('.sf-pane-live-btn').classList.contains('following'),
+    ariaPressed: document.querySelector('.sf-pane-live-btn').getAttribute('aria-pressed'),
+    title: document.querySelector('.sf-pane-live-btn').title,
   })`));
-  t.diagnostic(`FAB after Go: ${JSON.stringify(fabAfter)}`);
-  assert.equal(fabAfter.frozen, true, "the pane never froze on the survey's window — the jump was lost");
-  assert.equal(fabAfter.following, false);
-  assert.equal(fabAfter.ariaPressed, "false");
+  t.diagnostic(`the pane's Live button after Go: ${JSON.stringify(liveAfter)}`);
+  assert.equal(liveAfter.frozen, true, "the pane never froze on the survey's window — the jump was lost");
+  assert.equal(liveAfter.following, false);
+  assert.equal(liveAfter.ariaPressed, "false");
 
   // Corroborating: the periodic `/api/annotations` poll (T-820) — which every render frame keeps
   // addressed at the union of the panes' own (rendered) boxes — should now be asking about a window
