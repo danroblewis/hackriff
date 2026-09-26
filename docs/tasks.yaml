@@ -31595,6 +31595,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1072 worker 2026-09-26: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
+
+      2026-09-26 coordinator: T-1078's worker (fog-of-war past the geometry check with the shared helper) hit a THIRD fog-of-war red, reproduced twice: 'the pane REQUESTED a tile over band C, spectrum the coverage survey settles as never sampled - T-580's short-circuit did not fire'. Suspect T-1057 (landed 03:14: the survey may only turn a place GREY, a retune refreshes the survey before it may veto) - it changed exactly when the survey vetoes. Own it here with the band-A/re-sweep reads, or split with evidence.
   - id: T-1078
     milestone: MUI
     title: "RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper"
@@ -31649,6 +31651,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: app-detail - T-517's step control is not beside the sweep (scan panel layout moved)
+
+      2026-09-26 coordinator: likely the same cause, seen by T-1078's worker in scan-everything.e2e.mjs test 1 ('the Survey-sweep panel...'): the step <select> renders DUPLICATE options - expected ['coarse','fine'], got ['coarse','coarse','fine','fine'] - i.e. two step controls (or one filled twice) where there should be one beside the sweep; suspects T-1008's plan overlay + T-1009's per-front-end scans rendering the control twice. Own both specs here.
   - id: T-1081
     milestone: MUI
     title: "RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)"
@@ -31777,6 +31781,23 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(events_and_presence)'`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator deflaker 2026-09-26: events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5
+  - id: T-1088
+    milestone: MUI
+    title: 1736 magenta 'error ink' pixels on the canvas in NORMAL operation (x~2, rgb 255,64,217) before any failure - canvas-journey test 4 cannot run (unmasked by T-1078)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-MAGENTA
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      UNMASKED BY T-1078 (handback 2026-09-26 ~06:45; its shared pane-geometry fix lets canvas-journey past the geometry check): canvas-journey.e2e.mjs test 4 'a killed backend degrades to grey with no purple and no re-render thrash' fails on its own precondition: '1736 magenta pixels were already on screen BEFORE the stream was killed (e.g. {x:2,y:423,rgb:[255,64,217]}), so this test cannot attribute any to the loss'. Magenta/purple is the canvas's 'this should never be on screen' mark (the error/unknown ink the test guards against); 1736 px of it in NORMAL operation, at the left edge (x=2), is a real rendering defect: some layer draws the error ink (or an uninitialised texture / a new chrome colour collides with it) before any failure.
+      DELIVER: reproduce alone on a FRESH hk; screenshot + locate what paints (255,64,217) at x~2 (a pane's left gutter? a new layer from today's landings - T-1041 trace layer, T-1047/T-1042 live ring, T-1048 metrics, T-1056 sheet, T-996 scale layer?); fix the PRODUCT so normal operation never paints that ink. If the colour is a legitimate new mark that happens to be magenta, change the MARK (the test's premise - no purple unless something failed - is the product rule), with evidence. Then let test 4 run its real assertion.
+      ACCEPTANCE: canvas-journey test 4 green alone 3/3 on a FRESH hk (0 magenta before the kill; after the kill, grey with no purple).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1078 worker 2026-09-26: 1736 magenta 'error ink' pixels on the canvas in NORMAL operation (x~2, rgb 255,64,217) before any failure - canvas-journey test 4 cannot run (unmasked by T-1078)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
