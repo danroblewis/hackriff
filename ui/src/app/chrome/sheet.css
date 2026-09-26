@@ -8,6 +8,10 @@
   background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(8px);
   border: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 30px var(--shadow);
   transition: height .28s cubic-bezier(.2,.8,.2,1); }
+/* T-1026 (user 2026-09-25): CLOSED IS OFF THE SCREEN. `.sheet`'s own `display: flex` would beat the
+   UA's `[hidden] { display: none }`, so the hidden state is stated here: no strip along the bottom
+   edge, no pixels, no hit test — the map gets the whole edge back until a feature is clicked. */
+.sheet[hidden] { display: none; }
 .sheet.dragging { transition: none; }
 /* T-824: the handle is a >= 24 px target (docs/23 §10.5); the title strip gave up the 4 px, so peek stays 56. */
 .sheet .sheet-grab { flex: none; height: 24px; width: 100%; display: grid; place-items: center; padding: 0;
@@ -42,6 +46,8 @@
 .sheet .sheet-body > .side .list, .sheet .sheet-body > .side .sel-list { overflow: visible; }
 .sheet .sheet-body > .drawer { order: 2; }
 .sheet[data-snap="peek"] .sheet-body { visibility: hidden; }
+/* T-1026: at `peek` the × is still offered (`sheet.ts`), because the strip is the state that most
+   needs a way out — it is the one shape of this panel that spans an edge. */
 .sheet[data-snap="peek"] .sheet-head { border-bottom-color: transparent; }
 /* Wide screens: width-capped and docked to the right (docs/23 §10.3), where the focus column it
    replaces used to float. T-997 moved the inventory lists in here too, so this is the one panel

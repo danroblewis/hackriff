@@ -764,3 +764,180 @@ fn partial_frames_disarm_after_a_full_frame_and_rearm_on_retune() {
     assert_eq!(st.partial_frames, 2);
     assert_eq!(st.segments_discarded, 4, "B's tail at the gap");
 }
+
+/// A stream that loses samples more often than once per frame: pieces of `seg_per_piece`
+/// segments (plus `tail` samples too short for another), each followed by a `lost`-sample gap.
+fn lossy_inputs(
+    prov: &hk_core::ProvenanceHandle,
+    pieces: usize,
+    piece_len: usize,
+    lost: u64,
+    seed: u64,
+) -> (Vec<(BlockHeader, Vec<Complex32>)>, Vec<u64>) {
+    let mut rng = Rng::new(seed);
+    let (mut inputs, mut starts) = (Vec::new(), Vec::new());
+    let mut at = 0u64;
+    for i in 0..pieces {
+        let mut h = header(
+            at,
+            prov,
+            if i == 0 {
+                Discontinuity::STREAM_START
+            } else {
+                Discontinuity::GAP
+            },
+        );
+        if i > 0 {
+            h.dropped_before = lost;
+        }
+        starts.push(at);
+        inputs.push((h, synth::complex_noise(&mut rng, piece_len, 1e-3)));
+        at += piece_len as u64 + lost;
+    }
+    (inputs, starts)
+}
+
+/// **T-1071: a stream that loses samples more often than once per frame still yields frames.**
+///
+/// The defect, measured on the mock at a coarse scan step (19.2 Msps, ~80 % of samples lost in
+/// ~17 k-sample pieces): every gap reset the averaging before a frame completed, so the history
+/// reader emitted **no frame at all** and the step left nothing in the spectrum-history pyramid.
+/// With `bridge_gaps` the averaging continues across a pure gap, never with a segment straddling
+/// it, and each frame closes at its nominal span: its `n_avg` is the segments it really averaged,
+/// its `sample_count` the capture time its segments span (the loss included), `GAP` and the loss
+/// on it — and not one delivered segment is discarded.
+#[test]
+fn bridged_gaps_keep_averaging_and_close_each_frame_at_its_nominal_span() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let prov = provenance(100e6, fs);
+    // 2 segments + 10 samples per piece, then 100 samples lost: 622 samples of capture per piece.
+    let (pieces, piece_len, lost) = (40, 2 * n + 10, 100u64);
+    let (inputs, starts) = lossy_inputs(&prov, pieces, piece_len, lost, 71);
+
+    // Without bridging (the old behaviour): every gap resets, and no frame ever completes.
+    let (none, st_off) = run_inputs(history_like(n, k), &inputs);
+    assert!(
+        none.is_empty(),
+        "control: an unbridged lossy stream emits nothing"
+    );
+    assert_eq!(st_off.segments_discarded, 2 * (pieces as u64 - 1));
+
+    let mut config = history_like(n, k);
+    config.bridge_gaps = true;
+    let (frames, st) = run_inputs(config, &inputs);
+    let nominal = (k * n) as u64;
+    assert!(frames.len() >= 10, "frames: {}", frames.len());
+    // The first frame, worked by hand: segments at 0, 256, 622, 878, 1244, 1500; the next, at
+    // 1866, would end at 2122 > 2048, so the frame closes with 6 segments spanning 1500 + 256.
+    let f0 = &frames[0];
+    assert_eq!(
+        (
+            f0.t.sample_index,
+            f0.spectrum.resolution.n_avg,
+            f0.sample_count
+        ),
+        (0, 6, 1756)
+    );
+    assert_eq!(f0.t.host_time.as_unix_nanos(), 0);
+    assert!(f0.discontinuity.contains(Discontinuity::GAP));
+    assert_eq!(f0.dropped_samples, 2 * lost, "the two gaps inside it");
+    let mut prev_end = 0u64;
+    for (i, f) in frames.iter().enumerate() {
+        assert!(
+            f.sample_count <= nominal,
+            "frame {i} spans {} > {nominal}",
+            f.sample_count
+        );
+        assert!(
+            f.t.sample_index >= prev_end,
+            "frame {i} overlaps its predecessor"
+        );
+        assert!(
+            starts.contains(&f.t.sample_index) || starts.contains(&(f.t.sample_index - n as u64)),
+            "frame {i} starts on a delivered segment ({})",
+            f.t.sample_index
+        );
+        // Host time is the capture clock at the frame's first sample.
+        assert_eq!(
+            f.t.host_time.as_unix_nanos(),
+            (f.t.sample_index as f64 * 1e9 / fs).round() as i64
+        );
+        // The level is the noise's: averaging across a gap is a measurement, not an artefact.
+        assert!(
+            (db(mean(&f.spectrum.psd)) - db(1e-3 / fs)).abs() < 0.6,
+            "frame {i} level"
+        );
+        prev_end = f.t.sample_index + f.sample_count;
+    }
+    let averaged: u64 = frames
+        .iter()
+        .map(|f| u64::from(f.spectrum.resolution.n_avg))
+        .sum();
+    assert_eq!(st.segments, 2 * pieces as u64);
+    assert_eq!(
+        st.segments_discarded, 0,
+        "no delivered segment is thrown away"
+    );
+    assert!(
+        averaged + k as u64 > st.segments,
+        "only the last frame's averaging is still open"
+    );
+    assert_eq!(st.gaps_bridged, pieces as u64 - 1);
+    assert_eq!(st.resets, 1, "the stream start only");
+}
+
+/// T-1071: a gap longer than a frame closes the averaging in progress **at the gap** (the loss
+/// belongs to the next frame), and anything but a pure gap — a retune — still resets.
+#[test]
+fn bridged_gaps_close_at_a_long_gap_and_still_reset_on_a_retune() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let mut config = history_like(n, k);
+    config.bridge_gaps = true;
+    config.partial = Some(hk_dsp::PartialFrames {
+        min_segments: 2,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
+    let (prov_a, prov_b) = (provenance(100e6, fs), provenance(101e6, fs));
+    let mut rng = Rng::new(5);
+    let mut inputs = Vec::new();
+    inputs.push((
+        header(0, &prov_a, Discontinuity::STREAM_START),
+        synth::complex_noise(&mut rng, 3 * n, 1e-3),
+    ));
+    let start_b = (3 * n) as u64 + 10_000;
+    let mut hb = header(start_b, &prov_a, Discontinuity::GAP);
+    hb.dropped_before = 10_000;
+    inputs.push((hb, synth::complex_noise(&mut rng, (k + 3) * n, 1e-3)));
+    let start_c = start_b + ((k + 3) * n) as u64;
+    inputs.push((
+        header(start_c, &prov_b, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, k * n, 1e-3),
+    ));
+    let (frames, st) = run_inputs(config, &inputs);
+    let summary: Vec<(u64, u32, u64, bool)> = frames
+        .iter()
+        .map(|f| {
+            (
+                f.t.sample_index,
+                f.spectrum.resolution.n_avg,
+                f.dropped_samples,
+                f.discontinuity.contains(Discontinuity::GAP),
+            )
+        })
+        .collect();
+    let kn = (k * n) as u64;
+    assert_eq!(
+        summary,
+        vec![
+            (0, 3, 0, false),
+            (start_b, 8, 10_000, true),
+            (start_b + kn, 3, 0, false),
+            (start_c, 8, 0, false),
+        ]
+    );
+    assert_eq!(
+        frames[2].provenance, prov_a,
+        "the retune's partial keeps its tuning"
+    );
+    assert_eq!((st.gaps_bridged, st.resets), (1, 2));
+}

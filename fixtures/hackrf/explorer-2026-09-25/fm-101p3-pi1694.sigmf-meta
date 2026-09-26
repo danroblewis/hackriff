@@ -152,7 +152,14 @@
             "pi": "1694",
             "decoded": "RDS decoded by the app (recipe:rds on /api/pipelines, rows in /api/inventory/{id}/decode): PI 1694 (pi_votes 4/4 unprompted, 510 CRC-valid groups in 45 s prompted), PTY 7, pilot 18999.89 Hz, RT 'Star 101.3 - Olivia Dean - Man I Need' / 'Star 101.3 - Glass Animals - Heat Waves'. PS is dynamic/scrolling ('101.3 - ' fragment), so no stable PS is recorded.",
             "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
-          }
+          },
+          "rt": "Star 101.3 - Glass Animals - Heat Waves",
+          "rt_messages": [
+            {
+              "text": "Star 101.3 - Glass Animals - Heat Waves",
+              "ab": true
+            }
+          ]
         },
         "identity": {
           "type": "rds_pi",

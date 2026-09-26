@@ -38,6 +38,8 @@ pub mod audio;
 /// Streaming FIR decimator, discriminator and de-emphasis (public for the decoder-workbench
 /// blocks, ADR-0011 §1.6).
 pub mod dsp;
+/// FLEX paging: 2/4-level FSK frames, BCH(31,21), interleave and pages (T-950).
+pub mod flex;
 /// C20 2-FSK/GFSK demodulation, prior-led trials, framed records and bits streams (T-013).
 pub mod fsk;
 pub mod mode;
@@ -58,10 +60,11 @@ pub use mode::{
 pub use pilot::{PilotConfig, PilotPll, PilotReport};
 pub use rds::{RdsConfig, RdsDecoder, RdsDemod, RdsReport};
 pub use receiver::{
-    AnalogReceiver, AnalogSession, AudioBuffer, DemodError, MpxTimeMap, ReceiverConfig,
+    AnalogReceiver, AnalogSession, AudioBuffer, DemodError, MpxTimeMap, ReceiverConfig, WfmFollower,
 };
 pub use record::{
-    RecordContext, WrittenSession, rds_decodes, rds_label, write_declined, write_session,
+    FollowRecord, FollowWrite, RecordContext, WrittenSession, rds_decodes, rds_label,
+    write_declined, write_follow, write_session,
 };
 pub use wfm::{MPX_RATE_HZ, WfmConfig, WfmDemod, WfmReport};
 

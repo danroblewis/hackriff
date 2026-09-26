@@ -144,6 +144,60 @@ async function setBaseStyle(page, id) {
 }
 
 /**
+ * **Lift the floating chrome off the band the trace is drawn in, for one observation** (T-1051).
+ *
+ * Since T-1041 the trace is drawn over the pane's top rows, and since T-918 the canvas is full-bleed
+ * with the app's controls floating over it — so the trace's own band lies under the top toolbar,
+ * which leaves ~150 of 1440 columns where the surface is on top (`Page.unoccludedColumns`, T-801).
+ * A check that reads the trace's pixels was then reading them *through* translucent chips: the
+ * stated peak of an FM band that happened to sit under one read as "drawn at nothing at all", on a
+ * frame whose readout and picture agreed. That is the adjacent-question error this file is written
+ * against, with the chrome in the role the coarse stand-in played before.
+ *
+ * So for the length of an observation, whatever the browser's own hit test finds above the canvas
+ * across the band is made `visibility: hidden` — which changes no layout (the canvas's insets are
+ * measured boxes, and hidden boxes keep theirs), draws nothing, and is exactly what
+ * `unoccludedColumns` then reports as clear. [[restoreChrome]] puts every one back, and anything
+ * that CLICKS (the layers menu, a pane's Live button) runs with the chrome restored, because a
+ * real click on a hidden control would land on the canvas instead.
+ */
+async function liftChrome(page, rows = TRACE_PX + 8) {
+  return page.eval(`(() => {
+    const canvas = document.querySelector('.sf-canvas');
+    if (!canvas) return 0;
+    const lifted = (window.__hkLifted ??= []);
+    const r = canvas.getBoundingClientRect();
+    const top = r.top + (Number(canvas.dataset.insetTop) || 0);
+    const hide = (el) => { lifted.push([el, el.style.visibility]); el.style.visibility = 'hidden'; };
+    for (let y = top + 0.5; y < Math.min(r.bottom, top + ${rows}); y += 4) {
+      for (let x = r.left + 0.5; x < r.right; x += 2) {
+        for (let hit = document.elementFromPoint(x, y), k = 0;
+          hit && hit !== canvas && !hit.contains(canvas) && k < 16; hit = document.elementFromPoint(x, y), k++) hide(hit);
+      }
+    }
+    // unoccludedColumns also excludes the floating cluster by its boxes; lift those meeting the band.
+    for (const c of document.querySelectorAll('[data-band="chrome"] > *')) {
+      const b = c.getBoundingClientRect();
+      if (b.width > 0 && b.height > 0 && b.bottom > top && b.top < top + ${rows} && getComputedStyle(c).visibility !== 'hidden') hide(c);
+    }
+    return lifted.length;
+  })()`);
+}
+/** Put back everything [[liftChrome]] hid, newest first. */
+async function restoreChrome(page) {
+  await page.eval(`(() => {
+    const lifted = window.__hkLifted ?? [];
+    while (lifted.length) { const [el, v] = lifted.pop(); el.style.visibility = v; }
+  })()`);
+}
+/** Run a clicking step with the chrome back in place, then lift it again (see [[liftChrome]]). */
+async function withChrome(page, fn) {
+  const wasLifted = (await page.eval("(window.__hkLifted ?? []).length")) > 0;
+  if (wasLifted) await restoreChrome(page);
+  try { return await fn(); } finally { if (wasLifted) { await liftChrome(page); await page.frames(2); } }
+}
+
+/**
  * The tap. Observes the wire, and — only when a check asks it to — **holds** the page's view of it.
  *
  * `class ... extends WebSocket` rather than a wrapping function, so `new`, the prototype chain and
@@ -227,12 +281,14 @@ const TAP = `(() => {
 
 /** What the page is saying and what the socket delivered, read in ONE evaluation so they agree. */
 const SNAPSHOT = `(() => {
-  const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+  // T-996: the pane's own scale block is where a pane states itself (the per-viewport panel is
+  // retired); its dataset is the frame's own report — window, level, tier and tile counts.
+  const row = document.querySelector('.sf-scale');
   const canvas = document.querySelector('.sf-canvas');
   const box = canvas ? canvas.getBoundingClientRect() : null;
   return JSON.stringify({
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
-    headline: row ? row.children[1].textContent : "",
+    headline: row ? row.dataset.where + " · " + row.dataset.when : "",
     // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
     // the words** — see [[heldObservation]] for what a stale one costs.
     // T-918: the canvas is full-bleed; the pane (trace strip on top) starts below the inset it states.
@@ -240,7 +296,7 @@ const SNAPSHOT = `(() => {
       h: box.height - (Number(canvas.dataset.insetTop) || 0) - (Number(canvas.dataset.insetBottom) || 0) } : null,
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
-    counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
+    counts: row?.dataset.counts ?? "",
     // T-1050: the trace layer's own statement of the CORE it stroked this frame, for the active pane
     // — one [xPx, yPx, r, g, b] per MEASURED column, x/y the PIXEL CENTRE from the CANVAS ELEMENT's
     // top-left (not from the pane's rectangle), 0-255 ink. Read in the same evaluation as the words,
@@ -407,10 +463,64 @@ const isHoldInk = (r, g, b) => r - g >= HOLD_MARGIN && b - g >= HOLD_MARGIN;
 const isRampInk = (r, g, b) => r + g + b >= 120 && (CHROMA(r, g, b) >= 30 || r + g + b >= 620)
   && !isHoldInk(r, g, b);
 const isGreyInk = (r, g, b) => r + g + b >= 60 && CHROMA(r, g, b) < 12;
+/** `PHOSPHOR_INK` (ui/src/app/centre/surface.ts, `[0.35, 1, 0.45]`) in 8-bit. */
+const PHOSPHOR_RGB = [89, 255, 115];
+/**
+ * **How far a pixel was blended from the trace-OFF baseline TOWARD the phosphor ink** (T-1051), or
+ * `null` where the change is not such a blend.
+ *
+ * A phosphor afterglow row is `PHOSPHOR_INK` at `SHADOW_ALPHA` (0.34 … 0.09) composited over the
+ * cell below, so `img = base + a · (ink − base)`: the change is PARALLEL to `ink − base`. `a` is the
+ * least-squares coverage along that direction, and the residual off it has to be small — which a
+ * grey bloom, a magenta max-hold or a changed cell all fail, whatever their brightness. That is the
+ * separation the empty backdrop used to give for free ("grey ink is a shadow"), stated for a band
+ * that now lies over the waterfall.
+ */
+function glowAlpha(img, base, d) {
+  if (!base) return null;
+  const dv = [0, 1, 2].map((c) => img.data[d + c] - base.data[d + c]);
+  const u = [0, 1, 2].map((c) => PHOSPHOR_RGB[c] - base.data[d + c]);
+  const uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+  if (uu < 900) return null;   // the cell is already ink-coloured: nothing to measure a blend against
+  const a = (dv[0] * u[0] + dv[1] * u[1] + dv[2] * u[2]) / uu;
+  const res = Math.hypot(dv[0] - a * u[0], dv[1] - a * u[1], dv[2] - a * u[2]);
+  return res <= Math.max(8, 0.2 * Math.hypot(...dv)) ? a : null;
+}
+/** Which band pixels are the slice core (the caller's `sliceInk`, changed from the baseline). */
+function coreMask(img, rect, base, sliceInk) {
+  const x0 = Math.round(rect.x), y0 = Math.round(rect.y), w = Math.round(rect.w);
+  const m = new Uint8Array(w * TRACE_PX);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < TRACE_PX; y++) {
+      const d = ((y0 + y) * img.width + (x0 + x)) * 4;
+      if (changedAt(img, base, d) && sliceInk(img.data[d], img.data[d + 1], img.data[d + 2])) m[y * w + x] = 1;
+    }
+  }
+  return m;
+}
+/** Within the slice stroke's feather: a core pixel no more than `CORE_CLEAR_PX` away on each axis. */
+const CORE_CLEAR_PX = 2;
+function nearCore(m, w, x, y) {
+  for (let dy = -CORE_CLEAR_PX; dy <= CORE_CLEAR_PX; dy++) {
+    const yy = y + dy;
+    if (yy < 0 || yy >= TRACE_PX) continue;
+    for (let dx = -CORE_CLEAR_PX; dx <= CORE_CLEAR_PX; dx++) {
+      const xx = x + dx;
+      if (xx >= 0 && xx < w && m[yy * w + xx]) return true;
+    }
+  }
+  return false;
+}
+/** A shadow's pixel: blended toward the ink, short of the slice core's coverage (`isPhosphorInk`). */
+const isGlowAt = (img, base, d) => {
+  const a = glowAlpha(img, base, d);
+  return a !== null && a >= 0.04 && a <= 0.6
+    && !isPhosphorInk(img.data[d], img.data[d + 1], img.data[d + 2]);
+};
 /** What the retired ratio rule called the max-hold. Kept only to count what it used to leak. */
 const wasHoldInk = (r, g, b) => r > g * 1.3 && b > g * 1.3 && r + g + b > 150;
 
-function strip(img, rect, { base = null, sliceInk = isRampInk } = {}) {
+function strip(img, rect, { base = null, sliceInk = isRampInk, glow = false } = {}) {
   const x0 = Math.round(rect.x), y0 = Math.round(rect.y), w = Math.round(rect.w);
   const cols = new Array(w).fill(-1);       // topmost slice pixel per column, -1 = none
   const ink = new Array(w).fill(null);      // and the colour it was drawn in
@@ -434,7 +544,26 @@ function strip(img, rect, { base = null, sliceInk = isRampInk } = {}) {
       if (sliceInk(r, g, b)) {
         slicePx++;
         if (cols[x] < 0) { cols[x] = y; ink[x] = [r, g, b]; }
-      } else if (isGreyInk(r, g, b)) greyPx++;
+      } else if (glow || isGreyInk(r, g, b)) greyPx++;
+    }
+  }
+  // T-1051, `glow` (a trace-OFF baseline in the PHOSPHOR style): `greyPx` above is then every pixel
+  // the trace changed that is neither the slice core nor the max-hold — the bloom and the afterglow,
+  // the set "achromatic" named over the old empty strip, which over the waterfall is no longer grey.
+  // `glowClearPx` is the part of it that is a SHADOW visibly clear of the line: blended toward the
+  // ink ([[glowAlpha]]) more than `CORE_CLEAR_PX` from any core pixel. Reported, never asserted — a
+  // shadow under the line is hidden by construction, so this count is how much the band moved
+  // (measured 0 … 756 px over seven held frames of one fixture, 0 whenever the slice's cell had no
+  // carrier in it), which is the file's standing reason for asserting the afterglow's VALUES in
+  // `ui/test/surface-trace.test.ts` and not here.
+  let glowClearPx = 0;
+  if (glow) {
+    const core = coreMask(img, rect, base, sliceInk);
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < TRACE_PX; y++) {
+        const d = ((y0 + y) * img.width + (x0 + x)) * 4;
+        if (changedAt(img, base, d) && isGlowAt(img, base, d) && !nearCore(core, w, x, y)) glowClearPx++;
+      }
     }
   }
   let peakCol = -1, peakY = Infinity, lowY = -1;
@@ -443,7 +572,7 @@ function strip(img, rect, { base = null, sliceInk = isRampInk } = {}) {
     if (cols[x] < peakY) { peakY = cols[x]; peakCol = x; }
     if (cols[x] > lowY) lowY = cols[x];
   }
-  return { w, cols, ink, slicePx, holdPx, greyPx, rescued, peakCol, peakY, lowY,
+  return { w, cols, ink, slicePx, holdPx, greyPx, glowClearPx, rescued, peakCol, peakY, lowY,
     drawn: cols.filter((v) => v >= 0).length };
 }
 
@@ -684,9 +813,9 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
     // The same condition as isResident(), in the page, so the wait establishes exactly the state
     // the accept predicate re-verifies. Two spellings of one rule is the defect this file was
     // rewritten for; this is one rule in the two places the harness needs it.
-    const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const row = document.querySelector('.sf-scale');
     const c = /(\\d+) tiles · (\\d+) coarse stand-ins? · (\\d+) pending/
-      .exec(row?.querySelector('.hk-surface-counts')?.textContent ?? "");
+      .exec(row?.dataset.counts ?? "");
     if (!c || Number(c[1]) === 0 || Number(c[2]) !== 0 || Number(c[3]) !== 0) return false;
   }
   const at = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
@@ -721,8 +850,7 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
  */
 const PANE_REPORT = (expr) => `JSON.stringify({
   ok: ${expr},
-  counts: document.querySelector('.hk-surface-viewport[data-viewport="pane"]')
-    ?.querySelector('.hk-surface-counts')?.textContent ?? "",
+  counts: document.querySelector('.sf-scale')?.dataset.counts ?? "",
   trace: document.querySelector('.sf-trace')?.textContent ?? "",
 })`;
 async function whileTilesArrive(page, what, expr) {
@@ -806,9 +934,39 @@ async function scrubOntoCell(page, lagS, tries = 8) {
     `${tries} attempts — the last freeze landed somewhere the history has no cell: ${last}`);
 }
 
+/**
+ * **Zoom the pane's TIME axis in until it spans at most `maxS` seconds** (T-1051) — alt+wheel, the
+ * time-only gesture (T-456; view arithmetic, never a device route). Returns the span it reached.
+ *
+ * Why a scrubbed check needs it: the pane opens on the observed extent, so its time span is the
+ * BACKEND'S AGE — ~6 s on a fresh `hk serve`, minutes on a lane that has already served other
+ * files. A frozen pane has to be filled by the tile route before either scrubbed state exists, and
+ * the tiles it addresses scale with that span: measured on this file at load ~35 on a debug `hk`, a
+ * 2.2 min pane addressed 42 tiles at `3.1`, the route answered one batch of 2–4 of them every
+ * 10–40 s, and the afterglow park ran every one of its eight 180 s attempts WORKING — never stalled,
+ * never done — until the spec's own deadline killed it. The claim is about the rows before the
+ * pane's instant, which a ten-second window holds as well as a two-minute one; the span was only
+ * ever the backend's age leaking into the test.
+ */
+async function zoomTimeTo(page, maxS, { tries = 16 } = {}) {
+  const spanS = async () => Number(await page.eval(`(() => {
+    // T-996 retired the per-viewport row; the pane's own scale block carries the same window.
+    const row = document.querySelector('.sf-scale[data-pane]');
+    return row ? (Number(row.dataset.t1Ns) - Number(row.dataset.t0Ns)) / 1e9 : NaN; })()`));
+  let s = await spanS();
+  for (let i = 0; i < tries && !(s <= maxS); i++) {
+    const r = await page.$rect(".sf-canvas");
+    await page.wheel({ x: r.x + r.w * 0.5, y: r.y + r.h * 0.5 }, -240, { alt: true });
+    await page.frames(3);
+    s = await spanS();
+  }
+  assert.ok(s <= maxS, `could not zoom the pane's time axis in to ${maxS} s (it spans ${s} s)`);
+  return s;
+}
+
 /** The pane is at the growing edge — the chrome's own fact, never the readout string (T-478). */
 const FOLLOWING_EXPR =
-  `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"][data-following="true"]').length > 0`;
+  `document.querySelectorAll('.sf-scale[data-following="true"]').length > 0`;
 
 /**
  * **Bring the tuned band, with a control region on each side, into the columns the surface itself
@@ -825,7 +983,7 @@ async function fitBandIntoUncovered(page, { tries = 12 } = {}) {
   for (let i = 0; i <= tries; i++) {
     await page.waitFor("the tap to see a stream header and the pane to state its frequency window",
       `!!(window.__hkTap.geom && window.__hkTap.geom.bandwidthHz > 0) &&
-       / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+       / MHz ± /.test(document.querySelector('.sf-scale')?.dataset.where ?? "")`,
       { timeoutMs: 30000 });
     const snap = JSON.parse(await page.eval(SNAPSHOT));
     const unocc = await page.unoccludedColumns(".sf-canvas", { y0: snap.rect.y, y1: snap.rect.y + TRACE_PX });
@@ -994,10 +1152,10 @@ async function heldObservation(page, shotPath, { expr, accept, acceptView = null
  * the live-edge checks in this file use the phosphor ink instead.
  */
 async function traceOffBaseline(page, obs, shotPath, { soft = false } = {}) {
-  await setTraceLayer(page, false);
+  await withChrome(page, () => setTraceLayer(page, false));
   const snap = JSON.parse(await page.eval(SNAPSHOT));
   const base = await page.shot(shotPath);
-  await setTraceLayer(page, true);
+  await withChrome(page, () => setTraceLayer(page, true));
   // `soft` (T-1050): return the verdict instead of throwing it, so a caller that can re-establish the
   // whole observation retries rather than failing. The premise is unchanged and the numbers are the
   // same — what moves is who decides. Measured over 9 runs on this box: the pane below the band came
@@ -1153,9 +1311,14 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   // rather than of two successive ones. Capture itself never stops — `withheld` below counts the
   // rows that arrived on the wire while the picture stood still, which is what makes this a held
   // *view* rather than a quiet socket.
+  // The trace's band lies under the floating top toolbar since T-1041/T-918; read it with that
+  // chrome lifted, or a peak under a chip reads as "not drawn" (see [[liftChrome]]).
+  const lifted = await liftChrome(page);
   const obs = await heldObservation(page, path.join(ART, "app-trace-strip.png"), {
     what: "the trace to state a live-frame slice", expr: LIVE_FRAME_EXPR, accept: isLiveFrame,
   });
+  t.diagnostic(`chrome lifted off the trace band: ${lifted} element(s); the surface is on top across ` +
+    `${obs.unocc?.w ?? "?"} of ${Math.round(obs.rect.w)} columns`);
   const snap = obs.snap;
   t.diagnostic(`trace readout: ${snap.trace}`);
   t.diagnostic(`tap: ${snap.tap.headers} headers, ${snap.tap.rows} rows, ${snap.tap.recent.length} retained`);
@@ -1615,12 +1778,13 @@ test("a drag that STARTS OVER THE TRACE pans the pane — the trace is a readout
   // Inside the band the trace is drawn in: the top `TRACE_PX` device px of the canvas, at dpr 1.
   const y = rect.y + TRACE_PX / 2;
   assert.ok(TRACE_PX / 2 < rect.h, "the canvas is shorter than the band — this test is not aimed at it");
-  const before = (await page.$text(".sf-chrome")) ?? "";
+  // T-996: `.sf-where` — the kept centre/span/LIVE line — is where the viewport states itself.
+  const before = (await page.$text(".sf-where")) ?? "";
   await page.drag({ x: rect.x + rect.w * 0.65, y }, { x: rect.x + rect.w * 0.3, y });
-  await page.waitFor("the per-viewport readout to change after a drag begun in the strip",
-    `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`,
+  await page.waitFor("the viewport readout to change after a drag begun in the strip",
+    `(document.querySelector('.sf-where')?.textContent ?? "") !== ${JSON.stringify(before)}`,
     { timeoutMs: 15000 });
-  const after = (await page.$text(".sf-chrome")) ?? "";
+  const after = (await page.$text(".sf-where")) ?? "";
   t.diagnostic(`chrome before: ${before.slice(0, 80)}`);
   t.diagnostic(`chrome after:  ${after.slice(0, 80)}`);
 
@@ -1725,8 +1889,17 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   await setTraceLayer(page, true);   // T-1041: a layer, off by default
+  // T-1051: the PHOSPHOR style, for the same reason the live check uses it — over the waterfall the
+  // ramp-coloured core is painted from the cells' own palette, so it cannot be told from them in one
+  // frame; the phosphor core can (`isPhosphorInk`), and so can what is drawn behind it (see below).
+  await setBaseStyle(page, "phosphor");
+  const spanS = await zoomTimeTo(page, 10);
+  t.diagnostic(`the pane's time axis spans ${spanS.toFixed(1)} s (see [[zoomTimeTo]])`);
   const LAG_S = 2;
   const parked = await scrubOntoCell(page, LAG_S);
+  // After the Live presses above, never before them (see [[liftChrome]]).
+  const lifted = await liftChrome(page);
+  t.diagnostic(`chrome lifted off the trace band: ${lifted} element(s)`);
   // **The rows before the slice must be IN HAND before the afterglow is judged** (the deflake,
   // 2026-09-23). The afterglow is read from what RESIDENT tiles answered, so while the tiles holding
   // the rows before the pane's instant are still pending or drawn by a coarse stand-in, an empty glow
@@ -1792,19 +1965,21 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
 
   // ---- and what the pixels show ----
   //
-  // The afterglow and the bloom are the only ACHROMATIC ink the TRACE draws (`TraceStyle.shade`), so
-  // among the pixels the trace put there a grey one is a shadow and a chromatic one is the current
-  // slice. That separation is what lets this count them without a second copy of the ramp — and
-  // since T-1041 "the pixels the trace put there" is itself measured, by differencing the same
-  // frozen, held frame against one with the layer off.
+  // "The pixels the trace put there" is measured by differencing the same frozen, held frame against
+  // one with the layer off (T-1041). Among them, in the PHOSPHOR style, the slice core is the ink at
+  // full coverage and the max-hold is magenta, so what remains is what the trace drew BEHIND the
+  // line: the bloom and the afterglow. Until T-1051 that set was named "achromatic", which held over
+  // an empty strip and stopped holding when the band moved over the waterfall — a grey glow over a
+  // blue cell is a blue-grey — and the count fell to 2 px on a frame whose readout claimed four rows.
   const { base, stillness } = await traceOffBaseline(page, obs, path.join(ART, "app-trace-afterglow-off.png"));
   t.diagnostic(`trace-off baseline: ${(stillness * 100).toFixed(1)}% of the pane below the band unchanged`);
-  const s = strip(obs.img, obs.rect, { base });
-  t.diagnostic(`strip: ${s.slicePx} ramp px (current slice), ${s.greyPx} achromatic px ` +
-    `(afterglow + bloom), ${s.holdPx} max-hold px`);
+  const s = strip(obs.img, obs.rect, { base, sliceInk: isPhosphorInk, glow: true });
+  t.diagnostic(`strip: ${s.slicePx} phosphor-core px (current slice), ${s.greyPx} px behind it ` +
+    `(afterglow + bloom), ${s.holdPx} max-hold px; of those behind it, ${s.glowClearPx} px are afterglow ` +
+    "visibly clear of the line (DIAGNOSTIC, not asserted: how far the band moved across these rows)");
   assert.ok(s.slicePx > 20, "the current slice is not drawn, so there is nothing for a glow to be behind");
   assert.ok(s.greyPx > 40,
-    `only ${s.greyPx} achromatic pixels in the strip — the readout claims ${glow[1]} glowing rows and ` +
+    `only ${s.greyPx} pixels of trace ink behind the line — the readout claims ${glow[1]} glowing rows and ` +
     "nothing is drawn behind the line");
 
   // ---- and where the rest of the claim is asserted, and WHY it is not asserted here ----
@@ -1840,8 +2015,7 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
     let topGrey = -1;
     for (let y = 0; y < TRACE_PX && topGrey < 0; y++) {
       const d = ((y0 + y) * obs.img.width + (x0 + x)) * 4;
-      const r = obs.img.data[d], g = obs.img.data[d + 1], b = obs.img.data[d + 2];
-      if (changedAt(obs.img, base, d) && isGreyInk(r, g, b)) topGrey = y;
+      if (changedAt(obs.img, base, d) && isGlowAt(obs.img, base, d)) topGrey = y;
     }
     if (topGrey >= 0) offsets.push(s.cols[x] - topGrey);
   }

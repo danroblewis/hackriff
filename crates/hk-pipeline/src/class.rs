@@ -495,6 +495,12 @@ pub fn row_plan(
         min_segments: crate::history::partial_min_segments(k),
         arm_on: hk_core::Discontinuity::RETUNE | hk_core::Discontinuity::RATE_CHANGE,
     });
+    // T-1071: a source gap on a held tune no longer discards the row in progress. A stream broken
+    // more often than once per row (a coarse scan step at 19.2 Msps on a front end that delivers a
+    // fraction of it: measured on the mock, `view_frames` froze for the whole step) drew nothing
+    // at all — the live edge stalled over spectrum the radio sampled. Bridged, the row averages
+    // the segments on both sides of the gap and closes at its row period, with its true `n_avg`.
+    stft.bridge_gaps = true;
     RowPlan {
         stft,
         row_rate_hz,

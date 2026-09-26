@@ -126,6 +126,11 @@ pub enum NodeSpec {
         /// The probe must find a 19 kHz pilot.
         #[serde(default)]
         require_pilot: bool,
+        /// T-971: once the window decoded RDS, keep decoding the station incrementally for up to
+        /// this long, s, accumulating its RDS fields on its row (0 = never; see
+        /// `chains::analog`'s follow).
+        #[serde(default)]
+        follow_s: f64,
     },
     /// C20 FSK bursts from the track's member boxes, then C21 framing.
     FskBursts {
@@ -237,6 +242,28 @@ pub enum NodeSpec {
         /// Most classifying chains alive at once.
         max_chains: usize,
     },
+    /// The narrowband-FSK **frame hunt** over a candidate region's own IQ (T-950,
+    /// [`crate::chains::frames`]): channelise the track, then try each framing in the catalogue —
+    /// FLEX today — and keep what frame-syncs and BCH-checks. Which decoder a signal gets is
+    /// decided by sync plus check on its own symbols, never by where it was found.
+    ///
+    /// Every field is an admission bound:
+    ///
+    /// - `pad_s` — pad either side of a transmission, as `fsk-bursts` takes it;
+    /// - `retain_s` — the channelised buffer (held at the ~80 kSps channel rate, so its memory does not grow with the device rate) — must cover a segment plus the settle wait;
+    /// - `segment_s` — longest stretch decoded at once. A continuous transmitter is decoded in
+    ///   segments of this length, overlapping by one frame, so memory and latency stay bounded;
+    /// - `max_chains` — most hunting chains alive at once across the run.
+    FskFrames {
+        /// Pad either side of a transmission, s.
+        pad_s: f64,
+        /// Rolling sample buffer, s.
+        retain_s: f64,
+        /// Longest stretch decoded at once, s.
+        segment_s: f64,
+        /// Most hunting chains alive at once.
+        max_chains: usize,
+    },
 }
 
 fn one() -> u32 {
@@ -305,6 +332,8 @@ pub enum ChainShape {
         accept_modes: Vec<String>,
         /// Pilot required.
         require_pilot: bool,
+        /// T-971: longest RDS follow after the window, s (0 = none).
+        follow_s: f64,
     },
     /// FSK bursts + framing.
     Fsk {
@@ -363,6 +392,17 @@ pub enum ChainShape {
         /// Most classifying chains alive at once.
         max_chains: usize,
     },
+    /// The narrowband-FSK frame hunt (T-950).
+    FskFrames {
+        /// Pad, s.
+        pad_s: f64,
+        /// Buffer, s.
+        retain_s: f64,
+        /// Longest stretch decoded at once, s.
+        segment_s: f64,
+        /// Most hunting chains alive at once.
+        max_chains: usize,
+    },
 }
 
 impl ChainSpec {
@@ -404,6 +444,7 @@ impl ChainSpec {
                     probe_s,
                     accept_modes,
                     require_pilot,
+                    follow_s,
                 },
             ] => {
                 if !self.requires_content {
@@ -412,6 +453,9 @@ impl ChainSpec {
                 if !(*window_s > 0.0 && *bandwidth_hz > 0.0 && *pre_s >= 0.0 && *probe_s >= 0.0) {
                     return Err("analog-auto needs window_s, bandwidth_hz > 0".into());
                 }
+                if !(follow_s.is_finite() && *follow_s >= 0.0) {
+                    return Err("analog-auto needs follow_s >= 0".into());
+                }
                 Ok(ChainShape::Analog {
                     pre_s: *pre_s,
                     window_s: *window_s,
@@ -419,6 +463,7 @@ impl ChainSpec {
                     probe_s: *probe_s,
                     accept_modes: accept_modes.iter().map(|m| m.to_lowercase()).collect(),
                     require_pilot: *require_pilot,
+                    follow_s: *follow_s,
                 })
             }
             [
@@ -547,6 +592,37 @@ impl ChainSpec {
                 })
             }
             [
+                NodeSpec::FskFrames {
+                    pad_s,
+                    retain_s,
+                    segment_s,
+                    max_chains,
+                },
+            ] => {
+                // Content is decided per decode by the emitter's class, as `fsk-bursts` decides
+                // it; the chain itself records nothing, so a record node is refused.
+                if self.record().is_some() {
+                    return Err("fsk-frames must not carry a record node".into());
+                }
+                // A FLEX frame is 1.875 s; a segment must hold one plus its overlap.
+                if !(*pad_s >= 0.0 && *segment_s >= 4.0 && *retain_s >= *segment_s + 2.0 * *pad_s) {
+                    return Err(
+                        "fsk-frames needs pad_s >= 0, segment_s >= 4 and retain_s >= segment_s + \
+                         2 pad_s"
+                            .into(),
+                    );
+                }
+                if *max_chains == 0 {
+                    return Err("fsk-frames needs max_chains >= 1".into());
+                }
+                Ok(ChainShape::FskFrames {
+                    pad_s: *pad_s,
+                    retain_s: *retain_s,
+                    segment_s: *segment_s,
+                    max_chains: *max_chains,
+                })
+            }
+            [
                 rest @ ..,
                 NodeSpec::Plugin {
                     manifest,
@@ -575,7 +651,7 @@ impl ChainSpec {
             }
             _ => Err(
                 "node list must be [record] analog-auto | [record] fsk-bursts | \
-                 [record] [ddc] plugin | trunk-cc | sweep-char | classify"
+                 [record] [ddc] plugin | trunk-cc | sweep-char | classify | fsk-frames"
                     .into(),
             ),
         }
@@ -666,7 +742,7 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "nodes": [
       { "node": "record", "pre_s": 0.25, "post_s": 0.25 },
       { "node": "analog-auto", "pre_s": 0.5, "window_s": 4.0, "bandwidth_hz": 200e3,
-        "probe_s": 0.5, "accept_modes": ["wfm"], "require_pilot": true }
+        "probe_s": 0.5, "accept_modes": ["wfm"], "require_pilot": true, "follow_s": 600.0 }
     ]
   },
   {
@@ -705,6 +781,14 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "bandwidth_hz": [500, 2e6],
     "nodes": [
       { "node": "classify", "pad_s": 0.02, "retain_s": 3.0, "window_s": 0.25, "max_chains": 4 }
+    ]
+  },
+  {
+    "id": "fsk-frames",
+    "trigger": "every-track",
+    "bandwidth_hz": [4e3, 60e3],
+    "nodes": [
+      { "node": "fsk-frames", "pad_s": 0.05, "retain_s": 6.5, "segment_s": 4.0, "max_chains": 8 }
     ]
   },
   {

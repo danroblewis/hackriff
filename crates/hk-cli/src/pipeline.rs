@@ -1185,6 +1185,15 @@ pub fn serve_api(
             history: None,
             // T-439: the de-welded view lattice, whose finest node is the growing edge.
             view_history: handle.view_history(),
+            // T-1021: the view writer's unfolded rows, which a tile read yields to.
+            view_ingest_backlog: Some({
+                let c = handle.counters();
+                Arc::new(move || {
+                    c.history
+                        .view_backlog
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                })
+            }),
             floor: Some(handle.floor_product()),
             inventory: Some(Arc::clone(&db)),
             trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
@@ -1295,6 +1304,8 @@ pub fn serve_api(
             // growing edge are never cached — see `HotTileCache`.
             tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
             row_feeds: Default::default(),
+            // T-1043: `/ws/spectrum/rows` pane subscriptions, counted per server like the above.
+            pane_feeds: Default::default(),
             // T-579: the tile route's memoised geometry, per server — the readable ceiling per
             // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
             ceiling_memo: Default::default(),

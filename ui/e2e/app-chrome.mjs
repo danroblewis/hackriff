@@ -27,8 +27,10 @@ export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map
 export const FOLDED = "#map-more-menu .map-more-tools button";
 /** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ, per-device (T-1006). */
 export const PANE_ITEMS = "#map-pane-menu button";
-/** Inside the layers menu: Signals (the detections overlay), Trace (view-wide) and the colour scale. */
-export const LAYER_ITEMS = "#map-layers input[data-layer], #map-layers input[data-view-layer], #map-layers input[data-scale]";
+/** Inside the layers menu: Signals (the detections overlay) and Trace (view-wide). T-1007 moved the
+ * colour scale out of here into the ⋯ settings menu, where `app-settings.e2e.mjs` clicks every row
+ * (and every other moved setting) for real, at 1280 and at 400 px. */
+export const LAYER_ITEMS = "#map-layers input[data-layer], #map-layers input[data-view-layer]";
 
 /** T-528's hit test: each matched control, scrolled into view inside its own menu, must be what a
  * click at its centre lands on, and at least 16 px on a side. A menu's checkbox or radio is pressed
@@ -120,6 +122,10 @@ export async function rehomedHitTest(page) {
  * The deadline below bounds a HANG only: a green run returns as soon as the page agrees with itself.
  */
 export const arrived = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false;
+  // T-1026: an overlay that is OFF the screen (\`hidden\`, the detail card's closed state) is not
+  // moving — it has a zero box and runs no transition, so it has arrived by definition. Judging it by
+  // the inline height the product last set would wait forever for a box that will never be measured.
+  if (e.hidden) return true;
   const want = parseFloat(e.style.height);
   return e.getAnimations().length === 0 &&
     (!Number.isFinite(want) || Math.abs(e.getBoundingClientRect().height - want) < 1); })()`;

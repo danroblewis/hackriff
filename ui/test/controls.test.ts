@@ -153,6 +153,8 @@ test("error codes map to reactions", () => {
   assert.equal(r(400, { code: "out_of_range", error: "x" }), "field");
   assert.equal(r(501, { code: "unsupported", error: "no bias tee" }), "unsupported");
   assert.equal(r(503, { code: "unavailable", error: "no audit log" }), "error");
+  // T-1063: the connection-cap refusal is a live server asking for a moment, not a fault.
+  assert.equal(r(503, { code: "overloaded", error: "the server is at its connection limit; retry" }), "busy");
   assert.equal(reactionTo(new TypeError("Failed to fetch")).reaction, "offline");
   assert.equal(errorFrom(403, "").code, "forbidden");
   assert.equal(errorFrom(502, null, "Bad Gateway").message, "Bad Gateway");

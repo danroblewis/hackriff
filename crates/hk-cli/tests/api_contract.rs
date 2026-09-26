@@ -223,6 +223,46 @@ fn wait_for(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// Two routes read over **one state of the store**, for a test that compares what they serve
+/// about the same emitter while the live pipeline is still writing it.
+///
+/// Two HTTP calls are two instants, and a mock-SDR run keeps filing the station between them — a
+/// new detection span extends its interval, a tracker report reopens it (T-940). Comparing reads
+/// that straddle such a write compares two different states, which is a race in the test, not a
+/// disagreement between the surfaces (hk-cli::api_contract, MAIN RED 2026-09-26). So `a` is read
+/// on both sides of `b`, and the pair is used only when both readings of `a` agree on `key` —
+/// everything the comparison depends on — which proves no write the comparison could see landed
+/// in between. A write that lands flips the bracket and the pair is read again, never asserted.
+///
+/// This narrows *which* reads are compared, never *what* is asserted about them: surfaces that
+/// genuinely disagree disagree on every consistent pair, so the caller's assertion goes red on
+/// the first one. Bounded: a store that never holds still for three GETs is reported, not waited
+/// out. Returns the pair and how many brackets it took.
+fn read_one_state(
+    what: &str,
+    mut a: impl FnMut() -> Value,
+    mut b: impl FnMut() -> Value,
+    key: impl Fn(&Value) -> Value,
+) -> (Value, Value, usize) {
+    const MAX_BRACKETS: usize = 50;
+    let mut last = None;
+    for attempt in 1..=MAX_BRACKETS {
+        let before = a();
+        let between = b();
+        let after = a();
+        let (k0, k1) = (key(&before), key(&after));
+        if k0 == k1 {
+            return (after, between, attempt);
+        }
+        last = Some((k0, k1));
+    }
+    let (k0, k1) = last.expect("at least one bracket was read");
+    panic!(
+        "{what}: the store changed under every one of {MAX_BRACKETS} bracketed reads, so no pair \
+         read from one state exists to compare; last bracket {k0} vs {k1}"
+    );
+}
+
 fn is_object(v: &Value) -> bool {
     v.is_object()
 }
@@ -831,6 +871,26 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         v["tuning"]["baseband_filter_hz"].is_null(),
         "unset until requested: {v}"
     );
+
+    // T-1063 `/api/health`: the SERVER's own connection health, answerable on any server (unlike
+    // `/api/status`, which is the pipeline's and 404s without a run). The caps are asserted by
+    // value: the whole point of the ticket was that 64 shared slots were too few behind the
+    // tunnel, and a silent regression of the default is exactly the EOF storm coming back.
+    let before = unix_now();
+    let (st, h) = get(addr, "/api/health");
+    let after = unix_now();
+    assert_eq!(st, 200, "{h}");
+    let t = h["t"].as_f64().expect("t (server clock, s)");
+    assert!((before - 1.0..=after + 1.0).contains(&t), "t={t}: {h}");
+    let c = &h["connections"];
+    assert_eq!(c["http"]["max"], 256, "{h}");
+    assert_eq!(c["websocket"]["max"], 128, "{h}");
+    // This very request is in the HTTP pool while it is answered, and nothing has been refused.
+    assert!(c["http"]["open"].as_u64().is_some_and(|n| n >= 1), "{h}");
+    assert!(c["websocket"]["open"].is_u64(), "{h}");
+    assert_eq!(c["http"]["refused"], 0, "{h}");
+    assert_eq!(c["websocket"]["refused"], 0, "{h}");
+    assert!(c["refused_last_t"].is_null(), "nothing refused yet: {h}");
 
     // /api/status: pipeline counters, never content.
     let before = unix_now();
@@ -2188,14 +2248,30 @@ fn events_and_presence_serve_the_durable_catalogue() {
     // `IdleGap::conservative()` (60 s) while `/api/inventory` measured the gap off the band's tune
     // history (T-410), and they disagreed. Asserted over EVERY emitter the catalogue listed, with
     // the count reported — a comparison of zero emitters would be vacuous.
-    let (st, inv) = get(
-        addr,
-        &format!("/api/inventory?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=500"),
+    //
+    // Both answers are read from ONE state of the store ([`read_one_state`]): the mock run keeps
+    // filing the station between two GETs, and a detection or tracker report landing in between
+    // made the two routes answer about two different states (MAIN RED 2026-09-26: `ended` vs
+    // `live`, 1 in 20 runs alone). The bracket is keyed on everything the comparison reads — the
+    // listed emitters with their liveness, and the events that derive it.
+    let ok = |path: &str| {
+        let (st, body) = get(addr, path);
+        assert_eq!(st, 200, "{path}: {body}");
+        body
+    };
+    let events_path = format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}");
+    let inventory_path =
+        format!("/api/inventory?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=500");
+    let (v_state, inv, brackets) = read_one_state(
+        "/api/events around /api/inventory",
+        || ok(&events_path),
+        || ok(&inventory_path),
+        |e| json!([e["emitters"], e["events"]]),
     );
-    assert_eq!(st, 200, "{inv}");
+    eprintln!("T-591: one-state read of /api/events + /api/inventory took {brackets} bracket(s)");
     let rows = inv["entries"].as_array().expect("inventory entries");
     let mut compared = 0usize;
-    for m in emitters {
+    for m in v_state["emitters"].as_array().expect("emitters") {
         let id = m["id"].as_str().unwrap();
         let Some(row) = rows.iter().find(|r| r["id"] == json!(id)) else {
             continue;
@@ -2210,10 +2286,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
     }
     assert!(
         compared > 0,
-        "liveness was compared for {compared} emitters — a vacuous comparison: events {v}, \
+        "liveness was compared for {compared} emitters — a vacuous comparison: events {v_state}, \
          inventory {inv}"
     );
-    eprintln!("T-591: liveness compared across both surfaces for {compared} emitters");
+    eprintln!(
+        "T-591: liveness compared across both surfaces for {compared} emitters: {}",
+        v_state["emitters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| format!("{}={}", m["id"], m["liveness"]))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     // Coverage always answers, and always in words a client can show beside an empty list: an
     // unobserved stretch is never reported as a quiet band (C26).
     let statement = v["coverage"]["statement"]
@@ -2240,15 +2325,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
         "an unobserved period must never read as a quiet band: {past_statement}"
     );
 
-    // Paging and validation.
-    let (st, one) = get(
-        addr,
-        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=1"),
+    // Paging and validation. The page and the unpaged answer are read from one state of the store
+    // too: the mock run can file a second emitter in the box between two GETs, which changes the
+    // total without any page having changed it.
+    let (all, one, brackets) = read_one_state(
+        "/api/events around one page of it",
+        || ok(&events_path),
+        || ok(&format!("{events_path}&limit=1")),
+        |e| e["total"].clone(),
     );
-    assert_eq!(st, 200, "{one}");
+    eprintln!("paging: one-state read of /api/events + limit=1 took {brackets} bracket(s)");
     assert!(one["events"].as_array().unwrap().len() <= 1, "{one}");
     assert_eq!(
-        one["total"], v["total"],
+        one["total"], all["total"],
         "a page never changes the total: {one}"
     );
     // `limit`'s documented range is 1..=2000 (T-592: `events_json` used to re-validate the same
@@ -2352,8 +2441,15 @@ fn events_and_presence_serve_the_durable_catalogue() {
     // Now the gap is *measured* off the run's tune history (ADR-0019 §3), so on a continuously
     // dwelt band it is 1 s, a few-second silence is genuinely decayed, and a few milliseconds of
     // clock between two calls moves it. Equality here would now be asserting the 60 s default back.
-    let (st, one) = get(addr, &format!("/api/inventory/{id}"));
-    assert_eq!(st, 200, "{one}");
+    //
+    // And both are read from ONE state of the store ([`read_one_state`]). The clock is not the only
+    // thing that moves between two calls: the mock run keeps filing this station, so a detection
+    // span or a tracker report (T-940) landing between them made the two routes project two
+    // different states — `ended` beside `live` over the very same interval (MAIN RED 2026-09-26,
+    // failed alone on main). The track route is read on both sides of the row, keyed on its
+    // intervals and its projection less the clock-read fields, so the comparison below only ever
+    // sees a row read while the track stood still; a genuine disagreement is still a disagreement
+    // on that pair.
     let clock_read = |p: &serde_json::Value| {
         let mut p = p.clone();
         let o = p.as_object_mut().expect("presence is an object");
@@ -2361,6 +2457,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
         o.remove("confidence");
         p
     };
+    let track_path = format!("/api/inventory/{id}/presence");
+    let row_path = format!("/api/inventory/{id}");
+    let (track, one, brackets) = read_one_state(
+        "/api/inventory/{id}/presence around /api/inventory/{id}",
+        || ok(&track_path),
+        || ok(&row_path),
+        |t| json!([t["intervals"], clock_read(&t["presence"])]),
+    );
+    eprintln!(
+        "T-264: one-state read of the track route + the row took {brackets} bracket(s); \
+         liveness {}",
+        track["presence"]["liveness"]
+    );
     assert_eq!(
         clock_read(&track["presence"]),
         clock_read(&one["presence"]),
@@ -5724,6 +5833,84 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     let v: Value = serde_json::from_str(msg.as_str()).unwrap();
     assert_eq!(v["type"], json!("refused"));
     assert!(v["status"].is_number() && v["code"].is_string(), "{v}");
+
+    stop_server(serving);
+}
+
+/// **The documented close codes of `/ws/open/<name>`, on the wire** (T-1010; `docs/api.md`, "An
+/// open session ends with a real close frame"). T-079 says a route's documentation and its
+/// contract test move together, and this route had none: every code was asserted only inside
+/// `hk-api`, so a change in `http.rs`'s dispatch could have left the promise true in a unit test
+/// and false to a browser.
+///
+/// The three codes a *client* can provoke against a real server are asserted here end to end: the
+/// `4000 + status` refusal, `1002` for a consumer that writes (consumers never write, §2), and
+/// `1000` for a clean close. The remaining documented codes are producer-initiated — `1000`
+/// (`producer finished`), `1008` (`too slow to keep up`), `1008` (`did not drain in time`) and the
+/// best-effort `1011` (`transport reset`) — and no client action forces them on a live pipeline
+/// within a test's budget; they are asserted, frame bytes and all, by
+/// `hk_api::ondemand::tests::every_close_reason_sends_its_documented_code` over a real socket.
+#[test]
+fn ws_open_close_codes_match_the_documented_contract() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // A refusal closes with `4000 + status` after its one JSON message, and attaches nothing.
+    let mut refused = connect_ws(addr, &format!("/ws/open/listen?token={TOKEN}")).unwrap();
+    let msg = loop {
+        match refused.read().unwrap() {
+            Message::Text(t) => break t,
+            _ => continue,
+        }
+    };
+    let v: Value = serde_json::from_str(msg.as_str()).unwrap();
+    assert_eq!(v["type"], json!("refused"), "{v}");
+    let status = v["status"].as_u64().unwrap();
+    let code = loop {
+        match refused.read() {
+            Ok(Message::Close(f)) => break f.map(|f| u16::from(f.code)),
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    assert_eq!(
+        code,
+        Some(u16::try_from(4000 + status).unwrap()),
+        "a refusal closes with 4000 + status, never a bare hang-up"
+    );
+
+    let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
+
+    // A consumer that writes anything but a close or a ping breaks the contract: 1002.
+    let (mut ws, _) = wait_for_listen(addr, f_lo, f_hi, "");
+    ws.send(Message::Text("hello".into())).unwrap();
+    let frame = loop {
+        match ws.read() {
+            Ok(Message::Close(f)) => break f,
+            Ok(_) => {}
+            Err(e) => panic!("a consumer that wrote got a bare hang-up, not 1002: {e}"),
+        }
+    };
+    let frame = frame.expect("a close frame, not an empty close");
+    assert_eq!(u16::from(frame.code), 1002, "{frame:?}");
+    assert_eq!(
+        frame.reason.as_str(),
+        "unexpected message from a consumer",
+        "{frame:?}"
+    );
+
+    // A clean close from the peer is echoed as 1000 `closed`, not left to read as 1006.
+    let (mut ws, _) = wait_for_listen(addr, f_lo, f_hi, "");
+    ws.close(None).unwrap();
+    let frame = loop {
+        match ws.read() {
+            Ok(Message::Close(f)) => break f,
+            Ok(_) => {}
+            Err(e) => panic!("a clean close was answered with a hang-up: {e}"),
+        }
+    };
+    let frame = frame.expect("a close frame, not an empty close");
+    assert_eq!(u16::from(frame.code), 1000, "{frame:?}");
+    assert_eq!(frame.reason.as_str(), "closed", "{frame:?}");
 
     stop_server(serving);
 }
@@ -9298,6 +9485,20 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
     assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
     assert_eq!(probe["cost"]["fair_share"], json!(true), "{probe}");
+    // T-1021: every history-lock hold this request took, timed — at least the address lookup's,
+    // and no single hold longer than all of them together.
+    let lock = &probe["cost"]["lock"];
+    assert!(lock["holds"].as_u64().is_some_and(|n| n >= 1), "{probe}");
+    let (total, max, cpu) = (
+        lock["hold_ms_total"].as_f64().unwrap(),
+        lock["hold_ms_max"].as_f64().unwrap(),
+        lock["hold_cpu_ms_total"].as_f64().unwrap(),
+    );
+    assert!(max >= 0.0 && max <= total && cpu >= 0.0, "{probe}");
+    assert!(
+        lock["yielded_ms"].as_f64().is_some_and(|y| y >= 0.0),
+        "{probe}"
+    );
     // A client that names itself is a client of its own, and two of them halve the share. The
     // second client here has never been served, so it is also what arms the bootstrap reserve.
     let (st, mine) = get(addr, &format!("{}&client=tab-one", tile(0, 0, 0, 0)));
@@ -10529,6 +10730,275 @@ fn a_nudged_away_band_is_fog_at_the_finest_level_up_to_its_last_live_row() {
     stop_server(serving);
 }
 
+/// T-1058, **the user's fog-of-war bug, through the mock SDR: a departed band is fog at every zoom
+/// and every distance, from the last-known LEDGER — nothing searched, nothing left unsearched —
+/// and the ledger survives a restart.**
+///
+/// The user: "If I zoom in close enough that the most recent sample for a region is outside of the
+/// viewport, it does not render. If I pan down so that the last seen sample is in the viewport,
+/// SOME of the tiles resolve, but not all." The shadow used to be a bounded search per tile; at the
+/// finest level the band's last row lies many search steps away and the budget ran out.
+///
+/// Band A (the fixture's whole window) is measured at the data edge, the radio moves 10 MHz away
+/// through the device route, and the data edge is let run eight finest tiles past A's last row —
+/// every instant read off the wire. Then, at (0, 0), (1, 0), (2, 1) and (3, 2): every live-edge tile
+/// over A's band carries, in every column, fog down every row before the data edge; every carried
+/// value was last seen at A's last row (`/api/lastknown`'s, the same instant for every column);
+/// `search.ran` is false and `search.unsearched` is empty. Then the server is stopped and started
+/// again on the same data directory, tuned to B: the same finest tile, and `/api/lastknown`, still
+/// carry A's last row — the ledger was persisted, not rebuilt.
+#[test]
+fn a_departed_band_is_fog_at_every_zoom_from_the_ledger_and_survives_a_restart() {
+    let dir = temp_data_dir();
+    // Guarded for the whole test (T-232), not only by `start_server_fft`'s guard: the directory
+    // outlives the first server and is reopened by the second, and this binding is dropped last.
+    let _dir_guard = TempDataDirGuard::new(dir.clone());
+    let (_guard, serving, addr) = start_server_fft(dir.clone(), None, 1024);
+    const N: u64 = 32;
+    let n = N as usize;
+    let tile = |lf: u32, lt: u32, fi: u64, ti: u64| {
+        format!("/api/tiles?level_f={lf}&level_t={lt}&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let (st, probe) = get(addr, &tile(0, 0, 0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let geom = |lf: u32, lt: u32| {
+        (
+            f_cell * f64::from(1u32 << lf) * N as f64,
+            t_cell * f64::from(1u32 << lt) * N as f64,
+        )
+    };
+    let (w0, h0) = geom(0, 0);
+    let (band_lo, band_hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+    let probe_fi = (FIXTURE_CENTER_HZ / w0) as u64;
+    let edge_at = |addr| {
+        get(addr, &tile(0, 0, probe_fi, (unix_now() / h0) as u64)).1["shadow"]["edge_s"].as_f64()
+    };
+    let mut armed = 0.0f64;
+    wait_for(
+        "band A to be measured at the data edge",
+        Duration::from_secs(60),
+        || {
+            let Some(e) = edge_at(addr) else {
+                return false;
+            };
+            let v = get(addr, &tile(0, 0, probe_fi, (e / h0) as u64)).1;
+            let (Some(t0), Some(g)) =
+                (v["extent"]["t0_s"].as_f64(), v["grid"]["max_db"].as_array())
+            else {
+                return false;
+            };
+            match (0..n).rev().find(|&r| !g[r * n + n / 2].is_null()) {
+                Some(r) => {
+                    armed = t0 + r as f64 * t_cell;
+                    true
+                }
+                None => false,
+            }
+        },
+    );
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let b_center = step * ((FIXTURE_CENTER_HZ + 10e6) / step).round();
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{b_center:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // Eight finest tiles past A's last row: at (0, 0) the live-edge tile is far from it.
+    let away_s = 8.0 * h0;
+    wait_for(
+        "the data edge to run eight finest tiles past the retune",
+        Duration::from_secs(180),
+        || edge_at(addr).is_some_and(|e| e > armed + away_s + h0),
+    );
+    let edge = edge_at(addr).expect("an edge");
+
+    // One array over A's whole window: every column known, all last seen at the same row.
+    let lastknown = |addr| {
+        let (st, v) = get(
+            addr,
+            &format!("/api/lastknown?f_lo={band_lo}&f_hi={band_hi}&cols=64"),
+        );
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+    let lk = lastknown(addr);
+    let states = lk["states"].as_array().unwrap().clone();
+    assert_eq!(states[1], json!("known"), "{lk}");
+    let lts: Vec<f64> = lk["last_t_s"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(lk["state"].as_array().unwrap())
+        // The two outermost columns can hold only the window's rolled-off edge bins.
+        .skip(1)
+        .take(62)
+        .map(|(t, s)| {
+            assert_eq!(s, &json!(1), "every column of A is known: {lk}");
+            t.as_f64().unwrap()
+        })
+        .collect();
+    let a_last = lts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let a_first = lts.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        a_last - a_first <= t_cell + 1e-6,
+        "A's columns were all last seen at its last row: {a_first}..{a_last}"
+    );
+    assert!(
+        a_last >= armed && a_last <= armed + away_s,
+        "A's last row {a_last} is after it was armed ({armed}) and before the edge ran away"
+    );
+    assert_eq!(lk["complete"], json!(true), "{lk}");
+
+    let tiles_over_a = |lf: u32, lt: u32, ti: u64| {
+        let (w, _) = geom(lf, lt);
+        ((band_lo / w).ceil() as u64..(band_hi / w).floor() as u64).map(move |fi| (fi, ti))
+    };
+    // Checks one tile over A's band; returns its shadow's (column → last_t) for the finest level.
+    let check = |addr, lf: u32, lt: u32, fi: u64, ti: u64| {
+        let (_, h) = geom(lf, lt);
+        let dt = h / N as f64;
+        let (st, v) = get(addr, &tile(lf, lt, fi, ti));
+        assert_eq!(st, 200, "{v}");
+        let sh = &v["shadow"];
+        let at = format!("({lf}, {lt}) tile {fi}/{ti}");
+        assert_eq!(
+            sh["search"]["unsearched"],
+            json!([]),
+            "{at}: {}",
+            sh["search"]
+        );
+        assert_eq!(sh["search"]["ran"], json!(false), "{at}: {}", sh["search"]);
+        assert_eq!(
+            sh["ledger"]["columns_searched"],
+            json!(0),
+            "{at}: {}",
+            sh["ledger"]
+        );
+        let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+        let tile_edge = sh["edge_s"].as_f64().unwrap();
+        let grid = v["grid"]["max_db"].as_array();
+        let arr = |k: &str| sh[k].as_array().unwrap().clone();
+        let (f, row, rows, t, src) = (
+            arr("f"),
+            arr("row"),
+            arr("rows"),
+            arr("last_t_s"),
+            arr("src"),
+        );
+        let mut covered = vec![false; n * n];
+        for i in 0..f.len() {
+            let c = f[i].as_u64().unwrap() as usize;
+            let r0 = row[i].as_u64().unwrap() as usize;
+            let last_t = t[i].as_f64().unwrap();
+            let source = &sh["sources"][src[i].as_u64().unwrap() as usize];
+            if source["from"] == json!("ledger") {
+                assert!(
+                    (last_t - a_last).abs() <= t_cell + 1e-6,
+                    "{at} column {c}: the ledger carries A's last row {a_last}, not {last_t}: {sh}"
+                );
+            } else {
+                assert_eq!(source["from"], json!("this-tile"), "{at}: {source}");
+                assert!(
+                    (last_t - a_last).abs() <= dt + t_cell + 1e-6,
+                    "{at} column {c}: A's last row as this tile measured it, {last_t} vs {a_last}"
+                );
+            }
+            for r in r0..r0 + rows[i].as_u64().unwrap() as usize {
+                covered[r * n + c] = true;
+            }
+        }
+        for c in 0..n {
+            for r in 0..n {
+                if t0 + r as f64 * dt >= tile_edge {
+                    continue;
+                }
+                let measured = grid.is_some_and(|g| g[r * n + c].is_number());
+                assert!(
+                    measured || covered[r * n + c],
+                    "{at} column {c} row {r}: not measured and no fog, before the data edge \
+                     {tile_edge}: {}",
+                    sh["ledger"]
+                );
+            }
+        }
+        (v["grid"]["observed_cells"].as_u64().unwrap_or(0), f.len())
+    };
+    let mut checked = 0;
+    for (lf, lt) in [(0u32, 0u32), (1, 0), (2, 1), (3, 2)] {
+        let (_, h) = geom(lf, lt);
+        let ti = ((edge - h / N as f64) / h) as u64;
+        for (fi, ti) in tiles_over_a(lf, lt, ti) {
+            let (observed, runs) = check(addr, lf, lt, fi, ti);
+            if (lf, lt) == (0, 0) {
+                assert_eq!(
+                    observed, 0,
+                    "A's last row is far outside the finest live-edge tile"
+                );
+                assert!(runs >= n, "every column carries fog");
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 4, "{checked}");
+    // The finest tile, remembered for after the restart.
+    let fine_ti = ((edge - h0 / N as f64) / h0) as u64;
+    let fine_fi = tiles_over_a(0, 0, fine_ti).next().unwrap().0;
+    stop_server(serving);
+
+    // **Restart**, on the same data directory, tuned to B from the start: A is never looked at
+    // again, and its fog must still be there.
+    let serving = start(&ServeOptions {
+        source: ServeSource::HackRf {
+            spec: format!("mock:{}", fixture_path().display()),
+            extra: Vec::new(),
+            live: LiveArgs {
+                center_hz: b_center,
+                ..LiveArgs::default()
+            },
+        },
+        data_dir: Some(dir),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(64 << 20),
+        },
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = serving.server.local_addr();
+    let lk2 = lastknown(addr);
+    assert_eq!(lk2["ledger"]["loaded"], json!(true), "{lk2}");
+    assert_eq!(lk2["complete"], json!(true), "{lk2}");
+    assert_eq!(
+        lk2["last_t_s"], lk["last_t_s"],
+        "the ledger after a restart is the ledger before it"
+    );
+    let (_, runs) = check(addr, 0, 0, fine_fi, fine_ti);
+    assert!(
+        runs >= n,
+        "the finest tile still carries fog after the restart"
+    );
+    eprintln!(
+        "T-1058: {checked} departed tiles fogged from the ledger at 4 levels; A last seen \
+         {a_last:.3} (armed {armed:.3}), edge {edge:.3}; ledger {}; restart kept it",
+        lk["ledger"]
+    );
+    stop_server(serving);
+}
+
 /// deflake-0922: **`horizon.recording_began_s` is when THIS server began sampling, and a retune
 /// does not move it into the past.**
 ///
@@ -10952,6 +11422,195 @@ fn row_push_route_serves_an_address_range_growing_or_sealed() {
         row += n;
     }
     assert_eq!(row, b, "every row of the range, once");
+    stop_server(serving);
+}
+
+/// T-1043 (LSR-2): `GET /ws/spectrum/rows`, as `docs/api.md` and `docs/stream-contract.md` §17
+/// document it, on a real `hk serve` over the mock SDR.
+///
+/// - **A pane, not an address**: the window and the column count are the subscription, a tile
+///   parameter is refused, and there is no way to spell "now" — without `t_from` the upgrade
+///   completes with a `refused` message and close code `4400`.
+/// - **Binary blocks, by the documented layout**: every block's length is exactly
+///   `48 + rows × nf × 2 + trailer_bytes`, the values are binary16 (NaN = not measured), the trailer's
+///   runs cover the block's own cells in the four-state alphabet, and the header states the level, the
+///   tier and the per-axis fold of **that** block.
+/// - **Store walk → live**: an open range starting behind the data edge delivers what exists and then
+///   keeps delivering blocks past the edge it started at, contiguously.
+#[test]
+fn pane_row_blocks_are_served_as_documented_over_a_window_and_a_range() {
+    let (_dir_guard, serving, addr) = start_server();
+    const NF: usize = 64;
+    // A pane over a quarter of the tuned window, around the fixture's station.
+    let (lo, hi) = (STATION_HZ - 0.3e6, STATION_HZ + 0.3e6);
+    let pane = |extra: &str| {
+        format!("/ws/spectrum/rows?token={TOKEN}&f_lo_hz={lo}&f_hi_hz={hi}&nf={NF}{extra}")
+    };
+    let text = |ws: &mut Ws| -> Option<Value> {
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => return Some(serde_json::from_str(&t).unwrap()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    };
+    let binary = |ws: &mut Ws| -> Option<Vec<u8>> {
+        loop {
+            match ws.read() {
+                Ok(Message::Binary(b)) => return Some(b.to_vec()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(Message::Text(t)) => panic!("expected a block, got text: {t}"),
+                Ok(_) => {}
+            }
+        }
+    };
+    let refused = |path: &str| -> Option<u16> {
+        let mut ws = connect_ws(addr, path).expect("refusals still upgrade");
+        let mut ws_text = None;
+        for _ in 0..8 {
+            let Ok(m) = ws.read() else { break };
+            match m {
+                Message::Text(t) => ws_text = Some(serde_json::from_str::<Value>(&t).unwrap()),
+                Message::Close(f) => {
+                    let v = ws_text.take().expect("a refusal says why before it closes");
+                    assert_eq!(v["type"], "refused", "{v}");
+                    return f.map(|f| u16::from(f.code));
+                }
+                // A block means the request was ACCEPTED: this helper's caller asked for a
+                // refusal, so that is the failure, not something to read past.
+                Message::Binary(_) => panic!("{path} was accepted, and must not be"),
+                _ => {}
+            }
+        }
+        None
+    };
+
+    // ---- no range start, and no lattice address: both refused, never defaulted or ignored ----
+    assert_eq!(refused(&pane("")), Some(4400), "there is no implicit now");
+    assert_eq!(
+        refused(&pane("&t_from=0&cells=32")),
+        Some(4400),
+        "a pane is a window, not a tile address"
+    );
+    assert_eq!(
+        refused(&format!(
+            "/ws/spectrum/rows?token={TOKEN}&f_lo_hz={lo}&f_hi_hz={hi}&nf=2&t_from=0"
+        )),
+        Some(4400),
+        "nf is bounded: a pane of two columns is refused"
+    );
+
+    // ---- the data edge, from a one-row range at the epoch (itself a range, not "now") ----
+    let (mut edge_s, mut t_cell_s) = (0.0, 0.0);
+    wait_for("the store to hold rows", Duration::from_secs(60), || {
+        let mut ws = connect_ws(addr, &pane("&t_from=0&t_to=1")).unwrap();
+        let s = text(&mut ws).expect("subscribed");
+        assert_eq!(s["type"], "subscribed", "{s}");
+        assert_eq!(s["pane"]["nf"], json!(NF), "{s}");
+        assert_eq!(s["record"]["header_bytes"], json!(48), "{s}");
+        assert_eq!(s["record"]["values"]["type"], json!("f16"), "{s}");
+        assert_eq!(s["record"]["values"]["absent"], json!("nan"), "{s}");
+        assert_eq!(
+            s["record"]["coverage"]["states"],
+            json!(["unobserved", "observed", "unknown", "excluded"]),
+            "{s}"
+        );
+        t_cell_s = s["pane"]["t_cell_s"].as_f64().unwrap_or(0.0);
+        match s["data_edge_s"].as_f64() {
+            Some(e) if e > 1.0 && t_cell_s > 0.0 => {
+                edge_s = e;
+                true
+            }
+            _ => false,
+        }
+    });
+    // Start a second behind the edge and follow it.
+    let from_ns = ((edge_s - 1.0) * 1e9) as i64;
+    let mut live = connect_ws(addr, &pane(&format!("&t_from={from_ns}"))).unwrap();
+    let head = text(&mut live).expect("subscribed");
+    assert_eq!(head["range"]["open"], json!(true), "{head}");
+    let row0 = head["range"]["row0"].as_i64().unwrap();
+    let edge_row = (edge_s / t_cell_s).floor() as i64;
+
+    let mut next = row0;
+    let mut observed = 0u64;
+    let mut measured_blocks = 0;
+    while next < edge_row + 10 {
+        let b = binary(&mut live).expect("blocks keep arriving past the edge the range started at");
+        assert!(
+            b.len() >= 48,
+            "a block is at least its header: {} B",
+            b.len()
+        );
+        let u16le = |at: usize| u16::from_le_bytes(b[at..at + 2].try_into().unwrap());
+        let u32le = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let i64le = |at: usize| i64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let (kind, flags, values, level, tier, fold) = (b[0], b[1], b[2], b[3], b[4], b[5]);
+        let nf = usize::from(u16le(6));
+        let rows = u32le(8) as usize;
+        let trailer_bytes = u32le(40) as usize;
+        let t0_ns = i64le(16);
+        let t_cell_ns = i64le(24);
+        let block_row0 = i64le(32);
+        assert_eq!(block_row0, next, "contiguous, never skipped or repeated");
+        assert_eq!(t0_ns, block_row0 * t_cell_ns, "t0_ns is row0's own instant");
+        assert!(
+            (t_cell_ns as f64 / 1e9 - t_cell_s).abs() < 1e-12,
+            "the row period is the one the header stated: {t_cell_ns} ns vs {t_cell_s} s"
+        );
+        assert_eq!(flags & !0b11, 0, "no undocumented flag bit is set");
+        let payload = if kind == 1 { rows * nf * 2 } else { 0 };
+        assert_eq!(
+            b.len(),
+            48 + payload + trailer_bytes,
+            "a block is exactly header + rows*nf*2 + trailer"
+        );
+        if kind == 1 {
+            measured_blocks += 1;
+            assert_eq!(nf, NF, "the pane's own columns");
+            assert_eq!(values, 1, "binary16, as the header said");
+            assert!(rows <= 64, "at most 64 rows per block: {rows}");
+            assert!(rows * nf <= 65_536, "at most 65536 cells per block");
+            assert!(level < 8, "the level that answered: {level}");
+            assert!(tier <= 2, "a documented honesty tier: {tier}");
+            assert_eq!(fold & 0b1100_0000, 0, "no undocumented fold bits");
+            assert!(
+                fold & 0b11 <= 2 && (fold >> 2) & 0b11 <= 2,
+                "fold: {fold:b}"
+            );
+            observed += u64::from(u32le(44));
+            // Not one value is an infinity or a sentinel level: NaN is the only absence.
+            for i in 0..rows * nf {
+                let bits = u16le(48 + i * 2);
+                let finite = (bits & 0x7c00) != 0x7c00;
+                assert!(
+                    finite || (bits & 0x03ff) != 0,
+                    "cell {i} is an infinity: absence is NaN, never a level"
+                );
+            }
+            // The coverage trailer: `run8`, four states, covering exactly this block's cells.
+            let t = &b[48 + payload..];
+            assert_eq!(t[0], 1, "the trailer names its encoding");
+            assert_eq!(t[1], 4, "four coverage states, never two");
+            assert!(t[2] & 2 != 0, "the plane is laid on the block's own axes");
+            let runs = u32::from_le_bytes(t[4..8].try_into().unwrap()) as usize;
+            assert_eq!(t.len(), 8 + runs * 8, "the trailer is exactly its runs");
+            let mut cells = 0usize;
+            for k in 0..runs {
+                cells += u32::from_le_bytes(t[8 + k * 8..12 + k * 8].try_into().unwrap()) as usize;
+                assert!(t[12 + k * 8] < 4, "a state outside the alphabet");
+            }
+            assert_eq!(cells, rows * nf, "the trailer covers the block's cells");
+        } else {
+            assert_eq!(kind, 2, "only `rows` and `unobserved` are documented kinds");
+            assert_eq!((nf, values, level, tier), (0, 0, 0xff, 0xff), "{b:?}");
+        }
+        next += rows as i64;
+    }
+    assert!(measured_blocks > 0, "the tuned pane carries measurements");
+    assert!(observed > 0, "the tuned pane's cells are measurements");
+    drop(live);
     stop_server(serving);
 }
 
@@ -13766,11 +14425,39 @@ fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
     // back to back HERE, from ONE address, and the ordering between them is asserted. Byte counts,
     // never wall clock (the ticket's own rule) — `cost.build_ms` is printed because the honest
     // half of this result is that it does NOT move, and a future read of this log should see that.
+    //
+    // T-1076: the six reads below are SEPARATE HTTP requests, and a LIVE tile's content can grow
+    // between them — measured, a ~300 B real difference between spellings swamped by ~1 KB of
+    // read-to-read noise (`compact+gzip 57070 B against f16+gzip 56775 B`). So the address is
+    // fixed (the same one `settled` already proved has station content in it, just scaled to a
+    // 256-cell tile) and the test WAITS at that one address until the tile itself reports
+    // `sealed: true` — T-572: sealedness is a fact about the ADDRESS versus the watermark, and a
+    // sealed tile's whole extent has passed the watermark and can never change again (the
+    // hot-tile cache is even keyed on exactly that). Walking the address instead — trying a
+    // different, earlier `t_index` when this one isn't sealed yet — was tried and rejected: it
+    // can walk clean off the front of the fixture's captured span into a tile that is sealed
+    // (permanently in the past) but has NO data at all, which made every spelling collapse to the
+    // same near-empty, coverage-map-short-circuited answer and the size assertions fail for an
+    // unrelated reason. So this waits, at the one address, for BOTH sealed and non-empty.
+    let big_f_index = (STATION_HZ / (f_cell * 256.0)).floor() as u64;
     let big = format!(
-        "/api/tiles?level_f=0&level_t=0&f_index={}&t_index={}&cells=256",
-        (STATION_HZ / (f_cell * N as f64 * 8.0)).floor() as u64,
+        "/api/tiles?level_f=0&level_t=0&f_index={big_f_index}&t_index={}&cells=256",
         (settled as f64 / 8.0) as u64,
     );
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let (st, probe) = get(addr, &big);
+        let observed = probe["grid"]["observed_cells"].as_u64().unwrap_or(0);
+        if st == 200 && probe["sealed"] == json!(true) && observed > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never got a sealed, non-empty 256-cell tile at {big}: {st} sealed={} observed={observed}",
+            probe["sealed"],
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let read = |extra: &str, ae: Option<&str>| {
         let (st, enc, body) = get_encoded(addr, &format!("{big}{extra}"), ae);
         assert_eq!(st, 200, "{}{extra}", big);

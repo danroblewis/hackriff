@@ -148,7 +148,9 @@
             "pi": "A4FF",
             "decoded": "RDS decoded by the app when prompted (recipe:rds on a region/band target): PI A4FF, PTY 9, 106 CRC-valid groups in 45 s at this tuning; one PS row 'QueBuena' seen (stability across the capture not verified, so not recorded as ps). Carrier: app detection centre 98.925 MHz, recipe fm.offset -24.4 kHz => ~98.900 MHz.",
             "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
-          }
+          },
+          "rt": null,
+          "rt_messages": []
         },
         "identity": {
           "type": "rds_pi",
@@ -201,7 +203,9 @@
             "pi": null,
             "decoded": "pilot locked in the app's RDS recipe (rds57.pilot_locked=1) but only 3 CRC-valid groups in 45 s; PI not decoded. Carrier: detection centre 98.088 MHz + fm.offset +10.0 kHz => ~98.098 MHz.",
             "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
-          }
+          },
+          "rt": null,
+          "rt_messages": []
         },
         "t_start_s": 0.0,
         "duration_s": 5.0

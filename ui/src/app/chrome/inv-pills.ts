@@ -19,12 +19,12 @@
 // very one the lists render and count (T-389's one-collection rule) — so a pill can never disagree
 // with the list it opens.
 //
-// THIN CLIENT: this module reads the store, writes `inventory.tab` (view state) and moves the
-// sheet. It holds no client and reaches no route; a press can no more move the radio than a scroll
+// THIN CLIENT: this module reads the store, writes `inventory.tab` and the card's openness (view
+// state) and moves the sheet. It holds no client and reaches no route; a press can no more move the radio than a scroll
 // can (`ui/test/app-inv-pills.test.ts` asserts that on a spy client).
 import type { MountFn } from "../context";
 import { renderedInventory, type Row } from "../explore/inventory";
-import { setInventoryTab, type InventoryTab } from "../explore/slice";
+import { openCardOnList, type InventoryTab } from "../explore/slice";
 import { h } from "../dom";
 import { fillMapInvHome } from "./inv-home";
 import { revealFocusSheet } from "./focus-sheet";
@@ -49,7 +49,9 @@ export function pillLabel(list: InventoryTab, n: number): string {
 /**
  * What a press does, as a pure description (the DOM half is three lines below): the list to select
  * and the snap to raise the sheet to. `half` rather than `full` — the map stays the subject
- * (docs/23 §10.3), and a viewer who left the sheet at `full` keeps it (`reveal` never lowers).
+ * (docs/23 §10.3), and a viewer who left the sheet at `full` keeps it (`show` never lowers).
+ * T-1026: the card is hidden until something is pressed, so a pill is one of the two things that
+ * puts it on screen at all (the other is selecting a feature) — on the list it names.
  */
 export const pillAction = (list: InventoryTab) => ({ tab: list, snap: "half" as const });
 
@@ -70,7 +72,7 @@ export const mountInvPills: MountFn = (el, ctx) => {
       class: "map-pill", type: "button", "data-list": list,
       onclick: () => {
         const { tab, snap } = pillAction(list);
-        ctx.store.set(setInventoryTab(tab));
+        ctx.store.set(openCardOnList(tab));
         revealFocusSheet(snap);
         showLists();
       },

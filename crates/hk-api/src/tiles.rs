@@ -704,18 +704,151 @@ pub(crate) fn with_tile_history<T>(
     f: impl FnOnce(&hk_store::Pyramid) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
     match store {
-        TileStore::Main => crate::http::with_history(state, f),
+        TileStore::Main => crate::http::with_history(state, |p| {
+            let _hold = LockHold::start();
+            f(p)
+        }),
         TileStore::View => {
             let p = state
                 .view_history
                 .as_ref()
                 .ok_or_else(|| ApiError::new(404, "no view-scheme history on this server"))?;
+            yield_to_ingest(state);
             let p = p
                 .lock()
                 .map_err(|_| ApiError::new(500, "view history store poisoned"))?;
+            let _hold = LockHold::start();
             f(&p)
         }
     }
+}
+
+/// The longest one hold of a tile request waits for the view writer to fold what it holds
+/// (T-1021).
+///
+/// T-904's 50 ms lock-hold bound, the figure this repo uses for a hold the live path waits behind.
+/// **Per hold**, and that was measured against the alternative: a 500 ms budget per *request* did
+/// no better on a loaded box (the writer was then short of CPU, not of the lock — 23 rows/s against
+/// 25 arriving with readers yielding their whole budget) and cost every tile hundreds of ms. A
+/// bound, so a writer that is behind for a reason no tile read causes delays each hold by at most
+/// this and never refuses or starves the read.
+pub const TILE_INGEST_YIELD_MAX: std::time::Duration = std::time::Duration::from_millis(50);
+
+thread_local! {
+    /// Whether this thread is answering a tile request — only a tile request's holds yield.
+    static YIELDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Time this request spent yielding, reported as `cost.lock.yielded_ms`.
+    static YIELDED: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// **Tile reads step aside for the growing edge** (T-1021): before a hold of the view lattice's
+/// mutex, wait — up to [`TILE_INGEST_YIELD_MAX`] — while the view writer has rows waiting to fold.
+///
+/// Measured, not assumed (`hk-pipeline/tests/tile_lock_hold.rs`, timing tier: 2.4 Msps paced mock
+/// SDR, a 220-tile viewport over (0,0)..(6,1) on four readers, after T-1018's exact-node read).
+/// Without this, the view writer — which takes the lock once per display row — lost the lock to
+/// tile reads for most of a pass and the view lattice's live edge fell behind capture by **~2 s**
+/// on the dev Mac at load ~15 and **14–31 s** at load ~33–37 (the writer folding 10–23 rows/s
+/// against the 25/s arriving). With it: **~0.2 s** at load ~12 (baseline ~0.1 s) and ~1.3 s at load
+/// ~32. No row was dropped and no ring sample lost either way: the capture thread and the ring
+/// readers never take this lock. Shorter chunks would not have fixed it: the cost was the lock's
+/// **occupancy** (single holds 20–600 ms wall, most of it off-CPU on a loaded box) and the unfair
+/// mutex handing it back to a reader that re-locks, not the length of one hold. So the fix is
+/// priority, applied where the readers take the lock.
+fn yield_to_ingest(state: &ApiState) {
+    let Some(backlog) = state.view_ingest_backlog.as_ref() else {
+        return;
+    };
+    if !YIELDING.with(std::cell::Cell::get) || backlog() == 0 {
+        return;
+    }
+    let start = std::time::Instant::now();
+    while backlog() > 0 && start.elapsed() < TILE_INGEST_YIELD_MAX {
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    YIELDED.with(|c| c.set(c.get() + start.elapsed()));
+}
+
+/// **Every history-lock hold one tile request takes, timed from acquisition to release** (T-1021).
+///
+/// `cost.chunks` counts the holds a tile *read* takes and `cost.build_ms` is the request's wall
+/// clock, which also contains the waits for the lock, the coverage overlay and the JSON; neither is
+/// the number ingest waits behind. The view writer folds each display row under this same mutex,
+/// so the longest hold here is the longest a row fold can wait behind a tile — what T-1021 was
+/// asked to measure before changing the chunking, and what staging can now read off the wire as
+/// `cost.lock`.
+///
+/// Per thread because a tile request is answered on one thread from admission to body (the batch
+/// route runs each address's whole `tiles_json` on one worker), so no request can see another's.
+#[derive(Clone, Copy, Default)]
+struct LockHolds {
+    holds: u32,
+    total_ns: u64,
+    max_ns: u64,
+    cpu_ns: u64,
+}
+
+thread_local! {
+    static LOCK_HOLDS: std::cell::Cell<LockHolds> = const {
+        std::cell::Cell::new(LockHolds { holds: 0, total_ns: 0, max_ns: 0, cpu_ns: 0 })
+    };
+}
+
+/// Times one hold; records it into [`LOCK_HOLDS`] when dropped, i.e. as the guard is released.
+///
+/// Wall **and** this thread's CPU time: the wall is what ingest waits behind, and the gap between
+/// the two is the part of a hold spent off-CPU with the lock held — preempted on a loaded box, or
+/// waiting on disk — rather than reading cells.
+struct LockHold(std::time::Instant, u64);
+
+impl LockHold {
+    fn start() -> Self {
+        Self(std::time::Instant::now(), thread_cpu_ns())
+    }
+}
+
+impl Drop for LockHold {
+    fn drop(&mut self) {
+        let ns = u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let cpu = thread_cpu_ns().saturating_sub(self.1);
+        LOCK_HOLDS.with(|c| {
+            let mut h = c.get();
+            h.holds += 1;
+            h.total_ns = h.total_ns.saturating_add(ns);
+            h.max_ns = h.max_ns.max(ns);
+            h.cpu_ns = h.cpu_ns.saturating_add(cpu);
+            c.set(h);
+        });
+    }
+}
+
+/// CPU time of the calling thread, ns (0 where the clock is unavailable).
+fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the duration of the call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    u64::try_from(ts.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(ts.tv_nsec).unwrap_or(0)
+}
+
+/// `cost.lock` for the holds taken since the last call on this thread, and resets them.
+fn take_lock_holds() -> Value {
+    let h = LOCK_HOLDS.with(|c| c.replace(LockHolds::default()));
+    let yielded = YIELDED.with(|c| c.replace(std::time::Duration::ZERO));
+    let ms = |ns: u64| (ns as f64 / 1e3).round() / 1e3;
+    json!({
+        "holds": h.holds,
+        "yielded_ms": ms(u64::try_from(yielded.as_nanos()).unwrap_or(u64::MAX)),
+        "hold_ms_total": ms(h.total_ns),
+        "hold_ms_max": ms(h.max_ns),
+        "hold_cpu_ms_total": ms(h.cpu_ns),
+    })
 }
 
 /// [`with_tile_history`], with the store **mutable first**, so a read can build the coarse node it
@@ -744,9 +877,13 @@ pub(crate) fn with_tile_history_built<T>(
     let Some(shared) = shared else {
         return with_tile_history(state, store, read);
     };
+    if store == TileStore::View {
+        yield_to_ingest(state);
+    }
     let mut p = shared
         .lock()
         .map_err(|_| ApiError::new(500, "history store poisoned"))?;
+    let _hold = LockHold::start();
     p.materialize(usize::from(level), freq, time).map_err(|e| {
         ApiError::new(
             400,
@@ -1902,7 +2039,7 @@ fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
 /// spelling, so a conversion that turned it into an infinity or a zero would invent a measurement.
 /// A magnitude past binary16's range becomes an infinity, which the client reads as non-finite and
 /// therefore as absent too; no finite dB level this route serves is anywhere near 65 504.
-fn f16_bits(x: f32) -> u16 {
+pub(crate) fn f16_bits(x: f32) -> u16 {
     let b = x.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
     let raw_exp = (b >> 23) & 0xff;
@@ -2260,6 +2397,17 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
 struct Shadow {
     runs: Vec<hk_store::ShadowRun>,
     known: hk_store::LastKnown,
+    /// T-1058: the last-known LEDGER's answer over this tile's columns, read from `ledger_store`
+    /// before anything is searched.
+    ledger: hk_store::LedgerAnswer,
+    ledger_store: TileStore,
+    /// The tile's own row, ns: whether the ledger's max-hold is over exactly this tile's cell.
+    t_cell_ns: i64,
+    /// Per column: the ledger answered it (a value, or — when the ledger is complete — proof there
+    /// is none), so no search reads it.
+    resolved: Vec<bool>,
+    /// Per column: `known`'s value came from the ledger.
+    from_ledger: Vec<bool>,
     store: TileStore,
     /// T-911: the search pinned to the tile's own level in the tile's own store, when it ran, and
     /// that store's per-level `(f_cell_hz, t_cell_ns)`. Its values are carried in `known` for every
@@ -2474,6 +2622,34 @@ fn shadow(
             t1
         },
     };
+    // T-1058: the LEDGER first — per column, the newest value before `t0`, kept as the rows
+    // arrived, in the tile's own store and max-held over its own row's time cell (so the value is
+    // the one the band's last live row was drawn with, the T-911 colour). No search, no budget:
+    // exact at any zoom and any distance. Only a column the ledger cannot answer — looked at
+    // again after `t0` (`Later`), or unproven where the ledger began on older history — falls
+    // through to the bounded search below, which is kept for exactly those columns (the
+    // migration window, `docs/adr/0020` §T-1058).
+    let ledger = with_tile_history(state, tile_store, |p| {
+        Ok(p.last_known_ledger(
+            None,
+            key.region.freq,
+            n,
+            key.t_cell_ns,
+            Some(Timestamp::from_unix_nanos(t0)),
+        ))
+    })?;
+    let resolved: Vec<bool> = ledger
+        .columns
+        .iter()
+        .map(|c| match c {
+            hk_store::LedgerColumn::Known(_) => true,
+            hk_store::LedgerColumn::Never | hk_store::LedgerColumn::NothingBefore { .. } => {
+                ledger.complete
+            }
+            hk_store::LedgerColumn::Later { .. } => false,
+        })
+        .collect();
+    let needs_search = resolved.iter().any(|&r| !r);
     // T-911: first, the tile's OWN level in the tile's OWN store — the cells the band's last live
     // row was drawn with. See [`Shadow`].
     let mut chunks = 0;
@@ -2482,10 +2658,12 @@ fn shadow(
     // guard, and letting it override the guarded ladder per column would make such tiles worse
     // (spectrum-history level 1's 60 s cell under 2^k s overview rows is the case).
     let own_levels = store_levels(state, tile_store)?;
+    let ledger_level = own_level;
     let own_level = own_level.filter(|&l| {
-        own_levels
-            .get(usize::from(l))
-            .is_some_and(|&(_, t_cell)| t_cell > 0 && key.t_cell_ns % t_cell == 0)
+        needs_search
+            && own_levels
+                .get(usize::from(l))
+                .is_some_and(|&(_, t_cell)| t_cell > 0 && key.t_cell_ns % t_cell == 0)
     });
     let own = match own_level {
         Some(l) => {
@@ -2553,14 +2731,26 @@ fn shadow(
     // `sources` states per run.
     // T-523's bound is on the WHOLE search: the ladder gets only what the own-level search left.
     let ladder_budget = budget.saturating_sub(own.as_ref().map_or(0, |o| o.known.source_cells));
-    let ladder_ran = !own_found.iter().all(|&f| f);
+    let ladder_ran = (0..n).any(|f| !resolved[f] && !own_found[f]);
     let mut known = if !ladder_ran {
-        // Every column resolved at the tile's own level: the ladder is not searched, and its
-        // search block states no stage and no cell read.
-        let mut k = own
-            .as_ref()
-            .map(|o| o.known.clone())
-            .expect("found implies searched");
+        // Every column resolved by the ledger or at the tile's own level: the ladder is not
+        // searched, and its search block states no stage and no cell read.
+        let mut k = own.as_ref().map_or_else(
+            || {
+                let span = key.region.freq.hi_hz - key.region.freq.lo_hz;
+                hk_store::LastKnown {
+                    before_ns: t0,
+                    f_lo_hz: key.region.freq.lo_hz,
+                    f_cell_hz: span / n.max(1) as f64,
+                    nf: n,
+                    cells: vec![hk_store::LastKnownCell::NONE; n],
+                    stages: Vec::new(),
+                    searched_from_ns: t0,
+                    source_cells: 0,
+                }
+            },
+            |o| o.known.clone(),
+        );
         k.stages.clear();
         k.source_cells = 0;
         k.searched_from_ns = k.before_ns;
@@ -2591,6 +2781,25 @@ fn shadow(
             }
         }
     }
+    // T-1058: the ledger's answers stand over whatever a search said about the same column.
+    let mut from_ledger = vec![false; n];
+    for (f, c) in ledger.columns.iter().enumerate() {
+        if !resolved[f] {
+            continue;
+        }
+        known.cells[f] = match c {
+            hk_store::LedgerColumn::Known(v) => {
+                from_ledger[f] = true;
+                hk_store::LastKnownCell {
+                    max_db: v.max_db,
+                    t_ns: v.last_ns,
+                    level: ledger_level.unwrap_or(0),
+                }
+            }
+            _ => hk_store::LastKnownCell::NONE,
+        };
+    }
+    let own_found: Vec<bool> = (0..n).map(|f| own_found[f] && !resolved[f]).collect();
     // T-881: past the store's newest FOLDED frame, as far as the tune record reaches — the same
     // `as_of_s` this answer's coverage serves — over the cells that record says the radio was not
     // looking at. The fold trails capture, so without this a departed band's newest rows carried
@@ -2604,6 +2813,11 @@ fn shadow(
     Ok(Shadow {
         runs,
         known,
+        ledger,
+        ledger_store: tile_store,
+        t_cell_ns: key.t_cell_ns,
+        resolved,
+        from_ledger,
         store,
         own,
         from_own: own_found,
@@ -2641,9 +2855,30 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
     // stores, whose level numbers are not comparable (T-911).
     let mut src_of_level: Vec<((bool, u8), usize)> = Vec::new();
     let mut src = Vec::with_capacity(sh.runs.len());
+    // T-1058: one entry for every run the ledger supplied.
+    let mut ledger_src: Option<usize> = None;
+    let s_of_ledger = |ns: i64| ns as f64 / 1e9;
     for r in &sh.runs {
         src.push(match r.level {
             None => 0,
+            Some(_) if sh.from_ledger.get(r.f).copied().unwrap_or(false) => {
+                *ledger_src.get_or_insert_with(|| {
+                    let l = &sh.ledger;
+                    // Exactly this tile's cell: the max-hold is over the tile's own row, and a
+                    // column is a whole number of the ledger's cells (never one of them replicated).
+                    let own_cell = l.t_cell_ns == sh.t_cell_ns
+                        && l.f_cell_hz >= l.source_f_cell_hz * (1.0 - 1e-9);
+                    sources.push(json!({
+                        "from": "ledger",
+                        "store": store_name(sh.ledger_store),
+                        "level": tile_level,
+                        "f_cell_hz": l.f_cell_hz.max(l.source_f_cell_hz),
+                        "t_cell_s": s_of_ledger(l.t_cell_ns),
+                        "own_cell": own_cell,
+                    }));
+                    sources.len() - 1
+                })
+            }
             Some(l) => {
                 let own = sh.from_own.get(r.f).copied().unwrap_or(false);
                 match src_of_level.iter().find(|(x, _)| *x == (own, l)) {
@@ -2711,6 +2946,32 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
         .map(|s| json!([s_of(s.from_ns), s_of(s.to_ns)]))
         .collect();
     let own_cells = sh.own.as_ref().map_or(0, |o| o.known.source_cells);
+    let lg = &sh.ledger;
+    let count_of =
+        |pred: fn(&hk_store::LedgerColumn) -> bool| lg.columns.iter().filter(|c| pred(c)).count();
+    let searched_columns = sh.resolved.iter().filter(|&&r| !r).count();
+    let ledger_json = json!({
+        "store": store_name(sh.ledger_store),
+        "complete": lg.complete,
+        "columns_known": lg.known(),
+        "columns_never": count_of(|c| matches!(c, hk_store::LedgerColumn::Never)),
+        "columns_nothing_before": count_of(|c| matches!(c, hk_store::LedgerColumn::NothingBefore { .. })),
+        "columns_later": count_of(|c| matches!(c, hk_store::LedgerColumn::Later { .. })),
+        "columns_answered": sh.resolved.iter().filter(|&&r| r).count(),
+        "columns_searched": searched_columns,
+        "cells_read": lg.cells_read,
+        "f_cell_hz": lg.source_f_cell_hz,
+        "t_cell_s": s_of(lg.t_cell_ns),
+        "rule": "T-1058: the LAST-KNOWN LEDGER, read first and never searched: per front end and \
+            per finest frequency cell of this store, the newest sample's time and — per time \
+            level — the max-hold of the store's cell holding it, kept as each row arrived. A \
+            column is ANSWERED when its newest sample ends at or before this tile (`known`: the \
+            value, exactly, however long ago), or — only when `complete` (the ledger has seen \
+            every frame this store folded) — when nothing ever reached it (`never`) or its \
+            first sample is at or after the tile (`nothing_before`). A column looked at again \
+            after the tile's start (`later`: the ledger holds only the newest value) or unproven \
+            on an incomplete ledger is the ONLY kind `search` reads (`columns_searched`).",
+    });
     json!({
         "encoding": "column-runs",
         "runs": sh.runs.len(),
@@ -2740,7 +3001,11 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
         // T-881: how far past `edge_s` a run may reach — this answer's `coverage.horizon.as_of_s`
         // — or null when runs stop at `edge_s`.
         "reach_s": sh.reach_ns.map(s_of),
+        "ledger": ledger_json,
         "search": {
+            // T-1058: whether any search ran — only for the columns the ledger could not answer.
+            "ran": sh.own.is_some() || sh.ladder_ran,
+            "columns": searched_columns,
             // The store the ladder read, or — when the tile's own level resolved every column and
             // the ladder never ran — the store that did.
             "store": store_name(match (&sh.own, sh.ladder_ran) {
@@ -2877,6 +3142,14 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     // that never takes a slot from the client's share.
     let planes = parse_planes(q)?;
     let client = client_id(q);
+    // T-1021: this request's holds only, whatever an earlier request on this thread left; and
+    // this request's holds yield the view lock to the growing edge, which no other route's do.
+    let _ = take_lock_holds();
+    YIELDING.with(|c| c.set(true));
+    let stamp = |mut v: Value| {
+        v["cost"]["lock"] = take_lock_holds();
+        v
+    };
     let slot = match state.tile_admission.acquire(&client) {
         Ok(slot) => slot,
         // T-581: the cap is a PRODUCER cap. A sealed tile the hot-tile cache already holds is
@@ -2884,11 +3157,13 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         // into a client-side halving of its operating limit (`tilecache.ts`'s AIMD) behind a
         // couple of slow coarse producers. See [`hot_hit_unslotted`].
         Err(share) => {
-            return hot_hit_unslotted(state, q, planes, &client, share)
-                .ok_or_else(|| too_many_in_flight(share));
+            let hit = hot_hit_unslotted(state, q, planes, &client, share).map(stamp);
+            YIELDING.with(|c| c.set(false));
+            return hit.ok_or_else(|| too_many_in_flight(share));
         }
     };
-    let answer = tile_body(state, q, &slot, planes);
+    let answer = tile_body(state, q, &slot, planes).map(stamp);
+    YIELDING.with(|c| c.set(false));
     // Served means *drawn*: only an answer disarms this client's bootstrap reserve.
     if answer.is_ok() {
         slot.mark_served();
@@ -6728,27 +7003,31 @@ mod tests {
         // T-911: and that level is THE TILE'S OWN, so the carried value is exactly the cell of the
         // band's last live row, column for column — never a max-hold over some other box, which is
         // the colour change the user saw at the first tile boundary after leaving a band.
+        // T-1058: and it comes from the LEDGER, at the tile's own cells — nothing is searched.
         let before: Vec<&Value> = next["shadow"]["sources"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|s| s["from"] == json!("before-tile"))
+            .filter(|s| s["from"] != json!("this-tile"))
             .collect();
         assert!(!before.is_empty(), "{}", next["shadow"]);
         for s in &before {
-            assert_eq!(s["search"], json!("own-level"), "{s}");
+            assert_eq!(s["from"], json!("ledger"), "{s}");
             assert_eq!(s["f_cell_hz"].as_f64(), Some(tile_f_cell), "{s}");
+            assert_eq!(s["own_cell"], json!(true), "{s}");
         }
         for f in 0..n {
             let (db, ..) = plane[f].clone().expect("row 0 carries");
             assert_eq!(db, grid[(h - 1) * n + f].as_f64().unwrap(), "column {f}");
         }
         assert_eq!(
-            next["shadow"]["search"]["own_level"]["columns_used"],
+            next["shadow"]["ledger"]["columns_known"],
             json!(n),
             "{}",
-            next["shadow"]["search"]
+            next["shadow"]["ledger"]
         );
+        assert_eq!(next["shadow"]["search"]["ran"], json!(false));
+        assert_eq!(next["shadow"]["search"]["unsearched"], json!([]));
 
         // Never swept: NO shadow anywhere, and the search says it found nothing — grey stays grey.
         let never = tiles_json(&state, &tile_params(F_INDEX + 1, T_INDEX + 1)).unwrap();

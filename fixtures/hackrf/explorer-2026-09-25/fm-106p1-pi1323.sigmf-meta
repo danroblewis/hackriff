@@ -155,7 +155,9 @@
             "pi": "1323",
             "decoded": "App: recipe:rds (prompted, 45 s) 1060 blocks / 247 CRC-valid groups, identity rds-pi:1323, PTY 16 (on a separate 200 kHz row; the detection row was classified unknown 0.999). Oracle rds_ref on THIS 5 s clip: PI 1323 x18 votes, block error rate 0.29. No PS from either. Carrier: app detection 106.1126 MHz, recipe fm.offset -12.7 kHz => ~106.100 MHz.",
             "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
-          }
+          },
+          "rt": null,
+          "rt_messages": []
         },
         "identity": {
           "type": "rds_pi",
@@ -208,7 +210,9 @@
             "pi": null,
             "decoded": "app pilot lock yes, 0 RDS groups; oracle no RDS.",
             "source": "app blind detection + recipe:rds on the explorer agent's live staging build (/api/pipelines, /api/inventory/{id}/decode), 2026-09-25 04:00-04:14 PDT, SF"
-          }
+          },
+          "rt": null,
+          "rt_messages": []
         },
         "t_start_s": 0.0,
         "duration_s": 5.0

@@ -47,6 +47,7 @@ pub mod http;
 pub mod inspector;
 pub mod inventory;
 pub mod iqbuffer; // T-157
+pub mod lastknown; // T-1058: the fog-of-war's last-known ledger over a pane's window
 pub mod live_control;
 pub mod measurements; // T-818 MAP-18
 pub mod ml; // T-844: C38 models, modes and the durable shadow log
@@ -65,6 +66,7 @@ pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of t
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
 pub mod signatures; // T-201
+pub mod spectrum_rows; // T-1043 (LSR-2): one pane's rows, folded, quantised, pushed as binary
 pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)
@@ -73,6 +75,7 @@ pub mod trunk_cc; // T-977: the control-channel hunt's last pass, with per-chann
 pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
 pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
+mod wsclose; // T-954/T-1010: one never-blocking WebSocket close path for every bridged consumer
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122

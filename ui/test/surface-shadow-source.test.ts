@@ -115,6 +115,25 @@ test("T-916: a source the answer did not label is UNSTATED, and unstated is stat
   assert.deepEqual(none.shadowSource, { carried: 2, ownLevel: 0, ladder: 0, unstated: 2, coarsest: { fHz: 0, tS: 0 } });
 });
 
+test("T-1058: a LEDGER source is own-level only when the answer says it is the tile's own cell", () => {
+  // Since T-1058 a departed band's value comes from the store's last-known ledger, not a search, and
+  // the source entry carries no `search`. When the answer says `own_cell: true` it is exactly the
+  // tile's own cell (T-911's claim) and the pane must NOT tell the user it is coarser; otherwise it
+  // is counted like any source that did not say, and the pane says so.
+  const ledger = (ownCell: boolean | undefined) => {
+    const a = answer([], [1, 1]);
+    const sh = a.shadow as unknown as { sources: Record<string, unknown>[] };
+    sh.sources.push({
+      from: "ledger", store: "view-lattice", level: 0, f_cell_hz: 6250, t_cell_s: 1,
+      ...(ownCell === undefined ? {} : { own_cell: ownCell }),
+    });
+    return decodeTile(ADDR, a).shadowSource;
+  };
+  assert.deepEqual(ledger(true), { carried: 2, ownLevel: 2, ladder: 0, unstated: 0, coarsest: null });
+  assert.deepEqual(ledger(false), { carried: 2, ownLevel: 0, ladder: 0, unstated: 2, coarsest: { fHz: 6250, tS: 1 } });
+  assert.deepEqual(ledger(undefined), { carried: 2, ownLevel: 0, ladder: 0, unstated: 2, coarsest: { fHz: 6250, tS: 1 } });
+});
+
 test("T-916: an unreadable source table does not take the shadow plane off the screen", () => {
   // The source table is a statement ABOUT the shadow, not the shadow. `shadowCells` still holds the
   // plane itself to every rule it had (a run over a measured cell, two runs over one cell, …), but

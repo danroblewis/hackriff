@@ -106,8 +106,11 @@ counter_group!(
         /// STFT resets (discontinuities, gaps).
         stft_resets,
         /// Frames emitted from a reset's partial averaging (T-139; history reader only, included
-        /// in `frames`).
+        /// in `frames`), or closed short of `K` at their row period across a bridged gap (T-1071).
         partial_frames,
+        /// Source gaps this reader's STFT averaged across instead of resetting (T-1071; history
+        /// reader and the display stream): each is a gap that no longer costs a row.
+        gaps_bridged,
         /// CPU time of this reader's thread(s), ns (T-510, history reader; T-939, detection
         /// reader): the per-row cost of the growing edge, paid on every front end's ring whether
         /// or not anyone looks.
@@ -244,6 +247,11 @@ counter_group!(
         view_tiles_written,
         /// View-lattice bytes written.
         view_bytes_written,
+        /// **Gauge (T-1021): rows the view writer holds and has not folded yet** — its batch's
+        /// remainder, set before each fold takes the view lock. Non-zero means a growing-edge row
+        /// is waiting for that lock, which is what `/api/tiles` yields to
+        /// (`hk_api::http::ApiState::view_ingest_backlog`).
+        view_backlog,
     }
 );
 
@@ -309,6 +317,10 @@ counter_group!(
         fsk_bursts,
         /// FSK boxes whose samples had left the chain buffer.
         fsk_boxes_missed,
+        /// T-980: FSK boxes refused because they carried no on/off energy contrast against their
+        /// own pads — a steady carrier, a receiver line or noise, never a burst
+        /// (`hk_demod::DemodError::NotABurst`). Not an error: the chain asked and got an answer.
+        fsk_not_a_burst,
         /// CRC-valid frames.
         crc_valid,
         /// T-247: M3 classification rows the C15 cascade wrote (`crate::classify`).
@@ -356,6 +368,28 @@ counter_group!(
         /// (an overrun while it computed its probe or early identification) — instead of writing
         /// the fragment it had, too short for RDS.
         window_restarts,
+        /// T-971: analog chains that went on decoding their station's RDS after the window
+        /// ([`crate::chains::analog`]'s follow), accumulating PS/RT/PTY/AF/CT on its row.
+        rds_follows,
+        /// T-971: follows running now (a gauge, at most `chains::analog::MAX_RDS_FOLLOWS`).
+        rds_follows_active,
+        /// T-971: stations with RDS whose follow the concurrency cap refused (their window was
+        /// written as before; the channel is followed on a later attach once a slot frees).
+        rds_follow_refused,
+        /// T-971: accumulated-field `rds-pi` rows the follows wrote.
+        rds_follow_rows,
+        /// T-971: samples the follows demodulated (after their windows).
+        rds_follow_samples,
+        /// T-971: time the follows spent demodulating those samples, ns — with
+        /// `rds_follow_samples` the measured per-station cost (T-453: measured, never assumed).
+        rds_follow_ns,
+        /// T-971: follows that ended because the station's RDS went silent (the emitter ended).
+        rds_follow_ended_silent,
+        /// T-971: follows that ended at their spec's `follow_s` budget.
+        rds_follow_ended_budget,
+        /// T-971: follows that ended with the stream: a retune, a gap, an overrun (the chain fell
+        /// behind the ring) or the segment stopping.
+        rds_follow_ended_stream,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
@@ -544,6 +578,26 @@ counter_group!(
         /// Classifications made but not written: the inventory recorded no entry for the track
         /// within the bounded wait, so the row had nothing to be evidence about.
         classify_no_emitter,
+        /// T-950: narrowband-FSK frame-hunting chains attached ([`crate::chains::frames`]).
+        /// Counted apart from `attached`, for the reason `sweep_attached` is.
+        frames_attached,
+        /// Frame-hunting chains that finished.
+        frames_detached,
+        /// Frame-hunting chains the concurrency cap refused to attach.
+        frames_admission_refused,
+        /// Transmissions a frame-hunting chain could not decode: their samples had left its
+        /// buffer, or never reached it.
+        frames_missed,
+        /// Frames decoded but not written: no inventory entry for the track within the bounded
+        /// wait.
+        frames_no_emitter,
+        /// Frame-hunting chains that gave up: a transmission on the air for a whole segment
+        /// without one sync-1 (a carrier, not a framed FSK transmitter).
+        frames_abandoned,
+        /// FLEX frames decoded (sync-1 found and the frame information word checked).
+        flex_frames,
+        /// FLEX pages (address + vector) found in those frames.
+        flex_pages,
         /// T-989: regions a conventional-DMR scan ran on ([`crate::dmr`]). Counted apart from
         /// the classifications beside them: the scan runs whether or not the classifier could
         /// say anything, which is the point of it.
