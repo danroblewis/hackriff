@@ -34,7 +34,7 @@
 //! lost. In lossless replay the chain's gate cursor holds capture instead.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::thread;
@@ -310,6 +310,41 @@ impl Target {
     }
 }
 
+/// Who owns a running pipeline's lifetime (ADR-0015 §12.3).
+///
+/// Both modes are irreducible, and the difference is not cosmetic: a Listen chain is owned by
+/// its consumer, a recipe pipeline is a named object with a lifecycle. `POST /api/pipelines`
+/// makes an [`Owner::Explicit`] pipeline that outlives every consumer; the `listen` opener makes
+/// an [`Owner::Session`] one that stops when the last session that asked for it goes away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// Started by `POST /api/pipelines`: it runs until it is stopped or the source ends.
+    Explicit,
+    /// Started by the `listen` opener: ephemeral, never saved, and stopped when its last
+    /// listener detaches.
+    Session,
+}
+
+impl Owner {
+    /// As the API serves it (`GET /api/pipelines`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Session => "session",
+        }
+    }
+}
+
+/// How a pipeline is started, beside its recipe and target.
+#[derive(Clone, Default)]
+pub(crate) struct StartOpts {
+    /// `Session` for the `listen` opener's ephemeral pipeline (default `Explicit`).
+    pub session: bool,
+    /// What the chooser measured on the channel (T-869): the `audio` header reports it instead
+    /// of the recipe's declaration.
+    pub measured: Option<Arc<crate::recipes::audio::Measured>>,
+}
+
 /// A pipeline's counters.
 #[derive(Debug, Default)]
 pub struct PipelineStats {
@@ -340,6 +375,9 @@ pub struct PipelineStats {
     pub decodes: AtomicU64,
     /// Frames `messages` outputs dropped because their writer's queue was full (T-111).
     pub decodes_dropped: AtomicU64,
+    /// Agreeing votes per weak identity, shared by every `messages` writer of the pipeline and
+    /// kept across edits (T-962 round 3; [`crate::recipes::messages`] module docs).
+    pub identity_tally: std::sync::Mutex<crate::recipes::messages::IdentityTally>,
 }
 
 impl PipelineStats {
@@ -456,6 +494,12 @@ pub(crate) struct PipelineCtl {
     pub id: String,
     pub recipe_id: String,
     pub target: Target,
+    /// Who owns its lifetime (ADR-0015 §12.3).
+    pub owner: Owner,
+    /// Sessions attached through the `listen` opener. A `Session`-owned pipeline stops when this
+    /// falls back to zero; an `Explicit` one is never stopped by a listener leaving (attaching to
+    /// a named pipeline must not be able to kill it).
+    pub listeners: AtomicUsize,
     pub streams_ctx: StreamCtx,
     pub started: Timestamp,
     pub shared: Weak<Shared>,
@@ -486,6 +530,21 @@ pub(crate) struct PipelineCtl {
 }
 
 impl PipelineCtl {
+    /// The pipeline's served streams of one kind (`audio`, `inspector`, `messages`, `stage`).
+    pub(crate) fn streams_of(&self, kind: &str) -> Vec<StreamEntry> {
+        lock(&self.streams)
+            .iter()
+            .filter(|s| s.kind == kind)
+            .cloned()
+            .collect()
+    }
+
+    /// Why the pipeline ended, once it has (`segment-ended`, `source-ended`, `retune: …`,
+    /// `rate-change: …`, `stopped`, or a node failure).
+    pub(crate) fn end_reason(&self) -> Option<String> {
+        lock(&self.end).clone()
+    }
+
     /// The channel in force, `(centre, bandwidth)` Hz.
     pub(crate) fn channel(&self) -> (f64, f64) {
         let cs = lock(&self.control);
@@ -517,6 +576,8 @@ pub struct RecipeRuntime {
     pub(crate) capture_replays: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// This runtime: a pipeline's refinement worker applies its results through it (T-870).
     me: Weak<RecipeRuntime>,
+    /// Serialises the `listen` opener's attach and detach decisions ([`Self::listen_attach`]).
+    listen_attach: Mutex<()>,
 }
 
 pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -524,16 +585,43 @@ pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
 }
 
 /// The tune `(centre, rate)` to plan a channel at `center` for: the tune the capture thread last
-/// published, or — before it has published one (no block captured yet) — a provisional window
-/// centred on `center` at the run's rate. The pipeline thread re-plans for the tune its chunks
-/// carry (`Runner::chunk`, `Hops::apply_channels`) and refuses a channel outside it then.
-/// T-175: an optimised build serves a start and a channel change before the first block.
+/// published, or — before it has published one (no block captured yet) — the window the run has
+/// **commanded** the front end to ([`crate::run::CommandedWindow`]). The pipeline thread re-plans
+/// for the tune its chunks carry (`Runner::chunk`, `Hops::apply_channels`) and refuses a channel
+/// outside it then. T-175: an optimised build serves a start and a channel change before the first
+/// block.
 pub(crate) fn planning_tune(shared: &crate::run::Shared, center: f64) -> (f64, f64) {
-    let tune = shared.counters.tune();
-    if tune.1.is_finite() && tune.1 > 0.0 {
-        tune
+    provisional_tune(
+        shared.counters.tune(),
+        shared.commanded.get().0,
+        center,
+        shared.fs,
+    )
+}
+
+/// [`planning_tune`]'s rule, pure.
+///
+/// **T-974: before the first block the window is the commanded one, not one centred on the
+/// request.** T-175 planned against `(center, fs)` — a window built around whatever was asked for
+/// — so every target fitted it, and `POST /api/pipelines` answered **201 running** for a band the
+/// radio was nowhere near (90 MHz against a 100.8 MHz / 2.4 Msps window) whenever it arrived before
+/// the capture thread had published its first block, and `409 outside_window` after. The window
+/// the front end is being tuned to is known from the start — the run commands it — so the answer
+/// no longer depends on which side of the first block a request lands. The request-centred window
+/// is left only for a run with no usable commanded window at all.
+pub(crate) fn provisional_tune(
+    published: (f64, f64),
+    commanded: (f64, f64),
+    center: f64,
+    fs: f64,
+) -> (f64, f64) {
+    let usable = |t: (f64, f64)| t.0.is_finite() && t.1.is_finite() && t.1 > 0.0;
+    if usable(published) {
+        published
+    } else if usable(commanded) {
+        commanded
     } else {
-        (center, shared.fs)
+        (center, fs)
     }
 }
 
@@ -757,6 +845,7 @@ impl RecipeRuntime {
             pipelines: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
+            listen_attach: Mutex::new(()),
             captures: std::sync::OnceLock::new(),
             capture_replays: std::sync::Arc::default(),
             me: me.clone(),
@@ -916,8 +1005,18 @@ impl RecipeRuntime {
         self.pipeline_json(&id)
     }
 
-    /// Starts `recipe` on `target`; returns the pipeline id.
+    /// Starts `recipe` on `target` as an ordinary named pipeline; returns the pipeline id.
     pub fn start(&self, recipe: Recipe, target: Target) -> Result<String, RuntimeError> {
+        self.start_with(recipe, target, &StartOpts::default())
+    }
+
+    /// Starts `recipe` on `target` under `opts` (see [`StartOpts`]); returns the pipeline id.
+    pub(crate) fn start_with(
+        &self,
+        recipe: Recipe,
+        target: Target,
+        opts: &StartOpts,
+    ) -> Result<String, RuntimeError> {
         let registry = self.registry();
         if recipe.schema != RECIPE_SCHEMA {
             return Err(RuntimeError::new(400, "invalid", "not a recipe document"));
@@ -1024,6 +1123,7 @@ impl RecipeRuntime {
             bandwidth_hz,
             emitter_id: emitter,
             channels: hop.as_ref().map_or_else(Vec::new, |h| h.channel_infos()),
+            measured: opts.measured.clone(),
         };
         let stats = Arc::new(PipelineStats::default());
         let mut sinks = Vec::with_capacity(g.outputs.len());
@@ -1052,6 +1152,12 @@ impl RecipeRuntime {
             id: id.clone(),
             recipe_id: recipe.id.clone(),
             target,
+            owner: if opts.session {
+                Owner::Session
+            } else {
+                Owner::Explicit
+            },
+            listeners: AtomicUsize::new(0),
             streams_ctx,
             started: Timestamp::now(),
             shared: Arc::downgrade(&shared),
@@ -1165,6 +1271,24 @@ impl RecipeRuntime {
         lock(&self.pipelines).get(id).cloned()
     }
 
+    /// Every pipeline the runtime holds, in id order.
+    pub(crate) fn running_pipelines(&self) -> Vec<Arc<PipelineCtl>> {
+        lock(&self.pipelines).values().cloned().collect()
+    }
+
+    /// The run's counters (the `listen` budget an audio pipeline is admitted under).
+    pub(crate) fn counters(&self) -> Arc<Counters> {
+        Arc::clone(&self.counters)
+    }
+
+    /// Serialises the `listen` opener's attach/detach decisions (T-869,
+    /// [`crate::recipes::session`]): finding-or-starting the audio pipeline for a target, and
+    /// deciding whether the listener that just left was the last one. Held for those two
+    /// sections only.
+    pub(crate) fn listen_attach(&self) -> std::sync::MutexGuard<'_, ()> {
+        lock(&self.listen_attach)
+    }
+
     fn found(&self, id: &str) -> Result<Arc<PipelineCtl>, RuntimeError> {
         self.pipeline(id)
             .ok_or_else(|| RuntimeError::new(404, "not_found", "no such pipeline"))
@@ -1182,6 +1306,7 @@ impl RecipeRuntime {
             "state": if running { "running" } else { "ended" },
             "end_reason": *lock(&ctl.end),
             "target": ctl.target.to_json(),
+            "owner": ctl.owner.as_str(),
             "channel": {
                 "center_hz": cs.center_hz,
                 "bandwidth_hz": cs.bandwidth_hz,
@@ -1515,7 +1640,8 @@ impl RecipeRuntime {
             .ok_or_else(|| RuntimeError::new(409, "ended", "the pipeline has ended"))?;
         let recipe = Arc::clone(&lock(&ctl.control).recipe);
         let (lo, hi, _) = self.resolve(&shared, &ctl.target)?;
-        let set = hops::resolve_channels(&shared, &recipe, &ctl.target, (lo, hi))?;
+        let dc = planning_tune(&shared, 0.5 * (lo + hi)).0;
+        let set = hops::resolve_channels(&shared, &recipe, &ctl.target, (lo, hi), Some(dc))?;
         self.set_channels(id, &set.channels_hz)
     }
 
@@ -2067,5 +2193,42 @@ impl Runner {
             }
         }
         inc(&self.ctl.stats.status_ticks);
+    }
+}
+
+#[cfg(test)]
+mod provisional_tune_tests {
+    use super::{in_window, provisional_tune};
+
+    const UNPUBLISHED: (f64, f64) = (0.0, 0.0);
+
+    /// T-974: a start before the first block is judged against the commanded window, so a band
+    /// outside it is refused then exactly as it is after the first block.
+    #[test]
+    fn before_the_first_block_a_band_outside_the_commanded_window_is_outside_it() {
+        let commanded = (100.8e6, 2.4e6);
+        let center = 90.05e6;
+        let (c, r) = provisional_tune(UNPUBLISHED, commanded, center, 2.4e6);
+        assert_eq!((c, r), commanded);
+        assert!(!in_window(c, r, 90.0e6, 90.1e6));
+        // The same answer as once a block has published the same tune.
+        let (c, r) = provisional_tune(commanded, commanded, center, 2.4e6);
+        assert!(!in_window(c, r, 90.0e6, 90.1e6));
+        // And a band inside the window is planned inside it either way.
+        let (c, r) = provisional_tune(UNPUBLISHED, commanded, 100.8e6, 2.4e6);
+        assert!(in_window(c, r, 100.7e6, 100.9e6));
+    }
+
+    #[test]
+    fn a_published_tune_wins_and_nothing_usable_falls_back_to_the_request() {
+        let published = (101.8e6, 4.8e6);
+        assert_eq!(
+            provisional_tune(published, (100.8e6, 2.4e6), 90e6, 2.4e6),
+            published
+        );
+        assert_eq!(
+            provisional_tune(UNPUBLISHED, (f64::NAN, 0.0), 90e6, 2.4e6),
+            (90e6, 2.4e6)
+        );
     }
 }

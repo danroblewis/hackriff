@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! features@1 ─▶ tree gates ─▶ class-conditional densities ─▶ χ² open set ─▶ prior fusion
-//!                                                                    └▶ within-family class
+//!      │                                                              └▶ within-family class
+//!      └▶ the broadcast-FM pilot rule ([`crate::fm`]) ─▶ a likelihood, beside the gate
 //! ```
 //!
 //! What the stage guarantees, and what the tests below check:
@@ -14,7 +15,13 @@
 //!   when no family passes a gate, and when the evidence is too flat to report one
 //!   ([`crate::thresholds`] `min_confidence`, the entropy rule).
 //! - **Priors rank, never veto** ([`crate::fuse`]).
-//! - **Nothing is certain.** The posterior is capped at `MAX_CONFIDENCE`.
+//! - **Nothing is certain.** The posterior is capped at `MAX_CONFIDENCE`, and an abstention at
+//!   `MAX_UNKNOWN_CONFIDENCE` — "I could not measure this" is not a near-certain claim, and the
+//!   residual above the cap goes to the families the tree left admissible (T-970).
+//! - **A measurement may stand beside a gate.** The pre-classification rule of [`crate::fm`]
+//!   measures the FM multiplex directly and supplies a likelihood, so a broadcast station whose
+//!   in-band SNR the densities cannot be trusted at is still named. It is evidence, not a verdict:
+//!   it enters the likelihood and is fused with the C17 prior like everything else.
 //!
 //! The verifier (T-200) and the per-family DL stage (T-204) re-rank *within* what this stage
 //! produced; neither may add a family it did not score.
@@ -22,14 +29,15 @@
 use hk_estimate::blind::SymbolParameters;
 use hk_model::Timestamp;
 use hk_model::classify::{
-    ClassCall, ClassFlag, ClassProvenance, Classification, Coarse, HK_MOD_V1, LabelP, Stage,
-    SuspectFlags, TaxonomyRef, UNKNOWN, entropy_norm,
+    ClassCall, ClassFlag, ClassProvenance, Classification, Coarse, HK_MOD_V1, LabelP,
+    MAX_UNKNOWN_CONFIDENCE, Stage, SuspectFlags, TaxonomyRef, UNKNOWN, entropy_norm,
 };
 use hk_model::emitter::LinkTarget;
 use num_complex::Complex32;
 
 use crate::density::DensityModel;
 use crate::features::{FeatureInput, Features, features};
+use crate::fm::{self, WfmCall};
 use crate::fuse::{FamilyPriorSet, fuse};
 use crate::openset::open_set_score;
 use crate::thresholds::{
@@ -137,6 +145,39 @@ impl Classifier {
         &self.model
     }
 
+    /// The broadcast-FM pre-classification rule ([`crate::fm`]), run on the request's own samples.
+    ///
+    /// Bounded by construction: it measures nothing unless C13 reports a station-shaped occupied
+    /// bandwidth ([`fm::STATION_OBW_HZ`]) at a rate that can carry a 57 kHz subcarrier
+    /// ([`fm::MIN_MPX_RATE_HZ`]), so the extra transform is paid on FM-shaped boxes and on nothing
+    /// else. Every outcome leaves a machine reason, so a row says whether the rule looked.
+    fn wfm_rule(
+        &self,
+        request: &ClassifyRequest<'_>,
+        reasons: &mut Vec<String>,
+    ) -> Option<WfmCall> {
+        let obw = request.obw_hz?;
+        if !(fm::STATION_OBW_HZ.0..=fm::STATION_OBW_HZ.1).contains(&obw)
+            || request.sample_rate_hz < fm::MIN_MPX_RATE_HZ
+        {
+            return None;
+        }
+        let Some(ev) = fm::mpx_evidence(request.samples, request.sample_rate_hz) else {
+            push_reason(reasons, "mpx_not_measurable");
+            return None;
+        };
+        match fm::wfm_rule(Some(obw), &ev) {
+            Some(call) => {
+                push_reason(reasons, call.reason);
+                Some(call)
+            }
+            None => {
+                push_reason(reasons, "no_fm_pilot");
+                None
+            }
+        }
+    }
+
     /// Classifies one normalised snippet.
     pub fn classify(&self, request: &ClassifyRequest<'_>) -> Classification {
         let f = features(&FeatureInput {
@@ -197,6 +238,14 @@ impl Classifier {
             flags.push(ClassFlag::SuspectInput);
         }
 
+        // 1b. **The pre-classification rule** (T-970): a 19 kHz stereo pilot with its subcarriers
+        // suppressed is a broadcast FM multiplex and nothing else in `hk-mod@1` produces one, so
+        // the measurement decides on its own — including where the SNR gate above held `analog`
+        // back, because a tone's detectability is set by the integration time and not by the
+        // in-band SNR of the whole 200 kHz channel (see [`crate::fm`]). It reads only the samples
+        // and C13's occupied bandwidth; it cannot reach a band plan.
+        let wfm = self.wfm_rule(request, &mut reasons);
+
         // 2. Open set: how far the snippet is from every family that was allowed to explain it
         // (the calibrated plausibility). The evidence-only distribution ranks what is left.
         let open_set = open_set_score(scored.iter().map(|(_, s)| s.plausibility));
@@ -243,6 +292,22 @@ impl Classifier {
             }))
             .collect();
 
+        // The rule's claim enters as **likelihood**, not as a verdict: it goes where the cascade's
+        // evidence goes and is fused with the C17 prior through exactly the same path, rather than
+        // short-circuiting it as a hard-coded family would. What it is not is *arguable by the band
+        // plan*: [`rule_likelihood`] leaves the residual on `unknown`, so the runner-up known
+        // family is 0 and `fuse` finds the evidence dominant, tempering any prior that disagrees
+        // back. A prior explains a measured station; it never relabels one.
+        let likelihood = match &wfm {
+            Some(call) => rule_likelihood(&likelihood, call),
+            None => likelihood,
+        };
+        let open_set = match &wfm {
+            Some(call) => 1.0 - call.confidence,
+            None => open_set,
+        };
+        let known_mass = 1.0 - open_set;
+
         // 3. Fusion with the C17 prior (a prior can reorder, never veto or reach `unknown`).
         let fused = fuse(&likelihood, open_set, request.prior.as_ref());
         let mut posterior = fused.posterior;
@@ -258,6 +323,11 @@ impl Classifier {
         };
         let entropy_of_likelihood = entropy_norm(&likelihood, tax.families.len() + 1);
         let abstain = match &top {
+            // The rule measured the multiplex; the abstention rules below all ask whether the
+            // *density cascade* said enough, which is a question the rule has already answered —
+            // **for `analog`**. If fusion put some other family on top, the rule is not what is
+            // being reported and the ordinary rules apply again.
+            Some((label, _)) if wfm.is_some() && label == "analog" => None,
             None => Some("no_family_scored"),
             Some((label, p)) => {
                 let t = thresholds_of(label);
@@ -306,6 +376,15 @@ impl Classifier {
             push_reason(&mut reasons, reason);
             force_unknown(&mut posterior);
         }
+        // **An abstention is not a confident claim** (T-970). `unknown` used to come out of the
+        // cap at `MAX_CONFIDENCE` whenever no family scored at all, so a row the cascade could not
+        // measure read `unknown 0.999` — "100 % unk" on the explorer's screen — which states more
+        // certainty about the world than a row that names a family. The residual belongs to the
+        // families the tree left **admissible**: those are precisely the ones that were not ruled
+        // out and could not be measured, which is what an abstention means (ADR-0016 §2).
+        if cap_unknown(&mut posterior, &rules) {
+            push_reason(&mut reasons, "unknown_capped");
+        }
 
         let (family, confidence) = posterior
             .iter()
@@ -318,7 +397,13 @@ impl Classifier {
             .and_then(|t| t.snr_gate_db)
             .unwrap_or(0.0);
         let class_gate = thresholds_of(&family).map_or(0.0, |t| t.class_gate_db);
-        let class = if family == UNKNOWN
+        let class = if let Some(call) = wfm_class(&family, wfm.as_ref()) {
+            call
+        } else if wfm.is_some() && family != "analog" {
+            // The rule fired but something else is being reported: say so, and name no class.
+            push_reason(&mut reasons, "wfm_rule_not_reported");
+            None
+        } else if family == UNKNOWN
             || !request
                 .snr_db
                 .is_some_and(|s| s >= snr_gate_db + class_gate)
@@ -410,6 +495,107 @@ impl Classifier {
         }
         out
     }
+}
+
+/// The class a [`WfmCall`] names — **only when the family being reported is the one it belongs
+/// to** (T-970 review).
+///
+/// A `Classification` whose class is not a class of its family is invalid
+/// ([`Classification::validate`]: "class not in family"), and the family reported is the one
+/// fusion and the abstention rules settled on, not the one the rule proposed. Binding the class to
+/// the rule instead of to the family made an invalid row constructible, so the class follows the
+/// family here and the caller records why it dropped the name. Returns `None` when the rule did
+/// not fire, and `Some(None)` is not representable — a fired rule on another family is the
+/// caller's branch, so it can leave a reason.
+fn wfm_class(family: &str, call: Option<&WfmCall>) -> Option<Option<ClassCall>> {
+    let call = call?;
+    (family == "analog").then(|| {
+        // The pilot is not evidence that the emission is *some* analog mode — it is what makes it
+        // wideband broadcast FM rather than AM, SSB or NBFM. The class gate exists because the
+        // within-family densities need SNR; this name does not come from them.
+        Some(ClassCall {
+            label: "wfm".to_owned(),
+            p: call.confidence,
+            dist: Vec::new(),
+            stage: Stage::FeatureTree,
+        })
+    })
+}
+
+/// Redistributes `likelihood` so `analog` carries the rule's confidence and **`unknown` carries
+/// all of the residual**.
+///
+/// The residual is not evidence for the other families, and spreading it over them was a defect
+/// (T-970 review): a 19 kHz pilot says nothing whatever about whether an emission is FSK or PSK,
+/// so the alternative to "this is a broadcast multiplex" is "the pilot measurement misled me and I
+/// do not know what this is" — which is what `unknown` means. Putting it there is both the honest
+/// statement and the one that keeps the measurement safe from the band plan:
+/// [`crate::fuse::fuse`] tempers a prior back whenever the evidence is dominant, and dominance is
+/// read off the **runner-up known family**, which is now 0. A prior can therefore explain a
+/// measured station but never relabel one, which is the product rule that the database is never a
+/// source of truth and never overrides what was measured.
+///
+/// Spreading it proportionally instead put up to `1 − confidence` on one family, and a pilot-only
+/// call ([`fm::WFM_PILOT_CONFIDENCE`]) is 0.90 : 0.10 — a 9:1 ratio, *inside* the 10:1
+/// [`crate::thresholds::EVIDENCE_DOMINANCE_RATIO`] a prior may reorder within. The reported family
+/// could then be moved off `analog` while the class stayed `wfm`, which
+/// [`Classification::validate`] rejects outright.
+fn rule_likelihood(likelihood: &[LabelP], call: &WfmCall) -> Vec<LabelP> {
+    let share = 1.0 - call.confidence;
+    likelihood
+        .iter()
+        .map(|lp| LabelP {
+            label: lp.label.clone(),
+            p: match lp.label.as_str() {
+                "analog" => call.confidence,
+                UNKNOWN => share,
+                _ => 0.0,
+            },
+        })
+        .collect()
+}
+
+/// Holds an abstention's posterior at [`MAX_UNKNOWN_CONFIDENCE`], moving the excess to the
+/// families `rules` left admissible (or, when the tree admitted none, to every family: "we could
+/// measure nothing" is maximal ignorance, not certainty). Returns whether it had to.
+fn cap_unknown(posterior: &mut [LabelP], rules: &[crate::tree::Admissibility]) -> bool {
+    let Some(u) = posterior.iter().position(|lp| lp.label == UNKNOWN) else {
+        return false;
+    };
+    if posterior[u].p <= MAX_UNKNOWN_CONFIDENCE || posterior.iter().any(|lp| lp.p > posterior[u].p)
+    {
+        return false;
+    }
+    let admitted: Vec<usize> = (0..posterior.len())
+        .filter(|i| *i != u)
+        .filter(|i| {
+            rules.is_empty()
+                || !rules.iter().any(|r| r.family == posterior[*i].label)
+                || rules
+                    .iter()
+                    .any(|r| r.family == posterior[*i].label && r.allowed)
+        })
+        .collect();
+    let targets: Vec<usize> = if admitted.is_empty() {
+        (0..posterior.len()).filter(|i| *i != u).collect()
+    } else {
+        admitted
+    };
+    if targets.is_empty() {
+        return false;
+    }
+    let excess = posterior[u].p - MAX_UNKNOWN_CONFIDENCE;
+    posterior[u].p = MAX_UNKNOWN_CONFIDENCE;
+    let weight: f64 = targets.iter().map(|i| posterior[*i].p).sum();
+    for i in &targets {
+        posterior[*i].p += if weight > 0.0 {
+            excess * posterior[*i].p / weight
+        } else {
+            excess / targets.len() as f64
+        };
+    }
+    crate::fuse::normalise_dist(posterior);
+    true
 }
 
 fn push_reason(reasons: &mut Vec<String>, reason: &str) {
@@ -550,6 +736,154 @@ mod tests {
             c.reasons
         );
         c.validate().unwrap();
+    }
+
+    /// A **mono-programme stereo station**: an FM carrier with 0–15 kHz audio and a 19 kHz pilot,
+    /// and nothing at 38 or 57 kHz. It is a real and common case — a talk station, or any mono
+    /// programme on a stereo transmitter that leaves its pilot on — and it is the one the
+    /// pilot-only ceiling [`fm::WFM_PILOT_CONFIDENCE`] exists for. The dev grid cannot generate it
+    /// ([`crate::synth`] couples the pilot to the L−R subcarrier), so it is built here.
+    fn mono_programme_with_pilot(fs: f64, n: usize, snr_db: f64) -> Vec<Complex32> {
+        use hk_dsp::synth::Rng;
+        use std::f64::consts::TAU;
+        let mut rng = Rng::new(0x9704_0001);
+        let mut phase = 0.0_f64;
+        let mut out = Vec::with_capacity(n);
+        // Noise is not decoration here. A noiseless carrier's discriminator floor is f32 rounding
+        // residue shaped by the modulation itself, which reads as energy in the 24-53 kHz and the
+        // 57 kHz bands and turns this into a stereo-plus-RDS station (measured: `stereo_db` +22.1,
+        // `rds_p_fa` 3e-35, so the rule claimed `wfm_pilot_rds` at 0.97 and the case under test
+        // was never reached). A real thermal floor is what leaves the pilot as the only thing
+        // present.
+        let sigma = (10f64.powf(-snr_db / 10.0) / 2.0).sqrt();
+        for i in 0..n {
+            let t = i as f64 / fs;
+            let audio = 0.45 * (TAU * 997.0 * t).sin()
+                + 0.30 * (TAU * 4_310.0 * t).sin()
+                + 0.16 * (TAU * 11_030.0 * t).sin();
+            let mpx = 60e3 * audio + 5.4e3 * (TAU * 19_000.0 * t).sin();
+            // Wrapped, so the phase stays inside f64's precise range over a long record.
+            phase = (phase + TAU * mpx / fs).rem_euclid(TAU);
+            let (ni, nq) = rng.gaussian_pair();
+            out.push(Complex32::new(
+                (phase.cos() + sigma * ni) as f32,
+                (phase.sin() + sigma * nq) as f32,
+            ));
+        }
+        out
+    }
+
+    /// A prior that puts almost all of its allocation mass on one family.
+    fn hostile_prior(family: &str) -> crate::fuse::FamilyPriorSet {
+        let dist = HK_MOD_V1
+            .families
+            .iter()
+            .map(|f| LabelP {
+                label: f.name.to_owned(),
+                p: if f.name == family {
+                    1.0 - 0.001 * (HK_MOD_V1.families.len() - 1) as f64
+                } else {
+                    0.001
+                },
+            })
+            .collect();
+        let p = crate::fuse::FamilyPriorSet {
+            prior_ref: "test:hostile".to_owned(),
+            lambda: [0.1, 0.9, 0.0, 0.0],
+            dist,
+        };
+        p.validate().unwrap();
+        p
+    }
+
+    /// **The class follows the family, never the rule** (T-970 review).
+    ///
+    /// The reported family is what fusion and the abstention rules settled on, and a
+    /// `Classification` whose class is not a class of its family is invalid. Binding the `wfm`
+    /// name to the rule rather than to the family made an invalid row constructible, so this holds
+    /// the guard directly: every family in the taxonomy, plus `unknown`.
+    #[test]
+    fn a_wfm_class_is_only_ever_reported_on_the_analog_family() {
+        let call = crate::fm::WfmCall {
+            confidence: crate::fm::WFM_PILOT_CONFIDENCE,
+            reason: "wfm_pilot",
+        };
+        assert_eq!(wfm_class("analog", None), None, "no rule, no class");
+        let named = wfm_class("analog", Some(&call)).flatten().expect("named");
+        assert_eq!(named.label, "wfm");
+        for family in HK_MOD_V1
+            .families
+            .iter()
+            .map(|f| f.name)
+            .chain(std::iter::once(UNKNOWN))
+        {
+            if family == "analog" {
+                continue;
+            }
+            assert_eq!(
+                wfm_class(family, Some(&call)),
+                None,
+                "the rule named wfm while reporting {family}"
+            );
+        }
+    }
+
+    /// The whole path under an adversarial prior, on the waveform that reaches the pilot-only
+    /// ceiling: the row must be **valid**, and the band plan must not be able to relabel a
+    /// measured station.
+    ///
+    /// The features are taken from a genuine 2-FSK snippet while the samples are the pilot-bearing
+    /// multiplex, which is the sharpest input the public `classify_features` entry point admits:
+    /// it puts the density cascade's confidence on `fsk` at the same time as the rule measures the
+    /// pilot, so the rule's residual and the prior are both pushing the family off `analog` at
+    /// once. With the defect re-injected, the measured likelihood here is `analog` 0.900 against
+    /// `fsk` 0.100 — a 9:1 ratio *inside* the 10:1 the prior may reorder within — and the row came
+    /// back `fsk` carrying class `wfm`: `prior on fsk produced an invalid row: invalid
+    /// classification: class "wfm" not in family fsk`.
+    #[test]
+    fn a_prior_can_explain_a_measured_station_but_never_relabel_one() {
+        let fs = 600e3;
+        let samples = mono_programme_with_pilot(fs, 300_000, 25.0);
+        let fsk = generate(Class::Fsk2, &SynthConfig::new(30.0, 1_000_970));
+        let fsk_features = features(&FeatureInput {
+            samples: &fsk.samples,
+            sample_rate_hz: fsk.sample_rate_hz,
+            obw_hz: Some(fsk.obw_hz),
+            snr_db: Some(30.0),
+            symbols: None,
+        });
+
+        let mut req = ClassifyRequest::new(&samples, fs, Timestamp::UNIX_EPOCH);
+        req.obw_hz = Some(160e3);
+        req.snr_db = Some(30.0);
+        let classifier = Classifier::new();
+
+        // The rule has to fire on this waveform, or the test proves nothing.
+        let plain = classifier.classify_features(&fsk_features, &req);
+        assert!(
+            plain.reasons.iter().any(|r| r.starts_with("wfm_pilot")),
+            "the pilot rule did not fire: {:?}",
+            plain.reasons
+        );
+
+        for family in ["fsk", "psk-qam", "ook-ask", "ofdm"] {
+            let mut hostile = req.clone();
+            hostile.prior = Some(hostile_prior(family));
+            let c = classifier.classify_features(&fsk_features, &hostile);
+            c.validate()
+                .unwrap_or_else(|e| panic!("prior on {family} produced an invalid row: {e}"));
+            assert_eq!(
+                c.family,
+                "analog",
+                "a prior on {family} relabelled a measured station: {:?}",
+                c.top(3)
+            );
+            assert_eq!(
+                c.class.as_ref().map(|k| k.label.as_str()),
+                Some("wfm"),
+                "prior on {family}"
+            );
+        }
     }
 
     #[test]

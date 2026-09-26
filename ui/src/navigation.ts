@@ -499,6 +499,87 @@ export function retunePlan(g: FrequencyGrid | null, lo: number, hi: number): Ret
 }
 
 // ---------------------------------------------------------------------------
+// T-1028: fitting a view to what the front end can actually capture
+// ---------------------------------------------------------------------------
+//
+// **Retune mode's one arithmetic addition, and the reason it is here rather than in the surface.**
+// In retune mode the view's frequency window *is* the tune request (CLAUDE.md's amended navigation
+// rule), and a view is under no obligation to be capturable: the surface spans 1 MHz–6 GHz and a
+// user zoomed out past one instantaneous bandwidth has asked for a window no single capture holds.
+// The user's ruling (2026-09-25) is that this is **not an error in the mode**: *"For areas that are
+// too large and can't be tuned, use the largest possible size instead of denying them."*
+//
+// So the too-wide case resolves to the **largest achievable window centred on the view**, and that
+// is a fact about the grid — which spans exist, which centres exist — so it is computed here, beside
+// [`smallestCoveringSpan`], and handed to [`retunePlan`] as an ordinary region. There is still ONE
+// planner: the mode does not get a second way to derive a capture configuration, it gets a smaller
+// region to ask the same planner about. The three [`RetuneRefusal`]s are unchanged and still mean
+// what they meant; what changes is only which region the mode asks about.
+
+/**
+ * The **widest** span that is still one live capture window, or null when the grid names none.
+ *
+ * The mirror of [`smallestCoveringSpan`], and bounded the same way `retunePlan` bounds a request:
+ * `max_live_span_hz` is the front end's instantaneous bandwidth, and a span past it is survey
+ * overview however wide the rate ladder goes. A grid that reports no bound is not evidence of a wide
+ * window, but it is not grounds to refuse either — the ladder's own top then answers, exactly as the
+ * refusal path already lets it.
+ */
+export function largestLiveSpan(g: FrequencyGrid | null): number | null {
+  if (!g) return null;
+  const cap = g.max_live_span_hz;
+  const within = (v: number) => Number.isFinite(v) && v > 0 && (cap === null || !Number.isFinite(cap) || v <= cap);
+  const s = g.spans_hz;
+  if ("values" in s) {
+    let best: number | null = null;
+    for (const v of s.values) if (within(v) && (best === null || v > best)) best = v;
+    return best;
+  }
+  if (!(s.max >= s.min)) return null;
+  const top = cap === null || !Number.isFinite(cap) ? s.max : Math.min(s.max, cap);
+  return top >= s.min && top > 0 ? top : null;
+}
+
+/**
+ * The region a front end could actually capture, from the region a **view** names — the view itself
+ * when one window covers it, else the largest achievable window **centred on the view's centre**,
+ * with that centre clamped into the tunable range at the band edges.
+ *
+ * Null is the one case that stays an error (the user's ruling names it): a view with **no overlap at
+ * all** with the tunable range, which no clamp can reach without moving the radio somewhere the user
+ * is not looking. Everything else narrows rather than refusing — and narrowing is honest here in a
+ * way it is not for a region-select, because the mode's user is looking at the whole view and the
+ * coverage fog will show them which part of it the radio took.
+ *
+ * It does **not** plan: the returned region goes to [`retunePlan`], which snaps the centre, places
+ * the window off DC where there is room, and may still refuse. Deliberately so — this narrows a
+ * request, it does not decide what the front end will do with it.
+ */
+export function fitToLiveWindow(
+  g: FrequencyGrid | null, lo: number, hi: number,
+): { loHz: number; hiHz: number } | null {
+  if (!g || !Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) return null;
+  const widest = largestLiveSpan(g);
+  if (widest === null) return null;
+  // The band the view actually overlaps, preferring the one it overlaps MOST — a view straddling a
+  // gap between two bands belongs to the one it has more of, and a view inside a single band picks
+  // that band by the same rule. No overlap anywhere is the refusal: see above.
+  let band: [number, number] | null = null, bestOverlap = 0;
+  for (const r of g.ranges_hz) {
+    if (!Array.isArray(r)) continue;
+    const overlap = Math.min(hi, r[1]) - Math.max(lo, r[0]);
+    if (overlap > bestOverlap) { band = r; bestOverlap = overlap; }
+  }
+  if (!band) return null;
+  // The view's own centre, clamped to the achievable-centre band. A clamp only ever happens at a band
+  // edge, and it is a clamp rather than a refusal because the view still overlaps the band: the
+  // window lands as near the view as the front end can sit.
+  const centerHz = Math.min(Math.max((lo + hi) / 2, band[0]), band[1]);
+  const spanHz = Math.min(hi - lo, widest);
+  return { loHz: centerHz - spanHz / 2, hiHz: centerHz + spanHz / 2 };
+}
+
+// ---------------------------------------------------------------------------
 // The resolution half (T-418)
 // ---------------------------------------------------------------------------
 //

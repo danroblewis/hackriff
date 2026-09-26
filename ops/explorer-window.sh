@@ -3,7 +3,7 @@
 # in the foreground, and release the lock at window end, on exit and on crash. `ops/launch.sh explorer`
 # runs this as its tmux pane process; run it directly only with --dry-run.
 #
-#   ops/explorer-window.sh --window 3h [--dry-run]
+#   ops/explorer-window.sh --window 3h [--session-id <uuid>] [--dry-run]
 #
 # Guarantees:
 #   * ONE instance: a live pid in $HACKRIFF_OPS/explorer/window.pid refuses a second (exit 3).
@@ -18,13 +18,31 @@
 #
 #   * The agent starts only once `just radio status` shows staging on replay under the explorer's
 #     lock (bounded by EXPLORER_STAGING_WAIT, default 150 s; exit 5 and release otherwise).
-#   * On the way out it stops the agent's leftover descendants and its `hk serve` on EXPLORER_PORT
-#     (default 8897, the port .claude/agents/explorer.md uses) BEFORE releasing, so staging can
-#     reopen the HackRF.
+#
+#   * ONE `hk serve` for the whole window, started and owned by THIS SCRIPT, not the agent (T-983:
+#     each per-target server the agent used to start on its own preallocated its own multi-GB IQ
+#     ring that nothing reaped). Its URL/token/data-dir are exported to the agent
+#     (EXPLORER_SERVER_URL/_TOKEN/_DATADIR) and written to explorer/server.{url,token,datadir}; the
+#     agent retunes it between targets and never starts its own.
+#   * A background watcher polls every EXPLORER_WATCH_POLL seconds for a SECOND `hk serve` under the
+#     window's tree (a fresh --data-dir, or a second listener on the one already in use) and stops it
+#     the moment it's seen, with a window.log line and a red alert, before reaping its ring - EXCLUDING
+#     the kept server's own data dir always, however the rogue's claimed --data-dir relates to it (the
+#     same dir, or a parent of it), so a rogue can never take the kept server's still-live ring with it.
+#   * On every way out this script stops its own `hk serve` (specifically, then by the old
+#     pattern-match as a fallback) BEFORE releasing the lock, so staging can reopen the HackRF, and
+#     reaps every IQ ring directory left under the window's tree (`iqbuffer`/`iqbuffer-devices` -
+#     never history, recordings, a *.db or logs), logging the bytes reclaimed. `--dry-run` prints
+#     what a reap would find without starting anything or deleting anything.
 #
 # Test seams (py/tests/test_explorer_launcher.py): EXPLORER_RADIO (default "just radio"),
-# EXPLORER_CLAUDE (default "claude"), EXPLORER_KILL_GRACE (s, default 30), EXPLORER_WRAPUP_S (s before
-# the deadline, default 900), EXPLORER_POLL (s, default 5). Nothing here touches the HackRF itself.
+# EXPLORER_CLAUDE (default "claude"), EXPLORER_HK (default target-serve/release/hk), EXPLORER_UI_DIST,
+# EXPLORER_DATA_DIR, EXPLORER_CENTER_HZ, EXPLORER_RATE_HZ, EXPLORER_TOKEN, EXPLORER_KILL_GRACE (s,
+# default 30), EXPLORER_WRAPUP_S (s before the deadline, default 900), EXPLORER_POLL (s, default 5),
+# EXPLORER_WATCH_POLL (s, default 10), EXPLORER_SERVER_SETTLE (s, default 1: how long to wait before
+# checking the new hk serve is still alive), EXPLORER_PS_OUTPUT (a file of `ps` lines, for the
+# rogue-server watcher; tests only - default runs real `ps`), EXPLORER_REAP_PY (path to the reaper
+# module, default alongside this script). Nothing here touches the HackRF itself.
 set -uo pipefail
 REPO="${EXPLORER_REPO:-/Users/daniellewis/hackriff}"
 S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
@@ -35,16 +53,24 @@ GRACE="${EXPLORER_KILL_GRACE:-30}"
 WRAPUP_S="${EXPLORER_WRAPUP_S:-900}"
 STAGING_WAIT="${EXPLORER_STAGING_WAIT:-150}"
 POLL="${EXPLORER_POLL:-5}"
+WATCH_POLL="${EXPLORER_WATCH_POLL:-10}"
 PORT="${EXPLORER_PORT:-8897}"
 MAX_S=$((8 * 3600))
 
-WINDOW=3h; DRY=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY_REAP="${EXPLORER_REAP_PY:-$SCRIPT_DIR/../py/hkpy/explorer_reap.py}"
+ALERT_PY="$SCRIPT_DIR/alert.py"
+alert(){ python3 "$ALERT_PY" "$@" >/dev/null 2>&1 || true; }
+
+WINDOW=3h; DRY=0; SID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --window) [ $# -ge 2 ] || { echo "explorer: --window needs a value (e.g. 3h, 90m)" >&2; exit 2; }; WINDOW="$2"; shift 2 ;;
     --window=*) WINDOW="${1#--window=}"; shift ;;
     --dry-run) DRY=1; shift ;;
-    *) echo "explorer: unknown argument '$1' (usage: ops/explorer-window.sh --window 3h [--dry-run])" >&2; exit 2 ;;
+    # ops/launch.sh picks the session id and records it in role-session/explorer (the dashboard's role map)
+    --session-id) [ $# -ge 2 ] || { echo "explorer: --session-id needs a value" >&2; exit 2; }; SID="$2"; shift 2 ;;
+    *) echo "explorer: unknown argument '$1' (usage: ops/explorer-window.sh --window 3h [--session-id <uuid>] [--dry-run])" >&2; exit 2 ;;
   esac
 done
 
@@ -71,9 +97,6 @@ JOURNAL="$D/journal-$(date '+%Y%m%d').md"
 WHY="explorer window $WINDOW until $DEADLINE_HUMAN (T-923)"
 PIDF="$D/window.pid"
 
-PROMPT="Start your explorer window now. Deadline: $DEADLINE_HUMAN (EXPLORER_DEADLINE=$DEADLINE). The launcher has taken the radio lock as owner 'explorer' and staging is already on replay; confirm with 'just radio status' (do NOT take it again - a re-take is refused). Serve on 127.0.0.1:$PORT. Journal: $JOURNAL. Work the first-window targets in order, and release the radio before you exit."
-CMD=("$CLAUDE" --agent explorer --model opus --effort high --dangerously-skip-permissions "$PROMPT")
-
 mkdir -p "$D"
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$D/window.log"; }
 
@@ -87,7 +110,11 @@ fi
 if [ "$DRY" = 1 ]; then
   echo "explorer dry-run: window $WINDOW = ${SECS}s, deadline $DEADLINE_HUMAN, wrap-up $((SECS > WRAPUP_S ? SECS - WRAPUP_S : 0))s in"
   echo "  would take:    $RADIO take explorer $WINDOW \"$WHY\""
-  echo "  would run:     (cd $REPO && ${CMD[*]:0:${#CMD[@]}-1} \"<prompt>\")"
+  echo "  would start:   ONE hk serve for the window (127.0.0.1:$PORT), token/url/data-dir exported to the agent"
+  echo "  would run:     (cd $REPO && $CLAUDE --agent explorer --model opus --effort high --dangerously-skip-permissions \"<prompt>\")"
+  echo "  would watch:   every ${WATCH_POLL}s for a second hk serve under $D and stop it on sight"
+  echo "  would reap now (leftover from a prior window, if any):"
+  python3 "$PY_REAP" reap --window "$D" --dry-run 2>/dev/null | sed 's/^/    /'
   echo "  would release: $RADIO release explorer   (EXIT/INT/TERM/HUP trap + window-end timer)"
   echo "  journal:       $JOURNAL"
   exit 0
@@ -105,26 +132,61 @@ rm -f "$D/wrap-up"
 # Every descendant of the given pids (a TERMed agent must not leave a child holding the radio).
 tree(){ local p c; for p in "$@"; do for c in $(pgrep -P "$p"); do echo "$c"; tree "$c"; done; done; }
 
-TIMER=""
+# Reap every IQ ring directory left under the window's tree (this window's own server's, and
+# anything a rogue left before the watcher or a prior crash caught it) - never history, recordings,
+# a *.db or logs, which reap only ever touches iqbuffer/iqbuffer-devices under a data dir (T-983).
+reap_rings(){
+  local out total
+  out="$(python3 "$PY_REAP" reap --window "$D" 2>/dev/null)"
+  total="$(printf '%s\n' "$out" | awk -F'\t' '/^TOTAL/{print $2}')"
+  if [ -n "$total" ] && [ "$total" != 0 ]; then
+    log "reaped IQ ring(s): ${total} bytes freed under $D"
+  else
+    log "reap: no IQ ring bytes to reclaim under $D"
+  fi
+}
+
+TIMER=""; WATCHER=""; SERVER_PID=""
 cleanup(){
   local rc=$?
   trap - EXIT INT TERM HUP
-  if [ -n "$TIMER" ]; then  # the timer, then its sleep (collected first: it is orphaned once the timer dies)
-    local tk; tk="$(pgrep -P "$TIMER")"
-    kill "$TIMER" 2>/dev/null
+  if [ -n "$WATCHER" ]; then kill "$WATCHER" 2>/dev/null; fi
+  # Only while it is still our child: after the window-end path it may have exited, been reaped,
+  # and its pid gone to a stranger.
+  if [ -n "$TIMER" ] && [ "$(ps -o ppid= -p "$TIMER" 2>/dev/null | tr -d ' ')" = "$$" ]; then
+    # STOP, collect, KILL - neither can be caught, ignored or deferred. A timer that outlives this
+    # shell sleeps on for the whole window holding the pane's stdout (five were found leaked,
+    # PPID 1 in `sleep 3599`, 2026-09-25), and at its deadline would pgrep -P a reused pid.
+    # Stopped, it cannot fork a sleep we would miss.
+    kill -STOP "$TIMER" 2>/dev/null
+    local tk; tk="$(tree "$TIMER")"
     # shellcheck disable=SC2086
-    [ -n "$tk" ] && kill $tk 2>/dev/null
+    kill -KILL "$TIMER" $tk 2>/dev/null
   fi
-  # Whatever the agent left behind: its descendants, and its own `hk serve` (started with nohup, so
-  # no longer in the tree) - the radio is not free until that server has closed the HackRF.
+  # Whatever the agent left behind: its descendants - never its `hk serve`, which is this script's,
+  # not the agent's, and is stopped below by pid then by the old pattern-match as a fallback.
   local left; left="$(tree $$)"
   # shellcheck disable=SC2086
   [ -n "$left" ] && kill -TERM $left 2>/dev/null
-  if pkill -f "hk serve.*127\.0\.0\.1:$PORT" 2>/dev/null; then
-    log "stopped the explorer's hk serve on :$PORT"
-    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "hk serve.*127\.0\.0\.1:$PORT" >/dev/null || break; sleep 1; done
-    pkill -9 -f "hk serve.*127\.0\.0\.1:$PORT" 2>/dev/null
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill -TERM "$SERVER_PID" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1; done
+    kill -KILL "$SERVER_PID" 2>/dev/null
+    log "stopped the window's hk serve (pid $SERVER_PID)"
   fi
+  # The fallback matches an `hk serve` INVOCATION on this port - the program itself, `hk` at the start
+  # of the command line or after a `/` - never a mere mention of one. The agent's own command line
+  # carries the prompt, which says "hk serve at http://127.0.0.1:$PORT": the old unanchored
+  # `hk serve.*127.0.0.1:$PORT` matched it, so one window's exit TERMed any other process naming the
+  # server - a second window's agent (exit 143; T-1029: the test suite's concurrent runs on one box
+  # killed each other's agents), a shell or an editor with that line in it.
+  local leftover="(^|/)hk serve .*127\.0\.0\.1:$PORT([^0-9]|\$)"
+  if pkill -f "$leftover" 2>/dev/null; then
+    log "stopped a leftover hk serve on :$PORT"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$leftover" >/dev/null || break; sleep 1; done
+    pkill -9 -f "$leftover" 2>/dev/null
+  fi
+  reap_rings
   # shellcheck disable=SC2086
   if $RADIO release explorer; then log "radio lock released (exit $rc)"
   else log "radio release FAILED (exit $rc) - check 'just radio status'"; fi
@@ -150,6 +212,64 @@ until $RADIO status 2>/dev/null | grep "staging: replay (radio-lock: explorer" >
 done
 log "staging is on replay after ${waited}s - the HackRF is the explorer's"
 
+# The window's ONE hk serve, started here, not by the agent (T-983 - see the header comment). Its
+# URL/token/data-dir are exported below and written to $D/server.* so the agent can retune it
+# instead of starting its own.
+HK_BIN="${EXPLORER_HK:-$S/target-serve/release/hk}"
+UI_DIST="${EXPLORER_UI_DIST:-$S/stage-dist}"
+DATADIR="${EXPLORER_DATA_DIR:-$D/data}"
+CENTER="${EXPLORER_CENTER_HZ:-98000000}"
+RATE="${EXPLORER_RATE_HZ:-2400000}"
+TOKEN="${EXPLORER_TOKEN:-$(openssl rand -hex 16)}"
+mkdir -p "$DATADIR"
+HK_TOKEN="$TOKEN" nohup "$HK_BIN" serve --hackrf --bind "127.0.0.1:$PORT" --ui-dist "$UI_DIST" \
+  --data-dir "$DATADIR" --center-hz "$CENTER" --rate "$RATE" --lna 32 --vga 30 --amp \
+  > "$D/hk-serve.log" 2>&1 &
+SERVER_PID=$!
+SERVER_URL="http://127.0.0.1:$PORT"
+echo "$SERVER_PID" > "$D/server.pid"
+echo "$SERVER_URL" > "$D/server.url"
+printf '%s' "$TOKEN" > "$D/server.token"; chmod 600 "$D/server.token"
+echo "$DATADIR" > "$D/server.datadir"
+sleep "${EXPLORER_SERVER_SETTLE:-1}"
+if kill -0 "$SERVER_PID" 2>/dev/null; then
+  log "started the window's one hk serve (pid $SERVER_PID) at $SERVER_URL, data-dir $DATADIR"
+else
+  log "the window's hk serve (pid $SERVER_PID) did not stay up - check $D/hk-serve.log"
+fi
+
+# Every EXPLORER_WATCH_POLL seconds: a second hk serve under this window's tree - a fresh --data-dir
+# the agent started despite the rule, or a second listener on the one already in use - is stopped the
+# moment it's seen, its ring reaped, and an alert raised. The agent is never trusted to comply on its
+# own (the 2026-09-25 06:43 amendment: it was told at launch and started one anyway).
+watch_rogues(){
+  local rogue_args rogue_out rpid rdd rplan rtotal
+  while :; do
+    sleep "$WATCH_POLL"
+    rogue_args=(rogue --window "$D" --keep-pid "$SERVER_PID")
+    [ -n "${EXPLORER_PS_OUTPUT:-}" ] && rogue_args+=(--ps-output "$EXPLORER_PS_OUTPUT")
+    rogue_out="$(python3 "$PY_REAP" "${rogue_args[@]}" 2>/dev/null)"
+    [ -z "$rogue_out" ] && continue
+    while IFS=$'\t' read -r rpid rdd; do
+      [ -z "$rpid" ] && continue
+      log "ALERT: rogue hk serve detected (pid $rpid, data-dir $rdd) - the window runs ONE server; stopping it"
+      kill -TERM "$rpid" 2>/dev/null
+      for _ in $(seq 1 "$GRACE"); do kill -0 "$rpid" 2>/dev/null || break; sleep 1; done
+      kill -KILL "$rpid" 2>/dev/null
+      # --exclude "$DATADIR": a rogue's --data-dir is its own claim, not something to trust - one
+      # that names the kept server's data dir (or a parent of it) must never cost the kept
+      # server's still-live ring (T-983 fix round 2). Only a genuinely separate ring is ever
+      # removed here; the window-end reap_rings() still takes the kept ring once it too is stopped.
+      rplan="$(python3 "$PY_REAP" reap --window "$rdd" --exclude "$DATADIR" 2>/dev/null)"
+      rtotal="$(printf '%s\n' "$rplan" | awk -F'\t' '/^TOTAL/{print $2}')"
+      log "rogue server's ring reaped: ${rtotal:-0} bytes freed from $rdd (the kept server's own ring at $DATADIR is never touched here)"
+      alert red "explorer: rogue hk serve stopped" "pid $rpid data-dir $rdd (window $D, kept pid $SERVER_PID)" --key "explorer:rogue-$rpid"
+    done <<< "$rogue_out"
+  done
+}
+watch_rogues &
+WATCHER=$!
+
 PARENT=$$
 (
   trap - EXIT INT TERM HUP
@@ -161,7 +281,15 @@ PARENT=$$
     sleep "$SECS"
   fi
   log "window end: stopping the agent"
-  agent(){ local k; for k in $(pgrep -P "$PARENT" | grep -vx "$ME"); do echo "$k"; tree "$k"; done; }
+  # Never in this set: SERVER_PID/WATCHER - both children of $PARENT too, now that this script owns
+  # the server (T-983) - so the EXIT trap's cleanup() stops them itself, with its own log lines,
+  # rather than a redundant, unlogged kill racing it here.
+  agent(){
+    local k
+    for k in $(pgrep -P "$PARENT" | grep -vx "$ME" | grep -vx "${SERVER_PID:-x}" | grep -vx "${WATCHER:-x}"); do
+      echo "$k"; tree "$k"
+    done
+  }
   # shellcheck disable=SC2046
   kill -TERM $(agent) 2>/dev/null
   for _ in $(seq 1 "$GRACE"); do [ -z "$(agent)" ] && break; sleep 1; done
@@ -170,8 +298,15 @@ PARENT=$$
 ) &
 TIMER=$!
 
+PROMPT="Start your explorer window now. Deadline: $DEADLINE_HUMAN (EXPLORER_DEADLINE=$DEADLINE). The launcher has taken the radio lock as owner 'explorer' and staging is already on replay; confirm with 'just radio status' (do NOT take it again - a re-take is refused). The launcher has already started your one hk serve at $SERVER_URL (data-dir $DATADIR) - its token is in EXPLORER_SERVER_TOKEN; retune it between targets through the app's control API, never start your own (a second one is detected and stopped within ${WATCH_POLL}s). Journal: $JOURNAL. Work the first-window targets in order, and release the radio before you exit (leave the hk serve for the launcher to stop)."
+CMD=("$CLAUDE" --agent explorer --model opus --effort high --dangerously-skip-permissions)
+[ -n "$SID" ] && CMD+=(--session-id "$SID")
+CMD+=("$PROMPT")
+
 cd "$REPO" || exit 1
-EXPLORER_DEADLINE="$DEADLINE" EXPLORER_DEADLINE_HUMAN="$DEADLINE_HUMAN" EXPLORER_PORT="$PORT" "${CMD[@]}"
+EXPLORER_DEADLINE="$DEADLINE" EXPLORER_DEADLINE_HUMAN="$DEADLINE_HUMAN" EXPLORER_PORT="$PORT" \
+  EXPLORER_SERVER_URL="$SERVER_URL" EXPLORER_SERVER_TOKEN="$TOKEN" EXPLORER_SERVER_DATADIR="$DATADIR" \
+  EXPLORER_SERVER_PID="$SERVER_PID" "${CMD[@]}"
 RC=$?
 log "agent exited ($RC)"
 exit "$RC"

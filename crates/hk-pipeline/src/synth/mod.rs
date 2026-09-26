@@ -129,6 +129,7 @@ pub fn estimated_params(obs: &CcObservation<'_>) -> Option<(&'static str, Estima
             roll_off: None,
             bandwidth_hz: Some(obs.bandwidth_hz),
             pilot_hz: None,
+            subaudible: None,
         },
     ))
 }
@@ -338,6 +339,7 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
             kind: ResolutionKind::StructuredUnidentified,
             deepest_verdict: Some(verdict),
             reason: Some(ResolutionReason::NothingScored),
+            suspected: None,
             summary: format!(
                 "framed and check-valid under {} — {} of {} blocks pass — but {missing}. That is \
                  a result, not a failure: a confirmed emitter with no complete identification is \

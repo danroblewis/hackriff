@@ -1486,16 +1486,44 @@ mod tests {
             i += 1;
         }
         wait_frames(&store, 5);
-        // The disk hangs for 6× the disconnect policy while large frames fill the queue.
+        // The disk hangs while large frames fill the queue. How long that takes is the machine's
+        // business, not the test's: the loop ends on the state the assertions are about, not on a
+        // wall-clock window that may expire before the queue is even full (docs/10 §3.6 — the
+        // clock never decides *what* is asserted). Frames are published until the recorder's own
+        // counters report a drop, and then on past the disconnect policy, so the last offer is
+        // made to a consumer whose queue has been full for longer than a non-exempt one would
+        // have survived. The deadlines only bound a hang.
+        let dropped = |p: &Publisher| -> u64 {
+            p.handle()
+                .consumer_stats()
+                .iter()
+                .map(|s| s.records_dropped)
+                .sum()
+        };
         stalled.store(true, Ordering::SeqCst);
         let big = "ab".repeat(100_000);
-        let until = Instant::now() + Duration::from_millis(600);
-        while Instant::now() < until {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut first_drop: Option<Instant> = None;
+        loop {
             let mut f = frame(i);
             f.content.as_mut().unwrap().hex = big.clone();
             p.publish_frame(&f).unwrap();
             i += 1;
-            std::thread::sleep(Duration::from_millis(5));
+            if dropped(&p) > 0 {
+                // 3× the policy, measured from the first drop *observed*, which is at or after
+                // the offer the publisher started the full-queue clock on.
+                if first_drop.get_or_insert_with(Instant::now).elapsed()
+                    >= 3 * config.disconnect_after
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the stalled recorder never dropped a record: {:?}",
+                p.handle().consumer_stats()
+            );
         }
         assert_eq!(
             p.handle().open_consumers(),
@@ -1505,7 +1533,7 @@ mod tests {
         stalled.store(false, Ordering::SeqCst);
         // Once the recorder has drained what it queued, later frames are accepted, and the first
         // one carries the drop marker.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while p
             .handle()
             .consumer_stats()

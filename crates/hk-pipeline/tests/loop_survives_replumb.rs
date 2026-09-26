@@ -13,6 +13,20 @@
 //! reopening a recording does. That default is **not** where the run was moved, so the test also
 //! pins the second half of the fix: a pass reopened on a live run is sent the commanded window,
 //! rather than delivering blocks the segment's window guard would drop.
+//!
+//! **T-1012: every instant this test asserts at is read off the run's own counters, never off
+//! "whichever pass happens to be newest when the test thread looks".** Two races lived here:
+//!
+//! - The recovery's fault was armed on `passes.last()`. When that pass had already delivered its
+//!   final block — the capture thread then sits in the lossless gate with `emitted == PASS` until
+//!   the consumers drain it, which is most of a pass under load — the pass's next read is its end
+//!   (`Ok(None)`), so the budget was never consumed, the reopened pass had none, and the run looped
+//!   on for 90 s with `capture_recoveries` at 0 ("capture never recovered"). The stall is now a
+//!   fault of the **device** ([`Stall`]), shared by every pass, so whichever pass reads next
+//!   consumes it.
+//! - The commanded-window assertions read `passes.last()` too, which can be a pass opened a moment
+//!   ago whose factory has not sent the rate yet, or whose first block has not been read. They now
+//!   read the first pass opened after `retune` returned, and only once it has played out.
 
 mod common;
 #[path = "support/radio.rs"]
@@ -41,14 +55,45 @@ const PASS: u64 = 200_000;
 const BLOCK: usize = 8_192;
 const LIMIT: Duration = Duration::from_secs(90);
 
+/// **T-1012: a transient USB stall of the device, not of one pass.** The next `n` reads fail with
+/// a device error and the front end then delivers again — `radio::RadioControl::fail_reads_for`'s
+/// fault, held here because every pass of the recording is the same device. Armed on a single
+/// pass it could land on one that had already delivered its last block, whose next read is its
+/// end rather than a read of the device, so the fault was never consumed.
+#[derive(Clone, Default)]
+struct Stall(Arc<AtomicU64>);
+
+impl Stall {
+    fn arm(&self, n: u64) {
+        self.0.store(n, Ordering::SeqCst);
+    }
+
+    fn read(&self) -> Result<(), SourceError> {
+        let consumed = self
+            .0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            })
+            .is_ok();
+        if consumed {
+            return Err(SourceError::Device {
+                source_name: "scripted-radio",
+                operation: "receive",
+                message: "a USB transfer stalled (scripted, clears)".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// One pass of the recording: the scripted receiver, ended after [`PASS`] samples.
-struct Pass(radio::Radio, Arc<radio::RadioControl>);
+struct Pass(radio::Radio, Arc<radio::RadioControl>, Stall);
 
 impl Pass {
-    fn open() -> (Self, Arc<radio::RadioControl>) {
+    fn open(stall: &Stall) -> (Self, Arc<radio::RadioControl>) {
         let (r, c) = radio::Radio::new(CENTER, FS, BLOCK, radio::tone(|_| 50e3));
         c.hold_at(PASS);
-        (Self(r, Arc::clone(&c)), c)
+        (Self(r, Arc::clone(&c), stall.clone()), c)
     }
 }
 
@@ -63,6 +108,7 @@ impl Source for Pass {
         true
     }
     fn read_block(&mut self, s: &mut Vec<Complex32>) -> Result<Option<BlockHeader>, SourceError> {
+        self.2.read()?;
         if self.1.emitted() >= PASS {
             return Ok(None);
         }
@@ -72,6 +118,7 @@ impl Source for Pass {
         &mut self,
         s: &mut Vec<Complex<i8>>,
     ) -> Result<Option<BlockHeader>, SourceError> {
+        self.2.read()?;
         if self.1.emitted() >= PASS {
             return Ok(None);
         }
@@ -108,14 +155,15 @@ fn a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery() {
     cfg.lossless = true;
     cfg.settings.chains = Some(Vec::new());
 
-    let (first, first_ctl) = Pass::open();
+    let stall = Stall::default();
+    let (first, first_ctl) = Pass::open(&stall);
     // Every pass's control, newest last, so the test can reach the one capturing now.
     let passes: Arc<Mutex<Vec<Arc<radio::RadioControl>>>> = Arc::new(Mutex::new(vec![first_ctl]));
     let opened = Arc::new(AtomicU64::new(0));
     let reopen: SourceFactory = {
-        let (passes, opened) = (Arc::clone(&passes), Arc::clone(&opened));
+        let (passes, opened, stall) = (Arc::clone(&passes), Arc::clone(&opened), stall.clone());
         Box::new(move || {
-            let (p, c) = Pass::open();
+            let (p, c) = Pass::open(&stall);
             passes.lock().unwrap().push(c);
             opened.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(p) as Box<dyn Source>)
@@ -142,20 +190,32 @@ fn a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery() {
     // ---- 1. a re-plumb ----
     let out = controller.retune(CENTER, FS2).expect("retune");
     assert!(out.replumbed, "another rate must re-plumb: {out:?}");
+    // The old segment's threads have all ended once `retune` returns (`run::replumb`), so every
+    // pass from this index on was opened by the new segment, with the commanded window at FS2.
+    let first_after = passes.lock().unwrap().len();
     let at = counters.source.loops.load(Ordering::Relaxed);
     wait_loops(
         &handle,
         at + 2,
         "a re-plumbed segment dropped the run's --loop policy",
     );
-    // The pass reopened after the re-plumb was sent the commanded window, and delivered at it.
-    let last = Arc::clone(passes.lock().unwrap().last().unwrap());
-    let calls = last.calls.lock().unwrap().clone();
+    // Two reopens completed after `first_after` was read, and the second opened a pass after the
+    // first returned, so the pass at `first_after` exists and its factory call — which sends the
+    // commanded window before the capture thread counts the loop — has returned.
+    let reopened = Arc::clone(&passes.lock().unwrap()[first_after]);
+    let calls = reopened.calls.lock().unwrap().clone();
     assert!(
         calls.iter().any(|c| c == &format!("rate {FS2}")),
         "a pass reopened after the re-plumb was not sent the commanded rate: {calls:?}"
     );
-    let windows = last.windows.lock().unwrap().clone();
+    // Its window is recorded at its first read; wait for it to play out, which it does whichever
+    // window it is on (the radio emits either way; only the segment's guard would drop them).
+    assert!(
+        reopened.wait_emitted(PASS, LIMIT),
+        "the first pass reopened after the re-plumb never played out: emitted {}",
+        reopened.emitted()
+    );
+    let windows = reopened.windows.lock().unwrap().clone();
     assert_eq!(
         windows.last().map(|w| w.2),
         Some(FS2),
@@ -164,8 +224,7 @@ fn a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery() {
 
     // ---- 2. a capture recovery ----
     let before = stat(&controller, "capture_recoveries");
-    let current = Arc::clone(passes.lock().unwrap().last().unwrap());
-    current.fail_reads_for(2);
+    stall.arm(2);
     let deadline = Instant::now() + LIMIT;
     while stat(&controller, "capture_recoveries") <= before {
         assert!(

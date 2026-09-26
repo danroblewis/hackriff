@@ -74,6 +74,18 @@ export const selectResearch = (key: string | null) => (s: AppState): Partial<App
   (s.research.selected === key ? {} : { research: { ...s.research, selected: key } });
 
 /**
+ * T-984: a just-saved annotation joins the slice from the CREATE response, not the panel's own 15 s
+ * poll (`research.ts`'s `RESEARCH_REFRESH_MS`) — so a table opened right after authoring already
+ * shows the row instead of waiting out the refresh. A no-op if the id is already present (the poll
+ * landed first, or a double-commit); the next poll still overwrites this with the server's own
+ * answer, which is harmless since it is the same row by id.
+ */
+export const addResearchAnnotation = (a: Annotation) => (s: AppState): Partial<AppState> =>
+  (s.research.annotations.some((x) => x.id === a.id)
+    ? {}
+    : { research: { ...s.research, annotations: [...s.research.annotations, a] } });
+
+/**
  * The collection's stored layer default, toggled from the panel. Every pane's own override for that
  * collection is dropped, so the panel's switch is what every pane shows until a pane's layers menu
  * diverges it again (docs/24 §13: the menu writes the active pane only).

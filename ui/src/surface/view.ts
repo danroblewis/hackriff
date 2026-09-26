@@ -24,7 +24,7 @@
 // radio; a pan is a pan (retune is T-444).
 
 import type { ActiveWindow } from "../navigators";
-import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
+import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type StatusFor, type WidthActionsFor } from "./chrome";
 import type { Box, Lattice, LatticeSet } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
@@ -37,7 +37,7 @@ import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type Pan
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
 import { rulerLabel } from "./ticks";
-import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type PaneRuler } from "./hud";
+import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type HudReserve, type PaneRuler } from "./hud";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -68,6 +68,10 @@ export interface SurfaceViewOptions {
   /** The press, naming which preset (its opaque `key`). A discrete click; nothing here reads a
    * pointer stream. */
   onWidthAction?: ((paneId: string, key: string) => void) | null;
+  /** A viewport's status line (T-1028), re-asked every frame for the same reason `chromeAction` is:
+   * it says what is happening to the window on screen NOW, and a poll-produced sentence would be
+   * about a window the pane has left. Strings only — this file learns nothing about tuning. */
+  chromeStatus?: StatusFor | null;
   /** Draw the overlay pass. A user preference — **not** what keeps the data pass untinted. */
   overlays?: boolean;
   overlayStyle?: OverlayStyle;
@@ -120,6 +124,13 @@ export interface SurfaceViewOptions {
   hud?: HTMLElement | null;
   /** The chrome's fade, `0..1`, asked every frame; the ticks' ink is multiplied by it. Default 1. */
   hudAlpha?: (() => number) | null;
+  /**
+   * T-997: the floating chrome's top-left column, in CSS px from the canvas's top-left, asked once
+   * per frame BEFORE any DOM write of this frame (so the read costs at most one layout, never a
+   * read-write thrash). A time label that would print into it is dropped — the chrome is docked
+   * down the same left edge the time ruler runs down. `null` reserves nothing.
+   */
+  hudReserve?: (() => HudReserve | null) | null;
   /**
    * **Band-1 DOM marks** (T-809, `./pins.ts`): called once per frame, after the overlays and the
    * HUD, with the SAME pane views the data pass was handed — so a DOM mark is placed by the very
@@ -183,6 +194,8 @@ export class SurfaceView {
   private readonly chromeAction: RowActionFor | null;
   /** Per-viewport width presets, re-asked every frame (T-496). Null when the host offers none. */
   private readonly widthActions: WidthActionsFor | null;
+  /** Per-viewport status line, re-asked every frame (T-1028). Null when the host states none. */
+  private readonly chromeStatus: StatusFor | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
@@ -197,6 +210,7 @@ export class SurfaceView {
   hudAxes: boolean;
   private readonly hud: HudAxes | null;
   private readonly hudAlpha: (() => number) | null;
+  private readonly hudReserve: (() => HudReserve | null) | null;
   private readonly dom: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
 
   constructor(opts: SurfaceViewOptions) {
@@ -207,6 +221,7 @@ export class SurfaceView {
     this.hudAxes = opts.hudAxes ?? !!opts.hud;
     this.hud = opts.hud ? new HudAxes(opts.hud) : null;
     this.hudAlpha = opts.hudAlpha ?? null;
+    this.hudReserve = opts.hudReserve ?? null;
     this.dom = opts.dom ?? null;
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattices ?? opts.lattice, opts.cache, opts.surface ?? {});
@@ -221,6 +236,7 @@ export class SurfaceView {
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
     this.widthActions = opts.widthActions ?? null;
+    this.chromeStatus = opts.chromeStatus ?? null;
     this.chrome = opts.chrome
       ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null, opts.onWidthAction ?? null)
       : null;
@@ -335,6 +351,7 @@ export class SurfaceView {
     };
     const readout = readoutOf(
       statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor, this.widthActions,
+      this.chromeStatus,
     );
     this.chrome?.update(readout);
 
@@ -348,15 +365,16 @@ export class SurfaceView {
       const cssW = this.canvas.clientWidth;
       const dpr = cssW > 0 ? w / cssW : 1;
       const alpha = this.hudAlpha ? this.hudAlpha() : 1;
+      const reserve = this.hudReserve ? this.hudReserve() : null;
       const labels: HudLabel[] = [];
       for (const v of paneViews) {
         const s = statusById.get(v.id);
         if (!s) continue;
         const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
         rulers.push(r);
-        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        const q = hudTickQuads(r, { alpha, majorPx: 5 * dpr, minorPx: 3 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
         if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
-        labels.push(...hudLabels(r, hPx, dpr));
+        labels.push(...hudLabels(r, hPx, dpr, reserve));
       }
       this.hud?.update(labels);
     }
