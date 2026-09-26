@@ -1727,6 +1727,64 @@ impl TileOverlay {
         })
     }
 
+    /// The **selected plane's codes**, row-major on the asked-for grid — the binary spelling of
+    /// [`Self::selected_plane_json`]'s plane, for `/ws/spectrum/rows`' coverage trailer (T-1043),
+    /// with `present` (the selected device has a record here at all) and `aligned` (the plane is
+    /// laid cell-for-cell on the grid that was asked for) beside it.
+    ///
+    /// The codes are **the same `Vec<u8>` the JSON spelling serialises**, not a second opinion
+    /// about what was observed: one rasterisation, two encodings.
+    pub(crate) fn selected_plane_codes(&self, device: &str) -> (Vec<u8>, bool, bool) {
+        let selected = self.selected(device);
+        let codes = match selected {
+            Selected::Plane(i) => self.planes[i].clone(),
+            Selected::AbsentDevice => vec![UNOBSERVED; self.any.nt * self.any.nf],
+        };
+        let aligned = self.any.nt == self.nt_asked && self.any.nf == self.nf_asked;
+        (codes, selected != Selected::AbsentDevice, aligned)
+    }
+
+    /// **A fingerprint of the tuning configurations this overlay's evidence holds** — the
+    /// `/ws/spectrum/rows` epoch (T-1043).
+    ///
+    /// It folds each span's *configuration* — which front end, the tuned centre, the sample rate,
+    /// the extent it claims and whether the analysis ran on it — and **deliberately not its
+    /// times**: a dwell that simply goes on covering the same band extends its span every control
+    /// tick, and that is not a change a client has to re-lay the fog for. A retune is: the set of
+    /// configurations over the window changes, so the fingerprint does, so the epoch does.
+    ///
+    /// It is a fingerprint of the **set** of configurations, not of the spans: order-insensitive
+    /// (the span order a read returns is not part of what the coverage says) and duplicate-free,
+    /// because one dwell that goes on is filed as record after record with the same configuration
+    /// and a client must not see a retune every time the log seals one.
+    pub(crate) fn config_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // Only the spans **in force over this overlay's own window**. The record read is by filing
+        // segment, not by the instant (the per-cell time test happens in the rasteriser), so an
+        // unfiltered fold would answer "the configurations in this hour" — the same number before
+        // and after a retune inside it, which is exactly the change the epoch exists to carry.
+        let window = self.any.window;
+        let mut configs: Vec<u64> = self
+            .evidence
+            .spans
+            .iter()
+            .filter(|s| s.time.start < window.end && s.time.end > window.start)
+            .map(|s| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                s.device.hash(&mut h);
+                s.center_hz.to_bits().hash(&mut h);
+                s.sample_rate_hz.to_bits().hash(&mut h);
+                s.freq.lo_hz.to_bits().hash(&mut h);
+                s.freq.hi_hz.to_bits().hash(&mut h);
+                (s.analysis == hk_store::coverage::Analysis::Analysed).hash(&mut h);
+                h.finish()
+            })
+            .collect();
+        configs.sort_unstable();
+        configs.dedup();
+        configs.iter().fold(0u64, |acc, h| acc.wrapping_add(*h))
+    }
+
     /// The compact `coverage` block.
     pub(crate) fn to_json(&self, device: &str, named: bool) -> Value {
         let g = &self.any;

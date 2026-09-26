@@ -52,6 +52,7 @@
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
+//! | `/ws/spectrum/rows?…` | GET | token | One pane's rows, folded and quantised, pushed as binary blocks (T-1043, [`crate::spectrum_rows`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -253,6 +254,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/analyze/{id}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
     ("GET", "/ws/tiles/rows"),
+    // T-1043 (LSR-2) one pane's rows, folded onto its columns, quantised, pushed as binary blocks
+    ("GET", "/ws/spectrum/rows"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -483,6 +486,11 @@ pub struct ApiState {
     /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
     /// Per state for the same reason as `tile_admission`.
     pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
+    /// T-1043: `/ws/spectrum/rows` pane subscriptions open now, capped at
+    /// [`crate::spectrum_rows::MAX_PANE_FEEDS`]. Counted separately from [`Self::row_feeds`]
+    /// because a pane feed and a tile-column feed are different subscriptions: a browser holds one
+    /// of these per pane, where the tile route's client holds up to 12.
+    pub pane_feeds: Arc<std::sync::atomic::AtomicUsize>,
     /// T-579: the per-lattice readable ceiling, memoised — a pure function of the store's
     /// geometry and config, so it is computed once per lattice rather than probed per request.
     /// Shared by cloning, like [`Self::tile_admission`].
@@ -1245,6 +1253,11 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
         return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
+    }
+    // T-1043: likewise — `spectrum/rows` is a pane subscription, not the `spectrum/live` stream's
+    // sibling under the bridge.
+    if req.path == "/ws/spectrum/rows" && req.method == "GET" {
+        return crate::spectrum_rows::serve(stream, &shared.state, &req.query, &req.headers);
     }
     // T-859: `/ws/analyze/{id}` is the `analyze` on-demand opener with the id as its parameter.
     if let Some(id) = req.path.strip_prefix("/ws/analyze/")

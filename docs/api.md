@@ -1456,6 +1456,87 @@ Messages are JSON text, in order:
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
 - **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
 
+### `GET /ws/spectrum/rows` — **one pane's** rows, folded, quantised, pushed as binary blocks (T-1043, LSR-2)
+
+WebSocket; token as for every `/ws/` route. **The subscription is a pane and a time range**, not a
+lattice address: `f_lo_hz`, `f_hi_hz` and `nf` (the pane's columns, 8…4096) say *where and how wide*,
+`t_from` (**required**, absolute capture time in Unix **nanoseconds**, snapped down to a row
+boundary) and `t_to` (optional, ns) say *when*, and `level_t` (default `0`) names the row period on
+the same lattice [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8)
+addresses. `device` (`any` default) chooses whose coverage decides this pane's grey and `scheme`
+(`view` default) which store answers. A tile parameter — `level_f`, `f_index`, `t_index`, `cells` — is
+**refused**, not ignored: a pane is a window, and the fold onto its columns is this route's job.
+
+**Why this exists beside [`GET /ws/tiles/rows`](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468).**
+That route pushes rows at tile-lattice addresses, as JSON, which is the right shape for the tile cache
+and the wrong shape for a pane's live edge: a following pane covers a number of lattice columns that
+is neither 1 nor constant (the shipped client opens up to 12 subscriptions per pane), none of them on
+the pane's own pixel grid, and a 1600-cell row is ~12 kB of JSON text against 3.2 kB of binary16 —
+300 kB/s against 80 kB/s at 25 rows/s, plus a `JSON.parse` per block on the frame thread. Here the
+**pane** is the subscription, the fold happens once on the server where the cells already are, and the
+values are the same quantisation `/api/tiles?planes=f16` serves. Everything else is deliberately
+identical, because it is the same walk over the same store: `t_from` required and nothing defaulting
+it, a row pushed **once** when it is complete *and* the tune record has reached it, `final` when no
+late frame can still land in the block, and a uniformly-unobserved stretch answered from the coverage
+map alone (T-461) as one payload-less block whose probe span doubles while the grey continues.
+
+The first message is **text**, the subscription stated back; every block after it is one **binary**
+message (`docs/stream-contract.md` §17 is the record, field by field); a closed range ends with one
+text `end`.
+
+```jsonc
+{ "type": "subscribed",
+  "pane": { "f_lo_hz": 88e6, "f_hi_hz": 108e6, "nf": 1600, "f_cell_hz": 12500.0,
+            "device": "any", "scheme": "view", "level_t": 0, "t_cell_s": 0.040106667 },
+  "range": { "t_from": 1795000000000000000, "t_to": null, "t0_s": …, "t1_s": null,
+             "row0": 44758698, "open": true },
+  "record": { "contract": "docs/stream-contract.md#17",
+              "framing": "one WebSocket binary message per block",
+              "byte_order": "little-endian", "header_bytes": 48,
+              "kinds": { "rows": 1, "unobserved": 2 },
+              "values": { "code": 1, "type": "f16", "cells": "rows x nf, row-major, …",
+                          "absent": "nan" },
+              "coverage": { "encoding": 1, "name": "run8",
+                            "states": ["unobserved", "observed", "unknown", "excluded"],
+                            "grid": "the block's own cells, the same order as the values" } },
+  "epoch": 0, "epoch_rule": "…",
+  "store": "view-lattice", "candidates": [0, 1], "rows_per_block": 40,
+  "data_edge_s": …, "watermark_s": …, "rule": "…" }
+{ "type": "end", "row": 44758738, "t_ns": …, "reason": "range-complete" }   // only when t_to is given
+```
+
+- **Each block states what it is a measurement of, in its own header** (`docs/stream-contract.md`
+  §17.1): the store `level` that answered — by the tile route's own rule, the cheapest level that only
+  folds, walking on only when a level holds nothing (T-1018, T-426) — the honesty `tier` that level
+  makes this block (`tier_of`, T-902), and the `fold` **direction per axis**. A pane asking for its
+  own resolution over the finest level reads `exact` on both axes; a pane coarser than the store's
+  cells reads `folded`; a level coarser than the pane on either axis reads `replicated` and the tier
+  is `survey-overview`. A client states **this** block's tier and never borrows a neighbour's.
+- **Values are binary16, NaN = not measured** — never a zero and never a floor (C26's rule, unchanged
+  by the representation), and bit-for-bit the numbers `/api/tiles` serves for the same cells.
+- **Grey rides with the rows**, as the block's own coverage trailer over the block's own axes, in the
+  same four states and with the same rule the tile route's plane has (§17.2): grey if and only if
+  `unobserved`; `excluded` is drawn.
+- **`epoch`** (§17.3) increments when the tuning configurations over this pane's window change — a
+  retune under the pane — and not when a dwell simply goes on. It is the "the fog moved" signal a
+  client re-lays its coverage and re-reads its tiles on, and it is a *change*, never a value to
+  interpret.
+- **Block size.** At most 64 rows, and at most 65 536 cells (`nf × rows`), which is the coverage
+  rasteriser's own grid bound — so a block's plane is **always** laid cell-for-cell on the block's axes
+  and never read through another grid's addressing. At the live edge blocks go out as the rows are
+  recorded, in the few rows the tune record has reached, never a burst after a stall.
+- **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never
+  holds the history mutex longer than one tile chunk; it holds no `/api/tiles` in-flight slot. At most
+  **16** pane subscriptions are open per server (one per pane, where the tile route's client held up to
+  12 per pane) and the seventeenth is refused `503`.
+- **Refusals complete the upgrade**: one `{"type": "refused", "status", "reason"}` message, then close
+  `4000 + status` — `4400` a bad pane, range or parameter (including a missing `t_from`, an `nf`
+  outside 8…4096, `f_hi_hz <= f_lo_hz`, a `t_to` not after `t_from`, or a tile parameter), `4404` no
+  such time level, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`.
+  Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
+- **What blocks do not carry:** no `shadow`, no emitters and no per-cell sampling metadata — the same
+  exclusions as the tile route.
+
 ### `GET /api/status` — pipeline counters (T-027)
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …), plus one field this route itself adds: **`t`**, the server's own wall clock (`Timestamp::now`, not the run's sample clock) at the instant the response was built — bare name, Unix seconds, per the units convention (T-351). Without it a caller could not tell a fresh read from a cached one, or measure its own clock skew against this device. Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
@@ -2152,6 +2233,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 | GET | `/ws/{stream_id}` | token (header or `?token=`) | Upgrades to WebSocket and bridges the named always-on stream (§10) |
 | GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, `iq`, with query parameters per opener |
 | GET | `/ws/tiles/rows` | token | Rows pushed to a subscription over a tile-lattice **address range** — see [its section](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468) (T-468) |
+| GET | `/ws/spectrum/rows` | token | **One pane's** rows — its window folded onto its `nf` columns, quantised to binary16, pushed as binary blocks with a coverage trailer and an epoch; see [its section](#get-wsspectrumrows--one-panes-rows-folded-quantised-pushed-as-binary-blocks-t-1043-lsr-2) (T-1043) |
 
 **`GET /ws/{stream_id}`** (e.g. `spectrum/live`): the header JSON is the first **text** message, verbatim; every later record is one message — text (NDJSON line) for `messages` streams, binary (32-byte record header + payload) for every binary kind. Refusals never upgrade the connection and are plain HTTP: `401` (bad/missing token, checked before the upgrade), `403` (a `own-key-decrypted` stream — those are Unix-socket-only and never served over the bridge), `404` (unknown `stream_id`), `410` (stream finished), `426` (not a valid WebSocket upgrade request), `503` (consumer cap reached, or `replumbing` — see below).
 

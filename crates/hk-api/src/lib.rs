@@ -64,6 +64,7 @@ pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of t
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
 pub mod signatures; // T-201
+pub mod spectrum_rows; // T-1043 (LSR-2): one pane's rows, folded, quantised, pushed as binary
 pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)

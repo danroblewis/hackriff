@@ -10700,6 +10700,195 @@ fn row_push_route_serves_an_address_range_growing_or_sealed() {
     stop_server(serving);
 }
 
+/// T-1043 (LSR-2): `GET /ws/spectrum/rows`, as `docs/api.md` and `docs/stream-contract.md` §17
+/// document it, on a real `hk serve` over the mock SDR.
+///
+/// - **A pane, not an address**: the window and the column count are the subscription, a tile
+///   parameter is refused, and there is no way to spell "now" — without `t_from` the upgrade
+///   completes with a `refused` message and close code `4400`.
+/// - **Binary blocks, by the documented layout**: every block's length is exactly
+///   `48 + rows × nf × 2 + trailer_bytes`, the values are binary16 (NaN = not measured), the trailer's
+///   runs cover the block's own cells in the four-state alphabet, and the header states the level, the
+///   tier and the per-axis fold of **that** block.
+/// - **Store walk → live**: an open range starting behind the data edge delivers what exists and then
+///   keeps delivering blocks past the edge it started at, contiguously.
+#[test]
+fn pane_row_blocks_are_served_as_documented_over_a_window_and_a_range() {
+    let (_dir_guard, serving, addr) = start_server();
+    const NF: usize = 64;
+    // A pane over a quarter of the tuned window, around the fixture's station.
+    let (lo, hi) = (STATION_HZ - 0.3e6, STATION_HZ + 0.3e6);
+    let pane = |extra: &str| {
+        format!("/ws/spectrum/rows?token={TOKEN}&f_lo_hz={lo}&f_hi_hz={hi}&nf={NF}{extra}")
+    };
+    let text = |ws: &mut Ws| -> Option<Value> {
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => return Some(serde_json::from_str(&t).unwrap()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    };
+    let binary = |ws: &mut Ws| -> Option<Vec<u8>> {
+        loop {
+            match ws.read() {
+                Ok(Message::Binary(b)) => return Some(b.to_vec()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(Message::Text(t)) => panic!("expected a block, got text: {t}"),
+                Ok(_) => {}
+            }
+        }
+    };
+    let refused = |path: &str| -> Option<u16> {
+        let mut ws = connect_ws(addr, path).expect("refusals still upgrade");
+        let mut ws_text = None;
+        for _ in 0..8 {
+            let Ok(m) = ws.read() else { break };
+            match m {
+                Message::Text(t) => ws_text = Some(serde_json::from_str::<Value>(&t).unwrap()),
+                Message::Close(f) => {
+                    let v = ws_text.take().expect("a refusal says why before it closes");
+                    assert_eq!(v["type"], "refused", "{v}");
+                    return f.map(|f| u16::from(f.code));
+                }
+                // A block means the request was ACCEPTED: this helper's caller asked for a
+                // refusal, so that is the failure, not something to read past.
+                Message::Binary(_) => panic!("{path} was accepted, and must not be"),
+                _ => {}
+            }
+        }
+        None
+    };
+
+    // ---- no range start, and no lattice address: both refused, never defaulted or ignored ----
+    assert_eq!(refused(&pane("")), Some(4400), "there is no implicit now");
+    assert_eq!(
+        refused(&pane("&t_from=0&cells=32")),
+        Some(4400),
+        "a pane is a window, not a tile address"
+    );
+    assert_eq!(
+        refused(&format!(
+            "/ws/spectrum/rows?token={TOKEN}&f_lo_hz={lo}&f_hi_hz={hi}&nf=2&t_from=0"
+        )),
+        Some(4400),
+        "nf is bounded: a pane of two columns is refused"
+    );
+
+    // ---- the data edge, from a one-row range at the epoch (itself a range, not "now") ----
+    let (mut edge_s, mut t_cell_s) = (0.0, 0.0);
+    wait_for("the store to hold rows", Duration::from_secs(60), || {
+        let mut ws = connect_ws(addr, &pane("&t_from=0&t_to=1")).unwrap();
+        let s = text(&mut ws).expect("subscribed");
+        assert_eq!(s["type"], "subscribed", "{s}");
+        assert_eq!(s["pane"]["nf"], json!(NF), "{s}");
+        assert_eq!(s["record"]["header_bytes"], json!(48), "{s}");
+        assert_eq!(s["record"]["values"]["type"], json!("f16"), "{s}");
+        assert_eq!(s["record"]["values"]["absent"], json!("nan"), "{s}");
+        assert_eq!(
+            s["record"]["coverage"]["states"],
+            json!(["unobserved", "observed", "unknown", "excluded"]),
+            "{s}"
+        );
+        t_cell_s = s["pane"]["t_cell_s"].as_f64().unwrap_or(0.0);
+        match s["data_edge_s"].as_f64() {
+            Some(e) if e > 1.0 && t_cell_s > 0.0 => {
+                edge_s = e;
+                true
+            }
+            _ => false,
+        }
+    });
+    // Start a second behind the edge and follow it.
+    let from_ns = ((edge_s - 1.0) * 1e9) as i64;
+    let mut live = connect_ws(addr, &pane(&format!("&t_from={from_ns}"))).unwrap();
+    let head = text(&mut live).expect("subscribed");
+    assert_eq!(head["range"]["open"], json!(true), "{head}");
+    let row0 = head["range"]["row0"].as_i64().unwrap();
+    let edge_row = (edge_s / t_cell_s).floor() as i64;
+
+    let mut next = row0;
+    let mut observed = 0u64;
+    let mut measured_blocks = 0;
+    while next < edge_row + 10 {
+        let b = binary(&mut live).expect("blocks keep arriving past the edge the range started at");
+        assert!(
+            b.len() >= 48,
+            "a block is at least its header: {} B",
+            b.len()
+        );
+        let u16le = |at: usize| u16::from_le_bytes(b[at..at + 2].try_into().unwrap());
+        let u32le = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let i64le = |at: usize| i64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let (kind, flags, values, level, tier, fold) = (b[0], b[1], b[2], b[3], b[4], b[5]);
+        let nf = usize::from(u16le(6));
+        let rows = u32le(8) as usize;
+        let trailer_bytes = u32le(40) as usize;
+        let t0_ns = i64le(16);
+        let t_cell_ns = i64le(24);
+        let block_row0 = i64le(32);
+        assert_eq!(block_row0, next, "contiguous, never skipped or repeated");
+        assert_eq!(t0_ns, block_row0 * t_cell_ns, "t0_ns is row0's own instant");
+        assert!(
+            (t_cell_ns as f64 / 1e9 - t_cell_s).abs() < 1e-12,
+            "the row period is the one the header stated: {t_cell_ns} ns vs {t_cell_s} s"
+        );
+        assert_eq!(flags & !0b11, 0, "no undocumented flag bit is set");
+        let payload = if kind == 1 { rows * nf * 2 } else { 0 };
+        assert_eq!(
+            b.len(),
+            48 + payload + trailer_bytes,
+            "a block is exactly header + rows*nf*2 + trailer"
+        );
+        if kind == 1 {
+            measured_blocks += 1;
+            assert_eq!(nf, NF, "the pane's own columns");
+            assert_eq!(values, 1, "binary16, as the header said");
+            assert!(rows <= 64, "at most 64 rows per block: {rows}");
+            assert!(rows * nf <= 65_536, "at most 65536 cells per block");
+            assert!(level < 8, "the level that answered: {level}");
+            assert!(tier <= 2, "a documented honesty tier: {tier}");
+            assert_eq!(fold & 0b1100_0000, 0, "no undocumented fold bits");
+            assert!(
+                fold & 0b11 <= 2 && (fold >> 2) & 0b11 <= 2,
+                "fold: {fold:b}"
+            );
+            observed += u64::from(u32le(44));
+            // Not one value is an infinity or a sentinel level: NaN is the only absence.
+            for i in 0..rows * nf {
+                let bits = u16le(48 + i * 2);
+                let finite = (bits & 0x7c00) != 0x7c00;
+                assert!(
+                    finite || (bits & 0x03ff) != 0,
+                    "cell {i} is an infinity: absence is NaN, never a level"
+                );
+            }
+            // The coverage trailer: `run8`, four states, covering exactly this block's cells.
+            let t = &b[48 + payload..];
+            assert_eq!(t[0], 1, "the trailer names its encoding");
+            assert_eq!(t[1], 4, "four coverage states, never two");
+            assert!(t[2] & 2 != 0, "the plane is laid on the block's own axes");
+            let runs = u32::from_le_bytes(t[4..8].try_into().unwrap()) as usize;
+            assert_eq!(t.len(), 8 + runs * 8, "the trailer is exactly its runs");
+            let mut cells = 0usize;
+            for k in 0..runs {
+                cells += u32::from_le_bytes(t[8 + k * 8..12 + k * 8].try_into().unwrap()) as usize;
+                assert!(t[12 + k * 8] < 4, "a state outside the alphabet");
+            }
+            assert_eq!(cells, rows * nf, "the trailer covers the block's cells");
+        } else {
+            assert_eq!(kind, 2, "only `rows` and `unobserved` are documented kinds");
+            assert_eq!((nf, values, level, tier), (0, 0, 0xff, 0xff), "{b:?}");
+        }
+        next += rows as i64;
+    }
+    assert!(measured_blocks > 0, "the tuned pane carries measurements");
+    assert!(observed > 0, "the tuned pane's cells are measurements");
+    drop(live);
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");

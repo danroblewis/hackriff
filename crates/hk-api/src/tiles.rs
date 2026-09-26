@@ -1902,7 +1902,7 @@ fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
 /// spelling, so a conversion that turned it into an infinity or a zero would invent a measurement.
 /// A magnitude past binary16's range becomes an infinity, which the client reads as non-finite and
 /// therefore as absent too; no finite dB level this route serves is anywhere near 65 504.
-fn f16_bits(x: f32) -> u16 {
+pub(crate) fn f16_bits(x: f32) -> u16 {
     let b = x.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
     let raw_exp = (b >> 23) & 0xff;
