@@ -449,6 +449,7 @@ impl Repository {
                      (SELECT json_extract(k.body, '$.timing.duty_cycle') FROM track k \
                       WHERE k.track_id = o.source_id) END \
                  FROM emitter_observation o WHERE o.emitter_id = ?1 \
+                   AND o.source_kind != 'track-live' \
                  ORDER BY o.t_start, o.t_end",
             )?;
             stmt.query_map([blob(id)], |r| {

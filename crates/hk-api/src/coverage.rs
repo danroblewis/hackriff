@@ -121,7 +121,7 @@
 
 use hk_model::{
     EmitterId, FreqRange, IdleGap, Presence, PresenceInterval, RepoError, Repository, TimeRange,
-    Timestamp,
+    Timestamp, Watched,
 };
 use hk_store::coverage::{
     Coverage, CoverageGrid, CoverageSpan, Device, MAX_COVERAGE_CELLS, MAX_COVERAGE_ROWS,
@@ -186,13 +186,28 @@ impl ObservedCoverage {
     /// See [`hk_model::IdleGap::from_coverage`] for the rule and the three readings it
     /// distinguishes (continuously watched, combed, never recorded).
     pub fn idle_gap(&self, freq: FreqRange, window: TimeRange) -> hk_model::IdleGap {
-        let spans: Vec<TimeRange> = self
-            .spans
+        hk_model::IdleGap::from_coverage(&self.band_spans(freq), window)
+    }
+
+    /// The spans the receiver observed `freq` in: coverage of somewhere else is not coverage of here.
+    fn band_spans(&self, freq: FreqRange) -> Vec<TimeRange> {
+        self.spans
             .iter()
             .filter(|s| s.freq.overlaps(&freq))
             .map(|s| s.time)
-            .collect();
-        hk_model::IdleGap::from_coverage(&spans, window)
+            .collect()
+    }
+
+    /// When the receiver watched `freq` (T-940): the same tune history the gap is measured from,
+    /// asked the second question — **which part of a silence was observed**. The record begins at
+    /// the oldest segment the ring still holds, *on any band*: before it nobody can say whether the
+    /// receiver looked, and the reading there stays elapsed time. No ring at all is
+    /// [`Watched::unrecorded`], the unchanged behaviour of a replay store or a history-only server.
+    pub fn watched(&self, freq: FreqRange) -> Watched {
+        match self.spans.iter().map(|s| s.time.start).min() {
+            None => Watched::unrecorded(),
+            Some(from) => Watched::recorded(from, &self.band_spans(freq)),
+        }
     }
 
     /// **The one derivation of an emitter's presence track** (T-591), and therefore of its
@@ -223,9 +238,13 @@ impl ObservedCoverage {
         now: Timestamp,
     ) -> Result<PresenceTrack, RepoError> {
         let gap = self.idle_gap(freq, span);
+        // T-940: and the silence that gap is compared against is the silence the receiver
+        // *observed* — watched time on this band, or what the tracker reported for a track it is
+        // still following — never the wall clock. On staging every on-air FM station read `ended`
+        // because the time since its row was last written counted as quiet.
         Ok(PresenceTrack {
             gap,
-            intervals: repo.presence_intervals(id, gap, now)?,
+            intervals: repo.presence_intervals(id, gap, now, &self.watched(freq))?,
         })
     }
 }

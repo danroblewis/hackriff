@@ -131,8 +131,8 @@ pub use plan::{
 };
 pub use presence::{
     IdleGap, Liveness, MAX_IDLE_GAP_S, MIN_IDLE_GAP_S, NEGLIGIBLE_CONFIDENCE, ObservationSpan,
-    Presence, PresenceInterval, REVISIT_FACTOR, confidence_after_silence, intervals_from_spans,
-    presence_in_window, recheck_horizon_s,
+    Presence, PresenceInterval, REVISIT_FACTOR, Watched, confidence_after_silence,
+    intervals_from_spans, intervals_observed, presence_in_window, recheck_horizon_s,
 };
 pub use provenance::{
     BiasTee, CaptureArtefact, ClockSource, CyclicComb, FillBucket, OVER_CLIP_FRACTION, Provenance,

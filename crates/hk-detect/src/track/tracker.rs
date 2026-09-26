@@ -34,6 +34,8 @@ const REFUTED_RING: usize = 256;
 const SPLIT_RING: usize = 256;
 const RECENT_BURSTS: usize = 128;
 const SEGMENT_STARTS: usize = 16;
+/// T-940: tuned windows remembered for band-aware silence (one entry per retune, not per frame).
+const BAND_EPOCHS: usize = 64;
 const MAX_FUSED: usize = 8;
 const NS: f64 = 1e9;
 
@@ -529,6 +531,13 @@ pub struct Tracker {
     seg_head: usize,
     last_segment: Option<u64>,
     coverage: Coverage,
+    /// T-940: `(first frame's start ns, f_lo, f_hi)` of each tuned window the frames arrived in,
+    /// oldest first from `band_head - band_len`. [`Coverage`] says *when* the receiver was
+    /// observing; this says *where*, so a track whose band the receiver has retuned away from is
+    /// not charged the time as silence. Fixed-size: the per-frame path does not allocate.
+    bands: [(i64, f64, f64); BAND_EPOCHS],
+    band_len: usize,
+    band_head: usize,
     now: i64,
     next_maintain: i64,
     merge_queue: Vec<(usize, TrackId)>,
@@ -569,6 +578,9 @@ impl Tracker {
             seg_head: 0,
             last_segment: None,
             coverage: Coverage::default(),
+            bands: [(0, 0.0, 0.0); BAND_EPOCHS],
+            band_len: 0,
+            band_head: 0,
             now: 0,
             next_maintain: 0,
             merge_queue: Vec::with_capacity(64),
@@ -688,7 +700,75 @@ impl Tracker {
             frame.t.host_time,
             Timestamp::from_unix_nanos(t0.saturating_add(dur)),
         );
+        let half = frame.spectrum.sample_rate_hz / 2.0;
+        self.note_band(
+            t0,
+            frame.spectrum.f_center_hz - half,
+            frame.spectrum.f_center_hz + half,
+        );
         self.observe(seg.segment, samples, time, out);
+    }
+
+    /// T-940: records that frames from `t0_ns` on cover `[lo, hi]` Hz. A no-op unless the window
+    /// changed, so the journal grows by one entry per retune.
+    fn note_band(&mut self, t0_ns: i64, lo: f64, hi: f64) {
+        if !(lo.is_finite() && hi.is_finite() && hi > lo) {
+            return;
+        }
+        if self.band_len > 0 {
+            let (_, l, h) = self.band_at(self.band_len - 1);
+            if (l - lo).abs() < 1.0 && (h - hi).abs() < 1.0 {
+                return;
+            }
+        }
+        self.bands[self.band_head] = (t0_ns, lo, hi);
+        self.band_head = (self.band_head + 1) % BAND_EPOCHS;
+        self.band_len = (self.band_len + 1).min(BAND_EPOCHS);
+    }
+
+    /// The `k`-th oldest remembered tuned window.
+    fn band_at(&self, k: usize) -> (i64, f64, f64) {
+        self.bands[(self.band_head + BAND_EPOCHS - self.band_len + k) % BAND_EPOCHS]
+    }
+
+    /// T-940: silence in `[a, b)` that the receiver **observed at `f_hz`** — [`Coverage`]'s
+    /// observed time, counted only while the tuned window contained `f_hz`. A band the receiver
+    /// retuned away from is unobserved, and unobserved is not quiet. Time before the oldest
+    /// remembered window (or with no window recorded at all: a caller of [`Self::observe`] that
+    /// states no band) keeps the band-blind reading, which is what every caller had before.
+    fn observed_at(&self, f_hz: f64, a: i64, b: i64) -> i64 {
+        if b <= a || self.band_len == 0 {
+            return self.coverage.observed(a, b);
+        }
+        let covers = |lo: f64, hi: f64| lo <= f_hz && f_hz <= hi;
+        // The common case, and the only one on a dwell: no retune since `a`.
+        let (last_t, lo, hi) = self.band_at(self.band_len - 1);
+        if last_t <= a {
+            return if covers(lo, hi) {
+                self.coverage.observed(a, b)
+            } else {
+                0
+            };
+        }
+        let first_t = self.band_at(0).0;
+        let mut sum = if a < first_t {
+            self.coverage.observed(a, first_t.min(b))
+        } else {
+            0
+        };
+        for k in 0..self.band_len {
+            let (start, lo, hi) = self.band_at(k);
+            let end = if k + 1 < self.band_len {
+                self.band_at(k + 1).0
+            } else {
+                i64::MAX
+            };
+            let (x, y) = (start.max(a), end.min(b));
+            if y > x && covers(lo, hi) {
+                sum = sum.saturating_add(self.coverage.observed(x, y));
+            }
+        }
+        sum
     }
 
     /// Takes one detection record (copied; the record is not kept).
@@ -922,16 +1002,42 @@ impl Tracker {
     /// seconds and deliberately long, so that a bursty emitter stays one track, and a *box* must
     /// cap long before a *track* does. The two closes are separate decisions over the same
     /// measurement (ADR-0019 §Relationship).
+    ///
+    /// **A burst in flight is not silence (T-940).** While the track has a burst open (`cur`: the
+    /// detector cut a record and promised its continuation, or a transition's parts are still
+    /// arriving) both silences are 0. A continuous carrier is delivered as `max_duration_s` split
+    /// records, so its `t_last_end` steps by a whole record — 1 s by default, exactly the
+    /// [`hk_model::MIN_IDLE_GAP_S`] floor — and counting that step as silence read an on-air
+    /// station as ended between every pair of pieces. The tracker's own idle close already refuses
+    /// to count it (`maintain` closes only with no burst open); the extent now says the same. If
+    /// the continuation never comes, the burst is finalised at `split_wait_s` and the silence since
+    /// the *measured* end counts from then, so an END still caps at the measurement.
+    ///
+    /// **Nor is a band the receiver retuned away from (T-940).** [`Coverage`] knows only *when*
+    /// frames were observed, so after an in-place retune an open track on a band outside the new
+    /// window accumulated observed silence and read as ended. The observed silence now counts only
+    /// while the tuned window contained the track's centre (`observed_at`). The idle close
+    /// (`maintain`) is unchanged: a track left behind by a retune still closes after
+    /// `idle_timeout_s`, and its row then keeps reading ongoing on the receiver's coverage map.
     pub fn live_extents_into(&self, out: &mut Vec<LiveExtent>) {
         out.clear();
         for s in &self.slots {
             if s.live && !s.tentative {
+                let in_flight = s.cur.is_some();
                 out.push(LiveExtent {
                     track: s.id,
                     t_start_ns: s.t_first,
                     t_end_ns: s.t_last_end,
-                    observed_silence_ns: self.coverage.observed(s.t_last_end, self.now),
-                    wall_silence_ns: self.now.saturating_sub(s.t_last_end).max(0),
+                    observed_silence_ns: if in_flight {
+                        0
+                    } else {
+                        self.observed_at(s.fc, s.t_last_end, self.now)
+                    },
+                    wall_silence_ns: if in_flight {
+                        0
+                    } else {
+                        self.now.saturating_sub(s.t_last_end).max(0)
+                    },
                 });
             }
         }
