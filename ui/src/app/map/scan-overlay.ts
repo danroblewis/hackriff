@@ -65,19 +65,31 @@ export function planKey(s: ScanState | null): string | null {
   return [p.f_lo_hz, p.f_hi_hz, p.dwell_s, p.step ?? "fine", p.steps, p.sample_rate_hz, s.progress?.started_s ?? ""].join("|");
 }
 
-/** The price of a plan, WITH its steps — a read (`GET`), never a device route. */
-export function scanPriceRequest(r: { loHz: number; hiHz: number }, dwellS: number, step: ScanStep): string {
+/** The price of a plan, WITH its steps — a read (`GET`), never a device route. T-1009: `deviceId`
+ * names which radio is being priced (the run's default when null), the selector every scan route
+ * takes. */
+export function scanPriceRequest(
+  r: { loHz: number; hiHz: number }, dwellS: number, step: ScanStep, deviceId: string | null = null,
+): string {
   const path = scanPreviewPath({ f_lo_hz: r.loHz, f_hi_hz: r.hiHz, dwell_s: dwellS, step });
-  return `${path}${path.includes("?") ? "&" : "?"}windows=1`;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}windows=1${deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""}`;
 }
-/** The running sweep's own steps (one read per plan, never per poll). */
-export const SCAN_WINDOWS_REQUEST = "/api/control/scan?windows=1";
+/** The running sweep's own steps (one read per plan, never per poll), on the named radio. */
+export const scanWindowsRequest = (deviceId: string | null = null): string =>
+  `/api/control/scan?windows=1${deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""}`;
+/** The default radio's form of [[scanWindowsRequest]]. */
+export const SCAN_WINDOWS_REQUEST = scanWindowsRequest();
 /** Start/resume (the commissioning press) and stop (the surrender, never refused). */
 export const SCAN_START_PATH = "/api/control/scan";
 export const SCAN_STOP_PATH = "/api/control/scan/stop";
-/** The body Start sends: exactly the plan that was priced. */
-export function scanStartBody(r: { loHz: number; hiHz: number }, dwellS: number, step: ScanStep) {
-  return { f_lo_hz: r.loHz, f_hi_hz: r.hiHz, dwell_s: dwellS, step };
+/** The body Start sends: exactly the plan that was priced, on the radio it was priced for. A start
+ * COMMISSIONS a radio, so on a multi-SDR run the server requires the selector rather than guessing
+ * (T-1009); omitting it is correct only where the run holds one front end. */
+export function scanStartBody(
+  r: { loHz: number; hiHz: number }, dwellS: number, step: ScanStep, deviceId: string | null = null,
+) {
+  return { f_lo_hz: r.loHz, f_hi_hz: r.hiHz, dwell_s: dwellS, step, ...(deviceId ? { device_id: deviceId } : {}) };
 }
 
 const mhz = (hz: number) => (hz / 1e6).toFixed(hz < 1e9 ? 3 : 4);
@@ -116,6 +128,11 @@ export class ScanController {
   private seenRunning: string | null = null;
   private busy = false;
   private dragging: "lo" | "hi" | null = null;
+  /** T-1009: the radio this plan is for — the `device_id` every request it makes carries. `null` is
+   * the run's default front end, which is the only one a single-SDR run has. Set by the Measure
+   * box's "Scan this region with <device>" and by nothing else; a plan opened from the button is
+   * the default radio's, exactly as it was. */
+  private deviceId: string | null = null;
   private cached: ScanOverlayModel | null = null;
   private dirty = true;
   private published = "";
@@ -225,11 +242,14 @@ export class ScanController {
 
   // ---- the served state ----
 
-  /** The shell's `/api/control/state` poll delivered `scan` (compact, no windows). */
-  update(s: ScanState | null | undefined, loaded = true): void {
+  /** The shell's `/api/control/state` poll delivered `scan` (compact, no windows), and — T-1009 —
+   * `scans`, one per front end. A plan bound to a radio follows **that** radio's sweep: with two
+   * SDRs the default one's state says nothing about the sweep this panel started on the other. */
+  update(s: ScanState | null | undefined, loaded = true, scans: readonly ScanState[] = []): void {
     this.loaded = loaded;
     const prevKey = planKey(this.server);
-    this.server = s ?? null;
+    const mine = this.deviceId === null ? null : scans.find((x) => x.device_id === this.deviceId) ?? null;
+    this.server = mine ?? s ?? null;
     const key = planKey(this.server);
     if (key && this.running?.key !== key) void this.fetchRunning(key);
     if (!key) this.running = null;
@@ -244,7 +264,7 @@ export class ScanController {
     if (this.runFetch === key) return;
     this.runFetch = key;
     try {
-      const a = await this.host.client.get<{ scan: ScanState }>(SCAN_WINDOWS_REQUEST);
+      const a = await this.host.client.get<{ scan: ScanState }>(scanWindowsRequest(this.deviceId));
       const k = planKey(a.scan);
       if (k && a.scan.plan?.windows) this.running = { key: k, windows: a.scan.plan.windows };
     } catch { /* the next poll tries again */ } finally {
@@ -267,9 +287,28 @@ export class ScanController {
     if (scanGate(this.server, this.loaded)) return;
     const w = this.host.paneWindow();
     if (!w || !(w.f1Hz > w.f0Hz)) { this.host.toast("There is no viewport to plan a scan over."); return; }
-    this.open = true;
     const inset = (w.f1Hz - w.f0Hz) * PLAN_INSET;
-    this.draft = { loHz: w.f0Hz + inset, hiHz: w.f1Hz - inset };
+    this.openPlanOver({ loHz: w.f0Hz + inset, hiHz: w.f1Hz - inset }, null);
+  }
+
+  /**
+   * T-1009: open an idle plan over a region the user DREW — a measurement box's frequency extent —
+   * on the radio they picked. No inset: the region is the region they measured, not a fraction of a
+   * viewport, and the overlay is bounded by exactly the box.
+   *
+   * The box's time extent is deliberately not a scan parameter: a live sweep walks frequency, and a
+   * measurement's time extent is when it was measured. Everything after this is the plan the button
+   * opens — the server prices it and Start is still the one commissioning press.
+   */
+  openPlanOver(region: { loHz: number; hiHz: number }, deviceId: string | null): void {
+    if (!(region.hiHz > region.loHz)) { this.host.toast("That region has no width to scan."); return; }
+    this.deviceId = deviceId;
+    if (scanGate(this.server, this.loaded)) {
+      this.host.toast(`Cannot scan: ${scanGate(this.server, this.loaded)}`);
+      return;
+    }
+    this.open = true;
+    this.draft = { loHz: region.loHz, hiHz: region.hiHz };
     this.priced = null;
     this.priceError = null;
     this.showPanel(true);
@@ -280,7 +319,7 @@ export class ScanController {
   close(): void {
     const running = !!planKey(this.server);
     this.open = false;
-    if (!running) { this.draft = null; this.priced = null; this.priceError = null; }
+    if (!running) { this.draft = null; this.priced = null; this.priceError = null; this.deviceId = null; }
     this.showPanel(false);
     this.touch();
   }
@@ -310,7 +349,7 @@ export class ScanController {
     const seq = ++this.priceSeq;
     try {
       const a = await this.host.client.get<{ scan: ScanState; proposed: { plan: ScanPlan; budget: ScanBudget } | null }>(
-        scanPriceRequest(d, this.dwellS, this.step));
+        scanPriceRequest(d, this.dwellS, this.step, this.deviceId));
       if (seq !== this.priceSeq) return; // a newer drag or dwell superseded this answer
       this.server = a.scan ?? this.server;
       this.priced = a.proposed ? { key, plan: a.proposed.plan, budget: a.proposed.budget } : null;
@@ -332,7 +371,9 @@ export class ScanController {
     this.busy = true;
     this.touch();
     try {
-      const body = st === "yielded" ? { resume: true } : scanStartBody(d!, this.dwellS, this.step);
+      const body = st === "yielded"
+        ? { resume: true, ...(this.deviceId ? { device_id: this.deviceId } : {}) }
+        : scanStartBody(d!, this.dwellS, this.step, this.deviceId);
       const a = await this.host.client.post<{ scan: ScanState; device?: { id?: string | null } }>(SCAN_START_PATH, body);
       this.server = a.scan;
       const key = planKey(a.scan);
@@ -355,12 +396,14 @@ export class ScanController {
     this.busy = true;
     this.touch();
     try {
-      const a = await this.host.client.post<{ scan: ScanState }>(SCAN_STOP_PATH);
+      const a = await this.host.client.post<{ scan: ScanState }>(
+        SCAN_STOP_PATH, this.deviceId ? { device_id: this.deviceId } : {});
       this.server = a.scan;
       this.running = null;
       this.open = false;
       this.draft = null;
       this.priced = null;
+      this.deviceId = null;
       this.showPanel(false);
       this.host.toast("Scan stopped.");
     } catch (e) {

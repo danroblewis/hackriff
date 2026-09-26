@@ -10,6 +10,15 @@
 //! frames on it. On `frames` the rule restarts at each frame, and an abort run ends the frame
 //! (truncated before the run; ISO 13239 discards an aborted frame's data).
 //!
+//! **Flag search before destuffing (AIS/AX.25).** Stuffing guarantees six ones in a row only
+//! ever occur in a flag *on the stuffed line*; destuffed data can contain `01111110` (40 % of
+//! random AIS position reports do), so a receiver frames first (`sync_search` on the stuffed
+//! bits) and destuffs each frame here in `frames` mode. `bit_order: lsb` (frames only) then
+//! reverses the destuffed body per 8 bits from its first bit — the octets of a protocol that
+//! sends each octet LSB first (HDLC, ISO/IEC 13239 §4.3), in the packed form `crc` and `fields`
+//! read (the `sync_search` `bit_order` convention, which cannot be used there: the stuffed line
+//! is not octet-aligned). A trailing partial character is reversed within its own length.
+//!
 //! The only state is the current run of ones, so a stuffed zero that falls on a chunk boundary
 //! is handled identically to one inside a chunk.
 
@@ -48,6 +57,13 @@ pub(crate) fn descriptor(inputs: Vec<PortSpec>, outputs: Vec<PortSpec>) -> Block
             )
             .default_value("destuff"),
             param("abort_ones", int(2, 32), "Ones that mean abort/idle.").default_value(7),
+            param(
+                "bit_order",
+                one_of(&["msb", "lsb"]),
+                "frames only: lsb = the protocol sends octets LSB first (HDLC/AIS); the \
+                 destuffed body is bit-reversed per 8 bits from its first bit.",
+            )
+            .default_value("msb"),
         ],
         true,
     )
@@ -67,6 +83,11 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
     };
     let after = p.uint_or("stuff_after", 5)?;
     let abort = p.uint_or("abort_ones", 7)?;
+    let lsb = match p.str("bit_order").unwrap_or("msb") {
+        "msb" => false,
+        "lsb" => true,
+        _ => return Err(BlockError::Params("bit_order must be msb or lsb".into())),
+    };
     if abort <= after {
         return Err(BlockError::Params(
             "abort_ones must exceed stuff_after".into(),
@@ -76,6 +97,7 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         stuff,
         after,
         abort,
+        lsb,
         ones: 0,
         aborts: 0,
         scratch: Vec::new(),
@@ -88,6 +110,8 @@ pub struct Bitstuff {
     stuff: bool,
     after: u32,
     abort: u32,
+    /// `bit_order: lsb` (frames mode): reverse the output per 8 bits.
+    lsb: bool,
     /// Consecutive ones just seen.
     ones: u32,
     aborts: u64,
@@ -160,6 +184,11 @@ impl Bitstuff {
                 self.aborts += 1;
                 bits.truncate(bits.len() - self.abort as usize);
             }
+            if self.lsb {
+                for chr in bits.chunks_mut(8) {
+                    chr.reverse();
+                }
+            }
             buf.push_bits(&bits, f.info.clone());
         }
         self.scratch = bits;
@@ -173,6 +202,11 @@ impl Bitstuff {
 impl Block for Bitstuff {
     fn init(&mut self, inputs: &[PortInfo]) -> Result<Vec<PortInfo>, BlockError> {
         let input = one_input("bitstuff", inputs, &[PortType::Bits, PortType::Frames])?;
+        if self.lsb && input.ty != PortType::Frames {
+            return Err(BlockError::Params(
+                "bit_order: lsb needs a frames input (a bits stream has no octet boundary)".into(),
+            ));
+        }
         Ok(vec![match input.ty {
             PortType::Frames => frames_port(input, input.max_items),
             // Stuffing can add one bit per `after` ones.
@@ -302,5 +336,28 @@ mod tests {
         assert_eq!(out[0].bits, bits("111111 0"));
         assert_eq!(out[0].info.bit_len, 7);
         assert_eq!(out[1].bits, bits("100"));
+    }
+
+    #[test]
+    fn frames_mode_lsb_reverses_destuffed_octets() {
+        // Air order: octet 0x21 LSB first (1000 0100), then 0xFF LSB first (five ones, a
+        // stuffed zero, three ones), then a 3-bit tail.
+        let mut b = mk("bitstuff", json!({ "bit_order": "lsb" }), PortType::Frames);
+        let f = Owned::from_bits(&bits("10000100 11111 0 111 001"), 0, 0);
+        let out = run_frames(&mut *b, &[f], 1, false);
+        assert_eq!(out[0].bits, bits("00100001 11111111 100"));
+        assert_eq!(out[0].info.bit_len, 19);
+    }
+
+    #[test]
+    fn lsb_on_a_bits_stream_is_refused() {
+        let mut b = mk("bitstuff", json!({ "bit_order": "lsb" }), PortType::Bits);
+        let err = b.init(&[PortInfo {
+            ty: PortType::Bits,
+            rate_hz: 9600.0,
+            max_items: 64,
+            hold_items: 0,
+        }]);
+        assert!(err.is_err());
     }
 }

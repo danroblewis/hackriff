@@ -1080,6 +1080,29 @@ try_bulk(){
       rm -f "$BULKMARK"
       return 0
     fi
+    # A BATCH OF ONE (2026-09-26 00:50: task-t1009, the only branch of five that merged, was re-gated alone - a
+    # 30-40 min full gate - to re-prove a red the triage had already run alone on base + it, with main green on
+    # base). Blame it as the bisect blames its culprit, on the same evidence: red on base + it ALONE twice (the
+    # triage's run, then one bisect_red probe - one red run cannot tell a defect from a test flaky even alone).
+    # A green or given-up probe blames nobody: isolation decides, as before.
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ "${TRIAGE_ALONE_FIRST:-0}" = 1 ] \
+       && { [ -n "${TRIAGE_FILTER:-}" ] || [ -n "${TRIAGE_SPECS:-}" ]; } && [ "${#branches[@]}" -eq 1 ]; then
+      local culprit=${gated[0]%%=*} tip=${gated[0]#*=} side r
+      side=$(main_side_of "$culprit" | sed 's/^main-side //')
+      if [ -n "$side" ]; then
+        log "TRIAGE: $culprit is red alone, but $(echo $side) is main-side -> no blame here; isolation decides"
+      elif bisect_red "$base" "${gated[0]}"; r=$?; [ "$r" != 0 ]; then
+        log "TRIAGE: $culprit, the batch's only merged branch: the confirming run alone on base + it $([ "$r" = 1 ] && echo "was green" || echo "gave up") -> no blame here; isolation decides"
+      else
+        rm -f "$S/isolate-remaining"
+        record_attempt "$culprit" "$tip"
+        log "GATE FAILED $culprit (the batch's only merged branch: red ALONE twice on base + it, green on base: $(echo ${TRIAGE_FILTER:-${TRIAGE_SPECS:-}})) -> abort + flag for AI"
+        echo "$(date '+%m-%d %H:%M')  $culprit  $(ticket_of "$culprit")  GATE_FAIL" >> "$NEEDS"
+        notify_coordinator "$(ticket_of "$culprit") ($culprit) FAILED the merge gate (the batch's only merged branch): $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} | cut -c1-200)" "gate failed - fix run"
+        rm -f "$BULKMARK"
+        return 0
+      fi
+    fi
     # Only for a red that failed alone on its FIRST isolated run: one that passed alone and then
     # failed is flaky even alone, and a bisection over it would blame whichever branch it ended on.
     # A CHECK red is deterministic (a compile error, not a load-sensitive test), so it bisects by the check itself.

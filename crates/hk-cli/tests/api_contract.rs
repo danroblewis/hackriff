@@ -13944,6 +13944,117 @@ fn f16_to_f32(b: u16) -> f32 {
     }
 }
 
+/// **T-1009 — a sweep and a clip are addressed to a NAMED front end.**
+///
+/// The map's Measure box offers "Scan this region with &lt;device&gt;" and "Record IQ of this region
+/// with &lt;device&gt;", so the choice of radio has to survive the trip to the engine. A run holds
+/// one scan runner per front end ([`hk_api::scan::ScanRunners`]) and each front end keeps its own
+/// IQ ring, and both routes take the same `device_id` selector the six device routes take.
+///
+/// This run holds exactly one front end (the mock SDR) — the case the invariant protects: **with
+/// one device the selector may be omitted and behaviour is unchanged**, and naming that one device
+/// is accepted. Asserted on the wire, by value:
+///
+/// 1. `GET /api/control/state` enumerates a sweep per front end in `scans`, each naming its own
+///    `device_id`, and with one front end it agrees with the singular `scan`;
+/// 2. `GET /api/control/scan?device_id=…` prices on the named radio and answers for it;
+/// 3. a selector naming a radio this run does not hold is `404 unknown_device` — on the price, on
+///    the start and on a clip — and never falls back to the default radio;
+/// 4. a start naming this run's own radio is accepted and its `device.commissions`/`device.id`
+///    name that radio; stopping it, named or not, is still never refused.
+#[test]
+fn t1009_a_scan_and_a_clip_are_addressed_to_a_named_front_end() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for("a live front end", Duration::from_secs(30), || {
+        get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64() == Some(FIXTURE_CENTER_HZ)
+    });
+
+    // (1) one sweep per front end, each naming its radio.
+    let (st, v) = get(addr, "/api/control/state");
+    assert_eq!(st, 200, "{v}");
+    let device_id = v["device"]["device_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"))
+        .to_owned();
+    let scans = v["scans"]
+        .as_array()
+        .unwrap_or_else(|| panic!("control/state must enumerate a sweep per front end: {v}"));
+    assert_eq!(scans.len(), 1, "this run holds one front end: {v}");
+    assert_eq!(scans[0]["device_id"], json!(device_id), "{v}");
+    assert_eq!(
+        scans[0]["state"], v["scan"]["state"],
+        "with one front end the enumeration and the singular default are the same sweep: {v}"
+    );
+
+    // (2) pricing on the named radio.
+    // The id is a bare `mock:<name>`; nothing in it needs escaping in a query string.
+    let named = format!(
+        "/api/control/scan?f_lo_hz=88000000&f_hi_hz=90000000&dwell_s=1&device_id={device_id}"
+    );
+    let (st, v) = get(addr, &named);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["device_id"], json!(device_id), "{v}");
+    let steps = v["proposed"]["plan"]["steps"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a named radio prices a pass: {v}"));
+    assert!(steps >= 1, "{v}");
+
+    // (3) a radio this run does not hold: refused everywhere, never the default one instead.
+    let (st, v) = get(addr, "/api/control/scan?device_id=mock:not-this-radio");
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], json!("unknown_device"), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        "{\"f_lo_hz\":88000000,\"f_hi_hz\":90000000,\"dwell_s\":1,\"device_id\":\"mock:not-this-radio\"}",
+    );
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], json!("unknown_device"), "{v}");
+    assert_eq!(
+        get(addr, "/api/control/scan").1["scan"]["state"],
+        json!("idle"),
+        "a refused start commissioned nothing"
+    );
+    let (st, v) = post(
+        addr,
+        "/api/iqbuffer/clip",
+        "{\"t0\":1.0,\"t1\":2.0,\"device_id\":\"mock:not-this-radio\"}",
+    );
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(
+        v["code"],
+        json!("unknown_device"),
+        "a clip names whose ring it comes from: {v}"
+    );
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains(&device_id),
+        "the refusal names the ring this run does hold: {v}"
+    );
+
+    // (4) the start this run's own radio accepts, and the stop that is never refused.
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        &format!(
+            "{{\"f_lo_hz\":88000000,\"f_hi_hz\":90000000,\"dwell_s\":1,\"device_id\":{}}}",
+            json!(device_id)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions"], json!("retune"), "{v}");
+    assert_eq!(v["device"]["id"], json!(device_id), "{v}");
+    assert_eq!(v["scan"]["device_id"], json!(device_id), "{v}");
+    assert_eq!(v["scan"]["state"], json!("running"), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/scan/stop",
+        &format!("{{\"device_id\":{}}}", json!(device_id)),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["state"], json!("idle"), "{v}");
+    drop(serving);
+}
+
 /// **T-511 — the device selector on the wire, against a real server.**
 ///
 /// The serving layer holds N live controls keyed by `device_id`, and the routes that reach a radio
