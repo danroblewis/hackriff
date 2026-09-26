@@ -30461,7 +30461,8 @@ tasks:
   - id: T-1039
     milestone: MLIVE
     title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
-    status: todo
+    status: in-progress
+    branch: task-t1039
     priority: high
     deps:
     - T-1037
@@ -30729,7 +30730,8 @@ tasks:
   - id: T-1053
     milestone: MMAP
     title: "Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout"
-    status: todo
+    status: in-progress
+    branch: task-t1053
     priority: high
     deps: []
     parallel_group: UI-T1028-FOLLOWUP
