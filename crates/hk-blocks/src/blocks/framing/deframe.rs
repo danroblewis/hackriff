@@ -19,6 +19,11 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
     let p = P(params);
     let max = p.req_uint("frame_bits")?;
     let length = FrameLength::from_params(params, max)?;
+    if length.reopens() {
+        return Err(BlockError::Params(
+            "terminator.reopen is sync_search only (a shared flag re-opens a sync search)".into(),
+        ));
+    }
     let offset_bits = p.uint_or("offset_bits", 0)? as usize;
     Ok(Box::new(Deframe {
         params: params.clone(),

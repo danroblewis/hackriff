@@ -595,6 +595,21 @@ pub fn open_mock_replay(
     pacing: Pacing,
     end: hk_core::MockEnd,
 ) -> anyhow::Result<DeviceReplay> {
+    open_mock_replay_with_block_len(path, pacing, end, None)
+}
+
+/// [`open_mock_replay`] delivering `block_len`-sample transfers instead of
+/// [`replay_block_len`]'s 5 ms blocks (`None`: those).
+///
+/// T-926: a live HackRF delivers 65 536-sample transfers, and a 5 ms block divides every
+/// half-second a chain collects in stages (0.5 s is 100 of them at 2.4 Msps) where a live
+/// transfer never does — so a replay could hide a defect that live air showed on every station.
+pub fn open_mock_replay_with_block_len(
+    path: &Path,
+    pacing: Pacing,
+    end: hk_core::MockEnd,
+    block_len: Option<usize>,
+) -> anyhow::Result<DeviceReplay> {
     let fs = SigmfMeta::read(path)
         .with_context(|| format!("reading {}", path.display()))?
         .global
@@ -603,7 +618,7 @@ pub fn open_mock_replay(
     let driver = hk_core::MockSdrDriver::new(
         path,
         hk_core::MockOptions {
-            block_len: replay_block_len(fs),
+            block_len: block_len.unwrap_or_else(|| replay_block_len(fs)),
             pacing,
             end,
             ..hk_core::MockOptions::default()

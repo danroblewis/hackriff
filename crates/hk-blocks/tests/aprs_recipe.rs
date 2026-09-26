@@ -1,9 +1,11 @@
 //! T-952: the worked APRS recipe (`recipes/aprs.recipe.json`) validates against the pinned M1
 //! block catalogue (every block, parameter and port type checked) and carries the AX.25/Bell 202
-//! conventions: zero-bit destuffing (T-613's `bitstuff`) runs over the whole continuous line
-//! BEFORE framing (flags pass through unstuffed, so destuffing an already-cut frame would
-//! misalign every octet after the first stuffed bit), every octet incl. the flag sent LSB first
-//! (`sync.bit_order`), FCS = CRC-16/X-25 over dest..info (`crc`). The bit-level round trip
+//! conventions: the 0x7E flags are found on the still-stuffed line (T-1054, as the AIS recipe
+//! does: the flag is unique only there), each frame's closing flag also opens the next
+//! (`terminator.reopen`), then T-613's `bitstuff` destuffs each frame with `bit_order: lsb`
+//! (every octet sent LSB first), FCS = CRC-16/X-25 over dest..info (`crc`). Before T-1054 the
+//! line was destuffed first and framed at 8-bit steps, so a noise-opened frame never saw a flag
+//! off its own lattice and swallowed real packets. The bit-level round trip
 //! (encode -> destuff -> frame -> FCS-valid) is `crates/hk-blocks/src/blocks/framing/tests.rs`'s
 //! `known_aprs_ui_frame_destuffs_frames_and_fcs_validates_blind`.
 
@@ -35,8 +37,8 @@ fn aprs_recipe_validates_against_the_pinned_catalogue() {
         ("clock", Real),
         ("slice", Soft),
         ("line", Bits),
-        ("destuff", Bits),
         ("sync", Bits),
+        ("destuff", Frames),
         ("crc", Frames),
         ("frame", Frames),
     ] {
@@ -57,13 +59,32 @@ fn aprs_recipe_uses_the_ax25_conventions() {
     let sync = node("sync");
     assert_eq!(hex(&sync["sync_word"]), 0x7E);
     assert_eq!(sync["sync_bits"].as_u64().unwrap(), 8);
-    assert_eq!(sync["bit_order"], json!("lsb"));
+    assert!(
+        sync.get("bit_order").is_none(),
+        "the stuffed line has no octet boundary"
+    );
     assert_eq!(sync["include_sync"], json!(false));
     assert_eq!(hex(&sync["terminator"]["words"][0]), 0x7E);
-    assert_eq!(sync["terminator"]["step_bits"].as_u64().unwrap(), 8);
+    assert_eq!(
+        sync["terminator"]["step_bits"].as_u64().unwrap(),
+        1,
+        "every bit: a noise-opened frame must see a flag off its own lattice"
+    );
+    assert_eq!(
+        sync["terminator"]["reopen"],
+        json!(true),
+        "T-1054: shared HDLC flag"
+    );
 
     let destuff = node("destuff");
     assert_eq!(destuff["direction"], json!("destuff"));
+    assert_eq!(
+        destuff["bit_order"],
+        json!("lsb"),
+        "AX.25 octets are sent LSB first"
+    );
+    let pos = |id: &str| r.nodes.iter().position(|n| n.id == id).unwrap();
+    assert!(pos("sync") < pos("destuff") && pos("destuff") < pos("crc"));
 
     let crc = node("crc");
     assert_eq!(hex(&crc["poly"]), 0x1021);

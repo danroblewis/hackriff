@@ -184,6 +184,22 @@ impl ChainReader {
     pub fn release_to(&self, sample: u64) {
         self.cursor.set(sample);
     }
+
+    /// T-926: restarts a lapped reader just ahead of the oldest retained sample.
+    ///
+    /// A chain is lapped while it *computes* (a probe, a refinement) between reads, never while it
+    /// copies: a read loop outruns the writer by orders of magnitude. So after an overrun the
+    /// retained history is readable again, and restarting inside it keeps as much of it as
+    /// possible; the eighth of the retained span skipped keeps the first read out of the block the
+    /// writer overwrites next.
+    pub fn restart_in_history(&mut self) {
+        let ring = &self.shared.ring;
+        let head = ring.next_sample().unwrap_or(0);
+        let oldest = ring.oldest_sample().unwrap_or(head).min(head);
+        let at = oldest + (head - oldest) / 8;
+        self.cursor.set(at);
+        self.reader = ring.reader_at(at).with_resync_policy(ResyncPolicy::Oldest);
+    }
 }
 
 struct Running {
