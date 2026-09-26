@@ -845,6 +845,9 @@ fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, counters: &Counters) {
                 let (mut folded, mut late, mut rejected) = (0u64, 0u64, 0u64);
                 let n = batch.len();
                 for (k, (f, o)) in batch.drain(..).enumerate() {
+                    // T-1021: announce the rows still to fold BEFORE waiting for the lock, so a
+                    // tile reader about to take it steps aside for the growing edge.
+                    set(&h.view_backlog, (n - k) as u64);
                     let writes = {
                         let mut p = lock();
                         match p.ingest(&FrameInput::from_dsp(&f).with_origin(o)) {
@@ -859,6 +862,7 @@ fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, counters: &Counters) {
                         std::thread::yield_now();
                     }
                 }
+                set(&h.view_backlog, 0);
                 add(&h.view_frames, folded);
                 add(&h.view_late, late);
                 add(&h.view_rejected, rejected);

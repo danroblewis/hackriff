@@ -241,6 +241,11 @@ counter_group!(
         view_tiles_written,
         /// View-lattice bytes written.
         view_bytes_written,
+        /// **Gauge (T-1021): rows the view writer holds and has not folded yet** — its batch's
+        /// remainder, set before each fold takes the view lock. Non-zero means a growing-edge row
+        /// is waiting for that lock, which is what `/api/tiles` yields to
+        /// (`hk_api::http::ApiState::view_ingest_backlog`).
+        view_backlog,
     }
 );
 

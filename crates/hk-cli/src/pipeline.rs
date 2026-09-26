@@ -1173,6 +1173,15 @@ pub fn serve_api(
         history: None,
         // T-439: the de-welded view lattice, whose finest node is the growing edge.
         view_history: handle.view_history(),
+        // T-1021: the view writer's unfolded rows, which a tile read yields to.
+        view_ingest_backlog: Some({
+            let c = handle.counters();
+            Arc::new(move || {
+                c.history
+                    .view_backlog
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+        }),
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::clone(&db)),
         trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)

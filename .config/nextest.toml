@@ -210,7 +210,9 @@ fail-fast = false
 # deterministic halves gate normally (hk-core's ring reader-independence tests and
 # hk-pipeline::waterfall_survives_drops). T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
 # audio branch against the legacy Listen chain, same IQ); its audio/RDS/refinement parity half
-# gates normally (hk-pipeline::listen_recipe_parity).
+# gates normally (hk-pipeline::listen_recipe_parity). T-1021 added the view lattice's live-edge
+# lag under a 220-tile /api/tiles viewport (a paced 2.4 Msps run; the tile route yields the view
+# lock to the writer's backlog).
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
@@ -222,6 +224,7 @@ not (
   or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
   or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
   or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
+  or test(a_viewport_of_tile_reads_never_stalls_the_view_lattices_live_edge)
 )
 '''
 
@@ -501,4 +504,5 @@ or test(the_retention_index_build_is_measured_per_row)
 or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
 or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
+or test(a_viewport_of_tile_reads_never_stalls_the_view_lattices_live_edge)
 '''

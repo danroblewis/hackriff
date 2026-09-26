@@ -9160,6 +9160,20 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
     assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
     assert_eq!(probe["cost"]["fair_share"], json!(true), "{probe}");
+    // T-1021: every history-lock hold this request took, timed — at least the address lookup's,
+    // and no single hold longer than all of them together.
+    let lock = &probe["cost"]["lock"];
+    assert!(lock["holds"].as_u64().is_some_and(|n| n >= 1), "{probe}");
+    let (total, max, cpu) = (
+        lock["hold_ms_total"].as_f64().unwrap(),
+        lock["hold_ms_max"].as_f64().unwrap(),
+        lock["hold_cpu_ms_total"].as_f64().unwrap(),
+    );
+    assert!(max >= 0.0 && max <= total && cpu >= 0.0, "{probe}");
+    assert!(
+        lock["yielded_ms"].as_f64().is_some_and(|y| y >= 0.0),
+        "{probe}"
+    );
     // A client that names itself is a client of its own, and two of them halve the share. The
     // second client here has never been served, so it is also what arms the bootstrap reserve.
     let (st, mine) = get(addr, &format!("{}&client=tab-one", tile(0, 0, 0, 0)));

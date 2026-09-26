@@ -704,18 +704,151 @@ pub(crate) fn with_tile_history<T>(
     f: impl FnOnce(&hk_store::Pyramid) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
     match store {
-        TileStore::Main => crate::http::with_history(state, f),
+        TileStore::Main => crate::http::with_history(state, |p| {
+            let _hold = LockHold::start();
+            f(p)
+        }),
         TileStore::View => {
             let p = state
                 .view_history
                 .as_ref()
                 .ok_or_else(|| ApiError::new(404, "no view-scheme history on this server"))?;
+            yield_to_ingest(state);
             let p = p
                 .lock()
                 .map_err(|_| ApiError::new(500, "view history store poisoned"))?;
+            let _hold = LockHold::start();
             f(&p)
         }
     }
+}
+
+/// The longest one hold of a tile request waits for the view writer to fold what it holds
+/// (T-1021).
+///
+/// T-904's 50 ms lock-hold bound, the figure this repo uses for a hold the live path waits behind.
+/// **Per hold**, and that was measured against the alternative: a 500 ms budget per *request* did
+/// no better on a loaded box (the writer was then short of CPU, not of the lock — 23 rows/s against
+/// 25 arriving with readers yielding their whole budget) and cost every tile hundreds of ms. A
+/// bound, so a writer that is behind for a reason no tile read causes delays each hold by at most
+/// this and never refuses or starves the read.
+pub const TILE_INGEST_YIELD_MAX: std::time::Duration = std::time::Duration::from_millis(50);
+
+thread_local! {
+    /// Whether this thread is answering a tile request — only a tile request's holds yield.
+    static YIELDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Time this request spent yielding, reported as `cost.lock.yielded_ms`.
+    static YIELDED: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// **Tile reads step aside for the growing edge** (T-1021): before a hold of the view lattice's
+/// mutex, wait — up to [`TILE_INGEST_YIELD_MAX`] — while the view writer has rows waiting to fold.
+///
+/// Measured, not assumed (`hk-pipeline/tests/tile_lock_hold.rs`, timing tier: 2.4 Msps paced mock
+/// SDR, a 220-tile viewport over (0,0)..(6,1) on four readers, after T-1018's exact-node read).
+/// Without this, the view writer — which takes the lock once per display row — lost the lock to
+/// tile reads for most of a pass and the view lattice's live edge fell behind capture by **~2 s**
+/// on the dev Mac at load ~15 and **14–31 s** at load ~33–37 (the writer folding 10–23 rows/s
+/// against the 25/s arriving). With it: **~0.2 s** at load ~12 (baseline ~0.1 s) and ~1.3 s at load
+/// ~32. No row was dropped and no ring sample lost either way: the capture thread and the ring
+/// readers never take this lock. Shorter chunks would not have fixed it: the cost was the lock's
+/// **occupancy** (single holds 20–600 ms wall, most of it off-CPU on a loaded box) and the unfair
+/// mutex handing it back to a reader that re-locks, not the length of one hold. So the fix is
+/// priority, applied where the readers take the lock.
+fn yield_to_ingest(state: &ApiState) {
+    let Some(backlog) = state.view_ingest_backlog.as_ref() else {
+        return;
+    };
+    if !YIELDING.with(std::cell::Cell::get) || backlog() == 0 {
+        return;
+    }
+    let start = std::time::Instant::now();
+    while backlog() > 0 && start.elapsed() < TILE_INGEST_YIELD_MAX {
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    YIELDED.with(|c| c.set(c.get() + start.elapsed()));
+}
+
+/// **Every history-lock hold one tile request takes, timed from acquisition to release** (T-1021).
+///
+/// `cost.chunks` counts the holds a tile *read* takes and `cost.build_ms` is the request's wall
+/// clock, which also contains the waits for the lock, the coverage overlay and the JSON; neither is
+/// the number ingest waits behind. The view writer folds each display row under this same mutex,
+/// so the longest hold here is the longest a row fold can wait behind a tile — what T-1021 was
+/// asked to measure before changing the chunking, and what staging can now read off the wire as
+/// `cost.lock`.
+///
+/// Per thread because a tile request is answered on one thread from admission to body (the batch
+/// route runs each address's whole `tiles_json` on one worker), so no request can see another's.
+#[derive(Clone, Copy, Default)]
+struct LockHolds {
+    holds: u32,
+    total_ns: u64,
+    max_ns: u64,
+    cpu_ns: u64,
+}
+
+thread_local! {
+    static LOCK_HOLDS: std::cell::Cell<LockHolds> = const {
+        std::cell::Cell::new(LockHolds { holds: 0, total_ns: 0, max_ns: 0, cpu_ns: 0 })
+    };
+}
+
+/// Times one hold; records it into [`LOCK_HOLDS`] when dropped, i.e. as the guard is released.
+///
+/// Wall **and** this thread's CPU time: the wall is what ingest waits behind, and the gap between
+/// the two is the part of a hold spent off-CPU with the lock held — preempted on a loaded box, or
+/// waiting on disk — rather than reading cells.
+struct LockHold(std::time::Instant, u64);
+
+impl LockHold {
+    fn start() -> Self {
+        Self(std::time::Instant::now(), thread_cpu_ns())
+    }
+}
+
+impl Drop for LockHold {
+    fn drop(&mut self) {
+        let ns = u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let cpu = thread_cpu_ns().saturating_sub(self.1);
+        LOCK_HOLDS.with(|c| {
+            let mut h = c.get();
+            h.holds += 1;
+            h.total_ns = h.total_ns.saturating_add(ns);
+            h.max_ns = h.max_ns.max(ns);
+            h.cpu_ns = h.cpu_ns.saturating_add(cpu);
+            c.set(h);
+        });
+    }
+}
+
+/// CPU time of the calling thread, ns (0 where the clock is unavailable).
+fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the duration of the call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    u64::try_from(ts.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(ts.tv_nsec).unwrap_or(0)
+}
+
+/// `cost.lock` for the holds taken since the last call on this thread, and resets them.
+fn take_lock_holds() -> Value {
+    let h = LOCK_HOLDS.with(|c| c.replace(LockHolds::default()));
+    let yielded = YIELDED.with(|c| c.replace(std::time::Duration::ZERO));
+    let ms = |ns: u64| (ns as f64 / 1e3).round() / 1e3;
+    json!({
+        "holds": h.holds,
+        "yielded_ms": ms(u64::try_from(yielded.as_nanos()).unwrap_or(u64::MAX)),
+        "hold_ms_total": ms(h.total_ns),
+        "hold_ms_max": ms(h.max_ns),
+        "hold_cpu_ms_total": ms(h.cpu_ns),
+    })
 }
 
 /// [`with_tile_history`], with the store **mutable first**, so a read can build the coarse node it
@@ -744,9 +877,13 @@ pub(crate) fn with_tile_history_built<T>(
     let Some(shared) = shared else {
         return with_tile_history(state, store, read);
     };
+    if store == TileStore::View {
+        yield_to_ingest(state);
+    }
     let mut p = shared
         .lock()
         .map_err(|_| ApiError::new(500, "history store poisoned"))?;
+    let _hold = LockHold::start();
     p.materialize(usize::from(level), freq, time).map_err(|e| {
         ApiError::new(
             400,
@@ -2767,6 +2904,14 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     // that never takes a slot from the client's share.
     let planes = parse_planes(q)?;
     let client = client_id(q);
+    // T-1021: this request's holds only, whatever an earlier request on this thread left; and
+    // this request's holds yield the view lock to the growing edge, which no other route's do.
+    let _ = take_lock_holds();
+    YIELDING.with(|c| c.set(true));
+    let stamp = |mut v: Value| {
+        v["cost"]["lock"] = take_lock_holds();
+        v
+    };
     let slot = match state.tile_admission.acquire(&client) {
         Ok(slot) => slot,
         // T-581: the cap is a PRODUCER cap. A sealed tile the hot-tile cache already holds is
@@ -2774,11 +2919,13 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         // into a client-side halving of its operating limit (`tilecache.ts`'s AIMD) behind a
         // couple of slow coarse producers. See [`hot_hit_unslotted`].
         Err(share) => {
-            return hot_hit_unslotted(state, q, planes, &client, share)
-                .ok_or_else(|| too_many_in_flight(share));
+            let hit = hot_hit_unslotted(state, q, planes, &client, share).map(stamp);
+            YIELDING.with(|c| c.set(false));
+            return hit.ok_or_else(|| too_many_in_flight(share));
         }
     };
-    let answer = tile_body(state, q, &slot, planes);
+    let answer = tile_body(state, q, &slot, planes).map(stamp);
+    YIELDING.with(|c| c.set(false));
     // Served means *drawn*: only an answer disarms this client's bootstrap reserve.
     if answer.is_ok() {
         slot.mark_served();

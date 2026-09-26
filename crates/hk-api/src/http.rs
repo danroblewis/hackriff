@@ -375,6 +375,11 @@ pub struct ApiState {
     /// the growing edge must not be behind that lock. `None` leaves the tile route folding out of
     /// scheme 1's welded ladder exactly as it did before T-439.
     pub view_history: Option<Arc<Mutex<Pyramid>>>,
+    /// T-1021: rows the view lattice's writer holds and has not folded yet (the pipeline's
+    /// `history.view_backlog` gauge). A tile read yields to a non-zero backlog before each hold of
+    /// [`Self::view_history`], for a bounded time, so the growing edge is not starved by a
+    /// viewport's fan-out — see `tiles::yield_to_ingest`. `None` never yields.
+    pub view_ingest_backlog: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     /// Calibrated floor product for `/api/floor`.
     pub floor: Option<Arc<Mutex<FloorProduct>>>,
     /// Signal inventory (C27, T-018) for `/api/inventory`. Read through `query_inventory` only.
@@ -1041,6 +1046,10 @@ fn strip_read_diagnostics(v: &mut Value) {
                             if let Some(x) = cost.get_mut(f) {
                                 *x = Value::Null;
                             }
+                        }
+                        // T-1021: this read's history-lock holds — its timing, not the tile's.
+                        if let Some(x) = cost.get_mut("lock") {
+                            *x = Value::Null;
                         }
                     }
                     strip_read_diagnostics(val);
