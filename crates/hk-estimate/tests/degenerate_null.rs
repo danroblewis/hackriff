@@ -822,10 +822,16 @@ fn degenerate_null_rate_per_width() {
         }
     }
     // A grid framer splits the composite more often than not, so the `tested` multiplicity
-    // holds it below the gate at w = 8 and it opens from w = 12 — the opposite of a floor
-    // argument, and the reason the decision rests on the anchored rows.
+    // holds it near zero at w = 8 (1.1e-2 over 4000 windows, against 1.00 anchored) and it opens
+    // from w = 12 — the opposite of a floor argument, and the reason the decision rests on the
+    // anchored rows. Stated as a ratio, not as an exact 0: the cell is 0 of 40 at the default
+    // trial count and 45 of 4000 at the measurement's.
     let grid = |w| get(Source::PairSeeded, Framer::Grid, Affine::Linear, w);
-    assert_eq!(grid(8).gate_real, 0, "{:?}", grid(8));
+    let g8 = grid(8);
+    assert!(
+        g8.gate_real * 20 < g8.trials,
+        "grid framing should hold the pair below 5 % at w=8: {g8:?}"
+    );
     for w in [24u8, 32] {
         let r = grid(w);
         assert!(r.gate_real * 100 >= r.trials * 99, "{r:?}");
