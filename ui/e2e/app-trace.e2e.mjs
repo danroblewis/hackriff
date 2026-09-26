@@ -234,7 +234,7 @@ const SNAPSHOT = `(() => {
   const box = canvas ? canvas.getBoundingClientRect() : null;
   return JSON.stringify({
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
-    headline: row ? `${row.dataset.where} · ${row.dataset.when}` : "",
+    headline: row ? row.dataset.where + " · " + row.dataset.when : "",
     // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
     // the words** — see [[heldObservation]] for what a stale one costs.
     // T-918: the canvas is full-bleed; the pane (trace strip on top) starts below the inset it states.
