@@ -29808,7 +29808,7 @@ tasks:
   - id: T-1007
     milestone: MMAP
     title: "Settings menu replaces most of Review: theme, contrast, ruler mode, devices and which pane uses which, retention/capture window, colour scale; Review keeps only anomalies/alarms"
-    status: in-progress
+    status: done
     branch: task-t1007
     priority: normal
     deps:
@@ -29838,6 +29838,7 @@ tasks:
       Commits: 92d3dd92, 6a4eb5f3, 44ee2c11
       Observed, not chased: At 400 px the HUD time ruler prints no label at all: T-997's reserve drops every one of them because the map's top-left floating chrome column spans the whole width there. That is main's deliberate rule (a label under a control is lost), but on a phone it means the time axis has no numbers anywhere — worth a look by whoever owns T-997/docs 23, e.g. right-hand labels or a shorter reserve at phone width. Evidence: ui/e2e/app-settings.e2e.mjs at 400x820 reads [] visible `.sf-hud-label.time` and every pooled label hidden, while 1280x800 reads six. | The capture window is stated, not editable: no route exists to reconfigure the IQ ring's retention (hk serve --iq-retention is a start-up flag), so the menu names the flag rather than implying a control. | docs/14's table of where each retired control now lives is still not updated for this move (no route or contract changed).
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 49a5253a
   - id: T-1008
     milestone: MMAP
     title: "Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop"
