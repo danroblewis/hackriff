@@ -31980,6 +31980,76 @@ tasks:
 
       2026-09-26 coordinator: CONFLICTING evidence - T-1017's worker (~07:00) saw it fail inside a full 'cargo nextest run -p hk-api' at load ~50 (0.092 s) but PASS ALONE 3/3 (0.206 s, 'binary(shutdown)'), while T-1065's worker saw it fail alone 3/3 at a9f82aa1. So it is NOT deterministic: load- or environment-dependent (and passes in the gate). Treat it as a race under load first (deflake-triage: passes alone sometimes -> find the race the load exposes, e.g. the handler thread not scheduled before shutdown is asserted, or the 503 cap hit by the test's own connections under contention) - still a product question if a request under the cap can fail to reach its handler.
     high_effort_reason: regression bisect on the HTTP accept path (connection pools) + the gate-vs-worktree environment difference; hard debugging
+  - id: T-1090
+    milestone: M2-hardening
+    title: The server prints NOTHING and never binds when its --data-dir volume is ~99 % full (node2) - fail loudly with need/free numbers or degrade to a stated smaller ring, never hang silently
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: CLI-STARTUP-DISK
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      PRODUCT DEFECT (T-1074's worker, node2, 2026-09-26 morning): with its --data-dir on a volume at 98-99 % full (30-47 GB free), the serve command PRINTS NOTHING and never binds - no error, no exit, an empty log; the same command with --data-dir on /tmp answers /surface.html in 2 s. Likely the IQ ring's preallocation (a 551 MB ring; whole-gate runs 4.5-4.7 GB) or the storage budget (T-1023: 'sized to the device by default') blocking or failing silently at startup before the server binds. A portable handheld WILL run with a nearly full card: a server that neither starts nor says why is a user-facing failure.
+      DELIVER: reproduce (a small size-limited volume filled to near capacity); find where startup stalls or swallows the error; make startup FAIL LOUDLY with the cause and the numbers (need N bytes for the IQ ring / storage budget, M free), or degrade to a smaller ring with a stated warning, per the storage-budget design (T-1023: the budget is sized to the device) - never silently hang. Bind the HTTP server early enough that /api/status can report a storage fault if that is the chosen path.
+      ACCEPTANCE: a test (hk-cli) with a data dir whose free space is below the ring's need: the server exits non-zero within 5 s with a message naming the need and the free space (or starts with a stated smaller ring) - red on the pre-fix code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1074 worker 2026-09-26: The server prints NOTHING and never binds when its --data-dir volume is ~99 % full (node2) - fail loudly with need/free numbers or degrade to a stated smaller ring, never hang silently
+  - id: T-1091
+    milestone: MLIVE
+    title: live-edge spec test 4 (T-890 following pane keeps its rows across a row boundary) red 4/12 on main at 2 lanes - re-measure after T-1077's zstd fix, then deflake or fix
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI-LIVE-EDGE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      LOAD-DEPENDENT RED ON MAIN (T-1074's worker 2026-09-26, 12 runs at 2 lanes): live-edge spec test 4 (T-890 'a FOLLOWING pane shorter than a tile keeps its rows across a row boundary') failed 4 of 12 on main + one console.error line, e.g. '89 sample(s) with no tile of the pane's own in hand ... +12167 ms: 0 tiles - 4 coarse stand-ins - 0 pending - 2 behind the edge - 2 drew nothing'. Passes in the rest. Note T-1077 (landed 07:38) fixed a debug-build zstd bottleneck that starved the finest view lattice ('drew nothing' at the live edge) - re-measure on main WITH T-1077 first; it may already be gone.
+      DELIVER (deflake-triage): 10 runs alone and 10 at 2 lanes on a FRESH hk built after T-1077; if still red, find why a following pane holds no tile of its own across a row boundary (row feed / LSR ring / T-1057 retry / T-1040 changes) and fix the product or make the read wait on the page's reported state, never loosening the rows-kept claim.
+      ACCEPTANCE: live-edge green 10/10 alone and 10/10 at 2 lanes, or the product defect named and fixed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (ports >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1074 worker 2026-09-26: live-edge spec test 4 (T-890 following pane keeps its rows across a row boundary) red 4/12 on main at 2 lanes - re-measure after T-1077's zstd fix, then deflake or fix
+  - id: T-1092
+    milestone: MUI
+    title: "app-trace colour check (T-1050 picture guard) marginal: 0.53 vs <0.50 over only 154 clear columns since full bleed - re-derive the sampled region/bound with a measurement"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: UI-TRACE-COLOUR
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      MARGINAL BOUND (T-1074's worker 2026-09-26): app-trace's COLOUR check T-1050 picture guard failed 2 of 12 runs at 2 lanes with {ok:false, distinct:100, dominantShare:0.53, vis:{lo:308,hi:461}} - 0.53 against a <0.50 bound. Its clear span is only 154 of 1440 columns now (the floating chrome takes the rest since full bleed), while the 0.50 bound was measured at 11.5 % over a much wider region; a band mostly at noise floor scores 0.53-0.65 in 154 columns.
+      DELIVER: re-derive the guard for what it measures: sample the columns the surface actually draws on top of (the shared pane-geometry helper, T-1078) over a region at least as wide as the bound was measured on, or re-measure the bound for the narrower span with evidence (distribution over N runs). Same intent (the trace is drawn in the waterfall's palette, not a flat colour), never a looser bound without a measurement.
+      ACCEPTANCE: app-trace's colour check green 10/10 at 2 lanes on a FRESH hk; the measurement behind the bound in the result.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (ports >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1074 worker 2026-09-26: app-trace colour check (T-1050 picture guard) marginal: 0.53 vs <0.50 over only 154 clear columns since full bleed - re-derive the sampled region/bound with a measurement
+  - id: T-1093
+    milestone: M2-hardening
+    title: "hk-pipeline under load: data_path never-ready plugin chain hits its 120 s watchdog, and signal_001_readsb's unpaced replay DROPS (352) instead of waiting for readsb - both pass alone; deflake, and fix the drop if lossless back-pressure fails under load"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-LOAD-FLAKES
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      TWO hk-pipeline tests red under load in worker runs, both passing alone (reported twice on 2026-09-26: T-971's worker at load ~30, T-1086's at load ~20):
+      (1) data_path::a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait - a real-time-paced plugin chain at 1090 MHz; the run's 120 s watchdog stopped it. Seen red in a merge gate once before (log ~120112) and owned by earlier tickets (see board mentions of this test).
+      (2) signal_001_readsb::signal_001_long_unpaced_replay_waits_for_readsb_instead_of_dropping - an unpaced replay must WAIT for the readsb plugin rather than drop; under load it dropped 352 (samples/frames). That is a behavioural claim, not only a timing bound: if load makes the unpaced path drop instead of back-pressuring, that is a product defect (lossless replay is the contract for `hk replay` / cfg.lossless).
+      DELIVER (deflake-triage, per test): reproduce under load deterministically (a slow plugin/consumer in the test harness, never a CPU-spinner). (1) If the watchdog is a wall-clock budget that load exhausts, move the latency bound to the `timing` tier with its `just timing` home (docs/10 3.6) and keep a deterministic structural half in the gate; if the chain truly stalls, fix it. (2) Find where the unpaced path drops under a slow readsb and make it back-pressure (lossless means no drop, however slow the consumer); pin with a test that is red without the fix. Never loosen either assertion.
+      ACCEPTANCE: both green 10/10 alone and 5/5 inside `just test-crate hk-pipeline` under load; (2)'s drop path named and fixed or proven load-only with evidence.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-971 + T-1086 workers 2026-09-26: hk-pipeline under load: data_path never-ready plugin chain hits its 120 s watchdog, and signal_001_readsb's unpaced replay DROPS (352) instead of waiting for readsb - both pass alone; deflake, and fix the drop if lossless back-pressure fails under load
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
