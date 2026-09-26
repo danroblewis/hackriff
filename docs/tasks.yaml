@@ -30665,6 +30665,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold
+
+      Review (fix attempt 1) found: ring max-hold columns were computed over report.ringCover's (narrow, ring-band-clipped) frequency window but folded into pane.box-indexed columns by index, so a pane wider than the tuned band would land the ring's max-hold at the wrong frequencies (ui/src/app/centre/surface.ts:965). Fixed by building the ringMaxHoldColumns call's box from the pane's own full frequency window (matching hold's n-column domain) with only the TIME axis narrowed to ringCover's t0Ns/t1Ns; sampleRingRow already returns NaN for columns outside the ring's own band, so widening the frequency window costs nothing. Corrected ringMaxHoldColumns' docstring in livering.ts to state the contract explicitly, and added a regression test (ui/test/livering.test.ts) with a pane 4x wider than the ring's band asserting the peak lands in the pane's correct column, not shifted to column 0. Also merged main in (T-1037's rowsHeld/rowsLate landed on PaneReport concurrently; resolved by keeping both sets of fields). just test-ui: 106/106 files green; targeted livering/surface-trace/surface-reveal/surface-livering suites all green.
+
+      Gate (fix attempt 2) found one uncommitted file left after fix attempt 1: docs/tasks.yaml, holding the just task note entry from attempt 1 itself (legitimate board content from the sanctioned tool, not a hand-edit). Merge target e48d0eff was already an ancestor of task-t1047 (no re-merge needed). Committed the note as 12697dd4; no code change. just test-ui: 106/106 files green.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:20).
+      Gate (fix attempt 2) found one uncommitted file left in the worktree after fix attempt 1: docs/tasks.yaml, holding the notes-block entry written by `just task note T-1047` during attempt 1 (legitimate board content from the sanctioned tool, not a hand-edit) — it was written after the merge commit and never got committed. The merge target named in the gate finding (e48d0eff) was already an ancestor of task-t1047 (attempt 1's merge already pulled it in), so no re-merge was needed. Committed the stray note (12697dd4), then committed the note recording this fix itself (d082cc52) — that command also touches tasks.yaml, so it had to be committed too or the same UNCOMMITTED finding would recur. No code changed in this pass. Working tree is now clean (git status --short empty) with everything on task-t1047.
+      Tests: just test-ui -> exit 0 (106/106 test files passed (build + tsc + full node unit suite) — no code changed since the last green run, re-run to confirm the clean tree still builds)
+      precheck exit 0
+      Commits: 12697dd4, d082cc52
+      Observed, not chased: `just task note` leaves docs/tasks.yaml modified but uncommitted, which is exactly what tripped this gate finding — a worker (or the runner) that calls it as its last action before hand-back should commit immediately after, or the note-then-handback sequence will keep re-triggering this UNCOMMITTED check on every fix-and-return cycle that ends with a note.
+      Use cases: SIGNAL-012
+      Resources: 3 CPU-s, peak 0.3 GB
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
