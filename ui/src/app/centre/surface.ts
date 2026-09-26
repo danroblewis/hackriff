@@ -52,7 +52,7 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
-import type { HudReserve } from "../../surface/hud";
+import { TIME_LABEL_BOX_CSS, type HudReserve } from "../../surface/hud";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
@@ -63,6 +63,9 @@ import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
+import {
+  commitRetuneMode, isRetuneKey, retuneModeLabel, retuneModeTarget, RetuneModeController, type RetuneModeTarget,
+} from "../../surface/retune-mode";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
@@ -83,6 +86,7 @@ import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
+import { boxActivity, type BoxActivity } from "../dock/activity";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
@@ -90,7 +94,7 @@ import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
-import { activePaneName, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
+import { activePaneName, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
 import {
@@ -108,8 +112,11 @@ import {
 } from "../map/research-slice";
 
 const S_TO_NS = 1e9;
-/** The map strip along the bottom of the canvas, device px. */
-const MINIMAP_PX = 110;
+/** The map strip along the bottom of the canvas, device px. **0: the minimap is retired** (T-995,
+ * user 2026-09-25: "there is never a 'whole world' minimap" — the whole 1 MHz–6 GHz range is reached
+ * by zooming a pane out, Google-Maps style). Its per-SDR active-capture segments are drawn in the
+ * panes instead (`SurfaceView.frame`), and survey/sweep coverage is the panes' coverage fog. */
+const MINIMAP_PX = 0;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
  * control's `"past"` block (T-444/T-476). One frame at 60 Hz, generously. */
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
@@ -179,7 +186,7 @@ const HUD_IDLE_ALPHA = 0.45;
  * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
  * most one layout and never a read-write thrash.
  */
-const RULER_BAND_CSS = 14 + 150; // `hud.ts`'s TIME_LABEL_BOX_CSS: where a time label prints.
+const RULER_BAND_CSS = TIME_LABEL_BOX_CSS.left + TIME_LABEL_BOX_CSS.width; // where a time label prints.
 function chromeReserve(canvas: HTMLCanvasElement, ctl: HTMLElement | null): HudReserve | null {
   if (!ctl) return null;
   const base = canvas.getBoundingClientRect();
@@ -502,13 +509,28 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // box and rect. `composeOverlays` concatenates the pane's VISIBLE ones in ascending z into the one
   // `marks` hook — still one place overlay geometry is produced and one pass (`overlay.ts`: no
   // sampler, no ramp) that draws it. MAP-07…MAP-13 each add one entry here.
+  // T-994: which boxes have an open output (Listen / stream-out / decode / recording), from the
+  // backend's open-output records the Active-outputs mount polls (`dock/activity.ts`). Re-derived
+  // only when those records change, and read INSIDE the frame like every other mark's state, so the
+  // halo and the badge are laid out through the pane's own mapping on every frame (never on the
+  // poll's cadence — T-388).
+  let activitySrc: readonly [unknown, unknown] = [null, null];
+  let activityMap: Map<string, BoxActivity> = new Map();
+  const activityNow = (): ReadonlyMap<string, BoxActivity> => {
+    const s = store.get();
+    if (activitySrc[0] !== s.outputs || activitySrc[1] !== s.servedOutputs) {
+      activitySrc = [s.outputs, s.servedOutputs];
+      activityMap = boxActivity(s.outputs, s.servedOutputs.pipelines, s.servedOutputs.recordings);
+    }
+    return activityMap;
+  };
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     // T-910: the features, in their class symbology, generalized to a symbol under ~6 CSS px in both
     // axes — by the same predicate the pin layer's hit areas are laid out by, on the same frame.
     const rows = Object.values(s.inventory.rows);
-    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained), edge, pane.box, pane.rect,
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained, activityNow()), edge, pane.box, pane.rect,
       { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
@@ -636,6 +658,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
     onFocus: (p) => { focusedPin = p; },
     onSelect: selectPin,
   });
+  // T-994: the keyboard's menu key / Shift+F10 on a focused feature (the browser targets the focused
+  // button with `contextmenu`) opens the same menu, at the feature.
+  pinsEl.addEventListener("contextmenu", (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>(".sf-pin[data-pin]");
+    const row = btn ? store.get().inventory.rows[btn.dataset.pin ?? ""] : undefined;
+    if (!btn || !row) return;
+    e.preventDefault();
+    const r = btn.getBoundingClientRect();
+    openSignalMenu(ctx, row, e.clientX || r.left + Math.min(r.width, 24), e.clientY || r.top + Math.min(r.height, 24));
+  });
   /** The MapTip for whichever pin is focused (keyboard) or else hovered (pointer), re-placed on the
    * pin's position THIS frame so it moves with the pin. It reads loaded state only. */
   const placeTip = () => {
@@ -664,7 +696,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const layouts = panes
       .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
-    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
+    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null, activityNow());
     placeTip();
   };
   /** T-1000: outline the active pane, from pane rectangles in drawing-buffer px. Set-if-changed, like
@@ -1067,6 +1099,66 @@ function mount(el: HTMLElement, ctx: AppContext) {
     });
   };
 
+  // ---- retune mode (T-1028): the one mode in which a gesture commands the radio ----
+  //
+  // The user's 2026-09-25 amendment to the navigation invariant. Everything that makes it safe is in
+  // `surface/retune-mode.ts`; what lives here is the three seams a host owns: WHICH pane (the active
+  // one, T-1000), WHEN a gesture settled (`attachSurfaceInput`'s `onGesture`), and HOW it is said on
+  // screen (the chip, the banner and the pane's status line). The mode is off at mount and nothing
+  // below runs while it is off, so `app-map-controls`/`surface-input`'s empty-call-list controls hold
+  // exactly as they did.
+  const retuneTargetNow = (paneId: string): RetuneModeTarget | null => {
+    const p = preview;
+    const pane = p?.view.panes.get(paneId);
+    if (!p || !pane) return null;
+    // The pane's OWN device would choose the grid here once a pane can name one (T-1006); until
+    // then there is one front end and one grid, exactly as the Retune button's `offerNow` reads it.
+    return retuneModeTarget(pane, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
+  };
+  /** The last thing that happened to a pane in the mode, so the status line has something to say
+   * after the retune landed rather than blanking the instant the request resolves. */
+  let retuneSaid: { paneId: string; text: string } | null = null;
+  const retuneMode = new RetuneModeController({
+    commit: async (paneId) => {
+      const p = preview;
+      if (!p) return;
+      const r = await commitRetuneMode(ctx, {
+        targetNow: retuneTargetNow,
+        // T-437 §5.2, as everywhere else: the growing edge's tiles describe the tuning that ended.
+        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      }, paneId);
+      // What the pane says afterwards. A refusal is said too: in this mode the user did not press a
+      // button, so silence would read as "my pan did nothing" rather than "the front end said no" —
+      // and `applyDeviceAction` has already toasted the reason.
+      retuneSaid = r.target
+        ? { paneId, text: r.ok ? retuneModeLabel(r.target) : `${retuneModeLabel(r.target)}${r.reason === "refused" ? " The front end refused it." : ""}` }
+        : null;
+    },
+    onChange: () => { syncRetuneChip(); },
+  });
+  /** Set once the cluster is mounted; before that there is no chip to re-state. */
+  let syncRetuneChip: () => void = () => {};
+  /** The pane's own status line while the mode is acting on it (`chromeStatus`, per frame). */
+  const retuneStatusFor = (paneId: string): string | null => {
+    if (retuneMode.pendingPane === paneId) {
+      const t = retuneTargetNow(paneId);
+      const what = t ? retuneModeLabel(t) : "Retune mode: nothing to plan against yet.";
+      return retuneMode.inFlight ? `${what} (asking the front end…)` : `${what} (settling…)`;
+    }
+    return retuneSaid && retuneSaid.paneId === paneId && retuneMode.on ? retuneSaid.text : null;
+  };
+  /** `R`: held for one gesture, tapped to latch (`isRetuneKey` says which events count). */
+  const onRetuneKeyDown = (e: KeyboardEvent) => {
+    if (!isRetuneKey(e, isTypingTarget) || e.repeat) return;
+    e.preventDefault();
+    retuneMode.keyDown();
+  };
+  const onRetuneKeyUp = (e: KeyboardEvent) => {
+    if (!isRetuneKey(e, isTypingTarget)) return;
+    e.preventDefault();
+    retuneMode.keyUp();
+  };
+
   // ---- pointer: hover readout, click to focus, right-click for the menu ----
   //
   // **One hit test, `preview.paneAt`, so hover and gesture cannot disagree about where a pointer is.**
@@ -1239,6 +1331,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // `retune.ts` out of the `/surface.html` preview's import graph.
         chromeAction, onChromeAction: pressRetune,
         widthActions, onWidthAction: pressWidth,
+        // T-1028: one line per pane about a retune the mode has pending/in flight, per frame for the
+        // same reason `chromeAction` is — it names the window the pane is showing NOW.
+        chromeStatus: retuneStatusFor,
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
@@ -1332,6 +1427,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); viewMoved(); },
+      // T-1028: the only wire from a gesture to the front end, and it is inert while the mode is
+      // off — `moved`/`settled` return immediately then, so with the mode off this handler is the
+      // old rule byte for byte. A pinch and a drag report `ended` at their release (T-486's commit
+      // point); a wheel has none and is settled by stillness inside the controller.
+      onGesture: ({ pane, ended }) => { if (ended) retuneMode.settled(pane); else retuneMode.moved(pane); },
       onHover: (p, e) => {
         // A pin under the pointer wins the MapTip; the quadtree is the hit test (docs/24 §14.4).
         hoveredPin = p ? pinLayer.pick(cssPoint(e).x, cssPoint(e).y) : null;
@@ -1427,9 +1527,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
         setMeasureMode(false);
       },
       onContext: (p, e) => {
+        const s = store.get();
+        // T-994: a feature on the map — a detection's box or its generalized symbol — is hit the way
+        // a click hits it (the pin layer's polygon/quadtree pick), so right-click / long-press on ANY
+        // box opens its menu. (The detections are the `detections` LAYER since T-806, so `hitAt`'s
+        // marks — the user's own selections and measurements — no longer contain them.)
+        const c = cssPoint(e);
+        const pin = pinLayer.pick(c.x, c.y);
+        if (pin && pin.pin.source === "detection") {
+          const row = s.inventory.rows[pin.pin.id];
+          if (row) { openSignalMenu(ctx, row, e.clientX, e.clientY); return; }
+        }
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
-        const s = store.get();
         if (hit.mark.kind === "signal-box") {
           const row = s.inventory.rows[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
@@ -1446,7 +1556,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // fetch spy); the only press that can reach the radio is the Go-to's retune OFFER, which goes
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
-    const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
+    // T-995: no minimap toggle on the FAB any more (the minimap is retired), so `onFollow` is not
+    // passed: follow/freeze is the active pane's alone.
+    const acts = paneActions(pv.view.panes, () => pv.activePane, undefined,
       // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
       // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
       // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
@@ -1475,6 +1587,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // T-882: the retired toolbar row's controls, rehomed into the cluster. All view state.
       measuring: () => tool === "measure",
       setMeasuring: (on) => setMeasureMode(on),
+      // T-1028: retune mode's chip. A mode, like Measure — but the one whose state decides whether
+      // a settled gesture reaches the device, which is why it is stated twice (the lit chip and the
+      // banner) and why the held key is marked apart from the latch.
+      retuneMode: () => ({ on: retuneMode.on, held: retuneMode.isHeld }),
+      setRetuneMode: (on) => retuneMode.setSticky(on),
       // T-820 (MAP-20): the Annotate and Pin tool modes, beside Measure in the cluster.
       annotating: () => (tool === "annotate" || tool === "pin" ? tool : null),
       setAnnotating: (mode) => setTool(mode ?? "navigate"),
@@ -1578,6 +1695,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-1028: the chip and its banner, re-stated whenever the mode changes or a retune becomes
+    // pending. Wired here rather than passed in, because the controller exists before the cluster.
+    syncRetuneChip = controls.syncRetuneMode;
+    syncRetuneChip();
+    // `R` held is the mode for one gesture; `R` tapped latches it. Registered on `document` like the
+    // pane keys beside them, and refused for a key going into a text field or carrying a modifier.
+    document.addEventListener("keydown", onRetuneKeyDown);
+    document.addEventListener("keyup", onRetuneKeyUp);
+    // A window that loses focus with `R` down never delivers the keyup, and the momentary mode would
+    // stay on until `R` was pressed again — a mode that tunes the radio, left on by alt-tabbing away
+    // from it. Dropping the hold is not the same act as a release (see `releaseHeld`): it must not
+    // latch the mode, which is what a tap does.
+    window.addEventListener("blur", () => retuneMode.releaseHeld());
+    document.addEventListener("visibilitychange", () => { if (document.hidden) retuneMode.releaseHeld(); });
     // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
     // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
     store.select((s) => {
@@ -1623,22 +1754,24 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       preview?.resize(r.width, r.height, dpr);
-      // T-918: the canvas runs under the floating dock at the bottom (full-bleed, docs/23 §10.1), so
-      // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
-      const dock = document.querySelector<HTMLElement>(".app > .dock");
+      // T-918: the canvas runs under the floating chrome at the bottom (full-bleed, docs/23 §10.1),
+      // so the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
+      // T-994: the dock bar is retired; what can sit there now is the Active-outputs strip, and only
+      // while an output is open (hidden — height 0, nothing to clear — otherwise).
+      const dock = document.querySelector<HTMLElement>(".app > .out-strip");
       const dr = dock?.getBoundingClientRect();
       const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
       // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
-      // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
-      // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
-      // clear the peek strip too, not just the dock.
+      // it is never hidden (T-803's rule) — and the panes' bottom edge spans the WHOLE canvas width,
+      // so it always shares an x-range with the sheet: the panes must clear the peek strip too, not
+      // just the dock. (This was the minimap strip's clearance until T-995 retired the minimap.)
       //
       // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
       // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
       // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
       // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
       // height transition). Reading the live top/height, as an earlier version of this fix did,
-      // made the minimap — and so every pane, which packs above it — follow the sheet up and down
+      // made the bottom edge — and so every pane — follow the sheet up and down
       // on every drag and close (review finding on this ticket). The peek clearance itself is a
       // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
       // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
@@ -1648,7 +1781,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
-      // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
+      // The FAB and the readouts dock above the panes' bottom inset, in CSS px (`--map-strip` keeps
+      // its name; with the minimap retired, T-995, it is the lift alone).
       stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + lift}px`);
       // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
       // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
@@ -1672,10 +1806,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
     // height, see above), so this observer is not about tracking drag/snap changes — it exists so
     // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
-    // is still picked up once it appears, rather than the minimap staying un-lifted until the next
+    // is still picked up once it appears, rather than the panes staying un-lifted until the next
     // stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
+    // T-994: the Active-outputs strip appears and disappears with the outputs; its box changing size
+    // (0 while hidden) re-fits the map strip's clearance.
+    const outStrip = document.querySelector<HTMLElement>(".app > .out-strip");
+    if (outStrip) ro?.observe(outStrip);
     window.addEventListener("resize", fit);
     preview.start();
 

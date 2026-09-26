@@ -5,9 +5,9 @@
 //! the same run folded no history frame at all (every hop was shorter than one history row and
 //! each retune discarded the partial row).
 //!
-//! The fixed-tune companion replays the same scene without the scheduler: it never retunes, so the
-//! history reader emits no partial row (its frames, and hence its tiles, are the pre-T-139 ones;
-//! the frame-level bit identity is `hk-dsp` `partial_frames_never_armed_are_bit_identical`).
+//! The fixed-tune companion replays the same scene without the scheduler: it never retunes, so its
+//! partial rows can only come from breaks in the stream — which this scene, 108 joined IQ windows,
+//! is full of (T-939 arms a partial row on a `GAP` too; see the test).
 //!
 //! Blind: the scene's truth is stripped and never read.
 
@@ -326,15 +326,44 @@ fn scheduler_default_settings_feed_history_occupancy_baselines_and_alarms() {
     );
 }
 
+/// **T-939 changed what this companion proves, and the fixture is why.** Before it, the claim was
+/// "a stream that never retunes folds whole rows only" and the count was 0. The claim was about
+/// T-139's arming rule, not about the stream: this scene is `join_scene_windows` — 108 short IQ
+/// windows at revisits, joined into one recording — so the replay is 108 separate captures with
+/// ~60 s of never-sampled stream index between them, and each window ends with up to a row's worth
+/// of averaging in progress. Those samples were captured and their time is observed; discarding
+/// their row is the same loss T-915 fixed at the end of a stream, one capture at a time. Since
+/// T-939 arms partial rows on `GAP`, each break emits its row, with its own `n_avg`.
+///
+/// So what is asserted is the rule that still holds: **a partial row here is owed to a break in
+/// the stream, never to a tune change** — this run never retunes, and there is at most one partial
+/// row per reset. (The main test above checks the consequence that matters: the median central
+/// floor still agrees with the scheduler-driven run within 0.5 dB, so the extra reduced-averaging
+/// rows do not bias the product.)
 #[test]
-fn scheduler_history_fixed_tune_emits_no_partial_rows() {
+fn scheduler_history_fixed_tune_emits_partial_rows_only_where_the_stream_breaks() {
     let Some(out) = scene() else { return };
     let r = run_scene(&out, false);
     let reader = &r.counters["readers"]["history"];
-    assert!(n(&reader["frames"]) > 0, "[{T139}] {reader}");
+    let (frames, partial) = (n(&reader["frames"]), n(&reader["partial_frames"]));
+    let resets = n(&reader["stft_resets"]);
+    assert!(frames > 0, "[{T139}] {reader}");
     assert_eq!(
-        n(&reader["partial_frames"]),
+        n(&r.counters["scheduler"]["retunes_run"]),
         0,
-        "[{T139}] a stream that never retunes folds whole rows only: {reader}"
+        "[{T139}] the fixed-tune companion must not retune: {}",
+        r.counters["scheduler"]
+    );
+    assert!(
+        n(&reader["gap_samples"]) > 0 && resets > 0,
+        "[{T139}] the joined-window scene is a broken stream, or this proves nothing: {reader}"
+    );
+    assert!(
+        partial > 0 && partial <= resets,
+        "[T-939] at most one partial row per stream break, and no other source of one: {reader}"
+    );
+    assert!(
+        partial < frames,
+        "[{T139}] the whole rows are still the bulk of them: {reader}"
     );
 }

@@ -153,15 +153,33 @@ test("movedPastTolerance: long-press is cancelled once the touch drifts past the
 test("signalMenuItems: Listen toggles label/hint with whether the emitter is already on air", () => {
   const ctx = fakeCtx();
   const idle = signalMenuItems(ctx, makeRow());
-  assert.deepEqual(idle.map((i) => i.id), ["listen", "decode", "analyze", "export", "stream", "delete", "adjust-band"]);
+  // T-994: the ticket's order — Listen, Decode, Record clip, Stream out, Analyze, Promote/Delete, Go to
+  // — then the band edits. This menu is where Listen lives now that the Outputs dock is retired.
+  assert.deepEqual(idle.map((i) => i.id), ["listen", "decode", "export", "stream", "analyze", "delete", "goto", "adjust-band"]);
   assert.equal(idle[0].label, "Listen");
-  assert.equal(idle[0].hint, "adds to Outputs");
+  assert.match(idle[0].hint ?? "", /box shows ♪/, "Listen says where its state shows: on the box");
+  assert.equal(idle.find((i) => i.id === "export")!.label, "Record clip");
 
   seedListening(ctx, "e1");
   const onAir = signalMenuItems(ctx, makeRow());
   assert.equal(onAir[0].label, "Stop listening");
   onAir[0].onSelect(); // safe: stopOutput no-ops on AudioSession for an id it never opened
   assert.equal(ctx.store.get().outputs.length, 0, "Stop listening removes the dock entry");
+});
+
+test("signalMenuItems: Go to centres the view on the signal and selects it, reaching no route (T-994)", () => {
+  const calls: string[] = [];
+  const ctx = fakeCtx();
+  ctx.client = new Proxy({}, { get: (_t, k) => (...a: unknown[]) => { calls.push(`${String(k)} ${String(a[0])}`); return Promise.resolve({}); } }) as unknown as AppContext["client"];
+  const seq0 = ctx.store.get().nav.seq;
+  const go = signalMenuItems(ctx, makeRow()).find((i) => i.id === "goto")!;
+  assert.ok(go, "a Go to item");
+  go.onSelect();
+  const s = ctx.store.get();
+  assert.equal(s.nav.gotoHz, makeRow().f_center_hz, "the view is asked to centre on the signal's served centre");
+  assert.equal(s.nav.seq, seq0 + 1);
+  assert.deepEqual(s.focus, { kind: "signal", id: "e1" });
+  assert.deepEqual(calls, [], "view arithmetic only: no request, least of all a device route");
 });
 
 test("signalMenuItems: Promote appears only for candidates; Delete's wording follows state", () => {

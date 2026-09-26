@@ -76,7 +76,7 @@ use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_model::classify::Classification;
-use hk_model::{EmitterId, SampleTime, Timestamp, TrackId};
+use hk_model::{DetectionId, EmitterId, SampleTime, Timestamp, TrackId};
 use num_complex::Complex;
 
 use super::{ChainMsg, ChainReader, Next};
@@ -241,6 +241,8 @@ struct Group {
     end: u64,
     f_lo: f64,
     f_hi: f64,
+    /// The CFAR detection of the group's first box, the subject the C38 gate admits (T-844).
+    detection: DetectionId,
 }
 
 /// The box chosen so far: an owned copy of its padded samples and what classifying it needs.
@@ -251,6 +253,16 @@ struct Chosen {
     request: SnippetRequest,
     /// Analysed extent, samples.
     span: u64,
+    /// The group's CFAR detection (T-844: the shadow record's subject).
+    detection: DetectionId,
+}
+
+/// What the chain publishes: the classification, and (T-844) the learned stage's input of the same
+/// snippet when a model in a non-`off` mode wanted it ([`crate::classify::classify_box_observed`]).
+struct Classified {
+    classification: Classification,
+    input: Option<Vec<f32>>,
+    detection: DetectionId,
 }
 
 fn add_member(groups: &mut Vec<Group>, m: &MemberBox, missed: &std::sync::atomic::AtomicU64) {
@@ -267,6 +279,7 @@ fn add_member(groups: &mut Vec<Group>, m: &MemberBox, missed: &std::sync::atomic
         end: e,
         f_lo: m.f_lo_hz,
         f_hi: m.f_hi_hz,
+        detection: m.detection,
     });
     groups.sort_by_key(|g| g.start);
     if groups.len() > MAX_PENDING_GROUPS {
@@ -411,6 +424,7 @@ pub(crate) fn run(
                         bandwidth_hz: (g.f_hi - g.f_lo).max(1.0),
                     },
                     span,
+                    detection: g.detection,
                 });
             }
             groups.drain(..done);
@@ -446,7 +460,7 @@ pub(crate) fn run(
     if continuous && !detach {
         loop {
             if let Some(emitter) = emitter_of(&shared, track) {
-                write(&shared, emitter, &result);
+                publish(&shared, emitter, &result);
                 return;
             }
             if shared.stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -482,7 +496,7 @@ pub(crate) fn run(
         // for is written by a thread that is itself stopping, and waiting is shutdown latency.
         let stopping = shared.stop.load(std::sync::atomic::Ordering::SeqCst);
         if let Some(emitter) = emitter_of(&shared, track) {
-            write(&shared, emitter, &result);
+            publish(&shared, emitter, &result);
             return;
         }
         if stopping || Instant::now() >= deadline {
@@ -495,7 +509,7 @@ pub(crate) fn run(
 
 /// Classifies the chosen box ([`crate::classify::classify_box`]). `None` when the cascade abstained
 /// upstream (the box could not be extracted or normalised) — counted, and nothing is written.
-fn classify(shared: &Shared, b: &Chosen) -> Option<Classification> {
+fn classify(shared: &Shared, b: &Chosen) -> Option<Classified> {
     let info = InputInfo {
         time: b.time,
         discontinuity: Discontinuity::NONE,
@@ -503,7 +517,7 @@ fn classify(shared: &Shared, b: &Chosen) -> Option<Classification> {
         provenance: &b.prov,
     };
     let mut c14 = SymbolEstimator::new();
-    let out = crate::classify::classify_box(
+    let out = crate::classify::classify_box_observed(
         &Classifier::new(),
         &mut c14,
         // T-399: the receiver-line survey measured by the `hk-survey` reader, once for this
@@ -513,6 +527,7 @@ fn classify(shared: &Shared, b: &Chosen) -> Option<Classification> {
         &b.iq,
         &b.request,
         b.time.host_time,
+        active_ml(shared),
     );
     if out.is_none() {
         inc(&shared.counters.chains.classify_abstained);
@@ -523,13 +538,45 @@ fn classify(shared: &Shared, b: &Chosen) -> Option<Classification> {
             (b.prov.tune.center_hz + b.request.center_offset_hz) / 1e6,
             b.request.bandwidth_hz / 1e3,
             b.span,
-            out.as_ref().map_or("abstained".into(), |c| format!(
+            out.as_ref().map_or("abstained".into(), |(c, _)| format!(
                 "{} open-set {:.3} reasons {:?}",
                 c.family, c.open_set_score, c.reasons
             ))
         );
     }
-    out
+    out.map(|(classification, input)| Classified {
+        classification,
+        input,
+        detection: b.detection,
+    })
+}
+
+/// The run's C38 stage when an operator put some model in a non-`off` mode (T-844). `None` for an
+/// idle stage, so the learned input is never computed and no detection is waited for.
+fn active_ml(shared: &Shared) -> Option<&crate::ml::MlStage> {
+    shared.ml.as_deref().filter(|m| !m.is_idle())
+}
+
+/// Writes the classification ([`write`]), then — only after the repository lock is released, since
+/// the host batches and a batch must never stall other writers — offers it to the C38 shadow stage
+/// (T-844). The published row is final before the stage sees it: the stage borrows it and has no
+/// path that writes a `Classification` (`crate::ml`).
+fn publish(shared: &Shared, emitter: EmitterId, result: &Classified) {
+    write(shared, emitter, &result.classification);
+    let Some(ml) = active_ml(shared) else { return };
+    if !ml.wants(&result.classification.family) {
+        return;
+    }
+    // The detection row is written by the detect writer, which may trail this chain; wait for it
+    // as the decode chains wait for their parent (`super::stored_detection`), but only here, where
+    // a model will run.
+    let detection = super::stored_detection(shared, Some(result.detection))
+        .and_then(|d| shared.repo().detection(d).ok());
+    ml.observe(
+        detection.as_ref(),
+        &result.classification,
+        result.input.as_deref(),
+    );
 }
 
 /// The entry the inventory recorded for `track`, if any. Takes the inventory lock alone.

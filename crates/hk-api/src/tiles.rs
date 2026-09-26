@@ -68,20 +68,24 @@
 //!    *is* the budget, so `level_f` and `level_t` are structurally independent — changing one
 //!    cannot move the other's cell size by so much as a rounding (asserted in
 //!    `changing_one_axis_level_never_moves_the_other_axis_cell`).
-//! 2. The store level is chosen **finest-affordable-first**, never coarsest-adequate. Folding a
-//!    finer level onto the tile's grid can never grey a cell the finer level holds — a fold is a
-//!    max and a sum, so an output cell is observed if *any* source cell in it was. Only the
-//!    opposite direction (a source coarser than the tile's cell, which **replicates** a measured
-//!    value) is a claim, and it is stated per axis in `resolution.fold` and downgrades the honesty
-//!    tier to `survey-overview`.
+//! 2. The store level **never replicates while a level that only folds can answer**. Folding a
+//!    level whose cells are no larger than the tile's can never grey a cell that level holds — a
+//!    fold is a max and a sum, so an output cell is observed if *any* source cell in it was. Only
+//!    the opposite direction (a source coarser than the tile's cell, which **replicates** a
+//!    measured value) is a claim, and it is stated per axis in `resolution.fold` and downgrades the
+//!    honesty tier to `survey-overview`. Among the levels that fold, a store with **live** coarse
+//!    nodes answers from the tile's **exact node**, else the one with the **fewest source cells**
+//!    (T-1018, [`read_order`]): max-hold composes, so the answer is the same grid for a fraction of
+//!    the read. A store without live coarse nodes keeps the finest-first order, because its open
+//!    coarse tiles trail the live edge.
 //! 3. Candidates are ordered by **cell area**, explicitly, never by level index. T-434's warning:
 //!    index order is a coarseness order only for a ladder — in a lattice node (1, 0) outranks
 //!    (0, 3) in index while being *finer* in time.
-//! 4. When the finest affordable level holds nothing, the read walks **coarser** through the
-//!    remaining candidates (T-426's rule, in the direction this route's preference makes
-//!    meaningful: the byte budget evicts the finest tiles first, §5.5). `resolution.answered`
-//!    reports the level that **actually answered**, and `resolution.tried` every level consulted —
-//!    a silent fallback would trade one lie for another.
+//! 4. When the level read first holds nothing, the read walks on through the remaining candidates
+//!    (T-426's rule; the byte budget evicts the finest tiles first, §5.5, so a coarser level holds
+//!    at least what a finer one does). `resolution.answered` reports the level that **actually
+//!    answered**, and `resolution.tried` every level consulted — a silent fallback would trade one
+//!    lie for another.
 //!
 //! # Cost, and the two caps
 //!
@@ -136,6 +140,25 @@
 //! honest half of the result: the route's own work was never the float formatting, so on a loopback
 //! link the body was not what a refetch was waiting for. It is what a tunnel, a phone or a second
 //! machine waits for, and it is what the browser parses.
+//!
+//! # `?planes=compact`: the other three planes, and the one that was sent twice (T-1019)
+//!
+//! T-533 left three JSON number arrays of 65 536 cells behind, and they are what a hot-cache hit
+//! still spends its milliseconds writing: measured on the staging backend against a live HackRF, a
+//! `?planes=f16` tile body is **826–925 kB**, of which `max_db` packed is 174 764 B and the rest is
+//! `grid.coverage`, `grid.occupancy_max` and `grid.frames`. Even a hit whose `cost.build_ms` is 0.6
+//! took ~12 ms of wall clock, and the review this ticket came from established what it was NOT:
+//! transport, gzip and JSON-versus-binary on the wire were all excluded — wall ≈ build everywhere.
+//! What is left is producing the body.
+//!
+//! `compact` is that, negotiated exactly as `f16` is (a new **name**, never a redefinition):
+//! `occupancy_max` becomes a binary16 plane with the same `absent: nan` rule as `max_db`, `frames`
+//! becomes an unsigned-integer plane at the narrowest width that holds this tile's own counts
+//! (which is why it pays where T-533's fixed `u32` did not), and **`grid.coverage` is not sent**,
+//! because `coverage.planes[].runs` beside the grid already carries per-cell coverage compactly —
+//! the duplication T-467 removed between two coverage planes, still present between the coverage
+//! plane and the grid. A caller that wants the per-cell observed *fraction* asks `planes=json` or
+//! `planes=f16`, where every field is unchanged.
 //!
 //! # What a tile never carries
 //!
@@ -311,6 +334,16 @@ pub struct Share {
     pub reserved: usize,
     /// Slots out across all clients at the moment of the decision.
     pub in_flight: usize,
+    /// Slots **this client** holds at the moment of the decision, this read's own not included
+    /// (the decision is taken before the slot is, and a refusal takes none at all).
+    ///
+    /// It is the number that tells a refusal's two causes apart (T-959): at `held >= share` the
+    /// client is refused over reads it still owns — including ones it walked away from, which this
+    /// route goes on producing — and at `held < share` it is refused because somebody else holds
+    /// the slots. Backing off is right for the second and wrong for the first, and only the client
+    /// can tell which of its own held reads it is still waiting for, so the route states the count
+    /// and leaves the arithmetic to it.
+    pub held: usize,
     /// Is the fair share in force at all (`HK_TILE_FAIR_SHARE=off` turns it off — the
     /// first-come-first-served route this ticket replaced, kept so the test that proves the share
     /// matters has something to go red against).
@@ -456,6 +489,7 @@ impl TileAdmission {
                 clients: n,
                 reserved: 0,
                 in_flight: self.in_flight(),
+                held: 0,
                 fair: self.fair,
             });
         };
@@ -477,6 +511,7 @@ impl TileAdmission {
             clients: n,
             reserved,
             in_flight: self.in_flight(),
+            held: held.load(Ordering::Acquire),
             fair: self.fair,
         };
         let ceiling = TILE_MAX_IN_FLIGHT.saturating_sub(reserved).max(1);
@@ -573,7 +608,9 @@ impl Drop for TileSlot {
 
 /// The refusal served when admission says no, so the body states the numbers rather than only the
 /// status. `limit` is the server-wide cap (unchanged, and what pre-T-630 clients parse); `share` is
-/// **this client's** cap, which is the number a client should operate at.
+/// **this client's** cap, which is the number a client should operate at; `held` is how many of
+/// them this client already has out (T-959), which is what tells a refusal over its own reads from
+/// one over another client's.
 fn too_many_in_flight(d: Share) -> ApiError {
     let why = if d.share < TILE_MAX_IN_FLIGHT || d.reserved > 0 {
         format!(
@@ -589,13 +626,24 @@ fn too_many_in_flight(d: Share) -> ApiError {
     } else {
         String::new()
     };
+    // **Whose slots** (T-959). `held` is what THIS client already has out, and it is the only thing
+    // in the refusal that tells its two causes apart: at `held >= share` the client is being refused
+    // over its own reads — including ones it aborted, which this route goes on producing until they
+    // finish — and backing its cap off would be punishing it for its own slow reads. At `held <
+    // share` the slots belong to somebody else and backing off is exactly right.
+    let mine = if d.held >= d.share {
+        " — you already hold that many, so these are your own reads still being produced (an \
+         aborted read holds its slot until it finishes), not other clients'"
+    } else {
+        ""
+    };
     ApiError::new(
         503,
         format!(
-            "too many tile reads in flight (limit {TILE_MAX_IN_FLIGHT}, share {}){why}: tile \
-             production takes the history lock, so the cap is ingest backpressure, not a queue — \
-             cancel tiles whose viewport you have left and retry the ones you still want",
-            d.share
+            "too many tile reads in flight (limit {TILE_MAX_IN_FLIGHT}, share {}, held {}){why}{mine}: \
+             tile production takes the history lock, so the cap is ingest backpressure, not a queue \
+             — cancel tiles whose viewport you have left and retry the ones you still want",
+            d.share, d.held
         ),
     )
 }
@@ -1088,6 +1136,88 @@ pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
     out
 }
 
+/// **The order [`tile_read`] walks the candidates in** — and so the level that answers (T-1018).
+///
+/// # The exact node first, else the fewest source cells that still fold
+///
+/// On a store whose coarse nodes are maintained **live** ([`hk_store::PyramidConfig::coarse_live`],
+/// T-571/T-585) every node is current up to the fold edge (below) — its committed rows are folded as they
+/// arrive and its in-progress row is folded at read time (T-583) — and retention evicts finer
+/// tiles before coarser ones, so a coarser node holds everything a finer one does over any extent.
+/// Max-hold, frame counts and observed seconds compose under folding, so reading a coarser level
+/// whose cells are **no larger than the tile's own on either axis** gives the same grid as folding
+/// level 0 onto it, for a fraction of the source cells. The finest-first walk this replaced read a
+/// `(3, 1)` tile as 16 × 65 536 level-0 cells in four lock holds while node `(3, 1)` sat unread on
+/// disk (the user's tile-latency review, 2026-09-25: 135–152 ms against ~20 ms).
+///
+/// So the order is:
+///
+/// 1. the tile's **exact node** (`key.store_node`), when it is a candidate — `cells²` source cells;
+/// 2. every other candidate that only **folds** (both cells ≤ the tile's), **fewest source cells
+///    first** — the coarsest such level;
+/// 3. the candidates that would **replicate** (a cell coarser than the tile's on some axis), in the
+///    finest-first area order [`read_affordable_levels`] gives, so the least-replicating comes
+///    first. These are reached only when every folding level held nothing, exactly as before.
+///
+/// Honesty is untouched: a level in (1) or (2) never replicates, so the tier and
+/// `resolution.fold` state the same thing a finest-first read would have.
+///
+/// # Where it is NOT applied
+///
+/// **A tile that reaches past [`hk_store::Pyramid::coarse_lag_start`]** keeps the finest-first
+/// order: a closed level-0 row folds into the coarse nodes only once the ingest clock has left it
+/// by `seal_lag` (2 s shipped), and the read-time preview covers level 0's open column and each
+/// node's in-progress row but not those held-back rows. So "current to the live edge" above holds
+/// only before that instant, and a live-edge tile — or a `/ws/tiles/rows` block, which is pushed
+/// once and never re-sent — would otherwise lose its newest rows to a node that has not got them
+/// yet (T-1018 review). Once the rows fold, the next read of the same address takes the node.
+///
+/// A store without live coarse nodes keeps the finest-first order. Scheme 1's eager ladder rolls a
+/// child into its parent only when the child **seals**, so its open coarse tiles trail level 0 by a
+/// whole producer block at the live edge — preferring them there would stop the live edge
+/// appending, which the live-rendering invariant forbids. `coarse_on_demand` would fold the node
+/// inside the request, which is the batch work T-571 removed.
+pub(crate) fn read_order(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
+    read_order_until(p, key, key.region.t1_ns)
+}
+
+/// [`read_order`] for a read that ends at `end_ns` rather than at the tile's own end — a
+/// `/ws/tiles/rows` block is a few rows of one tile, and whether the coarse nodes are complete is a
+/// question about THOSE rows, asked when the block is read (a row is pushed once and never again).
+pub(crate) fn read_order_until(p: &hk_store::Pyramid, key: &TileKey, end_ns: i64) -> Vec<usize> {
+    let mut out = affordable_levels(p, key);
+    if !p.config().coarse_live {
+        return out;
+    }
+    // Only where the coarse nodes are complete: a closed level-0 row folds up `seal_lag` after
+    // the clock leaves it, and the read-time preview does not cover those held-back rows. A tile
+    // reaching into them keeps finest-first, so the live edge never loses its newest rows.
+    if p.coarse_lag_start()
+        .is_some_and(|t| end_ns > t.as_unix_nanos())
+    {
+        return out;
+    }
+    let geom = p.geometry();
+    let rank = |l: usize| {
+        let g = &geom.levels[l];
+        let folds = g.f_cell_hz <= key.f_cell_hz && g.t_cell_ns <= key.t_cell_ns;
+        let (nt, nf) = dims(geom, l, &key.region);
+        (
+            key.store_node != Some(l),
+            !folds,
+            if folds { nt * nf } else { 0.0 },
+        )
+    };
+    // Stable, so ties (every replicating level) keep the finest-first area order.
+    out.sort_by(|&a, &b| {
+        let (ra, rb) = (rank(a), rank(b));
+        ra.0.cmp(&rb.0)
+            .then(ra.1.cmp(&rb.1))
+            .then(ra.2.total_cmp(&rb.2))
+    });
+    out
+}
+
 /// Output rows one chunk of a read at `level` covers — **one history lock hold each**.
 ///
 /// Shared by the read and by [`servable`] on purpose: the readable ceiling is a claim about what
@@ -1330,7 +1460,7 @@ pub struct TileRead {
     /// Every level consulted, in order. More than one means a finer level held nothing and the
     /// read walked coarser.
     pub tried: Vec<u8>,
-    /// Affordable levels, finest first.
+    /// Affordable levels, in the order the read walks them ([`read_order`]).
     pub candidates: Vec<u8>,
     /// Source cells actually read.
     pub source_cells: usize,
@@ -1426,16 +1556,14 @@ fn read_level(
     })
 }
 
-/// Reads one tile: the finest affordable level, walking **coarser** only when a level holds nothing.
+/// Reads one tile from the candidates in [`read_order`] — the exact node, else the cheapest level
+/// that folds (T-1018) — walking on only when a level holds nothing.
 pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<TileRead, ApiError> {
     let (candidates, read_only) = with_tile_history(state, store, |p| {
-        let read = read_affordable_levels(p.geometry(), key);
-        let both: Vec<usize> = read
-            .iter()
-            .copied()
-            .filter(|&l| fold_affordable(p, key, l))
-            .collect();
-        Ok((both, read))
+        Ok((
+            read_order(p, key),
+            read_affordable_levels(p.geometry(), key),
+        ))
     })?;
     if candidates.is_empty() {
         // Which half emptied it is the difference between "this tile is too wide for the history's
@@ -1709,11 +1837,34 @@ pub enum Planes {
     Json,
     /// `max_db` as base64 of little-endian IEEE binary16; the other three planes unchanged.
     ///
-    /// Only `max_db`, because only `max_db` wins: on a full 256 × 256 live tile its JSON text is
-    /// 1 197 118 B against 174 764 B packed, while `frames` is 131 073 B as text against 349 528 B
-    /// as base64 `u32`, and `occupancy_max`/`coverage` lose by a similar factor. Packing them too
-    /// would grow the body by 394 kB to save nothing.
+    /// The plane that wins on its own: on a full 256 × 256 live tile `max_db`'s JSON text is
+    /// 1 197 118 B against 174 764 B packed. `frames` as base64 `u32` (349 528 B against 131 073 B
+    /// of text) loses, which is why this spelling leaves it alone — see [`Planes::Compact`] for
+    /// what *does* pay once the width is chosen from the data rather than fixed at 32 bits.
     F16,
+    /// Every per-cell plane typed and packed, and `grid.coverage` **omitted** (T-1019).
+    ///
+    /// What was left after [`Planes::F16`] was the other three planes, and they are most of the
+    /// body: measured on a live 256 × 256 tile, `?planes=f16` is 826–925 kB of which `max_db` is
+    /// 174 764 B. The rest is `grid.coverage` — 65 536 `f32` fractions spelled as decimal text,
+    /// each one of which `coverage.planes[].runs` already carries, compactly and per *state*, for
+    /// the same cells — plus `occupancy_max` (a null or a decimal a cell) and `frames`.
+    ///
+    /// So this spelling:
+    ///
+    /// - packs `max_db` and `occupancy_max` as binary16, the same [`f16_plane`] with the same
+    ///   `absent: nan` rule — `occupancy_max` is a fraction in `[0, 1]` and binary16 holds it to
+    ///   about three decimal digits, and it is `NaN` when nothing was observed exactly as `null`
+    ///   is in the JSON spelling;
+    /// - packs `frames` as base64 unsigned integers of the **narrowest width that holds this
+    ///   tile's own maximum** (`u8`/`u16`/`u32`/`u64`, stated in the plane's `type`), which is
+    ///   what makes it pay: the fixed `u32` T-533 measured cost 349 528 B, `u8` over the same
+    ///   65 536 cells is 87 384 B against 131 073 B of text, and nothing is lost at any width
+    ///   because the width is chosen from the values;
+    /// - **omits `grid.coverage`** — not a smaller spelling of it but a refusal to send it twice.
+    ///   It is stated in `grid.encoding.rule`, and a caller that wants the per-cell observed
+    ///   fraction asks `planes=json` or `planes=f16`, where it is unchanged.
+    Compact,
 }
 
 impl Planes {
@@ -1721,11 +1872,13 @@ impl Planes {
         match self {
             Planes::Json => "json",
             Planes::F16 => "f16",
+            Planes::Compact => "compact",
         }
     }
 }
 
-/// `?planes=`: `json` (the default) or `f16`. An unrecognised spelling is a **400 naming it**,
+/// `?planes=`: `json` (the default), `f16` or `compact`. An unrecognised spelling is a **400
+/// naming it**,
 /// never a silent fall back to JSON — a client that asked for a representation it can decode and
 /// was quietly given another one would mis-read every cell.
 fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
@@ -1736,8 +1889,9 @@ fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
     {
         None | Some("json") => Ok(Planes::Json),
         Some("f16") => Ok(Planes::F16),
+        Some("compact") => Ok(Planes::Compact),
         Some(other) => Err(bad(&format!(
-            "planes={other:?} is not a plane encoding this server serves (json, f16)"
+            "planes={other:?} is not a plane encoding this server serves (json, f16, compact)"
         ))),
     }
 }
@@ -1803,6 +1957,48 @@ fn f16_plane(values: impl Iterator<Item = f32>, cells: usize, scale: &str) -> Va
     })
 }
 
+/// What `grid.planes` says about itself, in every spelling that carries one.
+const PLANES_RULE: &str = "the typed spelling of the planes it names; every plane NOT named here \
+    is beside it as a JSON array — except `coverage` under `planes=compact`, which is not sent at \
+    all because `coverage.planes[].runs` beside this grid already carries it. \
+    `grid.encoding.planes` says which spelling this answer used.";
+
+/// One integer plane, packed at the **narrowest unsigned width that holds this tile's values**
+/// (T-1019): `u8`, `u16`, `u32` or `u64`, stated in `type`, little-endian, base64.
+///
+/// **The width is measured, never assumed, so the packing is lossless at every width.** That is
+/// the whole reason this plane pays where T-533's fixed `u32` did not: `frames` over a rendered
+/// tile is a handful of counts, so it packs to one byte a cell (87 384 B base64 over 65 536 cells)
+/// against 131 073 B of JSON text and 349 528 B as base64 `u32`. A tile whose counts are large
+/// widens instead of truncating — a saturated count would be an invented measurement.
+///
+/// There is no absent value: `frames` is a count, and a cell nothing was folded into has **0**
+/// frames, which is what the JSON spelling says too (`query::UNOBSERVED_RULE`). `absent: "none"`
+/// states that rather than leaving a reader to wonder which code means nothing.
+fn uint_plane(values: &[u64], scale: &str) -> Value {
+    let max = values.iter().copied().max().unwrap_or(0);
+    let (ty, width) = match max {
+        0..=0xff => ("u8", 1usize),
+        0x100..=0xffff => ("u16", 2),
+        0x1_0000..=0xffff_ffff => ("u32", 4),
+        _ => ("u64", 8),
+    };
+    let mut bytes = Vec::with_capacity(values.len() * width);
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes()[..width]);
+    }
+    json!({
+        "type": ty,
+        "byte_order": "little-endian",
+        "transfer": "base64",
+        "cells": values.len(),
+        "bytes": bytes.len(),
+        "scale": scale,
+        "absent": "none",
+        "data": base64(&bytes),
+    })
+}
+
 /// Standard base64, no line breaks — the alphabet `atob` reads.
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1838,9 +2034,14 @@ fn encoding_json(planes: Planes) -> Value {
             inferred: `json` is one number or `null` per cell; `f16` moves `max_db` into \
             `grid.planes.max_db` as base64 of little-endian IEEE binary16 (its destination is an \
             R16F texture, so nothing that reaches a screen is lost) and leaves `occupancy_max`, \
-            `coverage` and `frames` as JSON arrays, because for those three JSON is the SMALLER \
-            spelling (T-533). A reader that does not know the name served must refuse the tile, \
-            not guess: a plane decoded against the wrong type is a measurement invented.",
+            `coverage` and `frames` as JSON arrays (T-533); `compact` additionally moves \
+            `occupancy_max` into a binary16 plane and `frames` into an unsigned-integer plane \
+            whose width is the narrowest that holds this tile's own counts, and OMITS \
+            `grid.coverage` entirely, because `coverage.planes[].runs` beside this grid already \
+            carries per-cell coverage compactly — a caller that wants the per-cell observed \
+            FRACTION asks `planes=json` or `planes=f16` (T-1019). A reader that does not know the \
+            name served must refuse the tile, not guess: a plane decoded against the wrong type \
+            is a measurement invented.",
     })
 }
 
@@ -1928,9 +2129,6 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
         "f_lo_hz": o.f_lo_hz,
         "f_cell_hz": o.f_cell_hz,
         "encoding": encoding_json(planes),
-        "occupancy_max": Value::Array(o.cells.iter().map(|c| num(c.occupancy_max)).collect()),
-        "coverage": Value::Array(o.cells.iter().map(|c| json!(c.coverage)).collect()),
-        "frames": Value::Array(o.cells.iter().map(|c| json!(c.frames)).collect()),
         "cells": o.cells.len(),
         "observed_cells": o.observed_cells,
         "range_db": o.range_db.map(|(lo, hi)| json!({"lo": lo, "hi": hi})),
@@ -1944,15 +2142,30 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
         "semantics": crate::query::overview_semantics_json(o),
     });
     let g = v.as_object_mut().expect("object");
+    // Row-major, time then frequency, in every spelling. `null` is **not observed**, never quiet
+    // (C26), and its binary16 form is `NaN`.
+    let json_array = |f: &dyn Fn(&hk_store::OverviewCell) -> Value| {
+        Value::Array(o.cells.iter().map(f).collect())
+    };
     match planes {
-        // Row-major, time then frequency. `null` is **not observed**, never quiet (C26).
         Planes::Json => {
+            g.insert("max_db".into(), json_array(&|c| num(c.max_db)));
             g.insert(
-                "max_db".into(),
-                Value::Array(o.cells.iter().map(|c| num(c.max_db)).collect()),
+                "occupancy_max".into(),
+                json_array(&|c| num(c.occupancy_max)),
             );
+            g.insert("coverage".into(), json_array(&|c| json!(c.coverage)));
+            g.insert("frames".into(), json_array(&|c| json!(c.frames)));
         }
         Planes::F16 => {
+            // T-533: the one plane binary16 beats JSON on, and no other — the other three are
+            // still the JSON arrays, unchanged, byte for byte.
+            g.insert(
+                "occupancy_max".into(),
+                json_array(&|c| num(c.occupancy_max)),
+            );
+            g.insert("coverage".into(), json_array(&|c| json!(c.coverage)));
+            g.insert("frames".into(), json_array(&|c| json!(c.frames)));
             g.insert(
                 "planes".into(),
                 json!({
@@ -1961,9 +2174,29 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
                         o.cells.len(),
                         crate::query::scale_str(o.unit),
                     ),
-                    "rule": "the typed spelling of the planes it names; every plane NOT named here \
-                        is beside it as a JSON array, and `grid.encoding.planes` says which \
-                        spelling this answer used.",
+                    "rule": PLANES_RULE,
+                }),
+            );
+        }
+        Planes::Compact => {
+            // T-1019: every per-cell plane typed, and `coverage` NOT sent — `coverage.planes[]`
+            // beside this grid already carries what it says, per state and run-length encoded.
+            let frames: Vec<u64> = o.cells.iter().map(|c| c.frames).collect();
+            g.insert(
+                "planes".into(),
+                json!({
+                    "max_db": f16_plane(
+                        o.cells.iter().map(|c| c.max_db),
+                        o.cells.len(),
+                        crate::query::scale_str(o.unit),
+                    ),
+                    "occupancy_max": f16_plane(
+                        o.cells.iter().map(|c| c.occupancy_max),
+                        o.cells.len(),
+                        "fraction",
+                    ),
+                    "frames": uint_plane(&frames, "count"),
+                    "rule": PLANES_RULE,
                 }),
             );
         }
@@ -2060,7 +2293,7 @@ fn shadow_store(state: &ApiState, tile: TileStore) -> TileStore {
     }
 }
 
-/// The level [`tile_read`] would answer `key` from first — the finest affordable one — or `None`
+/// The level [`tile_read`] would answer `key` from first — the head of [`read_order`] — or `None`
 /// when none is (T-911). A tile the coverage map answers on its own is never read, so this is how
 /// its shadow finds the level its neighbours' live rows were drawn at.
 fn answering_level(
@@ -2069,9 +2302,9 @@ fn answering_level(
     key: &TileKey,
 ) -> Result<Option<u8>, ApiError> {
     with_tile_history(state, store, |p| {
-        Ok(read_affordable_levels(p.geometry(), key)
+        Ok(read_order(p, key)
             .into_iter()
-            .find(|&l| fold_affordable(p, key, l))
+            .next()
             .and_then(|l| u8::try_from(l).ok()))
     })
 }
@@ -2588,7 +2821,7 @@ fn tile_body(
         .map(|_| hot_tile_key(&key, store, planes, max_live));
     let epoch = coverage_epoch(state);
     if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), cache_key.as_ref())
-        && let Some(mut v) = c.get(k, epoch)
+        && let Some(mut v) = c.get(k, epoch, slot.client())
     {
         // The answer is the cached one, but the measurement of what THIS read cost, and whose
         // share it was admitted under (T-630), is this read's — `http.rs` strips exactly these
@@ -2704,8 +2937,9 @@ fn tile_body(
             "budget": {
                 "max_source_cells_per_lock": TILE_MAX_SOURCE_CELLS,
                 "max_source_cells_per_tile": TILE_MAX_TOTAL_SOURCE_CELLS,
-                "statement": "these bound WORK, never resolution: the level is chosen \
-                    finest-affordable-first, so a budget can only ever move the answer toward a \
+                "statement": "these bound WORK, never resolution: the level is the tile's \
+                    exact node, else the affordable level with the fewest source cells that still \
+                    only FOLDS (T-1018), so a budget can only ever move the answer toward a \
                     COARSER source, which replicates and says so — it can never grey a cell a \
                     finer level holds. There is no caller-supplied per-axis cell budget on this \
                     route at all, which is why /api/history's max_f defect (T-437 F2: a 1.5x \
@@ -2750,17 +2984,30 @@ fn tile_body(
 ///
 /// **Bounded is the point, and the bound is in bytes** (T-453): residency must not grow with node
 /// count, and a cache sized in *tiles* would, because a tile's size is a property of the grid.
-/// Thirty-two mebibytes is a few viewports' worth of `planes=f16` tiles and a small fraction of
-/// what one `/api/history` query already allocates; it does not move when the pyramid deepens,
-/// when a pane zooms, or when a second client connects.
-pub const TILE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+///
+/// **Sized in viewports (T-1020).** This is a RAM ACCELERATOR in front of the rolling tile
+/// storage T-1023 owns — it holds no data the disk pyramid does not, so growing it costs RAM
+/// only, never durability. The tile-latency review (2026-09-25) measured a screen at 135-290
+/// tiles; the prior 32 MiB bound held ~35 of today's `planes=f16` tiles (staging: 0 hits / 27
+/// misses on a single pan-back), so a pan re-read everything every time. T-1019 landed and cut a
+/// `planes=compact` tile to ~467 kB against f16's ~922 kB on the acceptance fixture (roughly
+/// half; the docstring below still says "a few viewports' worth" for the reasoning, not the
+/// number). 256 MiB / 467 kB is ~560 compact tiles, comfortably past 290 without chasing an exact
+/// multiple of a screen that varies with pane count and zoom. On the Jetson Orin Nano target
+/// (docs/02 hardware tiers, 4/8 GB variants) 256 MiB is under 6% of the smallest module's RAM and
+/// well inside the budget the pyramid, ring and inference stages already share.
+pub const TILE_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// The cache's entry bound.
 ///
 /// The byte bound alone would admit an unbounded number of tiny answers — a 7.5 kB
 /// coverage-short-circuit tile is 4300 of them inside 32 MiB — and each entry costs a key and a
 /// `Value` tree beyond its serialized size. Whichever bound binds first evicts.
-pub const TILE_CACHE_MAX_ENTRIES: usize = 256;
+///
+/// **T-1020:** raised past the 135-290 tiles/screen the review measured, so the byte bound above
+/// is what actually binds in the common case; the entry bound still stops a flood of tiny answers
+/// from being free.
+pub const TILE_CACHE_MAX_ENTRIES: usize = 600;
 
 /// One cached answer.
 struct HotTile {
@@ -2805,23 +3052,46 @@ struct HotTileCacheInner {
     misses: u64,
     evictions: u64,
     invalidations: u64,
+    /// Per-client hit/miss, so a pan-back can be measured per pane's declared `client` (T-1020)
+    /// rather than only in aggregate. Bounded the same way the T-630 share table is: an idle
+    /// client's row is dropped for a new one rather than growing without bound.
+    by_client: std::collections::HashMap<String, ClientHitStats>,
+    client_clock: u64,
 }
 
+/// One client's hit/miss counters (T-1020), plus the clock stamp that makes eviction LRU.
+#[derive(Default, Clone, Copy)]
+struct ClientHitStats {
+    hits: u64,
+    misses: u64,
+    used: u64,
+}
+
+/// Client identities tracked in the hit/miss table at once (T-1020). Shares its bound with the
+/// T-630 admission share table (`TILE_CLIENT_MAX`) — the same population of declared clients asks
+/// both routes.
+const TILE_CACHE_CLIENT_MAX: usize = TILE_CLIENT_MAX;
+
 impl HotTileCache {
-    /// A cached answer for `key`, if one is held at `epoch`.
-    fn get(&self, key: &str, epoch: (u64, u64)) -> Option<Value> {
+    /// A cached answer for `key`, if one is held at `epoch`. `client` is the caller's declared
+    /// `client` id (T-1020): its own hit/miss counters are updated so a pan-back over a viewport
+    /// can be measured per pane, not only in aggregate.
+    fn get(&self, key: &str, epoch: (u64, u64), client: &str) -> Option<Value> {
         let mut g = self.inner.lock().ok()?;
         g.reset_if_stale(epoch);
         g.clock += 1;
         let clock = g.clock;
-        let Some(e) = g.map.get_mut(key) else {
+        let hit = g.map.get_mut(key).map(|e| {
+            e.used = clock;
+            e.body.clone()
+        });
+        g.record_client(client, hit.is_some());
+        if hit.is_some() {
+            g.hits += 1;
+        } else {
             g.misses += 1;
-            return None;
-        };
-        e.used = clock;
-        let body = e.body.clone();
-        g.hits += 1;
-        Some(body)
+        }
+        hit
     }
 
     /// Hold `body` for `key`, evicting the least recently used until both bounds hold.
@@ -2869,6 +3139,16 @@ impl HotTileCache {
         let Ok(g) = self.inner.lock() else {
             return Value::Null;
         };
+        let by_client: serde_json::Map<String, Value> = g
+            .by_client
+            .iter()
+            .map(|(client, s)| {
+                (
+                    client.clone(),
+                    json!({ "hits": s.hits, "misses": s.misses }),
+                )
+            })
+            .collect();
         json!({
             "entries": g.map.len(),
             "bytes": g.bytes,
@@ -2878,12 +3158,16 @@ impl HotTileCache {
             "misses": g.misses,
             "evictions": g.evictions,
             "invalidations": g.invalidations,
+            "by_client": by_client,
             "rule": "SEALED TILES ONLY. A sealed tile's time extent has fully passed the \
                 pyramid's watermark, so it can never change again; a live tile at the growing \
                 edge changes on every arriving row and is never cached, never looked up and \
                 always re-read. `invalidations` counts the times the observation log moved \
                 (records written or segments deleted) and every entry was dropped, because the \
-                coverage plane beside a sealed grid is derived from that log.",
+                coverage plane beside a sealed grid is derived from that log. `by_client` is the \
+                same hits/misses split by the caller's declared `client` id (T-1020, T-630's \
+                identity), bounded to the least-recently-seen 64 the same way the admission share \
+                table is, so a pan-back over one pane's own viewport is directly measurable.",
         })
     }
 }
@@ -2898,6 +3182,41 @@ impl HotTileCacheInner {
             self.bytes = 0;
             self.epoch = epoch;
         }
+    }
+
+    /// Record one lookup's outcome against `client`'s own counters (T-1020), evicting the
+    /// least-recently-seen client row first when the table is full — the same bound as the T-630
+    /// share table, over the same population.
+    fn record_client(&mut self, client: &str, hit: bool) {
+        self.client_clock += 1;
+        let clock = self.client_clock;
+        if let Some(s) = self.by_client.get_mut(client) {
+            if hit {
+                s.hits += 1;
+            } else {
+                s.misses += 1;
+            }
+            s.used = clock;
+            return;
+        }
+        if self.by_client.len() >= TILE_CACHE_CLIENT_MAX {
+            if let Some(victim) = self
+                .by_client
+                .iter()
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone())
+            {
+                self.by_client.remove(&victim);
+            }
+        }
+        self.by_client.insert(
+            client.to_string(),
+            ClientHitStats {
+                hits: u64::from(hit),
+                misses: u64::from(!hit),
+                used: clock,
+            },
+        );
     }
 }
 
@@ -2989,13 +3308,17 @@ fn hot_hit_unslotted(
     }
     let max_live = crate::http::max_live_span_hz(state);
     let k = hot_tile_key(&key, store, planes, max_live);
-    let mut v = cache.get(&k, coverage_epoch(state))?;
+    let mut v = cache.get(&k, coverage_epoch(state), client)?;
     let cost = &mut v["cost"];
     cost["build_ms"] = json!((started.elapsed().as_secs_f64() * 1e6).round() / 1000.0);
     cost["in_flight"] = json!(state.tile_admission.in_flight());
     cost["in_flight_share"] = json!(share.share);
-    // This read holds no producer slot, and says so.
-    cost["in_flight_held"] = json!(0);
+    // This read holds no producer slot. What the client holds is whatever admission counted a
+    // moment ago when it refused it one (T-959) — 0 for a client with nothing else out, which is
+    // every hot hit that is not racing its own abandoned reads. Stating 0 unconditionally was a
+    // claim about the client, not about this read, and it is false for exactly the client whose
+    // abandoned reads are filling the route.
+    cost["in_flight_held"] = json!(share.held);
     cost["clients"] = json!(share.clients);
     cost["client"] = json!(client);
     cost["reserved"] = json!(share.reserved);
@@ -3864,6 +4187,48 @@ mod tests {
         assert_eq!(s.held(), 1);
     }
 
+    /// **A refusal states what THIS client holds, so its two causes can be told apart** (T-959).
+    ///
+    /// The client's own abandoned reads hold their slots until the route finishes producing them,
+    /// and a client that charges them the route's *average* service time releases them in its own
+    /// books while the route still has them — so its next reads are refused over slots it owns, and
+    /// an AIMD that reads every `503` as contention halves its cap for its own slow reads. The
+    /// number that separates the two is `held`: at or above the share, they are its own.
+    #[test]
+    fn a_refusal_states_how_many_slots_the_refused_client_itself_holds() {
+        let a = Arc::new(TileAdmission::default());
+        // One client holding its whole (sole) share, refused over its own reads.
+        let mine: Vec<TileSlot> = (0..TILE_MAX_IN_FLIGHT)
+            .map(|_| a.acquire("mine").expect("alone, under the cap"))
+            .collect();
+        let d = a.acquire("mine").expect_err("the cap binds");
+        assert_eq!(d.held, TILE_MAX_IN_FLIGHT, "{d:?}");
+        assert!(d.held >= d.share, "refused over its own reads: {d:?}");
+        let err = too_many_in_flight(d);
+        assert_eq!(err.status, 503);
+        assert!(
+            err.message
+                .contains(&format!("held {}", TILE_MAX_IN_FLIGHT)),
+            "the body must name what this client holds: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("your own reads"),
+            "and say so in words: {}",
+            err.message
+        );
+
+        // A second client refused while holding NOTHING is refused over somebody else's slots, and
+        // its refusal says `held 0` — the reading that means "back off", not "wait for yourself".
+        let d = a.acquire("other").expect_err("four are out");
+        assert_eq!(d.held, 0, "{d:?}");
+        assert!(d.held < d.share, "{d:?}");
+        let err = too_many_in_flight(d);
+        assert!(err.message.contains("held 0"), "{}", err.message);
+        assert!(!err.message.contains("your own reads"), "{}", err.message);
+        drop(mine);
+    }
+
     /// **The bootstrap reserve.** The share alone still lets the drawn clients fill the cap
     /// between them, and then a newcomer's first request — the one it cannot start without — waits
     /// on somebody's tile read. So while a client that has never been served a tile is asking, the
@@ -4190,9 +4555,40 @@ mod tests {
             "{}",
             err.message
         );
+        // **And the refusal says WHOSE slots they are** (T-959). These four are other clients':
+        // this caller holds none, which is the reading that means "back off".
+        assert!(
+            err.message.contains("held 0"),
+            "the refusal must state what THIS client holds: {}",
+            err.message
+        );
         drop(held);
+
+        // The same route, refused over the caller's OWN reads — the shape an aborted read leaves,
+        // since `hk-api` goes on producing a tile whose client has walked away. The body says so in
+        // its numbers and in words, so a client can tell a stale charge from contention.
+        // (Its share, not the whole cap: the two other clients are still known here, so this is
+        // exactly the everyday case — a client that fills its own share and asks once more.)
+        let mut mine: Vec<TileSlot> = Vec::new();
+        while let Ok(slot) = state.tile_admission.acquire(ANONYMOUS_CLIENT) {
+            mine.push(slot);
+        }
+        let held_now = mine.len();
+        assert!(held_now > 0, "the caller must hold some of its own");
+        let err = tiles_json(&state, &q).unwrap_err();
+        assert_eq!(err.status, 503, "{}", err.message);
+        assert!(
+            err.message.contains(&format!("held {held_now}"))
+                && err.message.contains("your own reads"),
+            "{}",
+            err.message
+        );
+        drop(mine);
+
         let v = tiles_json(&state, &q).unwrap();
         assert_eq!(v["cost"]["in_flight"], json!(1), "{v}");
+        // This read holds exactly one slot while it is answered, and states it (T-959).
+        assert_eq!(v["cost"]["in_flight_held"], json!(1), "{v}");
         assert!(v["grid"]["observed_cells"].as_u64().unwrap() > 0, "{v}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5123,6 +5519,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **T-1020: a pan back over a just-seen viewport is answered from the cache — the per-client
+    /// hit count rises and no filesystem read happens — measured through the mock SDR's own state
+    /// path (`tiles_json`), the same one `/api/tiles?client=` uses.**
+    #[test]
+    fn a_pan_back_over_a_just_seen_viewport_is_a_cache_hit_reported_per_client() {
+        let dir = temp_dir("cache-by-client");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let mut with_client = tile_params(F_INDEX, T_INDEX);
+        with_client.push(("client".into(), "pane-a".into()));
+
+        let first = tiles_json(&state, &with_client).unwrap();
+        assert!(
+            first["cost"]["served_from"].is_null(),
+            "the first read (a miss) is a real read"
+        );
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(stats["by_client"]["pane-a"]["misses"], json!(1), "{stats}");
+        assert_eq!(stats["by_client"]["pane-a"]["hits"], json!(0), "{stats}");
+
+        reset_source_reads(&state);
+        // The pan back: the SAME viewport, the SAME declared client.
+        let again = tiles_json(&state, &with_client).unwrap();
+        assert_eq!(
+            again["cost"]["served_from"],
+            json!("hot-tile-cache"),
+            "a pan back over a just-seen viewport must be a cache hit"
+        );
+        assert_eq!(source_reads(&state), 0, "a hit must not touch the pyramid");
+
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(
+            stats["by_client"]["pane-a"]["hits"],
+            json!(1),
+            "the pane's own hit count must rise: {stats}"
+        );
+        assert_eq!(stats["by_client"]["pane-a"]["misses"], json!(1), "{stats}");
+        assert_eq!(stats["hits"], json!(1), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A LIVE tile is re-read every time, and that is the correctness half of the ticket.**
     ///
     /// The growing edge changes on every arriving row: serving a stale copy would break *"the live
@@ -5197,17 +5635,22 @@ mod tests {
         for i in 0..TILE_CACHE_MAX_ENTRIES {
             c.put(format!("k{i}"), &body, epoch);
         }
-        assert!(c.get("k0", epoch).is_some());
+        assert!(c.get("k0", epoch, ANONYMOUS_CLIENT).is_some());
         c.put("fresh".into(), &body, epoch);
         assert!(
-            c.get("k0", epoch).is_some(),
+            c.get("k0", epoch, ANONYMOUS_CLIENT).is_some(),
             "the touched entry was evicted"
         );
-        assert!(c.get("k1", epoch).is_none(), "the coldest entry survived");
+        assert!(
+            c.get("k1", epoch, ANONYMOUS_CLIENT).is_none(),
+            "the coldest entry survived"
+        );
 
-        // And a body larger than the whole cache is never held: the bound is unconditional.
+        // And a body larger than the whole cache is never held: the bound is unconditional. A
+        // plain string of that length (rather than a huge numeric array) so the test builds and
+        // serializes it in memcpy time, not per-element formatting time, however big the bound is.
         let c = HotTileCache::default();
-        let huge = json!({ "grid": vec![-80.0f64; TILE_CACHE_MAX_BYTES / 4] });
+        let huge = json!({ "grid": "a".repeat(TILE_CACHE_MAX_BYTES + 1024) });
         c.put("huge".into(), &huge, epoch);
         let s = c.stats_json();
         assert_eq!(s["entries"], json!(0), "{s}");
@@ -5225,16 +5668,16 @@ mod tests {
         let c = HotTileCache::default();
         let body = json!({ "coverage": "observed" });
         c.put("t".into(), &body, (1, 0));
-        assert!(c.get("t", (1, 0)).is_some());
+        assert!(c.get("t", (1, 0), ANONYMOUS_CLIENT).is_some());
         // A record appended.
         assert!(
-            c.get("t", (2, 0)).is_none(),
+            c.get("t", (2, 0), ANONYMOUS_CLIENT).is_none(),
             "a new record left a stale coverage answer"
         );
         c.put("t".into(), &body, (2, 0));
         // A segment pruned.
         assert!(
-            c.get("t", (2, 1)).is_none(),
+            c.get("t", (2, 1), ANONYMOUS_CLIENT).is_none(),
             "retention left a stale coverage answer"
         );
         let s = c.stats_json();
@@ -6709,7 +7152,121 @@ mod tests {
         let e = tiles_json(&state, &q).unwrap_err();
         assert_eq!(e.status, 400);
         assert!(e.message.contains("f8"), "{}", e.message);
-        assert!(e.message.contains("json, f16"), "{}", e.message);
+        assert!(e.message.contains("json, f16, compact"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The narrowest width that holds the values, and nothing truncated at any of them**
+    /// (T-1019). The width is what makes an integer plane pay at all — T-533 measured a fixed
+    /// `u32` costing 349 528 B against 131 073 B of JSON text — so it is chosen from the data,
+    /// and a count that does not fit widens rather than saturating.
+    #[test]
+    fn an_integer_plane_picks_the_narrowest_width_that_holds_its_counts() {
+        let cases: [(&[u64], &str, usize); 5] = [
+            (&[0, 1, 255], "u8", 1),
+            (&[0, 256], "u16", 2),
+            (&[0xffff], "u16", 2),
+            (&[0x1_0000, 7], "u32", 4),
+            (&[0x1_0000_0000], "u64", 8),
+        ];
+        for (values, ty, width) in cases {
+            let p = uint_plane(values, "count");
+            assert_eq!(p["type"], json!(ty), "{values:?}");
+            assert_eq!(p["cells"], json!(values.len()));
+            assert_eq!(p["bytes"], json!(values.len() * width));
+            assert_eq!(p["absent"], json!("none"));
+            let bytes = decode_base64(p["data"].as_str().expect("data"));
+            assert_eq!(bytes.len(), values.len() * width);
+            for (i, want) in values.iter().enumerate() {
+                let mut got = [0u8; 8];
+                got[..width].copy_from_slice(&bytes[i * width..(i + 1) * width]);
+                assert_eq!(u64::from_le_bytes(got), *want, "cell {i} of {values:?}");
+            }
+        }
+        // An empty plane is a width, not a panic: no values, no maximum, the narrowest width.
+        assert_eq!(uint_plane(&[], "count")["type"], json!("u8"));
+    }
+
+    /// **`compact` is the same grid**, cell for cell, in three typed planes — and one plane fewer,
+    /// because `grid.coverage` is what `coverage.planes[].runs` beside it already says (T-1019).
+    #[test]
+    fn the_compact_spelling_carries_the_same_grid_and_drops_the_plane_sent_twice() {
+        let dir = temp_dir("planes-compact");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let q = tile_params(F_INDEX, T_INDEX);
+        let plain = tiles_json(&state, &q).unwrap();
+        let mut f16_q = q.clone();
+        f16_q.push(("planes".into(), "f16".into()));
+        let f16 = tiles_json(&state, &f16_q).unwrap();
+        let mut compact_q = q.clone();
+        compact_q.push(("planes".into(), "compact".into()));
+        let compact = tiles_json(&state, &compact_q).unwrap();
+
+        assert_eq!(compact["grid"]["encoding"]["planes"], json!("compact"));
+        // Every per-cell array is ABSENT, not empty — including `coverage`, which is not spelled
+        // anywhere in this answer's grid.
+        for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+            assert!(
+                compact["grid"][k].is_null(),
+                "grid.{k} is still spelled per cell: {}",
+                compact["grid"][k]
+            );
+        }
+        // …and the grey authority is untouched: the coverage plane is still served, which is the
+        // whole premise of dropping the grid's copy.
+        assert!(
+            !compact["coverage"]["planes"].as_array().unwrap().is_empty(),
+            "{}",
+            compact["coverage"]
+        );
+
+        // `max_db` is the same plane `f16` serves, byte for byte: one spelling, not two.
+        assert_eq!(
+            compact["grid"]["planes"]["max_db"],
+            f16["grid"]["planes"]["max_db"]
+        );
+
+        // `occupancy_max`: binary16, absence for absence against the JSON array.
+        let want_occ = plain["grid"]["occupancy_max"].as_array().unwrap();
+        let occ = &compact["grid"]["planes"]["occupancy_max"];
+        assert_eq!(occ["type"], json!("f16"));
+        assert_eq!(occ["scale"], json!("fraction"));
+        assert_eq!(occ["absent"], json!("nan"));
+        assert_eq!(occ["cells"], json!(want_occ.len()));
+        let bytes = decode_base64(occ["data"].as_str().expect("data"));
+        assert_eq!(bytes.len(), want_occ.len() * 2);
+        for (i, cell) in want_occ.iter().enumerate() {
+            let v = f16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]));
+            match cell.as_f64() {
+                None => assert!(!v.is_finite(), "cell {i}: null in JSON, {v} packed"),
+                Some(w) => assert!(
+                    (v as f64 - w).abs() <= 1e-3 + w.abs() * 1e-3,
+                    "cell {i}: {w} in JSON, {v} packed"
+                ),
+            }
+        }
+
+        // `frames`: exact, at whatever width this tile's counts need.
+        let want_frames = plain["grid"]["frames"].as_array().unwrap();
+        let fr = &compact["grid"]["planes"]["frames"];
+        let width = fr["bytes"].as_u64().unwrap() as usize / want_frames.len();
+        let bytes = decode_base64(fr["data"].as_str().expect("data"));
+        let mut counted = 0usize;
+        for (i, cell) in want_frames.iter().enumerate() {
+            let mut got = [0u8; 8];
+            got[..width].copy_from_slice(&bytes[i * width..(i + 1) * width]);
+            let want = cell.as_u64().expect("frames is a count, never null");
+            assert_eq!(u64::from_le_bytes(got), want, "frames cell {i}");
+            counted += usize::from(want > 0);
+        }
+        assert!(
+            counted > 0,
+            "the fixture folded no frame anywhere, so this comparison would pass on an empty grid"
+        );
+
+        // Smaller than the spelling it succeeds, on this very answer.
+        let (c, f) = (compact.to_string().len(), f16.to_string().len());
+        assert!(c < f, "compact body {c} B against f16 {f} B");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
