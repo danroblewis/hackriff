@@ -30433,7 +30433,7 @@ tasks:
   - id: T-1038
     milestone: MLIVE
     title: "Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget"
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-1037
@@ -30457,6 +30457,7 @@ tasks:
       Commits: 90bf841a
       Observed, not chased: surface-child-prefetch: cold 3-frame render of a 16x12-tile pane shows cancelled=15 (queue overflow drop, pre-existing, unrelated to child)
       Resources: 46 CPU-s, peak 0.7 GB
+    commit: c87e54ab
   - id: T-1039
     milestone: MLIVE
     title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
