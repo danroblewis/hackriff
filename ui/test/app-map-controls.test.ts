@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PaneModel } from "../src/surface/panes";
 import type { Lattice } from "../src/surface/lattice";
-import { IDLE_MS, IdleFade, ZOOM_STEP, mountMapControls, paneActions, parseGoto } from "../src/app/chrome/map-controls";
+import { GOTO_HINT, IDLE_MS, IdleFade, ZOOM_STEP, mountMapControls, paneActions, parseGoto } from "../src/app/chrome/map-controls";
 import { createStore } from "../src/app/store";
 import { initialState, requestGoto } from "../src/app/state";
 import type { AppContext } from "../src/app/context";
@@ -349,6 +349,9 @@ test("T-955: a painted Go-to offer is withdrawn when the radio retunes onto the 
     const root = c.el as unknown as FakeEl;
     const form = root.find("map-goto")!, offer = root.find("map-offer")!, why = root.find("map-offer-why")!;
     const input = form.children.find((x) => x.tag === "input")!;
+    // T-1027: the retired bottom strip's empty-state hint lives in the Go-to glass's tooltip.
+    assert.equal(form.getAttribute("title"), GOTO_HINT);
+    assert.match(GOTO_HINT, /click a signal.*shift\+drag.*region/);
     input.value = "162.2M";
     form.fire("submit");
     assert.equal(offer.hidden, false, "the Go-to offer is painted");
