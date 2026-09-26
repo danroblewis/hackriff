@@ -2358,7 +2358,10 @@ fn record_quiet_after(
     pad_hz: f64,
 ) -> Option<Vec<i64>> {
     let from = before_ns.saturating_sub(lookback_ns.max(0));
-    if n == 0 || from >= before_ns || !(freq.hi_hz > freq.lo_hz) {
+    if n == 0
+        || from >= before_ns
+        || freq.hi_hz.partial_cmp(&freq.lo_hz) != Some(std::cmp::Ordering::Greater)
+    {
         return None;
     }
     let pad = if pad_hz.is_finite() {
