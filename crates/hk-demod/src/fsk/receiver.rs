@@ -230,8 +230,12 @@ fn run_lengths(bits: &[u8]) -> Vec<usize> {
     runs
 }
 
+/// Least [`single_run_fraction`] a burst's bits may have before its rate reads as a `k×`
+/// harmonic of the true clock (the receiver's harmonic check, and the T-953 consensus gate).
+pub(crate) const HARMONIC_SINGLE_RUN_MIN: f64 = 0.2;
+
 /// Fraction of inner runs that are one symbol long (random NRZ ≈ 0.5; a `k×` rate ≈ 0).
-fn single_run_fraction(bits: &[u8]) -> f64 {
+pub(crate) fn single_run_fraction(bits: &[u8]) -> f64 {
     let runs = run_lengths(bits);
     if runs.len() < 3 {
         return 0.0;
@@ -362,7 +366,11 @@ impl FskBurst {
     ///    sampled at any rate yields a repeating pattern, as does an unmodulated carrier, while
     ///    data does not;
     /// 3. framing found the learned sync word in this burst;
-    /// 4. the rate was C14's trusted clock, or a cluster prior built from trusted C14 rates.
+    /// 4. the rate was C14's trusted clock, or a cluster prior built from trusted C14 rates;
+    /// 5. **the burst's own population agrees on its symbol clock** (T-953,
+    ///    [`crate::fsk::consensus`]) — the caller measured that this burst is one of many from the
+    ///    same emitter whose locked, tracked rates land on one value. One burst's best-fitting
+    ///    standard-rate trial is not evidence; the same trial winning burst after burst is.
     ///
     /// Anything else — the best-lock standard-rate trial nothing confirmed — abstains.
     pub fn alphabet_evidence_framed(&self, framed: FrameEvidence) -> AlphabetEvidence {
@@ -383,6 +391,9 @@ impl FskBurst {
         if framed.sync_found {
             return AlphabetEvidence::Measured("framing sync found");
         }
+        if framed.rate_consensus {
+            return AlphabetEvidence::Measured("the burst population agrees on the symbol rate");
+        }
         match self.seed.source {
             SeedSource::TrustedC14 => AlphabetEvidence::Measured("trusted C14 clock"),
             SeedSource::ClusterPrior { .. } => AlphabetEvidence::Measured("cluster prior"),
@@ -402,6 +413,10 @@ impl FskBurst {
     /// reported only when [`FskBurst::alphabet_evidence_framed`] says the alphabet was measured;
     /// otherwise they are `None` (measured values only, never a default — T-614), and the CFO
     /// falls back to C13's, which is a measurement of the carrier, not of symbols.
+    ///
+    /// T-953: `framed.rate_consensus` is one of the things that make it measured, so a burst
+    /// belonging to a population that agrees on its clock reports the rate its own Gardner loop
+    /// tracked — the value the `/ws/open/bits` tap has always published for it.
     pub fn estimated_params_framed(&self, framed: FrameEvidence) -> EstimatedParams {
         let s = self
             .symbols
@@ -422,13 +437,18 @@ impl FskBurst {
     }
 }
 
-/// What framing inference found in one burst (T-614), for [`FskBurst::alphabet_evidence_framed`].
+/// What is known about one burst **independently of the trial that demodulated it** (T-614), for
+/// [`FskBurst::alphabet_evidence_framed`]: what framing inference found in it, and — since T-953 —
+/// whether its own population agrees on its symbol clock ([`crate::fsk::consensus`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameEvidence {
     /// The learned sync word was located in the burst's bits.
     pub sync_found: bool,
     /// The frame's CRC checked.
     pub crc_valid: bool,
+    /// This burst is a member of a population that agrees on its tracked symbol rate (T-953,
+    /// [`crate::fsk::consensus::rate_consensus_members`]).
+    pub rate_consensus: bool,
 }
 
 /// Whether a burst's symbol alphabet was measured (T-614).
@@ -722,7 +742,9 @@ impl FskReceiver {
                         lock_quality: sy.lock.lock_quality,
                         error: None,
                     });
-                    if single_run_fraction(&sy.bits) >= 0.2 || sync_found == Some(true) {
+                    if single_run_fraction(&sy.bits) >= HARMONIC_SINGLE_RUN_MIN
+                        || sync_found == Some(true)
+                    {
                         seed.rate_bd = rate;
                         seed.harmonic_divisor = Some(k);
                         if sync_found.is_some() {

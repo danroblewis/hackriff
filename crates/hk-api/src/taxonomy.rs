@@ -12,7 +12,7 @@
 
 use hk_model::classify::taxonomy::{CURRENT, TAXONOMIES, Taxonomy, UNKNOWN};
 use hk_model::classify::thresholds::{THRESHOLDS, THRESHOLDS_VERSION};
-use hk_model::classify::{LAMBDA0_MIN, MAX_CONFIDENCE, TaxonomyRef};
+use hk_model::classify::{LAMBDA0_MIN, MAX_CONFIDENCE, MAX_UNKNOWN_CONFIDENCE, TaxonomyRef};
 use serde_json::{Value, json};
 
 fn taxonomy_value(t: &Taxonomy) -> Value {
@@ -40,6 +40,8 @@ pub fn taxonomy_json() -> Value {
         "thresholds": {
             "version": THRESHOLDS_VERSION,
             "max_confidence": MAX_CONFIDENCE,
+            // T-953: `unknown` is the residual hypothesis, capped strictly lower.
+            "max_unknown_confidence": MAX_UNKNOWN_CONFIDENCE,
             "lambda0_min": LAMBDA0_MIN,
             "families": THRESHOLDS.iter().map(|t| json!({
                 "family": t.family,
