@@ -29501,7 +29501,7 @@ tasks:
   - id: T-1002
     milestone: MMAP
     title: "Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it"
-    status: in-progress
+    status: done
     branch: task-t1002
     priority: medium
     deps:
@@ -29528,6 +29528,7 @@ tasks:
       Commits: 9567b761, 39e60839, 41f0264a
       Observed, not chased: No hk binary for current main exists on this box, so the browser tier was served with a neighbouring worktree's binary (t1035, built 19:30 today). That is the same compromise as the previous round and is why I did not re-run ui/e2e/app-outputs-map.e2e.mjs this time: last round I proved it red on a main-only ui tree with the same harness and binary (same final failure, 'timed out after 60000 ms waiting for a pressable box at 400 px'), so it is not this branch's. | canvas-journey.e2e.mjs test 4 remains red on this ticket's base as well as on the branch (reported with evidence in the first hand-back: the failedW2 <= failedW1*0.5+4 backoff bound, and in another run the 'magenta pixels before the kill' premise). Untouched by either merge. | At 400 px the bottom sheet's 'SIGNAL INVENTORY · pane 1 of 2' heading is partly overdrawn by the floating trace/measure HUD (ui/e2e/artifacts/app-pane-inventory-400-split.png) - pre-existing z-order between the HUD and the sheet. | The two inventory count pills in the map's top-left chrome now count the ACTIVE pane's rows (correct - they open the sheet on those lists) but do not name the pane the way the lists do; a one-line aria-label addition would finish docs/23 §10.7's naming rule for that chrome.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: b3a920b5
   - id: T-1003
     milestone: MMAP
     title: "Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes"
