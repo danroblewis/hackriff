@@ -30157,10 +30157,10 @@ tasks:
   - id: T-1032
     milestone: MMAP
     title: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
-    status: in-progress
+    status: todo
     branch: task-t1032
     priority: medium
-    deps: []
+    deps: [T-1026]
     parallel_group: UI-CARD-FLAKE
     needs: none
     model: opus
@@ -30171,6 +30171,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone and at 3 lanes on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been ~a day stale; build hk-cli once), then HAND BACK. Never `just gate`. Never loosen an assertion; make it deterministic and prove it goes red when the defect returns.
     notes: |
       FOUND BY coordinator triage 2026-09-25: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
+
+      2026-09-25 coordinator: filing error corrected - the app-card spec this ticket deflakes exists only on the unlanded T-996/T-1026/T-1007 stack, so the ticket now depends on T-1026 (status todo, not blocked). The runner's claim for T-1032 is 'blocked' and will not release on its own: when T-1026 lands, the coordinator re-dispatches this ticket (on task-t1032, which may hold the worker's first pass).
   - id: T-1033
     milestone: MAUTO
     title: "explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it"
