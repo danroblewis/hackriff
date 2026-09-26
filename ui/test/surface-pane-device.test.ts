@@ -42,6 +42,9 @@ import {
   acceptPaneRetune, offerAcceptable, offerLabel, paneRetuneAction, paneRetuneOffer, paneWidthAction,
   paneWidthOffer, type PaneRetuneOffer, type PaneRetuneSite,
 } from "../src/surface/retune";
+import {
+  commitRetuneMode, retuneModeAcceptable, retuneModeAction, retuneModeLabel, retuneModeTarget,
+} from "../src/surface/retune-mode";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
 import type { AppContext } from "../src/app/context";
@@ -160,7 +163,9 @@ test("the pill is on every pane's status row and NOT on the map, and `chrome.ts`
     tiles: 1, fallbacks: 0, pending: 0, differsFrom: [], behind: 0, surveyed: 0, blank: 0,
     shortNs: 0, shadowLabel: null,
   } as unknown as PaneStatus);
-  const r = readoutOf([st("pane1", A), st("pane2", B), st("map", ANY_DEVICE)], "map", null, null, null,
+  // `deviceFor` is the LAST slot (T-1028's `statusFor` is the one before it): the row is a list of
+  // independent, anonymous slots, and a new one goes on the end rather than in the middle.
+  const r = readoutOf([st("pane1", A), st("pane2", B), st("map", ANY_DEVICE)], "map", null, null, null, null,
     (id) => devicePill([DEV_A, DEV_B], id === "pane1" ? A : id === "pane2" ? B : ANY_DEVICE));
   assert.equal(r.rows[0].device?.label, "HackRF · 2.4 Msps");
   assert.equal(r.rows[1].device?.label, "RTL-SDR · 2.4 Msps");
@@ -322,4 +327,39 @@ test("retuneDevice: every case the backend distinguishes, and no other answer", 
   assert.deepEqual(retuneDevice([], ANY_DEVICE), { kind: "default" });
   assert.deepEqual(retuneDevice([DEV_A, DEV_B], ANY_DEVICE), { kind: "ambiguous", ids: [A, B] });
   assert.deepEqual(retuneDevice([DEV_A], B), { kind: "gone", requested: B, ids: [A] });
+});
+
+// ---------------------------------------------------------------------------
+// T-1028's retune mode reaches the front end too, so it names the pane's radio
+// ---------------------------------------------------------------------------
+
+test("retune mode — the one path a GESTURE opens — names the pane's device, and refuses out loud when it cannot", async () => {
+  const m = model();
+  const id = m.list()[0].id;
+  m.setDevice(id, B);
+  m.setFreq(id, 433.9e6, 1e6);
+  const target = retuneModeTarget(m.get(id)!, GRID, T0, 0, [DEV_A, DEV_B]);
+  assert.equal(target.retuneDeviceId, B);
+  assert.equal(target.deviceBlock, null);
+  assert.equal(retuneModeAcceptable(target), true, retuneModeLabel(target));
+  assert.equal(retuneModeAction(target).deviceId, B, "a settled view must tune ITS OWN pane's radio");
+  const { ctx, calls } = deviceSpyCtx();
+  const site = { targetNow: () => retuneModeTarget(m.get(id), GRID, T0, 0, [DEV_A, DEV_B]), invalidateEdge: () => 0 };
+  const r = await commitRetuneMode(ctx, site, id);
+  assert.equal(r.ok, true, `the commit was refused: ${JSON.stringify(r)}`);
+  assert.equal(calls[0].body.device_id, B);
+
+  // The CONTROL: the same settled view from a pane on the union of two radios sends nothing at all —
+  // the mode is a gesture path, so it is exactly the one that would otherwise post the request the
+  // server answers `400 device_required`.
+  const union = retuneModeTarget(model().list()[0], GRID, T0, 0, [DEV_A, DEV_B]);
+  assert.equal(union.deviceBlock, "device_required");
+  assert.equal(union.retuneDeviceId, null);
+  assert.equal(retuneModeAcceptable(union), false);
+  assert.equal(retuneModeAction(union), null);
+  assert.match(retuneModeLabel(union), /pick a front end for it in the viewport menu/);
+  const spy2 = deviceSpyCtx();
+  const out = await commitRetuneMode(spy2.ctx, { targetNow: () => union, invalidateEdge: () => 0 }, union.paneId);
+  assert.equal(out.ok, false);
+  assert.deepEqual(spy2.calls, [], "retune mode posted a request the server must refuse");
 });

@@ -61,6 +61,13 @@ export interface WidthAction extends RowAction {
   readonly key: string;
 }
 
+/**
+ * Supplies a viewport's **status line** (T-1028) — one sentence about something happening to this
+ * viewport right now, or `null` when nothing is. Anonymous exactly as [[RowActionFor]] is: this file
+ * does not learn what a retune, a mode or a settle is, it shows the sentence it is handed.
+ */
+export type StatusFor = (id: string) => string | null;
+
 /** Supplies a viewport's width presets, in a fixed order — `[]` for a viewport that has none (e.g.
  * the map, or a host that offers no width control at all). */
 export type WidthActionsFor = (id: string) => readonly WidthAction[];
@@ -141,6 +148,9 @@ export interface ReadoutRow {
   readonly ruler: string | null;
   /** Capture-width presets (T-496), `[]` when this viewport has none. */
   readonly widths: readonly WidthAction[];
+  /** One sentence about what is happening to this viewport now (T-1028: a retune the mode has
+   * pending, settling or in flight), or `null` when nothing is. Its own line, like `ruler`. */
+  readonly status: string | null;
   /** **Whose coverage decides this viewport's grey** (T-1006), or `null` when the viewport has no
    * device of its own (the minimap) or the host knows of no front end to name. */
   readonly device: RowDevice | null;
@@ -165,6 +175,7 @@ export function readoutOf(
   actionFor: RowActionFor | null = null,
   rulerFor: RulerFor | null = null,
   widthsFor: WidthActionsFor | null = null,
+  statusFor: StatusFor | null = null,
   deviceFor: RowDeviceFor | null = null,
 ): Readout {
   const rows = statuses.map((s): ReadoutRow => {
@@ -208,6 +219,8 @@ export function readoutOf(
       ruler: rulerFor?.(s.id) ?? null,
       // Width presets are a device action too, so the map gets none — same reasoning as `action`.
       widths: viewport === "minimap" ? [] : widthsFor?.(s.id) ?? [],
+      // The map is not a window you look through, so nothing acts on it — same reasoning again.
+      status: viewport === "minimap" ? null : statusFor?.(s.id) ?? null,
       // The minimap has no device of its own for the same reason it has no retune: it is the thing
       // that says where the panes are, not a window you look through at one radio's coverage.
       device: viewport === "minimap" ? null : deviceFor?.(s.id) ?? null,
@@ -270,6 +283,12 @@ export class SurfaceChrome {
       // T-916: the last-known tier's own resolution statement. Hidden — not emptied — when there is
       // nothing to say, exactly as `ruler` is, and marked on the element too so a test (and a
       // stylesheet) reads the state rather than parsing the sentence.
+      // T-1028: what is happening to this viewport now. `role="status"` on the element (set once at
+      // mint), so a screen reader hears a retune the user's own pan asked for — the one place on this
+      // surface where a gesture moves the radio, and therefore the one that must not be silent.
+      entry.status.hidden = row.status === null;
+      entry.root.setAttribute("data-status", row.status === null ? "" : "busy");
+      if (row.status !== null) set(entry.status, row.status);
       entry.shadow.hidden = row.shadow === null;
       entry.root.setAttribute("data-shadow-source", row.shadow === null ? "own-level" : "ladder");
       if (row.shadow !== null) set(entry.shadow, row.shadow);
@@ -351,6 +370,7 @@ export class SurfaceChrome {
     const action = h("button", { class: "hk-surface-action", type: "button", hidden: true }) as HTMLButtonElement;
     const ruler = h("span", { class: "hk-surface-ruler", hidden: true });
     const shadow = h("span", { class: "hk-surface-shadow-source", hidden: true });
+    const status = h("span", { class: "hk-surface-status", role: "status", hidden: true });
     // T-1006. Appended LAST on the row, after every existing element: `ui/e2e/app-surface.e2e.mjs`
     // and `app-trace.e2e.mjs` read the headline as `children[1]`, so the cells' positions are part
     // of this row's contract and a new element goes on the end, placed by the stylesheet.
@@ -359,8 +379,8 @@ export class SurfaceChrome {
     // The id is captured, not read off the DOM: rows are kept by id and this listener outlives every
     // update, so the press names the viewport the row was minted for and nothing else.
     action.addEventListener("click", () => { if (!action.disabled) this.onAction?.(id); });
-    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler, shadow, device);
-    const entry: Row = { root, cells, why, action, ruler, shadow, widthGroup, widthBtns: [], device };
+    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler, shadow, status, device);
+    const entry: Row = { root, cells, why, action, ruler, shadow, status, widthGroup, widthBtns: [], device };
     this.rows.set(id, entry);
     this.list.append(root);
     return entry;
@@ -381,6 +401,7 @@ interface Row {
   readonly action: HTMLButtonElement;
   readonly ruler: HTMLElement;
   readonly shadow: HTMLElement;
+  readonly status: HTMLElement;
   readonly widthGroup: HTMLElement;
   readonly widthBtns: WidthBtn[];
   readonly device: HTMLElement;

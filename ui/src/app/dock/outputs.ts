@@ -2,6 +2,7 @@
 // target formatting, address text and view-model text — no DOM, no fetch, unit-tested.
 import type { ListenTarget } from "./api";
 import type { OutputEntry } from "./slice";
+import type { AudioStatus } from "../../audio-frames";
 
 let seq = 0;
 /** A dock entry id, stable within the page's lifetime (not persisted). */
@@ -43,12 +44,34 @@ export function outputsCountText(outputs: readonly OutputEntry[]): string {
  * — on a two-channel stream (T-874) — what the latest status says it carries: "stereo" only while
  * the server reports the pilot locked, "mono · no pilot lock" when it does not, "2 ch" before the
  * first status. Never "stereo" from the header alone. */
-export function audioSubText(mode: string | undefined, sampleRateHz: number | undefined, channels = 1, stereo: boolean | null = null): string {
+export function audioSubText(mode: string | undefined, sampleRateHz: number | undefined, channels = 1, stereo: boolean | null = null, tone: string | null = null): string {
   const parts: string[] = [];
   if (mode) parts.push(`${mode.toUpperCase()} audio`);
   if (sampleRateHz) parts.push(`${Math.round(sampleRateHz / 1000)} kHz`);
   if (channels === 2) parts.push(stereo === null ? "2 ch" : stereo ? "stereo" : "mono · no pilot lock");
+  if (tone) parts.push(tone);
   return parts.length ? parts.join(" · ") : "audio";
+}
+
+/**
+ * The Listen header's sub-audible label from a status record (T-988): formatting only — the tone
+ * or code, and whether there is one at all, are the backend's blind measurement. `null` when the
+ * stream reports nothing (a mode nobody looked at).
+ */
+export function subaudibleText(s: AudioStatus): string | null {
+  const hz = (v: number | undefined) => (v === undefined ? "?" : `${v.toFixed(1)} Hz`);
+  const second = s.tone2_hz !== undefined ? ` + ${hz(s.tone2_hz)}` : "";
+  switch (s.subaudible) {
+    case "ctcss": return `CTCSS ${hz(s.ctcss_hz)}${second}`;
+    case "tone": return `tone ${hz(s.tone_hz)} (non-standard)${second}`;
+    case "dcs": {
+      const code = `DCS ${s.dcs_code ?? "?"}${s.dcs_polarity === "inverted" ? "I" : "N"}`;
+      return s.dcs_alias ? `${code} (≡ ${s.dcs_alias})` : code;
+    }
+    case "none": return "no tone";
+    case "measuring": return "tone: measuring…";
+    default: return null;
+  }
 }
 
 /** A meter bar's fill percent from a level in dBFS (roughly −80…0 dBFS mapped to 6…100 %; null = idle). */

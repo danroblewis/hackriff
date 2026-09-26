@@ -544,7 +544,31 @@ pub struct Coverage {
     pub window: Option<Value>,
 }
 
+/// Who suspected the structure an `unsupported-structure` resolution names (ADR-0021 §7A.6).
+/// **Closed**, so a reader can tell a confident suspicion from a shrug rather than parsing prose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuspectedBy {
+    /// An ADR-0016 classification, which carries a posterior.
+    Classification,
+    /// Measured features (occupied bandwidth, cyclostationarity…) with no posterior behind them.
+    Features,
+    /// A template in the library that declares the block it needs (ADR-0015 §15.6).
+    Template,
+    /// The user said so.
+    Operator,
+    /// Nothing recorded who suspected it. The default is **not** `classification`: an unattributed
+    /// suspicion may not borrow a classifier's authority.
+    #[default]
+    Unattributed,
+}
+
 /// What `unsupported-structure` suspected (ADR-0021 §7A.6).
+///
+/// Without this, the absence of a LoRa decode reads identically to a LoRa signal decoded as noise.
+/// The structure and the **missing block's stable id** are named in the served object, not left to
+/// be inferred from the summary text, so ADR-0021 §9.4's backlog ("3 emitters are waiting on
+/// `psk_demod`") is a group-by rather than a text search.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Suspected {
@@ -552,8 +576,8 @@ pub struct Suspected {
     pub structure: String,
     /// Missing block id.
     pub missing_block: String,
-    /// `classification | features | template | operator`.
-    pub suspected_by: String,
+    /// Who suspected it.
+    pub suspected_by: SuspectedBy,
     /// Posterior of the suspicion, when a classification made it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posterior: Option<f64>,
@@ -604,6 +628,115 @@ impl NullControl {
     }
 }
 
+/// No automatic re-analysis of the same emitter within this many seconds, whatever the reason
+/// code says (ADR-0021 §10's hard floor: default 1 h). The scheduler owns the other floor — none
+/// at all under the `battery` power policy.
+pub const MIN_RETRY_INTERVAL_S: f64 = 3600.0;
+
+/// Why re-analysing this `unknown` would, or would not, be worth the battery (ADR-0021 §10).
+/// **Closed**; the policy is served, never inferred by a client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RetryReason {
+    /// `stop: exhausted`, queue empty: the search covered the space and found nothing. **More
+    /// budget buys nothing** — retry only when the [`ReplayKey`] changes.
+    BudgetNotBinding,
+    /// `stop: budget` with `skeletons.deferred > 0`: the space was *not* covered, and more budget
+    /// is exactly what is missing.
+    BudgetBinding,
+    /// The emitter's measured SNR is ≥ 3 dB above the analysed window's — a real change in what
+    /// can be measured. Decided **later**, against the sealed [`Coverage::window`], never here:
+    /// a seal cannot know a future measurement.
+    SnrImproved,
+    /// Accumulated bursts have at least doubled, or a continuous emitter's retained extent is
+    /// ≥ 2× the analysed one. Decided later, like [`Self::SnrImproved`].
+    MoreSupport,
+    /// `kind: unsupported-structure`: **never retry until the named block exists.**
+    Unsupported,
+}
+
+/// A condition that would make a re-analysis worth running (ADR-0021 §10's conditions column).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RetryOn {
+    /// A larger evaluation budget (a deeper profile).
+    MoreBudget,
+    /// A longer analysed window.
+    LongerWindow,
+    /// A block this build does not have.
+    NewBlock,
+    /// A template the library did not hold.
+    NewTemplate,
+    /// A newer engine.
+    NewEngine,
+    /// The emitter measured ≥ 3 dB stronger than the analysed window.
+    SnrImproved,
+    /// At least twice the support (bursts, or retained extent).
+    MoreSupport,
+}
+
+/// When re-analysing is worth it, and when it is burning battery (ADR-0021 §10).
+///
+/// The seal decides only the codes that are **mechanical facts of the finished search**
+/// ([`RetryReason::BudgetBinding`], [`RetryReason::BudgetNotBinding`],
+/// [`RetryReason::Unsupported`]). The two data-driven codes are the scheduler's, measured later
+/// against this object's coverage window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Retry {
+    /// Whether re-running **this same search** could answer differently.
+    pub worthwhile: bool,
+    /// What would have to change first.
+    pub on: Vec<RetryOn>,
+    /// What explicitly would **not** help — the half that stops the battery burning.
+    pub not_on: Vec<RetryOn>,
+    /// The policy row this came from.
+    pub reason_code: RetryReason,
+    /// No automatic re-analysis before this (the job's end + [`MIN_RETRY_INTERVAL_S`]), in the
+    /// same units the job reports its end in. `None` when the end could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<String>,
+}
+
+impl Retry {
+    /// ADR-0021 §10, read mechanically off the finished search: `unsupported` first (a known-
+    /// unsupported structure is never re-run), then whether the budget was binding.
+    ///
+    /// "The budget was binding" is [`Reason::BudgetExhausted`] — §7A.3's *"the queue was
+    /// non-empty when the budget ran out"* — and not a second derivation from the coverage
+    /// counters. One fact, read once: a resolution whose reason says the space was not covered
+    /// cannot also advise that more budget buys nothing.
+    pub fn of(kind: ResolutionKind, reason: Option<Reason>, not_before: Option<String>) -> Self {
+        let (worthwhile, reason_code, on, not_on) = match kind {
+            ResolutionKind::UnsupportedStructure => (
+                false,
+                RetryReason::Unsupported,
+                vec![RetryOn::NewBlock],
+                vec![RetryOn::MoreBudget, RetryOn::LongerWindow],
+            ),
+            _ if reason == Some(Reason::BudgetExhausted) => (
+                true,
+                RetryReason::BudgetBinding,
+                vec![RetryOn::MoreBudget],
+                vec![RetryOn::LongerWindow],
+            ),
+            _ => (
+                false,
+                RetryReason::BudgetNotBinding,
+                vec![RetryOn::NewBlock, RetryOn::NewTemplate, RetryOn::NewEngine],
+                vec![RetryOn::MoreBudget],
+            ),
+        };
+        Self {
+            worthwhile,
+            on,
+            not_on,
+            reason_code,
+            not_before,
+        }
+    }
+}
+
 /// The negative result (ADR-0021 §7A.2), present whenever no result reached `solved`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -625,9 +758,9 @@ pub struct Resolution {
     /// Templates tried and not solved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ruled_out: Vec<RuledOut>,
-    /// ADR-0021 §10's retry advice (M-9).
+    /// ADR-0021 §10's retry advice; `None` when not searched (an aborted look advises nothing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry: Option<Value>,
+    pub retry: Option<Retry>,
     /// ADR-0021 §4.1 (M-8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_summary: Option<Value>,

@@ -119,13 +119,20 @@ export function gotoDecision(g: ax.Geometry | null, v: ax.View | null, hz: numbe
  * A request that **reaches the front end** (T-343), as opposed to one that changes the view.
  *
  * `source` names the explicit user request it came from, so the toast (and any future log) can say
- * what moved the radio. There is deliberately no variant for a gesture: a pan produces a
- * `RetuneOffer` for the user to accept, never a `DeviceAction`. (`"nudge"` is T-409's button press —
+ * what moved the radio. Outside retune mode there is still no variant for a gesture: a pan produces
+ * a `RetuneOffer` for the user to accept, never a `DeviceAction`. (`"nudge"` is T-409's button press —
  * a discrete, explicit action like the offer button, not the continuation of anything.
  * `"pane-offer"` is T-444's, on the unified surface: panning a pane to un-tuned spectrum *offers*,
  * and taking the offer is the discrete act — same shape, one surface over. `"pane-width"` is
  * T-496's: an explicit capture-WIDTH preset, pressed directly rather than discovered by zooming
  * then retuning — the pane's own centre is kept and only `spanHz` is asked for.)
+ *
+ * **`"retune-mode"` is T-1028's, and it is the one variant a GESTURE produces** — the user's
+ * 2026-09-25 amendment to the navigation invariant: in retune mode, which is explicit, visible and
+ * off by default, a settled pan/zoom is the tune request (`surface/retune-mode.ts`). It is its own
+ * source rather than reusing `"pane-offer"` precisely so the audit trail can tell a retune the user
+ * *pressed* from one their view asked for; with the mode off, nothing produces it and the
+ * empty-call-list control over the whole gesture vocabulary is unchanged.
  */
 export type DeviceAction = {
   kind: "retune";
@@ -147,7 +154,7 @@ export type DeviceAction = {
   spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
-  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer" | "pane-width";
+  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer" | "pane-width" | "retune-mode";
   /**
    * **Which front end to move** (T-1006) — the `device_id` selector every device route takes, or
    * null to send none.

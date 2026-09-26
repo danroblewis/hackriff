@@ -94,6 +94,7 @@
           "antenna": "unknown (stock/whatever is on the SMA)"
         },
         "identification_source": "Blind detection by hackriff live (Confirmed wfm, rds-pi 1694); FCC FM band plan 88-108 MHz (47 CFR 73.201). Station identity only from the app's RDS decode.",
+        "explorer_oracle_note": "Oracle py/fixtures/rds_ref.py on this 5 s clip: PI 1694 x56 votes, block error rate 0.0 (PS fragment 'Animals ' - dynamic PS).",
         "annotation_completeness": "partial: the station(s) named in the explorer's truth file, plus the whole-file overload artefact",
         "legal": "Receive-only capture. Truth is PHY/metadata only; RDS PI/PS/PTY are public broadcast station identity (CLAUDE.md legal guardrails).",
         "t_start_s": 0.0

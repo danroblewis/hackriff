@@ -1236,6 +1236,10 @@ pub fn serve_api(
             handle.iq_buffer(),
             handle.data_dir(),
         ))), // T-205
+        // T-844: the C38 models, modes and durable shadow log (`None` answers 503).
+        ml: handle
+            .ml()
+            .map(|m| Arc::new(crate::control::PipelineMl(m)) as Arc<dyn hk_api::MlControl>),
         // T-469: the persisted IQ recordings that extend the audio horizon past the ring.
         recordings: Some(Arc::new(PipelineRecordings::new(
             handle.data_dir().join("hackriff.db"),
@@ -2502,14 +2506,21 @@ mod tests {
         let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 3.0);
         // Paced (T-072): the control thread ticks the scheduler on wall time with the stream
-        // time, so an unpaced replay could outrun it under load and apply too few steps (a
-        // flake). Paced, the step count follows stream time.
+        // time, so an unpaced replay could outrun it and apply too few steps.
+        //
+        // T-934: even paced, how many steps fit in ONE pass of a 3 s recording depends on how
+        // often a loaded box lets the control thread sample the stream clock (a starved thread
+        // folds several steps into one), so "> 10 steps by the end of the pass" was a
+        // wall-clock race (9-10 seen at load ~28). The replay loops instead, and the test waits
+        // on the counted event - the step counter passing 10 - then stops the run; the deadline
+        // only bounds a hang (a scheduler that never steps).
         let mut args = daemon_args(
             format!("sigmf:{}", fixture.display()),
             dir.clone(),
             Some(TOKEN),
         );
         args.unpaced = false;
+        args.loop_replay = true;
         let Daemon { server, handle, .. } = start_daemon(&args).unwrap();
         let addr = server.local_addr();
         let (unauth, _) = get(addr, "/api/status", None);
@@ -2519,6 +2530,21 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.pointer("/readers/detect/lost_samples").is_some(), "{v}");
         assert!(v.pointer("/chains/attached").is_some(), "{v}");
+        let counters = handle.counters();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while counters
+            .scheduler
+            .steps
+            .load(std::sync::atomic::Ordering::Relaxed)
+            <= 10
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the scheduler is not being driven"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        handle.stop();
         let summary = handle.wait().unwrap();
         // The scheduler really retunes the device (T-057), and the spectrum stream is re-offered
         // under the same id at each new centre. The registry keeps offered streams after the run,

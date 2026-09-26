@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from scipy import signal
 
-from hkpy.synth import acars, adsb, fsk, pocsag, rds
+from hkpy.synth import acars, adsb, ax25, fsk, pocsag, rds
 from hkpy.synth.scene import (
     Scene,
     complex_noise,
@@ -710,6 +710,94 @@ def acars_message(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                                     "LSB-first characters, coherent MSK chips, CRC-16/KERMIT over "
                                     "parity-bearing characters); acarsdec itself is not installed, "
                                     "the py reference decoder ports its chip decisions")
+    return [scene], {}
+
+
+# ---------------------------------------------------------------------------------------------
+# aprs_message (SIGNAL-089 terrestrial APRS, T-952): NBFM + Bell 202 AFSK 1200 AX.25 UI frame
+# ---------------------------------------------------------------------------------------------
+
+APRS_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 48_000.0,
+    "center_hz": 144.39e6,
+    "offset_hz": 0.0,
+    "deviation_hz": 3000.0,  # NBFM peak deviation carrying the AFSK tones
+    "snr_db": 25.0,
+    "noise_dbfs": -40.0,
+    "prekey_s": 0.05,
+    "n_preamble_flags": 20,
+    "n_trailer_flags": 2,
+    "start_s": 0.02,
+    # A beacon repeats: the same frame sent n_bursts times, period_s apart (silence between).
+    "n_bursts": 3,
+    "period_s": 0.5,
+    "margin_s": 0.02,
+    "dest_call": "APRS",
+    "src_call": "N0CALL",
+    "src_ssid": 9,
+    "info": "!4903.50N/07201.75W-HACKRIFF T952 TEST",
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+}
+
+
+def aprs_message(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    frame = ax25.build_ui_frame(str(p["dest_call"]), str(p["src_call"]), int(p["src_ssid"]),
+                                str(p["info"]))
+    levels, tx_info = ax25.build_transmission(
+        frame, n_preamble_flags=int(p["n_preamble_flags"]), n_trailer_flags=int(p["n_trailer_flags"])
+    )
+    audio = ax25.afsk1200_audio(levels, fs, prekey_s=float(p["prekey_s"]))
+    n = len(audio)
+    n_bursts = max(1, int(p["n_bursts"]))
+    period = max(float(p["period_s"]), n / fs)
+    starts = [int(round((float(p["start_s"]) + k * period) * fs)) for k in range(n_bursts)]
+    total = starts[-1] + n + int(round(float(p["margin_s"]) * fs))
+    scene = ctx.scene("aprs_message", fs, total,
+                      "hkpy.synth aprs_message: NBFM-carried Bell 202 AFSK 1200 AX.25 UI frame "
+                      "(APRS), zero-bit-stuffed HDLC, CRC-16/X-25 FCS, repeated bursts")
+    _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
+    cap = scene.captures[0]
+    off = float(p["offset_hz"])
+    dev = float(p["deviation_hz"])
+    bw = 2 * (dev + ax25.SPACE_HZ)  # NBFM sidebands out to the space tone plus deviation
+    if abs(off) + bw / 2 > fs / 2:
+        raise ValueError("aprs channel does not fit inside the sample rate")
+    power = float(p["snr_db"]) + cap.floor_dbfs_per_hz + db(bw)
+    amp = math.sqrt(undb(power))
+    for k, start in enumerate(starts):
+        phase0 = float(scene.rng(f"carrier{k}").uniform(0, 2 * math.pi))
+        ph = 2 * math.pi * dev * np.cumsum(audio) / fs
+        base = np.exp(1j * (phase0 + ph))
+        tt = scene.time(start, n)
+        scene.add_samples(start, amp * base * np.exp(2j * math.pi * off * tt))
+        truth = scene.emission_truth(
+            cap, off, bw, power, kind="aprs-message", modulation="nbfm+afsk1200",
+            carrier_modulation="nbfm", deviation_hz=dev, subcarrier_modulation="afsk1200",
+            symbol_rate_bd=ax25.BAUD, mark_hz=ax25.MARK_HZ, space_hz=ax25.SPACE_HZ,
+            burst_index=k, framing=ax25.FRAMING_NOTE, fcs=frame.fcs_spec,
+            fields={"dest_call": frame.dest_call, "dest_ssid": frame.dest_ssid,
+                    "src_call": frame.src_call, "src_ssid": frame.src_ssid, "info": frame.info},
+            info_expected=frame.info,
+            frame={"n_content_bytes": len(frame.content), "content_hex": frame.content.hex(),
+                   "dest_hex": frame.dest_bytes.hex(), "src_hex": frame.src_bytes.hex(),
+                   "fcs_hex": f"{frame.fcs:04x}", **tx_info},
+            identity={"type": "ax25_source", "value": f"{frame.src_call}-{frame.src_ssid}"},
+        )
+        f = cap.center_hz + off
+        scene.annotate(start, n, f - bw / 2, f + bw / 2, "aprs-message", truth)
+    scene.scenario_truth["message"] = {
+        "dest_call": frame.dest_call, "dest_ssid": frame.dest_ssid, "src_call": frame.src_call,
+        "src_ssid": frame.src_ssid, "info": frame.info, "fcs_hex": f"{frame.fcs:04x}",
+        "dest_hex": frame.dest_bytes.hex(), "src_hex": frame.src_bytes.hex(),
+    }
+    scene.scenario_truth["note"] = (
+        "synthetic (no APRS burst reached the explorer's antenna, T-952): AX.25 UI frame, "
+        "zero-bit-stuffed HDLC between 0x7E flags, NRZI over the whole line, Bell 202 AFSK 1200 "
+        "audio FM-modulating an NBFM carrier, as a directly-heard beacon (no digipeater path)"
+    )
     return [scene], {}
 
 

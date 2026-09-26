@@ -437,7 +437,7 @@ timing:
 # set did locally) cannot recur either. Adding a target means adding it here, deliberately.
 e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
-e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_multipath acceptance_mauto"
+e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_multipath acceptance_mauto acceptance_captured_signals"
 
 # THE ONE PLACE an hk-e2e target set becomes a test command (T-631). Every recipe below calls
 # this, so hk-e2e's runner and its parallelism are defined once rather than copied eight times —
@@ -515,7 +515,7 @@ acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check acceptance 
 # have pinned CI red), because m2/m3 are explicitly kept apart for wall time, and because scene
 # simulations with wall-clock dwell budgets already flake under load on a 28-core Mac and would be
 # worse on a 2-vCPU runner. Each also has its own recipe for running one alone.
-acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-multipath acceptance-mauto
+acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-multipath acceptance-mauto acceptance-captured-signals
 
 # Census: every hk-e2e target on disk must appear in exactly one of the three lists above, and
 # every listed target must exist. This is the guard that makes the explicit `--test` lists safe —
@@ -583,6 +583,21 @@ acceptance-mauto *args:
     set -euo pipefail
     export HK_E2E_REQUIRE_SYNTH=1
     just _e2e-run acceptance_mauto {{args}}
+
+# "All captured signals decode" (T-936, SIGNAL-062): one blind test per ticket assertion over EVERY
+# signal the explorer agent has captured off the air (fixtures/hackrf/explorer-2026-09-25 and every
+# capture added after it), through the mock SDR - detected as one time-frequency region, classified
+# WFM with its pilot, the WFM+RDS chain auto-attached unprompted, the PI/PS decoded against an
+# independent oracle's answer key, and an FM broadcast allocation ranked without identifying.
+# The set grows by one line in `captured_signals::CAPTURES`. A milestone exit target, not a
+# regression gate: three controls are green and five red proofs are `#[ignore]`d until T-926/T-937/
+# T-938/T-940 land - run those with `just acceptance-captured-signals --run-ignored all`. Extra args
+# go to the runner (see `_e2e-run`).
+acceptance-captured-signals *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_REQUIRE_FIXTURES=1
+    just _e2e-run acceptance_captured_signals {{args}}
 
 # Chirp acceptance (T-255, CLAUDE.md invariant 1): LoRa up-chirps in 902-928 MHz US ISM through the mock SDR — a signal with a time extent and no stable frequency, against a steady carrier and fixed-frequency bursts as controls. Extra args go to the runner (see `_e2e-run`).
 acceptance-chirp *args:

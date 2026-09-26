@@ -104,6 +104,35 @@ pub struct DetectionProfile {
     pub branches: Branches,
 }
 
+/// T-990: the bound on how many **candidates** a noise-only band may produce per minute at
+/// [`DetectionProfile::standard`], per unit of tuned band.
+///
+/// A *candidate* here is a confirmed track — the thing the inventory catalogues as a Candidate
+/// row and hangs an explanation on — not a detection box. The number matters because the
+/// explorer met 52 of them in 8 minutes (~6.5/min) in an airband with nothing on the air, each
+/// offered "Aviation voice (VHF AM)", and until this constant existed the detector's false-alarm
+/// rate was stated per *cell* and never at the level anybody looks at.
+///
+/// **What the design implies.** A box needs a 4-connected component holding a seed cell
+/// (`pfa_on` 1e-6) and spanning [`DetectionProfile::min_frames`] frames of cells that at least
+/// cross the extend threshold (`pfa_off` 1e-3), with a ≥ 3-bin run; a track then needs
+/// `confirm_bursts` such boxes (or 0.1 s on air) before it opens. Treating the cells as
+/// independent — which the OS-CFAR reference makes very nearly true on noise — a box costs about
+/// `1e-6 · (1e-3)²` per cell, so at the explorer's geometry (2.4 Msps, 4096 bins, 8 averages:
+/// 1.8e7 cells/min) the designed box rate is ~2e-5/min and the designed candidate rate is
+/// smaller again. The design point is *zero*, and 6.5/min is not a threshold that is slightly
+/// too low.
+///
+/// **What is verified.** `tests/noise_band_candidates.rs` replays synthetic noise through the
+/// real chain — 8-bit IQ → STFT → the running floor tracker → detector → tracker — and counts
+/// confirmed tracks, reporting the 95 % upper bound `Gamma⁻¹(k+1, 0.95) / exposure` on the rate
+/// the way the S4 false-alarm suite does. The bound here is what a few minutes of exposure can
+/// certify at 95 % with zero observations; it is five orders above the design point and still
+/// six times under what the field run showed, which is the useful property: a regression that
+/// reintroduces field-rate false alarms fails it, and a run that merely fails to be infinitely
+/// long does not.
+pub const NOISE_BAND_MAX_CANDIDATES_PER_MIN: f64 = 1.0;
+
 impl DetectionProfile {
     /// S4 recommended: on 1e-6, off 1e-3, min 3 frames, gap 2 (0 false boxes in 3.31 MHz·h).
     pub fn standard() -> Self {
@@ -571,6 +600,16 @@ impl DetectorConfig {
                 g.stat_time_constant_frames,
             )?;
             check_non_negative("step_guard.floor_like_min", g.floor_like_min)?;
+            check_non_negative("step_guard.narrow_feature_db", g.narrow_feature_db)?;
+            if g.narrow_feature_max_db
+                .partial_cmp(&g.narrow_feature_db)
+                .is_none_or(|o| o.is_lt())
+            {
+                return Err(ConfigError::Invalid {
+                    name: "step_guard.narrow_feature_max_db must not be below narrow_feature_db",
+                    value: g.narrow_feature_max_db,
+                });
+            }
             if g.floor_like_max
                 .partial_cmp(&g.floor_like_min)
                 .is_none_or(|o| o.is_lt())

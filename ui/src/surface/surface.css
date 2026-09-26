@@ -115,6 +115,16 @@
   font: 10.5px/1.45 system-ui, sans-serif;
 }
 
+/* T-1028: what is happening to this viewport NOW — a retune the mode has pending, settling or in
+   flight. Its own line like the ruler, but marked (not dimmed): it is the one line on this surface
+   that reports the radio being moved by a gesture, and a user in retune mode has to be able to see
+   at a glance that their pan did something. */
+.hk-surface-status {
+  flex-basis: 100%;
+  font: 10.5px/1.45 system-ui, sans-serif;
+  color: #fad340;
+}
+
 /* A row's control and sentence are hidden by `el.hidden`; these are flex children, so the UA's
    `display: none` must not be outranked by anything above. */
 .hk-surface-viewport [hidden] { display: none !important; }
