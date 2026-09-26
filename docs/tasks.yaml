@@ -29073,7 +29073,7 @@ tasks:
   - id: T-980
     milestone: M2-hardening
     title: A CW carrier is Confirmed as a 55 kHz unknown 12 kHz off, and the burst chains mint 186 FSK bursts from it
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: ESTIMATE-CW
@@ -29098,6 +29098,7 @@ tasks:
       Observed, not chased: This is the branch's fifth merge of main and its second conflict in family.rs. Every conflict so far has been additive and in the same two places - the run of `pub fn`s above `track_family`, and the tail of the `mod tests` block - because T-948, T-953, T-979 and T-990 are all appending occupancy shapes and their tests to the same module alongside T-980. Nothing here is wrong, but the module is now a merge hot spot for a whole family of concurrent tickets; grouping them, or landing them through one branch, would cost less than resolving the same shape repeatedly. | The recorded 915 MHz FHSS fixture (ism_915M_10M_l24g30a1_t42p3_1p2s) contains annotated bursts with no on/off contrast at all: over its 54 boxes the box-over-pad ratio runs -0.03 .. 15.37 dB, 12 under 3 dB and 6 under 1 dB. Instrumented FskReceiver::run, e.g. `EXT n=6536 box=2500..4036 ext=Some((3013, 6536))` - the measured burst extent runs to the very end of the snippet, i.e. the channel is occupied right through the 2 ms post-pad. These are real emissions whose pads hold the same or a neighbouring hop, so a per-box on/off test cannot see them as bursts; it is why the receiver's contrast test defaults off and only the chain sets it. Separating 'a burst whose pad is busy' from 'a carrier that never stops' needs information one snippet does not hold - the track's own time structure, or a snippet pad long enough to contain a gap. | Recorded in main's own notes by the coordinator, repeated so it is not lost: after T-948, the exact field case that opened T-980 (a CW carrier 12 kHz off the tuned centre, inside the 15 kHz DC tolerance) now gets no inventory entry at all rather than the 'unmodulated carrier' explanation this ticket added - T-948 refuses an entry to a CW-narrow track whose every member is DC-flagged. That is T-948's rule and it is accepted; the regression scene therefore puts its carrier at -120 kHz, ~31 bins clear of the DC notch, where the question under test is reachable.
       Use cases: AWARE-036
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 55b6d61d
   - id: T-981
     milestone: M2-hardening
     title: Full-span overload stripes drawn as signal with no overload flag; /api/status reports no front-end overload
