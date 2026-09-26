@@ -28809,7 +28809,7 @@ tasks:
   - id: T-973
     milestone: M2-hardening
     title: "replumb_never_pays_for_the_ring fails alone on main: a re-plumb stalls the always-on readers 1.8 s (bound 1 s)"
-    status: in-progress
+    status: done
     priority: P1
     deps:
     - T-941
@@ -28831,6 +28831,7 @@ tasks:
       Observed, not chased: A re-plumb's capture-off window is dominated by hk-history's segment-end persistence on the join path (history.rs run() end: scheme-1 checkpoint 30-200 ms, ViewWriter::finish waiting on its producer ~130 ms and joining hk-view-io's tile writes/fsyncs 100-300 ms); candidate fix is a run-level view-io FIFO that segment ends enqueue to rather than join. Core real-time path, not chased.
       Resources: 273 CPU-s, peak 3.8 GB
     branch: task-t973
+    commit: d6b69f74
   - id: T-974
     milestone: M2-hardening
     title: hk-cli api_contract tests fail alone in worker worktrees but pass in the merge gate (retune stream, recipe routes, ws header, band-collapsed activity)
