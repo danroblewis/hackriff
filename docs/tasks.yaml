@@ -30368,6 +30368,16 @@ tasks:
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 21:49).
+      New GET /ws/tiles/changes (hk-api changes.rs): one socket per client pushes coverage_changed {f_lo, f_hi, t, departed, arrived, as_of_s} once per front-end MOVE. The move is read every 100 ms from the tune record the coverage map already uses: the IQ-ring journal, or the dwell in flight when the ring holds nothing, with one source per front end. A provenance change that keeps the band sends nothing. Capped at 16 per server (4503); unknown params are refused with 4400. rows.rs's upgrade and socket helpers are now shared.
+      Client: changefeed.ts is the kept-open feed plus a WS opener. On each event SurfacePreview re-asks the coverage survey at once, and TileCache.coverageChanged re-fetches exactly the resident tiles meeting [f_lo,f_hi] x [t,inf) in one synchronous turn, so they go out as one /api/tiles/batch. Copies are replaced in place, so nothing blanks. The survey timer and refresh lane remain as the fallback until LSR-5. The live-edge tile_committed half was not built because the LSR ring supersedes it.
+      docs/api.md has the new section and a route-table row. api_contract.rs runs a real hk serve with a mock-SDR retune: exactly one event arrives, and /api/coverage over the departed band for [t, as_of_s] is 0 observed / 8 unobserved the instant the event lands, with no timer. A ui spy-client test shows one event causes exactly one batch naming exactly the moved tiles, and goes red when the re-ask is made per-tile.
+      Tests: cargo nextest run -p hk-api --lib -> exit 0 (210 passed (incl. 2 new changes:: unit tests)); cargo nextest run -p hk-cli -E 'binary(api_contract) & (test(coverage_changed) | test(every_route_in_the_route_table) | test(row_push_route) | test(mmap_research))' -> exit 0 (4 passed; new contract test passed 3/3 repeat runs); just test-ui -> exit 0 (build + typecheck + 101/101 test files passed); node test/run.mjs surface-changefeed (CHANGE_OWNER re-injected as -1, i.e. per-tile solo re-asks) -> exit 1 (one-batch assertion fails with the defect re-injected); node test/run.mjs surface-changefeed -> exit 0 (4 passed)
+      precheck exit 0
+      Commits: 875da851
+      Observed, not chased: No browser e2e spec or screenshot was added. The fog re-lay is asserted at the contract level (real hk serve plus a mock-SDR retune) and by the spy-client unit test. A visible e2e of 'departed band greys without a timer wait' could be added later on top of this route. | TileCache.coverageChanged issues up to 64 re-asks in one turn, above the client's per-tile in-flight share. That matches the server, since a batch holds one route slot at a time (T-573), but it delays ordinary misses until the batch drains.
+      Resources: 70 CPU-s, peak 3.4 GB
   - id: T-1041
     milestone: MMAP
     title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"
