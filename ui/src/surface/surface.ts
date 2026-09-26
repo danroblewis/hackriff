@@ -51,7 +51,8 @@
 import { CMAP_GLSL } from "../cmap";
 import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, SHADOW_MARK, tierByte, type DrawKind } from "./cellrule";
 import {
-  ancestorsOf, extentOf, keyOf, oneTier, tierFor, tilesFor,
+  ancestor, coarsestCovering, extentOf, intersects, keyOf, levelCapF, levelCapT, oneTier, tierFor,
+  tilesFor,
   type Box, type Lattice, type LatticeSet, type TileAddr, type ViewTier,
 } from "./lattice";
 import { ringCovers, ringPlan, type LiveRingSource, type RingDraw, type RingFrame } from "./livering";
@@ -177,6 +178,19 @@ export interface PaneReport {
   readonly shadowCellHz: number;
   readonly shadowCellS: number;
   /**
+   * **Tile rows held back this frame** (T-1037): rows not every tile of which is in hand yet, and
+   * whose arrived tiles are therefore not on screen — a coarse stand-in is, under all of them. A row
+   * leaves this count by completing or by passing [[REVEAL_HOLD_MS]], so it is bounded in time and a
+   * number that stays positive means answers are not arriving, not that the gate is stuck.
+   *
+   * It is the number the "one swap per row, not per tile" rule is measured by: a row counted here on
+   * one frame and drawing `tiles` on the next swapped once.
+   */
+  readonly rowsHeld: number;
+  /** Of [[rowsHeld]], rows revealed **partially** because the bound expired rather than because the
+   * row completed: what arrived is on screen with stand-ins under the rest. */
+  readonly rowsLate: number;
+  /**
    * **Rows this pane painted from the live ring** (T-1042, `./livering.ts`): the published
    * `spectrum/live` rows drawn straight at the live edge, so the newest rows are on screen because
    * they were recorded rather than when a tile can be produced for them.
@@ -197,6 +211,41 @@ export interface PaneReport {
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
+
+/**
+ * **How long a tile row may be held back waiting for the rest of itself, ms** (T-1037).
+ *
+ * The bound exists because both failure modes are real and they pull opposite ways: revealing each
+ * tile the moment it lands is the blockiness the user reported (*"tiles come in at random times,
+ * they don't all show at once"*), and waiting for a row that will never complete — one address
+ * refused, one server stalled, an unstable network — would be a surface that never updates, which is
+ * worse than blocky. 300 ms is under the ~400 ms this client's own first guess at a tile read
+ * ([[TileCacheOptions.serverMsGuess]]) and well over a warm one at 11.4 ms, so a row whose tiles are
+ * coming together is revealed together and a row that is genuinely stuck reveals what it has.
+ */
+export const REVEAL_HOLD_MS = 300;
+
+/**
+ * The lane the coarse stand-in enumeration is asked for in ([[TileSourceHint.lane]], T-1037), so a
+ * batching source sends it as its own request: it only removes the black if it arrives as one
+ * picture, not cut up among a viewport's own hundred addresses.
+ */
+export const COARSE_LANE = "coarse";
+
+/**
+ * One address of a tile row, **resolved but not yet drawn** (T-1037).
+ *
+ * The reveal gate needs the whole row's state before any of it goes on the screen, so resolving and
+ * drawing are two passes and this is what the first hands the second. `awaiting` is a surface whose
+ * coverage survey has not landed (nothing is requested yet, T-580); `surveyed` carries the instant
+ * the survey is good to; `resident` carries the copy; `pending` and `refused` are the two states
+ * with no answer, which are drawn apart (T-499).
+ */
+type RowPlan =
+  | { readonly addr: TileAddr; readonly region: Box; readonly kind: "awaiting" }
+  | { readonly addr: TileAddr; readonly region: Box; readonly kind: "surveyed"; readonly through: number }
+  | { readonly addr: TileAddr; readonly region: Box; readonly kind: "resident"; readonly entry: TileEntry<TilePlanes> }
+  | { readonly addr: TileAddr; readonly region: Box; readonly kind: "pending" | "refused" };
 
 /**
  * How the one display range was decided. `anchored` is the default and is zoom-invariant.
@@ -419,12 +468,38 @@ interface RingTex {
 }
 
 export interface SurfaceOptions {
-  /** How many levels coarser a fallback may be found. Beyond this the place stays pending, which is
-   * honest: an eight-times-coarser cell standing in for a missing one says almost nothing. */
+  /**
+   * The greatest **total** level distance (`df + dt`) a stand-in may be found at.
+   *
+   * Unbounded by default since T-1037: *PENDING only when no ancestor exists at any level.* It was
+   * three steps per axis, on the reasoning that "an eight-times-coarser cell standing in for a
+   * missing one says almost nothing" — and the user's verdict on what it produced instead is the
+   * ticket: *"a lot of random black areas, which make it look very broken"*. A coarse cell that
+   * states its own level says something true; a PENDING quad over a place this client is holding an
+   * answer for says nothing at all. Set it to cap the reach for a test or a host that wants one.
+   */
   maxFallbackSteps?: number;
   /** Prefetch the parent level covering each pane (§5.5's second pin): what makes a zoom-out draw
    * instead of flash. */
   pinParents?: boolean;
+  /**
+   * Ask for the **coarsest level covering each pane** as one batch, in its own request, on every
+   * viewport change (T-1037, [[coarsestCovering]]). On by default: it is the stand-in that makes
+   * "never black" true on a cold reload and after a deep zoom, and it is one request.
+   */
+  coarseStandIn?: boolean;
+  /**
+   * How long a tile ROW may be held back waiting for the rest of itself, ms (T-1037). Default 300.
+   *
+   * A row's tiles arrive one answer at a time, and drawn one at a time they read as the user's
+   * *"tiles come in at random times, they don't all show at once"*. So a row is revealed as a whole:
+   * when every tile of it is in hand, or when this bound expires — and then what arrived is
+   * revealed and stand-ins are kept under the rest. `0` reveals each tile as it lands (the old
+   * behaviour) and is what a test asserting per-tile draws sets.
+   */
+  revealHoldMs?: number;
+  /** The clock the row-reveal bound is measured on. Defaults to `Date.now`; a test pins it. */
+  now?: () => number;
 }
 
 /**
@@ -479,6 +554,18 @@ export class Surface {
   private vao: WebGLVertexArrayObject;
   private readonly maxFallbackSteps: number;
   private readonly pinParents: boolean;
+  private readonly coarseStandIn: boolean;
+  private readonly revealHoldMs: number;
+  private readonly now: () => number;
+  /**
+   * When each pane's tile ROW was first seen incomplete, by `paneId|scheme|levelF|levelT|tIndex`
+   * (T-1037) — the only thing the reveal gate remembers. Pruned every frame to the rows actually
+   * drawn, so a pan leaves nothing behind: a row's wait is about the row on screen now.
+   */
+  private rowWaitSince = new Map<string, number>();
+  /** The row keys this frame actually drew, so [[rowWaitSince]] can be pruned to them. One Set,
+   * reused across frames. */
+  private rowSeen = new Set<string>();
 
   private lattices: LatticeSet;
 
@@ -525,8 +612,11 @@ export class Surface {
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false }) as GL | null;
     if (!gl) throw new Error("WebGL2 unavailable");
     this.gl = gl;
-    this.maxFallbackSteps = opts.maxFallbackSteps ?? 3;
+    this.maxFallbackSteps = opts.maxFallbackSteps ?? Infinity;
     this.pinParents = opts.pinParents ?? true;
+    this.coarseStandIn = opts.coarseStandIn ?? true;
+    this.revealHoldMs = Math.max(0, opts.revealHoldMs ?? REVEAL_HOLD_MS);
+    this.now = opts.now ?? (() => Date.now());
     const p = gl.createProgram()!;
     gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VS));
     gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FS));
@@ -689,6 +779,7 @@ export class Surface {
     // may outlive the geometry it was measured over. `null` in every other mode, so the per-cell
     // path costs exactly nothing unless the user asked for it.
     const vscale = this.mode === "viewport" ? new ViewportScale() : null;
+    this.rowSeen.clear();
     for (const pane of panes) {
       // The map is a viewport over the whole surface, so it may not be the thing the scale is
       // measured over. See [[PaneView.scales]].
@@ -717,8 +808,30 @@ export class Surface {
       const { tier, lat, levelF, levelT, addrs, clamped } =
         tierFor(this.lattices, pane.box, r.w, r.h, pane.device ?? "any", this.lastTier.get(pane.id) ?? null);
       this.lastTier.set(pane.id, tier);
-      viewports.push({ box: pane.box, levelF, levelT, lat });
+      const awaiting = this.survey === "awaiting";
+      // **The coarsest level covering this pane, in ONE batch** (T-1037). Computed here, before the
+      // viewport is reported, because the cache's cancellation predicate has to know this pane wants
+      // it: it is levels above the pane's own, and `wants()` keeps a viewport's level and one step
+      // coarser, so without saying so here the stand-in set would be cancelled at the end of the very
+      // frame that asked for it.
+      //
+      // **Not on the overview tier** (measured, `ui/e2e/surface-nav.e2e.mjs` test 3). The stand-in
+      // has to be cheaper than the thing it stands in for, and at the coarse end it is not: T-450
+      // measured a map-level read at **5.2 s and 9.5 MB** against 11.4 ms for a fine tile, and the
+      // queue is LIFO so the stand-in is fetched FIRST — a "fit to coverage" pane spent its whole
+      // 4-slot budget on tiles even coarser than the survey overview it was already drawing, and
+      // went from `1 tiles · 15 coarse stand-ins` to `0 tiles · 16` at the same instant. A pane on
+      // the overview tier is at the survey-overview honesty tier already: there is nothing
+      // meaningfully coarser to stand in for it, and the parent pin below still covers the zoom-out.
+      const coarse = this.coarseStandIn && !awaiting && tier !== "overview"
+        ? coarsestCovering(lat, pane.box, levelF, levelT, pane.device ?? "any")
+        : null;
+      viewports.push({
+        box: pane.box, levelF, levelT, lat,
+        standIn: coarse ? { levelF: coarse.levelF, levelT: coarse.levelT } : undefined,
+      });
       let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0;
+      let rowsHeld = 0, rowsLate = 0;
       // T-916: the shadow's provenance, counted over the tiles this pane actually DREW (stand-ins
       // included — their cells are what is on the screen here), so the readout names a coarser
       // last-known source only when one is visible.
@@ -739,95 +852,128 @@ export class Surface {
       const ring = this.rings?.ringFor(pane.id) ?? null;
       const plan = ring ? ringPlan(ring, pane.box, r.h) : null;
       let ringRows = 0, ringTiles = 0;
-      const awaiting = this.survey === "awaiting";
+      // Every level pair this cache holds anything at, read **once per pane per frame** — what makes
+      // the stand-in search unbounded in depth and still cheap ([[fallbackFor]]).
+      const levels = this.cache.residentLevels(lat.scheme);
+      const nowMs = this.now();
+      // **Addressed by tile ROW, because the row is the unit of reveal** (T-1037). `tilesFor` already
+      // emits row by row; grouping makes the row explicit so the gate below is about a row and not
+      // about whichever tiles happened to be adjacent in the enumeration.
+      const rows = new Map<number, TileAddr[]>();
       for (const a of addrs) {
-        // **The ring's extent short-circuits the tile lane** (T-1042): everything this pane shows of
-        // this address is already painted from rows that arrived before any tile for them could be
-        // produced, so it is neither drawn nor *requested*. Before `isResident` and before
-        // `acquire`, for the same reason T-580's survey check is: the cheapest answer is the one
-        // that costs no request at all.
-        if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) { ringTiles++; continue; }
-        // **Ask the coverage map first** (T-580). A resident copy is always drawn — it is the finer
-        // answer — but a place the survey settles as never sampled is not requested at all, and a
-        // surface still waiting for its survey requests nothing yet.
-        if (!this.cache.isResident(a)) {
-          if (awaiting) { pending++; continue; }
+        const row = rows.get(a.tIndex);
+        if (row) row.push(a); else rows.set(a.tIndex, [a]);
+      }
+      for (const [tIndex, row] of rows) {
+        // Pass one: **resolve** every address of the row — the same side effects, in the same order,
+        // as when each was resolved and drawn in one step (the ring's extent first, then the survey
+        // short-circuit, then `acquire`, which is what schedules the fetch and pins the copy).
+        // Nothing is drawn yet, because whether this row's own tiles may be drawn is not known until
+        // all of them have been asked about.
+        const resolved: RowPlan[] = [];
+        let missing = 0;
+        for (const a of row) {
+          // **The ring's extent short-circuits the tile lane** (T-1042): everything this pane shows of
+          // this address is already painted from rows that arrived before any tile for them could be
+          // produced, so it is neither drawn nor *requested*. Before `isResident` and before
+          // `acquire`, for the same reason T-580's survey check is: the cheapest answer is the one
+          // that costs no request at all. It is not `missing` either — nothing is coming for it and
+          // nothing needs to: the row gate below must not hold a row open on an address the rows
+          // already cover (T-1037 × T-1042).
+          if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) { ringTiles++; continue; }
           const region = extentOf(lat, a);
-          const through = this.surveyedThrough(region);
-          if (through !== null) {
-            if (through > region.t0Ns) {
-              const drawn = through >= region.t1Ns ? region : { ...region, t1Ns: through };
-              this.drawSurveyed(pane, drawn, r);
-              drawnToNs = Math.max(drawnToNs, drawn.t1Ns);
+          // **Ask the coverage map first** (T-580). A resident copy is always drawn — it is the finer
+          // answer — but a place the survey settles as never sampled is not requested at all, and a
+          // surface still waiting for its survey requests nothing yet.
+          if (!this.cache.isResident(a)) {
+            if (awaiting) { resolved.push({ addr: a, region, kind: "awaiting" }); continue; }
+            const through = this.surveyedThrough(region);
+            if (through !== null) { resolved.push({ addr: a, region, kind: "surveyed", through }); continue; }
+          }
+          const res = this.cache.acquire(a);
+          if (res.kind === "resident") { resolved.push({ addr: a, region, kind: "resident", entry: res.entry }); continue; }
+          // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
+          // waiting for one — the route refused it, or the server is unreachable and this client is
+          // backing off — and painting it as PENDING is a progress bar that never finishes.
+          resolved.push({ addr: a, region, kind: res.failed ? "refused" : "pending" });
+          // **A place with no visible area cannot be part of a reveal** (T-1037). `tilesFor` emits a
+          // phantom column or row for a box whose edge lands exactly on a tile boundary (see
+          // [[spanTiles]]); nothing is drawn for it and no viewport wants it, so it is never resident
+          // — and counted here it would hold its row open for the whole bound on every frame, for
+          // ever. It is still asked for, drawn and counted exactly as before: only the row's
+          // completeness ignores it, and about that the answer is simply true.
+          if (intersects(lat, a, pane.box)) missing++;
+        }
+        // Pass two: **the row's reveal gate** — all of it, or (after the bound) what arrived with
+        // stand-ins under the rest.
+        const gate = this.revealRow(pane.id, lat, levelF, levelT, tIndex, missing === 0, nowMs);
+        if (!gate.revealed) rowsHeld++;
+        else if (missing > 0) rowsLate++;
+        // Pass three: draw. Exactly one of the branches below puts something on the screen for each
+        // address, and none of them can produce grey: grey comes only from a coverage state byte.
+        for (const p of resolved) {
+          if (p.kind === "awaiting") { pending++; continue; }
+          if (p.kind === "surveyed") {
+            const through = p.through;
+            if (through > p.region.t0Ns) {
+              const shownTo = through >= p.region.t1Ns ? p.region : { ...p.region, t1Ns: through };
+              this.drawSurveyed(pane, shownTo, r);
+              drawnToNs = Math.max(drawnToNs, shownTo.t1Ns);
             }
             surveyed++;
             continue;
           }
-        }
-        const res = this.cache.acquire(a);
-        if (res.kind === "resident") {
-          const region = extentOf(lat, a);
-          const shown = this.drawUpToHorizon(pane, lat, region, res.entry, "tile", r);
-          if (shown.behind) behind++;
-          if (shown.drawn) drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); else blank++;
-          // The cells of this tile that are inside this pane's box — the measurement the viewport
-          // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
-          // the region are the same box — **clipped at the horizon** (T-532) when the answer stops
-          // short, so the scale is measured over what was DRAWN and never over rows this copy does
-          // not reach.
-          if (shown.drawn) measure?.add(res.entry.data, region, shown.drawn, pane.box);
-          if (shown.drawn) shadowOf(res.entry.data);
-          // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
-          // is on screen decides the scale only when the user has asked for that; otherwise the
-          // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
-          // that on this source, because the defect is re-introducible in one line.
-          if (this.autoScale) {
-            const rg = res.entry.data.rangeDb;
-            if (rg) { lo = Math.min(lo, rg.lo); hi = Math.max(hi, rg.hi); }
+          if (p.kind === "resident") {
+            // **Held back only while something coarser can cover the place for it** (T-1037). The
+            // whole point of the gate is that the row changes once; showing LESS than this client
+            // holds would be the "we have it but didn't render it" bug, so a row with no ancestor
+            // anywhere draws its own tiles as they land, exactly as before.
+            const stand = gate.revealed ? null : this.fallbackFor(lat, p.addr, levels);
+            if (stand) {
+              const held = this.drawStandIn(pane, lat, p.region, [stand], r, shadowOf, measure);
+              if (held.late) behind++;
+              if (!held.drawn) blank++; else drawnToNs = Math.max(drawnToNs, held.drawnToNs);
+              fallbacks++;
+              continue;
+            }
+            const shown = this.drawUpToHorizon(pane, lat, p.region, p.entry, "tile", r);
+            if (shown.behind) behind++;
+            if (shown.drawn) drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); else blank++;
+            // The cells of this tile that are inside this pane's box — the measurement the viewport
+            // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
+            // the region are the same box — **clipped at the horizon** (T-532) when the answer stops
+            // short, so the scale is measured over what was DRAWN and never over rows this copy does
+            // not reach.
+            if (shown.drawn) measure?.add(p.entry.data, p.region, shown.drawn, pane.box);
+            if (shown.drawn) shadowOf(p.entry.data);
+            // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
+            // is on screen decides the scale only when the user has asked for that; otherwise the
+            // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
+            // that on this source, because the defect is re-introducible in one line.
+            if (this.autoScale) {
+              const rg = p.entry.data.rangeDb;
+              if (rg) { lo = Math.min(lo, rg.lo); hi = Math.max(hi, rg.hi); }
+            }
+            tiles++;
+            continue;
           }
-          tiles++;
-          continue;
-        }
-        const stand = this.fallbackFor(lat, a);
-        // **Finer tiles already in hand stand in too** (T-893): a time zoom-out on a following pane
-        // asks for a coarser level while the rows it was just drawing are resident one level down,
-        // and searching only upwards left the pane blank until the coarser answer arrived. Drawn
-        // after the ancestor, so where both exist the finer (and newer) rows are the ones seen.
-        const finer = this.finerFor(lat, a);
-        if (stand || finer.length) {
-          const region = extentOf(lat, a);
-          let drew = false, late = false;
-          if (stand) {
-            this.cache.standIn(stand);
-            const shown = this.drawUpToHorizon(pane, lat, region, stand, "fallback", r);
-            late ||= shown.behind;
-            if (shown.drawn) { drew = true; drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); }
-            // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
-            // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
-            // extent, not the child's. Getting that pair the wrong way round would read a different
-            // corner of the ancestor than the one being displayed.
-            if (shown.drawn) measure?.add(stand.data, extentOf(lat, stand.addr), shown.drawn, pane.box);
-            if (shown.drawn) shadowOf(stand.data);
+          const stand = this.fallbackFor(lat, p.addr, levels);
+          // **Finer tiles already in hand stand in too** (T-893): a time zoom-out on a following pane
+          // asks for a coarser level while the rows it was just drawing are resident one level down,
+          // and searching only upwards left the pane blank until the coarser answer arrived. Drawn
+          // after the ancestor, so where both exist the finer (and newer) rows are the ones seen.
+          const finer = this.finerFor(lat, p.addr);
+          if (stand || finer.length) {
+            const drew = this.drawStandIn(pane, lat, p.region, stand ? [stand, ...finer] : finer, r, shadowOf, measure);
+            if (drew.late) behind++;
+            if (!drew.drawn) blank++; else drawnToNs = Math.max(drawnToNs, drew.drawnToNs);
+            fallbacks++;
+            continue;
           }
-          for (const c of finer) {
-            this.cache.standIn(c);
-            const own = extentOf(lat, c.addr);
-            const shown = this.drawUpToHorizon(pane, lat, own, c, "fallback", r);
-            late ||= shown.behind;
-            if (shown.drawn) { drew = true; drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); }
-            if (shown.drawn) measure?.add(c.data, own, shown.drawn, pane.box);
-            if (shown.drawn) shadowOf(c.data);
-          }
-          if (late) behind++;
-          if (!drew) blank++;
-          fallbacks++;
+          if (p.kind === "refused") { this.drawRefused(pane, p.region, r); refused++; continue; }
+          // Neither an answer nor an ancestor at ANY level: the one place PENDING is the truth.
+          this.drawFlat(pane, p.region, PENDING, r); pending++;
         }
-        // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
-        // waiting for one — the route refused it, or the server is unreachable and this client is
-        // backing off — and painting it as PENDING is a progress bar that never finishes. Neither
-        // branch can produce grey: both are [[DrawKind]]s, and grey comes only from a state byte.
-        else if (res.failed) { this.drawRefused(pane, extentOf(lat, a), r); refused++; }
-        else { this.drawFlat(pane, extentOf(lat, a), PENDING, r); pending++; }
       }
       // §5.5's second pin, and a **coarse-first fill**. These go on the queue *after* the pane's
       // own tiles, and the queue is LIFO, so a parent is fetched FIRST — deliberately: at 11.4 ms a
@@ -842,10 +988,26 @@ export class Surface {
           this.cache.prefetch(a);
         }
       }
+      // **Last on the queue, so FIRST off it** (T-1037). The queue is LIFO, and a stand-in that lands
+      // after the tiles it was meant to stand in for buys nothing; it rides in its own lane so a
+      // batching source sends the whole set as one request and it reveals as one picture.
+      if (coarse) {
+        for (const a of coarse.addrs) {
+          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          // The ring's extent short-circuits this lane too (T-1042's rule, applied to T-1037's set):
+          // a stand-in for a place the published rows already paint stands in for nothing, and the
+          // cheapest answer is the one that costs no request at all.
+          if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) continue;
+          this.cache.prefetch(a, COARSE_LANE);
+        }
+      }
       // **The rows, last** (T-1042): submitted after every tile, so where a ring row and a tile cell
       // describe the same instant the ROW is what is seen. That is the ordering the live-rendering
       // invariant asks for — the row exists, so it is on screen — and it is why a tile only partly
       // under the ring is still drawn: the part the rows do not reach keeps its measurement.
+      //
+      // It is also why the row gate above can never withhold a live row (T-1037): the gate is about
+      // the TILE lane, and these rows are not in it.
       if (ring && plan) {
         const planes = plan.draws.length ? this.ringPlanes(pane.id, ring) : null;
         if (planes) {
@@ -861,9 +1023,14 @@ export class Surface {
         this.dropRing(pane.id);
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0 });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, rowsHeld, rowsLate, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0 });
     }
     gl.disable(gl.SCISSOR_TEST);
+    // **The reveal gate remembers only rows that are on screen now** (T-1037). A row's wait is a
+    // statement about a row the user is looking at; a pan that leaves it behind must not leave the
+    // clock running, or coming back to it would reveal a half-arrived row instantly — and nothing
+    // here may grow with how far the view has travelled.
+    for (const k of this.rowWaitSince.keys()) if (!this.rowSeen.has(k)) this.rowWaitSince.delete(k);
     for (const id of this.ringTex.keys()) if (!drawn.has(id)) this.dropRing(id);
     if (this.autoScale && lo < hi) {
       // One range for every pane, moved gently: two panes showing the same energy must not read as
@@ -894,11 +1061,104 @@ export class Surface {
     return reports;
   }
 
-  /** The nearest resident coarser tile containing `a`, or null. Peeks only: the ancestor search
-   * must not enqueue a fetch at every level it tries, or one miss becomes `maxFallbackSteps²`. */
-  private fallbackFor(lat: Lattice, a: TileAddr): TileEntry<TilePlanes> | null {
-    for (const anc of ancestorsOf(lat, a, this.maxFallbackSteps)) {
-      const e = this.cache.peek(anc, true);
+  /**
+   * **Is this tile row allowed on the screen yet?** (T-1037, [[REVEAL_HOLD_MS]].)
+   *
+   * A row's tiles arrive one answer at a time, and drawn one at a time they are the user's *"tiles
+   * come in at random times, they don't all show at once … which make it look very broken"*. So the
+   * row is the unit of reveal: **complete, or past the bound.** Complete wins immediately and clears
+   * the row's clock, so a row that completes and is later re-cut by a retune waits again from scratch
+   * rather than from a wait it has already served.
+   *
+   * The bound is what keeps this a reveal gate and not a stall: a row one of whose addresses the
+   * route has refused, or that an unstable connection is drip-feeding, would otherwise never be
+   * allowed on screen at all — and holding measured data off the screen indefinitely is the one thing
+   * this surface may not do ("we have it but didn't render it" is a bug). Past it, what arrived is
+   * revealed and the stand-in stays under the rest.
+   */
+  private revealRow(
+    paneId: string, lat: Lattice, levelF: number, levelT: number, tIndex: number,
+    complete: boolean, nowMs: number,
+  ): { revealed: boolean } {
+    const key = `${paneId}|${lat.scheme}|${levelF}|${levelT}|${tIndex}`;
+    this.rowSeen.add(key);
+    if (complete) { this.rowWaitSince.delete(key); return { revealed: true }; }
+    const since = this.rowWaitSince.get(key);
+    if (since === undefined) {
+      this.rowWaitSince.set(key, nowMs);
+      // A host that set the bound to zero asked for the old per-tile reveal, and gets it.
+      return { revealed: this.revealHoldMs <= 0 };
+    }
+    return { revealed: nowMs - since >= this.revealHoldMs };
+  }
+
+  /**
+   * Draw `region` from stand-ins — a resident ancestor, resident finer tiles (T-893), or both.
+   *
+   * Each entry is drawn over **its own extent intersected with `region`**, which is the one
+   * expression that is right for both: an ancestor contains the region, so the intersection is the
+   * region, and a finer tile is inside it, so the intersection is the finer tile. The texture's
+   * extent is the *entry's* own — getting that pair the wrong way round would read a different corner
+   * of the ancestor than the one being displayed. Every entry drawn is marked `fallback` and carries
+   * its own tier byte, so a stand-in states the level it was drawn at.
+   */
+  private drawStandIn(
+    pane: PaneView, lat: Lattice, region: Box, entries: readonly TileEntry<TilePlanes>[], rect: PaneRect,
+    shadowOf: (d: TileData) => void, measure: ViewportScale | null,
+  ): { drawn: boolean; late: boolean; drawnToNs: number } {
+    let drawn = false, late = false, drawnToNs = -Infinity;
+    for (const e of entries) {
+      this.cache.standIn(e);
+      const own = extentOf(lat, e.addr);
+      const box: Box = {
+        f0Hz: Math.max(own.f0Hz, region.f0Hz), f1Hz: Math.min(own.f1Hz, region.f1Hz),
+        t0Ns: Math.max(own.t0Ns, region.t0Ns), t1Ns: Math.min(own.t1Ns, region.t1Ns),
+      };
+      if (!(box.f1Hz > box.f0Hz) || !(box.t1Ns > box.t0Ns)) continue;
+      const shown = this.drawUpToHorizon(pane, lat, box, e, "fallback", rect);
+      late ||= shown.behind;
+      if (!shown.drawn) continue;
+      drawn = true;
+      drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns);
+      measure?.add(e.data, own, shown.drawn, pane.box);
+      shadowOf(e.data);
+    }
+    return { drawn, late, drawnToNs };
+  }
+
+  /**
+   * The nearest resident coarser tile containing `a`, or null — **searched at every level, not a
+   * few** (T-1037). Peeks only: the ancestor search must not enqueue a fetch at every level it
+   * tries.
+   *
+   * `levels` is the pane's own [[TileCache.residentLevels]], read once per pane per frame. It is
+   * what makes "PENDING only when no ancestor exists **at any level**" cheap: the reach used to be
+   * three steps per axis because the search was `O(reach²)` map lookups per missing tile per frame
+   * and an unbounded one would have been `O(levels²)`, so a resident copy eight times coarser was
+   * passed over and the place was drawn as PENDING — black — with the answer in hand. Searching only
+   * the level pairs something is actually resident at is a handful of lookups whatever the ladder's
+   * depth, so the cap can go.
+   *
+   * Ordered by total level distance, so the closest resolution still wins: honesty is that the
+   * stand-in *states the level it was drawn at* ([[DrawKind]] `fallback` and the tier byte), not
+   * that a coarse truth is withheld in favour of black.
+   */
+  private fallbackFor(lat: Lattice, a: TileAddr, levels: ReadonlySet<string>): TileEntry<TilePlanes> | null {
+    const capF = levelCapF(lat), capT = levelCapT(lat);
+    const cand: { df: number; dt: number }[] = [];
+    for (const pair of levels) {
+      const cut = pair.indexOf("|");
+      const lf = Number(pair.slice(0, cut)), lt = Number(pair.slice(cut + 1));
+      const df = lf - a.levelF, dt = lt - a.levelT;
+      if (df < 0 || dt < 0 || (df === 0 && dt === 0)) continue;
+      // The CEILING, not the declared axis length (T-480): a stand-in must name a node the route
+      // could answer, and `maxFallbackSteps` still caps the reach for a caller that asks it to.
+      if (lf > capF || lt > capT || df + dt > this.maxFallbackSteps) continue;
+      cand.push({ df, dt });
+    }
+    cand.sort((x, y) => (x.df + x.dt) - (y.df + y.dt));
+    for (const c of cand) {
+      const e = this.cache.peek(ancestor(lat, a, c.df, c.dt), true);
       if (e) return e;
     }
     return null;
