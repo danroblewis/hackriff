@@ -30,7 +30,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL, PENDING } from "../src/surface/cellrule";
 import { extentOf, keyOf, tilesFor, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { Surface, type PaneView } from "../src/surface/surface";
+import { SURVEY_DEFER_MS, Surface, type PaneView } from "../src/surface/surface";
 import { TileCache } from "../src/surface/tilecache";
 import { TileBusyError, TileDecodeError, type TileData } from "../src/surface/tile";
 import { SurfacePreview, type SurfaceProbe } from "../src/surface/preview";
@@ -331,6 +331,46 @@ test("a survey with no evidence INSIDE a place may not veto its request: grey or
   for (let i = 0; i < 4; i++) { s2.render([PANE]); await flush(); }
   assert.equal(a2.length, 0, `never-sampled spectrum must still cost no round trip: ${a2.map(keyOf)}`);
   assert.ok(s2.lastFrame[0].surveyed > 0, "…and the survey draws it");
+});
+
+test("T-1077: a place newer than the survey's evidence WAITS for a following surface's next survey — no round trip over never-swept spectrum, and never for longer than SURVEY_DEFER_MS", async () => {
+  // The live-edge shape of the case above. A following pane starts a new tile row every row period,
+  // after the survey in hand was taken, so the row's place begins past `as_of`. T-1057 requests it —
+  // right for a surface whose survey is never re-asked, and a round trip over never-swept spectrum
+  // at every row crossing for one that re-asks every SURVEY_EVERY_MS (ui/e2e/fog-of-war's band C,
+  // 2026-09-26: "the pane REQUESTED a tile over band C … coverage [0,65536]", all unobserved).
+  const run = async (renews: boolean, clockMs: number) => {
+    const asked: TileAddr[] = [];
+    let t = 0;
+    const g = stubGl(W, H);
+    const surface = new Surface(
+      g.canvas, LAT,
+      (tex) => new TileCache(tex, (a) => { asked.push(a); return Promise.resolve(data(a)); },
+        { inFlight: 64, now: () => 0 }),
+      { now: () => t },
+    );
+    surface.setScale(-100, -60);
+    surface.setSurveyRenews(renews);
+    surface.setSurvey(decodeSurvey(unobserved(12.8 * MHZ, 0)));
+    t = clockMs;
+    for (let i = 0; i < 4; i++) { surface.render([PANE]); await flush(); }
+    return { asked, report: surface.lastFrame[0] };
+  };
+
+  // A. a following surface, survey just landed: nothing is requested, and the place says pending —
+  // the next survey is one cadence away and is what will turn it grey.
+  const a = await run(true, 0);
+  assert.equal(a.asked.length, 0, `a renewing survey must not cost a round trip over never-swept spectrum: ${a.asked.map(keyOf)}`);
+  assert.ok(a.report.pending > 0, "…and the place is stated pending (something is coming), not drawn as anything");
+
+  // B. the cadence stopped delivering: past SURVEY_DEFER_MS the place is owed its request again —
+  // T-1057's "never left pending for good" holds whatever the survey host does.
+  const b = await run(true, SURVEY_DEFER_MS + 1);
+  assert.ok(b.asked.length > 0, "a survey older than SURVEY_DEFER_MS may not keep a place pending: it is requested");
+
+  // C. a surface whose survey is never re-asked (historical): T-1057's request, unchanged.
+  const c = await run(false, 0);
+  assert.ok(c.asked.length > 0, "with no cadence nothing is coming for the place, so it is requested");
 });
 
 test("a retune: the survey in hand may not veto a request about the band just tuned to", async () => {

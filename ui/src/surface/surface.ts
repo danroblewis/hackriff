@@ -257,6 +257,24 @@ const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
 export const REVEAL_HOLD_MS = 300;
 
 /**
+ * **How long a survey keeps speaking for places newer than its own evidence** (T-1077), ms.
+ *
+ * A survey that settles a place's whole frequency span as never sampled, up to its `as_of`, says
+ * nothing directly about rows recorded after that instant — and at a following pane's live edge a
+ * new tile row starts every row period, *after* the survey in hand was taken. T-1057 made such a
+ * place requested rather than skipped (a skip that draws nothing is a place left pending for good),
+ * which put a round trip over never-swept spectrum at every row crossing — exactly the cost
+ * T-580/T-905 exist to avoid, and what `ui/e2e/fog-of-war`'s band C pins. On a host that re-asks the
+ * survey on a cadence ([[Surface.setSurveyRenews]], every [[SURVEY_EVERY_MS]] while following) the
+ * next answer is at most one cadence away and the radio can only have started sampling that band
+ * through a retune, which [[Surface.noteRetune]] already suspends the survey for. So such a place
+ * waits for that answer instead — as pending, the same ground as the rows above any survey's
+ * horizon — but only while the survey in hand landed within this bound: a cadence that has stopped
+ * delivering falls back to T-1057's request, so nothing is left pending indefinitely. Five cadences.
+ */
+export const SURVEY_DEFER_MS = 10_000;
+
+/**
  * The lane the coarse stand-in enumeration is asked for in ([[TileSourceHint.lane]], T-1037), so a
  * batching source sends it as its own request: it only removes the black if it arrives as one
  * picture, not cut up among a viewport's own hundred addresses.
@@ -627,6 +645,10 @@ export class Surface {
   /** From which instant the current survey is stale, ns on the capture clock (T-1057). See
    * [[noteRetune]]; `null` means the survey speaks for its whole window. */
   private surveyStaleFromNs: number | null = null;
+  /** Whether the host re-asks the survey on a cadence (T-1077, [[setSurveyRenews]]). */
+  private surveyRenews = false;
+  /** When the survey in hand landed, on [[now]]'s clock (T-1077, [[SURVEY_DEFER_MS]]). */
+  private surveyLandedMs = Number.NEGATIVE_INFINITY;
 
   /**
    * **The live ring, per pane** (T-1042 / LSR-1, `./livering.ts`): the published `spectrum/live`
@@ -696,12 +718,26 @@ export class Surface {
    */
   setSurvey(s: Survey | "awaiting" | null): void {
     this.survey = s;
+    if (s !== null && s !== "awaiting") this.surveyLandedMs = this.now();
     if (s === null) this.surveyStaleFromNs = null;
     else if (s !== "awaiting" && this.surveyStaleFromNs !== null && s.throughNs >= this.surveyStaleFromNs) {
       this.surveyStaleFromNs = null;
     }
   }
   get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /**
+   * **The host re-asks the survey on a cadence** (T-1077): a following surface does, every
+   * [[SURVEY_EVERY_MS]]; a historical one asks once. Only then may a place newer than the survey's
+   * evidence wait for the next answer instead of being requested — see [[SURVEY_DEFER_MS]].
+   */
+  setSurveyRenews(on: boolean): void { this.surveyRenews = on; }
+
+  /** May a place the survey settles as never sampled, but newer than its evidence, wait for the next
+   * survey rather than be requested? (T-1077, [[SURVEY_DEFER_MS]].) */
+  private surveyDefers(): boolean {
+    return this.surveyRenews && this.now() - this.surveyLandedMs < SURVEY_DEFER_MS;
+  }
 
   /**
    * **A retune happened at `atNs`: the survey may not veto a request about anything from that instant
@@ -769,12 +805,14 @@ export class Surface {
    * every lane inside [[render]] — the pane's own tiles, the parent pin, the child prefetch and the
    * coarse stand-in set. It is `true` only when the survey will actually **draw grey** for the place:
    * the user's rule is that the survey may turn a place grey and may never leave it pending, and a
-   * skip that draws nothing leaves it pending with nothing coming.
+   * skip that draws nothing leaves it pending with nothing coming. The one exception is a place
+   * newer than the survey's evidence on a surface whose next survey is due within
+   * [[SURVEY_DEFER_MS]] (T-1077): something IS coming for it, one cadence away.
    */
   private surveySettles(lat: Lattice, a: TileAddr): boolean {
     const region = extentOf(lat, a);
     const through = this.surveyedThrough(region);
-    return through !== null && through > region.t0Ns;
+    return through !== null && (through > region.t0Ns || this.surveyDefers());
   }
 
   /**
@@ -1016,6 +1054,15 @@ export class Surface {
             // short-circuit is granted only when it actually puts grey on the screen.
             if (through !== null && through > region.t0Ns) {
               resolved.push({ addr: a, region, kind: "surveyed", through });
+              continue;
+            }
+            // **Newer than the survey's evidence, on a surface whose next survey is due** (T-1077):
+            // never sampled up to `through`, and only a retune (which already voids `through`) could
+            // change that — so it waits for that answer as pending, like every row above a survey's
+            // horizon, instead of costing a round trip over never-swept spectrum. Bounded by
+            // [[SURVEY_DEFER_MS]], so a survey that stops arriving falls back to the request below.
+            if (through !== null && this.surveyDefers()) {
+              resolved.push({ addr: a, region, kind: "awaiting" });
               continue;
             }
           }
