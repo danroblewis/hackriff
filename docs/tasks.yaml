@@ -30815,13 +30815,13 @@ tasks:
 
       Review found: e2e unmet + resume walk fetched an unbounded gap and discarded it. Fixed: walk bounded to ring window, ring's band; on completion resident tiles over the gap are re-asked; e2e ui/e2e/live-ring-resume.e2e.mjs added (passes alone x3); decoder i64 refused every real block (t0_ns > 2^53) - fixed with unit test.
     result: |
-      DONE (work-runner, from handback.json, 2026-09-26 06:31).
-      Client half of LSR-3 (server t_from walk + DISCONTINUITY already landed in LSR-2). Added GapResume in livering.ts: on socket drop it remembers the ring's newest-run t1; on the first row after reconnect it returns [last t1, first new row) if rows were missed. live-edge.ts (behind live-ring flag) opens /ws/spectrum/rows for exactly that range via panePath and tallies blocks/DISCONTINUITY in resumeState. The ring keeps a gap a gap (GAP_FACTOR), so the tile lane fills the gap - no black - and ring resumes. panePath's isNs relaxed from safe-integer to integer (absolute capture ns ~1.8e18 exceeds 2^53 and would have thrown). ui/test asserts the resubscribe request carries last t1 and t_to. NOT done: the e2e drop-socket spec (needs fresh hk + browser harness; not run) and stitching walked blocks into the ring (tiles fill instead).
-      Tests: node ui/test/run.mjs livering panerows (+tsc --noEmit) -> exit 0 (3/3 files passed, tsc clean)
+      DONE (work-runner, from handback.json, 2026-09-26 07:12).
+      Review fix. (1) Added ui/e2e/live-ring-resume.e2e.mjs: an init-script WebSocket proxy drops the app's /ws/spectrum/live and refuses reconnects for ~2 s; asserts the pane is never a flat fill while dark, then that the page resubscribed to /ws/spectrum/rows with t_from (ring's last t1) and t_to, the server accepted it, walked 13 blocks (1-2 DISCONTINUITY), none unreadable, and the ring resumes painting. Passes alone 3/3 on a fresh hk. (2) The resume walk is now bounded to the ring's own window (GapResume.onRow maxRows) and uses the ring's band (not the header's); and it is no longer thrown away: when the walk ends, resident tiles over the gap are re-asked via TileCache.coverageChanged (new SurfacePreview.regionChanged, wired by setResumeSink) instead of waiting for the refresh lane. Walked rows are deliberately not painted into the ring (the gap is the tile lane's). (3) The per-row frame() allocation is now gated on GapResume.pending. (4) Real bug the e2e exposed: panerows' i64 refused any absolute capture ns > 2^53, so every real block was unreadable (22/22); fixed, with a unit test at a real 1.79e18 ns row. Merged gated main 4bdd4115.
+      Tests: node ui/test/run.mjs (all UI unit files, + tsc --noEmit) -> exit 0 (117/117 test files passed, tsc clean); node ui/e2e/run.mjs live-ring-resume (alone, fresh hk, x3) -> exit 0 (passed 3/3)
       precheck exit 0
-      Commits: ac9f3c52
-      Observed, not chased: e2e drop-the-socket-for-2s spec not written/run; walked-gap blocks are counted, not painted (tile lane fills) | ui/node_modules absent in worktree; used a temporary symlink to main's (test runner writes bundles there)
-      Resources: 35 CPU-s, peak 0.8 GB
+      Commits: 24b46df3
+      Observed, not chased: ui/e2e/live-ring.e2e.mjs (LSR-1) fails on this branch alone at 'waiting for the chrome to report a viewport' (.hk-surface-viewport[data-viewport=pane]): T-996 (already in merged main) stopped passing `chrome` to the preview so that selector no longer exists - the spec is stale against main, not touched by this diff | live-ring-resume + live-ring run concurrently on two lanes: resume spec failed at 115 s (not reproduced alone 3x) - load-flake candidate for the deflaker
+      Resources: 293 CPU-s, peak 4.8 GB
     branch: task-t1044
   - id: T-1045
     milestone: MLIVE
