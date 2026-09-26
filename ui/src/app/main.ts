@@ -22,6 +22,19 @@ import { initialState, parsePrefs } from "./state";
 
 const EAGER_AREAS: readonly AreaMounts[] = [explore.mounts, centre.mounts, dock.mounts];
 
+/**
+ * **The sealed-tile cache, for an instant first paint offline** (T-1039, `../sw/tiles-sw.ts`).
+ *
+ * Best-effort and silent: a browser with no Service Worker support, or one that refuses the
+ * registration, still runs exactly as before — this is resilience on top of the ordinary network
+ * path (`../surface/tilecache.ts`'s own stale-while-revalidate and jittered backoff), never a
+ * dependency of it.
+ */
+function registerTileServiceWorker(): void {
+  if (!("serviceWorker" in navigator)) return;
+  void navigator.serviceWorker.register("sw-tiles.js").catch(() => {});
+}
+
 function mountArea(area: AreaMounts, ctx: AppContext) {
   for (const [name, mount] of Object.entries(area)) mount(slot(name), ctx);
 }
@@ -31,6 +44,7 @@ function readPrefs(): string | null {
 }
 
 function main() {
+  registerTileServiceWorker();
   reloadOnTokenHash(window, sessionStorage);
   const token = takeToken();
   const store = createStore(initialState(parsePrefs(readPrefs())));

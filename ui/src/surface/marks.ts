@@ -133,6 +133,10 @@ export const HATCH_ON_CSS_PX = 1;
 export const FILL_ALPHA = 0.45;
 /** A selected feature's outline is this much heavier, CSS px, and carries corner handles. */
 export const SELECTED_EXTRA_CSS_PX = 2;
+/** T-1004: the linked ghost's corner brackets, as a fraction of the selection's ink — present
+ * enough to follow across a split, faint enough that the selected pane is the one that reads as
+ * selected. */
+export const LINKED_ALPHA = 0.4;
 export const HANDLE_LEN_CSS_PX = 8;
 export const HANDLE_THICK_CSS_PX = 3;
 /** Inner outline of a `double` (curated) outline: inset and thickness, CSS px. */
@@ -184,6 +188,17 @@ export interface MarkBox {
   readonly symbology?: MarkSymbology;
   /** T-910: the selected feature — heavier outline and corner handles. */
   readonly selected?: boolean;
+  /**
+   * T-1004: **the selection, seen from another pane** — the same feature, drawn in a pane that is
+   * not the one the selection was made in. Selection is one piece of state the whole page shares
+   * (`focus`), so with a split view the selected feature was drawn as *selected* in every pane at
+   * once and nothing said which pane owned it. A linked box keeps its own class symbology at its own
+   * extent — it is the same feature, and this claims nothing extra about the air — and carries the
+   * selection's corner brackets at [[LINKED_ALPHA]] instead of the selected outline and solid
+   * handles: a ghost of the selection, so the link is visible and the selection is still one place.
+   * Never set with [[selected]]; the selected pane wins.
+   */
+  readonly linked?: boolean;
   /** T-994: the feature has an open output (served by the backend's open-output records), drawn as
    * an [[ACTIVE_MARK]] halo outside its outline. */
   readonly active?: boolean;
@@ -240,6 +255,7 @@ const withAlpha = (c: readonly [number, number, number, number], a: number): rea
 export function signalMarkBoxes<R extends MarkRow>(
   rows: readonly R[], focusedId: string | null, unexplained?: (row: R) => boolean,
   active?: ReadonlyMap<string, { readonly level: number | null }>,
+  linkedFocus = false,
 ): MarkBox[] {
   const out: MarkBox[] = [];
   for (const r of rows) {
@@ -263,11 +279,14 @@ export function signalMarkBoxes<R extends MarkRow>(
       f1Hz: band ? band.f_hi : r.f_hi_hz,
       t0Ns: iv.t_start_s * S_TO_NS,
       t1Ns: iv.open ? null : iv.t_end_s * S_TO_NS,
-      rgba: r.id === focusedId ? withAlpha(base, FOCUS_ALPHA) : base,
+      rgba: r.id === focusedId && !linkedFocus ? withAlpha(base, FOCUS_ALPHA) : base,
       open: iv.open,
       strokePx: base === CONFIRMED_MARK ? CONFIRMED_STROKE_PX : CANDIDATE_STROKE_PX,
       symbology: SYMBOLOGY[cls],
-      selected: r.id === focusedId,
+      // T-1004: `linkedFocus` = these boxes are for a pane that does not own the selection, so the
+      // focused row is the linked ghost here and the selected feature only where it was selected.
+      selected: r.id === focusedId && !linkedFocus,
+      linked: r.id === focusedId && linkedFocus,
       ...(active?.has(r.id) ? { active: true, activeLevel: active.get(r.id)!.level } : {}),
     });
   }
@@ -283,7 +302,7 @@ export function signalMarkBoxes<R extends MarkRow>(
  * on this surface it is the same statement in the same pass as everything else.
  */
 export function selectionMarkBoxes(
-  sels: readonly MarkSelection[], focusedId: string | null, paneBox: Box,
+  sels: readonly MarkSelection[], focusedId: string | null, paneBox: Box, linkedFocus = false,
 ): MarkBox[] {
   const out: MarkBox[] = [];
   for (const s of sels) {
@@ -293,8 +312,9 @@ export function selectionMarkBoxes(
       f0Hz: s.f_lo, f1Hz: s.f_hi,
       t0Ns: timed ? (s.t_lo as number) * S_TO_NS : paneBox.t0Ns,
       t1Ns: timed ? (s.t_hi as number) * S_TO_NS : paneBox.t1Ns,
-      rgba: s.id === focusedId ? withAlpha(SELECTION_MARK, FOCUS_ALPHA) : SELECTION_MARK,
+      rgba: s.id === focusedId && !linkedFocus ? withAlpha(SELECTION_MARK, FOCUS_ALPHA) : SELECTION_MARK,
       open: false,
+      linked: s.id === focusedId && linkedFocus,
     });
   }
   return out;
@@ -394,6 +414,7 @@ export function markQuads(
       const alongX = x1 - x0 > y1 - y0;
       push([cx0, cy0, cx1, cy1], b.rgba, "edge", dash(alongX ? "x" : "y"));
       if (b.selected) handleQuads(push, x0, y0, x1, y1, b.rgba, spx, k, W, H);
+      else if (b.linked) handleQuads(push, x0, y0, x1, y1, b.rgba, spx, k, W, H, LINKED_ALPHA);
       continue;
     }
     // The light fill first, so the outline is drawn over it.
@@ -422,6 +443,11 @@ export function markQuads(
       if (a1 - a0 > 2 * tx && b1 - b0 > 2 * ty) rectEdges(edge, a0, b0, a1, b1, tx, ty, b.rgba);
     }
     if (b.selected && sym) handleQuads(push, x0, y0, x1, y1, b.rgba, spx, k, W, H);
+    // T-1004: the linked ghost — the selection's brackets, faint, on a box that is otherwise drawn
+    // exactly as it would be unselected. Drawn for a mark with no symbology too (a selection region
+    // linked from another pane): the brackets ARE the link, and without them the ghost would be
+    // indistinguishable from an unselected mark.
+    else if (b.linked) handleQuads(push, x0, y0, x1, y1, b.rgba, spx, k, W, H, LINKED_ALPHA);
   }
   return out;
 }
@@ -462,12 +488,15 @@ function rectEdges(
   if (y1 <= 1) edge([cx0, Math.max(y1 - ty, cy0), cx1, y1], rgba, pat?.("x"));
 }
 
-/** A selected feature's corner handles: an L-bracket just outside each corner that is on the pane. */
+/** A selected feature's corner handles: an L-bracket just outside each corner that is on the pane.
+ * `alpha` is the ink's own (T-1004): [[FOCUS_ALPHA]] for the selection, [[LINKED_ALPHA]] for the
+ * linked ghost another pane draws of it. */
 function handleQuads(
   push: PushQuad, x0: number, y0: number, x1: number, y1: number,
   rgba: readonly [number, number, number, number], spx: number, k: number, W: number, H: number,
+  alpha = FOCUS_ALPHA,
 ): void {
-  const ink = withAlpha(rgba, FOCUS_ALPHA);
+  const ink = withAlpha(rgba, alpha);
   const off = spx, len = HANDLE_LEN_CSS_PX * k, th = HANDLE_THICK_CSS_PX * k;
   const ox = (2 * off) / W, oy = (2 * off) / H, lx = (2 * len) / W, ly = (2 * len) / H, tx = (2 * th) / W, ty = (2 * th) / H;
   for (const [cx, sxg] of [[x0 - ox, 1], [x1 + ox, -1]] as const) {
@@ -507,6 +536,7 @@ function symbolQuads(
     rectEdges(edge, x0 + ix, y0 + iy, x1 - ix, y1 - iy, (2 * k) / W, (2 * k) / H, b.rgba);
   }
   if (b.selected) handleQuads(push, x0, y0, x1, y1, b.rgba, 2 * k, k, W, H);
+  else if (b.linked) handleQuads(push, x0, y0, x1, y1, b.rgba, 2 * k, k, W, H, LINKED_ALPHA);
 }
 
 /**

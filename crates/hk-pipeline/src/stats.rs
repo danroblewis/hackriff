@@ -207,6 +207,9 @@ counter_group!(
         presence_extensions,
         /// Presence extensions a tick left out at its cap; those boxes grow on the poll instead.
         presence_extensions_truncated,
+        /// T-940: open-track reports filed on the observation ledger (measured end + observed
+        /// silence), which keep an on-air emitter `live` on the inventory poll between sightings.
+        tracks_followed,
     }
 );
 
@@ -253,6 +256,16 @@ counter_group!(
         rows_gated,
         /// Publisher errors.
         errors,
+        /// T-1048 (LSR-7): the newest row's fold cost, ns — dB conversion plus the wire's
+        /// little-endian serialize (`crate::spectrum::Output::row`'s own timer, T-453's
+        /// "capture-thread cost is measured, never assumed"). Not per-subscription: one fold
+        /// serves every watcher of today's single-geometry `/ws/spectrum/live` alike; a per-pane
+        /// fold is LSR-2's (`/ws/spectrum/rows`) to add at this same point once it lands.
+        fold_ns_last,
+        /// The largest fold cost seen this run, ns.
+        fold_ns_max,
+        /// Every fold cost seen this run, summed, ns — `fold_ns_total / rows` is the mean.
+        fold_ns_total,
     }
 );
 
@@ -339,6 +352,10 @@ counter_group!(
         /// T-209: pilot-locked analog sessions without a decoded identity whose emitter was not
         /// placed because the window's front end was overloaded or clipping.
         mode_emitters_withheld,
+        /// T-926: analog windows restarted inside the ring's history after the chain was lapped
+        /// (an overrun while it computed its probe or early identification) — instead of writing
+        /// the fragment it had, too short for RDS.
+        window_restarts,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
@@ -547,6 +564,20 @@ counter_group!(
         flex_frames,
         /// FLEX pages (address + vector) found in those frames.
         flex_pages,
+        /// T-989: regions a conventional-DMR scan ran on ([`crate::dmr`]). Counted apart from
+        /// the classifications beside them: the scan runs whether or not the classifier could
+        /// say anything, which is the point of it.
+        dmr_scanned,
+        /// Regions identified as conventional DMR (Tier II) from their sync words.
+        dmr_identified,
+        /// DMR headers published on a `messages` stream, each one FEC- or CRC-checked.
+        dmr_headers,
+        /// DMR blocks whose BPTC could not be resolved, or whose CRC or RS parity refused them.
+        /// Counted, never published as a guess — a real capture shows a number here rather than
+        /// a silence.
+        dmr_headers_refused,
+        /// DMR header records the egress gate withheld.
+        dmr_headers_gated,
         /// Chain errors (demod, repository).
         errors,
         /// T-605: chain errors that came back from the **storage engine** — a write the database

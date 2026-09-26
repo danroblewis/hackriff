@@ -28,8 +28,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  ARTIFACT_MARK, CONFIRMED_MARK, OPEN_EDGE_MARK, GENERALIZE_BELOW_CSS_PX, HANDLE_LEN_CSS_PX, SYMBOLOGY,
-  markQuads, signalMarkBoxes, type MarkBox,
+  ARTIFACT_MARK, CONFIRMED_MARK, OPEN_EDGE_MARK, GENERALIZE_BELOW_CSS_PX, HANDLE_LEN_CSS_PX, LINKED_ALPHA, SYMBOLOGY,
+  markQuads, selectionMarkBoxes, signalMarkBoxes, type MarkBox,
 } from "../src/surface/marks";
 import { inkFraction, quadSizePx, type OverlayQuad } from "../src/surface/minimap";
 import {
@@ -278,6 +278,78 @@ test("selected = a heavier outline plus corner handles; deselected loses both", 
   // A selected generalized symbol has handles too.
   const dot = row("d", { f_lo_hz: 100.999e6, f_hi_hz: 101.001e6, presence: { last_interval: { t_start_s: T0 - 10, t_end_s: T0 - 9.95, open: false } } });
   assert.equal(quadsOf([dot], PANE, "d").filter((x) => x.part === "handle").length, 8);
+});
+
+// ---------------------------------------------------------------------------
+// 4b. T-1004: the selection, seen from the OTHER pane — a linked ghost, not a second selection
+// ---------------------------------------------------------------------------
+//
+// Selection is one piece of page state, and with a split view that state was drawn as *selected* in
+// every pane at once: two heavy outlines with corner handles, nothing saying which pane the user
+// selected in. The pane that owns it keeps the selection; every other pane draws the same feature as
+// a **linked ghost** — its own ordinary symbology, plus the selection's brackets at LINKED_ALPHA.
+// The degenerate implementations these stop: drawing nothing in the other pane (the link disappears),
+// and drawing the selection twice (the state the ticket is about).
+
+test("T-1004: the owning pane draws the selection; another pane draws the same feature as a faint linked ghost", () => {
+  const r = row("k", { state: "confirmed" });
+  const thick = (q: readonly OverlayQuad[]) => Math.max(...q.filter((x) => x.part === "edge" && x.clip[2] - x.clip[0] < 0.1).map((x) => quadSizePx(x, RECT).wPx));
+  const rest = quadsOf([r], PANE, null);
+  const owner = quadsOf([r], PANE, "k");
+  const ghost = markQuads(signalMarkBoxes([r], "k", isUnexplained, undefined, true), EDGE, PANE, RECT, GEN);
+
+  // The ghost is drawn, and it is drawn AS THE FEATURE: same outline weight as unselected, so the
+  // other pane never reads as a second selection.
+  assert.ok(ghost.length > 0, "the other pane dropped the selected feature entirely");
+  assert.equal(thick(ghost), thick(rest), "the ghost carries the selected pane's heavier outline");
+  assert.ok(thick(owner) > thick(ghost), "the owning pane's selection is no heavier than the ghost");
+
+  // The link is visible: the selection's brackets, at a lower alpha than the selection's own.
+  const gh = ghost.filter((x) => x.part === "handle"), oh = owner.filter((x) => x.part === "handle");
+  assert.equal(gh.length, oh.length, "the ghost has no brackets, so nothing says the panes are linked");
+  assert.equal(rest.filter((x) => x.part === "handle").length, 0, "an unselected feature grew brackets");
+  assert.equal(gh[0].rgba[3], oh[0].rgba[3] * LINKED_ALPHA);
+  assert.ok(gh[0].rgba[3] < oh[0].rgba[3], "the ghost is not fainter than the selection");
+  // Same ink, and the same corners: it is the same feature, not a mark of its own. (Not the same
+  // clip to the last unit — the selection's brackets sit outside its HEAVIER outline, so they are a
+  // stroke width further out than the ghost's.)
+  assert.deepEqual(gh.map((q) => q.rgba.slice(0, 3)), oh.map((q) => q.rgba.slice(0, 3)));
+  const cx = (q: OverlayQuad) => (q.clip[0] + q.clip[2]) / 2, cy = (q: OverlayQuad) => (q.clip[1] + q.clip[3]) / 2;
+  for (let i = 0; i < gh.length; i++) {
+    assert.ok(Math.abs(cx(gh[i]) - cx(oh[i])) * RECT.w / 2 < 6 && Math.abs(cy(gh[i]) - cy(oh[i])) * RECT.h / 2 < 6,
+      `ghost bracket ${i} is not at the selection's corner`);
+  }
+
+  // A generalized feature ghosts too (the symbol keeps the brackets), and so does a selection region,
+  // which has no symbology at all — there the brackets ARE the only thing that says "linked".
+  const dot = row("d", { f_lo_hz: 100.999e6, f_hi_hz: 101.001e6, presence: { last_interval: { t_start_s: T0 - 10, t_end_s: T0 - 9.95, open: false } } });
+  const dotGhost = markQuads(signalMarkBoxes([dot], "d", isUnexplained, undefined, true), EDGE, PANE, RECT, GEN);
+  assert.equal(dotGhost.filter((x) => x.part === "handle").length, 8);
+  const sel = { id: "s1", f_lo: 100.5e6, f_hi: 101e6, t_lo: T0 - 9, t_hi: T0 - 4 };
+  const selGhost = markQuads(selectionMarkBoxes([sel], "s1", PANE, true), EDGE, PANE, RECT, GEN);
+  const selOwn = markQuads(selectionMarkBoxes([sel], "s1", PANE), EDGE, PANE, RECT, GEN);
+  assert.ok(selGhost.length > selOwn.length, "a linked selection region is drawn exactly like the selection");
+});
+
+test("T-1004: the pin layer marks the ghost as linked, not selected, and only outside the owning pane", () => {
+  const r = row("k", { state: "confirmed" });
+  const lay = (paneId: string) => layoutPanePins(detectionPins([r]), paneId, PANE, RECT, CANVAS_H, 1, EDGE);
+  const root = new FakeEl();
+  const layer = new PinLayer(root as unknown as HTMLElement);
+  layer.update([lay("p1"), lay("p2")], null, "k", undefined, "p2");
+  const byPane = Object.fromEntries(root.children.filter((c) => c.type === "button").map((c) => [c.dataset.pane, c]));
+  assert.ok(byPane.p1 && byPane.p2, "both panes place the feature");
+  assert.match(byPane.p2.className, /\bselected\b/);
+  assert.doesNotMatch(byPane.p2.className, /\blinked\b/);
+  assert.match(byPane.p1.className, /\blinked\b/);
+  assert.doesNotMatch(byPane.p1.className, /\bselected\b/);
+  assert.equal(byPane.p1.getAttribute("aria-pressed"), "false", "the ghost reads as pressed to a screen reader");
+  assert.equal(byPane.p2.getAttribute("aria-pressed"), "true");
+  assert.match(String(byPane.p1.getAttribute("aria-label")), /linked: selected in another viewport/);
+  // A host that names no owning pane (one pane, or no preview) behaves exactly as before.
+  const plain = new FakeEl();
+  new PinLayer(plain as unknown as HTMLElement).update([lay("p1")], null, "k");
+  assert.match(plain.children.find((c) => c.type === "button")!.className, /\bselected\b/);
 });
 
 // ---------------------------------------------------------------------------

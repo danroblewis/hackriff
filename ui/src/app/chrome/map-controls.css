@@ -180,6 +180,42 @@
 .map-more-body #theme-btn { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
 .map-more-body #theme-btn:hover { background: var(--raise); }
 .map-more-body { display: flex; flex-direction: column; gap: 4px; }
+/* T-1053: the mode chips folded into ⋯ on a phone — the same buttons, as labelled menu rows. The
+   word is shown only here; in the chip row the icon is the face and the aria-label the name. */
+.map-ibtn-word { display: none; }
+.map-more-tools { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.map-more-tools .map-ibtn { width: auto; height: auto; min-height: 30px; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font: 12px var(--ui); text-align: left; }
+.map-more-tools .map-ibtn svg { width: 16px; height: 16px; flex: none; }
+.map-more-tools .map-ibtn-word { display: inline; }
+
+/* T-1008: the Scan button, inside the Go-to glass (small: it commands the radio), and its plan
+   panel bottom-left above the map strip — beside the frequency axis the plan is drawn along, and
+   clear of the Go-to column's nudges and retune offer. The panel is never faded while shown: it is
+   either a plan about to commit the radio or a sweep that holds it. */
+/* The overlay's lime (`SCAN_INK`), mixed toward the theme's text so it stays legible on light. */
+.map-ctl { --scan-ink: color-mix(in srgb, #9eff38 62%, var(--text)); }
+.map-scan-btn { flex: none; display: flex; align-items: center; gap: 4px; min-height: 26px; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--line) 90%, transparent); border-radius: 6px; background: none; color: var(--text); font: 600 11px var(--ui); cursor: pointer; }
+.map-scan-btn:hover { background: var(--raise); }
+.map-scan-btn[aria-pressed="true"] { border-color: var(--scan-ink); color: var(--scan-ink); }
+.map-scan-btn.is-active { background: color-mix(in srgb, var(--scan-ink) 18%, transparent); }
+.map-scan-btn:disabled { opacity: .45; cursor: not-allowed; }
+.map-scan-ico { width: 8px; height: 8px; border-radius: 1px; background: repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 4px); }
+.map-scan-btn.is-active .map-scan-ico { background: currentColor; }
+.map-scan { left: 0; bottom: calc(var(--map-strip, 110px) + 4px); width: min(330px, calc(100% - 64px)); box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; border-color: var(--scan-ink); background: color-mix(in srgb, var(--panel) 90%, transparent); z-index: 2; max-height: calc(100% - 140px); overflow-y: auto; }
+.map-scan .map-layers-head { margin: -2px -2px 2px 0; }
+.map-scan-device { color: var(--muted); }
+.map-scan-range { font-size: 12.5px; }
+.map-scan-inputs { display: flex; gap: 8px; align-items: center; }
+.map-scan-inputs input { width: 56px; min-height: 26px; background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--text); padding: 2px 4px; }
+.map-scan-inputs select { min-height: 26px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; color: var(--text); }
+.map-scan-commit.is-error { color: var(--coral); }
+.map-scan-notes:empty { display: none; }
+.map-scan-notes { color: var(--muted); }
+.map-scan-actions { display: flex; gap: 6px; }
+.map-scan-go, .map-scan-stop { min-height: 28px; border-radius: 6px; padding: 2px 12px; cursor: pointer; font: 600 12px var(--ui); }
+.map-scan-go { border: 1px solid var(--scan-ink); color: var(--scan-ink); background: color-mix(in srgb, var(--scan-ink) 14%, transparent); }
+.map-scan-stop { border: 1px solid var(--coral); color: var(--coral); background: none; }
+.map-scan-go:disabled, .map-scan-stop:disabled { opacity: .45; cursor: not-allowed; }
 
 /* T-1025: the mode switch, the device state, the recording pill, the readouts and the stream line
    are five SEPARATE chips on a row that paints nothing — never one pill 470 px wide across the top
@@ -226,11 +262,23 @@
    eight of them, the nudges drop their label, and the pill states the device by its dot and label
    on the row under the nudges. */
 @media (max-width: 600px) {
-  .map-ctl { --topright-w: 328px; } /* T-1025, +T-1028's chip: 9 × 32 + 8 × 4 + 8 */
+  /* T-1053: five chips here — Measure, Annotate, Pin and Retune mode fold into ⋯ (`FOLD_QUERY`),
+     because nine reached 80 % of a 400 px pane (a bar by another name) and left Go-to 4 px of
+     input. 5 × 32 + 4 × 4 + 8. */
+  .map-ctl { --topright-w: 184px; }
+  /* T-1025: no painted chip wider than a third of the pane on the top edge — Go-to included; the
+     canvas shows between it and the cluster. */
+  .map-goto { width: min(calc(100% / 3), calc(100% - var(--topright-w))); }
   .map-topright { gap: 4px; }
   .map-status { gap: 4px; }
   .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }
   .map-hint { display: none; }
+  /* Icon-only on a phone (its hatch; a filled square while a sweep runs), so Go-to keeps a usable
+     input beside it; the name is its aria-label and title. */
+  .map-scan-btn { padding: 2px 5px; min-width: 22px; justify-content: center; }
+  .map-scan-btn .map-scan-label { display: none; }
+  .map-scan-ico { width: 10px; height: 10px; }
+  .map-scan { width: calc(100% - 60px); }
   .map-nudge { padding: 3px 4px; }
   .map-nudge .nudge-label { display: none; }
   .map-nudge .nudge-btn { padding: 2px 4px; }

@@ -521,6 +521,25 @@ export const __selftestMark = __selftestPredicate(1);
   });`);
     },
   },
+  {
+    // T-1049: the browser tier's only reach for the touch long-press. `app-outputs-map` step 6 is
+    // the one place a HELD finger has to open the box menu, and until T-1049 its press point was
+    // pinned to the box's top — under the 400 px mode strip — so the step timed out before it ever
+    // pressed anything. With the press point now chosen where the canvas actually receives it, this
+    // fault checks the step can still go red for the REASON it exists: a long-press treated as a tap.
+    name: "t1049-long-press-is-a-tap",
+    expect: "app-outputs-map.e2e.mjs",
+    what: "T-824/T-994: a held finger stops being a long-press — the stroke decides 'tap' at " +
+      "release whatever it was held for, so no context menu opens on touch and the box menu is " +
+      "unreachable on a phone (docs/23 section 10.5).",
+    file: "surface/input.ts",
+    patch: (src) => {
+      const from = `      if (touchIntent(e.timeStamp - d.t0) === "region") { if (!d.map) opts.onContext?.(d.press, e); }`;
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in input.ts: the touch long-press branch");
+      // injected by ui/e2e/selftest.mjs — every held finger falls through to the tap below
+      return src.replace(from, `      if (false) { if (!d.map) opts.onContext?.(d.press, e); }`);
+    },
+  },
 ];
 
 function build(fault) {

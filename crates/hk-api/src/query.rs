@@ -1539,6 +1539,17 @@ pub fn inventory_entry_json_at(
                 (Some(scheme.as_string()), None, *class, true)
             }
         };
+        // T-967: the backend's own rendering of the identity, so a list row can show it beside
+        // the bare code without the client parsing decode fields (thin-client rule). `None` on a
+        // withheld row and without a decoded identity, matching `estimated_params`/`cluster_id`
+        // (T-159/T-163) — the field can never confirm a withheld identity by appearing. One
+        // identity-class scan and one indexed row per entry (see the method).
+        let identity_summary = match &entry.identity {
+            InventoryIdentity::Clear { identity, .. } => {
+                repo.latest_decode_identity_summary(identity)?
+            }
+            InventoryIdentity::None | InventoryIdentity::Withheld { .. } => None,
+        };
         let status = repo.known_status_history(e.id)?.last().map(|c| {
             let show = !withheld || reason_is_identity_free(c.author);
             json!({
@@ -1788,6 +1799,12 @@ pub fn inventory_entry_json_at(
             "identity_synthesized": identity_synthesized,
             "identity_class": class,
             "withheld": withheld,
+            // T-967: the decoder's voted session label (RDS: the most frequent PS frame of the
+            // latest session, never the latest fragment) and that label's own share of the
+            // session's frames — both null for a scheme with no decoder summary, and on a
+            // withheld row.
+            "identity_label": identity_summary.as_ref().map(|s| s.label.as_str()),
+            "identity_label_share": identity_summary.as_ref().and_then(|s| s.label_share),
             "snr_db": measurement.map(|m| m.snr_peak_db),
             "peak_dbfs": measurement.map(|m| m.peak_level_dbfs),
             // T-350: the same two numbers **with the time they were measured over**. The flat

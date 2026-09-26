@@ -48,7 +48,7 @@ import { TileCache } from "../src/surface/tilecache";
 import type { TileData } from "../src/surface/tile";
 import {
   HOLD_INK, LiveRow, SHADOW_ALPHA, TRACE_SUBDIV, levelFrac, liveFrameFits, maxHoldColumns, peakOf,
-  afterglowAbsence, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
+  afterglowAbsence, coreSamples, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
   type LiveFrame, type TracePath,
 } from "../src/surface/trace";
 import { cmap } from "../src/cmap";
@@ -60,7 +60,7 @@ const T0 = 1_700_000_000 * S;
 /** A pane looking at 2.4 MHz around 100.8 MHz over 20 s, ending at the edge. */
 const PANE = { f0Hz: 99.6e6, f1Hz: 102e6, t0Ns: T0 - 20 * S, t1Ns: T0 };
 const RECT: PaneRect = { x: 0, y: 0, w: 1000, h: 500 };
-/** A trace strip: the pane's width, a fraction of its height. */
+/** A trace band: the pane's width, a fraction of its height. */
 const STRIP: PaneRect = { x: 0, y: 500, w: 1000, h: 96 };
 const LO = -110, HI = -40;
 
@@ -760,7 +760,7 @@ test("a trace is a STROKE with a width, so it can never be a wash over the pane 
 }); 
 
 // ---------------------------------------------------------------------------
-// The strip is carved out of the pane, not painted over it
+// The trace is a LAYER OVER the pane's top rows and reserves nothing (T-1041)
 // ---------------------------------------------------------------------------
 
 const BOUNDS = { f0Hz: 1e6, f1Hz: 6e9, t0Ns: T0 - 86_400 * S, t1Ns: T0 };
@@ -783,7 +783,11 @@ function viewWith(tracePx: number, trace: SurfaceViewTrace | null) {
 }
 type SurfaceViewTrace = NonNullable<ConstructorParameters<typeof SurfaceView>[0]["trace"]>;
 
-test("the strip is taken out of the pane's RECTANGLE — it never covers the newest rows", () => {
+test("the trace layer RESERVES NO SPACE — the pane keeps its first row, band or no band", () => {
+  // T-457 carved the band off the pane's rectangle so that "the top of the pane is the newest row"
+  // stayed true of the pixels. The user's full-bleed ruling (2026-09-25) is that the reserved band
+  // reads as a black bar across the top of the map and costs the waterfall its newest rows — a
+  // worse failure of the same rule. So the pane keeps every pixel, and the band is drawn INSIDE it.
   const seen: { paneId: string; strip: PaneRect; levelF: number; levelT: number; paneRect: PaneRect }[] = [];
   const { view } = viewWith(96, (pane, _edge, report, strip) => {
     seen.push({ paneId: pane.id, strip, levelF: report.levelF, levelT: report.levelT, paneRect: pane.rect });
@@ -798,15 +802,15 @@ test("the strip is taken out of the pane's RECTANGLE — it never covers the new
     assert.equal(s.strip.h, 96);
     assert.equal(s.strip.w, pane.rect.w);
     assert.equal(s.strip.x, pane.rect.x);
-    // GL origin is bottom-left, so "above the pane" is y + h. Disjoint, by construction.
-    assert.equal(s.strip.y, pane.rect.y + pane.rect.h);
-    assert.ok(s.strip.y >= pane.rect.y + pane.rect.h, "the strip overlaps the pane it is a trace of");
+    // GL origin is bottom-left, so the pane's TOP rows are the last 96 px of its own rectangle.
+    assert.equal(s.strip.y, pane.rect.y + pane.rect.h - 96, "the band is the pane's own top rows");
+    assert.equal(s.strip.y + s.strip.h, pane.rect.y + pane.rect.h, "…flush with the pane's top edge");
   }
-  // And the pane really did give the space up rather than keeping it and being drawn under.
+  // And the pane really did keep the space rather than giving it up: same rectangle, trace or none.
   const { view: noTrace } = viewWith(0, null);
   const tall = noTrace.frame(T0, []).views.find((v) => v.id !== noTrace.minimap.id)!;
   const short = f.views.find((v) => v.id !== view.minimap.id)!;
-  assert.equal(tall.rect.h - short.rect.h, 96, "the pane is exactly the strip shorter");
+  assert.deepEqual(short.rect, tall.rect, "switching the trace on moved the pane's rectangle");
   // The level the trace reduces at is the level the picture under it was drawn at.
   const report = f.reports.find((r) => r.id === seen[0].paneId)!;
   assert.equal(seen[0].levelF, report.levelF);
@@ -831,8 +835,9 @@ test("the data pass is byte-identical with the trace on and off — a trace cann
     view.dispose();
     return ops;
   };
-  // The pane is 96 px shorter with a trace, which legitimately changes the RECT it is drawn into but
-  // must not change any colour decision: same ramp, same range, same tier, same fallback marks.
+  // Since T-1041 the pane is the same rectangle either way, so this is now an equality of the
+  // whole uniform set in all but name; it is still compared on the colour decision — same ramp,
+  // same range, same tier, same fallback marks — because that is the claim being made.
   const colourOf = (ops: string[]) => ops.map((s) => {
     const u = JSON.parse(s) as Record<string, unknown>;
     return JSON.stringify({ uLo: u.uLo, uHi: u.uHi, uKind: u.uKind, uTier: u.uTier, uFallback: u.uFallback, uFlat: u.uFlat });
@@ -861,19 +866,20 @@ test("EACH split pane gets its own trace, at its OWN time position", () => {
   const a = seen.find((s) => s.id === first)!, b = seen.find((s) => s.id === second)!;
   assert.equal(a.tAtNs, T0, "the following pane's time position is the growing edge");
   assert.ok(b.tAtNs < T0 - 30 * S, `the frozen pane's time position is its own window's top, not the edge (${b.tAtNs})`);
-  // Two strips, side by side, each over its own pane.
+  // Two bands, side by side, each over the top rows of its own pane.
   assert.notEqual(a.strip.x, b.strip.x);
   for (const s of seen) {
     const pane = f.views.find((v) => v.id === s.id)!;
     assert.equal(s.strip.w, pane.rect.w);
-    assert.equal(s.strip.y, pane.rect.y + pane.rect.h, "each strip sits above its own pane");
+    assert.equal(s.strip.y + s.strip.h, pane.rect.y + pane.rect.h, "each band sits over its own pane's top rows");
+    assert.ok(s.strip.y >= pane.rect.y, "…and inside it");
   }
   assert.equal(f.traces.length, 2);
   view.dispose();
 });
 
 // ---------------------------------------------------------------------------
-// The strip is a READOUT, not a control: it must not swallow a gesture
+// The trace is a READOUT, not a control: it must not swallow a gesture
 // ---------------------------------------------------------------------------
 
 /**
@@ -887,9 +893,10 @@ test("EACH split pane gets its own trace, at its OWN time position", () => {
  * measured in.
  *
  * The property below is stated in terms of neither gesture, which is the point: **turning the trace
- * on may not shrink the set of points a gesture can start from.** Any decoration carved out of a
- * pane in future has to satisfy it too, and it fails on the broken code without knowing that region
- * strokes, alt-drags or T-458 exist at all.
+ * on may not shrink the set of points a gesture can start from.** Since T-1041 the trace carves
+ * nothing out, so it holds structurally rather than by a second lookup — but the property is about
+ * any decoration, not about this one, so it stays: a future band that took the space back would
+ * fail it without knowing that region strokes, alt-drags or T-458 exist at all.
  */
 function grid(w: number, h: number, step = 7): { x: number; y: number }[] {
   const pts: { x: number; y: number }[] = [];
@@ -897,7 +904,7 @@ function grid(w: number, h: number, step = 7): { x: number; y: number }[] {
   return pts;
 }
 
-test("turning the trace ON may not make any point unreachable — the strip is not a hole", () => {
+test("turning the trace ON may not make any point unreachable — the trace is not a hole", () => {
   const W = 1200, H = 600;
   const frameOf = (tracePx: number) => {
     const { view } = viewWith(tracePx, tracePx > 0 ? () => [] : null);
@@ -915,38 +922,44 @@ test("turning the trace ON may not make any point unreachable — the strip is n
     `${lost.length} points could start a gesture without the trace and cannot with it ` +
     `(first: ${lost[0]}). A decoration carved out of a pane must pass pointers through to it.`);
 
-  // And the strip specifically resolves to ITS OWN pane, not merely to some pane: on a split, a
-  // strip that answered with its neighbour's id would pan the wrong viewport.
+  // And the band specifically resolves to ITS OWN pane, not merely to some pane: on a split, a
+  // band that answered with its neighbour's id would pan the wrong viewport.
   const trace = on.f.traces[0];
-  assert.ok(trace, "no trace strip in the frame");
+  assert.ok(trace, "no trace band in the frame");
   for (const p of [
     { x: trace.rect.x + 1, y: trace.rect.y + 1 },
     { x: trace.rect.x + trace.rect.w - 2, y: trace.rect.y + trace.rect.h - 1 },
     { x: trace.rect.x + trace.rect.w / 2, y: trace.rect.y + trace.rect.h / 2 },
   ]) {
-    assert.equal(paneAtPoint(on.f, on.mapId, p), trace.id, `a point in the strip at ${JSON.stringify(p)}`);
+    assert.equal(paneAtPoint(on.f, on.mapId, p), trace.id, `a point in the band at ${JSON.stringify(p)}`);
   }
 });
 
-test("a point in the strip clamps to the pane's TOP EDGE — the instant the strip is a spectrum of", () => {
+test("a point in the BAND reads the row under it — the band is over the pane, not instead of it", () => {
+  // The T-457 form of this asserted the clamp: a point in the reserved strip became a point on the
+  // pane's top edge, because the strip was not the pane. With the band drawn over the pane's own
+  // rows (T-1041) there is nothing to clamp — the point is already in the pane, and the instant it
+  // reads is the instant of the row genuinely under the cursor, which is the stronger answer.
   const { view } = viewWith(96, () => []);
   const f = view.frame(T0, []);
   const pane = f.views.find((v) => v.id !== view.minimap.id)!;
   const strip = f.traces[0];
-  // Halfway up the strip, three-quarters across.
+  // Halfway up the band, three-quarters across.
   const raw = { x: strip.rect.x + strip.rect.w * 0.75, y: strip.rect.y + strip.rect.h / 2 };
   const at = clampToRect(pane.rect, raw);
-  assert.equal(at.x, raw.x, "frequency is unchanged: the strip shares the pane's x axis exactly");
-  assert.equal(at.y, pane.rect.y + pane.rect.h, "…and the time is the pane's newest instant");
+  assert.deepEqual(at, raw, "a point in the band is already a point in its pane: nothing is clamped");
   const on = pointOn(pane.box, pane.rect, at.x, at.y);
-  near(on.tNs, pane.box.t1Ns, 1);
-  // The same frequency the unclamped point would have read, so a hover over the strip names the
-  // column under the cursor rather than an offset one.
+  // Its instant is inside the pane's window and within the band's own depth of the newest row.
+  const perPx = (pane.box.t1Ns - pane.box.t0Ns) / pane.rect.h;
+  assert.ok(on.tNs <= pane.box.t1Ns && on.tNs >= pane.box.t1Ns - 96 * perPx,
+    `the band reads a row in the pane's newest 96 px (${on.tNs} vs ${pane.box.t1Ns})`);
+  // The same frequency the top-edge point would have read, so a hover in the band names the column
+  // under the cursor rather than an offset one.
   near(on.fHz, pointOn(pane.box, pane.rect, raw.x, pane.rect.y).fHz, 1e-6);
   view.dispose();
 });
 
-test("tracePx 0 draws no strip and returns the space — the toggle is a layout, not a hidden layer", () => {
+test("tracePx 0 draws no trace and reserves nothing — the toggle is a layer, not a layout", () => {
   let called = 0;
   const { view } = viewWith(0, () => { called++; return []; });
   const f = view.frame(T0, []);
@@ -989,6 +1002,67 @@ test("T-475: the trace's own pass has NO SAMPLER — it can colour, but it can n
   assert.match(bare, /in vec4 aRgba/, "its colour arrives as a vertex attribute, not as a ramp it owns");
   // And the data pass is not reachable from it: it binds no texture and shares no display range.
   assert.ok(!/uLo|uHi|bindTexture/.test(bare), "the trace pass must not touch the data pass's state");
+});
+
+// ## `coreSamples` — about **the statement the page makes of where it stroked** (T-1050)
+//
+// The e2e tier's T-475 check reads the trace's colour out of a real framebuffer, and since T-1041 the
+// layer is drawn OVER the cells it is a spectrum of: a pixel read cannot tell the stroke's core from
+// its own achromatic bloom blended over a coloured cell, and where the equality HOLDS the core pixel
+// is identical to the cell, so a difference against a trace-off baseline keeps only the failures.
+// `coreSamples` is what the page states instead — the geometry and ink of the vertices handed to the
+// GPU — and the tests here are about that arithmetic: the GL y flip, the pixel CENTRES (a rounded
+// vertex is only ~0.79 covered on a 3 px stroke, which is what made the first version of the e2e read
+// return 58 of 110), the colour coming off the path's own attribute, and which columns are a measured
+// column rather than a point on the interpolant. They are NOT about what the shader then wrote: only
+// the browser tier can say that, and it does, by requiring the stated pixel to carry the stated ink.
+test("coreSamples states one fully-covered pixel centre per column, in screen px, with its own ink", () => {
+  // A flat slice: two measured columns at one dB, so the curve is a horizontal line and every
+  // column's colour is that dB's ramp colour.
+  const db = -75;
+  const paths = tracePaths(Float32Array.from([db, db]), PANE, STRIP, LO, HI, "trace-slice", "p",
+    { widthPx: 3 });
+  const canvasH = 700;
+  const got = coreSamples(paths, STRIP, canvasH, 1);
+  assert.ok(got.length >= STRIP.w - 2, `one sample per column: ${got.length} of ~${STRIP.w}`);
+  // In screen px from the canvas's top-left: GL's y runs UP from the drawing buffer's bottom, and
+  // the band sits at y 500..596 of a 700 px buffer, so a line at the middle of the scale is at
+  // 700 - (500 + 96 * levelFrac) from the top.
+  const want = canvasH - (STRIP.y + STRIP.h * levelFrac(db, LO, HI));
+  for (const c of got) {
+    near(c.yPx, Math.round(want - 0.5) + 0.5, 1e-9);
+    // Every x is a pixel CENTRE, which is the only place the stroke's coverage is saturated.
+    near(c.xPx - Math.floor(c.xPx), 0.5, 1e-9);
+  }
+  // The colour is the path's own vertex ink — `cmap` of the same normalisation the tile shader uses.
+  const [r, g, b] = cmap(levelFrac(db, LO, HI));
+  assert.deepEqual(got[10].rgb, [Math.round(255 * r), Math.round(255 * g), Math.round(255 * b)]);
+  // Columns in increasing x, each one once.
+  const xs = got.map((c) => c.xPx);
+  assert.deepEqual(xs, [...xs].sort((a, c) => a - c));
+  assert.equal(new Set(xs).size, xs.length);
+  // Measured columns are the two the data had, not the interpolation between them: `TRACE_SUBDIV`
+  // points per interval, and a 1000 px band over 2 columns is 500 px each.
+  const measured = got.filter((c) => c.measured);
+  assert.ok(measured.length >= 2 && measured.length <= 4,
+    `the two measured columns (plus their end caps), not the interpolant: ${measured.length}`);
+  assert.ok(measured.length * TRACE_SUBDIV < got.length, "the interpolated columns are reported too");
+});
+
+test("coreSamples scales by the device pixel ratio and refuses a stroke with no core", () => {
+  const paths = tracePaths(Float32Array.from([-75, -60]), PANE, STRIP, LO, HI, "trace-slice", "p",
+    { widthPx: 3 });
+  const one = coreSamples(paths, STRIP, 700, 1);
+  const two = coreSamples(paths, STRIP, 700, 2);
+  // Same drawing buffer, twice the ratio: the same pixels, named in half as many CSS px.
+  near(two[0].xPx, one[0].xPx / 2, 1e-9);
+  near(two[0].yPx, one[0].yPx / 2, 1e-9);
+  // A 1.4 px max-hold has no fully-covered pixel to read a colour out of, so none is claimed.
+  const thin = tracePaths(Float32Array.from([-75, -60]), PANE, STRIP, LO, HI, "trace-hold", "p",
+    { widthPx: 1.4, ink: [1, 0.45, 0.85] });
+  assert.deepEqual(coreSamples(thin, STRIP, 700, 1), []);
+  // And a band with no area states nothing rather than dividing by it.
+  assert.deepEqual(coreSamples(paths, { ...STRIP, h: 0 }, 700, 1), []);
 });
 
 test("the renderer's one display range is what the trace reads — Surface still owns it", () => {

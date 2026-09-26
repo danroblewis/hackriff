@@ -73,6 +73,8 @@ use hk_stream::{
     StreamHeader, StreamKind,
 };
 use serde_json::{Value, json};
+use tungstenite::protocol::frame::CloseFrame;
+use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::protocol::{Role, WebSocket};
 use tungstenite::{Bytes, Message, Utf8Bytes};
 
@@ -580,7 +582,35 @@ impl WsSink {
             text_records: !kind.is_binary(),
         }
     }
+
+    /// Sends a WebSocket close frame with `code`/`reason` and flushes it (T-954): every session
+    /// this server ends gets an honest close, not a bare TCP hang-up (which browsers report as
+    /// `1006`, "abnormal closure", indistinguishable from a real fault). Best-effort — the peer
+    /// may already be gone, in which case this is a no-op.
+    pub fn close(&mut self, code: CloseCode, reason: &str) {
+        let mut end = reason.len().min(MAX_CLOSE_REASON);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        let _ = self.ws.close(Some(CloseFrame {
+            code,
+            reason: reason[..end].to_owned().into(),
+        }));
+        let _ = self.ws.flush();
+    }
+
+    /// Overrides the underlying socket's write timeout (T-954), best-effort. For closing a peer
+    /// already known not to be responding: without this, [`Self::close`]'s write inherits
+    /// whatever timeout the caller set on the socket earlier (the full peer timeout, e.g.), so an
+    /// unresponsive session's teardown would wait out that timeout twice — once detecting the
+    /// silence, again trying to write the close frame it already knows will not be read.
+    pub fn set_write_timeout(&mut self, timeout: Duration) {
+        let _ = self.ws.get_mut().set_write_timeout(Some(timeout));
+    }
 }
+
+/// Longest close reason (the WebSocket limit is 123 bytes).
+const MAX_CLOSE_REASON: usize = 120;
 
 fn ws_io(e: tungstenite::Error) -> io::Error {
     match e {

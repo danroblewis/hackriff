@@ -627,3 +627,35 @@ test("touch: a finger in Annotate strokes a box and in Pin taps a marker — a t
   assert.deepEqual(points, ["marker"], "a finger tap in Pin drops a marker");
   assert.deepEqual(clicks, [], "…and is not also a focus");
 });
+
+// ---------------------------------------------------------------------------
+// T-1008: a host handle (the scan plan's region edges) is grabbed through the ONE handler
+// ---------------------------------------------------------------------------
+
+test("T-1008: a press on a host handle moves the handle — it pans nothing, clicks nothing, marks nothing, in any mode", () => {
+  for (const mode of [{}, { measureMode: true }, { annotateMode: "annotate" as const }]) {
+    const moves: { x: number; y: number }[] = [];
+    let ended = 0, clicks = 0, regions = 0;
+    const h = harness({
+      ...mode,
+      grabHandle: (p) => (p.x === 400 ? { move: (q) => moves.push(q), end: () => { ended++; } } : null),
+      onClick: () => { clicks++; }, onRegion: () => { regions++; }, onMeasure: () => { regions++; }, onAnnotateBox: () => { regions++; },
+    });
+    stroke(h, MID, [{ x: 460, y: 300 }, { x: 520, y: 300 }], { shift: true });
+    assert.deepEqual(h.calls, [], "a handle drag moved the view");
+    assert.deepEqual(h.settles, [], "…or committed a pan's follow/pause decision");
+    assert.equal(clicks + regions, 0, "a handle drag is not a click, a region, a measurement or an annotation");
+    assert.deepEqual(moves.map((m) => m.x), [460, 520, 520], "every move, then the release point");
+    assert.equal(ended, 1, "the release ends the handle drag exactly once");
+    // Off the handle, the vocabulary is untouched: a plain drag still pans (or measures/annotates).
+    const h2 = harness({ grabHandle: () => null });
+    stroke(h2, MID, [{ x: 460, y: 340 }]);
+    assert.deepEqual(h2.calls.map((c) => c.fn), ["drag"]);
+  }
+  // A cancel ends it too.
+  let ended = 0;
+  const h = harness({ grabHandle: () => ({ move: () => {}, end: () => { ended++; } }) });
+  h.fire("pointerdown", { button: 0, clientX: 400, clientY: 300, pointerId: 1 });
+  h.fire("pointercancel", { pointerId: 1 });
+  assert.equal(ended, 1);
+});

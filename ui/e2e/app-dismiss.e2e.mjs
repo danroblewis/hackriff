@@ -68,17 +68,18 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   // T-995: the minimap is retired (user, 2026-09-25) — no map viewport row, at any width.
   assert.equal(await page.$count('.hk-surface-viewport[data-viewport="minimap"]'), 0,
     `a minimap viewport is still drawn at ${width} px`);
-  // T-933, carried to the panes: what used to be the minimap's lift is now the panes' bottom edge,
-  // and it must clear the sheet's peek strip (never hidden — T-803) at every width. The sheet
-  // starts at peek here (the reset above), so this is the every-width, no-interaction case;
-  // `insetBottom` is `surface.ts`'s own lift, read off the canvas the way the surface itself
-  // states it (`canvas.dataset.insetBottom`), never a second guess at it.
+  // The sheet is a closeable overlay (docs/23 P1), never a bar: it floats OVER the full-bleed canvas
+  // and the panes are not lifted clear of its peek strip (that lift, T-933's, was the black band along
+  // the bottom of the map the user saw on 2026-09-25). With no output open there is no full-width bar
+  // at all, so the panes' bottom edge IS the page's last pixel row, at every width; `insetBottom` is
+  // `surface.ts`'s own statement of the lift (`canvas.dataset.insetBottom`), never a second guess.
   const insets = await page.canvasInsets();
   const paneBottom = bleed.y + bleed.h - insets.bottom;
   const peek = await page.$rect(".sheet");
   t.diagnostic(`at ${width} px pane bottom y ${Math.round(paneBottom)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
-  assert.ok(paneBottom <= peek.y + 0.5,
-    `the panes' bottom edge (y ${Math.round(paneBottom)}) runs under the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) at ${width} px`);
+  assert.equal(insets.bottom, 0, `the panes are lifted ${insets.bottom} px above the page's bottom edge at ${width} px with no output strip open`);
+  assert.ok(peek.y < paneBottom,
+    `the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) sits below the panes' bottom edge (y ${Math.round(paneBottom)}) at ${width} px — the panes were lifted clear of it`);
 
   // (1) Each overlay alone: open from its small control, visible close, map back after.
   for (const o of OVERLAYS) {

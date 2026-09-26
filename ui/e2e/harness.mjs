@@ -14,6 +14,25 @@ import { census, decodePng, pixelDiff } from "./png.mjs";
 
 export { census, pixelDiff };
 
+/**
+ * **The app's URL, with the client flags this run asked for** (T-1042).
+ *
+ * `src/flags.ts` reads its flags from the query string, which is the only source that is per tab,
+ * visible and needs no rebuild. This is where a *shell* spelling of the same switch is turned into
+ * that query, so `HK_UI_LIVE_RING=1 node e2e/run.mjs live-ring` and a page opened by hand are the
+ * same flag with the same name — and a spec that is ABOUT a flag passes it explicitly rather than
+ * depending on the environment it happens to run in.
+ *
+ * The token stays in the fragment, where every other spec puts it: a fragment is not sent to the
+ * server and does not appear in its logs.
+ */
+export function appUrl(origin, token, { liveRing = process.env.HK_UI_LIVE_RING === "1", path: pagePath = "/" } = {}) {
+  const q = new URLSearchParams();
+  if (liveRing) q.set("live-ring", "1");
+  const query = q.toString();
+  return `${origin}${pagePath}${query ? `?${query}` : ""}#token=${token}`;
+}
+
 /** CDP's modifier bitmask, from names: **Alt 1, Ctrl 2, Meta 4, Shift 8**. One definition, used by
  * both `wheel` and `drag`, so the two gestures cannot disagree about what "shift" is. */
 export function modifierBits({ alt = false, ctrl = false, meta = false, shift = false } = {}) {

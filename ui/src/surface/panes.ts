@@ -863,6 +863,9 @@ export interface PaneStatus {
   /** Resident tiles that drew NOTHING because their horizon is at or below their own start
    * ([[PaneReport.blank]]) — held, and yet the pane's ground is what is on screen. */
   readonly blank: number;
+  /** [[PaneReport.stale]]: resident tiles drawn here that have gone longer than `staleAfterMs`
+   * without a confirmed answer (T-1039) — still on screen, just old, and said so. */
+  readonly stale: number;
   /** [[PaneReport.shortNs]]: how far short of this pane's own window top the drawing reached. */
   readonly shortNs: number;
   /**
@@ -998,6 +1001,7 @@ export function paneStatuses(
       pending: r.pending,
       behind: r.behind,
       blank: r.blank,
+      stale: r.stale,
       shortNs: r.shortNs,
       surveyed: r.surveyed,
       shadowLabel: shadowStatement(r),

@@ -256,6 +256,23 @@ fn locate(hay: &[u8], needle: &[u8], hint: Option<usize>, from: usize) -> Option
         .map(|k| k as u64)
 }
 
+/// A framed burst's crc verdict (T-954): always `Some` once a sync word was located
+/// (`sync_bit.is_some()`) — `absent` when the model has no CRC at all, `unknown` when it does but
+/// this frame wasn't evaluated (e.g. truncated before the CRC field), else the check's result.
+/// `None` only for an unframed burst, where there is no frame to check.
+fn crc_verdict(
+    has_crc_model: bool,
+    sync_bit: Option<usize>,
+    crc_valid: Option<bool>,
+) -> Option<&'static str> {
+    sync_bit.map(|_| match (has_crc_model, crc_valid) {
+        (false, _) => "absent",
+        (true, Some(true)) => "valid",
+        (true, Some(false)) => "invalid",
+        (true, None) => "unknown",
+    })
+}
+
 fn prepare(burst: &FskBurst, index: usize, result: &FramingResult) -> Option<Prepared> {
     let sy = burst.symbols.as_ref()?;
     if sy.bits.is_empty() {
@@ -304,9 +321,11 @@ fn prepare(burst: &FskBurst, index: usize, result: &FramingResult) -> Option<Pre
             BitOrder::MsbFirst => "msb-first",
             BitOrder::LsbFirst => "lsb-first",
         }),
-        crc: frame
-            .and_then(|f| f.crc_valid)
-            .map(|v| if v { "valid" } else { "invalid" }),
+        crc: crc_verdict(
+            result.model.crc.is_some(),
+            sync_bit,
+            frame.and_then(|f| f.crc_valid),
+        ),
         ..BurstStatus::default()
     };
     Some(Prepared {
@@ -539,7 +558,7 @@ impl StreamOpener for BurstTapOpener {
 
 #[cfg(test)]
 mod tests {
-    use super::locate;
+    use super::{crc_verdict, locate};
 
     #[test]
     fn locate_prefers_the_hint_then_scans() {
@@ -549,5 +568,23 @@ mod tests {
         assert_eq!(locate(&hay, &[1, 1, 0], Some(0), 3), Some(5));
         assert_eq!(locate(&hay, &[0, 0], None, 0), None);
         assert_eq!(locate(&hay, &[], None, 0), None);
+    }
+
+    /// T-954: a framed burst (a sync word was located) always gets an explicit verdict, never
+    /// `None` — the bug the explorer hit was every one of 5 framed bursts (sync 0x0C5F matched)
+    /// reporting no `crc` field at all, because the old code mapped straight from `crc_valid`
+    /// and treated "no model" and "not yet evaluated" the same as "nothing to report".
+    #[test]
+    fn a_framed_burst_always_carries_a_crc_verdict() {
+        // No CRC model at all: "absent", not omitted.
+        assert_eq!(crc_verdict(false, Some(0), None), Some("absent"));
+        // A CRC model exists but this frame wasn't evaluated (e.g. truncated): "unknown", not
+        // omitted — this is exactly the explorer's 916.094 MHz case (framed, no verdict).
+        assert_eq!(crc_verdict(true, Some(0), None), Some("unknown"));
+        assert_eq!(crc_verdict(true, Some(0), Some(true)), Some("valid"));
+        assert_eq!(crc_verdict(true, Some(0), Some(false)), Some("invalid"));
+        // Unframed: there is no frame to check, so no verdict field at all.
+        assert_eq!(crc_verdict(true, None, None), None);
+        assert_eq!(crc_verdict(false, None, None), None);
     }
 }
