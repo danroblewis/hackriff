@@ -29233,7 +29233,7 @@ tasks:
   - id: T-995
     milestone: MMAP
     title: "Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-MINIMAP
@@ -29258,6 +29258,7 @@ tasks:
       Observed, not chased: live-edge.e2e.mjs is red on this box with or without this change: with the minimap restored it failed test 1 ('newest rows ... a FLAT fill 8 s after the surface first drew', dominant 98 %) and T-523 ('the pane opened spanning only 29.8 s'); with it retired, T-523 failed with 'never asked the wedged proxy for an address at the pane's own level 0/1 (levels refused: 1/1)' after 75 s of outage. The retired-minimap failure message differs, so a quiet-box rerun should confirm that T-523's premise does not depend on the minimap's coarse traffic. | canvas-journey and fog-of-war could not finish under load (both hit the 600 s spec timeout, with tiles never resident); they need a quiet-box/RC run to confirm the paneRectOf change. | precheck: no crates were touched, so only `cargo fmt --all --check` (exit 0) was run, plus tsc and test-ui; workspace clippy was skipped. | The worktree's target/debug/hk was stale (Sep 24) and the app surface never mounted against it ('timed out waiting for the surface to finish mounting'); a rebuild fixed it. Anyone running e2e from a seeded worktree target should rebuild hk first. | docs/api.md still mentions 'the zoomable minimap' historically (lines ~953, ~1056, ~1352). Left alone because editing api.md forces the full gate; a docs-only pass can update it. | The sibling scale-bar ticket should state where each pane is looking and the per-SDR tier text; this ticket put the per-SDR capture segments in the panes only. | Pre-merge, live-edge (T-523) was red on this box both with and without this change, and canvas-journey/fog-of-war timed out at load ~45; none were re-run after either merge (daily RC tier). | UX: at 1280x800 the T-997 inventory chip ('3 cand · 3 conf', top-left, about x 8-130 / y 97-130 CSS px) covers the pane's newest rows at the low-frequency end, so on a zoomed-out 6 GHz pane the HF/VHF live capture segment (100 MHz lands at x≈21) is hidden under it. Seen in the screenshot ~/.hackriff-ops/work/T-995/app-no-minimap-1280x800.png. Worth a look by whoever owns the chip's placement.
       Resources: 1714 CPU-s, peak 9.0 GB
     branch: task-t995
+    commit: 663fd6ac
   - id: T-996
     milestone: MMAP
     title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
