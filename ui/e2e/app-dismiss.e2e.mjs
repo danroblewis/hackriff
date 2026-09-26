@@ -98,6 +98,13 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
       return [...document.querySelectorAll('.sf-status-line, .sf-scale:not([hidden])')].map((e) => [e.className, e.getBoundingClientRect()])
         .filter(([, r]) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top).map(([c]) => c); })()`);
     assert.deepEqual(covered, [], `the card covers an honesty statement at ${width} px (${state})`);
+    // Main's sheet-inset fix (cbe32c84), for an OPEN card: its strip floats over the panes, which run
+    // to the canvas's bottom edge rather than stopping above it.
+    if (peek.h > 0) {
+      const c = await page.$rect(".sf-canvas");
+      assert.ok(peek.y < c.y + c.h - insets.bottom,
+        `the card's strip (y ${Math.round(peek.y)}) sits below the panes' bottom edge at ${width} px (${state}) — the panes were lifted clear of it`);
+    }
   };
   const shutCard = await page.$rect(".sheet");
   assert.equal(Math.round(shutCard.h), 0, `a closed card still takes ${shutCard.h} px at ${width} px`);

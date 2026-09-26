@@ -208,6 +208,17 @@ export interface PaneReport {
   /** One ring row's height in this pane, device px — the eligibility measurement, reported rather
    * than hidden so a pane that stood the ring aside can say why. `0` with no ring. */
   readonly ringRowPx: number;
+  /**
+   * **The ring this pane just painted from, and the extent it painted continuously** (T-1047, LSR-6):
+   * the same `ring`/`plan.cover` this data pass used to draw and to exclude tiles, handed to the
+   * trace so it reads the one ring rather than re-deriving a second answer about the same rows. `null`
+   * on every pane with no ring this frame — see [[ringRows]].
+   */
+  readonly ringFrame: RingFrame | null;
+  /** The extent [[ringFrame]] answers continuously, clipped to the pane — what the trace may answer
+   * from the ring instead of a tile that was never requested (T-1042's `ringCovers`). `null` with no
+   * ring, or a ring that has not yet measured a continuous run. */
+  readonly ringCover: Box | null;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -231,6 +242,12 @@ export const REVEAL_HOLD_MS = 300;
  * picture, not cut up among a viewport's own hundred addresses.
  */
 export const COARSE_LANE = "coarse";
+
+/** The middle third of a box on both axes, with the child levels it is prefetched at (T-1038). */
+function centreThird(b: Box, levelF: number, levelT: number): { levelF: number; levelT: number; box: Box } {
+  const df = (b.f1Hz - b.f0Hz) / 3, dt = (b.t1Ns - b.t0Ns) / 3;
+  return { levelF, levelT, box: { f0Hz: b.f0Hz + df, f1Hz: b.f1Hz - df, t0Ns: b.t0Ns + dt, t1Ns: b.t1Ns - dt } };
+}
 
 /**
  * One address of a tile row, **resolved but not yet drawn** (T-1037).
@@ -826,8 +843,14 @@ export class Surface {
       const coarse = this.coarseStandIn && !awaiting && tier !== "overview"
         ? coarsestCovering(lat, pane.box, levelF, levelT, pane.device ?? "any")
         : null;
+      // **The child level for the centre third** (T-1038): what a one-step zoom-in lands on. Not on
+      // the overview tier (nothing finer to promise there) and not while the survey is awaited.
+      const child = this.pinParents && !awaiting && tier !== "overview" && (levelF > 0 || levelT > 0)
+        ? centreThird(pane.box, Math.max(0, levelF - 1), Math.max(0, levelT - 1))
+        : null;
       viewports.push({
         box: pane.box, levelF, levelT, lat,
+        child: child ?? undefined,
         standIn: coarse ? { levelF: coarse.levelF, levelT: coarse.levelT } : undefined,
       });
       let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0;
@@ -988,6 +1011,14 @@ export class Surface {
           this.cache.prefetch(a);
         }
       }
+      // The child prefetch: lowest priority (back of the LIFO), and the same short-circuits.
+      if (child) {
+        for (const a of tilesFor(lat, child.box, child.levelF, child.levelT, pane.device ?? "any")) {
+          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) continue;
+          this.cache.prefetch(a, undefined, true);
+        }
+      }
       // **Last on the queue, so FIRST off it** (T-1037). The queue is LIFO, and a stand-in that lands
       // after the tiles it was meant to stand in for buys nothing; it rides in its own lane so a
       // batching source sends the whole set as one request and it reveals as one picture.
@@ -1023,7 +1054,11 @@ export class Surface {
         this.dropRing(pane.id);
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, rowsHeld, rowsLate, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0 });
+      reports.push({
+        id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank,
+        shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, rowsHeld, rowsLate, ringRows, ringTiles,
+        ringRowPx: plan?.rowPx ?? 0, ringFrame: ring, ringCover: plan?.cover ?? null,
+      });
     }
     gl.disable(gl.SCISSOR_TEST);
     // **The reveal gate remembers only rows that are on screen now** (T-1037). A row's wait is a

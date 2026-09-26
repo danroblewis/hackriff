@@ -280,7 +280,18 @@ class FakeEl {
   setAttribute(k: string, v: string) { this.attrs[k] = v; if (k === "class") v.split(/\s+/).forEach((c) => c && this.classes.add(c)); if (k === "hidden") this.hidden = true; }
   getAttribute(k: string) { return this.attrs[k] ?? null; }
   removeAttribute(k: string) { delete this.attrs[k]; }
-  append(...c: (FakeEl | string)[]) { for (const x of c) if (typeof x !== "string") this.children.push(x); else this.textContent += x; }
+  /** T-1053: a node has one parent — appending it elsewhere MOVES it, as the DOM does. */
+  parentElement: FakeEl | null = null;
+  private adopt(x: FakeEl) {
+    const old = x.parentElement;
+    if (old) { const i = old.children.indexOf(x); if (i >= 0) old.children.splice(i, 1); }
+    x.parentElement = this;
+  }
+  append(...c: (FakeEl | string)[]) { for (const x of c) if (typeof x !== "string") { this.adopt(x); this.children.push(x); } else this.textContent += x; }
+  before(...c: FakeEl[]) {
+    const p = this.parentElement!;
+    for (const x of c) { p.adopt(x); p.children.splice(p.children.indexOf(this), 0, x); }
+  }
   replaceChildren(...c: FakeEl[]) { this.children = []; this.append(...c); }
   addEventListener(t: string, fn: Handler) { (this.handlers[t] ??= []).push(fn); }
   removeEventListener() {}
@@ -560,6 +571,76 @@ test("T-1028 x T-996: retune mode's pane status is SAID on the capture block bes
     assert.equal(block.hidden, false, "the persistent Retune went with the status line");
   } finally {
     g.document = saved.document; g.window = saved.window;
+  }
+});
+
+// T-1053: nine chips reached 80 % of a 400 px pane — a bar by another name (T-1025) — and squeezed
+// Go-to's input to 4 px. On a phone the four MODE chips fold into the ⋯ menu; what is asserted here
+// is that the SAME elements move (so their handlers and pressed state go with them), both ways, as
+// the width changes. That the result fits, is pressable and reads as chips is the browser tier's
+// (`app-top-chrome`, `app-phone`, `app-surface` at 420 px).
+test("T-1053: on a phone the mode chips fold into the ⋯ menu and come back when the pane widens", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window, matchMedia: g.matchMedia };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  let phone = true;
+  let onChange: (() => void) | null = null;
+  const asked: string[] = [];
+  g.matchMedia = (q: string) => {
+    asked.push(q);
+    return { get matches() { return phone; }, addEventListener: (_t: string, fn: () => void) => { onChange = fn; } };
+  };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    let on = false;
+    const host = {
+      ...paneActions(m, () => id),
+      measuring: () => false, setMeasuring() {},
+      annotating: () => null, setAnnotating() {},
+      retuneMode: () => ({ on, held: false }),
+      setRetuneMode: (next: boolean) => { on = next; },
+      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const root = mountMapControls(host).el as unknown as FakeEl;
+    assert.deepEqual(asked, ["(max-width: 600px)"], "the fold follows the stylesheet's phone breakpoint");
+    const row = root.find("map-topright")!, tools = root.find("map-more-tools")!, pane = root.find("map-pane-btn")!;
+    const MODES = ["map-measure-btn", "map-annotate-btn", "map-pin-btn", "map-retune-btn"];
+    const kids = (el: FakeEl) => el.children.map((c) => [...c.classes].find((k) => k.endsWith("-btn") || k.endsWith("-home")));
+
+    // Phone: the row keeps the panels' buttons; the four modes are the ⋯ menu's Tools, in order.
+    assert.deepEqual(kids(tools), MODES, "the mode chips are not in the ⋯ menu on a phone");
+    assert.equal(tools.hidden, false, "the ⋯ menu's Tools group is hidden while it holds the modes");
+    assert.deepEqual(kids(row), ["map-layers-btn", "map-research-btn", "map-pane-btn", "map-review-home", "map-more-btn"],
+      "the phone's chip row: five small chips, the modes moved (never copied) out of it");
+    // The moved chip is the same control: its press still reaches the host and states the mode.
+    const chip = tools.children[3];
+    chip.fire("click");
+    assert.equal(on, true, "a folded retune chip no longer reaches the host");
+    assert.equal(chip.getAttribute("aria-pressed"), "true");
+
+    // Wider: they come back into the row, before the viewport button, and Tools is empty and hidden.
+    phone = false;
+    onChange!();
+    assert.deepEqual(kids(tools), [], "the modes stayed in the ⋯ menu on a wide pane");
+    assert.equal(tools.hidden, true);
+    assert.deepEqual(kids(row).slice(0, 7), ["map-layers-btn", "map-research-btn", ...MODES, "map-pane-btn"],
+      "the modes did not return to their place in the row");
+    assert.equal(row.children.indexOf(pane), 6);
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+    if (saved.matchMedia) g.matchMedia = saved.matchMedia; else delete g.matchMedia;
   }
 });
 

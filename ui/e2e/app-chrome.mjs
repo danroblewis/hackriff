@@ -21,6 +21,10 @@ export const FOLLOWING = `${liveBtn(1)}.classList.contains('following')`;
 /** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state.
  * (T-1001: the FAB left this list with the FAB; each pane's Live button is on the canvas.) */
 export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out";
+/** T-1053: the cluster's mode chips (Measure, Annotate, Pin, Retune mode) fold into the ⋯ menu's
+ * Tools group on a phone. They are still the cluster's controls — one press deeper — so the
+ * closed-set check counts them wherever the width put them, and hit-tests them where they are. */
+export const FOLDED = "#map-more-menu .map-more-tools button";
 /** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ, per-device (T-1006). */
 export const PANE_ITEMS = "#map-pane-menu button";
 /** Inside the layers menu: Signals (the detections overlay), Trace (view-wide) and the colour scale. */
@@ -66,6 +70,15 @@ export async function rehomedHitTest(page) {
   const counts = { closed: await count(CLOSED) };
   const names = JSON.parse(await page.eval(closedNames(CLOSED)));
   const overlaps = JSON.parse(await page.eval(overlapping(CLOSED)));
+  // T-1053: the folded chips, pressed where they live — inside the open ⋯ menu.
+  await page.click("document.querySelector('.map-more-btn')");
+  await page.waitFor("the ⋯ menu to open", "!document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
+  closed.push(...JSON.parse(await page.eval(unclickable(`${FOLDED}:not([hidden])`))));
+  counts.closed += await count(FOLDED);
+  names.push(...JSON.parse(await page.eval(closedNames(FOLDED))));
+  overlaps.push(...JSON.parse(await page.eval(overlapping(`${FOLDED}:not([hidden])`))));
+  await page.click("document.querySelector('.map-more-btn')");
+  await page.waitFor("the ⋯ menu to close", "document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
   await page.click("document.querySelector('.map-pane-btn')");
   await page.waitFor("the viewport menu to open", "!document.querySelector('#map-pane-menu').hidden", { timeoutMs: 5000 });
   const pane = JSON.parse(await page.eval(unclickable(PANE_ITEMS)));
