@@ -12700,6 +12700,45 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
         Some(FIXTURE_CENTER_HZ),
         "pricing a sweep moved the radio"
     );
+    // T-1008: the plan's steps, for a client to DRAW rather than re-derive — only when asked for
+    // (`windows=1`), and they tile the priced range: twelve slices, contiguous, in visit order.
+    assert!(
+        p["plan"].get("windows").is_none(),
+        "windows are opt-in on GET: {p}"
+    );
+    assert!(
+        v["scan"]["device_id"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("mock:")),
+        "the scan names the front end it would sweep, before the button: {v}"
+    );
+    let (st, v) = get(
+        addr,
+        "/api/control/scan?f_lo_hz=88000000&f_hi_hz=108000000&dwell_s=12&windows=1",
+    );
+    assert_eq!(st, 200, "{v}");
+    let windows = v["proposed"]["plan"]["windows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(windows.len(), 12, "one slice per step: {v}");
+    let wf = |w: &Value, k: &str| w[k].as_f64().unwrap_or(f64::NAN);
+    assert!((wf(&windows[0], "lo_hz") - 88e6).abs() < 1.0, "{windows:?}");
+    assert!(
+        (wf(&windows[11], "hi_hz") - 108e6).abs() < 1.0,
+        "{windows:?}"
+    );
+    for (i, w) in windows.iter().enumerate() {
+        assert_eq!(w["step"], json!(i), "{w}");
+        if i > 0 {
+            assert!(
+                (wf(w, "lo_hz") - wf(&windows[i - 1], "hi_hz")).abs() < 1.0,
+                "the slices tile the range without gap or overlap: {windows:?}"
+            );
+        }
+    }
+    let (st, v) = get(addr, "/api/control/scan?windows=2");
+    assert_eq!(st, 400, "windows is 1 or 0, nothing else: {v}");
 
     // A dwell outside the 10-30 s the survey is sized for still runs, and says it is unusual
     // rather than being clamped to one band's taste (T-406).
@@ -12732,6 +12771,18 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     );
     assert_eq!(v["scan"]["state"], json!("running"), "{v}");
     assert_eq!(v["scan"]["plan"]["steps"], json!(12), "{v}");
+    // T-1008: the start answer carries the steps it committed to — the ones priced above.
+    assert_eq!(
+        v["scan"]["plan"]["windows"],
+        json!(windows),
+        "the started plan is the priced plan: {v}"
+    );
+    assert!(
+        get(addr, "/api/control/state").1["scan"]["plan"]
+            .get("windows")
+            .is_none(),
+        "the polled state stays compact"
+    );
 
     // It steps: the tune moves off the fixture's own centre, through the device path.
     wait_for(
@@ -12752,6 +12803,20 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
         (88e6..=108e6).contains(&swept),
         "a step must land inside the range asked for: {v}"
     );
+    // T-1008: the step being dwelt on is named, and it is the drawn window whose centre is tuned.
+    let (_, v) = get(addr, "/api/control/scan");
+    if let (Some(d), Some(c)) = (
+        v["scan"]["progress"]["dwell_step"].as_u64(),
+        v["scan"]["progress"]["center_hz"].as_f64(),
+    ) {
+        let tol = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+        assert!(
+            (wf(&windows[d as usize], "center_hz") - c).abs() <= tol,
+            "dwell_step {d} is not the step tuned to {c}: {v}"
+        );
+    } else {
+        panic!("a running sweep that has stepped names the step it dwells on: {v}");
+    }
 
     // T-965: **a step has now been timed, so the stated pass length includes what it cost.**
     // The live defect this closes: `Scan everything (fast)` priced 418 steps x 0.3 s as 125.4 s
@@ -12832,6 +12897,17 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
         stepped.len() >= 2,
         "the sweep must write one record per step, each with its own centre: {stepped:?}"
     );
+    // T-1008: THE PLAN DRAWN IS THE PLAN EXECUTED — every per-step record the sweep wrote is
+    // centred on one of the windows the scan served for drawing (to the tuning step).
+    let tol = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    for c in &stepped {
+        assert!(
+            windows
+                .iter()
+                .any(|w| (wf(w, "center_hz") - c).abs() <= tol),
+            "the sweep tuned {c} Hz, which is no window the plan served: {windows:?}"
+        );
+    }
     let widest = stepped.last().unwrap() - stepped.first().unwrap();
     assert!(
         widest > 1.0,
@@ -13691,6 +13767,117 @@ fn f16_to_f32(b: u16) -> f32 {
         31 => f32::NAN,
         _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
     }
+}
+
+/// **T-1009 — a sweep and a clip are addressed to a NAMED front end.**
+///
+/// The map's Measure box offers "Scan this region with &lt;device&gt;" and "Record IQ of this region
+/// with &lt;device&gt;", so the choice of radio has to survive the trip to the engine. A run holds
+/// one scan runner per front end ([`hk_api::scan::ScanRunners`]) and each front end keeps its own
+/// IQ ring, and both routes take the same `device_id` selector the six device routes take.
+///
+/// This run holds exactly one front end (the mock SDR) — the case the invariant protects: **with
+/// one device the selector may be omitted and behaviour is unchanged**, and naming that one device
+/// is accepted. Asserted on the wire, by value:
+///
+/// 1. `GET /api/control/state` enumerates a sweep per front end in `scans`, each naming its own
+///    `device_id`, and with one front end it agrees with the singular `scan`;
+/// 2. `GET /api/control/scan?device_id=…` prices on the named radio and answers for it;
+/// 3. a selector naming a radio this run does not hold is `404 unknown_device` — on the price, on
+///    the start and on a clip — and never falls back to the default radio;
+/// 4. a start naming this run's own radio is accepted and its `device.commissions`/`device.id`
+///    name that radio; stopping it, named or not, is still never refused.
+#[test]
+fn t1009_a_scan_and_a_clip_are_addressed_to_a_named_front_end() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for("a live front end", Duration::from_secs(30), || {
+        get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64() == Some(FIXTURE_CENTER_HZ)
+    });
+
+    // (1) one sweep per front end, each naming its radio.
+    let (st, v) = get(addr, "/api/control/state");
+    assert_eq!(st, 200, "{v}");
+    let device_id = v["device"]["device_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"))
+        .to_owned();
+    let scans = v["scans"]
+        .as_array()
+        .unwrap_or_else(|| panic!("control/state must enumerate a sweep per front end: {v}"));
+    assert_eq!(scans.len(), 1, "this run holds one front end: {v}");
+    assert_eq!(scans[0]["device_id"], json!(device_id), "{v}");
+    assert_eq!(
+        scans[0]["state"], v["scan"]["state"],
+        "with one front end the enumeration and the singular default are the same sweep: {v}"
+    );
+
+    // (2) pricing on the named radio.
+    // The id is a bare `mock:<name>`; nothing in it needs escaping in a query string.
+    let named = format!(
+        "/api/control/scan?f_lo_hz=88000000&f_hi_hz=90000000&dwell_s=1&device_id={device_id}"
+    );
+    let (st, v) = get(addr, &named);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["device_id"], json!(device_id), "{v}");
+    let steps = v["proposed"]["plan"]["steps"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a named radio prices a pass: {v}"));
+    assert!(steps >= 1, "{v}");
+
+    // (3) a radio this run does not hold: refused everywhere, never the default one instead.
+    let (st, v) = get(addr, "/api/control/scan?device_id=mock:not-this-radio");
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], json!("unknown_device"), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        "{\"f_lo_hz\":88000000,\"f_hi_hz\":90000000,\"dwell_s\":1,\"device_id\":\"mock:not-this-radio\"}",
+    );
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], json!("unknown_device"), "{v}");
+    assert_eq!(
+        get(addr, "/api/control/scan").1["scan"]["state"],
+        json!("idle"),
+        "a refused start commissioned nothing"
+    );
+    let (st, v) = post(
+        addr,
+        "/api/iqbuffer/clip",
+        "{\"t0\":1.0,\"t1\":2.0,\"device_id\":\"mock:not-this-radio\"}",
+    );
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(
+        v["code"],
+        json!("unknown_device"),
+        "a clip names whose ring it comes from: {v}"
+    );
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains(&device_id),
+        "the refusal names the ring this run does hold: {v}"
+    );
+
+    // (4) the start this run's own radio accepts, and the stop that is never refused.
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        &format!(
+            "{{\"f_lo_hz\":88000000,\"f_hi_hz\":90000000,\"dwell_s\":1,\"device_id\":{}}}",
+            json!(device_id)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions"], json!("retune"), "{v}");
+    assert_eq!(v["device"]["id"], json!(device_id), "{v}");
+    assert_eq!(v["scan"]["device_id"], json!(device_id), "{v}");
+    assert_eq!(v["scan"]["state"], json!("running"), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/scan/stop",
+        &format!("{{\"device_id\":{}}}", json!(device_id)),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["state"], json!("idle"), "{v}");
+    drop(serving);
 }
 
 /// **T-511 — the device selector on the wire, against a real server.**

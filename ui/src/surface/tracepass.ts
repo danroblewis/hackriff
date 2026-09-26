@@ -18,8 +18,9 @@
 //     no state with it. `ui/test/surface-trace.test.ts` asserts the data draws are byte-identical
 //     with the trace on and off — unchanged from T-457, and still needing no flag.
 //   - **A trace cannot be mistaken FOR tile data.** Not because it lacks a colour, but because it is
-//     drawn into a rectangle **carved off** the pane (`view.ts` shortens the pane by exactly the
-//     strip), scissored to that rectangle, and **has no sampler**: it cannot read a tile, and it
+//     a **stroked curve** the user switched on by name — since T-1041 a layer blended over the
+//     pane's top rows rather than a band carved off them — scissored to the band the layer states,
+//     drawn after every tile draw, and **has no sampler**: it cannot read a tile, and it
 //     cannot express `cellrule.ts`'s grey, its tier hatching or its fallback mark. The ramp it does
 //     express arrives as a **vertex attribute** computed by `trace.ts` from `ui/src/cmap.ts` — the
 //     one module that defines a ramp. There are no stops in this file and no `cmap` in this shader,
@@ -130,7 +131,7 @@ function expand(p: TracePath, rect: PaneRect, out: number[]): number {
   return count;
 }
 
-/** Draws [[TracePath]]s into one pane's trace strip. Holds one growable buffer and no other state. */
+/** Draws [[TracePath]]s into one pane's trace band. Holds one growable buffer and no other state. */
 export class TracePass {
   private readonly prog: WebGLProgram;
   private readonly vbo: WebGLBuffer | null;
@@ -172,9 +173,11 @@ export class TracePass {
    * Submit `paths` inside `rect`, in order — later paths draw over earlier ones, which is how the
    * afterglow sits behind the current slice.
    *
-   * Scissored to the strip, so a trace can never paint on the pane it is a trace of, and blended
-   * straight (`SRC_ALPHA`) rather than additively: an additive glow would brighten wherever two
-   * shadows crossed and the crossing would read as energy that is not there.
+   * Scissored to the band, so a trace can never paint further down the pane than the band it
+   * states, and blended straight (`SRC_ALPHA`) rather than additively: an additive glow would
+   * brighten wherever two shadows crossed and the crossing would read as energy that is not there.
+   * Since T-1041 the band lies over the pane's own top rows, so that straight blend is also what
+   * lets the waterfall under a faint series stay visible instead of being replaced by it.
    *
    * Returns the number of vertices drawn — 0 when nothing was, which is the honest answer for a
    * window nothing has answered for.

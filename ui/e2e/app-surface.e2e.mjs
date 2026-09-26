@@ -34,13 +34,14 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
  * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
- * rows outside it: the coverage-fog row (T-807), the trace strip and the three colour-scale rows
+ * rows outside it: the coverage-fog row (T-807), the spectrum-trace row and the three colour-scale rows
  * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
 // T-1028 added the Retune-mode chip to the cluster; T-1001 took the follow-live FAB out of it. Both
 // landed against a list written before the other, so the set is stated here once, true of the
-// cluster the page actually mounts.
+// cluster the page actually mounts. On a phone (T-1053) Measure, Annotate, Pin and Retune mode fold
+// into the ⋯ menu; `rehomedHitTest` finds and presses them there, so the set is the same at every width.
 const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Retune mode",
   "Viewport", "Review", "More: settings", "Zoom in", "Zoom out"];
 
@@ -316,6 +317,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     bases: [...document.querySelectorAll('#map-layers input[data-base]')].map((i) => [i.value, i.checked]),
     overlays: [...document.querySelectorAll('#map-layers [data-axis=overlays] input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
     signals: String(document.querySelector('#map-layers input[data-layer="detections"]').checked),
+    trace: String(document.querySelector('#map-layers input[data-view-layer="trace"]').checked),
     registry: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? 'null'),
   })`;
   /** The menu's expected overlay rows for one snapshot: `[id, visibleByDefault]` in paint order. */
@@ -350,6 +352,13 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   assert.match(one.head[0], /Base style · this pane/);
   assert.ok(one.head.some((t) => /^Overlays · this pane/.test(t)), `no overlays axis: ${one.head}`);
   assert.equal(one.signals, "true");
+  // T-1041: the spectrum trace is a layer, OFF by default — it reserves no band above the pane.
+  assert.equal(one.trace, "false", "the spectrum-trace layer must be off by default");
+  // Switch it on for the rest of this check: the trace's readout (`.sf-trace`) is written only
+  // while the layer is drawn, and the phosphor assertions below read that readout.
+  await page.click(`document.querySelector('#map-layers input[data-view-layer="trace"]')`);
+  await page.waitFor("the trace layer to draw and state its slice",
+    `!!document.querySelector('.sf-trace').textContent`, { timeoutMs: 30000 });
 
   // Split (the viewport menu since T-882, which closes the layers menu while it is open): the new
   // pane is active, inherits pane 1's registry, and the reopened layers menu says which pane it is.
@@ -414,14 +423,15 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   // ones exactly and in order; the set of rows that carry a key at all is stated here, so a key
   // appearing on a row that should have none is still red; and the menu-wide list must be exactly
   // those rows' keys concatenated in DOM order — a fog row leaking out of the Coverage section, a
-  // symbology row leaking into it, or a key `li` belonging to no row is red.
+  // symbology row leaking into it, or a key `li` belonging to no row is red. T-981 (76902708) gave
+  // the front-end overload layer its key too: one fixed `frontend` swatch, whatever is in view.
   //
   // The retune key's CONTENT is not a literal: it names the devices whose tune records cover the
   // window, which is data, not symbology. Its row's presence and non-emptiness are asserted; what
   // it says about a device is `surface/tunepath.ts`'s unit tier.
   const FOG_KEY = ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"];
   const MARK_KEY = ["confirmed", "candidate", "unexplained", "artifact", "curated"];
-  const KEYED_ROWS = ["coverage", "detections", "tune"];
+  const KEYED_ROWS = ["coverage", "detections", "tune", "frontend"];
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -452,6 +462,7 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
     `exactly these rows carry a key, in section order: ${JSON.stringify(one.rows)}`);
   assert.ok(Array.isArray(rowKey.tune) && rowKey.tune.length > 0 && rowKey.tune.every((m) => typeof m === "string" && m.length > 0),
     `the retune row's key (T-898): a row per front end, or the "no route in view" row — never empty: ${JSON.stringify(rowKey.tune)}`);
+  assert.deepEqual(rowKey.frontend, ["frontend"], "the front-end overload row's key (T-981): its one hatched swatch");
   assert.deepEqual(one.key, one.rows.flatMap(([, k]) => k ?? []),
     "the menu's keys: each row's own, in section order, and no key li outside a row that has one");
   assert.deepEqual(one.key.slice(0, FOG_KEY.length + MARK_KEY.length), [...FOG_KEY, ...MARK_KEY],

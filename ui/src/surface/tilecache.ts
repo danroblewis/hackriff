@@ -224,6 +224,23 @@ export interface Viewport {
    * [[TileCache.setViewports]] was handed — which is what a single-tier caller has always passed.
    */
   readonly lat?: Lattice;
+  /**
+   * **The coarse stand-in level pair this viewport also asks for** (T-1037).
+   *
+   * A viewport wants its own level and one step coarser (the parent pin), and cancellation is what
+   * makes that bound real. The coarse stand-in enumeration is *several* levels up — that is what
+   * makes it one batch — so without being named here it would be cancelled at the end of the very
+   * frame that asked for it, and the black it exists to remove would come straight back. It is one
+   * exact pair, not a widened range: a stand-in is a specific level, and widening the predicate
+   * instead would stop cancellation cancelling, which is the T-443 defect.
+   */
+  readonly standIn?: { readonly levelF: number; readonly levelT: number };
+  /**
+   * **The child level for the centre third of the viewport** (T-1038): the finer level a one-step
+   * zoom-in lands on, held resident before the zoom so it draws without a PENDING quad. Matched
+   * exactly on level and against `box` (the centre third), so it keeps that set alive and nothing else.
+   */
+  readonly child?: { readonly levelF: number; readonly levelT: number; readonly box: Box };
 }
 
 /**
@@ -298,6 +315,54 @@ export interface TileCacheOptions {
    * 11.4 ms: guessing *fast* and being wrong is the failure this exists to stop.
    */
   serverMsGuess?: number;
+  /**
+   * **How long a resident tile may go without a successful re-read before it is reported STALE**
+   * (T-1039), ms. Default [[DEFAULT_STALE_AFTER_MS]].
+   *
+   * The last good tile is never dropped for going stale — that is the whole point of
+   * stale-while-revalidate (an unstable network must never clear what is drawn) — this only decides
+   * when a copy in hand is old enough that the honesty tier should say so ([[TileCache.isStale]]).
+   */
+  staleAfterMs?: number;
+  /** The source of jitter for backoff delays (T-1039), `[0, 1)`. Injectable so a test can pin the
+   * spread; defaults to `Math.random`. */
+  random?: () => number;
+}
+
+/**
+ * **State N** for stale-while-revalidate (T-1039): a resident tile in [[TileCache.isStale]]'s scope
+ * whose last successful confirmation is older than this — or older than [[STALE_CADENCE_MARGIN]]
+ * times its OWN refresh cadence, whichever is longer — is reported stale rather than silently trusted
+ * forever. 30 s is comfortably past the live edge's own fastest cadence (~1 s at level 0, T-460) and
+ * short enough that a genuinely stuck network is visible within one glance at the pane's own readout,
+ * not just to the request log; the cadence multiple is what keeps a healthy coarse level (32 s at
+ * level 5) from flickering "stale" between its own ordinary refreshes.
+ */
+export const DEFAULT_STALE_AFTER_MS = 30_000;
+
+/**
+ * How many of a tile's OWN refresh cadences (`tCellNs(levelT)`) it may run over before
+ * [[TileCache.isStale]] calls it overdue, when that is longer than [[DEFAULT_STALE_AFTER_MS]] itself
+ * (T-1039, a review finding on the first cut). Without this a perfectly healthy level-5 tile —
+ * refreshed once every 32 s by design (docs comment on [[TileCache.behindTheEdge]]) — read "stale"
+ * for the last two seconds of every ordinary cycle, on no unhealthy network at all. 2x is one missed
+ * cycle's worth of slack: due, then given one more full cadence to actually land, before the label
+ * says anything is wrong.
+ */
+export const STALE_CADENCE_MARGIN = 2;
+
+/**
+ * **Jittered backoff** (T-1039): `base` plus up to `base × spread` of randomness, so a batch of
+ * requests that all failed together (a retune, a reload, a network drop) do not all retry on the
+ * exact same tick and hammer the route the instant it comes back — the same herd this file already
+ * avoids for the live-edge lane by construction, applied here to the retry clock itself. `rand` is
+ * `[0, 1)`; the jitter is additive and never shortens the wait below `base`, so it can only ever make
+ * the ladder more spread out, never less patient.
+ */
+function jittered(base: number, rand: () => number): number {
+  const r = rand();
+  const spread = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
+  return base + base * 0.5 * spread;
 }
 
 export interface TileCacheStats {
@@ -521,13 +586,22 @@ interface InFlight {
  *
  * `solo`: this request must not wait on any other — it is the live edge's revalidation, which the
  * product never gates on generating other tiles (T-460, T-573). A source that batches sends it alone.
+ *
+ * `lane`: which set this address belongs to, when the caller needs the set answered **together**
+ * (T-1037). A batching source keeps one lane's addresses out of another's request, so the coarse
+ * stand-in enumeration arrives as one picture instead of being cut up among a viewport's own tiles.
+ * Absent is the ordinary lane; it is a grouping key and nothing else reads it.
  */
 export interface TileSourceHint {
   readonly solo?: boolean;
+  readonly lane?: string;
 }
 
 export class TileCache<T> {
   readonly budgetBytes: number;
+  /** The lane each queued/in-flight address belongs to, when its caller named one (T-1037). Only
+   * ever read to build the hint the source gets; dropped the moment the request retires. */
+  private lanes = new Map<string, string>();
   private readonly maxQueue: number;
   private readonly busyBackoffMs: number;
   private readonly now: () => number;
@@ -616,9 +690,45 @@ export class TileCache<T> {
    * The unit the duty gate is charged to. See [[nextRefresh]] for why it cannot be the tile.
    */
   private refreshPassLeft = new Map<string, number>();
-  /** When each resident tile's data was last taken in, ms. The refresh interval is measured from
-   * this, so a tile is never asked for again inside the period its newest cell spans. */
+  /**
+   * **When each resident tile's data was last taken in, ms** — but only as a cadence clock. It is
+   * stamped by [[pumpRefresh]] at the moment a revalidation is ISSUED, not when it lands, so the
+   * refresh interval is measured from *asking* and a tile is never asked for again inside the period
+   * its newest cell spans. **Not** what [[isStale]] reads (see [[lastGoodAt]]): an issued-but-not-
+   * yet-answered, or issued-and-failed, request must not read as a confirmation.
+   */
   private refreshedAt = new Map<string, number>();
+  /**
+   * **When each resident tile was last CONFIRMED, ms** (T-1039): stamped only by [[insert]], on a
+   * successful fetch or revalidation. This is [[isStale]]'s clock. A failed or slow revalidation
+   * must never advance it — the whole of stale-while-revalidate is that an unconfirmed copy stays on
+   * screen and stays honestly labelled unconfirmed, and [[refreshedAt]] alone cannot say that: it is
+   * stamped at issue, so a request that never comes back would otherwise look freshly confirmed for
+   * as long as the network stays down.
+   */
+  private lastGoodAt = new Map<string, number>();
+  /**
+   * **Which resident tiles [[isStale]] may even consider, and the threshold each is judged
+   * against** — recomputed from scratch on every [[refreshEdge]] scan ([[recomputeStaleScope]]),
+   * fixing a review finding on the first cut.
+   *
+   * A key is present here only when BOTH of the facts that decide whether a tile is still IN the
+   * revalidation loop at all hold: **drawn at its own level by a FOLLOWING viewport this frame**
+   * ([[drawnBy]] — a frozen pane's tiles are never in scope, because [[refreshEdge]] itself never
+   * revalidates them) **and not yet [[behindTheEdge]]'s "sealed"** — a copy whose own fetch already
+   * reached the tile's end can never be revalidated again and is correctly resident forever, not
+   * stale. The value is `max(staleAfterMs, STALE_CADENCE_MARGIN × this tile's OWN refresh cadence)`,
+   * computed here (where `lat` is in scope) rather than re-derived in [[isStale]] from `this.lat` —
+   * which [[setViewports]], a wholly different call path, is the only thing that ever sets, so a
+   * caller that only ever drives `refreshEdge` (every test in this file, and the production preview
+   * driver on its own dedicated path) must not silently read a stale `null`.
+   *
+   * Without any of this a flat wall-clock age flagged every sealed tile, every frozen pane's tiles
+   * and every coarse level slower than the flat default (32 s at level 5) as "stale" the moment the
+   * age passed, on a perfectly healthy network — the "UI claims something it didn't measure" defect
+   * this whole feature exists to avoid, aimed at itself.
+   */
+  private staleScope = new Map<string, number>();
   /** The next instant each lane may issue, and the next one the resident set may be walked. Per
    * lane, because a share of measured cost is only a fair share if it is that lane's own cost. */
   private refreshNextIssue = new Map<string, number>();
@@ -727,6 +837,10 @@ export class TileCache<T> {
   private silenced = new Set<string>();
   /** Measured mean production time, ms. See [[observe]]. */
   private serverMs: number;
+  /** See [[TileCacheOptions.staleAfterMs]]. */
+  private readonly staleAfterMs: number;
+  /** See [[TileCacheOptions.random]]. */
+  private readonly random: () => number;
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
@@ -746,6 +860,8 @@ export class TileCache<T> {
     this.busyBackoffMs = opts.busyBackoffMs ?? 200;
     this.serverMs = clamp(opts.serverMsGuess ?? 400, MIN_SERVER_MS, MAX_SERVER_MS);
     this.now = opts.now ?? (() => Date.now());
+    this.staleAfterMs = Math.max(0, opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS);
+    this.random = opts.random ?? Math.random;
   }
 
   get residentTiles(): number { return this.map.size; }
@@ -867,6 +983,70 @@ export class TileCache<T> {
   isResident(addr: TileAddr): boolean { return this.map.has(keyOf(addr)); }
 
   /**
+   * **State N of stale-while-revalidate** (T-1039): is the resident copy of this place overdue for a
+   * confirmation it is actually still owed?
+   *
+   * `false` for a place not resident at all — staleness is a fact about a copy in hand, not about a
+   * miss, which is already drawn as `pending`/`refused` and needs no second mark.
+   *
+   * **`false` for anything outside [[staleScope]], and that gate is not optional — it is what this
+   * predicate is FOR.** The first cut read only [[lastGoodAt]]'s wall-clock age, and a review of it
+   * found the exact three false-positive classes that follow from that: a **sealed** tile ([[behindTheEdge]]
+   * false — its own fetch already reached the tile's end, so no further answer is coming and none is
+   * owed), a **frozen pane's** tiles (never revalidated at all, because [[refreshEdge]] is only ever
+   * given `following` viewports — see its own doc comment), and a **coarse level** slower than
+   * `staleAfterMs` by design (32 s at level 5) flickering "stale" between its own healthy refreshes.
+   * All three are read from `staleScope` ([[recomputeStaleScope]]) rather than re-derived here, so
+   * this predicate can never disagree with the loop that actually decides what gets revalidated.
+   *
+   * **A tile the row-push lane is actively feeding is confirmed continuously**, by rows rather than
+   * by a tile answer ([[fedRecently]]) — it is not stale merely because no `/api/tiles` read has
+   * landed for it yet.
+   *
+   * Past those gates: [[lastGoodAt]] is stamped by [[insert]] on every successful answer, including a
+   * revalidation that only confirmed the same bytes, so a tile the network keeps failing to refresh
+   * ages here exactly as long as it has genuinely gone unconfirmed — never reset by a failed attempt
+   * (a failed or slow batch must not clear what is drawn, and must not silently un-stale it either).
+   * The threshold is `staleAfterMs`, or [[STALE_CADENCE_MARGIN]] cadences when that is longer, so a
+   * tile whose own design refreshes it slower than the flat default is judged against ITS OWN clock.
+   */
+  isStale(addr: TileAddr): boolean {
+    const key = keyOf(addr);
+    const e = this.map.get(key);
+    if (!e) return false;
+    const threshold = this.staleScope.get(key);
+    if (threshold === undefined) return false; // out of scope: sealed, frozen, or never offered at all.
+    if (this.fedRecently(e.addr, this.now())) return false;
+    const at = this.lastGoodAt.get(key);
+    if (at === undefined) return true; // in scope, still owed a confirmation, and never got one.
+    return this.now() - at >= threshold;
+  }
+
+  /**
+   * **Rebuild [[staleScope]] from scratch** (T-1039): exactly which resident tiles [[isStale]] may
+   * even consider, as of this scan, and the threshold each is judged against.
+   *
+   * The membership test is two conditions, both already load-bearing elsewhere in this file so this
+   * is never a second derivation of either: **drawn at its own level by a viewport in `following`**
+   * ([[drawnBy]] — the identical test [[refreshEdge]]'s own loop uses to decide what it revalidates,
+   * so scope can never disagree with the revalidation loop about what is "on screen and live") **and
+   * not yet [[behindTheEdge]]'s "sealed"** (its own fetch already reached the tile's end — nothing
+   * further is coming, ever, so nothing further is owed). Cleared entirely when nothing follows at
+   * all (every pane frozen): [[refreshEdge]] itself does no work in that case, and neither should
+   * this. The threshold is computed HERE, from the `lat` this scan was actually given, rather than in
+   * [[isStale]] from `this.lat` — see [[staleScope]]'s own comment for why that indirection is wrong.
+   */
+  private recomputeStaleScope(lat: Lattice, edgeNs: number, following: readonly Viewport[]): void {
+    if (!following.length) { this.staleScope.clear(); return; }
+    for (const e of this.map.values()) {
+      const inScope = this.behindTheEdge(lat, e, edgeNs) && following.some((v) => this.drawnBy(lat, v, e.addr));
+      if (!inScope) { this.staleScope.delete(e.key); continue; }
+      const cadenceMs = tCellNs(lat, e.addr.levelT) / 1e6;
+      this.staleScope.set(e.key, Math.max(this.staleAfterMs, STALE_CADENCE_MARGIN * cadenceMs));
+    }
+  }
+
+  /**
    * **Places the coverage survey settles as never sampled — no lane may start a request for one**
    * (T-905). T-580 gated the renderer's own misses on the survey, but a request can start from
    * other lanes: T-538's pan look-ahead ([[prefetchAhead]]) issues straight to the route, and it
@@ -881,10 +1061,36 @@ export class TileCache<T> {
   setSettled(fn: ((addr: TileAddr) => boolean) | null): void { this.settled = fn; }
   private settled: ((addr: TileAddr) => boolean) | null = null;
 
-  /** Want this tile soon, but do not draw it: the parent-level pin, and pan prefetch. */
-  prefetch(addr: TileAddr): void {
+  /**
+   * Want this tile soon, but do not draw it: the parent-level pin, the coarse stand-in set, and pan
+   * prefetch.
+   *
+   * `lane` names a set that must be answered **together** (T-1037): a batching source keeps one
+   * lane's addresses out of another's request, so the coarse stand-in enumeration is one answer and
+   * not a few addresses riding in whichever chunk of a viewport's own tiles they landed in.
+   */
+  prefetch(addr: TileAddr, lane?: string, low = false): void {
     if (this.map.has(keyOf(addr))) { this.peek(addr, true); return; }
-    this.schedule(addr);
+    if (lane !== undefined) this.lanes.set(keyOf(addr), lane);
+    this.schedule(addr, low);
+  }
+
+  /**
+   * The `(levelF, levelT)` pairs this cache holds a tile of, on `scheme` — `"<levelF>|<levelT>"`.
+   *
+   * What makes an **unbounded** ancestor search cheap (T-1037). "PENDING only when no ancestor
+   * exists at any level" read as a search over every level pair would be `O(levels²)` map lookups
+   * per missing tile per frame; the resident set is at most a few hundred tiles across a handful of
+   * level pairs, so the search runs over the pairs that could possibly answer and over nothing else.
+   * Recomputed per call by the caller's frame, not cached: residency changes under it.
+   */
+  residentLevels(scheme?: string): Set<string> {
+    const out = new Set<string>();
+    for (const e of this.map.values()) {
+      if (scheme !== undefined && e.addr.scheme !== scheme) continue;
+      out.add(`${e.addr.levelF}|${e.addr.levelT}`);
+    }
+    return out;
   }
 
   /**
@@ -892,19 +1098,21 @@ export class TileCache<T> {
    * viewports the user has already left, and under FIFO the ones that finally arrive are for the
    * wrong place. That is what makes map clients feel laggy (§5.5 cap (1)).
    */
-  private schedule(addr: TileAddr): void {
+  private schedule(addr: TileAddr, low = false): void {
     const key = keyOf(addr);
     if (this.map.has(key) || this.inflight.has(key) || this.queued.has(key)) return;
     // The route has already said this place is not askable. A renderer calls `acquire` for it on
     // every frame, so without this the refusal is re-issued at frame rate (T-479).
     if (this.terminal.has(key)) return;
     // A place whose silent probe just failed waits behind the others (T-903, [[silenced]]).
-    if (this.silenced.delete(key)) this.queue.unshift(addr);
+    // `low` (T-1038's child prefetch) goes to the back of the line too: a guess about the next zoom
+    // must never be served before something the pane is drawing now.
+    if (this.silenced.delete(key) || low) this.queue.unshift(addr);
     else this.queue.push(addr);
     this.queued.add(key);
     if (this.queue.length > this.maxQueue) {
       const dropped = this.queue.splice(0, this.queue.length - this.maxQueue);
-      for (const d of dropped) this.queued.delete(keyOf(d));
+      for (const d of dropped) { this.queued.delete(keyOf(d)); this.lanes.delete(keyOf(d)); }
       this.stats.cancelled += dropped.length;
     }
   }
@@ -941,7 +1149,7 @@ export class TileCache<T> {
     const keep: TileAddr[] = [];
     for (const a of this.queue) {
       if (wanted(a)) keep.push(a);
-      else { this.queued.delete(keyOf(a)); this.stats.cancelled++; }
+      else { this.queued.delete(keyOf(a)); this.lanes.delete(keyOf(a)); this.stats.cancelled++; }
     }
     this.queue = keep;
     for (const [key, f] of this.inflight) {
@@ -967,10 +1175,15 @@ export class TileCache<T> {
    * fix, one lattice up. */
   private wants(lat: Lattice, v: Viewport, a: TileAddr): boolean {
     const l = v.lat ?? lat;
-    return a.scheme === l.scheme &&
-      a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
-      a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
-      intersects(l, a, v.box);
+    if (a.scheme !== l.scheme || !intersects(l, a, v.box)) return false;
+    // The coarse stand-in set (T-1037): the one level pair above the pin this viewport also asked
+    // for. Matched exactly, so it keeps that set alive and nothing else.
+    const si = v.standIn;
+    if (si && a.levelF === si.levelF && a.levelT === si.levelT) return true;
+    const ch = v.child;
+    if (ch && a.levelF === ch.levelF && a.levelT === ch.levelT && intersects(l, a, ch.box)) return true;
+    return a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
+      a.levelT >= v.levelT && a.levelT <= v.levelT + 1;
   }
 
   /**
@@ -1108,11 +1321,13 @@ export class TileCache<T> {
     if (!Number.isFinite(edgeNs)) return 0;
     // Stamped even when nothing is following, because it is what the NEXT fetch records about itself.
     if (edgeNs > this.edgeNs) this.edgeNs = edgeNs;
-    // Nothing following, nothing ahead: a frozen pane's next row is not coming towards it.
-    if (!following.length) { this.ahead.clear(); return 0; }
+    // Nothing following, nothing ahead: a frozen pane's next row is not coming towards it. And
+    // nothing is in scope for staleness either — the same reason, stated for [[isStale]] (T-1039).
+    if (!following.length) { this.ahead.clear(); this.staleScope.clear(); return 0; }
     const t = this.now();
     if (t < this.nextEdgeScan) return 0;
     this.nextEdgeScan = t + EDGE_SCAN_MS;
+    this.recomputeStaleScope(lat, edgeNs, following);
     const ahead = this.lookAhead(lat, edgeNs, following);
     let n = 0;
     for (const e of this.map.values()) {
@@ -1602,6 +1817,8 @@ export class TileCache<T> {
     this.tex.destroy(e.tex);
     this.map.delete(key);
     this.refreshedAt.delete(key);
+    this.lastGoodAt.delete(key);
+    this.staleScope.delete(key);
     this.speculativeResident.delete(key);
     // A retune drops the look-ahead copy too; the next row may be asked for again.
     this.aheadAsked.delete(key);
@@ -1629,6 +1846,8 @@ export class TileCache<T> {
     this.refreshingLane = null;
     this.refreshQueued.clear();
     this.refreshedAt.clear();
+    this.lastGoodAt.clear();
+    this.staleScope.clear();
     this.terminal.clear();
     this.silences = 0;
     this.silentUntil = 0;
@@ -1643,6 +1862,7 @@ export class TileCache<T> {
     this.pushedAt.clear();
     this.standInFrame.clear();
     this.standInQueued.clear();
+    this.lanes.clear();
   }
 
   /**
@@ -1872,6 +2092,9 @@ export class TileCache<T> {
       let requeue = wanted;
       this.lastWireAt = Math.max(this.lastWireAt, this.now());
       this.inflight.delete(key);
+      // The lane tag belongs to the request, not to the place: a re-ask from the ordinary miss path
+      // must not inherit the stand-in lane it once rode in.
+      this.lanes.delete(key);
       if (this.refreshing.delete(key)) {
         // **The lane's cadence is a share of the LANE'S OWN cost** — measured on its own requests
         // ([[refreshCostOf]]), which since T-491 is the minimum of its last few rather than the last
@@ -1916,7 +2139,8 @@ export class TileCache<T> {
     // A live-edge revalidation (`owner === -1`, [[refreshEdge]]) is asked for ON ITS OWN: the lane's
     // cadence is a share of what ITS request costs, and a source that coalesces requests (T-573's
     // batch) would otherwise charge it — and hold its rows — for every cold tile it rode beside.
-    void this.source(addr, ctrl?.signal, { solo: owner === -1 }).then(
+    const lane = this.lanes.get(key);
+    void this.source(addr, ctrl?.signal, { solo: owner === -1, lane }).then(
       (data) => {
         this.observe(started);
         this.succeeded();
@@ -2095,8 +2319,10 @@ export class TileCache<T> {
       this.goodRuns = 0;
       this.refusals = Math.min(this.refusals + 1, 4);
       // The refusal itself cost the server nothing, but whatever is holding the slots has not
-      // finished — so wait longer each time rather than re-asking on the same cadence.
-      this.busyUntil = this.now() + this.busyBackoffMs * 2 ** (this.refusals - 1);
+      // finished — so wait longer each time rather than re-asking on the same cadence. **Jittered**
+      // (T-1039): every viewport's tiles refused by the same overload would otherwise retry on the
+      // exact same tick, re-creating the burst that got them refused.
+      this.busyUntil = this.now() + jittered(this.busyBackoffMs * 2 ** (this.refusals - 1), this.random);
       // **And the quiet clock starts when that backoff ends** (T-539): completions are one way to
       // earn a slot back, elapsed quiet is the other, and a frozen view only ever has the second.
       // Quiet means quiet *after* the route has stopped saying it is busy.
@@ -2124,8 +2350,11 @@ export class TileCache<T> {
     this.stats.silentFailures++;
     this.silenced.add(keyOf(addr));
     this.silences++;
-    this.silentUntil = this.now() +
-      Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1));
+    // **Jittered** (T-1039): a whole batch (T-573) fails together on a dropped connection, so
+    // without jitter every address in it would arm the SAME probe instant and the "one probe at a
+    // time" half-open shape would still cost a burst the moment the wire returns.
+    this.silentUntil = this.now() + jittered(
+      Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1)), this.random);
     return false;
   }
 
@@ -2213,6 +2442,7 @@ export class TileCache<T> {
     this.map.set(key, entry);
     this.bytes += data.bytes;
     this.refreshedAt.set(key, this.now());
+    this.lastGoodAt.set(key, this.now());
     // **Rows already pushed past this answer's horizon are laid back over it** (T-893). The route's
     // horizon trails the feed, so an answer is usually older at its top than what is on screen, and
     // replacing the copy without this would take the newest rows off the pane until the next push.
@@ -2238,6 +2468,8 @@ export class TileCache<T> {
       this.tex.destroy(victim.tex);
       this.map.delete(victim.key);
       this.refreshedAt.delete(victim.key);
+      this.lastGoodAt.delete(victim.key);
+      this.staleScope.delete(victim.key);
       this.speculativeResident.delete(victim.key);
       this.standInFrame.delete(victim.key);
       this.bytes -= victim.data.bytes;

@@ -1179,110 +1179,136 @@ pub fn serve_api(
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
     let alarms = alarm_control(handle, registry, &db)?; // T-122
-    let state = ApiState {
-        streams: registry.clone(),
-        history: None,
-        // T-439: the de-welded view lattice, whose finest node is the growing edge.
-        view_history: handle.view_history(),
-        // T-1021: the view writer's unfolded rows, which a tile read yields to.
-        view_ingest_backlog: Some({
-            let c = handle.counters();
-            Arc::new(move || {
-                c.history
-                    .view_backlog
-                    .load(std::sync::atomic::Ordering::Relaxed)
-            })
-        }),
-        floor: Some(handle.floor_product()),
-        inventory: Some(Arc::clone(&db)),
-        trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
-        // T-977: the hunt's last pass, with the verdict on every channel it looked at.
-        cc_hunt: Some(Arc::new(PipelineCcHunt(handle.cc_verdicts()))),
-        // T-891: the run's accessory-fed VLF services (an empty list without an accessory).
-        vlf: Some(Arc::new(PipelineVlf(handle.vlf()))),
-        // T-981: the front-end events the spectrum reader judged, for the canvas's mark.
-        frontend: Some(Arc::new(PipelineFrontEnd(handle.counters()))),
-        status: Some(Arc::new(move || {
-            let mut v = counters.to_json();
-            if let Some(o) = v.as_object_mut() {
-                o.insert(
-                    "control".into(),
-                    serde_json::to_value(status_ctl.status()).unwrap_or_default(),
-                );
-            }
-            v
-        })),
-        // T-452: the in-app survey sweep, over the same front end the five device routes move.
-        // It exists exactly when a live front end does — a replay has nothing to retune — and it
-        // is a driver over the interactive retune path, not the scheduler this run does not drive.
-        // T-517: with the run's own bin width, so a coarse step widens the window only where the
-        // detection/history bins stay exactly as wide.
-        // T-511: the sweep drives **one** front end — the run's default. A per-device sweep is a
-        // separate decision (`crate::scan`'s arbitration is written for one radio), and the wire
-        // says which one it commissions.
-        scan: live_controls.primary().cloned().map(|lc| {
-            let fft = handle.detection_fft_len();
-            Arc::new(
-                hk_api::scan::ScanRunner::new(lc)
-                    .with_bin_width(Arc::new(move |fs| hk_pipeline::detection_bin_hz(fs, fft))),
-            )
-        }),
-        live_controls,
-        run_control: Some(Arc::new(PipelineRunControl(controller))),
-        bookmarks: Some(db),
-        audit: Some(Arc::new(audit)),
-        on_demand: openers,
-        outputs: Some(Arc::new(PipelineOutputs(handle.output_recorders()))),
-        recipes: Some(Arc::new(PipelineRecipes(recipes))),
-        // T-092: the run's always-on decoded-stream capture store.
-        captures: handle
-            .decoded_captures()
-            .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
-        occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
-        observations: handle.observation_store(),                         // T-115
-        attention: Some(attention),                                       // T-119
-        scheduler: Some(Arc::new(PipelineScheduler(handle.scheduler_hub()))), // T-127
-        reports: Some(Arc::new(PipelineReports(
-            ReportService::new(
-                None,
-                Some(handle.floor_product()),
-                handle.observation_store(),
-                Arc::clone(&report_db),
-            )
-            .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
-        ))), // T-121
-        watch: Some(Arc::new(PipelineWatch(Arc::clone(&alarms)))),        // T-166
-        anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
-        iq_buffer: Some(Arc::new(PipelineIqBuffer(handle.iq_buffer()))),  // T-157
-        analyze: Some(Arc::new(PipelineAnalyze(analyze))),                // T-859
-        datasets: Some(Arc::new(PipelineDatasets::new(
-            handle.data_dir().join("hackriff.db"),
-            handle.iq_buffer(),
-            handle.data_dir(),
-        ))), // T-205
-        // T-844: the C38 models, modes and durable shadow log (`None` answers 503).
-        ml: handle
-            .ml()
-            .map(|m| Arc::new(crate::control::PipelineMl(m)) as Arc<dyn hk_api::MlControl>),
-        // T-469: the persisted IQ recordings that extend the audio horizon past the ring.
-        recordings: Some(Arc::new(PipelineRecordings::new(
-            handle.data_dir().join("hackriff.db"),
-            handle.data_dir().to_path_buf(),
-        ))),
-        // T-463: the one playhead of historical playback.
-        playback: Some(Arc::new(PipelinePlayback(playback))),
-        // T-438: the tile route's ingest-backpressure cap, per server.
-        tile_admission: Default::default(),
-        // T-572: the hot-tile LRU, on for a served run. A viewport that has not moved re-reads the
-        // same SEALED tiles every poll, and a sealed tile can never change again. Live tiles at the
-        // growing edge are never cached — see `HotTileCache`.
-        tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
-        row_feeds: Default::default(),
-        // T-579: the tile route's memoised geometry, per server — the readable ceiling per
-        // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
-        ceiling_memo: Default::default(),
-        coverage_raster: Default::default(),
-    };
+    let state =
+        ApiState {
+            streams: registry.clone(),
+            history: None,
+            // T-439: the de-welded view lattice, whose finest node is the growing edge.
+            view_history: handle.view_history(),
+            // T-1021: the view writer's unfolded rows, which a tile read yields to.
+            view_ingest_backlog: Some({
+                let c = handle.counters();
+                Arc::new(move || {
+                    c.history
+                        .view_backlog
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                })
+            }),
+            floor: Some(handle.floor_product()),
+            inventory: Some(Arc::clone(&db)),
+            trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
+            // T-977: the hunt's last pass, with the verdict on every channel it looked at.
+            cc_hunt: Some(Arc::new(PipelineCcHunt(handle.cc_verdicts()))),
+            // T-891: the run's accessory-fed VLF services (an empty list without an accessory).
+            vlf: Some(Arc::new(PipelineVlf(handle.vlf()))),
+            // T-981: the front-end events the spectrum reader judged, for the canvas's mark.
+            frontend: Some(Arc::new(PipelineFrontEnd(handle.counters()))),
+            status: Some(Arc::new(move || {
+                let mut v = counters.to_json();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert(
+                        "control".into(),
+                        serde_json::to_value(status_ctl.status()).unwrap_or_default(),
+                    );
+                }
+                v
+            })),
+            // T-452: the in-app survey sweep, over the same front end the five device routes move.
+            // It exists exactly when a live front end does — a replay has nothing to retune — and it
+            // is a driver over the interactive retune path, not the scheduler this run does not drive.
+            // T-517: with the run's own bin width, so a coarse step widens the window only where the
+            // detection/history bins stay exactly as wide.
+            // T-511: the sweep drives **one** front end — the run's default. A per-device sweep is a
+            // separate decision (`crate::scan`'s arbitration is written for one radio), and the wire
+            // says which one it commissions.
+            // T-1009: **one runner per front end**, in composition order (the primary first), so a
+            // request can say which radio sweeps — the arbitration in `crate::scan` is per radio, and
+            // a sweep of B must not yield to a retune of A.
+            scans: hk_api::scan::ScanRunners::new(
+                live_controls
+                    .iter()
+                    .cloned()
+                    .map(|lc| {
+                        let fft = handle.detection_fft_len();
+                        Arc::new(hk_api::scan::ScanRunner::new(lc).with_bin_width(Arc::new(
+                            move |fs| hk_pipeline::detection_bin_hz(fs, fft),
+                        )))
+                    })
+                    .collect(),
+            ),
+            live_controls,
+            run_control: Some(Arc::new(PipelineRunControl(controller))),
+            bookmarks: Some(db),
+            audit: Some(Arc::new(audit)),
+            on_demand: openers,
+            outputs: Some(Arc::new(PipelineOutputs(handle.output_recorders()))),
+            recipes: Some(Arc::new(PipelineRecipes(recipes))),
+            // T-092: the run's always-on decoded-stream capture store.
+            captures: handle
+                .decoded_captures()
+                .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
+            occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
+            observations: handle.observation_store(),                         // T-115
+            attention: Some(attention),                                       // T-119
+            scheduler: Some(Arc::new(PipelineScheduler(handle.scheduler_hub()))), // T-127
+            reports: Some(Arc::new(PipelineReports(
+                ReportService::new(
+                    None,
+                    Some(handle.floor_product()),
+                    handle.observation_store(),
+                    Arc::clone(&report_db),
+                )
+                .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
+            ))), // T-121
+            watch: Some(Arc::new(PipelineWatch(Arc::clone(&alarms)))),        // T-166
+            anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
+            iq_buffer: Some(Arc::new(PipelineIqBuffer(handle.iq_buffer()))),  // T-157
+            // T-1009: the FURTHER front ends' rings, by `device_id` — what a clip's `device_id`
+            // selector resolves against. The primary's ring is `iq_buffer` above (an omitted selector),
+            // so each ring appears exactly once and a clip is always taken from the radio it names.
+            iq_buffers: handle
+                .devices()
+                .into_iter()
+                .filter(|d| !d.primary)
+                .filter_map(|d| {
+                    d.device_id.clone().map(|id| {
+                        (
+                            id,
+                            Arc::new(PipelineIqBuffer(Arc::clone(&d.iq_buffer)))
+                                as Arc<dyn hk_api::IqBufferControl>,
+                        )
+                    })
+                })
+                .collect(),
+            analyze: Some(Arc::new(PipelineAnalyze(analyze))), // T-859
+            datasets: Some(Arc::new(PipelineDatasets::new(
+                handle.data_dir().join("hackriff.db"),
+                handle.iq_buffer(),
+                handle.data_dir(),
+            ))), // T-205
+            // T-844: the C38 models, modes and durable shadow log (`None` answers 503).
+            ml: handle
+                .ml()
+                .map(|m| Arc::new(crate::control::PipelineMl(m)) as Arc<dyn hk_api::MlControl>),
+            // T-469: the persisted IQ recordings that extend the audio horizon past the ring.
+            recordings: Some(Arc::new(PipelineRecordings::new(
+                handle.data_dir().join("hackriff.db"),
+                handle.data_dir().to_path_buf(),
+            ))),
+            // T-463: the one playhead of historical playback.
+            playback: Some(Arc::new(PipelinePlayback(playback))),
+            // T-438: the tile route's ingest-backpressure cap, per server.
+            tile_admission: Default::default(),
+            // T-572: the hot-tile LRU, on for a served run. A viewport that has not moved re-reads the
+            // same SEALED tiles every poll, and a sealed tile can never change again. Live tiles at the
+            // growing edge are never cached — see `HotTileCache`.
+            tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
+            row_feeds: Default::default(),
+            // T-579: the tile route's memoised geometry, per server — the readable ceiling per
+            // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
+            ceiling_memo: Default::default(),
+            coverage_raster: Default::default(),
+        };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
     config.stream_tcp = Some(tcp.local_addr());
