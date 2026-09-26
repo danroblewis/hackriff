@@ -137,6 +137,8 @@ HACKRIFF_OPS=~/.hackriff-ops nohup bash ops/merge-runner.sh >/dev/null 2>&1 & di
 # queue:    echo task-t519 >> $HACKRIFF_OPS/merge-queue.txt
 # review:   mkdir -p $HACKRIFF_OPS/review-hold && echo '<why>' > $HACKRIFF_OPS/review-hold/task-t519   # queued but never gated until
 #           rm $HACKRIFF_OPS/review-hold/task-t519 after the verdict (T-955, 2026-09-25: a tip moved mid-review landed)
+# hold back: to hold a branch back, write $HACKRIFF_OPS/review-hold/<branch> and leave it queued; do not pull it from
+#           the queue (a pulled branch is re-queued after 30 min - work-runner rescue_stranded, 2026-09-25 incident)
 # failures: cat $HACKRIFF_OPS/merge-needs-attention.txt
 # merged:   cat $HACKRIFF_OPS/merge-done.txt   ·   log: $HACKRIFF_OPS/merge-runner.log
 ```
