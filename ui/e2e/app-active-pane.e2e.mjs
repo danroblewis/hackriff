@@ -1,7 +1,8 @@
 // T-1000 (MMAP split view, docs/23 §10.7): the ACTIVE pane, made visible — in the real app, over the
 // product's own server, at a desktop width and a phone width.
 //
-// Before this, Go-to, zoom, the layers menu, the follow-live FAB and the viewport menu acted on a
+// Before this, Go-to, zoom, the layers menu, the (since retired, T-1001) follow-live FAB and the
+// viewport menu acted on a
 // HIDDEN active pane (whichever was pressed or wheeled last) and a right-click did not even change
 // it. With two panes open the user could not tell which pane a press of the chrome would move.
 //
@@ -37,7 +38,9 @@ const NAMED = `JSON.stringify((() => {
     layers: q('.map-layers-btn').getAttribute('aria-label'),
     zoom: q('.map-zoom').getAttribute('aria-label'),
     zoomBadge: q('.map-zoom-pane').hidden ? null : q('.map-zoom-pane').textContent,
-    fab: q('.map-fab').getAttribute('aria-label'),
+    // T-1001: Live/Freeze is per pane, inside each pane's rectangle — one button per pane, each
+    // naming its own pane, so the chrome's active-pane name is not the one that says "Live".
+    live: [...document.querySelectorAll('.sf-pane-live-btn')].map((b) => b.dataset.pane),
   };
 })())`;
 
@@ -49,7 +52,7 @@ const RECORDER = `(() => {
     window.__t1000.push({ type: ev.type, button: ev.button ?? null, key: ev.key ?? null,
       outline: o.hidden ? null : o.dataset.pane, goto: document.querySelector('.map-goto-pane').textContent,
       layers: document.querySelector('.map-layers-btn').getAttribute('aria-label'),
-      following: document.querySelector('.map-fab').classList.contains('following') }); };
+      following: document.querySelector('.sf-pane-live-btn').classList.contains('following') }); };
   for (const t of ['pointerdown', 'contextmenu', 'keydown']) document.addEventListener(t, rec);
   return true; })()`;
 const LAST = (type) => `JSON.stringify((window.__t1000 || []).filter((r) => r.type === ${JSON.stringify(type)}).at(-1) ?? null)`;
@@ -64,9 +67,11 @@ const clearPoint = (x0, x1) => `JSON.stringify((() => {
   }
   return null; })())`;
 
-/** Each pane's follow state, from its own status row (`data-following`, written per frame). */
-const FOLLOWS = `JSON.stringify(Object.fromEntries([...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]')]
-  .map((r) => [r.querySelector('.hk-surface-id').textContent, r.dataset.following === 'true'])))`;
+/** Each pane's follow state, from its own scale block (`data-following`, written per frame). T-996
+ * retired the per-viewport status rows from the app; the scale block is where a pane states itself
+ * now, from the same frame's statuses (`data-pane` is the pane id the row's id cell showed). */
+const FOLLOWS = `JSON.stringify(Object.fromEntries([...document.querySelectorAll('.sf-scale:not([hidden])')]
+  .map((r) => [r.dataset.pane, r.dataset.following === 'true'])))`;
 
 for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: the active pane is outlined and named; click, right-click and keys move both at once`, async (t) => {
   const browser = await Browser.open();
@@ -75,8 +80,8 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the floating cluster to mount", "!!document.querySelector('.map-pane-btn') && !!document.querySelector('.sf-active-pane')", { timeoutMs: 30000 });
-  await page.waitFor("a pane row with its level stated",
-    "!!document.querySelector('.hk-surface-viewport[data-viewport=\"pane\"] .hk-surface-level')?.textContent", { timeoutMs: 90000 });
+  await page.waitFor("a pane's scale block with its level stated",
+    "!!document.querySelector('.sf-scale:not([hidden])')?.dataset.level", { timeoutMs: 90000 });
 
   // One pane: nothing to disambiguate, so no outline and no badge (docs/23 §10.6 P1).
   const one = JSON.parse(await page.eval(NAMED));
@@ -84,6 +89,8 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   assert.equal(one.goto, null, "Go-to names a pane when there is only one");
   assert.equal(one.zoomBadge, null);
   assert.equal(one.layers, "Layers");
+  // T-1001: with one pane its Live button says just "Live" — there is nothing to disambiguate.
+  assert.deepEqual(one.live, [""], `one pane, one unnumbered Live button: ${JSON.stringify(one.live)}`);
 
   // Split: the new (right-hand) pane is active, and every per-pane control says so.
   await paneAct(page, "split");
@@ -92,9 +99,13 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   const two = JSON.parse(await page.eval(NAMED));
   t.diagnostic(`split, pane 2 active: ${JSON.stringify(two)}`);
   assert.deepEqual(
-    { goto: two.goto, gotoLabel: two.gotoLabel, layers: two.layers, zoom: two.zoom, zoomBadge: two.zoomBadge, fab: two.fab },
-    { goto: "pane 2", gotoLabel: "Go to frequency · pane 2 of 2", layers: "Layers · pane 2 of 2", zoom: "Zoom · pane 2 of 2", zoomBadge: "2", fab: "Follow live · pane 2 of 2" },
+    { goto: two.goto, gotoLabel: two.gotoLabel, layers: two.layers, zoom: two.zoom, zoomBadge: two.zoomBadge },
+    { goto: "pane 2", gotoLabel: "Go to frequency · pane 2 of 2", layers: "Layers · pane 2 of 2", zoom: "Zoom · pane 2 of 2", zoomBadge: "2" },
     "the per-pane chrome does not name the active pane");
+  // T-1001: Live/Freeze is NOT part of that chrome — each pane has its own button, inside itself,
+  // each naming its own pane. Two panes, two buttons, numbered in layout order.
+  assert.deepEqual(two.live, ["1", "2"],
+    `each pane must carry its own Live button, named for its own pane: ${JSON.stringify(two.live)}`);
   const canvas = await page.$rect(".sf-canvas");
   // The outline is ON the pane it names: pane 2 of a column split is the right half.
   assert.ok(two.box.x > canvas.x + canvas.w * 0.4 && two.box.x + two.box.w <= canvas.x + canvas.w + 1,
@@ -142,7 +153,7 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   }
 
   // `L` toggles Live on the ACTIVE pane (pane 1) and leaves pane 2 alone.
-  const ids = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"] .hk-surface-id')].map((e) => e.textContent))`));
+  const ids = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.sf-scale:not([hidden])')].map((e) => e.dataset.pane))`));
   const activeId = await page.eval("document.querySelector('.sf-active-pane').dataset.paneId");
   const otherId = ids.find((i) => i !== activeId);
   assert.ok(activeId && otherId, `two pane rows expected: ${JSON.stringify({ ids, activeId })}`);
@@ -153,9 +164,14 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   const after = JSON.parse(await page.eval(FOLLOWS));
   t.diagnostic(`L: ${JSON.stringify({ before, after, activeId })}`);
   assert.equal(after[otherId], before[otherId], "L on pane 1 changed pane 2's follow state");
-  assert.equal(await page.eval("document.querySelector('.map-fab').classList.contains('following')"), after[activeId],
-    "the FAB does not state the active pane's follow state");
-  // And back, so a second press is the FAB's other half.
+  // T-1001: the ACTIVE pane's own button — the one `L` pressed — states that pane's follow state,
+  // and the other pane's button still states its own (unchanged) one.
+  const stated = JSON.parse(await page.eval(`JSON.stringify(Object.fromEntries(
+    [...document.querySelectorAll('.sf-pane-live-btn')].map((b) => [b.dataset.paneId, b.classList.contains('following')])))`));
+  t.diagnostic(`the panes' Live buttons: ${JSON.stringify(stated)}`);
+  assert.equal(stated[activeId], after[activeId], "the active pane's Live button does not state its own follow state");
+  assert.equal(stated[otherId], after[otherId], "the other pane's Live button does not state its own follow state");
+  // And back, so a second press is the button's other half.
   await page.key("l", { code: "KeyL", keyCode: 76 });
   await page.waitFor("L again to restore it",
     `(${FOLLOWS.replace(/^JSON\.stringify/, "")})[${JSON.stringify(activeId)}] === ${before[activeId]}`, { timeoutMs: 10000 });

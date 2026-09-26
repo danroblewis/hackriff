@@ -195,7 +195,7 @@ function closeOfDepth(s: string): number {
 
 /** Modules exempt from rule 4, each with the reason. Adding one is a design decision - say why. */
 const NOT_A_PANEL: Record<string, string> = {
-  "src/app/chrome/map-controls.ts": "band-2 small chrome: Go-to box, zoom cluster, follow-live FAB, layers button, the retune offer (§10.6 rule 5: these ARE the small controls)",
+  "src/app/chrome/map-controls.ts": "band-2 small chrome: Go-to box, zoom cluster, layers button, the retune offer (§10.6 rule 5: these ARE the small controls)",
   "src/app/centre/surface.ts": "the canvas itself (band 0/1): a bare drag pans, a wheel zooms (ui/CONTROLS.md) - the map, not a panel over it",
   "src/app/centre/nudge.ts": "the tuning-nudge cluster: small band-2 buttons, the model for rule 4",
   "src/app/decode/": "the decoder workbench is a separate view, not a panel over the map",

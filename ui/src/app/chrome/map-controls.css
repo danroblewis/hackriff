@@ -166,18 +166,10 @@
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
 .map-sep { height: 1px; background: var(--line); margin: 2px 4px; }
 
-/* Follow-live FAB: bottom-right, above the panes' bottom inset (`--map-strip`; the minimap strip itself is retired, T-995). */
-.map-fab {
-  right: 0; bottom: calc(var(--map-strip, 0px) + 4px); width: 48px; height: 48px; border-radius: 50%;
-  display: grid; place-items: center; padding: 0; cursor: pointer;
-  background: color-mix(in srgb, var(--panel) 72%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--line); color: var(--muted); box-shadow: 0 4px 18px var(--shadow);
-}
-.map-fab svg { width: 22px; height: 22px; }
-.map-fab.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 4px var(--teal-soft), 0 4px 18px var(--shadow); }
-.map-fab.frozen { color: var(--amber); border-color: var(--amber); }
-/* T-955: following live TIME over spectrum the radio has left — the press brings it to the tuned window. */
-.map-fab.following.off-tuned { color: var(--amber); border-color: var(--teal); border-style: dashed; box-shadow: 0 4px 18px var(--shadow); }
+/* T-1001: the follow-live FAB is gone from the cluster — Live/Freeze is a button inside each
+   pane's rectangle (`centre/centre.css`'s `.sf-pane-live-btn`), one per pane. T-995's change to
+   the FAB's own bottom offset (the minimap strip it cleared is retired) went with it; the panes'
+   buttons are placed inside the picture and never needed that offset. */
 
 /* T-1000 (docs/23 §10.7): the number of the pane a per-pane control acts on, shown only while there
    are two or more — the same number the outline on the canvas carries (`.sf-active-pane[data-pane]`). */
@@ -188,7 +180,7 @@
   background: var(--text); color: var(--panel); font: 600 10px/14px var(--mono); text-align: center;
   pointer-events: none;
 }
-.map-layers-btn .map-pane-badge, .map-fab .map-pane-badge { position: absolute; right: 1px; top: 1px; }
+.map-layers-btn .map-pane-badge { position: absolute; right: 1px; top: 1px; }
 .map-zoom-pane { align-self: center; margin: 2px 0; }
 @media (max-width: 600px) { .map-goto-pane .map-goto-word { display: none; } }
 .map-goto-pane { flex: none; font: 600 11px var(--mono); color: var(--text); padding: 1px 6px; border-radius: 7px; background: var(--raise); white-space: nowrap; }

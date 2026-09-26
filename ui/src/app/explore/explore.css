@@ -8,6 +8,8 @@
 .side-inv .side-head { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
 .side-inv .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
 .side-inv .h em { font-style: normal; color: var(--dim); font-weight: 400; letter-spacing: 0.02em; text-transform: none; }
+/* T-1002: which pane the lists are of — said only when there is more than one (hidden otherwise). */
+.side-inv .h em.pane { color: var(--amber); font-variant-numeric: tabular-nums; }
 .side-inv .tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
 .side-inv .tab { border: 0; background: transparent; padding: 5px 6px; border-radius: 5px; cursor: pointer; color: var(--muted); display: flex; justify-content: center; gap: 6px; align-items: center; }
 .side-inv .tab .count { font-family: var(--mono); font-size: 11px; padding: 0 5px; border-radius: 8px; }

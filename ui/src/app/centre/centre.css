@@ -204,6 +204,33 @@
   border: 2px solid var(--text); border-radius: 2px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(0, 0, 0, .55);
 }
+/* T-1001 (MMAP split view): each pane's OWN Live/Freeze button, inside that pane's rectangle
+   (`centre/pane-live.ts` places them every render frame). The single follow-live FAB retired: with
+   two panes open, one corner button acting on the hidden active pane could not say which pane it
+   froze. The container never takes the pointer — a drag or wheel that starts on the picture still
+   pans and zooms — but the buttons do, because a control nobody can press is not one.
+   Colours are the retired FAB's, so the states read the same: teal = following the live edge,
+   amber = frozen on a past window, dashed = following live TIME off the tuned window (T-955). */
+.sf-pane-live { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
+.sf-pane-live-btn {
+  position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer;
+  display: flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 10px;
+  border-radius: 14px; box-sizing: border-box;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--line); color: var(--muted);
+  font: 600 11px/1 var(--ui); letter-spacing: .04em; text-transform: uppercase;
+  box-shadow: 0 4px 18px var(--shadow);
+}
+/* The state is a dot AND a word: never hue alone (docs/24 §14.2). */
+.sf-pane-live-btn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.sf-pane-live-btn.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft), 0 4px 18px var(--shadow); }
+.sf-pane-live-btn.frozen { color: var(--amber); border-color: var(--amber); }
+.sf-pane-live-btn.frozen::before { border-radius: 1px; }
+/* T-955: following live TIME over spectrum the radio has left — the press brings it to the tuned window. */
+.sf-pane-live-btn.following.off-tuned { color: var(--amber); border-color: var(--teal); border-style: dashed; box-shadow: 0 4px 18px var(--shadow); }
+.sf-pane-live-btn:hover { background: color-mix(in srgb, var(--panel) 92%, transparent); }
+.sf-pane-live-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .sf-pin {
   position: absolute; left: 0; top: 0; width: 24px; height: 24px; margin: -12px 0 0 -12px; padding: 0;
   border: 0; background: none; pointer-events: none; display: grid; place-items: center;
