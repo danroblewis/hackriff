@@ -31244,7 +31244,7 @@ tasks:
   - id: T-1063
     milestone: M2-hardening
     title: "P1: hk-api drops connections SILENTLY at max_connections (EOF storm behind cloudflared) - answer 503 + Retry-After from the accept thread, log + count it, WebSocket upgrades in their own pool, HTTP cap 64 -> 256"
-    status: in-progress
+    status: done
     branch: task-t1063
     priority: P1
     deps: []
@@ -31269,6 +31269,7 @@ tasks:
       Commits: cefdf5ba, 4238c737
       Observed, not chased: The request-volume half of the user's complaint ('over a hundred requests every time I zoom') is NOT fixed by this ticket - it only makes the overflow honest. The measured 264 requests per 24-event zoom, 100 of them /api/inventory, and the 7.3 req/s idle rate still need a client-side coalescing/debounce ticket; evidence in ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md. | Every hk-api response sets `Connection: close` (crates/hk-api/src/http.rs respond_cached), so each request really is a new TCP connection. Keep-alive would cut connection churn behind the tunnel by far more than raising the cap did, but it is a real change to the read/handler loop and out of this ticket's scope. | crates/hk-pipeline tests that set `config.max_connections` (listen_lifecycle 256, replumb/recovery_spectrum_handshake 512) now also inherit the new `max_ws_connections = 128` default; none opens near 128 sockets, and hk-api's own 348 tests (bridge, on-demand, tile-rows and main's new changes suite included) are green, but the full gate is the check that covers hk-pipeline.
       Resources: 3 CPU-s, peak 0.3 GB
+    commit: c7cd3d68
   - id: T-1064
     milestone: M2-hardening
     title: "P1: HTTP/1.1 keep-alive with idle reaping in hk-api (0 % connection reuse today: every response is Connection: close, one request per connection) - T-573's keep-alive half never landed"
