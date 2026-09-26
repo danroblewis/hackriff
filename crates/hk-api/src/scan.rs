@@ -105,7 +105,7 @@ use hk_core::scheduler::{
 use hk_model::{FreqRange, Timestamp};
 use serde_json::{Value, json};
 
-use crate::live_control::{DeviceAction, LiveControl, LiveControlError};
+use crate::live_control::{DeviceAction, LiveControl, LiveControlError, SelectError};
 
 /// Nanoseconds in a second.
 const NS_PER_S: f64 = 1e9;
@@ -318,6 +318,41 @@ impl Prepared {
     }
 }
 
+impl Prepared {
+    /// **The steps themselves** (T-1008), in visit order: each one's slice of the plan (`lo_hz`..
+    /// `hi_hz`, the part of the range that step is responsible for — the steps tile the range
+    /// without overlap) and the centre it tunes to on an undithered pass.
+    ///
+    /// Served so a client can draw *the plan the engine will execute* rather than re-deriving a
+    /// tiling of its own: the tiling depends on the rate in force, the device's ranges and RF-path
+    /// boundaries, and clipping, none of which is the client's to know. A dithered pass (T-173)
+    /// tunes `center_hz` offset by the plan's DC dither; `progress.center_hz` says where it really
+    /// is.
+    pub fn windows_json(&self) -> Value {
+        Value::Array(
+            self.hops
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    json!({
+                        "step": i,
+                        "lo_hz": h.covers.lo_hz,
+                        "hi_hz": h.covers.hi_hz,
+                        "center_hz": h.center_hz,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// [`Prepared::json`] with `plan.windows` ([`Prepared::windows_json`]).
+    pub fn json_with_windows(&self) -> Value {
+        let mut j = self.json();
+        j["plan"]["windows"] = self.windows_json();
+        j
+    }
+}
+
 /// A plan warning in words. The two a caller's own range can cause are spelled out; the rest are
 /// scheduler-internal and printed as themselves rather than paraphrased.
 fn warning_text(w: &PlanWarning) -> String {
@@ -351,6 +386,9 @@ struct Active {
     step_started_ns: Option<i64>,
     /// The centre in force from this scan (`None` before the first step).
     center_hz: Option<f64>,
+    /// The step whose retune last succeeded — the one being dwelt on while running (T-1008).
+    /// `None` before the first step.
+    dwelling: Option<usize>,
     /// When to tune `step`.
     due: Instant,
     /// Consecutive transient failures on `step` ([`STEP_RETRIES`]).
@@ -461,6 +499,14 @@ impl ScanRunner {
     pub fn with_bin_width(mut self, bin_hz: BinWidth) -> Self {
         self.bin_hz = Some(bin_hz);
         self
+    }
+
+    /// The front end this runner sweeps, as it identifies itself (`None` when the source reports
+    /// no identity — never a placeholder, the T-325 rule). This is the key a `device_id` selector
+    /// resolves against ([`ScanRunners::select`], T-1009) and what the served state carries.
+    #[must_use]
+    pub fn device_id(&self) -> Option<&str> {
+        self.shared.live.device_id()
     }
 
     /// Whether this front end can be swept at all, and why not when it cannot.
@@ -597,6 +643,7 @@ impl ScanRunner {
                 started_ns: now_ns(),
                 step_started_ns: None,
                 center_hz: None,
+                dwelling: None,
                 due: Instant::now(),
                 retries: 0,
                 retry_since: None,
@@ -706,8 +753,20 @@ impl ScanRunner {
         self.shared.wake.notify_all();
     }
 
-    /// The scan's state, as `GET /api/control/scan` serves it.
+    /// The scan's state, as `GET /api/control/scan` and `/api/control/state` serve it — without
+    /// the per-step windows, which [`ScanRunner::json_with_windows`] adds.
     pub fn json(&self) -> Value {
+        self.state_json(false)
+    }
+
+    /// [`ScanRunner::json`] with `plan.windows` (T-1008): every step's slice, in visit order. Only
+    /// on the scan routes, and on `GET` only when asked for (`windows=1`): a full-range fine pass
+    /// is thousands of steps, and `/api/control/state` is polled every couple of seconds.
+    pub fn json_with_windows(&self) -> Value {
+        self.state_json(true)
+    }
+
+    fn state_json(&self, windows: bool) -> Value {
         let unavailable = self.availability().err();
         let st = self.shared.lock();
         let mut out = json!({
@@ -715,6 +774,9 @@ impl ScanRunner {
             "available": unavailable.is_none(),
             "unavailable_reason": unavailable,
             "yielded": st.yielded.as_ref().map(Yielded::json),
+            // T-1008: the front end this runner sweeps — the one a plan is drawn for and the one a
+            // start commits. `null` when the source reports no identity, never a placeholder.
+            "device_id": self.shared.live.device_id(),
         });
         let o = out.as_object_mut().expect("object");
         match (&st.prepared, &st.active) {
@@ -725,7 +787,12 @@ impl ScanRunner {
                 let overhead = st.measured_step_overhead_ns();
                 let mut p = p.clone();
                 p.budget = priced(p.budget, overhead);
-                let j = p.json();
+                // T-1008: the step windows ride only on the scan routes' answers.
+                let j = if windows {
+                    p.json_with_windows()
+                } else {
+                    p.json()
+                };
                 o.insert("plan".into(), j["plan"].clone());
                 o.insert("budget".into(), j["budget"].clone());
                 let now = Instant::now();
@@ -744,6 +811,9 @@ impl ScanRunner {
                         "pass": a.pass,
                         "steps_done": a.steps_done,
                         "center_hz": a.center_hz,
+                        // T-1008: the step being dwelt on — only while running; a yielded or
+                        // stopped sweep is dwelling nowhere, whatever it last tuned.
+                        "dwell_step": if st.phase == Phase::Running { a.dwelling } else { None },
                         "started_s": a.started_ns as f64 / NS_PER_S,
                         "step_started_s": a.step_started_ns.map(|n| n as f64 / NS_PER_S),
                         "next_step_in_s": a.due.saturating_duration_since(now).as_secs_f64(),
@@ -792,6 +862,119 @@ impl Drop for ScanRunner {
         {
             let _ = h.join();
         }
+    }
+}
+
+/// **Every front end's scan runner** (T-1009), in composition order — the run's default first.
+///
+/// T-452 composed one runner over the run's default front end, because the arbitration it
+/// implements (an explicit user device action wins; the sweep yields, keeps its place and says so)
+/// is written about *one radio*. With several front ends that argument does not change: it is
+/// **per radio**, and a sweep of B has no business yielding to a retune of A. So the runners are
+/// held as a collection keyed the way every other device-facing route is keyed — by `device_id`,
+/// with the first as the default — and each one arbitrates over its own device alone.
+///
+/// A measurement box's "Scan this region with &lt;device&gt;" (T-1009) is what needs this: the user
+/// picks which radio sweeps the region they drew, so the choice has to reach the engine.
+#[derive(Clone, Default)]
+pub struct ScanRunners {
+    runners: Vec<Arc<ScanRunner>>,
+}
+
+impl std::fmt::Debug for ScanRunners {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.runners.iter()).finish()
+    }
+}
+
+impl ScanRunners {
+    /// The runners `runners` addresses, in order (the first is the default).
+    #[must_use]
+    pub fn new(runners: Vec<Arc<ScanRunner>>) -> Self {
+        Self { runners }
+    }
+
+    /// No sweepable front end (a replay, or a server composed without a scan runner).
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Exactly one runner — today's single-SDR run, where the selector may be omitted.
+    #[must_use]
+    pub fn one(runner: Arc<ScanRunner>) -> Self {
+        Self {
+            runners: vec![runner],
+        }
+    }
+
+    /// True when nothing here can sweep.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.runners.is_empty()
+    }
+
+    /// How many front ends this run can sweep.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.runners.len()
+    }
+
+    /// The **default** runner: the first, which is the run's primary front end's.
+    #[must_use]
+    pub fn primary(&self) -> Option<&Arc<ScanRunner>> {
+        self.runners.first()
+    }
+
+    /// Every runner, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<ScanRunner>> {
+        self.runners.iter()
+    }
+
+    /// Every sweepable `device_id`, in order (a front end reporting none contributes nothing —
+    /// "nothing said" is never a key, the T-325 rule).
+    #[must_use]
+    pub fn device_ids(&self) -> Vec<String> {
+        self.runners
+            .iter()
+            .filter_map(|r| r.device_id().map(str::to_owned))
+            .collect()
+    }
+
+    /// The runner for `device_id`, or the default when none is named.
+    ///
+    /// `None` resolves to the primary: a **read** (pricing a pass, reporting where a sweep is) has
+    /// a defined answer for the run's default radio, and `device_id` in the answer says which one
+    /// it was. Committing a radio is stricter — [`Self::select_to_commission`] refuses to guess.
+    pub fn select(&self, device_id: Option<&str>) -> Result<&Arc<ScanRunner>, SelectError> {
+        match device_id {
+            None => self.runners.first().ok_or(SelectError::NotLive),
+            Some(want) => self
+                .runners
+                .iter()
+                .find(|r| r.device_id() == Some(want))
+                .ok_or_else(|| SelectError::Unknown {
+                    requested: want.to_owned(),
+                    available: self.device_ids(),
+                }),
+        }
+    }
+
+    /// The runner a **commissioning** request names: as [`Self::select`], except that omitting the
+    /// selector on a run holding more than one sweepable front end is refused rather than guessed.
+    ///
+    /// Starting a sweep commits a radio to hundreds of retunes over the next minutes or hours. The
+    /// same rule the six device routes obey — "a client must name a device to move one" — applies
+    /// the moment a request *commits* one, and guessing here would silently commandeer whichever
+    /// front end happened to be composed first.
+    pub fn select_to_commission(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<&Arc<ScanRunner>, SelectError> {
+        if device_id.is_none() && self.runners.len() > 1 {
+            return Err(SelectError::Ambiguous(self.device_ids()));
+        }
+        self.select(device_id)
     }
 }
 
@@ -885,6 +1068,7 @@ fn worker(shared: &Arc<Shared>) {
                 let steps = st.prepared.as_ref().map_or(1, Prepared::steps).max(1);
                 if let Some(a) = st.active.as_mut() {
                     a.center_hz = Some(t.center_hz);
+                    a.dwelling = Some(step.index);
                     a.step_started_ns = Some(now_ns());
                     a.steps_done += 1;
                     took = Some(retune_took);
@@ -1006,6 +1190,8 @@ mod tests {
         /// reprograms the synthesiser, restarts the stream, and on a class or rate boundary the run
         /// re-plumbs behind it — and that cost is what the scan's price used to omit.
         retune_delay: Mutex<Duration>,
+        /// T-1009: the identity a `device_id` selector resolves against.
+        id: String,
     }
 
     impl Fake {
@@ -1034,7 +1220,14 @@ mod tests {
                 calls: AtomicU64::new(0),
                 rates: Mutex::new(Vec::new()),
                 retune_delay: Mutex::new(Duration::ZERO),
+                id: "fake:1".to_owned(),
             })
+        }
+        /// T-1009: the same front end under another identity, for a two-radio run.
+        fn named(id: &str) -> Arc<Self> {
+            let mut f = Self::new();
+            Arc::get_mut(&mut f).expect("sole owner").id = id.to_owned();
+            f
         }
         /// The same front end left at a narrow window, as a live run at 2.4 Msps is.
         fn at_rate(rate_hz: f64) -> Arc<Self> {
@@ -1070,7 +1263,7 @@ mod tests {
                 .clone()
         }
         fn device_id(&self) -> Option<&str> {
-            Some("fake:1")
+            Some(&self.id)
         }
         fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1327,6 +1520,77 @@ mod tests {
         assert_eq!(r.json()["plan"], Value::Null);
     }
 
+    /// T-1008: the plan names its steps, and they are the steps the engine takes. A client draws
+    /// `plan.windows` over the canvas, so every executed retune must be one of them, in order, and
+    /// the slices must tile the range with no gap and no overlap — never a client-side tiling.
+    #[test]
+    fn the_plan_serves_the_steps_the_engine_executes() {
+        let live = Fake::new();
+        let r = ScanRunner::new(live.clone() as Arc<dyn LiveControl>);
+        // Idle: the front end is named, and there is no plan to draw.
+        let idle = r.json_with_windows();
+        assert_eq!(idle["device_id"], "fake:1", "{idle}");
+        assert_eq!(idle["plan"], Value::Null, "{idle}");
+
+        let req = ScanRequest {
+            freq: None,
+            dwell_s: Some(0.2),
+            step: None,
+        };
+        let priced = r.prepare(&req).expect("prepared").json_with_windows();
+        let w = priced["plan"]["windows"]
+            .as_array()
+            .expect("windows")
+            .clone();
+        assert_eq!(w.len(), 4, "{priced}");
+        assert_eq!(priced["plan"]["steps"], json!(w.len()));
+        let f = |v: &Value, k: &str| v[k].as_f64().expect(k);
+        assert!((f(&w[0], "lo_hz") - 100e6).abs() < 1e-3, "{w:?}");
+        assert!((f(&w[3], "hi_hz") - 160e6).abs() < 1e-3, "{w:?}");
+        for (i, s) in w.iter().enumerate() {
+            assert_eq!(s["step"], json!(i));
+            assert!(f(s, "lo_hz") < f(s, "hi_hz"), "{s}");
+            assert!(
+                (f(s, "lo_hz")..=f(s, "hi_hz")).contains(&f(s, "center_hz")),
+                "a step's centre is inside its own slice: {s}"
+            );
+            if i > 0 {
+                assert!(
+                    (f(s, "lo_hz") - f(&w[i - 1], "hi_hz")).abs() < 1e-3,
+                    "the slices tile the range without gap or overlap: {w:?}"
+                );
+            }
+        }
+        // The compact form keeps `/api/control/state` small: no windows there.
+        r.start(&req).expect("started");
+        assert!(r.json()["plan"].get("windows").is_none());
+
+        assert!(wait_for(|| live.centers().len() >= 2));
+        let c = live.centers();
+        for (i, hz) in c.iter().take(4).enumerate() {
+            assert!(
+                (hz - f(&w[i], "center_hz")).abs() < 1e-3,
+                "executed step {i} tuned {hz}, the plan drew {}",
+                w[i]
+            );
+        }
+        // While running, the step being dwelt on is the one last tuned.
+        let j = r.json_with_windows();
+        let dwelling = j["progress"]["dwell_step"].as_u64().expect("dwell_step") as usize;
+        let tuned = j["progress"]["center_hz"].as_f64().expect("centre");
+        assert!(
+            (tuned - f(&w[dwelling], "center_hz")).abs() < 1e-3,
+            "dwell_step {dwelling} is not the step tuned to {tuned}: {j}"
+        );
+        assert_eq!(
+            j["plan"]["windows"],
+            json!(w),
+            "the running plan is the priced one"
+        );
+        r.stop();
+        assert_eq!(r.json()["progress"], Value::Null);
+    }
+
     /// THE ARBITRATION. An explicit user device action wins; the scan yields at its step, keeps
     /// its place, and says what took the radio.
     #[test]
@@ -1359,6 +1623,79 @@ mod tests {
         assert_eq!(r.json()["state"], "running");
         assert_eq!(r.json()["yielded"], Value::Null);
         r.stop();
+    }
+
+    /// T-1009: **which radio a sweep is about.** A run holds one runner per front end, and the
+    /// selector resolves the way every other device-facing route's does — except that a request
+    /// which COMMITS a radio (a start) refuses to guess on a multi-radio run, while a read (the
+    /// state, a price) answers for the default one and says which that was.
+    #[test]
+    fn a_runner_is_selected_by_device_id_and_a_commission_never_guesses() {
+        let a = Arc::new(ScanRunner::new(Fake::named("fake:a")));
+        let b = Arc::new(ScanRunner::new(Fake::named("fake:b")));
+        let runners = ScanRunners::new(vec![Arc::clone(&a), Arc::clone(&b)]);
+
+        assert_eq!(runners.len(), 2);
+        assert_eq!(runners.device_ids(), vec!["fake:a", "fake:b"]);
+        // Named: that radio's runner, each time.
+        assert!(Arc::ptr_eq(runners.select(Some("fake:b")).unwrap(), &b));
+        assert!(Arc::ptr_eq(runners.select(Some("fake:a")).unwrap(), &a));
+        // A read with no selector is the default front end — and the answer names it.
+        assert!(Arc::ptr_eq(runners.select(None).unwrap(), &a));
+        assert_eq!(runners.select(None).unwrap().json()["device_id"], "fake:a");
+        // A start with no selector on a two-radio run is refused, not guessed: starting commits a
+        // radio to hundreds of retunes, and picking whichever was composed first is commandeering.
+        let e = runners.select_to_commission(None).expect_err("ambiguous");
+        assert_eq!(e.code(), "device_required");
+        assert_eq!(e.http_status(), 400);
+        assert!(e.to_string().contains("fake:b"), "{e}");
+        // A name this run does not hold is refused too, never the default as a fallback.
+        let e = runners.select(Some("fake:c")).expect_err("unknown");
+        assert_eq!(e.code(), "unknown_device");
+        assert_eq!(e.http_status(), 404);
+
+        // One front end: the selector may be omitted, including to commission — today's run.
+        let one = ScanRunners::one(Arc::clone(&a));
+        assert!(Arc::ptr_eq(one.select_to_commission(None).unwrap(), &a));
+        assert!(ScanRunners::none().select(None).is_err());
+    }
+
+    /// T-1009: **the arbitration is per radio.** A sweep on B has no business stopping because the
+    /// user retuned A, so a yield is noted on the runner the action's own radio owns and on no
+    /// other. (The routing of a request to that runner is `control.rs`; this is the property the
+    /// routing relies on: two runners are two independent sweeps.)
+    #[test]
+    fn one_radios_sweep_does_not_yield_to_another_radios_tune() {
+        let (fa, fb) = (Fake::named("fake:a"), Fake::named("fake:b"));
+        let a = ScanRunner::new(fa);
+        let b = ScanRunner::new(fb);
+        a.start(&ScanRequest {
+            freq: Some(FreqRange::new(100e6, 160e6)),
+            dwell_s: Some(0.01),
+            step: None,
+        })
+        .expect("a starts");
+        b.start(&ScanRequest {
+            freq: Some(FreqRange::new(100e6, 160e6)),
+            dwell_s: Some(0.01),
+            step: None,
+        })
+        .expect("b starts");
+
+        let y = a
+            .note_user_device_action(DeviceAction::Retune)
+            .expect("a yields to its own radio's tune");
+        assert_eq!(a.json()["state"], "yielded", "{}", a.json());
+        assert_eq!(
+            b.json()["state"],
+            "running",
+            "b's sweep is over another radio: {}",
+            b.json()
+        );
+        a.unyield(&y);
+        assert_eq!(a.json()["state"], "running", "{}", a.json());
+        a.stop();
+        b.stop();
     }
 
     /// An idle scan has nothing to yield, so a user action is not reported as preempting one.

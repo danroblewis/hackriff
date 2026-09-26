@@ -57,6 +57,10 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     fftBounds: cs.display_limits
       ? { fft_size_min: cs.display_limits.fft_size_min, fft_size_max: cs.display_limits.fft_size_max }
       : null,
+    scan: cs.scan ?? null,
+    // T-1009: every front end's sweep. An older server sends none; `[]` then, never a guess that
+    // the default one's sweep is every radio's.
+    scans: cs.scans ?? [],
   };
 }
 
