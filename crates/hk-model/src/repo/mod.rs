@@ -204,6 +204,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0019_detection_retention.sql"), // T-904 detection retention + rollup
     include_str!("migrations/0020_explanation_detection.sql"), // T-913 pin cited detections
     include_str!("migrations/0021_observation_live_silence.sql"), // T-940 open-track silence
+    include_str!("migrations/0022_identity_label_decl.sql"), // T-1017 declared identity labels
 ];
 
 /// Schema version this build creates and understands.

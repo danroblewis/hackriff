@@ -26,7 +26,8 @@
 //! catalogue; with no history store the answer is **unknown**, never "quiet".
 
 use hk_model::{
-    InventoryEntry, InventoryIdentity, Presence, PresenceInterval, Repository, TimeRange, Timestamp,
+    IdentityLabelRegistry, InventoryEntry, InventoryIdentity, Presence, PresenceInterval,
+    Repository, TimeRange, Timestamp,
 };
 use hk_store::Pyramid;
 use serde_json::{Value, json};
@@ -81,12 +82,15 @@ fn event_json(entry: &InventoryEntry, i: &PresenceInterval, window: TimeRange) -
 
 /// The emitter an event belongs to: enough to explain the row, gated exactly as
 /// `/api/inventory` gates it (the identity is served in clear only when the query returned it so).
+#[allow(clippy::too_many_arguments)]
 fn emitter_json(
     repo: &Repository,
     entry: &InventoryEntry,
     events: u64,
     on_air_s: f64,
     presence: &Presence,
+    labels: &IdentityLabelRegistry,
+    window: TimeRange,
 ) -> Result<Value, ApiError> {
     let e = &entry.emitter;
     let (scheme, value, class, withheld) = match &entry.identity {
@@ -100,6 +104,18 @@ fn emitter_json(
         InventoryIdentity::Withheld { scheme, class } => {
             (Some(scheme.as_string()), None, *class, true)
         }
+    };
+    // T-1017: the decoder's **declared** identity label, rendered by the same backend code
+    // `/api/inventory` renders it with, and scoped to **this query's window** — the catalogue of a
+    // period must not name a station from a label decoded after it, so the window's own `t1` is the
+    // bound (one-sided: a session that began before this window and is still on air keeps its
+    // name). `None` on a withheld row and without a decoded identity, exactly as `identity_value`
+    // is.
+    let summary = match &entry.identity {
+        InventoryIdentity::Clear { identity, .. } => repo
+            .latest_decode_identity_summary_as_of(identity, labels, Some(window.end))
+            .map_err(|_| failed())?,
+        InventoryIdentity::None | InventoryIdentity::Withheld { .. } => None,
     };
     let freq = e.freq();
     let mut row = json!({
@@ -116,6 +132,14 @@ fn emitter_json(
         "identity_scheme": scheme,
         "identity_class": class,
         "withheld": withheld,
+        // T-1017: the declared label, its declared confidence and what that confidence means —
+        // the same three fields, with the same meanings, `/api/inventory` serves.
+        "identity_label": summary.as_ref().map(|s| s.label.as_str()),
+        "identity_label_share": summary.as_ref().and_then(|s| s.label_share),
+        "identity_label_meaning": summary
+            .as_ref()
+            .and_then(|s| s.confidence_meaning)
+            .map(|m| m.as_str()),
         // This emitter's share of the catalogue over the requested window — not a lifetime total,
         // and never `count` (ADR-0017 §5).
         "events": events,
@@ -259,6 +283,8 @@ pub fn events_json(
     // looked" — beside an inventory row deriving the same fact from the measurement, so the two
     // disagreed about one emitter's liveness. The window's own `t1` is the live edge for both.
     let coverage = ObservedCoverage::of(state, window);
+    // T-1017: the declarations, read **once** for the whole answer (see `/api/inventory`).
+    let labels = repo.identity_label_declarations().map_err(|_| failed())?;
     for entry in &page.entries {
         let freq = entry.emitter.freq();
         let track = coverage
@@ -297,6 +323,8 @@ pub fn events_json(
                 n,
                 on_air_s,
                 &track.project(window),
+                &labels,
+                window,
             )?);
         }
     }

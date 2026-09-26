@@ -30,6 +30,11 @@ export interface CatalogueEmitter {
   known_status: string; family: string | null;
   explanations: CatalogueExplanation[];
   identity_scheme: string | null; identity_value?: string; withheld: boolean;
+  /** T-1017: the label this identity's decoder declared as its name, scoped to the queried window,
+   * with the declared confidence and what it means. `null`/absent for a decoder that declared no
+   * label and on a withheld row. */
+  identity_label?: string | null; identity_label_share?: number | null;
+  identity_label_meaning?: "vote-share" | "crc-valid-rate" | "decoder-score" | null;
   /** Events and time on air for this emitter over the whole window (never this page). */
   events: number; on_air_s: number;
   /** The lifetime History total — never a liveness or ranking input (ADR-0017 §5). */
@@ -182,7 +187,10 @@ export function eventRowView(ev: CatalogueEvent, emitter: CatalogueEmitter | und
     freq: hz === null ? "—" : `${(hz / 1e6).toFixed(4)} MHz`,
     open: ev.open,
     // A suggestion, in the order the backend ranked it — never presented as what the signal is.
-    what: emitter?.identity_value ?? emitter?.family ?? (top ? `${top.label}?` : "unknown"),
+    // T-1017: a declared label is the readable form of the identity, so it comes first when the
+    // backend served one for this window (an RDS PI is four hex digits; "KROQ" is the station).
+    what: emitter?.identity_label ?? emitter?.identity_value ?? emitter?.family
+      ?? (top ? `${top.label}?` : "unknown"),
     state: emitter?.state ?? "",
     sightings: `${ev.count}`,
   };

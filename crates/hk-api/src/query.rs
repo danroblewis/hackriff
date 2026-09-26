@@ -22,9 +22,9 @@ use hk_model::attention::baseline::SiteKey;
 use hk_model::ids::SiteId;
 use hk_model::{
     AnnotationAuthor, AnnotationTarget, ArtifactKind, Demodulation, FreqRange, IdentityAccess,
-    IdentityScheme, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
-    LifecycleAuthor, LifecycleState, Presence, RelationVisibility, RepoError, Repository,
-    StatusAuthor, TimeRange, Timestamp, cluster_label,
+    IdentityLabelRegistry, IdentityScheme, InventoryEntry, InventoryIdentity, InventoryQuery,
+    KnownStatus, LifecycleAuthor, LifecycleState, Presence, RelationVisibility, RepoError,
+    Repository, StatusAuthor, TimeRange, Timestamp, cluster_label,
 };
 use hk_store::history::{
     CoverageSummary, FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat,
@@ -1177,14 +1177,19 @@ pub fn inventory_json(
     // matters — an unwindowed Confirmed list still renders liveness, against all of time up to its
     // live edge — so it is built from the same `presence_window` those rows are projected through.
     let coverage = ObservedCoverage::of(state, presence_window(query.time, at).0);
+    // T-1017: what each decoder declared as its identity label, read **once** for the whole page,
+    // so one answer cannot hold two views of the contract.
+    let labels = repo.identity_label_declarations().map_err(failed)?;
     let mut entries = Vec::with_capacity(page.entries.len());
     for entry in &page.entries {
         // ADR-0017 TM-2: the query's own window scopes each row's `presence` and
         // `family_in_window`. The rows themselves are already selected by the same window, in the
         // same predicate (`InventoryQuery::time`, interval overlap), so the list and the liveness
         // it renders can never disagree.
-        entries
-            .push(inventory_entry_json_at(repo, entry, query.time, at, &coverage).map_err(failed)?);
+        entries.push(
+            inventory_entry_json_at(repo, entry, query.time, at, &coverage, &labels)
+                .map_err(failed)?,
+        );
     }
     // T-320: the grouping, computed here because only the list knows what is in view. A client
     // must not derive it — the UI is a thin client over this contract (CLAUDE.md) — and only the
@@ -1479,7 +1484,15 @@ pub(crate) fn presence_json(p: &Presence) -> Value {
 }
 
 pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
-    inventory_entry_json_at(repo, entry, None, None, &ObservedCoverage::default())
+    let labels = repo.identity_label_declarations()?;
+    inventory_entry_json_at(
+        repo,
+        entry,
+        None,
+        None,
+        &ObservedCoverage::default(),
+        &labels,
+    )
 }
 
 /// [`inventory_entry_json`] for a caller that has the run's tune history in hand (T-410): the
@@ -1489,7 +1502,8 @@ pub fn inventory_entry_json_with_coverage(
     entry: &InventoryEntry,
     coverage: &ObservedCoverage,
 ) -> Result<Value, RepoError> {
-    inventory_entry_json_at(repo, entry, None, None, coverage)
+    let labels = repo.identity_label_declarations()?;
+    inventory_entry_json_at(repo, entry, None, None, coverage, &labels)
 }
 
 /// [`inventory_entry_json_at`] with no caller-named live edge (the wall clock decides `open`).
@@ -1498,7 +1512,15 @@ pub fn inventory_entry_json_in_window(
     entry: &InventoryEntry,
     window: Option<TimeRange>,
 ) -> Result<Value, RepoError> {
-    inventory_entry_json_at(repo, entry, window, None, &ObservedCoverage::default())
+    let labels = repo.identity_label_declarations()?;
+    inventory_entry_json_at(
+        repo,
+        entry,
+        window,
+        None,
+        &ObservedCoverage::default(),
+        &labels,
+    )
 }
 
 /// [`inventory_entry_json`] with the request's time window, which adds ADR-0017 TM-2's two
@@ -1524,6 +1546,7 @@ pub fn inventory_entry_json_at(
     window: Option<TimeRange>,
     at: Option<Timestamp>,
     coverage: &ObservedCoverage,
+    labels: &IdentityLabelRegistry,
 ) -> Result<Value, RepoError> {
     {
         let e = &entry.emitter;
@@ -1544,9 +1567,22 @@ pub fn inventory_entry_json_at(
         // withheld row and without a decoded identity, matching `estimated_params`/`cluster_id`
         // (T-159/T-163) — the field can never confirm a withheld identity by appearing. One
         // identity-class scan and one indexed row per entry (see the method).
+        //
+        // T-1017: the label is the one its decoder **declared** (`labels`, read once for the whole
+        // page by the caller), and it is scoped to **the view's own moment** — the inventory is
+        // time-scoped to the view (CLAUDE.md), so a scrubbed pane must not show a name decoded
+        // after the moment it is looking at. That moment is the request's `t1` when it named a
+        // window and the caller's live edge `at` otherwise, which is what scopes the **Confirmed**
+        // list too: it is sent unwindowed with only `at` (`ui/src/app/explore/inventory.ts`), and
+        // was therefore the one surface still showing an all-time label on a scrubbed pane.
+        //
+        // The bound is one-sided, on purpose (see the method): an identity learned earlier stays
+        // known, and a summary row is stamped with the **start** of the session it summarises, so a
+        // lower bound would strip the name off a station that is still on air.
+        let label_as_of = window.map(|w| w.end).or(at);
         let identity_summary = match &entry.identity {
             InventoryIdentity::Clear { identity, .. } => {
-                repo.latest_decode_identity_summary(identity)?
+                repo.latest_decode_identity_summary_as_of(identity, labels, label_as_of)?
             }
             InventoryIdentity::None | InventoryIdentity::Withheld { .. } => None,
         };
@@ -1805,6 +1841,12 @@ pub fn inventory_entry_json_at(
             // withheld row.
             "identity_label": identity_summary.as_ref().map(|s| s.label.as_str()),
             "identity_label_share": identity_summary.as_ref().and_then(|s| s.label_share),
+            // T-1017: what the share *means* (a vote share is not a CRC-valid rate), as the
+            // decoder declared it; null exactly when the share is.
+            "identity_label_meaning": identity_summary
+                .as_ref()
+                .and_then(|s| s.confidence_meaning)
+                .map(|m| m.as_str()),
             "snr_db": measurement.map(|m| m.snr_peak_db),
             "peak_dbfs": measurement.map(|m| m.peak_level_dbfs),
             // T-350: the same two numbers **with the time they were measured over**. The flat

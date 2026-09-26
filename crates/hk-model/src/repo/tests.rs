@@ -2140,6 +2140,7 @@ fn t_967_identity_summary_reads_only_the_decoders_explicit_summary_row() {
         Some(DecodeIdentitySummary {
             label: "KROQ".into(),
             label_share: Some(0.75),
+            confidence_meaning: Some(LabelConfidence::VoteShare),
         })
     );
 
@@ -2158,6 +2159,304 @@ fn t_967_identity_summary_reads_only_the_decoders_explicit_summary_row() {
         ))
         .unwrap();
     assert_eq!(b.repo.latest_decode_identity_summary(&icao).unwrap(), None);
+}
+
+/// T-1017: a decoder's identity label is **declared**, never guessed from a field name, and the
+/// declaration is stored so it outlives the decoder's process.
+///
+/// A plugin-written row whose fields are spelled exactly like RDS's (`ps`, `ps_frames`) reads as no
+/// label while it has declared none; the same rows read as a label the moment its declaration is
+/// recorded, and stop again when the declaration is replaced by one naming a field it does not
+/// write. The declared confidence carries its own **meaning** (a vote share is not a CRC-valid
+/// rate), and a declaration with none serves the label with a null share.
+#[test]
+fn t_1017_identity_label_is_served_only_where_a_decoder_declared_one() {
+    let mut b = base();
+    let ric = DecodedIdentity {
+        scheme: IdentityScheme::Other("pocsag-ric".into()),
+        value: "1234567".into(),
+    };
+    let decode = |frame_model: &str, md, secs| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: "plug-pager".into(),
+        decoder_version: "0.1.0".into(),
+        frame_model: frame_model.into(),
+        metadata: md,
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(ric.clone()),
+        content_class: ContentClass::Unrestricted,
+        t: t(secs),
+        provenance: None,
+    };
+    b.repo
+        .insert_decode(&decode(
+            "pager-session",
+            json!({"alias": "FIRE DISPATCH ", "ps": "GUESS", "crc_ok_rate": 0.8,
+                   "ps_frames": [["GUESS", 9]]}),
+            20,
+        ))
+        .unwrap();
+
+    // Declared nothing: no label, however its fields are named.
+    let builtin = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(builtin.get("plug-pager", "pager-session"), None);
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&ric, &builtin, None)
+            .unwrap(),
+        None
+    );
+
+    // Declared: the named field is the label, and the declared meaning travels with the figure.
+    let decl = IdentityLabelDecl::new(
+        "plug-pager",
+        "pager-session",
+        "alias",
+        Some(LabelConfidenceDecl {
+            source: LabelConfidenceSource::Field {
+                field: "crc_ok_rate".into(),
+            },
+            meaning: LabelConfidence::CrcValidRate,
+        }),
+    )
+    .unwrap();
+    b.repo
+        .declare_identity_labels("plug-pager", std::slice::from_ref(&decl))
+        .unwrap();
+    let declared = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(declared.get("plug-pager", "pager-session"), Some(&decl));
+    // The built-in RDS declaration is still in force beside it.
+    assert!(declared.get("hk-rds", "rds-pi").is_some());
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&ric, &declared, None)
+            .unwrap(),
+        Some(DecodeIdentitySummary {
+            label: "FIRE DISPATCH".into(),
+            label_share: Some(0.8),
+            confidence_meaning: Some(LabelConfidence::CrcValidRate),
+        })
+    );
+
+    // Re-declaring replaces: a field the decoder does not write states no label, and the old
+    // declaration does not linger.
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[IdentityLabelDecl::new("plug-pager", "pager-session", "not_written", None).unwrap()],
+        )
+        .unwrap();
+    let replaced = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&ric, &replaced, None)
+            .unwrap(),
+        None
+    );
+
+    // A declaration with no confidence: the label, and an honestly null share.
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap()],
+        )
+        .unwrap();
+    let no_conf = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&ric, &no_conf, None)
+            .unwrap(),
+        Some(DecodeIdentitySummary {
+            label: "FIRE DISPATCH".into(),
+            label_share: None,
+            confidence_meaning: None,
+        })
+    );
+
+    // A decoder re-loaded with its declaration REMOVED withdraws it: "declares no label shows none"
+    // has to hold after an edit, not only at first install (T-1017 review finding 2). Another
+    // decoder's declaration — here a second row kind of the same plugin, and the built-in RDS one —
+    // is untouched, so one reconciliation can never erase a sibling's.
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[
+                IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap(),
+                IdentityLabelDecl::new("plug-pager", "pager-net", "net_name", None).unwrap(),
+            ],
+        )
+        .unwrap();
+    b.repo.declare_identity_labels("plug-pager", &[]).unwrap();
+    let withdrawn = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(withdrawn.get("plug-pager", "pager-session"), None);
+    assert_eq!(withdrawn.get("plug-pager", "pager-net"), None);
+    assert!(
+        withdrawn.get("hk-rds", "rds-pi").is_some(),
+        "withdrawing one decoder's declarations leaves every other decoder's alone"
+    );
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&ric, &withdrawn, None)
+            .unwrap(),
+        None
+    );
+    // And a reconciliation that drops only *one* of two row kinds keeps the other.
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[
+                IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap(),
+                IdentityLabelDecl::new("plug-pager", "pager-net", "net_name", None).unwrap(),
+            ],
+        )
+        .unwrap();
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[IdentityLabelDecl::new("plug-pager", "pager-net", "net_name", None).unwrap()],
+        )
+        .unwrap();
+    let one = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(one.get("plug-pager", "pager-session"), None);
+    assert!(one.get("plug-pager", "pager-net").is_some());
+    // A set naming another decoder is refused rather than written under the wrong key.
+    assert!(
+        b.repo
+            .declare_identity_labels(
+                "plug-pager",
+                &[IdentityLabelDecl::new("other", "f", "a", None).unwrap()]
+            )
+            .is_err()
+    );
+
+    // Declarations are validated at the boundary: the paths reach a JSON path and a SQL predicate.
+    assert!(IdentityLabelDecl::new("d", "f", "a'b", None).is_err());
+    assert!(IdentityLabelDecl::new("d", "f", "", None).is_err());
+    assert!(IdentityLabelDecl::new("", "f", "a", None).is_err());
+}
+
+/// T-1017: the label is scoped to the **view's own moment**, as an upper bound and only an upper
+/// bound (review finding 1).
+///
+/// A pane scrubbed into the past must not show a name decoded **after** the moment it is looking at.
+/// But a summary row is stamped with the **start** of the session it summarises, and an identity
+/// learned earlier stays known while the emission is still on air (ADR-0017/0019's
+/// ongoing-until-ended interval), so a row *older* than the view must still be served — a lower
+/// bound would strip the name off a station that is still transmitting, which is exactly what the
+/// first implementation of this rule did.
+#[test]
+fn t_1017_identity_label_is_bounded_above_by_the_views_moment_and_never_below() {
+    let mut b = base();
+    let pi = DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: "C3D4".into(),
+    };
+    let summary = |ps: &str, secs| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: "hk-rds".into(),
+        decoder_version: "0.1.0".into(),
+        frame_model: "rds-pi".into(),
+        metadata: json!({"pi": "C3D4", "ps": ps, "ps_frames": [[ps, 4]]}),
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(pi.clone()),
+        content_class: ContentClass::Unrestricted,
+        t: t(secs),
+        provenance: None,
+    };
+    // Two sessions: one summarised at t=100, a later one at t=500.
+    b.repo.insert_decode(&summary("KOLD    ", 100)).unwrap();
+    b.repo.insert_decode(&summary("KNEW    ", 500)).unwrap();
+    let reg = b.repo.identity_label_declarations().unwrap();
+    let label = |as_of: Option<Timestamp>| {
+        b.repo
+            .latest_decode_identity_summary_as_of(&pi, &reg, as_of)
+            .unwrap()
+            .map(|s| s.label)
+    };
+    // No bound: the latest of all time.
+    assert_eq!(label(None).as_deref(), Some("KNEW"));
+    // A view at t=200 knows the session that began at 100 and not the one at 500.
+    assert_eq!(label(Some(t(200))).as_deref(), Some("KOLD"));
+    // A view whose whole window lies INSIDE the first session — the live-following and scrubbed
+    // cases the review named (an RDS session 10:00–10:30 seen at 10:10) — still shows its name.
+    assert_eq!(label(Some(t(120))).as_deref(), Some("KOLD"));
+    assert_eq!(label(Some(t(499))).as_deref(), Some("KOLD"));
+    // At and after the later session's row, the later name.
+    assert_eq!(label(Some(t(500))).as_deref(), Some("KNEW"));
+    assert_eq!(label(Some(t(9_000))).as_deref(), Some("KNEW"));
+    // Before anything was decoded, no name: the row shows its bare code, never a future label.
+    assert_eq!(label(Some(t(50))), None);
+}
+
+/// T-1017 (T-967 re-review): a restricted, metadata-only decode naming the same identity alongside
+/// an unrestricted `hk-rds` summary row must withhold the label — the row's identity is withheld,
+/// so `identity_label` is null, exactly as `identity_value` is. The field can never confirm a
+/// withheld identity by appearing.
+#[test]
+fn t_1017_a_restricted_decode_of_the_same_identity_withholds_the_label() {
+    // Content gating is opt-in (T-143) and off by default; this rule only exists under it. Each
+    // nextest test runs in its own process, and the flag is restored below either way.
+    crate::set_content_gating(true);
+    let mut b = base();
+    let pi = DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: "E5F6".into(),
+    };
+    let row = |class, frame_model: &str, md, secs| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: "hk-rds".into(),
+        decoder_version: "0.1.0".into(),
+        frame_model: frame_model.into(),
+        metadata: md,
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(pi.clone()),
+        content_class: class,
+        t: t(secs),
+        provenance: None,
+    };
+    b.repo
+        .insert_decode(&row(
+            ContentClass::Unrestricted,
+            "rds-pi",
+            json!({"pi": "E5F6", "ps": "KROQ    ", "ps_frames": [["KROQ    ", 4]]}),
+            10,
+        ))
+        .unwrap();
+    let reg = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&pi, &reg, None)
+            .unwrap()
+            .map(|s| s.label)
+            .as_deref(),
+        Some("KROQ")
+    );
+
+    // A restricted-paging row naming the same identity makes the identity itself restricted, so
+    // the label goes with it.
+    b.repo
+        .insert_decode(&row(
+            ContentClass::RestrictedPaging,
+            "pager-page",
+            json!({"capcode": 12345}),
+            11,
+        ))
+        .unwrap();
+    let withheld = b
+        .repo
+        .latest_decode_identity_summary_as_of(&pi, &reg, None)
+        .unwrap();
+    crate::set_content_gating(false);
+    assert_eq!(withheld, None);
 }
 
 /// AWARE-053: an emitter that matches priors but is not expected here gets

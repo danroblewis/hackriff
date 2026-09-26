@@ -1412,10 +1412,12 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-860 (ADR-0015 §5.5): the identity rests only on synthesized decodes (present, possibly
         // null).
         "identity_synthesized",
-        // T-967: the decoder's voted session label for the identity (RDS: the most frequent PS)
-        // and that label's own frame share — present, possibly null.
+        // T-967 / T-1017: the label the identity's decoder DECLARED as its name (RDS: the most
+        // frequent PS), its declared confidence and what that confidence means — present, possibly
+        // null. Null for a decoder that declared no label: never guessed from a field's name.
         "identity_label",
         "identity_label_share",
+        "identity_label_meaning",
         // T-566 (ADR-0021 §7A.4): the decode-side resolution — never absent, and `not-searched`
         // rather than `null` on a row nothing has analysed.
         "resolution",
@@ -2222,6 +2224,11 @@ fn events_and_presence_serve_the_durable_catalogue() {
             "explanations",
             "identity_scheme",
             "withheld",
+            // T-1017: the declared identity label, its declared confidence and that confidence's
+            // meaning — the same three fields `/api/inventory` serves, scoped to this window.
+            "identity_label",
+            "identity_label_share",
+            "identity_label_meaning",
             "events",
             "on_air_s",
             "liveness",
@@ -2282,6 +2289,19 @@ fn events_and_presence_serve_the_durable_catalogue() {
              events {m}, inventory row presence {}",
             row["presence"]
         );
+        // T-1017: and they cannot disagree about the identity's declared label either — one
+        // backend rendering, read from the declarations, scoped to the same window on both routes.
+        for field in [
+            "identity_label",
+            "identity_label_share",
+            "identity_label_meaning",
+        ] {
+            assert_eq!(
+                m[field], row[field],
+                "/api/events and /api/inventory disagree about {field} for emitter {id} in the \
+                 same window: events {m}, inventory row {row}"
+            );
+        }
         compared += 1;
     }
     assert!(

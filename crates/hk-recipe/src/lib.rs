@@ -56,10 +56,11 @@ pub use param::{
 pub use port::PortType;
 pub use recipe::{
     AUDIO_OUT_BLOCK, AudioChannels, AudioProfile, ChannelsSpec, DEFAULT_LIVE_EDGE_BACKLOG_S,
-    DecodeMapping, Edge, Endpoint, EvidenceTarget, FOLLOW_HOPS_BLOCK, IdentityMapping, InputSpec,
-    Liveness, LivenessMode, LivenessSpec, MAX_LIVE_EDGE_BACKLOG_S, MatchHints, NodeSpec,
-    ObjectiveForm, OutputKind, OutputPolicy, OutputSpec, PortRef, REFINE_BUILTINS, Recipe,
-    RecipeError, RefineGoal, RefineObjective, RefineSpec, Resolved, StageView, parse_param_path,
+    DecodeMapping, Edge, Endpoint, EvidenceTarget, FOLLOW_HOPS_BLOCK, IdentityLabelMapping,
+    IdentityMapping, InputSpec, LabelConfidenceMapping, Liveness, LivenessMode, LivenessSpec,
+    MAX_LIVE_EDGE_BACKLOG_S, MatchHints, NodeSpec, ObjectiveForm, OutputKind, OutputPolicy,
+    OutputSpec, PortRef, REFINE_BUILTINS, Recipe, RecipeError, RefineGoal, RefineObjective,
+    RefineSpec, Resolved, StageView, parse_param_path, stored_key,
 };
 
 /// `schema` value of every recipe document.

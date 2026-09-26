@@ -271,7 +271,16 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
   "output": {
     "format": "ndjson",
     "schema_id": "hackriff.adsb/1",
-    "content_class": "unrestricted"      // REQUIRED ceiling, enforced by the host
+    "content_class": "unrestricted",     // REQUIRED ceiling, enforced by the host
+    "identity_label": {                  // OPTIONAL (T-1017); absent = this plugin has no label
+      "frame_model": "adsb-ident",       // the row kind that carries the label
+      "field": "callsign",               // metadata path of the human-readable label
+      "confidence": {                    // OPTIONAL
+        "field": "crc_ok_rate",          // metadata path of the figure
+        "from": "field",                 // field (a 0-1 figure) | vote-counts ([[value,count],…])
+        "meaning": "crc-valid-rate"      // vote-share | crc-valid-rate | decoder-score
+      }
+    }
   },
   "restart": {"backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300},
   "limits": {"input_queue_bytes": 8388608, "stall_timeout_ms": 10000, "startup_timeout_ms": 60000,
@@ -285,6 +294,17 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
 **Argument placeholders:** `{input.sample_rate_hz}`, `{input.center_hz}`, `{input.bandwidth_hz}`, `{input.datatype}`, `{plugin.dir}`, `{param.<name>}`. `{{` and `}}` are literal braces. Unknown placeholders are validation errors.
 
 **`check_input`** refuses an input stream whose datatype, rate, centre or bandwidth the manifest doesn't accept.
+
+**`output.identity_label` — the declared identity label (T-1017).** `/api/inventory` and `/api/events` serve a decoded identity's human-readable name (`identity_label`) with a confidence (`identity_label_share`) and that confidence's **meaning** (`identity_label_meaning`). A plugin opts in by **declaring** which field is which, here; it never opts in by naming a field a certain way. There is no fallback and no inference from key names: a manifest without this block is served no label, whatever its output looks like (before this, a host guessed at `ps`/`callsign`/`station` and `pi_share`/`share`, which made any plugin's `station` field an identity label by accident — an implicit output contract nobody wrote down). Rules:
+
+- one declaration per plugin, naming the **one** `frame_model` whose rows carry the label; other rows of the same plugin carry none;
+- `field` and `confidence.field` are dotted `[A-Za-z0-9_]` paths (at most 4 segments) into the row's **`metadata`** — a label is served on list rows, so it can never be content;
+- `from` is `field` (the metadata field already holds the 0–1 figure) or `vote-counts` (it holds a `[[value, count], …]` table, and the figure is this label's own count over every count, so a decoder that keeps a tally need not also compute a share);
+- `meaning` is required with a confidence: `vote-share`, `crc-valid-rate` or `decoder-score`. A bare number beside a name is not self-describing, and the client words it from the meaning;
+- under a class that forbids content (§6) the declared fields must also be allowlisted in `output.metadata_keys`, or the manifest is **rejected**: the host would otherwise strip the very field the manifest promises and the plugin would silently never show a label;
+- the declaration is recorded in the store beside the rows it describes, so the label survives the process that decoded them. A load **reconciles** the plugin's whole set: a re-loaded manifest replaces its earlier declaration, and one edited to *remove* the block withdraws it — "a plugin that declares no label shows none" holds after an edit, not only at first install.
+
+A recipe declares the same thing as `outputs[].decode.identity_label` (`{field, confidence: {field, from, meaning}}`, ADR-0011), where `field` must be one of that mapping's own `decode.metadata` paths — a recipe cannot declare a field its writer never stores.
 
 ### 9.2 Data plane: stdin
 
