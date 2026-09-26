@@ -30121,7 +30121,6 @@ tasks:
     milestone: M2-hardening
     title: Listen level_dbfs while squelch is closed reads the dropped demod audio (docs say 'delivered'); stereo halves its time constant; docs + WFM/AGC and squelch-closed tests
     status: in-progress
-    branch: task-t1015
     priority: low
     deps:
     - T-966
@@ -30137,6 +30136,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-demod -E 'kind(lib) & test(/audio/)'; the listen status binary in hk-pipeline; just precheck hk-demod hk-pipeline), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY review of T-966 2026-09-25: Listen level_dbfs while squelch is closed reads the dropped demod audio (docs say 'delivered'); stereo halves its time constant; docs + WFM/AGC and squelch-closed tests
+    branch: task-t1015
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 20:36).
+      AudioDemod::level_dbfs() no longer tracks the discarded demod output while squelch is closed: the delivered-audio smoother now only updates while squelch is open, level_dbfs() returns the new SILENCE_FLOOR_DBFS (-120 dBFS) constant for the whole closed period, and restarts fresh (not from a stale value) the next time squelch reopens. Also fixed the stereo smoothing time constant: it was applied per interleaved sample instead of per audio frame, halving level_tau_s on a two-channel stream; it now sums power over both channels per frame, matching mono's time constant. Updated docs/stream-contract.md §12.2 and docs/api.md (playback status list, listen status text) to describe the silence floor, the per-frame stereo time constant (mean power over both channels), and that the field is a ~50 ms meter sample on a ~250 ms tick rather than an interval RMS. Added four hk-demod tests: squelch-closed reads the floor, restart-on-reopen, mono-vs-stereo time-constant match (a known-level step), and a known-level WFM stereo tone with AGC on. All four were verified red on the pre-fix code by temporarily reverting the relevant hunks and confirming failure, then restoring the fix.
+      Tests: cargo nextest run -p hk-demod -E 'kind(lib) & test(/audio/)' -> exit 0 (14 passed); just test-crate hk-demod -> exit 0 (84 passed); cargo nextest run -p hk-pipeline -E 'binary(listen_conformance)' -> exit 0 (5 passed); cargo nextest run -p hk-demod -E 'test(level_dbfs_reads_the_silence_floor_while_squelch_is_closed) + test(level_dbfs_restarts_from_delivered_audio_when_squelch_reopens)' [defect re-injected: level_dbfs unconditional + accumulation ungated] -> exit 1 (both fail on pre-fix code: -7.45 dBFS and -2.79 dBFS reported instead of the -120 dBFS floor); cargo nextest run -p hk-demod -E 'test(stereo_level_dbfs_time_constant_matches_mono_not_half_of_it)' [defect re-injected: channels forced to 1] -> exit 1 (fails on pre-fix code: mono -15.96 dBFS vs stereo -13.88 dBFS (>1.0 dB apart))
+      precheck exit 0
+      Commits: 34e1cbe6
+      Use cases: SIGNAL-062
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-1030
     milestone: MMAP
     title: "Selected-region drawer asks /api/coverage for a stale scope (0-9.8 GHz instead of the selected region) when the selection lands mid-flight: send the current scope, drop superseded responses"
