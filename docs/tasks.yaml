@@ -30476,7 +30476,7 @@ tasks:
   - id: T-1041
     milestone: MMAP
     title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"
-    status: in-progress
+    status: done
     branch: task-t1041
     priority: high
     deps: []
@@ -30492,6 +30492,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows
+    commit: c930e37c
   - id: T-1042
     milestone: MLIVE
     title: "LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)"
