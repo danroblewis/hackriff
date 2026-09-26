@@ -42,7 +42,9 @@
 # EXPLORER_WATCH_POLL (s, default 10), EXPLORER_SERVER_SETTLE (s, default 1: how long to wait before
 # checking the new hk serve is still alive), EXPLORER_PS_OUTPUT (a file of `ps` lines, for the
 # rogue-server watcher; tests only - default runs real `ps`), EXPLORER_REAP_PY (path to the reaper
-# module, default alongside this script). Nothing here touches the HackRF itself.
+# module, default alongside this script), EXPLORER_PS_BIN (the `ps` used to verify a pid's identity
+# right before a final -KILL - default runs real `ps`; tests only). Nothing here touches the HackRF
+# itself.
 set -uo pipefail
 REPO="${EXPLORER_REPO:-/Users/daniellewis/hackriff}"
 S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
@@ -61,6 +63,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_REAP="${EXPLORER_REAP_PY:-$SCRIPT_DIR/../py/hkpy/explorer_reap.py}"
 ALERT_PY="$SCRIPT_DIR/alert.py"
 alert(){ python3 "$ALERT_PY" "$@" >/dev/null 2>&1 || true; }
+PS_BIN="${EXPLORER_PS_BIN:-ps}"
+# A stable identity stamp for a pid (T-1033): `kill -0` only says a pid is occupied, not that it's
+# still OUR process - between the last `kill -0` before a final `-KILL` and the `-KILL` itself, the
+# original process can have exited and the pid been reused by something unrelated (a live window on
+# a busy box, or - even for our own children below - a zombie the shell's job control reaps out from
+# under us). `lstart` (its start time) plus `comm` never matches across two different processes
+# unless they started in the same second with the same program name, close enough that a real
+# collision here is not the failure mode worth engineering against; a pid whose stamp changed, or
+# that no longer answers at all, is signalled no further.
+# shellcheck disable=SC2086  # PS_BIN is a command line, word-split on purpose, like RADIO/CLAUDE.
+ps_stamp(){ $PS_BIN -o lstart=,comm= -p "$1" 2>/dev/null; }
 
 WINDOW=3h; DRY=0; SID=""
 while [ $# -gt 0 ]; do
@@ -146,11 +159,52 @@ reap_rings(){
   fi
 }
 
-TIMER=""; WATCHER=""; SERVER_PID=""
+# One rogue-detect-and-stop pass, factored out of the poll loop below (T-1033) so cleanup() can also
+# run it once, synchronously, right after stopping the background watcher - closing the window where
+# a rogue was already detected, or already TERMed and mid-grace, when the watcher itself was stopped.
+# Defined here, BEFORE `trap cleanup EXIT`, since cleanup() can fire (a refused lock, a staging
+# timeout) before the window's own server/watcher setup below ever runs.
+scan_and_stop_rogues(){
+  local rogue_args rogue_out rpid rdd rplan rtotal stamp
+  rogue_args=(rogue --window "$D" --keep-pid "${SERVER_PID:-}")
+  [ -n "${EXPLORER_PS_OUTPUT:-}" ] && rogue_args+=(--ps-output "$EXPLORER_PS_OUTPUT")
+  rogue_out="$(python3 "$PY_REAP" "${rogue_args[@]}" 2>/dev/null)"
+  [ -z "$rogue_out" ] && return 0
+  while IFS=$'\t' read -r rpid rdd; do
+    [ -z "$rpid" ] && continue
+    log "ALERT: rogue hk serve detected (pid $rpid, data-dir $rdd) - the window runs ONE server; stopping it"
+    stamp="$(ps_stamp "$rpid")"
+    kill -TERM "$rpid" 2>/dev/null
+    for _ in $(seq 1 "$GRACE"); do kill -0 "$rpid" 2>/dev/null || break; sleep 1; done
+    # Signal the final -KILL only if the pid still verifiably identifies the process we TERMed
+    # (T-1033) - not one that exited in the meantime and had its pid reused by something unrelated.
+    if [ -n "$stamp" ] && [ "$(ps_stamp "$rpid")" = "$stamp" ]; then
+      kill -KILL "$rpid" 2>/dev/null
+    fi
+    # --exclude "$DATADIR": a rogue's --data-dir is its own claim, not something to trust - one
+    # that names the kept server's data dir (or a parent of it) must never cost the kept
+    # server's still-live ring (T-983 fix round 2). Only a genuinely separate ring is ever
+    # removed here; the window-end reap_rings() still takes the kept ring once it too is stopped.
+    rplan="$(python3 "$PY_REAP" reap --window "$rdd" --exclude "${DATADIR:-}" 2>/dev/null)"
+    rtotal="$(printf '%s\n' "$rplan" | awk -F'\t' '/^TOTAL/{print $2}')"
+    log "rogue server's ring reaped: ${rtotal:-0} bytes freed from $rdd (the kept server's own ring at $DATADIR is never touched here)"
+    alert red "explorer: rogue hk serve stopped" "pid $rpid data-dir $rdd (window $D, kept pid $SERVER_PID)" --key "explorer:rogue-$rpid"
+  done <<< "$rogue_out"
+}
+
+TIMER=""; WATCHER=""; SERVER_PID=""; DATADIR=""
 cleanup(){
   local rc=$?
   trap - EXIT INT TERM HUP
-  if [ -n "$WATCHER" ]; then kill "$WATCHER" 2>/dev/null; fi
+  if [ -n "$WATCHER" ]; then
+    kill "$WATCHER" 2>/dev/null
+    wait "$WATCHER" 2>/dev/null
+  fi
+  # The watcher can be stopped mid-way through spotting or stopping a rogue (T-1033): a rogue it had
+  # already detected but not yet killed at that instant would otherwise survive the window. One more
+  # synchronous pass here, after the watcher is fully stopped (the `wait` above), catches it - and any
+  # rogue it had already TERMed but was still waiting out the grace period on.
+  scan_and_stop_rogues
   # Only while it is still our child: after the window-end path it may have exited, been reaped,
   # and its pid gone to a stranger.
   if [ -n "$TIMER" ] && [ "$(ps -o ppid= -p "$TIMER" 2>/dev/null | tr -d ' ')" = "$$" ]; then
@@ -169,9 +223,13 @@ cleanup(){
   # shellcheck disable=SC2086
   [ -n "$left" ] && kill -TERM $left 2>/dev/null
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    local server_stamp; server_stamp="$(ps_stamp "$SERVER_PID")"
     kill -TERM "$SERVER_PID" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 1; done
-    kill -KILL "$SERVER_PID" 2>/dev/null
+    # Signal the final -KILL only if the pid still verifiably identifies our own server (T-1033).
+    if [ -n "$server_stamp" ] && [ "$(ps_stamp "$SERVER_PID")" = "$server_stamp" ]; then
+      kill -KILL "$SERVER_PID" 2>/dev/null
+    fi
     log "stopped the window's hk serve (pid $SERVER_PID)"
   fi
   # The fallback matches an `hk serve` INVOCATION on this port - the program itself, `hk` at the start
@@ -243,28 +301,9 @@ fi
 # moment it's seen, its ring reaped, and an alert raised. The agent is never trusted to comply on its
 # own (the 2026-09-25 06:43 amendment: it was told at launch and started one anyway).
 watch_rogues(){
-  local rogue_args rogue_out rpid rdd rplan rtotal
   while :; do
     sleep "$WATCH_POLL"
-    rogue_args=(rogue --window "$D" --keep-pid "$SERVER_PID")
-    [ -n "${EXPLORER_PS_OUTPUT:-}" ] && rogue_args+=(--ps-output "$EXPLORER_PS_OUTPUT")
-    rogue_out="$(python3 "$PY_REAP" "${rogue_args[@]}" 2>/dev/null)"
-    [ -z "$rogue_out" ] && continue
-    while IFS=$'\t' read -r rpid rdd; do
-      [ -z "$rpid" ] && continue
-      log "ALERT: rogue hk serve detected (pid $rpid, data-dir $rdd) - the window runs ONE server; stopping it"
-      kill -TERM "$rpid" 2>/dev/null
-      for _ in $(seq 1 "$GRACE"); do kill -0 "$rpid" 2>/dev/null || break; sleep 1; done
-      kill -KILL "$rpid" 2>/dev/null
-      # --exclude "$DATADIR": a rogue's --data-dir is its own claim, not something to trust - one
-      # that names the kept server's data dir (or a parent of it) must never cost the kept
-      # server's still-live ring (T-983 fix round 2). Only a genuinely separate ring is ever
-      # removed here; the window-end reap_rings() still takes the kept ring once it too is stopped.
-      rplan="$(python3 "$PY_REAP" reap --window "$rdd" --exclude "$DATADIR" 2>/dev/null)"
-      rtotal="$(printf '%s\n' "$rplan" | awk -F'\t' '/^TOTAL/{print $2}')"
-      log "rogue server's ring reaped: ${rtotal:-0} bytes freed from $rdd (the kept server's own ring at $DATADIR is never touched here)"
-      alert red "explorer: rogue hk serve stopped" "pid $rpid data-dir $rdd (window $D, kept pid $SERVER_PID)" --key "explorer:rogue-$rpid"
-    done <<< "$rogue_out"
+    scan_and_stop_rogues
   done
 }
 watch_rogues &

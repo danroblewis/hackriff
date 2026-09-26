@@ -930,8 +930,13 @@ test("T-386/T-389: the sidebar list and the surface's marks come from ONE collec
   // T-522 moved the composition into `paneMarkBoxes` (so the found-signal toggle has one place to
   // gate), but the rows and selections still flow straight from the store, through it, to
   // `signalMarkBoxes`/`selectionMarkBoxes` — no second filter appeared.
-  assert.match(src, /paneMarkBoxes\(Object\.values\(s\.inventory\.rows\).*s\.selections\.list/,
-    "the marks are composed from the store's rows and selections, straight through");
+  // T-1002 named WHICH rows without adding a filter: `paneRows(s.inventory, pane.id)` is the
+  // pane's own answer from the store (`inventory.panes[id]`, written by that pane's own query), and
+  // it still flows straight through the one composition. The invariant is unchanged and stricter —
+  // the boxes and the list are one collection *per pane* — so a second, client-side window filter
+  // over the rows would still be the regression this test exists to catch.
+  assert.match(src, /paneMarkBoxes\(Object\.values\(paneRows\(s\.inventory, pane\.id\)\).*s\.selections\.list/,
+    "the marks are composed from this pane's rows and the store's selections, straight through");
   // T-1004 added the linked-focus flag (a pane that does not own the selection draws its ghost); the
   // rows and the focus still go straight through to the one `signalMarkBoxes`.
   assert.match(src, /signalMarkBoxes\(rows, focusId, undefined, undefined, linkedFocus\)/, "…into the same signalMarkBoxes…");
@@ -972,7 +977,12 @@ test("T-386 CLOCK GUARD: no clock of the browser's own reaches the Explore sideb
   const inv = bare("src/app/explore/inventory.ts");
   for (const word of clocks.slice(1)) assert.ok(!inv.includes(word), `inventory.ts must not contain "${word}"`);
   assert.equal(inv.match(/Date\.now/g)?.length, 1, "the one page-lifecycle stamp, and no second clock");
-  assert.match(inv, /setInventoryRows\(rows, Date\.now\(\) \/ 1000\)/, "and it is that one");
+  // T-1002: read once per load and handed to each pane's write-back, so N panes are still one
+  // stamp — and still not a capture time. The pane windows themselves come from `liveEdgeS`/the
+  // pane's own frozen instant, which is what the rest of this guard protects.
+  assert.match(inv, /const loadedAtS = Date\.now\(\) \/ 1000;/, "and it is that one");
+  assert.match(inv, /setInventoryRows\(rows, loadedAtS\)/, "…passed to the row writer, never re-read");
+  assert.match(inv, /setPaneInventory\(spec\.id, \{ rows, window \}, loadedAtS\)/, "…and to each pane's");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----

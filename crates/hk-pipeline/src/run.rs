@@ -694,6 +694,10 @@ pub(crate) struct Shared {
     pub view_queue: Option<Arc<crate::history::ViewQueue>>,
     /// T-844: the run's C38 shadow stage, observed at the classifier's call site.
     pub ml: Option<Arc<crate::ml::MlStage>>,
+    /// T-977: the last completed control-channel hunt pass, with the verdict on every channel it
+    /// looked at. One `Option`, replaced per pass — the durable half of a verdict is the
+    /// `emitter_synthesis` row the same pass writes.
+    pub cc_verdicts: Arc<crate::ccverdict::CcVerdictLog>,
 }
 
 impl Shared {
@@ -958,6 +962,10 @@ struct Common {
     listen: Arc<Mutex<crate::config::ListenSettings>>,
     /// Burst taps (T-060), closed when the run ends.
     bursts: Arc<crate::chains::taps::BurstHub>,
+    /// T-977: the last control-channel hunt pass, with its per-channel verdicts. Run-wide rather
+    /// than per segment: a re-plumb starts a new segment and the answer to "what did the hunt last
+    /// decide" does not become unknown because the front end was re-tuned.
+    cc_verdicts: Arc<crate::ccverdict::CcVerdictLog>,
     /// Compute providers (T-056): built once per run, so no segment changes provider.
     compute: hk_dsp::compute::Compute,
     /// Occupancy engine and series (T-118), closed when the run ends.
@@ -1427,6 +1435,7 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             detection_fft_len: cfg.settings.fft_len,
             bursts: Arc::default(),
+            cc_verdicts: Arc::default(),
             // T-115: never fails the run; a log that cannot open is reported and skipped.
             scheduler: Arc::new(crate::control::SchedulerHub::default()),
             observations: crate::observe::ObservationLog::open(
@@ -1737,6 +1746,7 @@ fn start_segment(
         successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
         seal_at_end: !common.defer_seal,
         bursts: Arc::clone(&common.bursts),
+        cc_verdicts: Arc::clone(&common.cc_verdicts),
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
         compute: common.compute.clone(),
@@ -3272,6 +3282,12 @@ impl PipelineHandle {
     /// [`crate::vlf::VlfServices::attach`]. Empty unless an accessory was given.
     pub fn vlf(&self) -> Arc<crate::vlf::VlfServices> {
         Arc::clone(&self.vlf)
+    }
+
+    /// T-977: the last completed control-channel hunt pass, with the verdict on every channel it
+    /// looked at (`GET /api/trunking/cc-candidates`).
+    pub fn cc_verdicts(&self) -> Arc<crate::ccverdict::CcVerdictLog> {
+        Arc::clone(&self.sup.common.cc_verdicts)
     }
 
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while

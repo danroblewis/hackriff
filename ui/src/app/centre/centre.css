@@ -220,6 +220,23 @@
   border: 2px solid var(--text); border-radius: 2px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(0, 0, 0, .55);
 }
+/* T-1005: the split's own chrome. The container takes no pointer (the canvas shows and drags
+   through it); each handle and × does. Below the floating cluster (z 20) and its menus. */
+.sf-split { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.sf-divider { position: absolute; pointer-events: auto; touch-action: none; background: transparent; }
+.sf-divider.columns { width: 16px; margin-left: -8px; cursor: col-resize; }
+.sf-divider.rows { height: 16px; margin-top: -8px; cursor: row-resize; }
+.sf-divider::after { content: ""; position: absolute; background: var(--line); border-radius: 2px; transition: background .12s; }
+.sf-divider.columns::after { left: 7px; width: 2px; top: 0; bottom: 0; }
+.sf-divider.rows::after { top: 7px; height: 2px; left: 0; right: 0; }
+.sf-divider:hover::after, .sf-divider:focus-visible::after, .sf-stage[data-dragging] .sf-divider::after { background: var(--text); }
+.sf-divider:focus-visible { outline: none; }
+.sf-pane-x {
+  position: absolute; pointer-events: auto; width: 24px; height: 24px; padding: 0; box-sizing: border-box;
+  border: 1px solid var(--line); border-radius: 6px; color: var(--text); font: 600 15px/1 var(--mono, monospace);
+  background: color-mix(in srgb, var(--panel) 82%, transparent); cursor: pointer; display: grid; place-items: center;
+}
+.sf-pane-x:hover, .sf-pane-x:focus-visible { border-color: var(--text); }
 /* T-1001 (MMAP split view): each pane's OWN Live/Freeze button, inside that pane's rectangle
    (`centre/pane-live.ts` places them every render frame). The single follow-live FAB retired: with
    two panes open, one corner button acting on the hidden active pane could not say which pane it

@@ -11851,6 +11851,81 @@ fn trunking_load_index_answers_documented_shape_and_carries_no_content() {
 }
 
 // ---------------------------------------------------------------------------
+// T-977 control-channel candidates and their verdicts
+
+/// T-977, SIGNAL-085: `/api/trunking/cc-candidates` answers the documented shape on a fresh run.
+///
+/// The interesting assertion is the **empty state**: a run whose hunt has not completed a pass
+/// answers `pass: null`, not `{"channels": []}`. Un-looked-at and looked-at-and-chose-nothing are
+/// different facts (ADR-0021 §7A.4), and this route exists precisely to keep them apart — the same
+/// rule the canvas's grey obeys. A shape-only assertion would pass either way, so this one asserts
+/// the value.
+#[test]
+fn cc_candidates_answers_pass_null_before_a_hunt_has_completed_one() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/trunking/cc-candidates");
+    assert_eq!(st, 200, "{v}");
+    assert!(v.get("pass").is_some(), "missing pass: {v}");
+    assert!(
+        v["pass"].is_null() || v["pass"].is_object(),
+        "pass is either null (no pass completed) or the pass object: {v}"
+    );
+    if let Some(pass) = v["pass"].as_object() {
+        for field in [
+            "pass",
+            "t_start",
+            "t_end",
+            "device_id",
+            "tune_center_hz",
+            "raster_hz",
+            "grid_offset_hz",
+            "channels_swept",
+            "channels",
+        ] {
+            assert!(pass.contains_key(field), "missing {field}: {v}");
+        }
+        assert!(is_array(&v["pass"]["channels"]), "{v}");
+        for ch in v["pass"]["channels"].as_array().unwrap() {
+            for field in ["k", "center_hz", "fco", "candidacy", "outcome", "reason"] {
+                assert!(ch.get(field).is_some(), "channel missing {field}: {ch}");
+            }
+            let outcome = ch["outcome"].as_str().unwrap_or_default();
+            assert!(
+                [
+                    "confirmed",
+                    "sync-without-check",
+                    "no-sync",
+                    "not-demodulated",
+                    "admission-refused",
+                ]
+                .contains(&outcome),
+                "outcome outside the documented enum: {ch}"
+            );
+        }
+    }
+
+    // Metadata only, exactly like `/api/trunking/load`: a verdict about a channel is not its
+    // traffic.
+    let body = v.to_string().to_lowercase();
+    for banned in ["audio", "vocoder", "pcm"] {
+        assert!(!body.contains(banned), "must never carry {banned:?}: {v}");
+    }
+
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/trunking/cc-candidates",
+        Some(&auth),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
+// ---------------------------------------------------------------------------
 // T-349: every absolute time on the wire declares its unit in its own name.
 //
 // `docs/api.md` "Conventions": times are Unix seconds by default, and a field that departs from

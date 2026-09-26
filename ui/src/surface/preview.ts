@@ -51,6 +51,7 @@ import {
   type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
 } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
+import { activeAfterClose } from "./panes";
 import type { HudReserve } from "./hud";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
@@ -1171,9 +1172,26 @@ export class SurfacePreview {
     if (id) this.activePane = id;
   }
 
-  closeActive(): void {
-    if (!this.view.panes.close(this.activePane)) return;
-    this.activePane = this.view.panes.list()[0].id;
+  /** Close the active pane. See [[closePane]] for which pane is active afterwards. */
+  closeActive(at: GlPoint | null = null): void {
+    this.closePane(this.activePane, at);
+  }
+
+  /**
+   * **Close pane `id` (T-1005), and choose the active pane by a stated rule, not by position** —
+   * [[activeAfterClose]]: the pane under the pointer `at` (GL device px of the canvas, against the
+   * layout AFTER the close), else the live one. The last pane never closes. View only — nothing
+   * here reaches a route.
+   */
+  closePane(id: string, at: GlPoint | null = null): boolean {
+    if (!this.view.panes.close(id)) return false;
+    const next = activeAfterClose(this.view.panes.list(), this.view.paneRects(), at, this.active)
+      ?? this.view.panes.list()[0].id;
+    // The setter refuses a no-op, so the listeners still hear about a close that kept the active
+    // pane: the outline and the chrome's "pane N of M" re-state against the new count.
+    if (next === this.active) for (const f of this.activeListeners) f(next);
+    else this.activePane = next;
+    return true;
   }
 }
 
