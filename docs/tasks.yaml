@@ -28670,7 +28670,8 @@ tasks:
   - id: T-969
     milestone: MAUTO
     title: "All captured signals decode: add the 88.5 (PI 3AAB) and 106.1 (PI 1323) FM members to T-936's set"
-    status: todo
+    status: in-progress
+    branch: task-t969
     priority: P1
     deps:
     - T-936
@@ -28753,7 +28754,8 @@ tasks:
   - id: T-973
     milestone: M2-hardening
     title: "replumb_never_pays_for_the_ring fails alone on main: a re-plumb stalls the always-on readers 1.8 s (bound 1 s)"
-    status: todo
+    status: in-progress
+    branch: task-t973
     priority: P1
     deps:
     - T-941
@@ -30051,7 +30053,8 @@ tasks:
   - id: T-1032
     milestone: MMAP
     title: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
-    status: todo
+    status: in-progress
+    branch: task-t1032
     priority: medium
     deps: []
     parallel_group: UI-CARD-FLAKE
