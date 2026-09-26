@@ -54,6 +54,7 @@
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
 //! | `/ws/spectrum/rows?…` | GET | token | One pane's rows, folded and quantised, pushed as binary blocks (T-1043, [`crate::spectrum_rows`]) |
 //! | `/ws/tiles/changes` | GET | token | `coverage_changed` pushed on a retune (T-1040, [`crate::changes`]) |
+//! | `/ws/changes` | GET | token | `changed {route, version}` instead of a poll (T-1065, [`crate::versions`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -270,6 +271,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/spectrum/rows"),
     // T-1040: `coverage_changed` pushed on a front-end move, so a retune re-lays the fog at once
     ("GET", "/ws/tiles/changes"),
+    // T-1065 the route-version feed: `changed {route, version}` instead of a client poll
+    ("GET", "/ws/changes"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -554,6 +557,13 @@ pub struct ApiState {
     /// T-579: the tile coverage raster, memoised against the tune history it is computed from.
     /// Always on: its key is the evidence itself, so it cannot serve a stale grey.
     pub coverage_raster: Arc<crate::coverage::CoverageRasterMemo>,
+    /// T-1065: the **route-version** feed behind `/ws/changes` (not [`Self::change_feeds`], which
+    /// counts T-1040's coverage subscriptions). Every mutating control-plane route bumps the version
+    /// of the routes it wrote (`versions::routes_for_write`, applied once in
+    /// `control::dispatch_device`), and a producer may bump one directly. Always on: a server
+    /// without it would silently answer the feed with a table that never moves, and a client that
+    /// had stopped polling would never learn. Its own open-connection count lives inside it.
+    pub versions: Arc<crate::versions::VersionFeed>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -1271,6 +1281,36 @@ fn respond_tile(stream: &mut TcpStream, req: &Request, body: Value) {
     respond_cached(stream, 200, "application/json", cache_control, &extra, &out);
 }
 
+/// A **conditional** JSON answer (T-1065): a content-derived `ETag`, and a bodyless `304` when the
+/// caller's `If-None-Match` already holds it.
+///
+/// `/api/control/state` is the measured case — 10 kB every two seconds, byte-identical almost every
+/// time — and this is the half of the fix that works even for a client that has not adopted
+/// `/ws/changes` yet: the request still happens, but the body does not.
+///
+/// **`no-cache`, not `no-store`.** Every other route here is `no-store`, which forbids a cache from
+/// keeping the response at all — and a response nothing kept can never be revalidated, so
+/// `If-None-Match` would never be sent. `private, no-cache` is the exact semantics wanted: the
+/// browser may keep it, only this client may, and it must revalidate **every** time before reusing
+/// it. So a stale body is never shown; a 304 is only ever the server agreeing it is current.
+///
+/// Like [`respond_tile`], the tag is computed over the UNCOMPRESSED JSON — gzip is a transfer
+/// coding, so both forms are the same representation and validate under the same tag.
+fn respond_validated(stream: &mut TcpStream, req: &Request, body: &Value, extra: &str) {
+    let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
+    let etag = format!("\"{:08x}\"", crc32(&bytes));
+    let cache_control = "private, no-cache";
+    let extra = format!("{extra}ETag: {etag}\r\n");
+    if req
+        .header("if-none-match")
+        .is_some_and(|v| v.split(',').any(|part| part.trim() == etag))
+    {
+        return respond_cached(stream, 304, "application/json", cache_control, &extra, &[]);
+    }
+    let (extra, out) = maybe_gzip(accepts_gzip(req), &extra, &bytes);
+    respond_cached(stream, 200, "application/json", cache_control, &extra, &out);
+}
+
 /// Gzip `bytes` when the caller accepts it and the body is big enough, returning the extra headers
 /// to send with them (T-533). Borrowed body back unchanged when it is not worth it.
 fn maybe_gzip<'a>(gzip_ok: bool, extra: &str, bytes: &'a [u8]) -> (String, Cow<'a, [u8]>) {
@@ -1548,6 +1588,13 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared, conn_id: u64) {
     if req.path == "/ws/tiles/changes" && req.method == "GET" {
         return crate::changes::serve(stream, &shared.state, &req.query, &req.headers);
     }
+    // T-1065: likewise before the bridge — and, like every route here, **after** T-1063's pool
+    // entry above, so a route-version feed holds a WebSocket slot and not an HTTP one. Note the two
+    // neighbours are different feeds: `/ws/tiles/changes` is the tile lattice's coverage (T-1040),
+    // `/ws/changes` is one version per HTTP route.
+    if req.path == "/ws/changes" && req.method == "GET" {
+        return crate::versions::serve(stream, &shared.state, &req.headers);
+    }
     // T-859: `/ws/analyze/{id}` is the `analyze` on-demand opener with the id as its parameter.
     if let Some(id) = req.path.strip_prefix("/ws/analyze/")
         && req.method == "GET"
@@ -1661,6 +1708,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared, conn_id: u64) {
             && href.bytes().all(|b| b.is_ascii_graphic())
         {
             extra.push_str(&format!("Location: {href}\r\n"));
+        }
+        // T-1065: a validator on the routes a client re-reads unchanged (`/api/control/state`,
+        // 10 kB every 2 s in the measured client). Only a successful GET: a 4xx body is a sentence,
+        // and a write must never be answered from a cache.
+        if req.method == "GET" && r.status == 200 && crate::versions::validated(&req.path) {
+            return respond_validated(&mut stream, &req, &r.body, &extra);
         }
         return respond_json_with(&mut stream, r.status, &r.body, &extra);
     }

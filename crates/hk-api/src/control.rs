@@ -1228,6 +1228,16 @@ pub(crate) fn dispatch_device(
     }
     // Errors are reported (rate-limited) by the log; they never fail the request.
     let _ = audit.append(&entry);
+    // T-1065: the ONE place a control-plane write is recorded, so it is the one place the
+    // route-version feed is bumped. A successful write only — a refusal changed nothing, and a client told
+    // otherwise would re-read a body that is exactly what it already had. Which routes a path
+    // writes is `versions::routes_for_write`, a pure function tested against `ROUTES`; the bump
+    // itself is an atomic add per route, so this costs the request nothing measurable.
+    if (200..300).contains(&status) {
+        state
+            .versions
+            .bump_all(crate::versions::routes_for_write(req.path));
+    }
     CtlResponse {
         status,
         body: response,

@@ -74,6 +74,9 @@ pub mod timeline; // T-338: the capture window, and the compressed overview draw
 pub mod trunk_cc; // T-977: the control-channel hunt's last pass, with per-channel verdicts
 pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
+// T-1065: the route-version feed (`/ws/changes`) - the server says which route's answer changed,
+// so a client stops polling. Distinct from `changes` above: that one is the tile lattice's coverage.
+pub mod versions;
 pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
 mod wsclose; // T-954/T-1010: one never-blocking WebSocket close path for every bridged consumer
 
@@ -112,6 +115,7 @@ pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 pub use playback::{PlaybackChange, PlaybackControl, PlaybackFailure};
 pub use recordings::{RecordingCatalog, RecordingsFailure};
 pub use scan::{Phase as ScanPhase, Prepared as ScanPlan, ScanError, ScanRequest, ScanRunner};
+pub use versions::{VersionFeed, Versioned};
 
 #[cfg(test)]
 mod tests {

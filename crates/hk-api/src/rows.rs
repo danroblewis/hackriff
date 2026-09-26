@@ -691,6 +691,14 @@ pub(crate) fn send(ws: &mut WebSocket<TcpStream>, v: &Value) -> bool {
     ws.send(Message::Text(v.to_string().into())).is_ok()
 }
 
+/// An unsolicited ping (T-1065), so a deliberately **idle** socket survives a proxy without sending
+/// a message. A feed whose whole promise is "nothing while nothing changed" cannot use a JSON
+/// heartbeat for this: the heartbeat would *be* the traffic the feed exists to remove. Unused by
+/// this route's own cursor, which either has rows to send or is waiting on the data edge.
+pub(crate) fn ping(ws: &mut WebSocket<TcpStream>) -> bool {
+    ws.send(Message::Ping(Vec::new().into())).is_ok()
+}
+
 /// `true` while the peer is still there. Reads (and so answers pings) for at most `wait`.
 pub(crate) fn peer_alive(ws: &mut WebSocket<TcpStream>, wait: Duration) -> bool {
     let _ = ws.get_mut().set_read_timeout(Some(wait));
