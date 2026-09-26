@@ -27,9 +27,9 @@ import { parseFrequency } from "../../controls/freq";
 import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
+import { renderSettings, type SettingsHost } from "./settings";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { registerMapHome } from "./top-chrome";
-import { getTimeLabelMode, onTimeLabelMode, setTimeLabelMode, type TimeLabelMode } from "../../surface/hud";
 import { registerMapInvHome } from "./inv-home";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
@@ -85,9 +85,6 @@ export interface LayerMenu {
   data?: LayerRow[];
   overlays: LayerRow[];
   viewWide: LayerRow[];
-  /** The colour scale (T-470/T-528, rehomed from the toolbar by T-882): exactly one of the surface's
-   * range modes, view-wide, plus the sentence stating the range it produces. Absent = not offered. */
-  scale?: { rows: LayerRow[]; note: string };
 }
 
 /** The menu's writes. Every one is presentation state; none can reach a route. */
@@ -97,8 +94,6 @@ export interface LayerMenuHost {
   /** Toggle one of the active pane's layers — an overlay, or a `data` row (the coverage fog). */
   toggleOverlay(id: string): void;
   toggleViewWide(id: string): void;
-  /** Choose the colour-scale mode (a display range, never a gain). Optional: a host with no scale. */
-  setScale?(id: string): void;
 }
 
 /**
@@ -148,7 +143,7 @@ export interface PaneDeviceMenu {
   offer: { label: string; why: string; enabled: boolean };
 }
 
-export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
+export interface MapControlHost extends LayerMenuHost, PaneMenuHost, SettingsHost {
   zoom(factor: number): void;
   /** Measurement mode (T-822): whether a plain drag measures instead of panning. */
   measuring(): boolean;
@@ -462,19 +457,13 @@ export function mountMapControls(host: MapControlHost): {
   const moreClose = h("button", {
     type: "button", class: "map-layers-close map-more-close", "aria-label": "Close the settings menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
-  // T-998: the time ruler's wording — "seconds ago" or the local clock — a per-viewer preference.
-  const timeModeBtn = h("button", {
-    type: "button", class: "map-pane-item map-time-mode", "data-time-mode": getTimeLabelMode(),
-    title: "Time ruler labels: relative (12 s ago) or local clock time (HH:MM:SS). Display only.",
-  }) as HTMLButtonElement;
-  const paintTimeMode = (m: TimeLabelMode) => {
-    timeModeBtn.setAttribute("data-time-mode", m);
-    timeModeBtn.textContent = m === "absolute" ? "Time ruler: clock time" : "Time ruler: seconds ago";
-  };
-  paintTimeMode(getTimeLabelMode());
-  onTimeLabelMode(paintTimeMode);
-  timeModeBtn.addEventListener("click", () => setTimeLabelMode(getTimeLabelMode() === "absolute" ? "relative" : "absolute"));
-  const moreBody = h("div", { class: "map-more-body" }, timeModeBtn);
+  // T-1007: the ⋯ menu is THE settings menu — Theme (the node T-993 moved here) plus every
+  // preference that used to sit in Review: the colour scale (and with it auto-contrast), the time
+  // ruler's labels (T-998's seconds-ago / local-clock preference, `surface/hud.ts`'s
+  // `TimeLabelMode`, offered here as one radio group rather than a second toggle), the front ends
+  // and which viewport's grey reads which, and the capture window the backend reports. `./settings.ts` renders the groups; each press is presentation state.
+  const moreBody = h("div", { class: "map-more-body" });
+  const settingsList = h("div", { class: "map-settings-rows" });
   // T-1053: on a phone the four MODE chips (Measure, Annotate, Pin, Retune mode) fold into the ⋯
   // menu, so the top-right row stays five small chips — Layers, Research, Viewport, Review, ⋯ —
   // instead of nine reaching across the pane (T-1025: chips, not a bar) and squeezing Go-to to a
@@ -482,7 +471,7 @@ export function mountMapControls(host: MapControlHost): {
   // retune chip's held marker go with them, and a mode that is on is still said by its banner.
   const moreTools = h("div", { class: "map-more-tools", role: "group", "aria-label": "Tools", hidden: true });
   const moreMenu = h("div", { class: "map-glass map-pane-menu map-more-menu", id: "map-more-menu", role: "group", "aria-label": "Settings", hidden: true },
-    h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreTools, moreBody);
+    h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreTools, moreBody, settingsList);
   // T-993: the retired bar's other homes. T-1025: the mode switch and the device/stream state are
   // SEPARATE chips in a `map-chips` row that paints nothing of its own and takes no pointer, so the
   // canvas shows (and drags) between them; the tuning nudges (T-409, device commands through the one gated DeviceAction path) sit
@@ -648,8 +637,7 @@ export function mountMapControls(host: MapControlHost): {
     const act = document.activeElement as HTMLElement | null;
     const refocus = act && layersList.contains(act)
       ? (act.dataset.base ? `[data-base="${act.dataset.base}"]` : act.dataset.layer ? `[data-layer="${act.dataset.layer}"]`
-        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]`
-          : act.dataset.scale ? `[data-scale="${act.dataset.scale}"]` : null)
+        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]` : null)
       : null;
     const row = (l: LayerRow, input: HTMLInputElement, press: () => void) => {
       input.checked = l.on;
@@ -678,12 +666,6 @@ export function mountMapControls(host: MapControlHost): {
         ...m.viewWide.map((l) => row(l,
           h("input", { type: "checkbox", "data-view-layer": l.id }) as HTMLInputElement,
           () => host.toggleViewWide(l.id))))] : []),
-      ...(m.scale && host.setScale ? [h("div", { class: "map-layers-axis", "data-axis": "scale", role: "radiogroup", "aria-label": "Colour scale, every pane" },
-        h("h4", {}, "Colour scale · every pane · one at a time"),
-        ...m.scale.rows.map((l) => row(l,
-          h("input", { type: "radio", name: "map-scale", value: l.id, "data-scale": l.id }) as HTMLInputElement,
-          () => host.setScale!(l.id))),
-        h("div", { class: "map-layers-note sf-range-note" }, m.scale.note))] : []),
       h("div", { class: "map-layers-note" }, "Unknowns are never hidden by default. Toggling a layer changes this pane's picture only — never what is captured or detected."),
     );
     if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
@@ -738,7 +720,7 @@ export function mountMapControls(host: MapControlHost): {
     moreMenu.hidden = !open;
     moreBtn.setAttribute("aria-pressed", String(open));
     moreBtn.setAttribute("aria-expanded", String(open));
-    if (open) { if (layersOpen) setLayersOpen(false); if (paneOpen) setPaneOpen(false); }
+    if (open) { renderSettings(settingsList, host, () => setMoreOpen(false)); if (layersOpen) setLayersOpen(false); if (paneOpen) setPaneOpen(false); }
     fade.hold("more-menu", open); // an open menu never fades
   };
   moreBtn.addEventListener("click", () => setMoreOpen(!moreOpen));
@@ -861,8 +843,14 @@ export function mountMapControls(host: MapControlHost): {
   syncRetuneMode();
   registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
   registerMapInvHome(invHome);
-  /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
-  const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
+  /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. The
+   * settings menu re-states too: its range sentence follows auto-contrast, and its front-end list
+   * follows the control-state poll. */
+  const syncLayers = () => {
+    if (layersOpen) renderLayers();
+    if (paneOpen) syncPaneMenu();
+    if (moreOpen) renderSettings(settingsList, host, () => setMoreOpen(false));
+  };
   /**
    * T-955: **the front end's tuned window changed** (a retune by this page, another client or the
    * API). A painted Go-to offer was computed against the OLD tuning — "Retune to 162.2 MHz" still on

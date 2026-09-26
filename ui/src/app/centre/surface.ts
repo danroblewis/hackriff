@@ -52,12 +52,14 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
-import { TIME_LABEL_BOX_CSS, type HudReserve } from "../../surface/hud";
+import { TIME_LABEL_BOX_CSS, getTimeLabelMode, setTimeLabelMode, type HudReserve } from "../../surface/hud";
 import { paneCountsText, type RowAction, type WidthAction } from "../../surface/chrome";
 // T-996: the per-pane scale bars — pure arithmetic plus a pooled band-2 layer, like the HUD's.
 import { ScaleBars, scaleMarkOf, type ScaleMark } from "../../surface/scale";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
+import { fmtBandwidth } from "../../axis";
+import { formatFrequency } from "../../controls/freq";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
@@ -108,8 +110,9 @@ import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
 import { closeCard, focusSelection, focusSignal, paneRows, setInventoryPanes } from "../explore/slice";
 import type { PaneWindowSpec } from "../explore/pane-window";
-import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { gotoTimeWindow, gotoWindow, openReview, requestGoto, reviewAt, setNavigation, toast, type AppState, type ReviewTab } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import { rulerRows, type SettingsModel } from "../chrome/settings";
 import { activePaneName, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
 import { PaneLiveLayer, paneLiveActions, type ChromeRect } from "./pane-live";
 import { mountSplitChrome } from "./split-chrome";
@@ -2238,8 +2241,72 @@ function mount(el: HTMLElement, ctx: AppContext) {
             key: undefined,
           } }))).sort((a, b) => PLANE_ORDER.indexOf(a.plane) - PLANE_ORDER.indexOf(b.plane) || a.z - b.z).map((x) => x.row),
           viewWide: [{ id: "trace", label: "Spectrum trace", hint: "over every pane's top rows", on: traceOn }],
-          scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
         };
+      },
+      // ---- T-1007: the ⋯ settings menu's model. Every field is presentation state or the
+      // backend's own words; nothing here reaches a device route (`app-map-controls.test.ts` drives
+      // each press against a fetch spy and an empty call list).
+      settings: (): SettingsModel => {
+        const ids = pv.view.panes.list();
+        const devices = store.get().device.frontEnds;
+        // Short labels: the select sits in a 300 px menu, and the full `device_id` is stated once
+        // in the list above it rather than clipped in every option.
+        const choices = [
+          { id: "any", label: "Any front end" },
+          ...devices.filter((d) => d.deviceId).map((d) => ({ id: d.deviceId!, label: d.driver })),
+        ];
+        const w = store.get().captureWindow;
+        return {
+          scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
+          ruler: { rows: rulerRows(getTimeLabelMode()) },
+          devices: {
+            list: devices.map((d) => ({
+              id: d.deviceId, driver: d.driver, kind: d.kind,
+              tuned: d.centerHz !== null
+                ? `${formatFrequency(d.centerHz)}${d.sampleRateHz !== null ? ` · ${fmtBandwidth(d.sampleRateHz)}` : ""}`
+                : null,
+            })),
+            // A replay has no live front end, and that is a fact about the run, not an empty list to
+            // pad: the coverage on screen is still whichever device recorded it.
+            empty: devices.length === 0
+              ? "No live front end: this run is a replay, so coverage is whichever radio recorded it."
+              : null,
+            panes: ids.map((p, i) => ({
+              id: p.id, label: ids.length > 1 ? `Viewport ${i + 1}` : "This viewport", device: p.device,
+            })),
+            choices,
+          },
+          // The bigger panels keep their DOM (the drawer), but they are reached from here now: they
+          // are settings, and Review is only what needs a person (T-1007).
+          panels: [
+            { id: "device", label: "Device & display", hint: "gains, span, bias tee, FFT/speed, recording, survey sweep" },
+            { id: "scheduler", label: "Scheduler", hint: "scheduled survey passes" },
+            { id: "bookmarks", label: "Bookmarks", hint: "saved places on the surface" },
+          ],
+          capture: {
+            // The CONFIGURED retention and what the ring holds inside it — `GET /api/timeline`'s
+            // `window`, through the capture clock. Never a default span (T-379's rule).
+            retention: w ? durationText(w.spanS) : null,
+            buffered: w?.buffered ? durationText(Math.max(0, w.buffered.t1S - w.buffered.t0S)) : null,
+            note: w
+              ? "The retained capture window, as this server is configured. Resizing it is a server "
+                + "setting (`hk serve --iq-retention`), so it is stated here, not changed here."
+              : "This server has not stated a capture window, so none is drawn — never a default span.",
+          },
+        };
+      },
+      setRulerMode: (mode) => {
+        // Labelling only: the HUD re-derives its labels from the same marks on the next frame.
+        // T-998's per-viewer preference (stored and read by `surface/hud.ts`) — one mode, one home.
+        setTimeLabelMode(mode);
+        lastMirror = ""; mirror(); renderLive();
+      },
+      openPanel: (id) => store.set(openReview(id as ReviewTab)),
+      setDeviceOfPane: (paneId, device) => {
+        // Whose coverage decides this pane's grey (T-259/T-305: coverage is a fact about ONE front
+        // end). A pane is where you look from, so this never adds a view window and never tunes.
+        pv.view.panes.setDevice(paneId, device);
+        lastMirror = ""; mirror(); renderLive();
       },
       setBase: (id) => {
         const b = BASE_STYLES.find((x) => x.id === id);
