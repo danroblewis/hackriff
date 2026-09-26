@@ -39,12 +39,12 @@
 /* The two CONDITIONAL statements above the line — each on screen only because the viewer put it
    there (fog hidden on this pane; the priors layer switched on), so neither is permanent chrome.
    Same small panel as the line, bounded so a long list of priors scrolls rather than growing. */
-.sf-status > .sf-fog, .sf-status > .sf-priors {
+.sf-status > .sf-fog, .sf-status > .sf-priors, .sf-status > .sf-ring-metrics {
   pointer-events: auto; max-width: 100%; min-width: 0; max-height: 28vh; overflow-y: auto;
   border: 1px solid var(--line); border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 82%, transparent);
 }
-.sf-fog { font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px; overflow-wrap: anywhere; }
+.sf-fog, .sf-ring-metrics { font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px; overflow-wrap: anywhere; }
 
 /* The one line: where this viewport is looking, the scale it is painted on, and what is under the
    pointer. One row at every width — it is a line, not a panel. */

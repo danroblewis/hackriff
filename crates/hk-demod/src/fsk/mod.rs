@@ -20,12 +20,19 @@
 //!   emitter's.
 
 pub mod c4fm;
+/// T-953: the symbol-clock consensus of a **population** of bursts.
+pub mod consensus;
 pub mod demod;
 pub mod receiver;
 pub mod record;
 pub mod stream;
 /// T-546: what a demodulator is TOLD versus what was MEASURED.
 pub mod structure;
+
+pub use consensus::{
+    CONSENSUS_FRACTION, CONSENSUS_TOLERANCE, ClockSample, MIN_CONSENSUS_BURSTS, RateConsensus,
+    clock_sample, consensus_of, rate_consensus, rate_consensus_members,
+};
 
 pub use c4fm::{
     C4FM_DEMOD_VERSION, C4FM_INNER_DEVIATION_HZ, C4FM_OUTER_DEVIATION_HZ, C4FM_SYMBOL_RATE_BD,

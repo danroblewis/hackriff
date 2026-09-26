@@ -1322,7 +1322,8 @@ fn classification_json(r: &hk_model::RecordedClassification) -> Value {
 }
 
 /// T-163 (ADR-0013 gap 7a) `estimated_params` object: one field per [`hk_model::EstimatedParams`]
-/// measurement, plus `modulation` (the demodulation's `mode`, e.g. `wfm`, `2fsk`) and provenance.
+/// measurement, plus `modulation` (the demodulation's `mode`, e.g. `wfm`, `2fsk`), `duration_s`
+/// (the session's own extent — a burst's length, T-953) and provenance.
 /// A field the estimator never measured for this signal (e.g. `symbol_rate_hz` on an analog FM
 /// station) is `null`, exactly like the stored [`hk_model::EstimatedParams`] — never a fabricated
 /// default. `t_s` and `source_session` match `/api/inventory/{id}/decode`'s `at`/`source_session`
@@ -1332,6 +1333,11 @@ fn estimated_params_json(d: &Demodulation) -> Value {
     json!({
         "modulation": d.mode,
         "symbol_rate_hz": p.symbol_rate_hz,
+        // T-953: the session's own extent, in seconds. For the burst demodulators this is the
+        // burst length the `/ws/open/bits` tap reports per burst and the inventory could not state
+        // at all; for a continuous session it is how long the session ran. Read off the stored
+        // row's `time`, so it is a measurement like the rest and never a default.
+        "duration_s": d.time.duration_ns() as f64 / 1e9,
         "mod_order": p.mod_order,
         "deviation_hz": p.deviation_hz,
         "cfo_hz": p.cfo_hz,
@@ -1532,6 +1538,17 @@ pub fn inventory_entry_json_at(
             InventoryIdentity::Withheld { scheme, class } => {
                 (Some(scheme.as_string()), None, *class, true)
             }
+        };
+        // T-967: the backend's own rendering of the identity, so a list row can show it beside
+        // the bare code without the client parsing decode fields (thin-client rule). `None` on a
+        // withheld row and without a decoded identity, matching `estimated_params`/`cluster_id`
+        // (T-159/T-163) — the field can never confirm a withheld identity by appearing. One
+        // identity-class scan and one indexed row per entry (see the method).
+        let identity_summary = match &entry.identity {
+            InventoryIdentity::Clear { identity, .. } => {
+                repo.latest_decode_identity_summary(identity)?
+            }
+            InventoryIdentity::None | InventoryIdentity::Withheld { .. } => None,
         };
         let status = repo.known_status_history(e.id)?.last().map(|c| {
             let show = !withheld || reason_is_identity_free(c.author);
@@ -1782,6 +1799,12 @@ pub fn inventory_entry_json_at(
             "identity_synthesized": identity_synthesized,
             "identity_class": class,
             "withheld": withheld,
+            // T-967: the decoder's voted session label (RDS: the most frequent PS frame of the
+            // latest session, never the latest fragment) and that label's own share of the
+            // session's frames — both null for a scheme with no decoder summary, and on a
+            // withheld row.
+            "identity_label": identity_summary.as_ref().map(|s| s.label.as_str()),
+            "identity_label_share": identity_summary.as_ref().and_then(|s| s.label_share),
             "snr_db": measurement.map(|m| m.snr_peak_db),
             "peak_dbfs": measurement.map(|m| m.peak_level_dbfs),
             // T-350: the same two numbers **with the time they were measured over**. The flat
