@@ -584,16 +584,18 @@ acceptance-mauto *args:
     export HK_E2E_REQUIRE_SYNTH=1
     just _e2e-run acceptance_mauto {{args}}
 
-# "All captured signals decode" (T-936 + T-969, SIGNAL-062): one blind test per ticket assertion
+# "All captured signals decode" (T-936 + T-969 + T-976, SIGNAL-062/085): one blind test per ticket assertion
 # over EVERY signal the explorer agent has captured off the air (fixtures/hackrf/explorer-2026-09-25
 # - all four FM/RDS captures, seven captured signals - and every capture added after it), through
 # the mock SDR - detected as one time-frequency region, classified WFM with its pilot, the WFM+RDS
 # chain auto-attached unprompted, the PI/PS decoded against an independent oracle's answer key and
 # landed on the station's own row with its votes, and an FM broadcast allocation ranked without
-# identifying. The set grows by one line in `captured_signals::CAPTURES`. A milestone exit target,
-# not a regression gate: four controls are green and six red proofs are `#[ignore]`d until
-# T-926/T-937/T-938/T-940 land - run those with `just acceptance-captured-signals --run-ignored
-# all`. Extra args go to the runner (see `_e2e-run`).
+# identifying; plus the P25 member (T-976, captured_p25: one region, C4FM 4-level, P25-like from
+# its own frame syncs, the hunt's verdict on the row). The set grows by one line in
+# `captured_signals::CAPTURES` (or `captured_p25::P25_CAPTURES`). A milestone exit target, not a
+# regression gate: seven controls are green and nine red proofs are `#[ignore]`d until
+# T-926/T-937/T-938/T-940 and the tickets T-976's hand-back asks for land - run those with
+# `just acceptance-captured-signals --run-ignored all`. Extra args go to the runner (see `_e2e-run`).
 acceptance-captured-signals *args:
     #!/usr/bin/env bash
     set -euo pipefail
