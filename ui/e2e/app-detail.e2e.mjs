@@ -1,7 +1,7 @@
 // T-804 (MAP-04): the detail sheet, in the real app over the replayed FM fixture. The unit tier
 // (`ui/test/app-detail.test.ts`) proves what each line says for a served row; this proves the
-// journey: a signal blind detection found is selected, the T-803 sheet rises from peek to half on
-// its own, and it shows that signal — its frequency (the same one its list row shows), liveness,
+// journey: a signal blind detection found is selected, the T-803 sheet (hidden until then — T-1026)
+// opens at half on its own, and it shows that signal — its frequency (the same one its list row shows), liveness,
 // the Measured block with the time it was measured over, the ranked explanations framed as
 // suggestions, and the action row — while selecting reaches no device route.
 import test from "node:test";
@@ -32,8 +32,9 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
-  await page.waitFor("the sheet to mount collapsed",
-    "document.querySelector('.sheet')?.dataset.snap === 'peek'", { timeoutMs: 60000 });
+  // T-1026: the card is HIDDEN until something is clicked, so the journey starts with no card at all.
+  await page.waitFor("the card to mount off the screen",
+    "document.querySelector('.sheet')?.hidden === true", { timeoutMs: 60000 });
   // T-997: the lists live in the sheet, opened by an inventory pill in the map's top-left chrome
   // (the T-895 chip at mid-height is retired); a real click on a row needs them open.
   await page.waitFor("the inventory pills", "!!document.querySelector('.map-inv .map-pill')", { timeoutMs: 60000 });
@@ -55,7 +56,7 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   await settled(page, ".sheet", "the sheet's rise");
   assert.match((await page.$text(".focus .detail .bigf")) ?? "", new RegExp(`^${mhz.replace(".", "\\.")}`),
     "the sheet's big frequency is the selected row's");
-  assert.match((await page.$text(".sheet-title")) ?? "", /^Selected signal · [\d.]+ MHz$/, "the peek strip names it");
+  assert.match((await page.$text(".sheet-title")) ?? "", /^Selected signal · [\d.]+ MHz$/, "the card's title names it");
   assert.match((await page.$text(".focus .detail .liveness")) ?? "", /^(On air|Ended|Not on air|Liveness not reported)/);
   assert.match((await page.$text(".focus .detail .cols")) ?? "", /Measured[\s\S]*Centre[\s\S]*Bandwidth/);
   assert.match((await page.$text(".focus .detail .at")) ?? "", /^(measured at \d\d:\d\d:\d\d UTC over |No level measured yet)/,
@@ -86,11 +87,12 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   assert.equal(await page.eval(`!!document.elementFromPoint(${at.x}, ${at.y})?.closest('.surface')`), true,
     "a point beside the open detail sheet is the surface");
 
-  // docs/23 §10.6 P1: a visible dismiss returns the sheet's pixels to the map.
+  // docs/23 §10.6 P1, as T-1026 sharpens it: the visible dismiss returns ALL of the sheet's pixels to
+  // the map — the card goes off the screen, it does not shrink to a strip along the bottom edge.
   await page.click("document.querySelector('.sheet .sheet-close')");
-  await page.waitFor("the dismiss to collapse the sheet", "document.querySelector('.sheet')?.dataset.snap === 'peek'", { timeoutMs: 5000 });
-  await page.waitFor("the sheet to shrink to its peek strip",
-    "document.querySelector('.sheet').getBoundingClientRect().height <= 60 && document.querySelector('.sheet .sheet-close').hidden", { timeoutMs: 5000 });
+  await page.waitFor("the dismiss to close the card", "document.querySelector('.sheet')?.hidden === true", { timeoutMs: 5000 });
+  await page.waitFor("the card to take no pixels at all",
+    "document.querySelector('.sheet').getBoundingClientRect().height === 0 && document.querySelector('.sheet .sheet-close').hidden", { timeoutMs: 5000 });
 
   assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), [],
     "selecting a signal or opening its sheet reached a device route");

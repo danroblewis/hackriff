@@ -7,7 +7,8 @@
 //   1. NO MINIMAP — no `[data-viewport="minimap"]` row, and the panes run down to the canvas's own
 //      bottom inset (nothing is laid out below them).
 //   2. ZOOMING OUT REACHES THE WHOLE RANGE — pressing the cluster's Zoom-out, and nothing else,
-//      widens the pane until its own readout (`.hk-surface-where`) spans the device range.
+//      widens the pane until its own readout spans the device range (T-996: the scale block's
+//      `data-where`, the frame's own freqLabel — it was the retired row's `.hk-surface-where`).
 //   3. THE ACTIVE CAPTURE WINDOW IS STILL ON THE MAP — what only the minimap drew, a lit segment
 //      per SDR at the live edge, is now drawn in the zoomed-out pane: its colour (`DEVICE_MARKS[0]`
 //      in `surface/minimap.ts`) is found in the pane's newest rows.
@@ -46,7 +47,7 @@ let backendP = null;
 const backend = () => (backendP ??= ready());
 after(async () => { (await backendP?.catch(() => null))?.stop(); });
 
-/** The pane's frequency window, parsed from `.hk-surface-where` (canvas-journey.e2e.mjs's reading). */
+/** The pane's frequency window, parsed from the scale block's `data-where` (canvas-journey.e2e.mjs's reading since T-996). */
 function windowOf(where) {
   const m = /^([\d.]+) MHz ± ([\d.]+) (Hz|kHz|MHz|GHz)/.exec(where);
   assert.ok(m, `the pane readout is not a frequency window: ${JSON.stringify(where)}`);
@@ -54,7 +55,7 @@ function windowOf(where) {
   const centerHz = Number(m[1]) * 1e6, halfHz = Number(m[2]) * mult;
   return { loHz: centerHz - halfHz, hiHz: centerHz + halfHz, spanHz: 2 * halfHz };
 }
-const WHERE = `document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-where')?.textContent ?? ""`;
+const WHERE = `document.querySelector('.sf-scale')?.dataset.where ?? ""`;
 
 for (const [width, height] of [[1280, 800], [400, 800]]) test(`at ${width} x ${height} there is no minimap, and zooming out reaches the whole device range with the live capture window lit`, async (t) => {
   const be = await backend();
@@ -76,10 +77,11 @@ for (const [width, height] of [[1280, 800], [400, 800]]) test(`at ${width} x ${h
     `(${WHERE}).length > 0 && !!document.querySelector('.map-zoom-out')`, { timeoutMs: 30000 });
   await page.frames(3);
 
-  // 1. No minimap.
+  // 1. No minimap. T-996 retired the per-viewport rows from the app altogether, so no viewport row
+  // of either kind is drawn; a pane states itself by its own scale block, one per pane.
   assert.equal(await page.$count('.hk-surface-viewport[data-viewport="minimap"]'), 0,
     `a minimap viewport row is still drawn at ${width} px`);
-  assert.equal(await page.$count('.hk-surface-viewport[data-viewport="pane"]'), 1, "the page draws no pane");
+  assert.equal(await page.$count('.sf-scale'), 1, "the page draws no pane (or more than one)");
 
   // 2. Zoom out with the cluster's own control until the pane spans the device range.
   const before = windowOf(await page.eval(WHERE));
@@ -95,7 +97,7 @@ for (const [width, height] of [[1280, 800], [400, 800]]) test(`at ${width} x ${h
     `zooming out never reached the whole device range: ${w.loHz}-${w.hiHz} Hz of ${devLo}-${devHi} Hz`);
   // The readout states 3 significant figures at GHz, so the ends are known to ~5 MHz.
   assert.ok(w.loHz <= devLo + 10e6 && w.hiHz >= devHi - 10e6, `the zoomed-out pane is not the device range: ${w.loHz}-${w.hiHz}`);
-  assert.equal(await page.eval(`document.querySelector('.hk-surface-viewport[data-viewport="pane"]').getAttribute('data-following')`),
+  assert.equal(await page.eval(`document.querySelector('.sf-scale').dataset.following`),
     "true", "zooming out walked the pane off the live edge, so there is no live edge to light");
 
   // 3. The mock's active capture window, lit at the pane's live edge.

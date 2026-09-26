@@ -69,6 +69,19 @@ pub enum DemodError {
     Ddc(DdcError),
     /// A filter could not be designed.
     Design(DesignError),
+    /// T-980: the box carries no **on/off energy contrast** against its own pads, so it is not a
+    /// burst. A burst is an emission that started and stopped; a steady carrier, a receiver line
+    /// and plain noise all measure the same inside the box as either side of it, and demodulating
+    /// one mints a "burst" out of something that never happened.
+    ///
+    /// `contrast_db` is `None` when the snippet held too little pad to answer the question, which
+    /// refuses rather than guessing — a missing measurement is not a passing one.
+    NotABurst {
+        /// Measured box-over-pad power ratio, dB.
+        contrast_db: Option<f64>,
+        /// Least ratio that would have been a burst, dB.
+        required_db: f64,
+    },
 }
 
 impl fmt::Display for DemodError {
@@ -78,6 +91,17 @@ impl fmt::Display for DemodError {
             DemodError::Estimate(e) => write!(f, "estimation: {e:?}"),
             DemodError::Ddc(e) => write!(f, "DDC: {e:?}"),
             DemodError::Design(e) => write!(f, "filter design: {e:?}"),
+            DemodError::NotABurst {
+                contrast_db,
+                required_db,
+            } => match contrast_db {
+                Some(db) => write!(
+                    f,
+                    "not a burst: {db:.1} dB of on/off contrast against the pads, \
+                     {required_db:.1} dB needed"
+                ),
+                None => write!(f, "not a burst: too little pad to measure on/off contrast"),
+            },
         }
     }
 }

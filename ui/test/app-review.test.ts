@@ -10,7 +10,10 @@ import type { AnomalyRow } from "../src/alarms";
 import { alarmEmitterId, alarmRowView } from "../src/app/review/alarms";
 import { newBookmarkFromForm } from "../src/app/review/bookmarks";
 import { defaultReportParams } from "../src/app/review/report";
-import { bookmarksError, openReview, reviewInitial, setBookmarks, toggleReview } from "../src/app/review/slice";
+import {
+  bookmarksError, openReview, reviewInitial, REVIEW_TABS, SETTINGS_TABS, setBookmarks, tabGroup,
+  toggleReview,
+} from "../src/app/review/slice";
 import type { AppState } from "../src/app/state";
 
 function mkAnomaly(over: Partial<AnomalyRow> & { status: AnomalyRow["status"] }): AnomalyRow {
@@ -30,16 +33,42 @@ test("reviewInitial starts closed on the alarms tab with no region and an empty 
   assert.deepEqual(s.bookmarks, { list: [], loadedAtS: null, error: null });
 });
 
-test("toggleReview flips open without touching tab or region", () => {
-  const s0: Pick<AppState, "review"> = { review: { open: false, tab: "history", region: { loHz: 1, hiHz: 2 } } };
+test("toggleReview flips open without touching a review tab or the region", () => {
+  const s0: Pick<AppState, "review"> = { review: { open: false, tab: "report", region: { loHz: 1, hiHz: 2 } } };
   const p1 = toggleReview(s0 as unknown as AppState);
-  assert.deepEqual(p1.review, { open: true, tab: "history", region: { loHz: 1, hiHz: 2 } });
+  assert.deepEqual(p1.review, { open: true, tab: "report", region: { loHz: 1, hiHz: 2 } });
+});
+
+// T-1007: the drawer is shared with the settings panels, so the REVIEW button must open the review
+// group — the badge it carries counts alarms, and reopening onto the device controls would put
+// settings under it. Closing keeps the tab, so close/open returns where you were.
+test("toggleReview opens on the review group when the drawer last showed a settings panel", () => {
+  const s0 = { review: { open: false, tab: "device" as const, region: null } } as unknown as AppState;
+  assert.deepEqual(toggleReview(s0).review, { open: true, tab: "alarms", region: null });
+  // Open on a SETTINGS panel, Review switches to alarms rather than closing: the badge's button must
+  // not shut a drawer that is showing something else, or the count it carries becomes unreachable.
+  const onSettings = { review: { open: true, tab: "device" as const, region: null } } as unknown as AppState;
+  assert.deepEqual(toggleReview(onSettings).review, { open: true, tab: "alarms", region: null });
+  // Open on review, it is the toggle it has always been.
+  const onReview = { review: { open: true, tab: "alarms" as const, region: null } } as unknown as AppState;
+  assert.deepEqual(toggleReview(onReview).review, { open: false, tab: "alarms", region: null });
+});
+
+test("T-1007: every tab belongs to exactly one group, and nothing configurable is in Review", () => {
+  assert.deepEqual([...REVIEW_TABS], ["alarms", "report"]);
+  assert.deepEqual([...SETTINGS_TABS], ["device", "scheduler", "bookmarks"]);
+  for (const t of REVIEW_TABS) assert.equal(tabGroup(t), "review");
+  for (const t of SETTINGS_TABS) assert.equal(tabGroup(t), "settings");
+  // The drawer names the group it is showing, and the tab bar hides the other group's tabs.
+  const src = readFileSync("src/app/review/drawer.ts", "utf8");
+  assert.match(src, /title\.textContent = GROUP_TITLE\[group\];/);
+  assert.match(src, /btn\.hidden = tabGroup\(id\) !== group;/);
 });
 
 test("openReview sets open, tab and region (a selection's History action)", () => {
   const region = { loHz: 433e6, hiHz: 434e6, t0: 10, t1: 20 };
-  const p = openReview("history", region)();
-  assert.deepEqual(p.review, { open: true, tab: "history", region });
+  const p = openReview("report", region)();
+  assert.deepEqual(p.review, { open: true, tab: "report", region });
 });
 
 test("openReview defaults region to null", () => {

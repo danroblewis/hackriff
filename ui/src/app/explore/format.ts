@@ -86,7 +86,22 @@ export function unknownScoreText(c: Classification | null): string {
 
 /** The classification distribution as label/percentage pairs, highest first — read straight off
  * `classification.top` (≤ 5 posterior labels, `unknown` included), never re-ranked or filtered
- * here. Empty without a distribution yet. */
-export function classificationDistribution(c: Classification | null): { label: string; pct: number }[] {
-  return (c?.top ?? []).map((t) => ({ label: t.label, pct: Math.round(t.p * 100) }));
+ * here. Empty without a distribution yet.
+ *
+ * **Ties collapse into one entry (T-1011).** At a saturated open set the server spreads the
+ * residual uniformly over the families and sorts the tie alphabetically (docs/api.md: "a reader
+ * must not read an order into it"), so listing `analog 1% · css 1% · …` one per row would present
+ * the alphabet as a ranking. Adjacent labels whose posteriors are equal (the server's exact
+ * number, not the rounded percentage) become one entry with `tied` set and the labels joined; the
+ * `pct` stays per label. Presentation only: the values and their order are the server's. */
+export function classificationDistribution(
+  c: Classification | null,
+): { label: string; pct: number; tied: boolean }[] {
+  const out: { labels: string[]; p: number }[] = [];
+  for (const t of c?.top ?? []) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(last.p - t.p) <= 1e-9) last.labels.push(t.label);
+    else out.push({ labels: [t.label], p: t.p });
+  }
+  return out.map((g) => ({ label: g.labels.join(" · "), pct: Math.round(g.p * 100), tied: g.labels.length > 1 }));
 }

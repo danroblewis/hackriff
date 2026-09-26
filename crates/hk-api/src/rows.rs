@@ -259,8 +259,59 @@ impl RowSubscription {
     }
 }
 
+/// **How far forward the tune record reaches, over any band** — the evidence grey is decided
+/// from, and the route's own `as_of_s` rule (T-532) applied to a stream (T-468 review).
+///
+/// A row is pushed once and never again, so its coverage must be *final* when it goes: a row
+/// past the newest tune record would be rasterised `unobserved` because the record has not
+/// reached it yet, not because nothing looked — and with the IQ ring refused (T-588/T-596)
+/// the record's live edge is the open dwell, which trails the spectrum by up to a control
+/// tick. So the cursor delivers nothing past this instant. Over **any** band, because a record
+/// that reaches past a row elsewhere proves the absence here is real: the radio was somewhere
+/// else. `None` means wait (a record source exists and has reached nothing yet);
+/// `Some(i64::MAX)` means this server keeps no tune record at all, so every plane is
+/// uniformly `unobserved` and nothing will ever change that.
+///
+/// `cached` is the caller's own memo of the answer, which only ever grows: a sealed walk far
+/// behind the record never re-reads it. **One implementation, two routes** — `/ws/tiles/rows`
+/// (T-468) and `/ws/spectrum/rows` (T-1043) push a row once and never again, so both owe a row's
+/// coverage this same finality.
+pub(crate) fn record_reach(
+    state: &ApiState,
+    from_ns: i64,
+    want_ns: i64,
+    cached: &mut Option<i64>,
+) -> Option<i64> {
+    if let Some(r) = *cached
+        && r >= want_ns
+    {
+        return Some(r);
+    }
+    let from = cached.unwrap_or(from_ns);
+    let ev = crate::coverage::Evidence::collect(
+        state,
+        FreqRange::new(0.0, 1e12),
+        TimeRange::new(
+            Timestamp::from_unix_nanos(from),
+            Timestamp::from_unix_nanos(i64::MAX / 4),
+        ),
+    );
+    if !ev.has_source() {
+        *cached = Some(i64::MAX);
+        return *cached;
+    }
+    if let Some(t) = ev.newest_record {
+        let t = t.as_unix_nanos();
+        *cached = Some(cached.map_or(t, |r| r.max(t)));
+    }
+    *cached
+}
+
 /// `(data edge, watermark)` of the store, ns. The data edge is the end of the newest folded frame.
-fn edges(state: &ApiState, store: TileStore) -> Result<(Option<i64>, Option<i64>), ApiError> {
+pub(crate) fn edges(
+    state: &ApiState,
+    store: TileStore,
+) -> Result<(Option<i64>, Option<i64>), ApiError> {
     with_tile_history(state, store, |p| {
         let w = p.watermark().as_unix_nanos();
         Ok((
@@ -307,42 +358,14 @@ impl RowCursor {
         }
     }
 
-    /// **How far forward the tune record reaches, over any band** — the evidence grey is decided
-    /// from, and the route's own `as_of_s` rule (T-532) applied to a stream (T-468 review).
-    ///
-    /// A row is pushed once and never again, so its coverage must be *final* when it goes: a row
-    /// past the newest tune record would be rasterised `unobserved` because the record has not
-    /// reached it yet, not because nothing looked — and with the IQ ring refused (T-588/T-596)
-    /// the record's live edge is the open dwell, which trails the spectrum by up to a control
-    /// tick. So the cursor delivers nothing past this instant. Over **any** band, because a record
-    /// that reaches past a row elsewhere proves the absence here is real: the radio was somewhere
-    /// else. `Ok(None)` means wait (a record source exists and has reached nothing yet);
-    /// `Ok(Some(i64::MAX))` means this server keeps no tune record at all, so every plane is
-    /// uniformly `unobserved` and nothing will ever change that.
+    /// This cursor's [`record_reach`], cached: how far forward the tune record reaches.
     fn record_reach(&mut self, state: &ApiState, want_ns: i64) -> Option<i64> {
-        if let Some(r) = self.reach_ns
-            && r >= want_ns
-        {
-            return Some(r);
-        }
-        let from = self.reach_ns.unwrap_or_else(|| self.sub.row_ns(self.next));
-        let ev = crate::coverage::Evidence::collect(
+        record_reach(
             state,
-            FreqRange::new(0.0, 1e12),
-            TimeRange::new(
-                Timestamp::from_unix_nanos(from),
-                Timestamp::from_unix_nanos(i64::MAX / 4),
-            ),
-        );
-        if !ev.has_source() {
-            self.reach_ns = Some(i64::MAX);
-            return self.reach_ns;
-        }
-        if let Some(t) = ev.newest_record {
-            let t = t.as_unix_nanos();
-            self.reach_ns = Some(self.reach_ns.map_or(t, |r| r.max(t)));
-        }
-        self.reach_ns
+            self.sub.row_ns(self.next),
+            want_ns,
+            &mut self.reach_ns,
+        )
     }
 
     /// The subscription.
@@ -466,7 +489,15 @@ impl RowCursor {
                 .collect())
         })?;
         for &level in &order {
-            let o = read_rows(state, s.store, &key, level, self.window(a, b), nrows)?;
+            let o = read_rows(
+                state,
+                s.store,
+                &key,
+                key.cells,
+                level,
+                self.window(a, b),
+                nrows,
+            )?;
             tried.push(level);
             if o.observed_cells > 0 {
                 answered = Some((level, o));
@@ -536,10 +567,11 @@ impl RowCursor {
 
 /// Reads `nrows` output rows over `window` at `level`, chunked so no single history lock hold
 /// exceeds one tile chunk's ([`chunk_rows`]).
-fn read_rows(
+pub(crate) fn read_rows(
     state: &ApiState,
     store: TileStore,
     key: &TileKey,
+    nf: usize,
     level: u8,
     window: TimeRange,
     nrows: usize,
@@ -549,7 +581,7 @@ fn read_rows(
     })?
     .max(1);
     let t0 = window.start.as_unix_nanos();
-    let cells = key.cells;
+    let cells = nf;
     let freq: FreqRange = key.region.freq;
     let mut out = vec![OverviewCell::UNOBSERVED; nrows * cells];
     let mut unit = None;
