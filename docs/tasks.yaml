@@ -31947,7 +31947,6 @@ tasks:
     milestone: M2-hardening
     title: "RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam"
     status: in-progress
-    branch: task-t1083
     priority: P1
     deps: []
     parallel_group: PIPE-RDS-LOOP
@@ -31962,6 +31961,16 @@ tasks:
     notes: |
       FOUND BY rc-20260926: RC P1: acceptance tutorial_rds signal_062 rds recipe agreement 0.200 with the oracle - T-926's full-length windows cross the looping recording's seam
     high_effort_reason: RDS decode timing across a replay loop on the real-time chain window path (T-926 follow-up); hard debugging
+    branch: task-t1083
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 08:38).
+      The ticket's premise was wrong: the cause is T-938 (06b0d1e9, landed 09-25 after the last green RC at 92d0f6f1), not T-926's full-length windows. T-938 made the RDS recipe refine its centre from the processed output (refine.objective.builtin wfm-pilot), and each accepted refinement is applied as a hot edit that bumps edit_rev to 1. tutorial_rds's agreement filter kept only frames with edit_rev == 0, so it counted just the groups decoded before the first refinement: 9 of the oracle's 45. It reproduced alone on the old code (agreement 0.200). Position dump from that run: every CRC-valid recipe group sat within 0.5 bit of its oracle position in both loop passes, so nothing is mis-timed across the loop seam. The mistake was in the test, not the product. The fix counts every group decoded before the tutorial's own edit. It asserts that the pipeline's revision before that edit equals refinement.applied_edit_rev (no revision came from anything but the refinement) and that no frame carries a newer revision. The tutorial's hot edit must now take a revision after that one, instead of the hard-coded 1. The 0.9 agreement bar and conflict == 0 are unchanged. Green alone 3/3: agree 45/45, conflict 0, agreement 1.000, hot edit and save included. Tests exposed to a WFM window crossing a loop seam: every looping fixture is 5.0 s (explorer-2026-09-25 fm-*, fm_100p8M_..._5s) against a 4 s WFM window plus pre_s, so a window opening more than about 1 s into a pass crosses the splice. Looped runs over the analog WFM chain: crates/hk-pipeline/tests/t971_rds_follow.rs (MockEnd::Loop, 5 passes of fm-101p3); signal_062_dense_fm_pipeline.rs t129 (2 s scene x3, which T-926 deliberately kept, occupancy only); the e2e blind_live (MockEnd::Loop) callers acceptance/listen.rs and signal_062 (the 062 pi-label test passed in the RC); tests/e2e/tests/refine.rs, listen_live.rs, concurrent_demod.rs. The recipe/Listen tests (tutorial_*, recipe_*, listen_*) read the ring directly and are not WFM-window-bound.
+      Tests: cargo nextest run -p hk-e2e -E 'binary(acceptance_m0) & test(/signal_062_rds_recipe_decodes_blind/)' (old test, main 92cebf1f) -> exit 100 (group agreement 0.200: agree 9, missing 36, conflict 0; reproduces the RC alone); cargo nextest run -p hk-e2e -E 'binary(acceptance_m0) & test(/signal_062_rds_recipe_decodes_blind/)' (run 1) -> exit 0 (agree 45/45, conflict 0, agreement 1.000); cargo nextest run -p hk-e2e -E 'binary(acceptance_m0) & test(/signal_062_rds_recipe_decodes_blind/)' (run 2) -> exit 0 (agree 45/45, conflict 0, agreement 1.000); cargo nextest run -p hk-e2e -E 'binary(acceptance_m0) & test(/signal_062_rds_recipe_decodes_blind/)' (run 3) -> exit 0 (agree 45/45, conflict 0, agreement 1.000)
+      precheck exit 0
+      Commits: 0b1053ea
+      Observed, not chased: T-938 changed a shipped recipe (rds.recipe.json schema 3, refine now active) without running the acceptance tier. The merge gate's check tier never runs tutorial_rds, so this red could only surface at the RC. | Debug-build runtime of this test is 155-240 s on a loaded box (RC release: 18 s). The pipeline had not been seen running past the tutorial edit since T-938; it now does, and saves version 2.
+      Use cases: SIGNAL-062
+      Resources: 193 CPU-s, peak 3.8 GB
   - id: T-1084
     milestone: MUI
     title: "RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands"
