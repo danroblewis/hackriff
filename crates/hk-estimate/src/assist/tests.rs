@@ -2,6 +2,7 @@
 //! structure; the assist is never told the answer, and the hidden truth appears only in asserts.
 
 use super::*;
+use hk_model::synth::tally::CheckTally;
 
 struct Rng(u64);
 
@@ -491,6 +492,65 @@ fn assist_noise_gives_no_confident_sync() {
             st.syncs
         );
         assert!(st.block_codes.iter().all(|c| c.score < 0.2), "{st:?}");
+    }
+}
+
+/// Short 902–928 MHz sensor frames with a byte-wide CRC — the canonical ISM shape — must keep
+/// their credited differences (T-921 review).
+///
+/// ADR-0022 §4.3.1's count is taken per candidate width, not once at the cell's widest, because
+/// the degenerate guard trims `w` bits off each end and a *wider* trim leaves a *shorter* span,
+/// which reads constant or two-period far more often. Trimming a 34-bit frame at 32 leaves two
+/// bits, constant half the time; measured on random spans, a max-width trim refuses 75 % of
+/// 34-bit, 44 % of 36-bit and 16 % of 40-bit frames that the `crc` block at w = 8 counts. The
+/// search would then quietly stop suggesting a real CRC-8 on exactly the frames it exists for.
+#[test]
+fn assist_short_ism_frames_keep_their_credited_differences() {
+    // 8-bit id, 4-bit channel, N-bit reading, CRC-8 — 34, 36 and 40 bits in total.
+    for reading in [14usize, 16, 20] {
+        let mut rng = Rng(0x5EED_0921 + reading as u64);
+        let ids: Vec<u64> = (0..4).map(|_| rng.below(1 << 8)).collect();
+        let frames: Vec<Vec<u8>> = (0..24)
+            .map(|i| {
+                let mut f = Vec::new();
+                push(&mut f, ids[i % ids.len()], 8);
+                push(&mut f, (i % 4) as u64, 4);
+                push(&mut f, rng.below(1 << reading), reading);
+                let c = crc_bits(&f, 0x12F, 8, 0, 0);
+                push(&mut f, c, 8);
+                f
+            })
+            .collect();
+        let len = 20 + reading;
+        assert_eq!(frames[0].len(), len);
+        let r = search_codes(&frames, &CodeSearchConfig::default());
+        let c = r
+            .codes
+            .iter()
+            .find(|c| c.width == 8)
+            .unwrap_or_else(|| panic!("a CRC-8 at {len} bits, got {:?}", r.codes));
+        assert_eq!(
+            (c.generator, c.start_bit, c.tail_bits),
+            (0x12F, 0, 0),
+            "{c:?}"
+        );
+        // The invariant, stated against the block path rather than against a guessed number:
+        // what a `crc` block of this width would credit over the same spans is what the search
+        // must credit, less the one class constant. The guard does refuse some of these frames
+        // even at w = 8 — `is_short_periodic` calls an 18-bit span periodic on two matching bit
+        // pairs, so a 34-bit frame loses ~43 % — but the search must lose no MORE than the block.
+        let mut block = CheckTally::default();
+        for f in &frames {
+            block.record(f, true, 8.0, 8);
+        }
+        assert!(
+            c.differences as u64 + 1 >= block.independent(),
+            "{len} bits: the search credits {} of 24, the crc block at w=8 credits {} — the \
+             search must not be the weaker of the two. {c:?}",
+            c.differences,
+            block.independent()
+        );
+        assert!(c.score > 0.5, "{len} bits: {c:?}");
     }
 }
 

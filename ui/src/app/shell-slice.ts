@@ -2,7 +2,8 @@
 // nav, toast. `device` is T-150's alone (the top bar's reduction of `/api/control/state`); T-155's
 // Device tab keeps the full control state it needs in its own review slice, never here.
 import type { CenterGrid, FftBounds } from "../navigation";
-import type { CaptureState } from "../controls/model";
+import type { AttachedDevice } from "../surface/panedevice";
+import type { CaptureState, ScanState } from "../controls/model";
 import type { AppState } from "./state";
 
 /** T-264 (ADR-0017 TM-8): `history` is the durable all-time catalogue (workflow #3), a surface of
@@ -28,6 +29,16 @@ export interface DeviceSlice {
    * reports no identity. A retune is a device action recorded against this id, so the UI names the
    * radio it is about to move. Null means *nothing said*, never "some default device". */
   deviceId: string | null;
+  /**
+   * **Every live front end this run holds** (T-1006), from `/api/control/state`'s `devices[]`
+   * (T-511): `[]` on a replay, one entry on a single-SDR run, N when N are composed.
+   *
+   * Here rather than in the Device tab's own slice because it is not a device *setting* — it is the
+   * list a **pane** picks its coverage selector from and the list a retune names a `device_id` out
+   * of, so the surface needs it on the same 2 s poll as the rest of this slice. `deviceId` above
+   * stays the singular default (null with several, because then there is no "the" device).
+   */
+  devices: readonly AttachedDevice[];
   /** The centre axis of the achievable grid (T-341): the tunable bounds and the tuning step, from
    * `/api/control/state`'s `device`. Null before the state loads or on a run with no device; a
    * `center_step_hz` of null means the source cannot state a step, and then **nothing snaps**. */
@@ -43,17 +54,31 @@ export interface DeviceSlice {
    * reject on a device it has not been told about.
    */
   fftBounds: FftBounds | null;
+  /** T-1008: `/api/control/state`'s `scan` (T-452) as served — the compact form, without windows —
+   * so the map's scan overlay learns of a sweep and its progress from the poll that already runs.
+   * Null on a replay (nothing can be swept) or before the state loads. */
+  scan?: ScanState | null;
   /**
    * T-1007 (over T-511's `devices`): every live front end, for the ⋯ settings menu's list and for
    * the per-pane choice of whose coverage decides a pane's grey. `[]` on a replay, on a server that
    * does not send the list, or before the state loads — never a list invented from the singular
    * `device`, which is null exactly when the run holds more than one.
+   *
+   * Beside T-1006's `devices` (above), not instead of it: that list keeps only the ADDRESSABLE front
+   * ends (a `device_id` a selector can name), which is what a pane pin and a retune need; this one
+   * keeps every entry the server listed, with its kind, because the settings menu states each radio —
+   * including one that reports no id ("this source reports no device id"). Named apart so the two
+   * readings of one wire list cannot be confused (integration of T-1006 and T-1007).
    */
-  devices: readonly DeviceEntry[];
+  frontEnds: readonly FrontEnd[];
+  /** T-1009: every front end's sweep (`/api/control/state`'s `scans`), so a scan plan bound to a
+   * chosen radio follows THAT radio's sweep — with two SDRs the default one's state says nothing
+   * about a sweep started on the other. `[]` on a replay or before the state loads. */
+  scans?: readonly ScanState[];
 }
 
 /** One front end as the shell reduces it: its identity, what it is, and what it is tuned to now. */
-export interface DeviceEntry {
+export interface FrontEnd {
   deviceId: string | null;
   driver: string;
   kind: "hardware" | "replay";
@@ -107,7 +132,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null, devices: [] },
+  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, devices: [], centerGrid: null, fftBounds: null, frontEnds: [], scans: [] },
   nav: { gotoHz: null, gotoSpanHz: null, gotoTS: null, gotoSpanS: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,

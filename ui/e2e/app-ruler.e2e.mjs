@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
 import { startBackend } from "./backend.mjs";
-import { FOLLOWING } from "./app-chrome.mjs";
+import { FOLLOWING, liveBtn } from "./app-chrome.mjs";
 
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 let backendP = null;
@@ -99,10 +99,10 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the time ruler 
 
   // Frozen pane, then both modes again.
   assert.ok(await page.eval(FOLLOWING), "the pane should be following before the scrub");
-  // Freeze the pane on its window (the FAB, an explicit pause). No drag afterwards: a pan that ends
-  // at the tuned live edge re-follows by design (T-955), which would make this assertion depend on
-  // the viewport's geometry rather than on the ruler.
-  await page.click("document.querySelector('.map-fab')");
+  // Freeze the pane on its window (T-1001: that pane's OWN Live button, an explicit pause). No drag
+  // afterwards: a pan that ends at the tuned live edge re-follows by design (T-955), which would
+  // make this assertion depend on the viewport's geometry rather than on the ruler.
+  await page.click(liveBtn(1));
   await page.waitFor("the pane to freeze", `!(${FOLLOWING})`, { timeoutMs: 10000 });
   await page.frames(5);
   assert.equal(await page.eval(FOLLOWING), false, "the frozen pane resumed following");

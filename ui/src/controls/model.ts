@@ -81,7 +81,13 @@ export interface ScanPlan {
   bin_hz?: number | null;
   steps: number;
   warnings: string[];
+  /** T-1008: every step's slice, in visit order — only on the scan routes' answers (`GET` with
+   * `windows=1`, and a start's answer), never on the polled `/api/control/state`. What the map's
+   * scan overlay draws: the engine's own steps, never a tiling of the client's. */
+  windows?: ScanWindow[];
 }
+/** T-1008: one step of a plan, as served. */
+export interface ScanWindow { step: number; lo_hz: number; hi_hz: number; center_hz: number }
 /** T-517: how far a sweep step advances. `coarse` is fewer, wider windows at the same bin width. */
 export type ScanStep = "fine" | "coarse";
 
@@ -97,6 +103,9 @@ export interface ScanBudget {
 export interface ScanProgress {
   step: number; steps: number; pass: number; steps_done: number;
   center_hz: number | null; started_s: number; step_started_s: number | null; next_step_in_s: number;
+  /** T-1008: the step being dwelt on now (running only; null before the first step and while
+   * yielded). `step` is the NEXT one to tune. Optional only for a server older than it. */
+  dwell_step?: number | null;
 }
 /** Why the sweep stopped stepping (T-452). `to` is a device-action name, or `"step_failed"`. */
 export interface ScanYielded { to: string; at_s: number; step: number; detail: string }
@@ -104,6 +113,8 @@ export interface ScanState {
   state: "idle" | "running" | "yielded";
   available: boolean;
   unavailable_reason: string | null;
+  /** T-1008: the front end this sweep drives; null when the source reports no identity. */
+  device_id?: string | null;
   plan: ScanPlan | null;
   budget: ScanBudget | null;
   progress: ScanProgress | null;
@@ -111,23 +122,37 @@ export interface ScanState {
 }
 
 /**
- * One live front end of `GET /api/control/state`'s `devices` (T-511), in composition order: `[]` on a
- * replay, one entry on a single-SDR run (the same radio the singular `device`/`tuning` describe), N
- * when N are composed. The list a client picks a `device_id` selector from — and the list the ⋯
- * settings menu names the radios from (T-1007).
+/**
+ * One front end on `/api/control/state`'s `devices[]` (T-511): the list a client picks a `device_id`
+ * selector from (T-1006) and the list the ⋯ settings menu names the radios from (T-1007). `[]` on a
+ * replay, one entry on a single-SDR run — the same device the singular `device`/`tuning` describe —
+ * and N when N are composed, where those two are `null` because then there is no "the" device to
+ * describe. `device`/`tuning` are nullable here (T-1007's reading): a client never assumes a field
+ * the server did not send.
+ *
+ * Optional on [[ControlState]] only because a server older than T-511 does not send it; a missing
+ * list reads as "this server names no front ends", never as "there are none".
  */
-export interface ControlDevice { device_id: string | null; device: DeviceCaps | null; tuning: Tuning | null }
+export interface DeviceEntry {
+  device_id: string | null;
+  device: DeviceCaps | null;
+  tuning: Tuning | null;
+}
 
 export interface ControlState {
   live: boolean;
   device: DeviceCaps | null;
+  /** Every live front end, in composition order (T-511). See [[DeviceEntry]]. */
+  devices?: DeviceEntry[];
   tuning: Tuning | null;
-  /** T-511: every live front end. Absent on a server older than T-511; never assume one from `device`. */
-  devices?: ControlDevice[];
   run: Run | null;
   /** T-452: the survey sweep, beside the tuning it moves. `null` when nothing can sweep this
    * source (a replay), so the panel disables the control with a reason rather than hiding it. */
   scan: ScanState | null;
+  /** T-1009: one sweep per live front end, each naming its own `device_id` — the enumeration a
+   * multi-SDR client picks from, as `devices` is beside `device`. `scan` above stays the run's
+   * DEFAULT front end's. `[]` on a replay, and absent from an older server. */
+  scans?: ScanState[];
   display_limits: DisplayLimits | null;
   transmit: { available: false; reason: string };
   audit: boolean;

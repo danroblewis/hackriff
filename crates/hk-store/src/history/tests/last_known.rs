@@ -788,3 +788,134 @@ fn a_pinned_search_looks_back_no_further_than_its_reach() {
         "B's block is past the reach: the ladder's"
     );
 }
+
+/// T-1034: band A (16–20 kHz) for `T0 .. T0+5 s`, then the radio moves to band B (24–28 kHz) —
+/// **the same 16 kHz frequency block** — and stays there to `T0+100 s`. Every 10 s time block after
+/// the departure holds a tile over A's range, and none of it is A's.
+fn departed_beside_a_neighbour(dir: &TempDir) -> Pyramid {
+    let mut p = Pyramid::open(&dir.0, ladder()).unwrap();
+    let a = vec![lin(-60.0); 4];
+    let b = vec![lin(-70.0); 4];
+    for k in 0..5 {
+        p.ingest(&frame(T0 + k * S, S, 16_000.0, 1000.0, &a))
+            .unwrap();
+    }
+    for k in 5..100 {
+        p.ingest(&frame(T0 + k * S, S, 24_000.0, 1000.0, &b))
+            .unwrap();
+    }
+    p.seal_through(ts(T0 + 2000 * S)).unwrap();
+    p
+}
+
+fn pinned_over_a(p: &Pyramid, total: usize, quiet: Option<Vec<i64>>) -> LastKnown {
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(16_000.0, 20_000.0),
+        ts(T0 + 100 * S),
+        4,
+        0,
+        1_000_000,
+        total,
+    );
+    if let Some(q) = quiet {
+        s = s.quiet_after(q);
+    }
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    s.finish()
+}
+
+/// **T-1034: time the caller's tune record proves a column unobserved costs no read to cross.**
+///
+/// The block-level skip (T-911) cannot see it: a time block spans far more frequency than a tile,
+/// so after a small retune the new window holds a tile in the departed band's frequency block in
+/// every block, and each was read in full for nothing. With a budget of four blocks' rows, the
+/// search stopped nine blocks short of the band's last row and left it unsearched — measured on
+/// the mock SDR as blank columns at the finest level after a +½-span nudge. Told the columns were
+/// quiet after the departure, it reads the departure's block and nothing else.
+#[test]
+fn a_pinned_search_crosses_the_time_a_record_proves_quiet_without_reading_it() {
+    let dir = TempDir::new("lastknown-pinned-quiet");
+    let p = departed_beside_a_neighbour(&dir);
+    // Four columns x 10 rows = 40 cells a block: 160 affords four blocks of the nine B fills.
+    let budget = 160;
+
+    // RED without the record: the budget runs out inside B's blocks.
+    let blind = pinned_over_a(&p, budget, None);
+    assert!(
+        blind.cells.iter().all(|c| !c.found()),
+        "the fixture must exhaust the budget before A's block: {:?}",
+        blind.stages
+    );
+    assert!(blind.stages.iter().any(|s| s.skipped), "{:?}", blind.stages);
+
+    // The record: nothing over A after the departure.
+    let k = pinned_over_a(&p, budget, Some(vec![T0 + 5 * S; 4]));
+    for (f, c) in k.cells.iter().enumerate() {
+        assert_eq!(
+            (c.max_db, c.level, c.t_ns),
+            (-60.0, 0, T0 + 5 * S),
+            "A col {f} carries its last live row: {c:?}"
+        );
+    }
+    assert!(
+        k.stages.iter().all(|s| !s.skipped),
+        "nothing is left unsearched: {:?}",
+        k.stages
+    );
+    // One stage, and only the rows up to the departure: the end is the record's instant rounded
+    // up to the row, never the block's end.
+    assert_eq!(k.stages.len(), 1, "one block read: {:?}", k.stages);
+    assert_eq!(
+        (k.stages[0].from_ns, k.stages[0].to_ns),
+        (T0, T0 + 5 * S),
+        "{:?}",
+        k.stages
+    );
+    assert_eq!(k.source_cells, 4 * 5, "{:?}", k.stages);
+
+    // The bound is the newest over the columns STILL UNRESOLVED: one column the record says was
+    // looked at up to the end keeps the newest block in the search, and once that block resolves
+    // it (B's value is not in A's column, so here it does not) the rest still jump.
+    let k = pinned_over_a(
+        &p,
+        1_000_000,
+        Some(vec![T0 + 5 * S, T0 + 5 * S, T0 + 5 * S, T0 + 100 * S]),
+    );
+    assert!(
+        k.cells.iter().all(|c| c.t_ns == T0 + 5 * S),
+        "{:?}",
+        k.cells
+    );
+    assert!(k.stages.iter().all(|s| !s.skipped), "{:?}", k.stages);
+
+    // A claim at or after `before` is no claim: the search is the blind one.
+    // (Compared by stages and cells found: an unfound cell's value is NaN.)
+    let same = |k: &LastKnown| k.stages == blind.stages && k.found() == blind.found();
+    assert!(same(&pinned_over_a(
+        &p,
+        budget,
+        Some(vec![T0 + 100 * S; 4])
+    )));
+    // A vector of the wrong length is ignored.
+    assert!(same(&pinned_over_a(&p, budget, Some(vec![T0 + 5 * S; 3]))));
+}
+
+/// T-1034: the ladder given no budget at all — a pinned search before it spent every cell — says
+/// the past it stands for was not read, rather than answering "nothing found" in silence.
+#[test]
+fn a_ladder_with_no_budget_left_reports_its_window_unsearched() {
+    let dir = TempDir::new("lastknown-zero-budget");
+    let p = swept(&dir);
+    let k = search(&p, 300, None, 0);
+    assert!(k.cells.iter().all(|c| !c.found()));
+    let skipped: Vec<_> = k.stages.iter().filter(|s| s.skipped).collect();
+    assert_eq!(skipped.len(), 1, "{:?}", k.stages);
+    assert!(
+        skipped[0].from_ns <= T0 && skipped[0].to_ns == T0 + 300 * S,
+        "{:?}",
+        skipped[0]
+    );
+}

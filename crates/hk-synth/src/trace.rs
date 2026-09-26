@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// ADR-0021 §9.3: the Explanation TYPE is shared vocabulary (hk-model); the code that COMPUTES
+// one lives in hk-context, which this crate must never depend on.
+use hk_model::repo::synthesis::Explanation;
+
 use crate::candidate::{Scale, SeedSource};
 use crate::evidence::MetricId;
 use crate::result::Verdict;
@@ -767,9 +771,16 @@ pub struct Resolution {
     /// ADR-0021 §5 (M-9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_key: Option<Value>,
-    /// ADR-0021 §9.3: attached **after** the object is sealed, modifying nothing above.
+    /// ADR-0021 §9.3: ranked known-signal suggestions, attached **after** this object is sealed
+    /// and modifying nothing above it.
+    ///
+    /// The type comes from `hk-model`, not from `hk-context`, deliberately: **`hk-synth` does not
+    /// depend on `hk-context` and must not** (ADR-0021 §9.3), so the search can neither compute a
+    /// suggestion nor read one it did not put here. `hk-pipeline::synth` hands `hk-context` an
+    /// immutable `&Resolution` and gets back only this vector to attach; the direction is held by
+    /// `tests/explanation_boundary.rs`, not by this comment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub explanations: Vec<Value>,
+    pub explanations: Vec<Explanation>,
     /// `not-searched` after a cancelled or failed job: when that was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attempt: Option<String>,

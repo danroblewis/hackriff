@@ -398,7 +398,7 @@ pub(super) fn observation_spans(conn: &Connection, id: EmitterId) -> Result<Vec<
     let mut spans: Vec<Span> = conn
         .prepare_cached(
             "SELECT source_kind = 'track', t_start, t_end, count FROM emitter_observation \
-             WHERE emitter_id = ?1",
+             WHERE emitter_id = ?1 AND source_kind != 'track-live'",
         )?
         .query_map([blob(id)], |r| {
             Ok(Span {

@@ -53,13 +53,13 @@ use hk_detect::clip::is_clipped_ci8;
 use hk_detect::track::TrackSummary;
 use hk_detect::{
     BandProfile, BurstConfig, BurstDetector, ClipCount, Confirmation, DetectionProfile,
-    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, LiveExtent,
-    TrackBatch, TrackEvent, Tracker, TrackerConfig,
+    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, FrontEndMonitor,
+    LiveExtent, TrackBatch, TrackEvent, Tracker, TrackerConfig,
 };
 use hk_dsp::floor::{FloorConfig, FloorEvent, NoiseFloorTracker};
 use hk_dsp::window::WindowKind;
 use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
-use hk_model::{DetectionId, FreqRange, Timestamp, TrackId, TrustVerdict};
+use hk_model::{DetectionId, FreqRange, TimeRange, Timestamp, TrackId, TrustVerdict};
 use num_complex::Complex;
 
 use crate::dc_twin::{LiveDcTwins, Observed};
@@ -113,6 +113,14 @@ pub(crate) const CAPTURE_NAME_SAMPLES: usize = 16_384;
 /// Dense-frame indices kept for flagging records (records never span more frames).
 const DENSE_MEMORY_FRAMES: u64 = 1 << 20;
 /// Longest end-of-stream wait for the writer.
+/// T-981: how long the detection reader remembers a front-end event's frames, s — longer than the
+/// detector's longest box (1 s) plus its impulsive aggregation, so a record emitted late still
+/// finds the event it spans.
+const FRONTEND_MEMORY_S: f64 = 10.0;
+
+/// T-981: the share of the tuned window a record must cover to be "whole-span".
+const FRONTEND_WIDE_FRACTION: f64 = 0.5;
+
 const SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 /// Ring chunks between samples of this reader's CPU clock (T-939; ~0.2 s at 20 Msps).
 const CPU_SAMPLE_CHUNKS: u64 = 64;
@@ -360,6 +368,11 @@ struct DetectNode {
     batch: TrackBatch,
     carry: WriteBatch,
     clips: VecDeque<u64>,
+    /// T-981: the front-end judgement of this reader's own frames ([`crate::frontend`]).
+    frontend: FrontEndMonitor,
+    /// T-981: sample ranges of the frames judged front-end events, merged, oldest first; kept for
+    /// [`FRONTEND_MEMORY_S`] so a record closed late still finds the event it spans.
+    frontend_spans: VecDeque<Range<u64>>,
     pending: Vec<DetectionRecord>,
     pending_floor: Vec<FloorEvent>,
     closed: Vec<TrackEvent>,
@@ -435,6 +448,8 @@ impl DetectNode {
             batch: TrackBatch::new(),
             carry: WriteBatch::default(),
             clips: VecDeque::new(),
+            frontend: FrontEndMonitor::default(),
+            frontend_spans: VecDeque::new(),
             pending: Vec::new(),
             pending_floor: Vec::new(),
             closed: Vec::new(),
@@ -491,6 +506,7 @@ impl DetectNode {
             self.clips.pop_front();
         }
         let clipped = self.clips.partition_point(|&i| i < b) as u64;
+        self.judge_front_end(frame, clipped);
         let mut floor_events = std::mem::take(&mut self.pending_floor);
         let t_frame = Instant::now();
         let floor = self.floor.update(frame, |e| floor_events.push(e.clone()));
@@ -511,6 +527,11 @@ impl DetectNode {
         add(&rc.detector_ns, t_floor.elapsed().as_nanos() as u64);
         self.pending_floor = floor_events;
         self.now_ns = frame.t.host_time.as_unix_nanos();
+        // T-978: one atomic load per frame in the steady state; a snapshot is taken only when the
+        // inventory has an overlap it could not resolve from the rows (`crate::overlap`).
+        self.shared
+            .region_spectrum
+            .publish(|| self.det.integrated_snapshot());
 
         let stats = self.det.stats();
         let (segments, dense, dropped, frames) = (
@@ -559,6 +580,46 @@ impl DetectNode {
         );
     }
 
+    /// T-981: judges `frame` by the spectrum reader's own rule and remembers the event frames.
+    fn judge_front_end(&mut self, frame: &SpectrumFrame, clipped: u64) {
+        let (a, b) = (
+            frame.t.sample_index,
+            frame.t.sample_index + frame.sample_count,
+        );
+        let verdict = self.frontend.observe(
+            &frame.spectrum.psd,
+            ClipCount::new(clipped, frame.sample_count),
+            &frame.provenance.get().tune,
+        );
+        if verdict.event {
+            match self.frontend_spans.back_mut() {
+                Some(last) if last.end >= a => last.end = last.end.max(b),
+                _ => self.frontend_spans.push_back(a..b),
+            }
+        }
+        let keep = a.saturating_sub((FRONTEND_MEMORY_S * self.shared.fs) as u64);
+        while self.frontend_spans.front().is_some_and(|s| s.end < keep) {
+            self.frontend_spans.pop_front();
+        }
+    }
+
+    /// T-981: `r` is a front-end event's energy, not a signal's: it spans a frame judged a
+    /// front-end event **and** it is whole-span — impulsive (the detector's broadband class) or at
+    /// least [`FRONTEND_WIDE_FRACTION`] of the tuned window. A narrow emission over the same frames
+    /// (often the very burst that overloaded the front end) is kept, flagged `clipped` as before.
+    fn is_front_end_event(&self, r: &DetectionRecord) -> bool {
+        let overlaps = self
+            .frontend_spans
+            .iter()
+            .any(|s| s.start < r.samples.end && r.samples.start < s.end);
+        if !overlaps {
+            return false;
+        }
+        let rate = r.provenance.get().tune.sample_rate_hz;
+        r.detection.flags.impulsive
+            || (rate > 0.0 && (r.f_hi_hz - r.f_lo_hz).abs() >= FRONTEND_WIDE_FRACTION * rate)
+    }
+
     /// A short-burst detection (T-075): stored untracked (never offered to the tracker).
     fn push_burst(&mut self, r: DetectionRecord) {
         inc(&self.shared.counters.detect.detections);
@@ -575,6 +636,12 @@ impl DetectNode {
         for ev in evs {
             match ev {
                 Owned::Det(mut r) => {
+                    if self.is_front_end_event(&r) {
+                        // T-981: never stored as a detection; the event itself is on the canvas
+                        // (`GET /api/frontend/events`) and in `/api/status`.
+                        inc(&shared.counters.frontend.suppressed_detections);
+                        continue;
+                    }
                     inc(&dc.detections);
                     if self.spans_dense(&r.frames) {
                         r.detection.flags.dense_skipped = true;
@@ -951,6 +1018,10 @@ struct Writer {
     live_reviews: Vec<TrackSummary>,
     /// The latest observed extents (T-388), replaced by each batch and published by [`Writer::write`].
     live_extents: Vec<LiveExtent>,
+    /// T-940: [`Self::live_extents`] arrived since the last write pass and has not yet been
+    /// reported to the observation ledger. A kept list is never re-reported: a report after the
+    /// track's close would mark its final row followed again.
+    extents_unreported: bool,
     /// The `presence` stream: track→emitter bindings the offers teach it, and the tick gate.
     presence: PresenceStream,
     floor: Vec<FloorEvent>,
@@ -983,6 +1054,13 @@ impl Writer {
         };
         let site = shared.cfg.settings.site.map(|s| Site::new(s[0], s[1]));
         let presence = PresenceStream::new(shared.cfg.stream_sink.as_ref())?;
+        // T-978: the inventory resolves an unresolved overlap against the spectrum, which lives on
+        // the reader. It asks through this handle and the reader answers; see `crate::overlap`.
+        shared
+            .inventory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .region_spectrum(Arc::clone(&shared.region_spectrum));
         Ok(Self {
             detections: DetectionWriter::new(shared.cfg.settings.detection_batch),
             shared,
@@ -992,6 +1070,7 @@ impl Writer {
             live: Vec::new(),
             live_reviews: Vec::new(),
             live_extents: Vec::new(),
+            extents_unreported: false,
             presence,
             floor: Vec::new(),
             anomalies,
@@ -1031,6 +1110,7 @@ impl Writer {
         }
         if !live_extents.is_empty() {
             self.live_extents = live_extents;
+            self.extents_unreported = true;
         }
         self.floor.extend(floor);
         self.now_ns = self.now_ns.max(now_ns);
@@ -1043,6 +1123,7 @@ impl Writer {
             || !self.closed.is_empty()
             || !self.live.is_empty()
             || !self.floor.is_empty()
+            || self.extents_unreported
     }
 
     /// T-410 (ADR-0019): one presence tick — publish the **endpoints** of each open track's
@@ -1264,6 +1345,40 @@ impl Writer {
                 }
             }
         }
+        // T-940: then report every open track the inventory has given a row, so an emission
+        // still on the air reads **live** on the poll between sightings. The live offer refreshes
+        // a row every `LIVE_OFFER_NS` (5 s), and a track bound through a chain — a WFM station —
+        // had no track row at all, while `/api/inventory` closes an interval after 1 s under a
+        // live dwell: every on-air FM station read `ended` (staging, 2026-09-25). The report
+        // carries the measured end and the silence the tracker *observed* since it, never a clock
+        // read, so it can only say how far the emission was measured and whether the tracker has
+        // seen it stop.
+        //
+        // After the offers (an offer may bind the track this pass) and before the closes (a close
+        // must be the last word on its row). Creates no entry: a track with no binding is not
+        // reported, which is T-388's gate. Chunked like the rest of this stage (T-941).
+        if std::mem::take(&mut self.extents_unreported) {
+            for chunk in self.live_extents.chunks(INVENTORY_LOCK_CHUNK) {
+                let mut repo = shared.repo();
+                let inv = shared
+                    .inventory
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                for e in chunk {
+                    let Some(emitter) = inv.emitter_of_track(e.track) else {
+                        continue;
+                    };
+                    let seen = TimeRange::new(
+                        Timestamp::from_unix_nanos(e.t_start_ns),
+                        Timestamp::from_unix_nanos(e.t_end_ns.max(e.t_start_ns)),
+                    );
+                    match repo.follow_track(emitter, e.track, seen, e.observed_silence_ns) {
+                        Ok(()) => inc(&dc.tracks_followed),
+                        Err(_) => inc(&dc.db_errors),
+                    }
+                }
+            }
+        }
         while !self.closed.is_empty() {
             let n = self.closed.len().min(INVENTORY_LOCK_CHUNK);
             let mut repo = shared.repo();
@@ -1273,6 +1388,18 @@ impl Writer {
                 .unwrap_or_else(PoisonError::into_inner);
             for e in self.closed.drain(..n) {
                 if inv.track_event(&mut repo, &e).is_err() {
+                    inc(&dc.db_errors);
+                }
+                // T-940: a track that closed or merged is no longer followed; its row's end is
+                // final. Keyed by the track, not by its binding, which the event just removed.
+                let ended = match &e {
+                    TrackEvent::Closed(s) => Some(s.track.id),
+                    TrackEvent::Merged { from, .. } => Some(*from),
+                    _ => None,
+                };
+                if let Some(track) = ended
+                    && repo.stop_following_track(track).is_err()
+                {
                     inc(&dc.db_errors);
                 }
             }

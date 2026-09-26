@@ -2,8 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { drawerScope, foldSurveyRecords, groupItems, itemsInScope, peekLine, quietItems, scopeKey, scopeLine, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type DrawerItem, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { drawerRequests, drawerScope, foldSurveyRecords, groupItems, itemsInScope, materialScopeKey, peekLine, quietItems, scopeKey, scopeLine, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type DrawerItem, type DrawerScope, type EventsResp } from "../src/app/chrome/explore-drawer";
 import { PaneModel } from "../src/surface/panes";
+import { surveyUrl } from "../src/surface/survey";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
 import type { SchedulerResponse } from "../src/scheduler";
 import type { Selection } from "../src/selections";
@@ -165,7 +166,24 @@ class FakeEl {
   all(): FakeEl[] { return this.children.flatMap((c) => [c, ...c.all()]); }
 }
 
-async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unknown; region?: Selection; events?: unknown } = {}) {
+/**
+ * A client whose answers are released BY HAND, so a scope change can land while a batch is in
+ * flight (T-1030). `release` picks which in-flight answers come back, and in which order — the
+ * dangerous order (the superseded batch answering LAST) is the one a sequence guard must survive.
+ */
+class Latch {
+  private held: { path: string; go: () => void }[] = [];
+  gate(path: string): Promise<void> { return new Promise((go) => { this.held.push({ path, go }); }); }
+  get pending(): string[] { return this.held.map((h) => h.path); }
+  release(which: (path: string) => boolean = () => true): number {
+    const go = this.held.filter((h) => which(h.path));
+    this.held = this.held.filter((h) => !which(h.path));
+    for (const h of go) h.go();
+    return go.length;
+  }
+}
+
+async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unknown; region?: Selection; events?: unknown; latch?: Latch } = {}) {
   const g = globalThis as Record<string, unknown>;
   // The fake document stays installed: row clicks re-render. Nothing else in this file needs a DOM.
   const saved = { setInterval: g.setInterval };
@@ -181,7 +199,7 @@ async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unkn
     "/api/coverage": { window: { t0_s: 40, t1_s: 100 }, grid: { cells: 2, f_lo_hz: 400e6, f_cell_hz: 1e6 }, any: { cells: [{ state: "observed" }, { state: "unobserved" }] } },
   };
   if (opts.obs) replies["/api/observations"] = opts.obs;
-  const client = { get: async (path: string) => { calls.push(path); const f = replies[path.split("?")[0]]; const r = typeof f === "function" ? f(path) : f; if (!r) throw new Error("none"); return r; } };
+  const client = { get: async (path: string) => { calls.push(path); if (opts.latch) await opts.latch.gate(path); const f = replies[path.split("?")[0]]; const r = typeof f === "function" ? f(path) : f; if (!r) throw new Error("none"); return r; } };
   if (opts.events) replies["/api/events"] = opts.events;
   const store = createStore(initialState());
   store.set(() => ({ live: { ...store.get().live, edgeTS: opts.edge ?? 100, view: { loHz: 400e6, hiHz: 500e6 } } }));
@@ -196,7 +214,7 @@ async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unkn
   const gos = el.all().filter((e) => e.className === "go");
   const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
   const tick = async () => { every?.(); await flush(); };
-  return { store, calls, el, rows, gos, tick };
+  return { store, calls, el, rows, gos, tick, flush };
 }
 
 /** Everything the surface reads to move a pane's view (centre/span/time window) or offer a retune. */
@@ -420,4 +438,193 @@ test("T-943: a row outside the selected region is not listed, whatever the backe
   // Without a region the drawer is "places to go": a row in another band is the whole point of it.
   const elsewhere: DrawerItem[] = [{ group: "surveys", tag: "survey · observed then", title: "430–440 MHz", why: "", hz: 435e6, spanHz: 10e6 }];
   assert.equal(itemsInScope(elsewhere, drawerScope({ live: { edgeTS: 1000, view: { loHz: 88e6, hiHz: 108e6 } }, selections: { list: [], sync: "" }, focus: { kind: "none" } } as never)).length, 1);
+});
+
+
+// ---- T-1030: the selection lands MID-FLIGHT ------------------------------------------------
+//
+// The drawer polls, and a region can be committed between one refresh's send and its answer. Two
+// separate claims are at stake, and only the pair is safe:
+//
+//   1. **What is SENT** is built from the scope current at that instant, so a request issued after
+//      the selection carries the region — never a scope computed earlier and held in a closure.
+//   2. **What is RENDERED** comes only from the newest scope: a superseded batch answering LATE is
+//      dropped, not drawn. Without that, the stale view-scoped answer repaints the "Selected
+//      region" sheet with signals from the whole viewed span — visually identical to the T-943
+//      defect, and reachable purely by timing.
+//
+// The dangerous order is asserted deliberately: the FRESH batch answers first and the SUPERSEDED
+// one afterwards, which is the only ordering a sequence guard is needed for. Proven red both ways
+// (T-1030): dropping `if (my !== seq) return` renders "106.997 / 107.816 MHz" over the region's
+// sheet, and hoisting `drawerScope(s)` out of the refresh sends `f_lo=400000000` after the commit.
+test("T-1030: a selection landing mid-flight — requests carry the send-time scope, late stale answers are dropped", async () => {
+  const latch = new Latch();
+  // The server answers per band, so a stale answer is distinguishable from a fresh one: the viewed
+  // span holds the explorer's far-away unknowns, the region holds its own signal.
+  const events = (path: string) => {
+    const hz = /f_lo=98822600/.test(path) ? [98.9e6] : [107.816e6, 106.997e6];
+    return {
+      events: hz.map((_, i) => ({ emitter_id: `e${i}`, t_start_s: 90 + i, t_end_s: null, open: true, count: 1 })),
+      emitters: hz.map((f, i) => ({ id: `e${i}`, state: "candidate", f_center_hz: f, bandwidth_hz: 180e3, known_status: "unknown", explanations: [] })),
+    };
+  };
+  const m = await mountedDrawer({ edge: 1000, events, latch });
+  const windowed = (c: string) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c);
+  const inFlight = m.calls.filter(windowed);
+  assert.ok(inFlight.length >= 4 && inFlight.every((c) => !/f_lo=98822600/.test(c)),
+    `the first batch is the unscoped one and is in flight: ${JSON.stringify(m.calls)}`);
+  // Unscoped, the coverage plane alone is the device's whole range ("where have I looked at all");
+  // the other three are the viewed span. Both are superseded by the region.
+  assert.equal(inFlight.filter((c) => /f_lo=400000000/.test(c)).length, 3);
+  assert.ok(inFlight.some((c) => c.startsWith("/api/coverage?f_lo=1000000&f_hi=6000000000")));
+
+  // The region is committed while that batch is still unanswered.
+  const at = m.calls.length;
+  m.store.set(() => ({ selections: { list: [REGION], sync: "" }, focus: { kind: "selection", id: "s1" } }));
+  await m.flush();
+
+  // (1) every request SENT after the selection is the region's, coverage included.
+  const after = m.calls.slice(at).filter(windowed);
+  assert.equal(after.length, 4, `the re-scope re-asked all four questions: ${JSON.stringify(m.calls.slice(at))}`);
+  for (const c of after) {
+    assert.match(c, /f_lo=98822600&f_hi=99040700/, `${c} was sent for a stale scope after the region was selected`);
+  }
+  assert.ok(after.some((c) => c.startsWith("/api/coverage")), "the coverage question is one of them");
+
+  // (2) the fresh answers land first, then the superseded ones — and only the fresh ones render.
+  // The shared observation-log read (`SurveyLog.refresh` de-duplicates it) is released with the
+  // fresh batch: it belongs to both, and holding it would stall the fresh batch's own `Promise.all`
+  // and so hide the ordering under test.
+  assert.ok(latch.release((p) => /98822600/.test(p) || p.startsWith("/api/observations")) >= 5,
+    "the region's batch answers");
+  await m.flush();
+  assert.ok(latch.release() >= 4, "the superseded viewed-span batch answers afterwards");
+  await m.flush();
+
+  const titles = m.el.all().filter((e) => e.className === "f").map((e) => e.textContent);
+  assert.ok(titles.length > 0, "the region's own rows are drawn");
+  for (const t of titles) {
+    assert.ok(!/^10[67]\./.test(t), `a superseded viewed-span answer was rendered over the region's sheet: ${JSON.stringify(titles)}`);
+  }
+  assert.match(m.el.all().find((e) => e.className === "drawer-scope")!.textContent, /selected region/,
+    "the late stale answer also rewrote the sentence saying which window the rows are about");
+});
+
+test("T-1030: the drawer's four requests are distinguishable on the wire from the other clients' ", () => {
+  // `ui/e2e/app-selected-region.e2e.mjs` has to say which of three coverage clients it is judging, and
+  // it does so by the SHAPE this builder produces: `cells=64` and no `rows`. The other two are the
+  // canvas's whole-surface survey (`rows=`, a time grid — `surveyUrl`) and the window-scoped
+  // `windowCoverage` question (`cells=1`, `ui/src/app/explore/inventory.ts`). Pinned here so the
+  // discriminator cannot drift out from under the spec: if this builder stops carrying `cells=64`,
+  // this test says so, instead of the spec quietly crediting nothing as the drawer's request.
+  const sc = { loHz: 98_822_600, hiHz: 99_040_700, t0: 0, t1: 100, region: { id: "s1", f_lo: 98_822_600, f_hi: 99_040_700 } };
+  const req = drawerRequests(sc);
+  const cov = new URLSearchParams(req.coverage.split("?")[1]);
+  assert.equal(cov.get("cells"), "64", "the e2e identifies the drawer's coverage question by cells=64");
+  assert.equal(cov.get("rows"), null, "the drawer asks one band, not a time grid over the surface");
+  assert.deepEqual([cov.get("f_lo"), cov.get("f_hi")], ["98822600", "99040700"]);
+  assert.equal(new URLSearchParams(req.events.split("?")[1]).get("limit"), "200");
+  assert.equal(new URLSearchParams(req.strongest.split("?")[1]).get("window_s"), "30");
+  assert.ok(req.scheduler.startsWith("/api/scheduler?"), req.scheduler);
+  assert.match(surveyUrl(0, 9_830_400_000, 0, 1e9), /(^|&)rows=2(&|$)/);
+  assert.doesNotMatch(surveyUrl(0, 9_830_400_000, 0, 1e9), /(^|&)cells=64(&|$)/);
+});
+
+// ---- T-1061: material-change rescope + settle ----------------------------------------------
+//
+// request-volume-review-2026-09-26.md: a 24-event trackpad zoom fired 264 requests (100 of them
+// /api/inventory-shaped), because `scopeKey` above re-asked all four windowed questions PLUS the
+// unscoped coverage plane and the observation log on every intermediate frame. The fix: a settled,
+// materially-different view re-asks only the three questions that depend on the exact window
+// (events/strongest/scheduler); the unscoped coverage plane and the observation log wait for the
+// 30 s tick or a region change (T-943's rescope, unaffected — the region select/deselect below).
+
+test("T-1061: materialScopeKey ignores a sub-threshold pan or zoom, but changes on a real move, a real zoom, or a region", () => {
+  const view = (loHz: number, hiHz: number): DrawerScope => ({ loHz, hiHz, t0: 0, t1: 1, region: null });
+  const base = view(400e6, 500e6); // span 100 MHz
+  assert.equal(materialScopeKey(view(400.1e6, 500.1e6)), materialScopeKey(base), "a sub-pixel pan is not material");
+  assert.notEqual(materialScopeKey(view(430e6, 530e6)), materialScopeKey(base), "moving most of a span is material");
+  assert.notEqual(materialScopeKey(view(430e6, 450e6)), materialScopeKey(base), "a 5x zoom is material");
+  const region: DrawerScope = { ...base, region: { id: "s1", f_lo: 400e6, f_hi: 500e6 } };
+  assert.notEqual(materialScopeKey(region), materialScopeKey(base), "a region is never bucketed with the view");
+  assert.equal(materialScopeKey(null), "");
+});
+
+test("T-1061: 24 intermediate view changes in ~400 ms settle into ONE set of [events, strongest, scheduler]; observations and the unscoped coverage plane are not re-asked", async () => {
+  const m = await mountedDrawer({ edge: 1000 });
+  const before = m.calls.length;
+  // A trackpad zoom: 24 steps, each a tiny move over the last but a large one over the whole run —
+  // never a region, so this is exactly the intermediate-view case the settle timer exists for.
+  for (let i = 1; i <= 24; i++) {
+    const span = 100e6 * 0.9 ** i;
+    m.store.set(() => ({ live: { ...m.store.get().live, view: { loHz: 450e6 - span / 2, hiHz: 450e6 + span / 2 } } }));
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  const asked = m.calls.slice(before);
+  const windowed = asked.filter((c) => /^\/api\/(events|analysis\/strongest|scheduler)/.test(c));
+  assert.equal(windowed.length, 3, `exactly one settled set of three, got ${JSON.stringify(asked)}`);
+  assert.equal(asked.filter((c) => c.startsWith("/api/observations")).length, 0, "observations count 0");
+  assert.equal(asked.filter((c) => c.startsWith("/api/coverage")).length, 0, "the unscoped coverage plane waits for the 30 s tick");
+});
+
+test("T-1061: a region select/deselect still rescopes at once (all four questions, no settle wait)", async () => {
+  const m = await mountedDrawer({ edge: 1000 });
+  const before = m.calls.length;
+  m.store.set(() => ({ selections: { list: [REGION], sync: "" }, focus: { kind: "selection", id: "s1" } }));
+  await m.flush(); // no real-time wait: a region change is never behind the settle timer
+  const asked = m.calls.slice(before).filter((c) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c));
+  assert.equal(asked.length, 4, `the region re-asked everything at once, got ${JSON.stringify(m.calls.slice(before))}`);
+  const before2 = m.calls.length;
+  m.store.set(() => ({ selections: { list: [], sync: "" }, focus: { kind: "none" } }));
+  await m.flush();
+  const afterDeselect = m.calls.slice(before2).filter((c) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c));
+  assert.equal(afterDeselect.length, 4, "deselecting re-asks everything at once too");
+});
+
+// ---- T-1061 review fix: a race between a region commit and its OWN answers landing -----------
+//
+// The bug: `lastRegionId` used to update only inside `refresh()`, after its answers land — so a
+// SECOND region change (a quick select-then-deselect) arriving before the first request's answers
+// come back compared the new region against a STALE `lastRegionId`, read it as an unmoved view,
+// asked nothing, and let the first (now superseded) request's answer land unopposed (its `seq` was
+// still current) — drawing the wrong scope's rows. The fix records the requested region id at SEND
+// time, in `rescope` itself, so a second region change is never mistaken for a no-op.
+test("T-1061 review fix: a quick region select then deselect does not leave the region's rows behind", async () => {
+  const latch = new Latch();
+  const events = (path: string) => {
+    const hz = /f_lo=98822600/.test(path) ? [98.9e6] : [401e6]; // the region's own signal vs. the view's
+    return {
+      events: hz.map((_, i) => ({ emitter_id: `e${i}`, t_start_s: 90 + i, t_end_s: null, open: true, count: 1 })),
+      emitters: hz.map((f, i) => ({ id: `e${i}`, state: "candidate", f_center_hz: f, bandwidth_hz: 180e3, known_status: "unknown", explanations: [] })),
+    };
+  };
+  const m = await mountedDrawer({ edge: 1000, events, latch });
+  latch.release(); // let the initial (unscoped) mount batch land, so the drawer starts settled
+  await m.flush();
+
+  // Select the region: its own batch starts and is held in flight (the slow tunnel from the
+  // review that was logging EOFs).
+  m.store.set(() => ({ selections: { list: [REGION], sync: "" }, focus: { kind: "selection", id: "s1" } }));
+  await m.flush();
+  assert.ok(latch.pending.some((p) => /98822600/.test(p)), "the region's own batch is in flight");
+
+  // The user deselects BEFORE it lands. This must fire its OWN (view-scoped) batch — not be
+  // swallowed as "the view didn't move" because `lastRegionId` still reads the region it is about
+  // to supersede.
+  m.store.set(() => ({ selections: { list: [], sync: "" }, focus: { kind: "none" } }));
+  await m.flush();
+  assert.ok(latch.pending.some((p) => /f_lo=400000000/.test(p)),
+    `the deselect fired its own batch rather than being treated as a no-op view change: ${JSON.stringify(latch.pending)}`);
+
+  // The stale (region) answers land FIRST, the fresh (view) answers land after — the dangerous
+  // order, exactly as T-1030 proves it for the sibling race.
+  latch.release((p) => /98822600/.test(p));
+  await m.flush();
+  latch.release();
+  await m.flush();
+
+  assert.match(m.el.all().find((e) => e.className === "drawer-scope")!.textContent, /viewed span/,
+    "the drawer settled on the deselected state, not the stale region answer");
+  const titles = m.el.all().filter((e) => e.className === "f").map((e) => e.textContent);
+  assert.ok(!titles.some((t) => t?.includes("98.900")), `the region's stale row was not rendered, got ${JSON.stringify(titles)}`);
 });

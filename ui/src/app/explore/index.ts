@@ -24,10 +24,11 @@ import {
   type Loaded,
 } from "./focus";
 import {
-  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, loadInventoryRows,
+  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, identityChip, loadInventoryRows,
   nextInventorySort, promoteEntry, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   liveEdgeS, sortInventoryRows, viewWindow, windowKey, type Row,
 } from "./inventory";
+import { listPaneNames, paneSpecsKey } from "./pane-window";
 import { mountPresenceStream } from "./presence-stream";
 import {
   foundInside, selectionStoreFor, selectionsEmptyText, selectionsInWindow, sortSelections,
@@ -57,7 +58,11 @@ const mountInventory: MountFn = (el, ctx) => {
   const onMore = (tab: InventoryTab, m: boolean) => { more[tab] = m; };
   const reload = () => loadInventoryRows(ctx, onMore).catch((e) => ctx.store.set(toast(apiErrorText(e))));
 
-  const heading = h("div", { class: "h" }, "Signal inventory ", h("em", {}, "this span"));
+  // T-1002: the lists are the ACTIVE pane's, so the heading says which pane that is — the same
+  // naming the canvas's outline and the map controls use (`centre/active-pane.ts`, T-1000), and
+  // nothing extra when there is only one pane to be looking at.
+  const paneName = h("em", { class: "pane" });
+  const heading = h("div", { class: "h" }, "Signal inventory ", h("em", {}, "this span"), paneName);
   const tabConfirmed = h("button", { class: "tab", role: "tab", type: "button", "data-tab": "confirmed", onclick: () => ctx.store.set(setInventoryTab("confirmed")) });
   const tabCandidate = h("button", { class: "tab", role: "tab", type: "button", "data-tab": "candidate", onclick: () => ctx.store.set(setInventoryTab("candidate")) });
   const tabs = h("div", { class: "tabs", role: "tablist" }, tabConfirmed, tabCandidate);
@@ -110,7 +115,11 @@ const mountInventory: MountFn = (el, ctx) => {
     // hover title, so it can't be missed the way T-587's field report was.
     const artifact = explanationChip(r);
     const reasonText = explanationReasonText(r);
-    const chips = [...rowChips(r), ...(cluster ? [cluster] : []), ...(artifact ? [artifact] : [])]
+    // T-967: the decoded identity, right beside the family it decorates — the explorer's field
+    // report was a CRC-valid RDS PI/PS decode reading "unknown"/"100% unk" because nothing in the
+    // list rendered it, even though the focus panel already had the data.
+    const identity = identityChip(r);
+    const chips = [...rowChips(r), ...(identity ? [identity] : []), ...(cluster ? [cluster] : []), ...(artifact ? [artifact] : [])]
       .map((c) => h("span", { class: `chip ${c.cls}`, title: c.title }, c.text));
     const dotsEl = r.state === "candidate" && recurrenceDots(r).length
       ? h("span", { class: "dots" }, ...recurrenceDots(r).map((v) => h("i", { style: `height:${2 + Math.round(v * 8)}px` })))
@@ -140,6 +149,17 @@ const mountInventory: MountFn = (el, ctx) => {
     const { listed: { confirmed, candidate } } = renderedInventory(s.inventory.rows, s.focus.kind === "signal" ? s.focus.id : null);
     tabConfirmed.setAttribute("aria-selected", String(s.inventory.tab === "confirmed"));
     tabCandidate.setAttribute("aria-selected", String(s.inventory.tab === "candidate"));
+    // Which pane these rows are of. With one pane there is nothing to disambiguate and the chrome
+    // says nothing extra (docs/23 §10.6 P1); with two, both the heading and each tab's label name
+    // it, so the list cannot be read as being about the pane the user is looking at but not acting
+    // on. `data-pane` is the same 1-based position the outline carries.
+    const act = s.inventory.active;
+    const named = listPaneNames(act);
+    paneName.textContent = named?.heading ?? "";
+    paneName.hidden = !named;
+    if (named && act) heading.dataset.pane = String(act.n); else delete heading.dataset.pane;
+    tabConfirmed.setAttribute("aria-label", named?.confirmed ?? "Confirmed");
+    tabCandidate.setAttribute("aria-label", named?.candidate ?? "Candidates");
     tabConfirmed.replaceChildren("Confirmed ", h("span", { class: "count" }, more.confirmed ? "500+" : String(confirmed.length)));
     tabCandidate.replaceChildren("Candidates ", h("span", { class: "count" }, more.candidate ? "500+" : String(candidate.length)));
     note.textContent = s.inventory.tab === "confirmed"
@@ -166,6 +186,14 @@ const mountInventory: MountFn = (el, ctx) => {
   // already showing a different time. `loadInventoryRows` reads the cursor from the store at call
   // time, so the windows it sends follow the scrub; this only makes it happen immediately.
   ctx.store.select((s) => s.time, () => void reload(), { eq: sameCursor });
+  // T-1002: and so does any OTHER pane's window moving, a pane opening or closing, or the active
+  // pane changing — each pane's list is its own query, and a pane whose window just moved (or that
+  // has only just appeared) has no answer yet. One key over the whole set (`paneSpecsKey`), so a
+  // pane merely tracking the live edge does not re-ask every frame.
+  ctx.store.select(
+    (s) => paneSpecsKey(Object.values(s.inventory.panes).map((p) => p.spec), s.inventory.active?.id ?? null),
+    () => void reload(),
+  );
   void reload();
   startPoll(reload, 5000, (e) => ctx.store.set(toast(`inventory: ${apiErrorText(e)}`)));
   // T-388: while the view follows the live edge, a continuing signal's box top tracks it over the

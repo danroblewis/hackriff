@@ -33,6 +33,7 @@
 //! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |
 //! | `/api/anomalies[?f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`, `/api/anomalies/<id>[/dismiss\|/reopen]` | GET, POST | token (header only for mutating) | T-122 anomalies and novelty alarms with explanations; dismiss/reopen ([`crate::anomalies`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
+//! | `/api/frontend/events?t0&t1[&device][&limit]` | GET | token | T-981 front-end events (clipped rows with a whole-span energy step) over a window ([`crate::frontend`]) |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/collections[/<id>[/markers]]`, `/api/markers[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-817 marker collections ([`crate::collections`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -51,6 +52,7 @@
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
+//! | `/ws/tiles/changes` | GET | token | `coverage_changed` pushed on a retune (T-1040, [`crate::changes`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -152,6 +154,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/playback"),
     ("POST", "/api/playback"),
     ("GET", "/api/status"),
+    // T-981: front-end events - runs of clipped spectrum rows whose energy stepped across the
+    // whole tuned window - over a time window, for the canvas's front-end mark
+    ("GET", "/api/frontend/events"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
     ("POST", "/api/control/rate"),
@@ -249,6 +254,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/analyze/{id}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
     ("GET", "/ws/tiles/rows"),
+    // T-1040: `coverage_changed` pushed on a front-end move, so a retune re-lays the fog at once
+    ("GET", "/ws/tiles/changes"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -314,6 +321,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/anomalies/{id}/reopen"),
     // T-273 trunking load index (metadata only, AWARE-067)
     ("GET", "/api/trunking/load"),
+    // T-977 the control-channel hunt's last pass, with the verdict on every channel it looked at
+    ("GET", "/api/trunking/cc-candidates"),
     // T-891 VLF/LF science on the accessory-fed source (SPACE-001, SPACE-041, PROP-019)
     ("GET", "/api/vlf"),
 ];
@@ -391,13 +400,16 @@ pub struct ApiState {
     /// through [`crate::LiveControls::select`], which may be omitted only when there is exactly
     /// one front end.
     pub live_controls: crate::live_control::LiveControls,
-    /// T-452: the in-app survey sweep over one of [`Self::live_controls`] ([`crate::scan`]). `None` leaves
-    /// `/api/control/scan*` answering 503 — the front end is there but nothing can sweep it.
+    /// T-452/T-1009: the in-app survey sweep, **one runner per front end** of
+    /// [`Self::live_controls`] ([`crate::scan`]). Empty leaves `/api/control/scan*` answering 503
+    /// — the front end is there but nothing can sweep it.
     ///
     /// It is a *driver over the interactive retune path*, not a scheduler: `hk serve` still does
     /// not drive the scheduler, and every step is the same gated [`crate::DeviceAction::Retune`] a
-    /// user's explicit tune is. See [`crate::scan`] for the decision and the arbitration rule.
-    pub scan: Option<Arc<crate::scan::ScanRunner>>,
+    /// user's explicit tune is. T-1009 made it a collection because the arbitration is per radio:
+    /// a sweep of B must not yield to a retune of A, and the user picks which radio sweeps a
+    /// region they drew. See [`crate::scan`] for the decision and the arbitration rule.
+    pub scans: crate::scan::ScanRunners,
     /// Display and recording control of the running pipeline (T-050).
     pub run_control: Option<Arc<dyn RunControl>>,
     /// Bookmark store (T-050), usually the run's database.
@@ -432,12 +444,24 @@ pub struct ApiState {
     /// T-891: the run's accessory-fed VLF services behind `GET /api/vlf` ([`crate::vlf`]); `None`
     /// answers 503, an attached-but-empty set answers an empty `accessories` list.
     pub vlf: Option<Arc<dyn crate::vlf::VlfControl>>,
+    /// T-977: the run's control-channel hunt behind `GET /api/trunking/cc-candidates`
+    /// ([`crate::trunk_cc`]); `None` on a server with no pipeline, which answers `503` rather than
+    /// an empty channel list.
+    pub cc_hunt: Option<Arc<dyn crate::trunk_cc::CcHuntControl>>,
+    /// T-981: the run's front-end event log behind `GET /api/frontend/events`
+    /// ([`crate::frontend`]); `None` answers 503.
+    pub frontend: Option<Arc<dyn crate::frontend::FrontEndControl>>,
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
     /// T-157: the rolling IQ capture buffer for `/api/iqbuffer*` ([`crate::iqbuffer`]); `None`
     /// answers 503.
     pub iq_buffer: Option<Arc<dyn crate::iqbuffer::IqBufferControl>>,
+    /// T-1009: the **further** front ends' IQ capture rings, by `device_id` — what
+    /// `POST /api/iqbuffer/clip`'s `device_id` selector resolves against. [`Self::iq_buffer`]
+    /// above stays the run's default front end's ring, which is what an omitted selector means;
+    /// a ring listed here belongs to exactly one other radio. Empty on a single-SDR run.
+    pub iq_buffers: Vec<(String, Arc<dyn crate::iqbuffer::IqBufferControl>)>,
     /// T-859 (MAUTO M-8): the region-analyze job manager behind `/api/analyze` jobs
     /// ([`crate::analyze`]); `None` answers a job request `503 unavailable` (a bare
     /// `{emitter_id}` read still works).
@@ -476,6 +500,9 @@ pub struct ApiState {
     /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
     /// Per state for the same reason as `tile_admission`.
     pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
+    /// T-1040: `/ws/tiles/changes` subscriptions open now, capped at
+    /// [`crate::changes::MAX_CHANGE_FEEDS`].
+    pub change_feeds: Arc<std::sync::atomic::AtomicUsize>,
     /// T-579: the per-lattice readable ceiling, memoised — a pure function of the store's
     /// geometry and config, so it is computed once per lattice rather than probed per request.
     /// Shared by cloning, like [`Self::tile_admission`].
@@ -1239,6 +1266,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     if req.path == "/ws/tiles/rows" && req.method == "GET" {
         return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
     }
+    if req.path == "/ws/tiles/changes" && req.method == "GET" {
+        return crate::changes::serve(stream, &shared.state, &req.query, &req.headers);
+    }
     // T-859: `/ws/analyze/{id}` is the `analyze` on-demand opener with the id as its parameter.
     if let Some(id) = req.path.strip_prefix("/ws/analyze/")
         && req.method == "GET"
@@ -1335,7 +1365,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::schedule::route(state, &ctl)) // T-120
         .or_else(|| crate::reports::route(state, &ctl)) // T-121
         .or_else(|| crate::trunking::route(state, &ctl)) // T-273
+        .or_else(|| crate::trunk_cc::route(state, &ctl)) // T-977
         .or_else(|| crate::vlf::route(state, &ctl)) // T-891
+        .or_else(|| crate::frontend::route(state, &ctl)) // T-981
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122
     {

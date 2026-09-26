@@ -91,7 +91,9 @@ export interface SettingsHost {
   setScale(id: string): void;
   setRulerMode(mode: TimeLabelMode): void;
   /** Which device's coverage decides this pane's grey (`any` = the union). */
-  setPaneDevice(paneId: string, device: string): void;
+  /** Named apart from T-1006's `PaneMenuHost.setPaneDevice(id)` (which sets the ACTIVE pane's):
+   * this one names the pane, because the settings menu lists every pane (integration). */
+  setDeviceOfPane(paneId: string, device: string): void;
   /** Open one of the drawer's settings panels. Opening a panel is view state; what the panel itself
    * then does (a gain, a sweep, a schedule) is the panel's own, gated, business. */
   openPanel(id: string): void;
@@ -142,7 +144,7 @@ export function renderSettings(list: HTMLElement, host: SettingsHost, close: () 
             return o;
           })) as HTMLSelectElement;
         sel.value = p.device;
-        sel.addEventListener("change", () => { host.setPaneDevice(p.id, sel.value); again(); });
+        sel.addEventListener("change", () => { host.setDeviceOfPane(p.id, sel.value); again(); });
         return h("label", { class: "map-row map-row-sel" }, h("span", {}, `${p.label} grey`), sel);
       }),
       h("div", { class: "map-layers-note" },

@@ -56,6 +56,13 @@ impl RecordFlags {
     pub const BURST_START: RecordFlags = RecordFlags(1 << 3);
     /// Last record of a burst.
     pub const BURST_END: RecordFlags = RecordFlags(1 << 4);
+    /// T-981: **this record's own samples clipped** — the clipped fraction of the span it was
+    /// computed from exceeded the front end's clip threshold. Measured per record, unlike the sticky
+    /// tune-state [`Self::OVERLOAD`].
+    pub const CLIPPED: RecordFlags = RecordFlags(1 << 5);
+    /// T-981: a **front-end event** — clipped *and* a whole-span energy step (or saturation with
+    /// nothing to step from). The record's energy is the front end's, not a signal's.
+    pub const FRONTEND_EVENT: RecordFlags = RecordFlags(1 << 6);
 
     /// No flags.
     pub const fn empty() -> Self {

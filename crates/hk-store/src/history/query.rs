@@ -657,12 +657,39 @@ pub struct LastKnownSearch {
     /// ladder, so the index scan that finds the newest block holding data is bounded however much
     /// the store holds.
     reach_tb: i64,
+    /// T-1034: per output column, the newest instant the caller's tune record says the column
+    /// can hold anything — see [`LastKnownSearch::quiet_after`].
+    quiet_after: Option<Vec<i64>>,
 }
 
 impl LastKnownSearch {
     /// Whether no step remains.
     pub fn done(&self) -> bool {
         self.done
+    }
+
+    /// **T-1034: a column the caller PROVES held nothing after an instant is not read after it.**
+    ///
+    /// `after[f]` is, per output column, an instant after which the caller's tune record says the
+    /// radio was not looking at column `f` at all (`i64::MAX`, or any instant at or after the
+    /// search's `before`, claims nothing). A pinned search ([`Pyramid::last_known_search_at`]) then
+    /// starts each stage no later than the newest such instant over the columns still unresolved,
+    /// rounded UP to its row, so the time a departed band spent unobserved costs no cell read to
+    /// cross — T-461's rule, which the block-level skip alone could not keep: a time block of the
+    /// pinned level spans far more frequency than a tile, so after a small retune the NEW window
+    /// holds a tile in the same frequency block every block, and each was read in full for a band
+    /// it holds nothing of. Measured on the mock SDR: a +½-span nudge spent the whole budget on the
+    /// eight blocks after the retune and left the band's last live rows unsearched — blank columns
+    /// at the finest level, not the shadow.
+    ///
+    /// A window skipped this way is **not** reported unsearched: it is proven empty, by the record
+    /// that also decides grey. The ladder ([`Pyramid::last_known_search`]) ignores it — the ladder
+    /// is time-deep and cheap per unit of time already. A vector of the wrong length is ignored.
+    pub fn quiet_after(mut self, after: Vec<i64>) -> Self {
+        if self.pinned && after.len() == self.out.nf {
+            self.quiet_after = Some(after);
+        }
+        self
     }
 
     /// The result so far.
@@ -1452,6 +1479,7 @@ impl Pyramid {
             pinned: false,
             quantum_ns: 0,
             reach_tb: i64::MIN,
+            quiet_after: None,
         }
     }
 
@@ -1571,6 +1599,27 @@ impl Pyramid {
             // `quantum_ns`), else the level's own cell.
             let q = s.quantum_ns.max(cell);
             let blk = g.t_block_ns().max(1);
+            // T-1034: nothing after the newest instant any unresolved column was on record is
+            // read. Rounded UP to the row grid, so the row holding that instant is still read
+            // whole; `end` stays aligned, as every bound below assumes.
+            if let Some(after) = &s.quiet_after {
+                let newest = after
+                    .iter()
+                    .zip(&s.out.cells)
+                    .filter(|(_, c)| !c.found())
+                    .map(|(&a, _)| a)
+                    .max()
+                    .unwrap_or(i64::MIN);
+                if newest < s.end_ns {
+                    let up = newest
+                        .div_euclid(q)
+                        .saturating_add(i64::from(newest.rem_euclid(q) != 0))
+                        .saturating_mul(q);
+                    // Never below the reach: older is the ladder's, and the block scan below then
+                    // finds nothing and ends the search.
+                    s.end_ns = s.end_ns.min(up.max(s.reach_tb.saturating_mul(blk)));
+                }
+            }
             let Some(tb) = self.newest_block_before(l, s.freq, s.end_ns, s.reach_tb) else {
                 // Nothing older is held at this level within the reach: the search is complete,
                 // and anything older is the ladder's.
@@ -1694,6 +1743,20 @@ impl Pyramid {
             }
             .max(0);
             if hi <= lo {
+                // T-1034: the last stage with NO budget left for even one row (a pinned search
+                // before it spent it all) did not read the past it stands for: that is a window
+                // unsearched, and says so — never a silent "nothing found".
+                let floor = oldest.div_euclid(cell) * cell;
+                if last && s.remaining / cols.max(1) == 0 && floor < hi.min(s.end_ns) {
+                    s.out.stages.push(LastKnownStage {
+                        level: l as u8,
+                        from_ns: floor.max(0),
+                        to_ns: hi.min(s.end_ns),
+                        source_cells: 0,
+                        found: 0,
+                        skipped: true,
+                    });
+                }
                 // No whole cell of this level here; the next stage covers the window.
                 s.done |= last;
                 continue;

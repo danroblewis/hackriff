@@ -23,7 +23,9 @@ import {
   DROP_LEAD_S, IQ_RULE_INK, RETENTION_RULE_INK, captureWindow, currentSpan, durationText, iqAvailability,
   iqBackingAt, iqNote, ringRuleQuads, ringRules, type CaptureWindow,
 } from "../src/app/centre/capture-window";
-import { CAPTURE_CLOCK_MS, CAPTURE_CLOCK_REQUEST, IQ_AVAILABILITY_REQUEST } from "../src/app/centre/capture-clock";
+import {
+  CAPTURE_CLOCK_MS, CAPTURE_CLOCK_REQUEST, IQ_AVAILABILITY_REQUEST, frozenRecordNote, recordLabel, recordTitle,
+} from "../src/app/centre/capture-clock";
 import { timeRuleQuads } from "../src/surface/marks";
 import { quadSizePx } from "../src/surface/minimap";
 import { timeExtent } from "../src/navigators";
@@ -352,7 +354,42 @@ test("Record IQ survived the panel: it records the viewport's band through the o
   const src = readFileSync("src/app/centre/capture-clock.ts", "utf8");
   assert.match(src, /"\/api\/outputs\/record\/start", \{ band: \{ f_lo: span\.loHz, f_hi: span\.hiHz \}, kinds: \["iq"\] \}/);
   assert.match(src, /"\/api\/outputs\/record\/stop"/);
-  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /recordIqButton\(ctx\)/, "it is mounted (in the viewport menu since T-882)");
+  // T-1004: mounted with the pane reporter — the button is per-pane chrome, and what it records
+  // depends on whether the active pane is frozen.
+  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /recordIqButton\(ctx, \(\) => \{/, "it is mounted (in the viewport menu since T-882)");
+});
+
+test("T-1004: Record IQ says what it will record when the active viewport is FROZEN", () => {
+  const span = { loHz: 99.6e6, hiHz: 102e6 };
+  // Live (or a host with no panes): unchanged, and no mention of a past it is not recording.
+  assert.equal(recordLabel(null), "Record IQ");
+  assert.equal(recordLabel({ frozen: false, pane: "pane 2 of 2" }), "Record IQ");
+  assert.match(recordTitle({ frozen: false, pane: "pane 2 of 2" }, span), /^Record raw IQ forward from now over 99\.600–102\.000 MHz/);
+  assert.doesNotMatch(recordTitle(null, span), /frozen/);
+
+  // Frozen: the word on the button says LIVE, and the sentence says both what it records and what
+  // it does not — with the reason, so the refusal is a fact about IQ, not a UI opinion.
+  const at = { frozen: true, pane: "pane 1 of 2" };
+  assert.equal(recordLabel(at), "Record IQ (live)");
+  const title = recordTitle(at, span);
+  assert.match(title, /99\.600–102\.000 MHz/, "it still names the band that will be recorded");
+  assert.match(title, /pane 1 of 2 is frozen behind the live edge/);
+  assert.match(title, /not the past window on screen/);
+  // And the same statement is made again when the recording actually starts.
+  const note = frozenRecordNote(at, span);
+  assert.match(note, /99\.600–102\.000 MHz/);
+  assert.match(note, /not the frozen window pane 1 of 2 is showing/);
+  assert.match(note, /cannot be recorded from the past/);
+  // With one pane there is no pane name to use, and the sentence still stands on its own.
+  assert.match(recordTitle({ frozen: true, pane: null }, null), /This viewport is frozen behind the live edge/);
+  assert.match(recordTitle({ frozen: true, pane: null }, null), /the tuned span/);
+
+  // The press path re-reads the pane at the click (a viewport freezes and follows as the user
+  // scrubs), and the button re-states itself on the frame rather than when its menu was built.
+  const src = readFileSync("src/app/centre/capture-clock.ts", "utf8");
+  assert.match(src, /const where = at\(\);\s+client\.post/, "the press reads the pane state at the press");
+  assert.match(src, /if \(where\?\.frozen\) store\.set\(toast\(frozenRecordNote\(where, span\)\)\)/);
+  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /recordBtn\.sync\(\);/, "the word is re-stated on the frame");
 });
 
 test("no default span: nothing on the capture window's path can fall back to a constant window", () => {

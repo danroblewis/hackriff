@@ -229,9 +229,48 @@ impl IterativeScan {
     }
 
     /// What this policy costs and buys on a compiled plan (see the module docs).
+    ///
+    /// The per-step cost **beyond** the dwell is unpriced here, and that is deliberate: nothing in
+    /// a plan knows it. [`ScanBudget::with_step_overhead`] prices it once something has measured
+    /// it; [`measured_step_overhead_ns`] is what measures it.
     pub fn budget(self, plan: &CompiledPlan) -> ScanBudget {
         ScanBudget::of(plan)
     }
+}
+
+/// The per-step cost a pass really pays **beyond its dwell**, from a measurement of a pass that
+/// ran: `None` when nothing has been measured yet (T-965).
+///
+/// # Why a pass costs more than its dwells, and why only a measurement can say how much
+///
+/// [`ScanBudget::pass_ns`] used to be `Σ dwell`, which is the pass length **in capture time** — the
+/// sample clock. A step is a **retune**, and a retune stops the sample stream: the front end is
+/// reprogrammed, the stream restarted, and on a class or rate boundary the run re-plumbs. None of
+/// that advances capture time, so all of it is invisible to a price computed from the dwells, and
+/// all of it is paid by the user, on the wall clock, once per step.
+///
+/// The size of it is not a constant and must not be guessed (T-453's rule: *per-step cost must be
+/// measured, not assumed*). Measured on the live HackRF (the explorer's `Scan everything (fast)`
+/// pass of 2026-09-25, 418 steps × 0.3 s at 19.2 Msps): the pass was priced at **125.4 s** and
+/// took **237 s**, a 268 ms per-step cost the price stated as zero — 1.9× the number the user was
+/// shown before committing the radio. `source.source_dropped` rose by 3.5 G samples over that pass,
+/// which at 19.2 Msps is 182 s of air the steps never heard: the same quantity, counted a second
+/// way.
+///
+/// So this takes the one measurement that is always available while a pass runs — how long it has
+/// been going on the wall clock, and how many steps it has finished — and returns what each step
+/// cost over and above its dwell. `None` when no step has finished (there is nothing to divide by),
+/// and floored at zero rather than going negative on a step cut short by preemption.
+///
+/// **`None` is not zero.** A caller with no measurement prices the dwells only and must say the
+/// figure is a floor — [`ScanBudget::statement`] does — exactly as `Coverage::Unobserved` is not
+/// quiet and `BiasTee::Unknown` is not off.
+pub fn measured_step_overhead_ns(wall_ns: i64, steps_done: u64, dwell_ns: i64) -> Option<i64> {
+    if steps_done == 0 || wall_ns <= 0 {
+        return None;
+    }
+    let per_step = wall_ns / i64::try_from(steps_done).unwrap_or(i64::MAX);
+    Some((per_step - dwell_ns).max(0))
 }
 
 /// How far one scan step advances (T-517): the **width of the window the pass is tiled at**, never
@@ -323,9 +362,20 @@ pub struct ScanBudget {
     pub steps: usize,
     /// Planned length of one step, ns (the longest, when hops differ).
     pub dwell_ns: i64,
-    /// One whole pass, ns: `Σ hop.duration_ns` over the dwell hops. This is the **revisit**
-    /// interval — how long a band waits between looks.
+    /// One whole pass, ns: the dwells **plus** the per-step cost when one has been measured. This
+    /// is the **revisit** interval — how long a band waits between looks — and it is what the user
+    /// is committing the radio for.
+    ///
+    /// With no measured [`ScanBudget::step_overhead_ns`] this is `Σ hop.duration_ns` and is a
+    /// **floor**, not the answer; [`ScanBudget::statement`] says so in words.
     pub pass_ns: i64,
+    /// The listening alone, ns: `Σ hop.duration_ns` over the dwell hops. Unaffected by the
+    /// overhead, because a step's retune is not listening.
+    pub dwell_total_ns: i64,
+    /// Measured per-step cost beyond the dwell, ns — the retune and any re-plumb the step pays
+    /// before it can listen (see [`measured_step_overhead_ns`]). `None` when nothing has measured
+    /// it for this front end, which is **not** zero.
+    pub step_overhead_ns: Option<i64>,
     /// Total frequency extent the dwell hops cover, Hz.
     pub span_hz: f64,
     /// Extent one step covers, Hz (the usable span of one window).
@@ -351,9 +401,33 @@ impl ScanBudget {
             steps,
             dwell_ns,
             pass_ns,
+            dwell_total_ns: pass_ns,
+            step_overhead_ns: None,
             span_hz,
             step_span_hz: plan.usable_span_hz,
         }
+    }
+
+    /// The same budget with a **measured** per-step cost priced in, so `pass_ns` and
+    /// [`ScanBudget::statement`] state the wall-clock pass the user will wait for rather than the
+    /// capture-time one (T-965). See [`measured_step_overhead_ns`].
+    ///
+    /// A negative or non-finite figure is refused by clamping to zero — this prices a cost, and a
+    /// pass cannot be cheaper than its listening.
+    pub fn with_step_overhead(self, overhead_ns: i64) -> Self {
+        let overhead = overhead_ns.max(0);
+        Self {
+            pass_ns: self
+                .dwell_total_ns
+                .saturating_add(overhead.saturating_mul(self.steps as i64)),
+            step_overhead_ns: Some(overhead),
+            ..self
+        }
+    }
+
+    /// Whether [`ScanBudget::pass_ns`] prices the per-step cost, or is the dwell-only floor.
+    pub fn overhead_measured(&self) -> bool {
+        self.step_overhead_ns.is_some()
     }
 
     /// Fraction of wall time any one band is actually being listened to: `dwell / pass`.
@@ -378,11 +452,24 @@ impl ScanBudget {
     /// One line a log or a status page can print, stating what this pass catches and what it does
     /// not. The wording is the module docs' trade, with this plan's numbers in it.
     pub fn statement(&self) -> String {
+        // T-965: the per-step cost, said out loud — either the measured figure that is already in
+        // `pass_ns`, or the admission that the pass length below is only a floor. A price the user
+        // commits the radio on must never read as measured when nothing measured it.
+        let cost = match self.step_overhead_ns {
+            Some(o) => format!(
+                " Each step also pays a measured {:.2} s to retune before it can listen, which is \
+                 in the pass length above.",
+                o as f64 / NS_PER_S,
+            ),
+            None => " Nothing has measured what a step of this pass pays to retune before it can \
+                 listen, so the pass length above is a floor, not the answer: expect longer."
+                .to_owned(),
+        };
         format!(
             "iterative scan: {} steps × {:.1} s = a {:.1} s pass over {:.3} MHz ({:.3} MHz per step); \
              each band is listened to {:.1} s in every {:.1} s (duty {:.3} %). A step catches \
              anything on the air during its own dwell; it catches nothing during the other {:.1} s, \
-             and spectrum the pass has not reached is unobserved, never quiet.",
+             and spectrum the pass has not reached is unobserved, never quiet.{}",
             self.steps,
             self.dwell_ns as f64 / NS_PER_S,
             self.revisit_s(),
@@ -392,6 +479,7 @@ impl ScanBudget {
             self.revisit_s(),
             self.duty() * 100.0,
             (self.pass_ns - self.dwell_ns).max(0) as f64 / NS_PER_S,
+            cost,
         )
     }
 }
@@ -587,6 +675,83 @@ mod tests {
         let s = b15.statement();
         assert!(s.contains("unobserved, never quiet"), "{s}");
         assert!(s.contains("duty"), "{s}");
+    }
+
+    /// T-965: **a pass costs more than its dwells, and the price says so or says it cannot.**
+    ///
+    /// The live failure this is the unit half of: `Scan everything (fast)` priced a 418-step pass
+    /// at 125.4 s and took 237 s, because the price counted the listening and not the retuning.
+    #[test]
+    fn the_pass_price_includes_the_measured_per_step_cost_and_admits_when_it_is_unmeasured() {
+        let scan = IterativeScan::from_seconds(15.0).unwrap();
+        let plan = scan.plan_over(
+            "test",
+            FreqRange::new(100e6, 200e6),
+            Timestamp::from_unix_nanos(0),
+        );
+        let mut c = cfg();
+        scan.apply(&mut c);
+        let compiled = CompiledPlan::compile(&plan, &c, &caps()).unwrap();
+        let bare = scan.budget(&compiled);
+
+        // Unmeasured: the pass is the dwells, and the statement refuses to present that as the
+        // answer. `None` is not zero.
+        assert_eq!(bare.step_overhead_ns, None);
+        assert!(!bare.overhead_measured());
+        assert_eq!(bare.pass_ns, bare.dwell_total_ns);
+        assert_eq!(bare.pass_ns, 15_000_000_000 * bare.steps as i64);
+        let s = bare.statement();
+        assert!(s.contains("a floor, not the answer"), "{s}");
+
+        // Measured: the cost is in the pass length, once per step, and the listening is unchanged.
+        let priced = bare.with_step_overhead(2_000_000_000);
+        assert_eq!(priced.dwell_total_ns, bare.dwell_total_ns);
+        assert_eq!(priced.step_overhead_ns, Some(2_000_000_000));
+        assert!(priced.overhead_measured());
+        assert_eq!(
+            priced.pass_ns,
+            bare.pass_ns + 2_000_000_000 * bare.steps as i64
+        );
+        // And the duty falls, because a retuning band is not a listened-to band.
+        assert!(
+            priced.duty() < bare.duty(),
+            "{} vs {}",
+            priced.duty(),
+            bare.duty()
+        );
+        let s = priced.statement();
+        assert!(s.contains("measured 2.00 s to retune"), "{s}");
+        assert!(!s.contains("a floor, not the answer"), "{s}");
+
+        // A cost cannot be negative: a pass is never cheaper than its listening.
+        assert_eq!(bare.with_step_overhead(-5).pass_ns, bare.dwell_total_ns);
+    }
+
+    /// T-965: the measurement itself — the live pass's own numbers, and the cases with nothing to
+    /// divide by.
+    #[test]
+    fn the_per_step_cost_is_measured_from_a_pass_that_ran() {
+        // The explorer's pass: 418 steps of 0.3 s took 237 s.
+        let dwell = 300_000_000;
+        let o = measured_step_overhead_ns(237_000_000_000, 418, dwell).unwrap();
+        // 237 s / 418 = 567 ms per step, of which 300 ms is the dwell.
+        assert!(
+            (o - 267_000_000).abs() < 2_000_000,
+            "measured {o} ns per step beyond the dwell"
+        );
+        // Priced back onto the plan it explains the whole overrun, which is the point: the price
+        // and the measurement must be the same number.
+        let priced_pass = 418 * (dwell + o);
+        assert!(
+            (priced_pass - 237_000_000_000i64).abs() < 1_000_000_000,
+            "{priced_pass} ns priced against 237 s measured"
+        );
+
+        // Nothing finished yet, or no wall time: no measurement, and `None` is not zero.
+        assert_eq!(measured_step_overhead_ns(10_000_000_000, 0, dwell), None);
+        assert_eq!(measured_step_overhead_ns(0, 5, dwell), None);
+        // A step cut short by a higher tier never prices a negative cost.
+        assert_eq!(measured_step_overhead_ns(1_000_000, 5, dwell), Some(0));
     }
 
     /// The full-spectrum plan takes its range from the device, never from a constant.

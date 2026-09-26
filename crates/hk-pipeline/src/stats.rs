@@ -207,6 +207,9 @@ counter_group!(
         presence_extensions,
         /// Presence extensions a tick left out at its cap; those boxes grow on the poll instead.
         presence_extensions_truncated,
+        /// T-940: open-track reports filed on the observation ledger (measured end + observed
+        /// silence), which keep an on-air emitter `live` on the inventory poll between sightings.
+        tracks_followed,
     }
 );
 
@@ -253,6 +256,16 @@ counter_group!(
         rows_gated,
         /// Publisher errors.
         errors,
+        /// T-1048 (LSR-7): the newest row's fold cost, ns — dB conversion plus the wire's
+        /// little-endian serialize (`crate::spectrum::Output::row`'s own timer, T-453's
+        /// "capture-thread cost is measured, never assumed"). Not per-subscription: one fold
+        /// serves every watcher of today's single-geometry `/ws/spectrum/live` alike; a per-pane
+        /// fold is LSR-2's (`/ws/spectrum/rows`) to add at this same point once it lands.
+        fold_ns_last,
+        /// The largest fold cost seen this run, ns.
+        fold_ns_max,
+        /// Every fold cost seen this run, summed, ns — `fold_ns_total / rows` is the mean.
+        fold_ns_total,
     }
 );
 
@@ -339,6 +352,10 @@ counter_group!(
         /// T-209: pilot-locked analog sessions without a decoded identity whose emitter was not
         /// placed because the window's front end was overloaded or clipping.
         mode_emitters_withheld,
+        /// T-926: analog windows restarted inside the ring's history after the chain was lapped
+        /// (an overrun while it computed its probe or early identification) — instead of writing
+        /// the fragment it had, too short for RDS.
+        window_restarts,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
@@ -355,6 +372,18 @@ counter_group!(
         cc_demods,
         /// Candidates the per-pass admission cap refused a demodulation.
         cc_admission_refused,
+        /// T-977: channels demodulated because **blind detection already has an emitter** there,
+        /// not because occupancy made them control-channel candidates. An intermittent burst train
+        /// never reaches `MIN_CC_FCO` and never will — it is not a control channel — but the run
+        /// has already committed an emitter at that frequency, so a demodulation spent saying
+        /// *what it is* is spent on a question that has an answer. Counted apart from
+        /// `cc_candidates` because it is a different admission rule, and it shares one budget with
+        /// them: `cc_demods` still never exceeds the spec's `max_demods` per pass.
+        cc_emitter_candidates,
+        /// T-977: per-channel verdicts filed onto an inventory emitter for a channel that was
+        /// demodulated and **not** confirmed. The row is what moves that emitter off
+        /// `resolution: not-searched`; before it, a rejected candidate left no trace but a counter.
+        cc_verdicts,
         /// T-546: hunt passes where the receiver's own offset from the channel grid was **fitted
         /// and found to exceed the raster tolerance** (docs/19 §7.6a). It is a property of the
         /// receiver, not of any signal, so one pass counts once however many channels it
@@ -515,6 +544,20 @@ counter_group!(
         /// Classifications made but not written: the inventory recorded no entry for the track
         /// within the bounded wait, so the row had nothing to be evidence about.
         classify_no_emitter,
+        /// T-989: regions a conventional-DMR scan ran on ([`crate::dmr`]). Counted apart from
+        /// the classifications beside them: the scan runs whether or not the classifier could
+        /// say anything, which is the point of it.
+        dmr_scanned,
+        /// Regions identified as conventional DMR (Tier II) from their sync words.
+        dmr_identified,
+        /// DMR headers published on a `messages` stream, each one FEC- or CRC-checked.
+        dmr_headers,
+        /// DMR blocks whose BPTC could not be resolved, or whose CRC or RS parity refused them.
+        /// Counted, never published as a guess — a real capture shows a number here rather than
+        /// a silence.
+        dmr_headers_refused,
+        /// DMR header records the egress gate withheld.
+        dmr_headers_gated,
         /// Chain errors (demod, repository).
         errors,
         /// T-605: chain errors that came back from the **storage engine** — a write the database
@@ -1095,6 +1138,9 @@ pub struct Counters {
     /// T-904: the detection store's size and the retention thread's last pass
     /// (`/api/status` `storage`).
     pub storage: crate::retention::StorageCounters,
+    /// T-981: the front end's clip state per spectrum row, and the front-end events
+    /// (`/api/status` `frontend`, `GET /api/frontend/events`).
+    pub frontend: crate::frontend::FrontEndReport,
 }
 
 impl Counters {
@@ -1146,6 +1192,7 @@ impl Counters {
             "compute": self.compute.to_json(),
             "observations": self.observations.to_json(),
             "storage": self.storage.to_json(),
+            "frontend": self.frontend.to_json(),
         })
     }
 

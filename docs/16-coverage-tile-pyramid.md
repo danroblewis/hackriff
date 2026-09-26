@@ -1080,10 +1080,13 @@ IS finishing MCANVAS"* — and then widened it. The trace is **not** pinned to *
 > not one tile — one long continuous plot, rendering only the section shown and only where data
 > exists. And it is per viewport: each split pane gets its own trace at its own time position.
 
-**Where it lives.** A strip is carved off the **top of each pane's rectangle** in
-`SurfaceView.frame()` (`tracePx`). Carved, never painted over: an overlay covering the newest rows
-would falsify "the top of the pane is the newest row", which every mark on this surface is placed
-through. The arithmetic is `ui/src/surface/trace.ts` and it is pure; the mount composes it in
+**Where it lives.** A band across the **top of each pane's rectangle** in `SurfaceView.frame()`
+(`tracePx`) — since **T-1041 a LAYER over those rows, off by default**, not a strip carved out of
+them (§8.5h). T-457 carved it, on the argument that an overlay covering the newest rows would
+falsify "the top of the pane is the newest row", which every mark on this surface is placed
+through; the user's full-bleed ruling retired that trade, because a reserved band costs the
+waterfall its newest rows outright — a worse failure of the same rule. The arithmetic is
+`ui/src/surface/trace.ts` and it is pure; the mount composes it in
 `ui/src/app/centre/surface.ts`. T-457 drew it through the existing `overlay.ts` pass — the program
 with no sampler and no ramp — and argued from that that the trace could not tint a measurement;
 **T-475 retired that argument and replaced it** (§8.5d).
@@ -1437,6 +1440,35 @@ a runtime display patch in `1024..=65536`; at 4096 the detail floor is 585.9375 
 minimap costs **7031**. The client cannot predict the floor, which is exactly why `tierFor` chooses
 by the budget rather than by a span threshold: at every floor tested the chosen tier stays inside
 100, because the overview tier's reach does not move when the display's cells do.
+
+### 8.5h The trace is a LAYER, not a strip: no reserved band above the waterfall (T-1041, 2026-09-25)
+
+The user, on the full-bleed canvas: *"the waterfall map is still currently not full bleed. There
+are still black bars on the bottom and top. The top bar looks like it's actually the phosphor
+display … We can remove it entirely for now."*
+
+The top bar was §8.5c's trace strip: 96 device px carved off every pane's rectangle, backdrop
+wherever the stroke was not, reserved whether or not anyone had asked for a trace. So:
+
+- **`SurfaceView.frame()` reserves nothing.** The pane's rectangle runs to its own top edge, and
+  `frame.traces[i].rect` is now the top `tracePx` px **of** that rectangle. The trace pass is
+  scissored to it and blends (`SRC_ALPHA`), so the rows underneath show through a faint series and
+  are replaced only by the core of an opaque one.
+- **The layer is off by default** (`app/centre/surface.ts`, the layers menu's "Every pane" row).
+  T-457's invariant — viewport-wide, time-addressable, per pane — is a property of that layer and
+  survives intact; what is retired is the space it took.
+- **The preview's `paneAtPoint` lost its second pass.** "Turning the trace on may not shrink the set
+  of points a gesture can start from" (the T-457 × T-458 merge break) is now structural: the band's
+  points were always the pane's. `ui/test/surface-trace.test.ts` still asserts it over a grid.
+- **What it costs the tests.** A ramp-coloured trace over ramp-coloured cells cannot be told from
+  them in one frame, so `ui/e2e/app-trace.e2e.mjs` names the trace's own pixels two ways instead of
+  by an empty backdrop: on a *following* viewport, whose rows scroll too fast for two shots to be
+  one frame, the pane is put in the **phosphor** style, whose ink is off the ramp by construction
+  (`min(g−r, g−b) ≥ 100`, against a ramp that never reaches 80); on a **frozen** one, a second shot
+  with the layer off is the baseline, and the difference is the layer — which is how the T-475
+  colour equality now reads the cells *under* the band rather than the rows below it.
+- **LSR-6** will feed the trace from the ring; the layer's data path (`trace: (pane, edge, report,
+  band) => TracePath[]`) is unchanged and still swappable.
 
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 

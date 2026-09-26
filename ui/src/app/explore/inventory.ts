@@ -6,7 +6,11 @@ import { deleteEntry, inventoryQuery, promoteEntry, rowListenTarget, type Action
 import { surveyCells, type CoverageResponse } from "../../navigators";
 import type { AppContext } from "../context";
 import { apiErrorText } from "./format";
-import { setInventoryRows, setInventoryWindow } from "./slice";
+import { setInventoryRows, setInventoryWindow, setPaneInventory } from "./slice";
+import {
+  paneBand, paneCandidateFilters, paneConfirmedFilters, paneFilters, paneWindow,
+  type PaneWindowSpec, type ViewWindow,
+} from "./pane-window";
 import type { InventoryTab, InventorySortKey, WindowCoverage } from "./slice";
 
 export { promoteEntry, deleteEntry, rowListenTarget };
@@ -145,8 +149,31 @@ export function waterfallSpanS(state: WindowState): number {
   return FALLBACK_ROWS / Math.max(1e-3, rate);
 }
 
-/** The UI's one time window: `[t0, t1]` on the capture clock. */
-export interface ViewWindow { t0: number; t1: number }
+/** The UI's one time window: `[t0, t1]` on the capture clock. Defined with the per-pane query
+ * arithmetic (`./pane-window`) since T-1002 — there is one definition of a window, whether it came
+ * from a pane or from the app's mirrored state — and re-exported here for its long-standing
+ * callers. */
+export type { ViewWindow };
+
+/**
+ * The **unpaned** window as a spec (T-1002): the app's mirrored view — `live.view` + `time` — read
+ * through the same arithmetic a pane's own window is.
+ *
+ * This is the window the lists use before the surface has published a pane registry, and the one
+ * every caller outside the canvas (the output/decode panels, a test that seeds state) still means
+ * by "the view". It is not a pane: `id` is `""` and it is never named on screen.
+ */
+export function stateSpec(state: WindowState): PaneWindowSpec {
+  const span = state.time.spanS !== undefined && state.time.spanS !== null && state.time.spanS > 0
+    ? state.time.spanS
+    : waterfallSpanS(state);
+  return {
+    id: "", n: 0,
+    loHz: state.live.view?.loHz ?? null, hiHz: state.live.view?.hiHz ?? null,
+    live: state.time.live, tS: !state.time.live && state.time.tS !== undefined ? state.time.tS : null,
+    spanS: span,
+  };
+}
 
 /**
  * The `[t0, t1]` the **Candidate** list is scoped to — **the window the waterfall is showing, and
@@ -164,12 +191,7 @@ export interface ViewWindow { t0: number; t1: number }
  * renders as emptiness that looks exactly like a quiet band.
  */
 export function viewWindow(state: WindowState): ViewWindow | null {
-  const span = state.time.spanS !== undefined && state.time.spanS !== null && state.time.spanS > 0
-    ? state.time.spanS
-    : waterfallSpanS(state);
-  if (!state.time.live && state.time.tS !== undefined) return { t0: state.time.tS - span, t1: state.time.tS };
-  const edge = liveEdgeS(state);
-  return edge === null ? null : { t0: edge - span, t1: edge };
+  return paneWindow(stateSpec(state), liveEdgeS(state));
 }
 
 /**
@@ -208,9 +230,7 @@ export function windowKey(state: WindowState): string {
  * `explanationChip`).
  */
 export function viewFilters(state: WindowState): Filters {
-  const f: Filters = { relations: "all" };
-  if (state.live.view) { f.fLoHz = state.live.view.loHz; f.fHiHz = state.live.view.hiHz; }
-  return f;
+  return paneFilters(stateSpec(state));
 }
 
 /**
@@ -234,52 +254,84 @@ export function viewFilters(state: WindowState): Filters {
  * `Date.now()`; `null` (no edge known yet) sends nothing rather than inventing one.
  */
 export function confirmedFilters(state: WindowState): Filters {
-  const f = viewFilters(state);
-  const at = !state.time.live && state.time.tS !== undefined ? state.time.tS : liveEdgeS(state);
-  if (at !== null) f.at = at;
-  return f;
+  return paneConfirmedFilters(stateSpec(state), liveEdgeS(state));
 }
 
-/** Loads both tabs' current pages and writes them into the store's `inventory.rows`. `onMore`
- * reports whether a tab's page was cut short (GAP 13 "500+" interim, §4.2).
+/**
+ * Loads both tabs' current pages **for every pane on screen** and writes each pane's answer into
+ * its own entry (`inventory.panes`); the active pane's is mirrored into `inventory.rows`, which is
+ * what the lists, the focus panel and the menus read. `onMore` reports whether a tab's page was cut
+ * short (GAP 13 "500+" interim, §4.2) — for the ACTIVE pane, because that is the list it counts.
+ *
+ * **One query set per pane** (T-1002). The inventory is time-scoped to the view and since MCANVAS
+ * the view is a pane: a pane frozen on a past signal and a pane at the live edge are two windows,
+ * and answering both from one made freezing pane 1 re-scope pane 2's live boxes. With no pane
+ * registry published yet there is exactly one window ([[stateSpec]]) and this behaves as it always
+ * did — one candidate query, one confirmed query.
  *
  * **Candidates are window-scoped; Confirmed are always listed** (ADR-0017 §2.2, invariant 3). A
  * Candidate is a hypothesis about energy in the window on screen, so outside that window there is
  * nothing to hypothesise about and the row simply isn't listed — no expiry timer and no decay. A
  * Confirmed row is a catalogue entry carrying its own presence track, so it stays listed whether or
- * not it is transmitting right now. Dropping that asymmetry would make a user's quiet confirmed
- * stations vanish from Explore the moment they went off the air.
+ * not it is transmitting right now, with `at` naming the pane's own instant ([[paneConfirmedFilters]]).
  *
- * **Scrubbing back re-derives both lists** (T-263, TM-7) from the same two queries: the Candidate
- * window follows the scrubbed instant ([[viewWindow]]) and the Confirmed query names it as its
- * own live edge ([[confirmedFilters]]). Neither list is filtered here — the client chooses only
- * *which window to ask about*. */
+ * **Scrubbing back re-derives that pane's lists** (T-263, TM-7) from the same two queries, and only
+ * that pane's: the panes beside it are asking their own questions and their answers do not move.
+ * Neither list is filtered here — the client chooses only *which window to ask about*.
+ */
 export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void): Promise<void> {
   const state = ctx.store.get();
-  const f = viewFilters(state);
-  const w = viewWindow(state);
+  const edge = liveEdgeS(state);
+  // The one page-lifecycle stamp in this module, read once per load and handed to every pane's
+  // write-back: it records whether this PAGE has completed a load (what tells "Loading…" from an
+  // empty answer), and it is never a capture time. Nothing measured, windowed or compared against a
+  // capture stamp may use it — the clock guard in `ui/test/app-explore.test.ts` holds this file to
+  // exactly this one occurrence, and `liveEdgeS` above is where capture time comes from.
+  const loadedAtS = Date.now() / 1000;
+  const inv = state.inventory;
+  const specs = Object.values(inv.panes).map((p) => p.spec);
+  if (specs.length === 0) {
+    await loadPaneRows(ctx, stateSpec(state), edge, loadedAtS, onMore);
+    return;
+  }
+  const activeId = inv.active?.id ?? "";
+  await Promise.all(specs.map((spec) => loadPaneRows(ctx, spec, edge, loadedAtS, spec.id === activeId ? onMore : null)));
+}
+
+/** One pane's two queries, its coverage question and its write-back. Errors propagate to the
+ * caller's one handler, exactly as the single-window load's did. */
+async function loadPaneRows(
+  ctx: AppContext, spec: PaneWindowSpec, edge: number | null, loadedAtS: number,
+  onMore: ((tab: InventoryTab, more: boolean) => void) | null,
+): Promise<void> {
+  const w = paneWindow(spec, edge);
   // T-379: no live edge reported yet — the window is *unknown*. Asking unwindowed would list
   // all-time candidates (widening the window, which breaks time-scoping) and asking on the
   // browser's clock would list none; both lie. So neither query is made up, and the list says
   // "unknown" instead of "nothing".
   if (!w) {
-    ctx.store.set(setInventoryWindow(null));
+    ctx.store.set(spec.id === "" ? setInventoryWindow(null) : setPaneInventory(spec.id, null, loadedAtS));
     return;
   }
   const [confirmed, candidate] = await Promise.all([
-    fetchInventoryPage(ctx.client, "confirmed", confirmedFilters(state)),
-    fetchInventoryPage(ctx.client, "candidate", { ...f, t0: w.t0, t1: w.t1 }),
+    fetchInventoryPage(ctx.client, "confirmed", paneConfirmedFilters(spec, edge)),
+    fetchInventoryPage(ctx.client, "candidate", paneCandidateFilters(spec, w)),
   ]);
-  onMore("confirmed", !!confirmed.next_cursor);
-  onMore("candidate", !!candidate.next_cursor);
+  onMore?.("confirmed", !!confirmed.next_cursor);
+  onMore?.("candidate", !!candidate.next_cursor);
   const rows: Record<string, Row> = {};
   for (const r of [...confirmed.entries, ...candidate.entries]) rows[r.id] = r;
   // The window's own coverage, asked for only when the list came back empty — the one case where
   // the difference between "nothing was on the air" and "nothing ever looked here" is the whole
   // message. It is the backend's `Coverage` (T-368), read as served; nothing here decides it.
-  const coverage = candidate.entries.length === 0 ? await windowCoverage(ctx.client, state, w) : "observed";
-  ctx.store.set(setInventoryRows(rows, Date.now() / 1000));
-  ctx.store.set(setInventoryWindow({ t0: w.t0, t1: w.t1, coverage }));
+  const coverage = candidate.entries.length === 0 ? await specCoverage(ctx.client, spec, w) : "observed";
+  const window = { t0: w.t0, t1: w.t1, coverage };
+  if (spec.id === "") {
+    ctx.store.set(setInventoryRows(rows, loadedAtS));
+    ctx.store.set(setInventoryWindow(window));
+    return;
+  }
+  ctx.store.set(setPaneInventory(spec.id, { rows, window }, loadedAtS));
 }
 
 // ---- the one collection both Explore surfaces derive from (T-389) --------------------------
@@ -349,12 +401,6 @@ export function renderedInventory(
   return out;
 }
 
-/** What the current window's frequency range is, for a coverage question about exactly it. */
-function windowBand(state: WindowState): { lo: number; hi: number } | null {
-  const v = state.live.view;
-  return v && v.hiHz > v.loHz ? { lo: v.loHz, hi: v.hiHz } : null;
-}
-
 /**
  * Whether the front end ever sampled this (time × frequency) window, straight from
  * `GET /api/coverage` (T-368): `"observed"`, `"unobserved"`, or `null` for *not known*.
@@ -371,7 +417,15 @@ function windowBand(state: WindowState): { lo: number; hi: number } | null {
 export async function windowCoverage(
   client: Pick<InventoryClient, "get">, state: WindowState, w: { t0: number; t1: number },
 ): Promise<WindowCoverage> {
-  const band = windowBand(state);
+  return specCoverage(client, stateSpec(state), w);
+}
+
+/** [[windowCoverage]] for one pane's window (T-1002): the same question, asked over the band that
+ * pane is showing rather than the app's mirrored one. */
+export async function specCoverage(
+  client: Pick<InventoryClient, "get">, spec: PaneWindowSpec, w: { t0: number; t1: number },
+): Promise<WindowCoverage> {
+  const band = paneBand(spec);
   if (!band || !(w.t1 > w.t0)) return null;
   try {
     const body = await client.get<CoverageResponse>(
@@ -519,7 +573,7 @@ export function emptyListText(s: EmptyState): string {
 
 // ---- row view model ----
 
-export interface Chip { cls: "known" | "unknown" | "flag" | "cluster" | "artifact"; text: string; title?: string }
+export interface Chip { cls: "known" | "unknown" | "flag" | "cluster" | "artifact" | "identity"; text: string; title?: string }
 
 /** The family/flag chip(s) for a row, from already-known fields only (`family`,
  * `classification.family`, `explanations[0].flags`); "unknown" when no family is known yet. */
@@ -556,6 +610,41 @@ export function clusterChip(r: Pick<Row, "cluster_id" | "cluster_group">): Chip 
     ? `signature cluster ${g.label} · ${g.rows_in_view} rows measure alike`
     : `signature cluster ${g.label} · seen before`;
   return { cls: "cluster", text, title: CLUSTER_CHIP_TITLE };
+}
+
+/** Why the identity chip shows what it shows, on hover (T-967). */
+export const IDENTITY_CHIP_TITLE =
+  "The decoded identity — the label its decoder voted over its latest session (for RDS the most "
+  + "frequent PS station name, not the latest scrolling fragment), then the bare code, then the share "
+  + "of that session's frames that read the label, when under 100 %. Backend-rendered, never re-parsed here.";
+
+/**
+ * The decoded-identity chip for a row (T-967, the explorer's field report: a CRC-valid RDS PI/PS
+ * decode was invisible in the list — "unknown", "100% unk" — because nothing rendered it).
+ *
+ * With `identity_label` (RDS's voted PS station name) the chip reads `KROQ · 1694`, the label
+ * beside the bare `identity_value` it names; `identity_label_share` — the label's own share of the
+ * session's frames, *not* the PI vote — is appended as `· 75% of frames`, worded so it reads as a
+ * share of frames and never as confidence in the code, and only under 100 % so a settled name is
+ * not cluttered. Without a label (a scheme with no decoder summary, an ICAO address, an MMSI) the
+ * bare code alone, so a decoded identity still shows something. `null` without a decoded identity
+ * at all; "withheld" on a gated row, exactly as the focus panel's identity box reads it. Every
+ * word comes straight off already-rendered backend fields (thin-client rule, CLAUDE.md).
+ */
+export function identityChip(
+  r: Pick<Row, "identity_scheme" | "identity_value" | "identity_label" | "identity_label_share" | "withheld">,
+): Chip | null {
+  if (!r.identity_scheme) return null;
+  if (r.withheld) return { cls: "identity", text: "withheld", title: IDENTITY_CHIP_TITLE };
+  const code = r.identity_value ?? null;
+  const label = r.identity_label ?? null;
+  if (!label && !code) return null;
+  const parts = label ? [label, ...(code && code !== label ? [code] : [])] : [code as string];
+  const share = r.identity_label_share;
+  if (label && share !== null && share !== undefined && share < 1) {
+    parts.push(`${Math.round(share * 100)}% of frames`);
+  }
+  return { cls: "identity", text: parts.join(" · "), title: IDENTITY_CHIP_TITLE };
 }
 
 // ---- T-587: artefact vs real emission vs not-yet-decided ----

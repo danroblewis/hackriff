@@ -26,8 +26,33 @@ import type { OutputEntry } from "./slice";
 
 export { OUTPUT_KINDS, OUTPUT_KIND_GLYPH, OUTPUT_KIND_WORDS, activityWords, type OutputKind } from "../../surface/badges";
 
-/** `GET /api/pipelines`' pipeline, narrowed to what the badge needs. */
-export interface ServedPipeline { readonly id: string; readonly state: string; readonly emitter_id?: string | null }
+/** One output of a served pipeline (`GET /api/pipelines` `outputs[]`). */
+export interface ServedPipelineOutput { readonly id: string; readonly kind: string; readonly stream_id: string }
+/** `GET /api/pipelines`' pipeline, narrowed to what the badge and the per-signal panel need. */
+export interface ServedPipeline {
+  readonly id: string; readonly state: string; readonly emitter_id?: string | null;
+  readonly outputs?: readonly ServedPipelineOutput[];
+}
+
+// ---- LP-7 (ADR-0015 §12.7): ONE output model ----
+// The map's box badge (below) and the per-signal output panel (`explore/output-panel.ts`
+// `collectPanelSources`) both read `outputs` + `servedOutputs` through these two functions, so
+// "is this signal's audio an open output, and whose is it" has exactly one answer.
+
+/** Running pipeline id → its emitter, from the served records. */
+export function runningEmitters(pipelines: readonly ServedPipeline[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const p of pipelines) if (p.state === "running" && p.emitter_id) m.set(p.id, p.emitter_id);
+  return m;
+}
+
+/** The emitter an audio entry is an open output of, or null when it is not one: only once the
+ * server's header has arrived (`live`), and resolved through its own `emitterId` or — for a recipe
+ * pipeline's `audio` output, whose header names `pipeline_id` (T-866) — the running pipeline's. */
+export function audioOutputEmitter(o: OutputEntry, running: ReadonlyMap<string, string>): string | null {
+  if (o.kind !== "audio" || o.state !== "live") return null;
+  return o.emitterId ?? (o.pipelineId ? running.get(o.pipelineId) ?? null : null);
+}
 /** `GET /api/outputs`' recording `Session`, narrowed. */
 export interface ServedRecording { readonly id: string; readonly active: boolean; readonly emitter_id?: string | null }
 
@@ -57,19 +82,16 @@ export function boxActivity(
     if (!s) { s = new Set(); kinds.set(id, s); }
     s.add(k);
   };
-  const running = new Map<string, string>();
-  for (const p of pipelines) {
-    if (p.state !== "running" || !p.emitter_id) continue;
-    running.set(p.id, p.emitter_id);
-    add(p.emitter_id, "decode");
-  }
+  const running = runningEmitters(pipelines);
+  for (const em of running.values()) add(em, "decode");
   for (const r of recordings) if (r.active) add(r.emitter_id, "rec");
   for (const o of outputs) {
     if (o.kind === "audio") {
-      if (o.state !== "live" || !o.emitterId) continue;
-      add(o.emitterId, "audio");
+      const em = audioOutputEmitter(o, running);
+      if (!em) continue;
+      add(em, "audio");
       const l = levelFrac(o.levelDbfs);
-      if (l !== null) levels.set(o.emitterId, Math.max(levels.get(o.emitterId) ?? 0, l));
+      if (l !== null) levels.set(em, Math.max(levels.get(em) ?? 0, l));
     } else if (o.pipelineId && running.has(o.pipelineId)) {
       add(running.get(o.pipelineId), "stream");
     }

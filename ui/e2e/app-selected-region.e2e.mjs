@@ -97,11 +97,74 @@ test("a region selected on the canvas: only its signals, with Listen and Decode 
   const shown = (await page.$text(".focus .bigf")) ?? "";
   const [lo, hi] = [...shown.matchAll(/[\d.]+/g)].map((m) => Number(m[0]) * 1e6);
   assert.ok(Number.isFinite(lo) && Number.isFinite(hi) && hi > lo, `the panel did not state the region: "${shown}"`);
-  const asked = page.requests.slice(marker)
-    .filter((q) => /\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(new URL(q.url).pathname))
-    .filter((q) => new URL(q.url).searchParams.has("f_lo"));
-  assert.ok(asked.length >= 3, `the drawer did not re-ask after the region was selected: ${asked.length} requests`);
-  for (const q of asked) {
+  // **The boundary is the COMMIT, not the drag** (T-1030). `marker` is taken before the gesture, and
+  // the gesture takes about a second: a drawer poll (every 30 s) or a canvas survey re-ask (every 2 s)
+  // firing inside that second is asked about the pre-selection scope *correctly*, because no
+  // selection existed yet when it was built. Judging those by the region's bounds is what made this
+  // spec report the drawer asking about 0–9 830 400 000 Hz — seen at 3 lanes, green alone, because
+  // load is what widens the window between `marker` and the commit. Observed in run 3 of this fix:
+  // four whole-lattice drawer requests (events/strongest/scheduler and `coverage?f_lo=1000000&
+  // f_hi=6000000000&cells=64`) sent after `marker` and before `POST /api/selections`.
+  // `page.requests` is in send order, so the POST that committed the region is the honest boundary:
+  // everything the client sends AFTER it must carry the region. That keeps the claim this file exists
+  // to make — a request built from a stale scope after the selection landed is a product bug — and
+  // drops only the requests that were never about the region.
+  const postIdx = page.requests.findIndex((r, i) => i >= marker && r.method === "POST" &&
+    /\/api\/selections$/.test(new URL(r.url).pathname));
+  assert.ok(postIdx >= 0, "the commit's POST /api/selections is not in the recorded requests");
+  // **Which requests are the DRAWER's** (T-1030). Three different clients ask `/api/coverage` in
+  // this app, and only one of them is the sheet under test. Before T-1030 this guard held every
+  // band-scoped request to the region's bounds, so it went red whenever either of the other two
+  // happened to be asked after the commit — the "0–9 830 400 000 Hz" report at 3 lanes, green alone,
+  // because load is what decides whether their timers fire inside this window:
+  //
+  //   1. the **drawer** (`ui/src/app/chrome/explore-drawer.ts`, `drawerRequests`): four questions per
+  //      refresh, region-scoped the instant a region is focused. THIS spec's subject. They are
+  //      identified here by the shape that builder produces — `events?…&limit=200`,
+  //      `analysis/strongest?…&window_s=30`, `scheduler?…`, `coverage?…&cells=64` — so a request that
+  //      merely looks similar is not credited as the drawer's, and a builder that changed shape shows
+  //      up as a missing request rather than as a silently narrower guard.
+  //   2. the canvas's **skip survey** (`ui/src/surface/survey.ts`): `cells=2048&rows=2` (and
+  //      `cells=128&rows=32`) over the WHOLE lattice every ~2 s while a pane follows the live edge. It
+  //      decides which tiles are grey across the entire surface, so selecting a region must NOT shrink
+  //      it; asserted in its own right below.
+  //   3. the **window question** (`ui/src/app/explore/inventory.ts`, `windowCoverage`): `cells=1` over
+  //      the pane's VIEWED band, asked by the window-scoped surfaces (inventory list, output panel,
+  //      decode inspector) only when their list is empty, to say whether that window was ever sampled.
+  //      Window-scoped is correct for it (T-386: the sidebar is the window's, not the selection's), and
+  //      an empty list is exactly what load makes likely — measured at 3 lanes, 6 runs of 6:
+  //      `/api/coverage?f_lo=99120000&f_hi=102480000&cells=1&…` against a region of 100.29–100.80 MHz.
+  const isDrawerAsk = (q) => {
+    const u = new URL(q.url), p = u.pathname, s = u.searchParams;
+    return (p === "/api/events" && s.get("limit") === "200")
+      || (p === "/api/analysis/strongest" && s.get("window_s") === "30")
+      || p === "/api/scheduler"
+      || (p === "/api/coverage" && s.get("cells") === "64");
+  };
+  const sentAfter = (from) => page.requests.slice(from).filter((q) => new URL(q.url).searchParams.has("f_lo"));
+  const drawerAsked = () => sentAfter(postIdx + 1).filter(isDrawerAsk);
+  // **Wait for the re-ask, do not assume it has happened.** Before T-1030 the assertion ran as soon as
+  // the sheet's title changed, and `marker` (taken before the ~1 s gesture) let PRE-commit requests
+  // satisfy `>= 3` — so on a fast box it could pass with no post-commit request on the wire at all,
+  // the same vacuity as asserting on a render alone. Four: the drawer asks exactly four per refresh.
+  for (let i = 0; drawerAsked().length < 4 && i < 300; i++) await new Promise((k) => setTimeout(k, 100));
+  const asked = sentAfter(postIdx + 1);
+  t.diagnostic(`asked after the commit: ${JSON.stringify(asked.map((q) => q.url.replace(/^https?:\/\/[^/]+/, "")))}`);
+  // The canvas's survey, in its own right: still the whole surface after the commit. "Whole-surface"
+  // is the device's whole tunable range (1 MHz–6 GHz, the canvas's X extent), not a multiple of the
+  // region's width — a region committed while the view still spans the lattice is itself gigahertz
+  // wide (measured 3436.0–4915.2 MHz on this fixture), so a ratio test would call the real survey too
+  // narrow. No band-scoped question can cover 1 MHz–6 GHz, so nothing can pass this by carrying `rows=`.
+  for (const q of asked.filter((q) => new URL(q.url).searchParams.has("rows"))) {
+    const [qlo, qhi] = band(q.url);
+    assert.ok(qlo <= Math.min(lo, 1e6) && qhi >= Math.max(hi, 6e9),
+      `${new URL(q.url).search} carries rows= (the canvas's whole-surface coverage survey) but asked about ` +
+      `${qlo}–${qhi} Hz, which does not cover the device's range — a band-scoped request must not hide as one`);
+  }
+  assert.equal(drawerAsked().length, 4,
+    `the drawer did not re-ask its four questions after the region was selected: ` +
+    `${JSON.stringify(drawerAsked().map((q) => new URL(q.url).pathname + new URL(q.url).search))}`);
+  for (const q of drawerAsked()) {
     const [qlo, qhi] = band(q.url);
     // The panel states MHz to 2 decimals, so the bound it gives is the true one to within 5 kHz;
     // that is the whole slack. The fault this catches is a request about the VIEWED SPAN, which is

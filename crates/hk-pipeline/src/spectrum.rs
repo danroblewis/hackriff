@@ -64,12 +64,24 @@
 //! 1.7 CPU-s, which its own note says varied ±9% with other agents on the box; the direction and
 //! the order of magnitude hold, the exact 13% does not. Same run, the reader's own counters:
 //! `reader spectrum 179 388 000 samples, 0 frames, lost 0` — the ring drained in full, no FFT.
+//!
+//! **T-1048 (LSR-7): the row's own fold — dB conversion plus wire serialize — is timed, never
+//! assumed** ([`SpectrumCounters::fold_ns_last`]/`fold_ns_max`/`fold_ns_total`, `/api/status`
+//! `spectrum`). It is the one step every subscriber's row pays before publish, so it is the
+//! server-side half of T-453's "capture-thread cost is measured, never assumed" for this reader —
+//! but it is **not yet the per-pane fold** the design's live-ring ticket set (LSR-1..7) means by
+//! "per-subscription fold cost": today's `/ws/spectrum/live` folds a row exactly **once** and every
+//! watcher gets the same bytes, because there is one canonical geometry for the whole stream. A
+//! genuinely per-subscription fold needs a per-pane geometry to fold *to*, which is what LSR-2's
+//! `/ws/spectrum/rows` adds; once it lands, its own per-pane fold should be timed at this same
+//! point, extending these counters rather than duplicating them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_core::{Discontinuity, ReadOutcome};
+use hk_detect::{ClipLedger, FrontEndMonitor};
 use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftProcessor};
 use hk_model::ContentClass;
 use hk_store::history::{FrameOrigin, source_key};
@@ -150,6 +162,10 @@ struct Output<'a> {
     view: Option<Arc<crate::history::ViewQueue>>,
     /// T-133: the site each frame is folded under, peeked at the frame's sample time.
     attention: Option<Arc<AttentionService>>,
+    /// T-981: clipped samples and ADC peaks of the chunks read, for each row's own span.
+    ledger: ClipLedger,
+    /// T-981: the per-row front-end judgement (clipped; a whole-span step while clipped).
+    monitor: FrontEndMonitor,
 }
 
 impl<'a> Output<'a> {
@@ -175,6 +191,8 @@ impl<'a> Output<'a> {
             error: None,
             view: shared.view_queue.clone(),
             attention,
+            ledger: ClipLedger::default(),
+            monitor: FrontEndMonitor::default(),
         }
     }
 
@@ -292,6 +310,11 @@ impl<'a> Output<'a> {
                 return;
             }
         }
+        // T-1048 (LSR-7): the fold itself, timed — dB conversion plus the wire's little-endian
+        // serialize, exactly the work skipped in the T-348/T-489 measurement above. One timer
+        // around the same lines that measurement already names, so "the cost" is never two
+        // different things in this file.
+        let fold_t0 = Instant::now();
         self.db.resize(bins, 0.0);
         self.bytes.resize(4 * bins, 0);
         let trace: &[f32] = if averaging > 1 { &self.avg } else { &spec.psd };
@@ -299,10 +322,45 @@ impl<'a> Output<'a> {
         for (c, v) in self.bytes.chunks_exact_mut(4).zip(&self.db) {
             c.copy_from_slice(&v.to_le_bytes());
         }
+        let fold_ns = fold_t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        {
+            let sc = &self.shared.counters.spectrum;
+            sc.fold_ns_last.store(fold_ns, Ordering::Relaxed);
+            sc.fold_ns_max.fetch_max(fold_ns, Ordering::Relaxed);
+            sc.fold_ns_total.fetch_add(fold_ns, Ordering::Relaxed);
+        }
         let mut flags = RecordFlags::empty();
-        if frame.provenance.get().overload {
+        let provenance = frame.provenance.get();
+        if provenance.overload {
             flags = flags.with(RecordFlags::OVERLOAD);
         }
+        // T-981: this row's OWN clip state, measured over its span — not the sticky tune-state
+        // flag above, which says only that this gain state has clipped at some point. The
+        // reference is NOT forgotten on `reset`: the overload itself mints a provenance (a
+        // discontinuity), and forgetting there would lose exactly the level it steps from. The
+        // monitor forgets on a change of tuning or gains, the changes that move the level.
+        let a = frame.t.sample_index;
+        let span = self.ledger.span(a, a + frame.sample_count);
+        let verdict = self.monitor.observe(&spec.psd, span.clip, &provenance.tune);
+        if verdict.clipped {
+            flags = flags.with(RecordFlags::CLIPPED);
+        }
+        if verdict.event {
+            flags = flags.with(RecordFlags::FRONTEND_EVENT);
+        }
+        let dur_ns = (frame.sample_count as f64 * 1e9 / spec.sample_rate_hz).round() as i64;
+        self.shared
+            .counters
+            .frontend
+            .row(&crate::frontend::RowMeasure {
+                t0: frame.t.host_time,
+                t1: frame.t.host_time.saturating_add_nanos(dur_ns),
+                device_id: &provenance.device_id,
+                center_hz: spec.f_center_hz,
+                sample_rate_hz: spec.sample_rate_hz,
+                span,
+                verdict,
+            });
         if reset {
             flags = flags.with(RecordFlags::DISCONTINUITY);
         }
@@ -514,6 +572,7 @@ pub(crate) fn run(
                     // Resuming needs nothing done here: the STFT was cleared when the idle began,
                     // so no sample from before the gap survives to be stitched across it, and the
                     // flag `skipped` left behind restarts the average and marks the first row.
+                    out.ledger.push(chunk.first_sample(), &buf[..chunk.len]);
                     stft.push(InputInfo::from(&chunk), &buf[..chunk.len], |frame| {
                         out.row(frame)
                     });
@@ -531,6 +590,7 @@ pub(crate) fn run(
                         }
                         stft.reset();
                     }
+                    out.ledger.clear();
                     out.skipped();
                     // No row will correct the header in force while none is produced, so the
                     // offer follows the window here instead (T-057's rule has no rows to follow).

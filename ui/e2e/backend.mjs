@@ -101,6 +101,14 @@ export async function startBackend({
   // active capture window, and takes a retune, so a browser can drive the whole act without any real
   // hardware (CLAUDE.md: e2e goes THROUGH the device interface; receive only; never the real radio).
   mockDevice = false,
+  // T-1006: **two (or more) mock front ends**, the browser tier's version of T-513's two-device
+  // setup. Each entry is `{ fixture, set }`: the recording behind one `--device mock:…`, plus
+  // optional `--device-set` values (`center-hz`, `rate`, gains) for that device alone. Two mock
+  // devices need two DIFFERENT recordings — a mock's `device_id` is `mock:<the recording's own
+  // device_id>`, and `hk serve` refuses two front ends reporting the same id outright (a selector
+  // could not tell them apart), which is exactly the honesty rule this spec is about. Implies
+  // `mockDevice`; `fixture` above is ignored when this is given.
+  devices = null,
   // T-508: a **fault** for that mock device (`HK_MOCK_FAULT`, e.g. `retune-apply-fails:1` or
   // `gone-on-retune`; see `hk_core::MockFault::parse`). Every retune guard in this tier was green
   // because the mock always landed exactly where it was told; a fault is what lets one go red. It
@@ -133,7 +141,8 @@ export async function startBackend({
   // `hk serve` held 8791. The repo runs up to four agents at once, so this is the normal case, not a
   // corner. Stepping to the next free port is what the caller wanted anyway — the port is internal,
   // callers use the returned `origin` — and it fails closed if none is free.
-  if (mockFault && !mockDevice) throw new Error("a mock fault needs mockDevice: true (a --replay has no device to fail)");
+  if (mockFault && !mockDevice && !devices) throw new Error("a mock fault needs mockDevice: true (a --replay has no device to fail)");
+  if (devices && devices.length < 2) throw new Error("`devices` is for a MULTI-device run; one device is `mockDevice: true`");
   const bin = hkBinary();
   // **The port race (T-883).** `freePort` answers "free" at the instant it asks, and `hk serve` binds
   // a moment later — so two runs in two worktrees that ask about the same port at the same time are
@@ -148,7 +157,7 @@ export async function startBackend({
   let lastLog = "";
   for (let attempt = 0; attempt < 8; attempt++) {
     port = await freePort(port);
-    const started = await spawnAndAwait({ bin, port, fixture, mockDevice, mockFault, uiDist, token, args });
+    const started = await spawnAndAwait({ bin, port, fixture, mockDevice, mockFault, uiDist, token, args, devices });
     if (started.ok) return started.backend;
     lastLog = started.log;
     if (!started.lostRace) throw new Error(started.error);
@@ -175,11 +184,18 @@ async function isOurs(origin, token, proc) {
   return r.ok && proc.exitCode === null && proc.signalCode === null ? "ours" : "not-yet";
 }
 
-async function spawnAndAwait({ bin, port, fixture, mockDevice, mockFault, uiDist, token, args }) {
+async function spawnAndAwait({ bin, port, fixture, mockDevice, mockFault, uiDist, token, args, devices }) {
   const dataDir = mkdtempSync(path.join(tmpdir(), "hk-e2e-data-"));
-  const source = mockDevice
-    ? ["--device", `mock:${path.join(REPO, fixture)}`]
-    : ["--replay", path.join(REPO, fixture), "--loop"];
+  const source = devices
+    // One `--device mock:<path>` per front end, then that device's own `--device-set`s, addressed by
+    // the same spec string (T-512's form exactly — this adds no new CLI shape).
+    ? devices.flatMap((d) => {
+      const spec = `mock:${path.join(REPO, d.fixture)}`;
+      return ["--device", spec, ...Object.entries(d.set ?? {}).flatMap(([k, v]) => ["--device-set", `${spec}:${k}=${v}`])];
+    })
+    : mockDevice
+      ? ["--device", `mock:${path.join(REPO, fixture)}`]
+      : ["--replay", path.join(REPO, fixture), "--loop"];
   const proc = spawn(bin, [
     "serve",
     ...source,

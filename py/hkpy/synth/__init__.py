@@ -18,7 +18,10 @@ population -- see :mod:`hkpy.synth.mismatch`), ``retune_diversity`` (AWARE-011, 
 centres, fixed-frequency emitters beside LO-relative artefacts -- see :mod:`hkpy.synth.retune`),
 ``generic_fsk_sweep`` (RESEARCH-002/SIGNAL-052, T-863: ADR-0015 section 7's
 generic FSK/OOK population -- see :mod:`hkpy.synth.generic_fsk`), ``multipath_echo`` (AWARE-053, T-222: one transmission received twice -- a delayed, attenuated
-copy beside an independent station of the same family -- see :mod:`hkpy.synth.multipath`). Every scenario also accepts the impairment parameters in
+copy beside an independent station of the same family -- see :mod:`hkpy.synth.multipath`), ``ais_vessels``
+(SIGNAL-015, T-963: GMSK 9600 Bd AIS Class A position reports on the two fixed marine channels,
+hidden MMSI/message type per vessel -- see :mod:`hkpy.synth.ais_scene`, oracle `py/fixtures/ais_ref.py`).
+Every scenario also accepts the impairment parameters in
 :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
 Truth conventions (dBFS reference, calibration constant, annotation roles) are documented in
@@ -34,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from hkpy.synth import (
+    ais_scene,
     c4fm_burst,
     generic_fsk,
     impairments,
@@ -169,6 +173,11 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "
         "steady CW carrier and short fixed-frequency FSK bursts"),
+    "ais_vessels": ScenarioSpec(
+        ais_scene.ais_vessels, ais_scene.AIS_DEFAULTS, ("SIGNAL-015",),
+        "GMSK 9600 Bd AIS Class A position reports (T-963) on the two fixed marine channels "
+        "AIS1/161.975 MHz and AIS2/162.025 MHz, hidden truth MMSI/message type per vessel -- "
+        "validated by the independent oracle py/fixtures/ais_ref.py"),
 }
 
 

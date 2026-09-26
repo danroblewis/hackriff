@@ -66,7 +66,7 @@ const READ = `JSON.stringify((() => {
         box: box(el),
       };
     }),
-    cluster: ['.map-goto', '.map-topright', '.map-zoom', '.map-fab'].map((s) => {
+    cluster: ['.map-goto', '.map-topright', '.map-zoom', '.sf-pane-live-btn'].map((s) => {
       const e = document.querySelector(s); return e ? { sel: s, ...box(e) } : null;
     }).filter(Boolean),
     scrollW: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),

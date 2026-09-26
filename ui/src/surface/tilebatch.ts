@@ -19,6 +19,13 @@
 // own address (as `TileBusyError`, which the cache already knows how to back off from) and the
 // tiles beside it resolve. `truncated` puts the unanswered addresses back in the queue rather than
 // failing them: the route said it did not reach them, not that they are unreachable.
+//
+// **No entry of a batch answer is ever dropped** (T-1057, the "never abandoned" invariant read at this
+// layer). Exactly three things can happen to an address this file was asked about: it resolves, it is
+// re-queued (`remaining`), or it is rejected with an error the cache's own ladder will re-ask — there
+// is no fourth branch, and the one that used to be terminal (a batch that named no entry for it) is
+// not any more. A `remaining` entry is re-queued **per address**, so a truncated answer costs the
+// truncated addresses another turn and costs the ones it did answer nothing.
 
 import { errorFrom } from "../controls/client";
 import { buildRequest } from "../controls/client";
@@ -35,6 +42,9 @@ import type { TileSourceHint } from "./tilecache";
 /** One waiting address. */
 interface Waiter {
   readonly addr: TileAddr;
+  /** The set this address must be answered WITH, if its caller named one (T-1037). Part of the
+   * group key, so one lane's addresses never ride in another lane's request. */
+  readonly lane?: string;
   readonly signal?: AbortSignal;
   readonly resolve: (d: TileData) => void;
   readonly reject: (e: unknown) => void;
@@ -96,7 +106,10 @@ export function batchedTileSource(
   };
 
   const requeue = (w: Waiter): void => {
-    const group = batchGroupKey(w.addr);
+    // **A named lane is its own group** (T-1037). The coarse stand-in enumeration exists to arrive
+    // as ONE picture — that is the whole of "never black" — so its four addresses must not be split
+    // across the chunks a hundred-address viewport is cut into, nor wait on the slowest tile in one.
+    const group = w.lane === undefined ? batchGroupKey(w.addr) : `${w.lane}\u0000${batchGroupKey(w.addr)}`;
     const q = pending.get(group);
     if (q) q.push(w); else pending.set(group, [w]);
     arm(group);
@@ -136,6 +149,12 @@ export function batchedTileSource(
         // The route answered without this address and without listing it as unreached. That is
         // not a coverage answer, so it throws rather than resolving to anything: the place stays
         // pending, which is true, instead of claiming the radio never looked.
+        //
+        // **And pending means still owed** (T-1057): a `TileDecodeError` is not terminal any more —
+        // the cache puts the address on its per-address jittered ladder and asks again — so this is
+        // now the whole fix for the batch layer's own way of losing a tile. A batch that names no
+        // entry for an address it was asked about is a bug in the answer, not a statement about the
+        // place, and the next batch usually answers it.
         w.reject(new TileDecodeError(
           `batch answer named no entry for ${spelling}: an address that is neither answered nor listed in \`remaining\` is a tile left pending with nothing saying why`));
         continue;
@@ -165,7 +184,7 @@ export function batchedTileSource(
     if (hint?.solo) return fetchTile(addr, token, fetchFn, signal);
     return new Promise<TileData>((resolve, reject) => {
       if (signal?.aborted) { reject(abortError()); return; }
-      requeue({ addr, signal, resolve, reject });
+      requeue({ addr, lane: hint?.lane, signal, resolve, reject });
     });
   };
 }

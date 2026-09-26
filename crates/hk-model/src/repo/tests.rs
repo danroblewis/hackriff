@@ -1621,19 +1621,53 @@ fn region_and_time_queries_use_indexes() {
     }
 }
 
-/// ADR-0006 risk: SQLite write throughput under dense detection rates. Prints the batched
-/// insert rate; the bound is deliberately loose so CI is not flaky.
-#[test]
-fn detection_write_throughput_is_reported() {
-    let dir = TempDir::new();
+/// ADR-0006 risk: SQLite write throughput under dense detection rates. One batched-insert run,
+/// measured. Split in two by T-1036 (docs/10 §3.6): the figures below are *reported* and every
+/// row is read back by `detection_writes_are_all_readable_and_the_rate_is_reported`, which the
+/// gate runs; the wall-clock BOUND on `rate_rows_per_s` is
+/// `the_detection_write_rate_clears_its_floor`, which lives in the `timing` tier
+/// (`.config/nextest.toml`) because a bound on rows/s measures this box's headroom as much as
+/// the code — it took 9.6 s alone and 59.3 s at load 30, 173 mentions in the gate log.
+struct WriteThroughput {
+    rows: usize,
+    batch: usize,
+    secs: f64,
+    rate_rows_per_s: f64,
+}
+
+impl WriteThroughput {
+    /// The stated figure. Both halves of the split assert against this one line, so a report
+    /// that stops stating the rate, the row count or the build fails the gate's half.
+    fn report(&self) -> String {
+        format!(
+            "T-002 detection insert throughput: {:.0} rows/s ({} rows in batches of {}, \
+             {:.3} s, file DB, WAL, synchronous=NORMAL, {} build)",
+            self.rate_rows_per_s,
+            self.rows,
+            self.batch,
+            self.secs,
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        )
+    }
+}
+
+const THROUGHPUT_BATCH: usize = 1_000;
+const THROUGHPUT_BATCHES: usize = 20;
+
+/// Write `THROUGHPUT_BATCHES` batches of `THROUGHPUT_BATCH` detections into a file-backed repo,
+/// timing the inserts. Returns the repo, the detections written (for read-back) and the measured
+/// figures, so both halves of the split measure exactly the same thing.
+fn measure_detection_writes(dir: &TempDir) -> (Base, Vec<Detection>, WriteThroughput) {
     let mut b = base_in(Repository::open(dir.0.join("throughput.db")).unwrap());
-    const BATCH: usize = 1_000;
-    const BATCHES: usize = 20;
-    let batches: Vec<Vec<Detection>> = (0..BATCHES)
+    let batches: Vec<Vec<Detection>> = (0..THROUGHPUT_BATCHES)
         .map(|k| {
-            (0..BATCH)
+            (0..THROUGHPUT_BATCH)
                 .map(|i| {
-                    let n = (k * BATCH + i) as i64;
+                    let n = (k * THROUGHPUT_BATCH + i) as i64;
                     det(
                         b.survey.id,
                         b.prov_id,
@@ -1650,21 +1684,100 @@ fn detection_write_throughput_is_reported() {
         b.repo.insert_detections(batch).unwrap();
     }
     let secs = start.elapsed().as_secs_f64();
-    let rate = (BATCH * BATCHES) as f64 / secs;
-    eprintln!(
-        "T-002 detection insert throughput: {rate:.0} rows/s ({} rows in batches of {BATCH}, \
-         file DB, WAL, synchronous=NORMAL, {} build)",
-        BATCH * BATCHES,
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        }
+    let rows = THROUGHPUT_BATCH * THROUGHPUT_BATCHES;
+    let measured = WriteThroughput {
+        rows,
+        batch: THROUGHPUT_BATCH,
+        secs,
+        rate_rows_per_s: rows as f64 / secs,
+    };
+    eprintln!("{}", measured.report());
+    (b, batches.into_iter().flatten().collect(), measured)
+}
+
+/// The deterministic half of the ADR-0006 write-throughput measurement (T-1036): dense batched
+/// detection writes are all readable afterwards — by count and row for row through the
+/// region query (docs/07 §4) — and the throughput is *reported*: the rate is computed from the
+/// rows actually written over the elapsed time and stated in the run's output. No wall-clock
+/// bound is asserted here; that is `the_detection_write_rate_clears_its_floor` in the `timing`
+/// tier.
+#[test]
+fn detection_writes_are_all_readable_and_the_rate_is_reported() {
+    let dir = TempDir::new();
+    let (b, written, measured) = measure_detection_writes(&dir);
+    let rows = THROUGHPUT_BATCH * THROUGHPUT_BATCHES;
+
+    // Every row written is stored and readable back, unchanged.
+    assert_eq!(b.repo.detection_count().unwrap(), rows as u64);
+    let region = Region::new(FreqRange::new(399e6, 406e6), tr(-10, 400));
+    let read_back = b.repo.detections_in_region(&region).unwrap();
+    assert_eq!(
+        read_back.len(),
+        rows,
+        "the region query must return every detection written"
     );
-    assert_eq!(b.repo.detection_count().unwrap(), (BATCH * BATCHES) as u64);
+    let by_id: std::collections::HashMap<DetectionId, &Detection> =
+        written.iter().map(|d| (d.id, d)).collect();
+    assert_eq!(
+        by_id.len(),
+        rows,
+        "each written detection has a distinct id"
+    );
+    for got in &read_back {
+        let want = by_id.get(&got.id).unwrap_or_else(|| {
+            panic!("read back a detection that was never written: {:?}", got.id)
+        });
+        assert_eq!(&got, want, "detection {:?} did not round-trip", got.id);
+    }
+
+    // The throughput is reported: the numbers are computed from what was written, and stated.
+    assert_eq!(measured.rows, rows);
+    assert_eq!(measured.batch, THROUGHPUT_BATCH);
     assert!(
-        rate > 1_000.0,
-        "batched inserts unexpectedly slow: {rate:.0} rows/s"
+        measured.secs.is_finite() && measured.secs > 0.0,
+        "elapsed time must be measured: {} s",
+        measured.secs
+    );
+    assert!(
+        measured.rate_rows_per_s.is_finite() && measured.rate_rows_per_s > 0.0,
+        "a rate must be computed: {} rows/s",
+        measured.rate_rows_per_s
+    );
+    assert!(
+        (measured.rate_rows_per_s * measured.secs - rows as f64).abs() < 1.0,
+        "the rate must be the rows written over the time they took, not {} rows/s over {} s",
+        measured.rate_rows_per_s,
+        measured.secs
+    );
+    let report = measured.report();
+    for part in [
+        "rows/s".to_string(),
+        format!("{rows} rows"),
+        format!("{:.0}", measured.rate_rows_per_s),
+    ] {
+        assert!(
+            report.contains(&part),
+            "the reported line must state {part:?}: {report}"
+        );
+    }
+}
+
+/// `timing` tier (docs/10 §3.6, `.config/nextest.toml`): the ADR-0006 wall-clock floor on batched
+/// detection-insert throughput. Unchanged bound, run alone on a quiet box by `just timing` — the
+/// gate never runs it, because rows/s is a property of the machine's headroom. Its deterministic
+/// half is `detection_writes_are_all_readable_and_the_rate_is_reported`.
+#[test]
+fn the_detection_write_rate_clears_its_floor() {
+    let dir = TempDir::new();
+    let (b, _written, measured) = measure_detection_writes(&dir);
+    assert_eq!(
+        b.repo.detection_count().unwrap(),
+        (THROUGHPUT_BATCH * THROUGHPUT_BATCHES) as u64
+    );
+    assert!(
+        measured.rate_rows_per_s > 1_000.0,
+        "batched inserts unexpectedly slow: {:.0} rows/s",
+        measured.rate_rows_per_s
     );
 }
 
@@ -1958,6 +2071,93 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         b.repo.emitter_links(station).unwrap()[0].target,
         LinkTarget::Decode(decode.id)
     );
+}
+
+/// T-967 N1: the list-row identity summary is served only from a decoder's explicit session
+/// summary (RDS: `hk-rds`'s `rds-pi` row — the real writer's shape is tested end to end in
+/// `hk-demod`'s `t967_identity_label`). Nothing is guessed from similarly-named fields: an RDS
+/// per-frame fragment, a recipe-written `rds-pi` row and another scheme's `callsign`/`ps` keys all
+/// read as no summary.
+#[test]
+fn t_967_identity_summary_reads_only_the_decoders_explicit_summary_row() {
+    let mut b = base();
+    let pi = DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: "A1B2".into(),
+    };
+    let decode = |decoder: &str, frame_model: &str, identity: &DecodedIdentity, md, secs| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: decoder.into(),
+        decoder_version: "0.1.0".into(),
+        frame_model: frame_model.into(),
+        metadata: md,
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(identity.clone()),
+        content_class: ContentClass::Unrestricted,
+        t: t(secs),
+        provenance: None,
+    };
+    assert_eq!(b.repo.latest_decode_identity_summary(&pi).unwrap(), None);
+
+    // A per-frame fragment and a recipe-written row under the same identity: no summary.
+    b.repo
+        .insert_decode(&decode(
+            "hk-rds",
+            "rds-group-0-ps-frame",
+            &pi,
+            json!({"pi": "A1B2", "ps": "NOW PLAY"}),
+            10,
+        ))
+        .unwrap();
+    b.repo
+        .insert_decode(&decode(
+            "recipe:rds",
+            "rds-pi",
+            &pi,
+            json!({"ps": "GUESSED "}),
+            11,
+        ))
+        .unwrap();
+    assert_eq!(b.repo.latest_decode_identity_summary(&pi).unwrap(), None);
+
+    // The decoder's summary row: its voted PS, and that PS's own share of the frames (not
+    // `pi_share`), even though a later fragment exists.
+    b.repo
+        .insert_decode(&decode(
+            "hk-rds",
+            "rds-pi",
+            &pi,
+            json!({"pi": "A1B2", "pi_share": 0.97, "ps": "KROQ    ",
+                   "ps_frames": [["KROQ    ", 3], ["NOW PLAY", 1]]}),
+            5,
+        ))
+        .unwrap();
+    assert_eq!(
+        b.repo.latest_decode_identity_summary(&pi).unwrap(),
+        Some(DecodeIdentitySummary {
+            label: "KROQ".into(),
+            label_share: Some(0.75),
+        })
+    );
+
+    // Another scheme with label-like keys: no summary (no guessing by key name).
+    let icao = DecodedIdentity {
+        scheme: IdentityScheme::AdsbIcao,
+        value: "a1b2c3".into(),
+    };
+    b.repo
+        .insert_decode(&decode(
+            "adsb",
+            "adsb-ident",
+            &icao,
+            json!({"callsign": "UAL123", "flight": "UA123", "ps": "X", "share": 1.0}),
+            10,
+        ))
+        .unwrap();
+    assert_eq!(b.repo.latest_decode_identity_summary(&icao).unwrap(), None);
 }
 
 /// AWARE-053: an emitter that matches priors but is not expected here gets

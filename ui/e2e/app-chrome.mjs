@@ -2,7 +2,8 @@
 // (`ui/src/app/chrome/map-controls.ts`). These are the selectors and the one helper the specs share
 // to reach them, so a spec says "split the viewport", not how the menu is built.
 
-/** Open the viewport menu (top-right) and press one of its items: "split", "close" or "whole".
+/** Open the viewport menu (top-right) and press one of its items: "split", "split-rows", "flip",
+ * "close" or "whole".
  * A real click on both, so an item a user cannot press fails here. */
 export async function paneAct(page, act) {
   await page.click("document.querySelector('.map-pane-btn')");
@@ -10,12 +11,21 @@ export async function paneAct(page, act) {
   await page.click(`document.querySelector('#map-pane-menu [data-pane-act="${act}"]')`);
 }
 
-/** The retired `.sf-live` button's state, read off the FAB that replaced it: true when following. */
-export const FOLLOWING = "document.querySelector('.map-fab').classList.contains('following')";
+/** T-1001: the follow-live FAB retired — Live/Freeze is a button INSIDE each pane's rectangle, one
+ * per pane. This is the first pane's; `liveBtn(n)` names any pane's by its position. */
+export const LIVE_BTN = ".sf-pane-live-btn";
+export const liveBtn = (n = 1) => `document.querySelectorAll('${LIVE_BTN}')[${n - 1}]`;
+/** Whether the first pane is following the live edge, read off its own Live button. */
+export const FOLLOWING = `${liveBtn(1)}.classList.contains('following')`;
 
-/** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state. */
-export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out, .map-fab";
-/** Inside the viewport menu: Split, Close, Whole surface, Record IQ. */
+/** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state.
+ * (T-1001: the FAB left this list with the FAB; each pane's Live button is on the canvas.) */
+export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out";
+/** T-1053: the cluster's mode chips (Measure, Annotate, Pin, Retune mode) fold into the ⋯ menu's
+ * Tools group on a phone. They are still the cluster's controls — one press deeper — so the
+ * closed-set check counts them wherever the width put them, and hit-tests them where they are. */
+export const FOLDED = "#map-more-menu .map-more-tools button";
+/** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ, per-device (T-1006). */
 export const PANE_ITEMS = "#map-pane-menu button";
 /** Inside the layers menu: Signals (the detections overlay) and Trace (view-wide). T-1007 moved the
  * colour scale out of here into the ⋯ settings menu, where `app-settings.e2e.mjs` clicks every row
@@ -62,6 +72,15 @@ export async function rehomedHitTest(page) {
   const counts = { closed: await count(CLOSED) };
   const names = JSON.parse(await page.eval(closedNames(CLOSED)));
   const overlaps = JSON.parse(await page.eval(overlapping(CLOSED)));
+  // T-1053: the folded chips, pressed where they live — inside the open ⋯ menu.
+  await page.click("document.querySelector('.map-more-btn')");
+  await page.waitFor("the ⋯ menu to open", "!document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
+  closed.push(...JSON.parse(await page.eval(unclickable(`${FOLDED}:not([hidden])`))));
+  counts.closed += await count(FOLDED);
+  names.push(...JSON.parse(await page.eval(closedNames(FOLDED))));
+  overlaps.push(...JSON.parse(await page.eval(overlapping(`${FOLDED}:not([hidden])`))));
+  await page.click("document.querySelector('.map-more-btn')");
+  await page.waitFor("the ⋯ menu to close", "document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
   await page.click("document.querySelector('.map-pane-btn')");
   await page.waitFor("the viewport menu to open", "!document.querySelector('#map-pane-menu').hidden", { timeoutMs: 5000 });
   const pane = JSON.parse(await page.eval(unclickable(PANE_ITEMS)));

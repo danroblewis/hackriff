@@ -29,8 +29,9 @@ const W = 400, H = 820;
 
 // T-1026: the card's own handle and × are NOT in this list — the card is hidden until something is
 // clicked, so before that they have no box at all. They are checked, with the same hit test, in (3)
-// once a pill has opened the card (`CARD_CONTROLS`).
-const GUARDED = ".map-goto input, .map-topright button:not([hidden]), .map-nudge .nudge-btn, .map-status .mode, .map-zoom-in, .map-zoom-out, .map-fab, .map-inv .map-pill";
+// once a pill has opened the card (`CARD_CONTROLS`). T-1001: the retired FAB's place is each pane's
+// own Live button.
+const GUARDED = ".map-goto input, .map-topright button:not([hidden]), .map-nudge .nudge-btn, .map-status .mode, .map-zoom-in, .map-zoom-out, .sf-pane-live-btn, .map-inv .map-pill";
 const CARD_CONTROLS = ".sheet-grab, .sheet-close";
 // T-528's hit test at phone width: on screen, >= 24 px, and what a press at its centre lands on.
 const unpressable = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})].map((el) => {
@@ -64,7 +65,8 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitForSurfaceMounted({ timeoutMs: 240000 });
   await page.waitFor("the floating controls, the closed card and the inventory pills",
-    `!!document.querySelector('.map-ctl .map-fab') && document.querySelector('.sheet')?.hidden === true &&
+    `!!document.querySelector('.map-ctl .map-zoom-in') && !!document.querySelector('.sf-pane-live-btn') &&
+     document.querySelector('.sheet')?.hidden === true &&
      !!document.querySelector('.map-inv .map-pill') && !!document.querySelector('.sf-where')?.textContent`, { timeoutMs: 240000 });
   await page.frames(5);
   await shot("1-open");
@@ -86,7 +88,11 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   // nothing, at phone width too.
   assert.equal(await page.eval(overlap(".map-inv", ".map-goto, .map-nudge, .map-topright, .map-status, .sheet")), 0,
     "the inventory pills collide with another piece of chrome at phone width");
-  assert.equal(await page.eval(overlap(".map-zoom", ".map-fab, .map-topright")), 0, "the zoom stack collides with the FAB or the top-right cluster");
+  // T-1001: the FAB left this list with the FAB; the pane's own Live button took its place, and it
+  // is inside the pane at the top — it must not land under the zoom stack or the top-right cluster.
+  assert.equal(await page.eval(overlap(".map-zoom", ".map-topright")), 0, "the zoom stack collides with the top-right cluster");
+  assert.equal(await page.eval(overlap(".sf-pane-live-btn", ".map-zoom, .map-topright, .map-goto")), 0,
+    "the pane's Live button collides with the floating chrome");
   // T-1026: with nothing clicked there is no card at all, so the first thing to state is that —
   // a closed card cannot cover an honesty statement because it is not on screen.
   assert.equal(await page.eval("Math.round(document.querySelector('.sheet').getBoundingClientRect().height)"), 0,
@@ -105,11 +111,15 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   assert.equal(await page.eval(`document.querySelector('.app > .out-strip').hidden`), true, "nothing open: no outputs strip");
   const idle = JSON.parse(await page.eval(`JSON.stringify({
     status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, zoom: ${opacity(".map-zoom")},
-    fab: ${opacity(".map-fab")}, pills: ${opacity(".map-inv")}, sheet: ${opacity(".sheet")},
+    live: ${opacity(".sf-pane-live-btn")}, pills: ${opacity(".map-inv")}, sheet: ${opacity(".sheet")},
     where: ${opacity(".sf-status-line")}, scale: ${opacity(".sf-scale")} })`));
   t.diagnostic(`idle opacities: ${JSON.stringify(idle)}`);
-  for (const k of ["status", "nudge", "zoom", "fab", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
-  for (const k of ["sheet", "where", "scale"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
+  // T-994: the dock bar is retired, so there is no bottom bar left to fade.
+  for (const k of ["status", "nudge", "zoom", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
+  // T-1001: a pane's Live button is also its statement of whether what it shows is live, and an
+  // honesty statement never fades (docs/23 §10.2) — it is on the picture, not in the cluster.
+  // T-996: the one status line and each pane's scale block are the honesty statements on the picture.
+  for (const k of ["sheet", "where", "scale", "live"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
   // T-1025: the wake-up touch lands on the DEVICE chip, found by its own box, not on a fixed
   // (200, 110) that happened to be over the Explore button while the status pill was one wide box.
   // The chips made that point "Decode" — the touch switched view, and everything after it was

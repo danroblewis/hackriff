@@ -72,6 +72,27 @@
 .hk-surface-width:not(:disabled):hover { color: #fad340; border-color: #fad340; }
 .hk-surface-width:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* T-1006: the device pill — WHOSE coverage decides this viewport's grey (docs/16 §8). Appended last
+   in the DOM (the cells' positions are part of the row's contract) and pulled back beside the
+   headline with `order`, so it reads as part of "where am I looking" rather than as an action.
+   A pane pinned to a front end this run does not hold is marked, not reset. */
+.hk-surface-viewport > * { order: 2; }
+.hk-surface-id { order: 0; }
+
+.hk-surface-device {
+  order: 1;
+  padding: 0 6px;
+  border: 1px solid #6b7488;
+  border-radius: 999px;
+  color: var(--hk-text, #dde3ec);
+  white-space: nowrap;
+}
+
+.hk-surface-viewport[data-device-stale="true"] .hk-surface-device {
+  color: #e8a33d;
+  border-color: #e8a33d;
+}
+
 .hk-surface-why {
   flex-basis: 100%;
   opacity: 0.8;

@@ -136,14 +136,14 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_demod::fsk::{C4fmConfig, C4fmDemod, C4fmSymbols, measure_fm_structure};
+use hk_demod::fsk::{C4fmConfig, C4fmDemod, C4fmSymbols, FmStructure, measure_fm_structure};
 use hk_detect::trunk::{
     AliasResolution, AliasScore, AliasUnresolved, CC_FRAMINGS, CSBK_BYTES, CallHeader, CcCandidate,
     CcConfirmer, CcFraming, ChannelMap, DmrGrant, EncryptionSync, Grant, GridFit, LDU_DIBITS,
-    LduPayload, LduScan, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ,
-    RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit, VoiceRefused, algid_name, best_lmr_raster,
-    clock_offset_mod_grid, dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of,
-    protocol_of, resolve_alias, scan_blocks, scan_cacs, scan_csbks, scan_ldus,
+    LduPayload, LduScan, MIN_CC_FCO, MIN_CRC_VALID, MIN_SYNC_HITS, NXDN_L3_BYTES, NxdnAssignment,
+    RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit, VoiceRefused, algid_name,
+    best_lmr_raster, clock_offset_mod_grid, dmr_protocol_of, fit_grid_offset, grid_aliases,
+    nxdn_protocol_of, protocol_of, resolve_alias, scan_blocks, scan_cacs, scan_csbks, scan_ldus,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::repo::synthesis::{AliasEvidence, AliasState, ReceiverAlias, ReceiverFit};
@@ -155,11 +155,12 @@ use num_complex::{Complex, Complex32};
 use serde_json::json;
 
 use super::{ChainMsg, ChainReader, Next};
+use crate::ccverdict::{CcCandidacy, CcChannelVerdict, CcFramingVerdict, CcOutcome, CcPass};
 use crate::events::Candidate;
 use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{add, inc};
-use crate::synth::{CcObservation, FramingScore};
+use crate::synth::CcObservation;
 
 /// How far above the band's own **measured** noise floor a raster channel counts as occupied, dB.
 ///
@@ -590,6 +591,18 @@ pub(crate) fn run(
     // Control channels this chain has already written, by rounded frequency: a repeat sighting
     // updates `last_seen` rather than minting a second system for the same channel.
     let mut known: HashMap<i64, KnownCc> = HashMap::new();
+    // T-977: the verdict already filed onto an emitter for each channel, so an unchanged answer is
+    // not re-written every pass. A hunt runs every `period_s` for the life of the run; a synthesis
+    // row per rejected channel per pass would grow the database without bound to say the same
+    // thing over and over. A CHANGED verdict is written, which is the part worth keeping.
+    let mut filed: HashMap<i64, CcOutcome> = HashMap::new();
+    // T-977 review: the pass on which a detected-emitter reservation last looked at each channel,
+    // so the slots occupancy leaves go round the unanswered emitters instead of to the same ones.
+    let mut looked: HashMap<i64, u64> = HashMap::new();
+    // T-977 review: `filed` and `looked` are keyed by ABSOLUTE channel, counted on the raster from
+    // the first pass's fitted origin — the chain outlives an in-band retune, and a key relative to
+    // the tuned centre would hand one channel's verdict to whatever sits at the same offset after it.
+    let mut anchor_hz: Option<f64> = None;
     let (mut detach, mut closed) = (false, false);
     loop {
         match rx.try_recv() {
@@ -642,8 +655,12 @@ pub(crate) fn run(
                         t_start: base_time,
                         prov: &p,
                         track: cand.track,
+                        index: passes + 1,
                     },
                     &mut known,
+                    &mut filed,
+                    &mut looked,
+                    &mut anchor_hz,
                 );
                 passes += 1;
                 inc(&c.cc_passes);
@@ -666,15 +683,26 @@ struct Pass<'a> {
     prov: &'a ProvenanceHandle,
     /// The detection track the chain was attached for, carried so a decode can be bound to it.
     track: Option<hk_model::TrackId>,
+    /// 1-based pass number within this chain's life, carried onto the pass report (T-977).
+    index: u64,
 }
 
-fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMap<i64, KnownCc>) {
+fn hunt(
+    shared: &Shared,
+    node: &TrunkCcNode,
+    pass: &Pass<'_>,
+    known: &mut HashMap<i64, KnownCc>,
+    filed: &mut HashMap<i64, CcOutcome>,
+    looked: &mut HashMap<i64, u64>,
+    anchor_hz: &mut Option<f64>,
+) {
     let Pass {
         buf,
         base,
         t_start,
         prov,
         track,
+        index: pass_index,
     } = *pass;
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
@@ -735,6 +763,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
     let Some(fco) = occupancy(buf, fs, raster, grid_offset, &ks) else {
         return;
     };
+    let keys = channel_keys(*anchor_hz.get_or_insert(origin_hz), origin_hz, raster, &ks);
     add(&c.cc_channels, ks.len() as u64);
 
     // ---- Candidacy. A pure-FCO detector would stop here and be wrong.
@@ -747,25 +776,99 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
     // channels are continuously occupied. Above the cap the highest-FCO candidates win, ties going
     // to the channel nearest the tuned centre — deterministic, and decided without truth.
     cands.sort_by(|a, b| b.1.total_cmp(&a.1).then(ks[a.0].abs().cmp(&ks[b.0].abs())));
-    if cands.len() > node.max_demods {
-        add(
-            &c.cc_admission_refused,
-            (cands.len() - node.max_demods) as u64,
-        );
-        cands.truncate(node.max_demods);
+    // ---- T-977: the OTHER reason to spend a demodulation. A channel blind detection already has
+    // an emitter on has an emission on it by the run's own decision, and the question "what is it"
+    // has an answer a demodulation can give — but an intermittent burst train never reaches
+    // `MIN_CC_FCO`, so before this the hunt walked past every one of them. That is how a P25 C4FM
+    // voice channel came to read `family: unknown, resolution: not-searched` in a band where the
+    // chain had run twelve demodulations.
+    //
+    // It is not a band-plan lookup and not a second control-channel rule: the emitter came from
+    // blind detection, the channel it maps to is the receiver's own fitted grid, and such a channel
+    // can never be *confirmed* here (`CcCandidate::new` refuses below the occupancy floor, and this
+    // module cannot manufacture a `ConfirmedCc`). What it earns is a verdict.
+    let emitters = unanswered_emitters(
+        emitter_channels(shared, &ks, &fco, origin_hz, raster, &cands),
+        &ks,
+        &keys,
+        filed,
+        looked,
+    );
+    let Admission {
+        occupancy: cands,
+        refused,
+        reserved,
+    } = admit(cands, emitters, node.max_demods);
+    add(&c.cc_admission_refused, refused.len() as u64);
+    add(&c.cc_emitter_candidates, reserved.len() as u64);
+    for &(i, _) in &reserved {
+        looked.insert(keys[i], pass_index);
     }
+    let work: Vec<(usize, f64, CcCandidacy)> = cands
+        .iter()
+        .map(|&(i, f)| (i, f, CcCandidacy::Occupancy))
+        .chain(
+            reserved
+                .iter()
+                .map(|&(i, f)| (i, f, CcCandidacy::DetectedEmitter)),
+        )
+        .collect();
     if crate::debug_enabled() {
         eprintln!(
-            "hk-pipeline: trunk-cc pass at {:.4} MHz: {} raster channels, candidates {:?}",
+            "hk-pipeline: trunk-cc pass at {:.4} MHz: {} raster channels, candidates {:?}, \
+             detected-emitter channels {:?}",
             tune_center / 1e6,
             ks.len(),
             cands
                 .iter()
                 .map(|&(i, f)| (ks[i], format!("{f:.3}")))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            reserved
+                .iter()
+                .map(|&(i, f)| (ks[i], format!("{f:.3}")))
+                .collect::<Vec<_>>(),
         );
     }
-    if cands.is_empty() {
+    // A channel the cap refused is a channel NOTHING was measured about beyond its occupancy, and
+    // that is its own verdict rather than a silence — the pass report says so, and says how many.
+    let mut verdicts: Vec<CcChannelVerdict> = refused
+        .iter()
+        .map(|&(i, f)| CcChannelVerdict {
+            k: ks[i],
+            center_hz: origin_hz + ks[i] as f64 * raster,
+            bandwidth_hz: raster,
+            fco: f,
+            candidacy: CcCandidacy::Occupancy,
+            outcome: CcOutcome::AdmissionRefused,
+            reason: format!(
+                "occupancy {:.0} % reached candidacy, but the pass's {} demodulation slots were \
+                 already spent on higher-occupancy channels. Nothing was measured about this \
+                 channel beyond its occupancy.",
+                f * 100.0,
+                node.max_demods,
+            ),
+            framings: Vec::new(),
+            levels: None,
+            symbol_rate_bd: None,
+            symbols: 0,
+            emitter_id: None,
+        })
+        .collect();
+    let report = |shared: &Shared, verdicts: Vec<CcChannelVerdict>, t_end: Timestamp| {
+        shared.cc_verdicts.record(CcPass {
+            pass: pass.index,
+            t_start,
+            t_end,
+            device_id: prov.device_id.clone(),
+            tune_center_hz: tune_center,
+            raster_hz: raster,
+            grid_offset_hz: grid_offset,
+            channels_swept: ks.len(),
+            channels: verdicts,
+        });
+    };
+    if work.is_empty() {
+        report(shared, verdicts, t_start);
         return;
     }
 
@@ -777,16 +880,47 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         .max(1.0);
     let out_rate = fs / decim;
     let t_end = t_start.saturating_add_nanos((buf.len() as f64 * 1e9 / fs) as i64);
-    for (i, fco_i) in cands {
+    for (i, fco_i, candidacy) in work {
         let k = ks[i];
+        // The ABSOLUTE channel `filed` is keyed by ([`channel_keys`]) — never the raster index `k`,
+        // which is relative to this pass's tuned centre and names a different channel after a
+        // retune the chain survives.
+        let channel_k = keys[i];
         let offset = k as f64 * raster + grid_offset;
         let center_hz = origin_hz + k as f64 * raster;
+        // Every channel this loop reaches produces a verdict, whatever happens to it. `push` is
+        // the one exit: the outcomes below are the closed set of ways a look can end, and adding
+        // a `continue` that skips it is how the answer went missing before T-977.
+        let push = |verdicts: &mut Vec<CcChannelVerdict>,
+                    outcome: CcOutcome,
+                    reason: String,
+                    framings: Vec<CcFramingVerdict>,
+                    structure: Option<FmStructure>,
+                    symbols: u64,
+                    emitter: Option<hk_model::EmitterId>| {
+            verdicts.push(CcChannelVerdict {
+                k,
+                center_hz,
+                bandwidth_hz: raster,
+                fco: fco_i,
+                candidacy,
+                outcome,
+                reason,
+                framings,
+                levels: structure.and_then(|s: FmStructure| s.levels.order()),
+                symbol_rate_bd: structure.map(|s: FmStructure| s.symbol_rate_bd),
+                symbols,
+                emitter_id: emitter.map(|e| e.to_string()),
+            });
+        };
         let Some(fit) = best_lmr_raster(center_hz, origin_hz, RASTER_TOLERANCE_HZ) else {
             continue;
         };
-        let Some(candidate) = CcCandidate::new(center_hz, raster, fco_i, fit) else {
-            continue;
-        };
+        // Only an occupancy candidate can become a `CcCandidate`, and only a `CcCandidate` can be
+        // confirmed: `CcCandidate::new` refuses below `MIN_CC_FCO`, so a detected-emitter channel
+        // is looked at and never promoted. That is the type system holding C23's line, not a
+        // convention here.
+        let candidate = CcCandidate::new(center_hz, raster, fco_i, fit);
         // A deliberately wide channel, not a 12.5 kHz brick wall: the C4FM demodulator applies its
         // own channel filter, and leaving adjacent energy in is realistic. An extra candidate
         // costs a demodulation and is then rejected by sync + CRC, which is the design.
@@ -796,6 +930,15 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
             Ok(d) => d,
             Err(_) => {
                 inc(&c.errors);
+                push(
+                    &mut verdicts,
+                    CcOutcome::NotDemodulated,
+                    "the channel could not be down-converted from this window".to_owned(),
+                    Vec::new(),
+                    None,
+                    0,
+                    None,
+                );
                 continue;
             }
         };
@@ -812,37 +955,169 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
             Ok(b) => b.samples.to_vec(),
             Err(_) => {
                 inc(&c.errors);
+                push(
+                    &mut verdicts,
+                    CcOutcome::NotDemodulated,
+                    "the channel could not be down-converted from this window".to_owned(),
+                    Vec::new(),
+                    None,
+                    0,
+                    None,
+                );
                 continue;
             }
         };
         inc(&c.cc_demods);
         let rate = ddc.output_rate_hz();
         let Some(symbols) = demodulate_best(&baseband, rate, &confirmer) else {
+            push(
+                &mut verdicts,
+                CcOutcome::NotDemodulated,
+                "the four-level demodulator recovered no symbols from this window at any \
+                 integration depth"
+                    .to_owned(),
+                Vec::new(),
+                None,
+                0,
+                None,
+            );
             continue;
         };
         // Every framing this build knows, not just P25 (T-271). Trying a second one cannot make a
         // false confirmation likely — each carries its own ~1.4e-16-per-frame chance rate — and it
         // is what lets a DMR control channel be found by the same blind hunt.
-        let Some(cc) = confirmer.confirm_any(&candidate, &symbols.dibits) else {
+        //
+        // Scanned once here rather than twice (T-977): the scores decide the verdict AND become the
+        // synthesis row's "why not that one" trace, so one measurement answers both.
+        let scores: Vec<crate::synth::FramingScore> = CC_FRAMINGS
+            .iter()
+            .map(|&f| {
+                let o = confirmer.scan_framing(f, &symbols.dibits);
+                crate::synth::FramingScore {
+                    framing: f,
+                    sync_hits: o.sync_hits,
+                    crc_valid: o.crc_valid,
+                    crc_checked: o.crc_checked,
+                }
+            })
+            .collect();
+        let wire: Vec<CcFramingVerdict> = scores
+            .iter()
+            .map(|f| CcFramingVerdict {
+                framing: f.framing.name().to_owned(),
+                sync_hits: f.sync_hits,
+                crc_valid: f.crc_valid,
+                crc_checked: f.crc_checked,
+            })
+            .collect();
+        let confirmed = candidate
+            .as_ref()
+            .and_then(|cand| confirmer.confirm_any(cand, &symbols.dibits));
+        let Some(cc) = confirmed else {
             if crate::debug_enabled() {
                 // What each framing actually saw, so a candidate that should have confirmed can be
                 // told apart from one that correctly did not — the decoy has to fail here too.
-                for f in hk_detect::trunk::CC_FRAMINGS {
-                    let s = confirmer.scan_framing(f, &symbols.dibits);
+                for f in &scores {
                     eprintln!(
-                        "hk-pipeline: trunk-cc {:.4} MHz unconfirmed under {}: trials {} sync {} \
-                         crc {}/{} ({} symbols, margin {:.3})",
+                        "hk-pipeline: trunk-cc {:.4} MHz unconfirmed under {}: sync {} crc {}/{} \
+                         ({} symbols, margin {:.3})",
                         center_hz / 1e6,
-                        f.name(),
-                        s.trials,
-                        s.sync_hits,
-                        s.crc_valid,
-                        s.crc_checked,
+                        f.framing.name(),
+                        f.sync_hits,
+                        f.crc_valid,
+                        f.crc_checked,
                         symbols.dibits.len(),
                         symbols.level_margin,
                     );
                 }
             }
+            // ---- T-977: the verdict, and where it goes. `attach_to_inventory` writes the same
+            // three objects it writes for a confirmed channel — the measured structure, the
+            // analysis row, the family evidence — with `confirmed: None`, so the emitter reads
+            // `resolution: unknown` with the sentence above rather than `not-searched`.
+            let resembles = scores
+                .iter()
+                .filter(|f| f.sync_hits >= MIN_SYNC_HITS)
+                .max_by_key(|f| (f.sync_hits, f.crc_valid));
+            let outcome = if resembles.is_some() {
+                CcOutcome::SyncWithoutCheck
+            } else {
+                CcOutcome::NoSync
+            };
+            let reason = match resembles {
+                Some(r) => format!(
+                    "{} frame syncs under {} at the expected spacing, {} of {} blocks CRC-valid \
+                     (floor {}): the air interface is recognised and this is not a control \
+                     channel — a voice or data channel of the same system looks exactly like this",
+                    r.sync_hits,
+                    r.framing.name(),
+                    r.crc_valid,
+                    r.crc_checked,
+                    MIN_CRC_VALID,
+                ),
+                None => format!(
+                    "none of the {} framings in this build found frame sync at the expected \
+                     spacing (floor {}) over {} symbols",
+                    scores.len(),
+                    MIN_SYNC_HITS,
+                    symbols.dibits.len(),
+                ),
+            };
+            // Re-filed only when [`may_file_unconfirmed`] says so: the same verdict every half
+            // second is one fact, and a confirmation is never walked back by a window that failed
+            // to confirm.
+            let stands = filed.get(&channel_k) == Some(&CcOutcome::Confirmed);
+            let reason = if stands {
+                format!(
+                    "{reason}. A control channel was CONFIRMED here on an earlier pass, by frame \
+                     sync AND CRC; this window produced no valid check, which is the absence of \
+                     evidence and not evidence of absence (a fade, a shorter dwell or a drifted \
+                     grid all look like this), so the confirmed analysis stands and nothing was \
+                     filed over it."
+                )
+            } else {
+                reason
+            };
+            let mut repo = shared.repo();
+            let filing = may_file_unconfirmed(filed.get(&channel_k).copied(), outcome);
+            let attached = if filing {
+                attach_to_inventory(
+                    shared,
+                    &mut repo,
+                    &AttachInput {
+                        confirmed: None,
+                        framings: &scores,
+                        baseband: &baseband,
+                        baseband_rate_hz: rate,
+                        center_hz,
+                        bandwidth_hz: raster,
+                        fco: fco_i,
+                        protocol: TrunkProtocol::Unknown,
+                        grid,
+                        alias: None,
+                        tune_center_hz: tune_center,
+                        raster_hz: raster,
+                        t: t_end,
+                        track,
+                    },
+                )
+            } else {
+                None
+            };
+            drop(repo);
+            if attached.is_some() {
+                inc(&c.cc_verdicts);
+                filed.insert(channel_k, outcome);
+            }
+            push(
+                &mut verdicts,
+                outcome,
+                reason,
+                wire,
+                attached.and_then(|a| a.structure),
+                symbols.dibits.len() as u64,
+                attached.map(|a| a.emitter),
+            );
             continue;
         };
         inc(&c.cc_confirmed);
@@ -1057,14 +1332,12 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         // IS (four levels, 4800 Bd, ±1800 Hz) is measured blind from the same baseband the
         // dibits came from, so `estimated_params` carries measured values or nothing at all.
         let protocol = k.system.protocol;
-        attach_to_inventory(
+        let attached = attach_to_inventory(
             shared,
             &mut repo,
             &AttachInput {
-                candidate: &candidate,
-                confirmed: &cc,
-                confirmer: &confirmer,
-                dibits: &symbols.dibits,
+                confirmed: Some(&cc),
+                framings: &scores,
                 baseband: &baseband,
                 baseband_rate_hz: rate,
                 center_hz,
@@ -1072,12 +1345,30 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
                 fco: fco_i,
                 protocol,
                 grid,
-                alias: plan.alias,
+                alias: Some(plan.alias),
                 tune_center_hz: tune_center,
                 raster_hz: raster,
                 t: t_end,
                 track,
             },
+        );
+        filed.insert(channel_k, CcOutcome::Confirmed);
+        push(
+            &mut verdicts,
+            CcOutcome::Confirmed,
+            format!(
+                "{} frame syncs under {} AND {} of {} blocks CRC-valid: a control channel, and \
+                 the system it names is {:?}",
+                ev.sync_hits(),
+                cc.framing().name(),
+                ev.crc_valid(),
+                ev.crc_checked(),
+                protocol,
+            ),
+            wire,
+            attached.and_then(|a| a.structure),
+            symbols.dibits.len() as u64,
+            attached.map(|a| a.emitter),
         );
 
         // ---- Follow (T-269): what the grants above entitle. The repository lock is released
@@ -1090,6 +1381,248 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
             follow_grants(shared, node, &win, &plan, system_id, tails);
         }
     }
+    // ---- The pass, as the API serves it (T-977). Recorded once per pass, replacing the last: it
+    // is the answer to "which channels did this pass look at, and what did each come to", which no
+    // counter can give and no durable row holds for the channels that never reached an emitter.
+    report(shared, verdicts, t_end);
+}
+
+/// Whether an unconfirmed pass may file its verdict over what this chain has already filed for the
+/// channel (T-977).
+///
+/// Two rules, and the first is the one that matters:
+///
+/// 1. **A confirmation is never walked back by a window that failed to confirm.** `Confirmed` means
+///    frame sync *and* CRC-valid blocks were measured on this channel — 16 bits per valid block
+///    against chance — and a later window with no valid check is the **absence of evidence**, not
+///    evidence of absence: a fade, a shorter dwell, a grid that drifted, or the admission cap
+///    spending its slots elsewhere all produce exactly that. Letting one such window file
+///    `resolution: unknown, "this is NOT a control channel"` over a CRC-confirmed emitter would
+///    make the strongest decode in the run retractable by the weakest observation, which is the
+///    same defect as [`CallHeader::fold`] refusing to let a clear header walk back an encrypted
+///    grant. A control channel that genuinely moves is a *new* confirmation elsewhere, not a denial
+///    here.
+/// 2. Otherwise, file only a **changed** answer. The hunt runs every `period_s` for the life of the
+///    run; re-writing the same verdict every half-second would grow the database without adding a
+///    fact.
+///
+/// `None` (nothing filed yet) always files: that is the case the whole ticket exists for.
+fn may_file_unconfirmed(previous: Option<CcOutcome>, outcome: CcOutcome) -> bool {
+    match previous {
+        Some(CcOutcome::Confirmed) => false,
+        Some(p) => p != outcome,
+        None => true,
+    }
+}
+
+/// The longest contiguous **keyed** run of an intermittent channel's baseband (T-977).
+///
+/// Block mean power at ~1 ms, thresholded at the geometric mean of the quietest and loudest block
+/// — the midpoint in dB, which sits cleanly between a keying and the noise between keyings at any
+/// SNR worth demodulating, and needs no absolute level. The longest run of blocks above it is the
+/// span returned.
+///
+/// **It claims nothing when it cannot separate the two.** A run shorter than
+/// [`MIN_KEYED_FRACTION`] of the window, or a window with too few blocks, gives the whole window
+/// back: a bad split would be worse than no split, and a continuous channel has nothing to split.
+fn keyed_span(baseband: &[Complex32]) -> std::ops::Range<usize> {
+    let whole = 0..baseband.len();
+    let block = (baseband.len() / 500).max(1);
+    let n = baseband.len() / block;
+    if n < 8 {
+        return whole;
+    }
+    let power: Vec<f32> = (0..n)
+        .map(|b| {
+            let s = &baseband[b * block..(b + 1) * block];
+            s.iter().map(|x| x.norm_sqr()).sum::<f32>() / block as f32
+        })
+        .collect();
+    let (lo, hi) = power
+        .iter()
+        .fold((f32::MAX, 0.0f32), |(l, h), &p| (l.min(p), h.max(p)));
+    if !(lo.is_finite() && hi.is_finite() && lo > 0.0 && hi > lo) {
+        return whole;
+    }
+    let threshold = (lo * hi).sqrt();
+    let (mut best, mut run) = (0..0usize, None::<usize>);
+    // One sentinel "off" past the end closes a run that reaches the window's edge.
+    let flags = power
+        .iter()
+        .map(|&p| p >= threshold)
+        .chain(std::iter::once(false));
+    for (b, on) in flags.enumerate() {
+        match (on, run) {
+            (true, None) => run = Some(b),
+            (false, Some(start)) => {
+                if b - start > best.end - best.start {
+                    best = start..b;
+                }
+                run = None;
+            }
+            _ => {}
+        }
+    }
+    if (best.end - best.start) * 100 < n * MIN_KEYED_FRACTION_PCT {
+        return whole;
+    }
+    (best.start * block)..(best.end * block)
+}
+
+/// Least fraction of a window a keyed run must occupy for [`keyed_span`] to use it, per cent.
+///
+/// Below this the split is measuring something too short to be a symbol alphabet, and the honest
+/// answer is the window — whose measurement will then abstain or read low, which is a *result*.
+const MIN_KEYED_FRACTION_PCT: usize = 20;
+
+/// Which channels a pass demodulates, and which it refuses (T-977).
+struct Admission {
+    /// Occupancy candidates admitted, highest occupancy first.
+    occupancy: Vec<(usize, f64)>,
+    /// Occupancy candidates the cap refused — reported as `admission-refused`.
+    refused: Vec<(usize, f64)>,
+    /// Detected-emitter channels given a slot occupancy left unused.
+    reserved: Vec<(usize, f64)>,
+}
+
+/// Splits one pass's `max_demods` slots between the two reasons to demodulate (T-977).
+///
+/// **Occupancy keeps its whole budget.** Control-channel discovery (SIGNAL-085) is what the chain
+/// exists for, and a detected-emitter channel can never be confirmed here, so an emitter verdict
+/// takes only the slots the occupancy candidates leave unused — never one a control channel
+/// needed. The T-977 review's defect was the opposite: half the slots were reserved first, so an
+/// occupancy candidate ranked 5th–8th was refused on every pass on a band with enough emitters.
+///
+/// One budget, not two: at most `max_demods` down-conversions per pass, so the a priori cost in
+/// this module's header is unchanged. `cands` must already be in admission order and `emitters`
+/// in the order they should be answered ([`unanswered_emitters`]).
+fn admit(
+    mut cands: Vec<(usize, f64)>,
+    mut emitters: Vec<(usize, f64)>,
+    max_demods: usize,
+) -> Admission {
+    let refused = if cands.len() > max_demods {
+        cands.split_off(max_demods)
+    } else {
+        Vec::new()
+    };
+    emitters.truncate(max_demods - cands.len());
+    Admission {
+        occupancy: cands,
+        refused,
+        reserved: emitters,
+    }
+}
+
+/// The detected-emitter channels still owed a verdict, in the order they should get one (T-977).
+///
+/// **A channel whose verdict is already filed is skipped**: `filed` holds it and an unchanged
+/// answer is not re-written, so demodulating it again spends a slot to learn nothing. The rest
+/// are ordered least-recently-looked-at first (never looked at before any), then nearest the tuned
+/// centre — so the leftover slots go round every unanswered emitter in turn, and one whose look
+/// ended without a filing (`not-demodulated`) cannot hold a slot against the others forever. With
+/// `s` leftover slots per pass, every one of `n` unanswered emitters is looked at within
+/// `ceil(n / s)` passes.
+///
+/// `ks` are this pass's raster indices (relative to the tuned centre, used only for the
+/// nearest-centre tie-break); `keys` the same channels' absolute keys ([`channel_keys`]), which is
+/// what `filed` and `looked` are keyed by.
+fn unanswered_emitters(
+    emitters: Vec<(usize, f64)>,
+    ks: &[i64],
+    keys: &[i64],
+    filed: &HashMap<i64, CcOutcome>,
+    looked: &HashMap<i64, u64>,
+) -> Vec<(usize, f64)> {
+    let mut out: Vec<(usize, f64)> = emitters
+        .into_iter()
+        .filter(|&(i, _)| !filed.contains_key(&keys[i]))
+        .collect();
+    out.sort_by_key(|&(i, _)| (looked.get(&keys[i]).copied(), ks[i].abs(), ks[i]));
+    out
+}
+
+/// The ABSOLUTE channel key of each raster index `ks` (T-977 review): the channel's count on the
+/// raster from `anchor_hz`, the first pass's fitted origin.
+///
+/// The raster index `k` is relative to `origin_hz = tune_center + grid_offset`, so it names a
+/// different channel after an in-band retune — which the chain survives. Anything that must
+/// remember a channel across passes (`filed`, `looked`, the confirmed stand-over) uses this key.
+/// Counting from a fitted anchor rather than rounding the frequency in hertz keeps the key stable
+/// against the grid fit moving by a few hundred hertz from pass to pass, and against a grid whose
+/// channel centres sit at a half-raster phase (where `f / raster` would round either way).
+fn channel_keys(anchor_hz: f64, origin_hz: f64, raster: f64, ks: &[i64]) -> Vec<i64> {
+    ks.iter()
+        .map(|&k| ((origin_hz + k as f64 * raster - anchor_hz) / raster).round() as i64)
+        .collect()
+}
+
+/// Raster channels of the swept set that **blind detection already has an emitter on**, minus the
+/// ones occupancy candidacy has already admitted (T-977).
+///
+/// One repository query for the whole swept span, not one per channel: the sweep is up to
+/// `max_channels` wide and this runs every pass, so a per-channel query would put `max_channels`
+/// round trips on the chain thread for an answer one range read gives.
+///
+/// **Why this is not a band-plan lookup.** Nothing here reads an allocation, a licence table or a
+/// frequency list. It reads rows *this run* wrote from blind detection, and maps each to the
+/// receiver's own fitted grid. An emitter is admitted only if its centre falls inside a swept
+/// channel; the run's own decision that there is an emission there is the whole prior.
+///
+/// Ordered nearest-the-tuned-centre first, which is deterministic and is the part of the window
+/// with the least front-end roll-off — the same tie-break admission already uses.
+fn emitter_channels(
+    shared: &Shared,
+    ks: &[i64],
+    fco: &[f64],
+    origin_hz: f64,
+    raster: f64,
+    taken: &[(usize, f64)],
+) -> Vec<(usize, f64)> {
+    let (Some(&lo), Some(&hi)) = (ks.first(), ks.last()) else {
+        return Vec::new();
+    };
+    let span_lo = origin_hz + lo as f64 * raster - raster / 2.0;
+    let span_hi = origin_hz + hi as f64 * raster + raster / 2.0;
+    if !(span_lo.is_finite() && span_hi > span_lo) {
+        return Vec::new();
+    }
+    let ever = hk_model::TimeRange::new(
+        Timestamp::from_unix_nanos(0),
+        Timestamp::from_unix_nanos(i64::MAX / 2),
+    );
+    let rows = {
+        let repo = shared.repo();
+        match repo.emitters_in_region(&hk_model::Region::new(
+            hk_model::FreqRange::new(span_lo, span_hi),
+            ever,
+        )) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        }
+    };
+    let mut out: Vec<(usize, f64)> = Vec::new();
+    for e in rows {
+        let k = ((e.f_center_hz - origin_hz) / raster).round();
+        if !k.is_finite() {
+            continue;
+        }
+        let k = k as i64;
+        // Inside the channel, not merely nearest it: an emission half a raster away is a different
+        // channel, and rounding to it would demodulate the wrong place.
+        if (e.f_center_hz - (origin_hz + k as f64 * raster)).abs() > raster / 2.0 {
+            continue;
+        }
+        let Some(i) = ks.iter().position(|&x| x == k) else {
+            continue;
+        };
+        if taken.iter().any(|&(j, _)| j == i) || out.iter().any(|&(j, _)| j == i) {
+            continue;
+        }
+        out.push((i, fco.get(i).copied().unwrap_or(0.0)));
+    }
+    out.sort_by_key(|&(i, _)| ks[i].abs());
+    out
 }
 
 /// Demodulates `baseband` once per [`DEMOD_INTEGRATE_LADDER`] entry and keeps the dibits with the
@@ -2101,10 +2634,10 @@ fn follow_grants(
 
 /// Everything [`attach_to_inventory`] needs, gathered at the confirmation site.
 struct AttachInput<'a> {
-    candidate: &'a CcCandidate,
-    confirmed: &'a hk_detect::trunk::ConfirmedCc,
-    confirmer: &'a CcConfirmer,
-    dibits: &'a [u8],
+    /// The framing that confirmed, `None` for a channel the hunt looked at and rejected (T-977).
+    confirmed: Option<&'a hk_detect::trunk::ConfirmedCc>,
+    /// Every framing in the catalogue with what it scored, measured once by the caller.
+    framings: &'a [crate::synth::FramingScore],
     baseband: &'a [Complex32],
     baseband_rate_hz: f64,
     center_hz: f64,
@@ -2112,11 +2645,21 @@ struct AttachInput<'a> {
     fco: f64,
     protocol: TrunkProtocol,
     grid: Option<GridFit>,
-    alias: ReceiverAlias,
+    /// The absolute receiver clock the pass's alias search settled; `None` when no search ran,
+    /// which is every unconfirmed channel (the search is driven by granted channels).
+    alias: Option<ReceiverAlias>,
     tune_center_hz: f64,
     raster_hz: f64,
     t: Timestamp,
     track: Option<hk_model::TrackId>,
+}
+
+/// What [`attach_to_inventory`] measured and where it filed it (T-977).
+#[derive(Clone, Copy, Debug)]
+struct AttachOutcome {
+    emitter: hk_model::EmitterId,
+    /// The blind symbol-structure measurement, `None` when it abstained.
+    structure: Option<FmStructure>,
 }
 
 /// Measures what the confirmed channel IS, then files the decode against the inventory emitter at
@@ -2136,7 +2679,11 @@ struct AttachInput<'a> {
 /// **It creates no emitter.** Like `Inventory::live_trust`, a measurement may be filed against an
 /// entry something else made, never conjure one: the emission was found by blind detection, and
 /// if detection has not offered a row yet there is nothing here to confirm.
-fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: &AttachInput<'_>) {
+fn attach_to_inventory(
+    shared: &Shared,
+    repo: &mut hk_model::Repository,
+    input: &AttachInput<'_>,
+) -> Option<AttachOutcome> {
     let c = &shared.counters.chains;
     // The emitter blind detection already has here, when it has one. A control channel confirms
     // inside the first window while the detector is still accumulating a track, so routinely it
@@ -2144,11 +2691,29 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
     // evidence in the run on the floor.
     let emitter = crate::refine::emitter_for_channel(repo, input.center_hz, input.bandwidth_hz)
         .unwrap_or(None);
+    // An unconfirmed channel files a verdict against a row blind detection already has, and
+    // creates nothing: see [`crate::synth::attach`]. Checked here too so the measurement below is
+    // not paid for an answer with nowhere to go.
+    if input.confirmed.is_none() && emitter.is_none() {
+        return None;
+    }
 
+    // ---- T-977: measure the KEYED part of an intermittent channel, not the window.
+    //
+    // A control channel is continuous by definition, so for one the window *is* the emission and
+    // this changes nothing. A voice channel is not: over a 0.5 s window a P25 keying occupies
+    // ~0.36 s and the rest is noise, and a level histogram built over both reads the four-level
+    // alphabet as two — which is exactly the `mod: 2fsk` the field row carried on a C4FM emission.
+    // Gated on the channel's own measured occupancy, so the confirmed path cannot reach it.
+    let span = if input.fco < MIN_CC_FCO {
+        keyed_span(input.baseband)
+    } else {
+        0..input.baseband.len()
+    };
     // The symbol rate search is bounded by the channel itself: a rate wider than the channel is
     // not physical. No expected rate is supplied.
     let structure = match measure_fm_structure(
-        input.baseband,
+        &input.baseband[span],
         input.baseband_rate_hz,
         Some(input.bandwidth_hz),
     ) {
@@ -2168,40 +2733,26 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
             None
         }
     };
-    // Every framing in the catalogue, with what it actually scored — so "why P25 and not DMR" is
-    // answered from measurements. The winner is re-scanned too rather than special-cased.
-    let framings: Vec<FramingScore> = CC_FRAMINGS
-        .iter()
-        .map(|&f| {
-            let o = input.confirmer.scan_framing(f, input.dibits);
-            FramingScore {
-                framing: f,
-                sync_hits: o.sync_hits,
-                crc_valid: o.crc_valid,
-                crc_checked: o.crc_checked,
-            }
-        })
-        .collect();
     let receiver = input.grid.map(|g| ReceiverFit {
         grid_hz: input.raster_hz,
         offset_hz: g.offset_hz,
         concentration: g.concentration,
         ppm: 1e6 * g.offset_hz / input.tune_center_hz,
-        alias: Some(input.alias),
+        alias: input.alias,
     });
     let obs = CcObservation {
-        center_hz: input.candidate.center_hz,
+        center_hz: input.center_hz,
         bandwidth_hz: input.bandwidth_hz,
         fco: input.fco,
         structure,
-        framings: &framings,
+        framings: input.framings,
         confirmed: input.confirmed,
         protocol: input.protocol,
         receiver,
         t: input.t,
     };
     let attached = match crate::synth::attach(repo, emitter, &obs) {
-        Ok(a) => {
+        Ok(Some(a)) => {
             inc(&c.cc_attached);
             if crate::debug_enabled() {
                 eprintln!(
@@ -2216,10 +2767,12 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
             }
             a
         }
+        // No emitter and nothing that may create one: nothing was written, and the caller says so.
+        Ok(None) => return None,
         Err(e) => {
             inc(&c.errors);
             eprintln!("hk-pipeline: trunk-cc inventory attach: {e}");
-            return;
+            return None;
         }
     };
     // Re-rank at once: a decode that does not change what the inventory says the signal is has
@@ -2232,6 +2785,10 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
         inc(&c.errors);
         eprintln!("hk-pipeline: trunk-cc chain emitter: {e}");
     }
+    Some(AttachOutcome {
+        emitter: attached.emitter,
+        structure,
+    })
 }
 
 /// The absolute receiver offsets a pass's alias search tries, Hz: every alias of the receiver's
@@ -2451,6 +3008,320 @@ mod tests {
             *s = Complex::new(re.clamp(-128.0, 127.0) as i8, im.clamp(-128.0, 127.0) as i8);
         }
         out
+    }
+
+    /// **T-977 review: a confirmation is never walked back by a window that failed to confirm.**
+    ///
+    /// The defect this pins: `filed` was compared with `!=`, so `Confirmed` followed by `NoSync`
+    /// read as "the answer changed" and an unconfirmed pass filed
+    /// `resolution: unknown, "this is NOT a control channel"` over an emitter carrying a CRC-valid
+    /// P25 decode. One fade, one shorter dwell, one drifted grid, or the admission cap spending its
+    /// slots elsewhere is enough to produce that window — so the strongest decode in the run was
+    /// retractable by the weakest observation.
+    ///
+    /// Re-inject the defect (`previous != Some(outcome)`) and the first two assertions go red.
+    #[test]
+    fn a_crc_confirmed_channel_is_never_denied_by_a_later_window_that_did_not_confirm() {
+        for outcome in [
+            CcOutcome::NoSync,
+            CcOutcome::SyncWithoutCheck,
+            CcOutcome::NotDemodulated,
+        ] {
+            assert!(
+                !may_file_unconfirmed(Some(CcOutcome::Confirmed), outcome),
+                "{outcome:?} filed over a CRC-valid confirmation: the absence of a check in one \
+                 window is not evidence that the control channel is not one",
+            );
+        }
+    }
+
+    /// The other half of the rule, so the fix cannot be "never file anything": a channel that was
+    /// never confirmed files its first verdict and every CHANGED one, and stops re-filing an
+    /// unchanged one — the hunt runs every `period_s` for the life of the run.
+    #[test]
+    fn an_unconfirmed_channel_files_its_first_verdict_and_only_changes_after_it() {
+        assert!(
+            may_file_unconfirmed(None, CcOutcome::SyncWithoutCheck),
+            "the first verdict is the whole point: without it the row reads `not-searched`",
+        );
+        assert!(!may_file_unconfirmed(
+            Some(CcOutcome::SyncWithoutCheck),
+            CcOutcome::SyncWithoutCheck
+        ));
+        assert!(may_file_unconfirmed(
+            Some(CcOutcome::NoSync),
+            CcOutcome::SyncWithoutCheck
+        ));
+        assert!(may_file_unconfirmed(
+            Some(CcOutcome::SyncWithoutCheck),
+            CcOutcome::NoSync
+        ));
+    }
+
+    /// A continuous channel's window IS the emission, so [`keyed_span`] must give the whole of it
+    /// back — the confirmed path cannot be changed by the intermittent-channel measurement.
+    /// A keyed run too short to be a symbol alphabet also gives the window back rather than a
+    /// fragment: a bad split is worse than no split.
+    #[test]
+    fn keyed_span_splits_an_intermittent_channel_and_leaves_a_continuous_one_whole() {
+        let n = 20_000;
+        let steady: Vec<Complex32> = (0..n).map(|_| Complex32::new(0.5, 0.0)).collect();
+        assert_eq!(
+            keyed_span(&steady),
+            0..n,
+            "a continuous channel has no split"
+        );
+
+        // 60 % keyed in the middle, 20 dB down either side.
+        let keyed: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let on = (n / 5..4 * n / 5).contains(&i);
+                Complex32::new(if on { 0.5 } else { 0.005 }, 0.0)
+            })
+            .collect();
+        let span = keyed_span(&keyed);
+        let (lo, hi) = (span.start as f64 / n as f64, span.end as f64 / n as f64);
+        assert!(
+            (lo - 0.2).abs() < 0.02 && (hi - 0.8).abs() < 0.02,
+            "the keyed run should be found at 20..80 %, got {lo:.2}..{hi:.2}",
+        );
+
+        // A 5 % blip is below MIN_KEYED_FRACTION_PCT: claim nothing, hand the window back.
+        let blip: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let on = (n / 2..n / 2 + n / 20).contains(&i);
+                Complex32::new(if on { 0.5 } else { 0.005 }, 0.0)
+            })
+            .collect();
+        assert_eq!(keyed_span(&blip), 0..n);
+    }
+
+    /// One simulated pass of the admission rule over a fixed band: `cands` in admission order,
+    /// `emitters` the detected-emitter channels [`emitter_channels`] would return. Every reserved
+    /// channel is marked looked-at, and filed unless it is in `never_files` (a look that ends
+    /// `not-demodulated` files nothing).
+    // One simulated pass takes exactly the state `hunt` threads through it; bundling it into a
+    // struct only for the test would hide which map each assertion reads.
+    #[allow(clippy::too_many_arguments)]
+    fn admission_pass(
+        ks: &[i64],
+        keys: &[i64],
+        cands: &[(usize, f64)],
+        emitters: &[(usize, f64)],
+        filed: &mut HashMap<i64, CcOutcome>,
+        looked: &mut HashMap<i64, u64>,
+        never_files: &[i64],
+        pass: u64,
+    ) -> Admission {
+        let adm = admit(
+            cands.to_vec(),
+            unanswered_emitters(emitters.to_vec(), ks, keys, filed, looked),
+            8,
+        );
+        for &(i, _) in &adm.reserved {
+            looked.insert(keys[i], pass);
+            if !never_files.contains(&keys[i]) {
+                filed.insert(keys[i], CcOutcome::SyncWithoutCheck);
+            }
+        }
+        adm
+    }
+
+    /// Raster offsets, occupancy candidates in admission order, detected-emitter channels.
+    type Band = (Vec<i64>, Vec<(usize, f64)>, Vec<(usize, f64)>);
+
+    /// A busy band: six occupancy candidates, the control channel ranked **6th** (k = 9), and
+    /// seven intermittent detected emitters nearer the tuned centre than any of them (k = ±1…±3,
+    /// 4). `max_demods` is the built-in 8.
+    fn busy_band() -> Band {
+        let ks: Vec<i64> = (-10..=10).collect();
+        let at = |k: i64| ks.iter().position(|&x| x == k).unwrap();
+        let cands = [
+            (-9, 0.97),
+            (-8, 0.95),
+            (7, 0.93),
+            (8, 0.91),
+            (-7, 0.90),
+            (9, 0.88),
+        ]
+        .iter()
+        .map(|&(k, f)| (at(k), f))
+        .collect();
+        let emitters = [1, -1, 2, -2, 3, -3, 4]
+            .iter()
+            .map(|&k| (at(k), 0.2))
+            .collect();
+        (ks, cands, emitters)
+    }
+
+    /// **T-977 review (third): the emitter reservation starved both the emitters and the control
+    /// channel.** Half of `max_demods` was reserved first for the emitters nearest the centre and
+    /// never moved on once they were answered, so (1) the 5th-nearest emitter and beyond stayed
+    /// `not-searched` for ever, and (2) an occupancy candidate ranked 5th–8th was
+    /// `admission-refused` on every pass — a control channel main confirms, never confirmed.
+    ///
+    /// Pinned: the control channel ranked 6th is admitted for demodulation on **every** pass (so
+    /// confirmation is reached exactly as on main), and all seven emitters have a verdict within
+    /// **N = 4 passes** — `ceil(7 / 2)`, the two slots occupancy leaves. Also with one emitter
+    /// whose look never files (`not-demodulated`): it cannot hold a slot against the others.
+    ///
+    /// Red on c66d349c's rule (reserve `div_ceil(2)` first, ignore `filed`): the control channel
+    /// is refused on pass 1 and emitters 5–7 are never looked at.
+    #[test]
+    fn busy_band_answers_every_emitter_and_never_refuses_the_control_channel() {
+        let (ks, cands, emitters) = busy_band();
+        let cc = ks.iter().position(|&k| k == 9).unwrap();
+        for never_files in [&[][..], &[1][..]] {
+            let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
+            for pass in 1..=4u64 {
+                let adm = admission_pass(
+                    &ks,
+                    &ks,
+                    &cands,
+                    &emitters,
+                    &mut filed,
+                    &mut looked,
+                    never_files,
+                    pass,
+                );
+                assert!(
+                    adm.occupancy.iter().any(|&(i, _)| i == cc),
+                    "pass {pass}: the control channel (occupancy rank 6 of 6) was not admitted; \
+                     refused {:?}",
+                    adm.refused.iter().map(|&(i, _)| ks[i]).collect::<Vec<_>>(),
+                );
+                assert!(
+                    adm.refused.is_empty(),
+                    "pass {pass}: nothing needs refusing"
+                );
+                assert!(adm.occupancy.len() + adm.reserved.len() <= 8, "one budget");
+            }
+            for &(i, _) in &emitters {
+                let answered = filed.contains_key(&ks[i]) || never_files.contains(&ks[i]);
+                assert!(
+                    answered && looked.contains_key(&ks[i]),
+                    "emitter at k = {} got no verdict within 4 passes (never_files {never_files:?})",
+                    ks[i],
+                );
+            }
+        }
+    }
+
+    /// **A filed emitter is never re-reserved**: `filed` already holds its answer and an unchanged
+    /// verdict is not re-written, so a slot spent on it learns nothing. Once every emitter is
+    /// answered the reservation is empty, and occupancy has every slot it had on main.
+    #[test]
+    fn a_filed_emitter_is_never_reserved_again() {
+        let (ks, cands, emitters) = busy_band();
+        let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
+        for pass in 1..=10u64 {
+            let before = filed.clone();
+            let adm = admission_pass(
+                &ks,
+                &ks,
+                &cands,
+                &emitters,
+                &mut filed,
+                &mut looked,
+                &[],
+                pass,
+            );
+            for &(i, _) in &adm.reserved {
+                assert!(
+                    !before.contains_key(&ks[i]),
+                    "pass {pass}: k = {} was reserved again after its verdict was filed",
+                    ks[i],
+                );
+            }
+            if pass > 4 {
+                assert!(
+                    adm.reserved.is_empty(),
+                    "pass {pass}: nothing left to answer"
+                );
+            }
+        }
+        // And with no occupancy candidates at all, the emitters get the whole budget.
+        let adm = admit(Vec::new(), emitters.clone(), 8);
+        assert_eq!(adm.reserved.len(), emitters.len());
+    }
+
+    /// **T-977 review (fourth): a verdict belongs to a channel, not to an offset from the tuned
+    /// centre.** `filed` and `looked` live for the whole chain, and an in-band retune keeps the
+    /// chain; keyed by the raster index `k` (relative to `tune_center + grid_offset`), a NoSync
+    /// filed at 855.0375 MHz (k = +3 at 855 MHz) silenced the emitter at 857.0375 MHz after a
+    /// retune to 857 — also k = +3 — for the chain's life, and the confirmed stand-over applied to
+    /// whatever sat at that k.
+    ///
+    /// Pinned, through [`channel_keys`] as `hunt` computes it (anchor = the first pass's origin):
+    /// (1) after a retune the emitter at the same `k` is still reserved; (2) the channel filed
+    /// before the retune stays filed at its absolute frequency when a later tune puts it at a
+    /// different `k`, and the new channel at the old `k` is reserved — with the second tune's grid
+    /// fit landing 150 Hz off the first, as a real fit does.
+    ///
+    /// Red on 3dd426b9 (keys = the raster index): pass B reserves nothing, and pass C skips 855.05.
+    #[test]
+    fn a_verdict_stays_with_its_channel_across_a_retune() {
+        let raster = 12_500.0;
+        let ks: Vec<i64> = (-10..=10).collect();
+        let at = |k: i64| ks.iter().position(|&x| x == k).unwrap();
+        let (mut filed, mut looked) = (HashMap::new(), HashMap::new());
+        let anchor = 855.0e6;
+        // Pass A at 855 MHz: the emitter at k = +3 (855.0375 MHz) is answered.
+        let keys_a = channel_keys(anchor, 855.0e6, raster, &ks);
+        let a = admission_pass(
+            &ks,
+            &keys_a,
+            &[],
+            &[(at(3), 0.2)],
+            &mut filed,
+            &mut looked,
+            &[],
+            1,
+        );
+        assert_eq!(a.reserved, vec![(at(3), 0.2)]);
+        // Pass B, retuned to 857 MHz (the chain survives): an emitter at k = +3 is 857.0375 MHz,
+        // a channel nothing was ever filed on.
+        let keys_b = channel_keys(anchor, 857.0e6, raster, &ks);
+        let b = admission_pass(
+            &ks,
+            &keys_b,
+            &[],
+            &[(at(3), 0.2)],
+            &mut filed,
+            &mut looked,
+            &[],
+            2,
+        );
+        assert_eq!(
+            b.reserved,
+            vec![(at(3), 0.2)],
+            "857.0375 MHz was refused a look because 855.0375 MHz was filed at the same offset",
+        );
+        // Pass C, back near 855 with the grid fit 150 Hz off: 855.0375 MHz is now k = +2 and
+        // stays filed; 855.05 MHz sits at the old k = +3 and is owed its own verdict.
+        let origin_c = 855.0125e6 + 150.0;
+        let keys_c = channel_keys(anchor, origin_c, raster, &ks);
+        let c = admission_pass(
+            &ks,
+            &keys_c,
+            &[],
+            &[(at(2), 0.2), (at(3), 0.2)],
+            &mut filed,
+            &mut looked,
+            &[],
+            3,
+        );
+        assert_eq!(
+            c.reserved,
+            vec![(at(3), 0.2)],
+            "855.0375 MHz (now k = +2) was re-reserved or 855.05 MHz (k = +3) was skipped",
+        );
+        assert_eq!(
+            keys_c[at(2)],
+            keys_a[at(3)],
+            "one channel, one key, across the retune"
+        );
+        assert_eq!(filed.len(), 3, "three channels, three verdicts");
     }
 
     /// Occupancy separates a continuous channel from a bursty one and from empty ones — which is

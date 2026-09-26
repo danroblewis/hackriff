@@ -86,6 +86,16 @@ impl RunControl for PipelineRunControl {
         RunState {
             live: s.live,
             content_class: s.content_class,
+            content_classes: s
+                .content_classes
+                .into_iter()
+                .map(|b| hk_api::ClassBand {
+                    lo_hz: b.lo_hz,
+                    hi_hz: b.hi_hz,
+                    content_class: b.content_class,
+                    source: b.source,
+                })
+                .collect(),
             center_hz: s.center_hz,
             sample_rate_hz: s.sample_rate_hz,
             segment: s.segment,

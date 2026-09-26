@@ -98,7 +98,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
         ctx.client.get<{ recordings: ServedRecording[] }>("/api/outputs").catch(() => null),
       ]);
       const prev = ctx.store.get().servedOutputs;
-      const pipelines = pr ? pr.pipelines.map((p) => ({ id: p.id, state: p.state, emitter_id: p.emitter_id ?? null })) : prev.pipelines;
+      const pipelines = pr ? pr.pipelines.map((p) => ({
+        id: p.id, state: p.state, emitter_id: p.emitter_id ?? null,
+        outputs: (p.outputs ?? []).map((o) => ({ id: o.id, kind: o.kind, stream_id: o.stream_id })),
+      })) : prev.pipelines;
       const recordings = or ? (or.recordings ?? []).map((r) => ({ id: r.id, active: !!r.active, emitter_id: r.emitter_id ?? null })) : prev.recordings;
       if (JSON.stringify(pipelines) !== JSON.stringify(prev.pipelines) || JSON.stringify(recordings) !== JSON.stringify(prev.recordings)) {
         ctx.store.set(setServedOutputs({ pipelines, recordings }));

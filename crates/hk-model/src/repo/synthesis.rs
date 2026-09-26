@@ -362,6 +362,61 @@ pub enum ResolutionReason {
     UnsupportedStructure,
 }
 
+/// Where a suggestion came from (ADR-0021 §9.1; closed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExplanationSource {
+    /// A spectrum-allocation row.
+    Alloc,
+    /// A band plan (channel raster, service convention).
+    BandPlan,
+    /// A licence or assignment record.
+    Licence,
+    /// A catalogue of known emitters (satellites, beacons).
+    Catalogue,
+    /// This device's own earlier observations.
+    History,
+}
+
+/// How the measurement sits against the reference (ADR-0021 §9.1; closed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExplanationStatus {
+    /// The measurement is where the reference says this service should be.
+    Expected,
+    /// The measurement disagrees with the reference — **the interesting case** (CLAUDE.md). It is
+    /// a flag, never a correction: the emitter keeps its measured centre.
+    Unexpected,
+    /// Nothing in the reference data covers this measurement. **Not** "this is fine".
+    NoReferenceData,
+}
+
+/// A ranked suggestion about what a **sealed** [`Resolution`] might be (ADR-0021 §9.1).
+///
+/// **A suggestion explains a result; it never becomes one.** It is computed by `hk-context` after
+/// the resolution is final, from measured parameters only, and modifies nothing on the row: an
+/// `unknown` with three high-scoring explanations is still `unknown` (ADR-0021 §9.2).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Explanation {
+    /// Which reference said so.
+    pub source: ExplanationSource,
+    /// What it names, e.g. `fm-broadcast`.
+    pub identity: String,
+    /// How well the measurement fits, 0..=1. Ordering only: it never confirms anything.
+    pub score: f64,
+    /// Measured centre minus the reference's nearest expected frequency, Hz; `None` when the
+    /// reference names a band rather than a channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_hz: Option<f64>,
+    /// Expected / unexpected / no reference data.
+    pub status: ExplanationStatus,
+    /// Age of the reference data, days; `None` when the source does not date itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_age_days: Option<u32>,
+    /// Why this suggestion, in words the user can check against the measurement.
+    pub reasoning: String,
+}
+
 /// What an [`ResolutionKind::UnsupportedStructure`] row suspected (ADR-0021 §7A.6), summarised
 /// onto the row so ADR-0021 §9.4's backlog — *"3 emitters are waiting on `psk_demod`"* — is a
 /// group-by over `emitter_synthesis` and not a search through summary prose. The full sealed
@@ -372,6 +427,17 @@ pub struct SuspectedStructure {
     pub structure: String,
     /// The missing block's stable id (`css_dechirp`).
     pub missing_block: String,
+}
+
+/// One row of [`Repository::missing_block_backlog`] (ADR-0021 §9.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingBlockCount {
+    /// The block this build does not have, e.g. `psk_demod`.
+    pub missing_block: String,
+    /// The structure it would decode, e.g. `psk`.
+    pub structure: String,
+    /// Emitters whose latest analysis is waiting on it.
+    pub emitters: u64,
 }
 
 /// The sealed negative result (ADR-0021 §7A.2).
@@ -392,6 +458,11 @@ pub struct Resolution {
     pub suspected: Option<SuspectedStructure>,
     /// Backend-rendered statement.
     pub summary: String,
+    /// Ranked known-signal suggestions, attached **after** everything above was sealed and
+    /// modifying none of it (ADR-0021 §9.2). Written only by
+    /// [`Resolution::attach_explanations`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explanations: Vec<Explanation>,
 }
 
 impl Resolution {
@@ -405,7 +476,17 @@ impl Resolution {
             summary: "no analysis has run on this emitter: not searched, which is not the same \
                       as searched and unidentified"
                 .into(),
+            explanations: Vec::new(),
         }
+    }
+
+    /// **The only way a suggestion reaches a resolution** (ADR-0021 §9.2/§9.3).
+    ///
+    /// Replaces `explanations` and touches nothing else: `kind`, `deepest_verdict`, `reason`,
+    /// `suspected` and `summary` are what the search sealed, whatever the suggestions say. An
+    /// `unknown` explained by three high-scoring allocations is still `unknown`.
+    pub fn attach_explanations(&mut self, explanations: Vec<Explanation>) {
+        self.explanations = explanations;
     }
 }
 
@@ -863,6 +944,55 @@ impl Repository {
         Ok(self.synthesis_rows(emitter, 1)?.into_iter().next())
     }
 
+    /// **The `missing_block` backlog** (ADR-0021 §9.4): for each block this build does not have,
+    /// how many emitters are waiting on it — *"3 emitters are waiting on `psk_demod`"*.
+    ///
+    /// A group-by over `emitter_synthesis`, counted from each emitter's **latest** row only (an
+    /// emitter re-analysed four times is one emitter waiting, not four), and only where that row
+    /// resolved `unsupported-structure`. It is the device's own argument for which block to build
+    /// next — made from what it met, not from a guess about what users will meet.
+    pub fn missing_block_backlog(&self) -> Result<Vec<MissingBlockCount>, RepoError> {
+        self.ensure_synthesis_table()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT body FROM emitter_synthesis s \
+             WHERE s.synthesis_id = ( \
+                 SELECT synthesis_id FROM emitter_synthesis x \
+                 WHERE x.emitter_id = s.emitter_id ORDER BY x.t DESC, x.synthesis_id DESC LIMIT 1 \
+             )",
+        )?;
+        let bodies = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        let mut counts: std::collections::BTreeMap<(String, String), u64> =
+            std::collections::BTreeMap::new();
+        for body in &bodies {
+            let row: EmitterSynthesis = serde_json::from_str(body)?;
+            let Some(res) = row.resolution else { continue };
+            if res.kind != ResolutionKind::UnsupportedStructure {
+                continue;
+            }
+            let Some(sus) = res.suspected else { continue };
+            *counts
+                .entry((sus.missing_block, sus.structure))
+                .or_insert(0) += 1;
+        }
+        let mut out: Vec<MissingBlockCount> = counts
+            .into_iter()
+            .map(|((missing_block, structure), emitters)| MissingBlockCount {
+                missing_block,
+                structure,
+                emitters,
+            })
+            .collect();
+        // Most-wanted first; ties by block id, so the answer is stable.
+        out.sort_by(|a, b| {
+            b.emitters
+                .cmp(&a.emitters)
+                .then_with(|| a.missing_block.cmp(&b.missing_block))
+        });
+        Ok(out)
+    }
+
     /// Whether `emitter`'s decoded identity rests **only** on synthesized decodes (decoder id
     /// `synth:…`, ADR-0015 §5.5 trust rules): `None` without an identity; `Some(true)` when at
     /// least one synthesized decode carries it and no ordinary decoder's does. `/api/inventory`
@@ -982,10 +1112,101 @@ mod tests {
                     reason: Some(ResolutionReason::NothingScored),
                     suspected: None,
                     summary: "framed, unidentified".into(),
+                    explanations: Vec::new(),
                 }),
             )
             .validate()
             .is_ok()
+        );
+    }
+
+    /// **ADR-0021 §9.4's backlog**: *"3 emitters are waiting on `psk_demod`"*, counted from the
+    /// device's own data. One emitter waiting is one emitter, however many times it was
+    /// re-analysed, and only its **latest** analysis counts — a row superseded by one that found
+    /// the structure after all is not a vote for building the block.
+    #[test]
+    fn the_missing_block_backlog_counts_each_waiting_emitter_once_from_its_latest_row() {
+        use crate::LinkTarget;
+        use crate::cluster::{Fingerprint, Sighting};
+        use crate::ids::TrackId;
+
+        let mut repo = Repository::open_in_memory().unwrap();
+        let t = |s: i64| Timestamp::from_unix_nanos(s * 1_000_000_000);
+        let emitter_at = |repo: &mut Repository, f: f64| {
+            repo.record_sighting(
+                &Sighting {
+                    source: LinkTarget::Track(TrackId::new()),
+                    seen: TimeRange::new(t(0), t(5)),
+                    count: 3,
+                    f_center_hz: f,
+                    bandwidth_hz: 12e3,
+                    fingerprint: Some(Fingerprint::new(f, 12e3)),
+                    identity: None,
+                    context: None,
+                    classification: None,
+                    tags: Vec::new(),
+                },
+                None,
+            )
+            .unwrap()
+            .emitter_id
+        };
+        let waiting = |block: &str, structure: &str| Resolution {
+            kind: ResolutionKind::UnsupportedStructure,
+            deepest_verdict: Some(Verdict::Demodulated),
+            reason: Some(ResolutionReason::UnsupportedStructure),
+            suspected: Some(SuspectedStructure {
+                structure: structure.to_owned(),
+                missing_block: block.to_owned(),
+            }),
+            summary: format!("no {block} in this build"),
+            explanations: Vec::new(),
+        };
+        let write = |repo: &mut Repository, id: EmitterId, at: i64, res: Resolution| {
+            let mut row = row(Vec::new(), Verdict::Demodulated, Some(res));
+            row.emitter_id = id;
+            row.t = t(at);
+            repo.insert_synthesis(&row).unwrap();
+        };
+
+        // Three emitters wait on psk_demod; one of them was analysed twice and still waits.
+        for (i, f) in [915e6, 916e6, 917e6].into_iter().enumerate() {
+            let id = emitter_at(&mut repo, f);
+            if i == 0 {
+                write(&mut repo, id, 1, waiting("psk_demod", "psk"));
+            }
+            write(&mut repo, id, 2, waiting("psk_demod", "psk"));
+        }
+        // One waits on css_dechirp.
+        let lora = emitter_at(&mut repo, 868e6);
+        write(&mut repo, lora, 2, waiting("css_dechirp", "css"));
+        // One waited, then a later analysis solved it: it is no longer waiting on anything.
+        let solved = emitter_at(&mut repo, 869e6);
+        write(&mut repo, solved, 1, waiting("ofdm_sync", "ofdm"));
+        let mut done = row(Vec::new(), Verdict::Solved, None);
+        done.emitter_id = solved;
+        done.t = t(3);
+        repo.insert_synthesis(&done).unwrap();
+        // And one emitter nothing analysed at all: not-searched is not a vote (§7A.4).
+        let _unlooked = emitter_at(&mut repo, 870e6);
+
+        let backlog = repo.missing_block_backlog().unwrap();
+        assert_eq!(
+            backlog,
+            vec![
+                MissingBlockCount {
+                    missing_block: "psk_demod".into(),
+                    structure: "psk".into(),
+                    emitters: 3,
+                },
+                MissingBlockCount {
+                    missing_block: "css_dechirp".into(),
+                    structure: "css".into(),
+                    emitters: 1,
+                },
+            ],
+            "most-wanted first, each emitter counted once, and nothing solved or un-looked-at \
+             counted at all"
         );
     }
 
@@ -1002,6 +1223,7 @@ mod tests {
                 reason: Some(ResolutionReason::UnsupportedStructure),
                 suspected,
                 summary: "no block for it".into(),
+                explanations: Vec::new(),
             })
         };
         let css = || {

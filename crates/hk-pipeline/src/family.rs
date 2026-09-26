@@ -30,6 +30,7 @@
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
 //! | `p25-tsbk`, `dmr-csbk`, `nxdn-cac` | decoder | `public-safety` | 0.97 | a CRC-valid trunked control channel; nothing else transmits one (T-546) |
+//! | `dmr-tier2` | decoder | `public-safety` | 0.97 | DMR frame syncs plus an FEC-checked slot type: a **conventional** DMR repeater, which no control-channel hunt ever reaches (T-989) |
 //! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
 //! | `nbfm`, `nfm` | demod mode | — | — | land mobile, amateur, marine, public safety and FRS/GMRS share it |
 //! | `am` | demod mode | — | — | aviation, AM broadcast, CB and amateur share it |
@@ -178,6 +179,7 @@ use std::collections::BTreeMap;
 use hk_context::{BandTable, Region, match_known_status};
 // T-218: a user reclassification is written at the user arbitration rank (ADR-0016 §2).
 use hk_detect::TrackSummary;
+use hk_detect::track::HopSetSummary;
 use hk_detect::track::inventory::SUSPECT_FRACTION;
 use hk_model::ReceiverArtefactShare;
 use hk_model::classify::{ArbRank, Stage};
@@ -275,15 +277,29 @@ pub struct ChannelRaster {
 /// 73.201, channels 200–300; unverified this session). The 20 kHz tolerance is 10 % of the
 /// raster; the detector's centre error on the fixture station is about 3 kHz. Every entry is keyed
 /// by its region; other regions' rasters (e.g. 100 kHz FM steps in ITU Region 1) are future work.
-pub const CHANNEL_RASTERS: &[ChannelRaster] = &[ChannelRaster {
-    region: Region::Us,
-    service: "fm-broadcast",
-    range_hz: [87.8e6, 108.0e6],
-    raster_hz: 200e3,
-    offset_hz: 100e3,
-    tolerance_hz: 20e3,
-    source: "47 CFR 73.201 (US FM channels, 200 kHz on odd tenths)",
-}];
+pub const CHANNEL_RASTERS: &[ChannelRaster] = &[
+    ChannelRaster {
+        region: Region::Us,
+        service: "fm-broadcast",
+        range_hz: [87.8e6, 108.0e6],
+        raster_hz: 200e3,
+        offset_hz: 100e3,
+        tolerance_hz: 20e3,
+        source: "47 CFR 73.201 (US FM channels, 200 kHz on odd tenths)",
+    },
+    // T-979: US UHF television, channels 14-36, 6 MHz each, centres at 473 MHz + 6 MHz·k. The
+    // tolerance is ~40 ppm at 600 MHz: wide enough for any receiver clock error (the explorer's
+    // was 4 ppm), tight enough that a station genuinely off the raster is flagged, not snapped.
+    ChannelRaster {
+        region: Region::Us,
+        service: "tv-broadcast",
+        range_hz: [470e6, 608e6],
+        raster_hz: 6e6,
+        offset_hz: 5e6,
+        tolerance_hz: 25e3,
+        source: "47 CFR 73.603(a), 73.699 Fig. 1 (US TV channels 14-36, 6 MHz)",
+    },
+];
 
 /// Kind of a vocabulary entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -336,6 +352,9 @@ const SHARED_HF: &str = "SSB/CW are shared by amateur and HF utility services";
 const MODULATION_ONLY: &str = "a modulation names no service; a Part 15 / ISM status needs a \
      protocol decode (e.g. rtl_433) or a CRC-valid framing ground truth";
 const RDS_NOTE: &str = "RDS rides only on FM broadcast";
+/// Why a measured 8VSB pilot identifies television and nothing else (T-979).
+const ATSC_NOTE: &str = "a 5.381 MHz flat band with a CW pilot on its lower edge is ATSC 1.0 \
+     8VSB (A/53 Part 2 §5.1.2); no other service emits that pair";
 const ADSB_NOTE: &str = "CRC-checked Mode S / ADS-B frames";
 const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 /// Why a decoded trunking control channel is public-safety / land-mobile evidence, and why it is
@@ -351,6 +370,19 @@ const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
 const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
      raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
 
+/// T-989: conventional DMR, which is not trunked and therefore never reaches the control-channel
+/// hunt. The evidence is the air interface itself — DMR's own frame sync words at 4800 Bd, and
+/// the FEC-checked slot type behind them — so it stands beside the trunking decoders rather than
+/// under them.
+const DMR_TIER2_NOTE: &str = "DMR frame syncs at 4800 Bd with an FEC-checked slot type: a \
+     conventional (Tier II) DMR repeater or radio. Nothing else transmits DMR bursts, and DMR is \
+     public safety, land mobile and business radio";
+
+/// T-977: what a frame sync without a check actually says.
+const TRUNK_SYNC_NOTE: &str = "frame sync at the expected spacing with no CRC-valid control block: the air interface is \
+     recognised, the channel is not a control channel (a voice or data channel of the same system \
+     looks exactly like this)";
+
 /// The vocabulary (see the module table).
 pub const VOCABULARY: &[VocabEntry] = &[
     entry(
@@ -359,6 +391,17 @@ pub const VOCABULARY: &[VocabEntry] = &[
         Some("fm-broadcast"),
         0.9,
         "200 kHz wideband FM is the broadcast service (47 CFR 73 subpart B)",
+    ),
+    // T-979. `Modulation` is the nearest kind, but this label is never a bare modulation call:
+    // `hk_estimate::atsc` writes it only when a 5.381 MHz flat band AND a CW pilot on its lower
+    // edge were both measured, which is a positive identification of ATSC 1.0 and of nothing
+    // else. It is therefore status-setting evidence, not shape.
+    entry(
+        "atsc-8vsb",
+        Modulation,
+        Some("tv-broadcast"),
+        0.97,
+        ATSC_NOTE,
     ),
     entry("nbfm", DemodMode, None, 0.0, SHARED_NBFM),
     entry("nfm", DemodMode, None, 0.0, SHARED_NBFM),
@@ -410,6 +453,38 @@ pub const VOCABULARY: &[VocabEntry] = &[
         0.97,
         TRUNK_CC_NOTE,
     ),
+    // T-989: the conventional-DMR identifier, which is not a control-channel decode.
+    entry(
+        "dmr-tier2",
+        Decoder,
+        Some("public-safety"),
+        0.97,
+        DMR_TIER2_NOTE,
+    ),
+    // T-977: frame sync at the expected spacing with NO CRC-valid control block. The same service
+    // family, at less certainty, under its own id — a P25 voice or data channel carries P25's
+    // 48-bit frame sync and no TSBK, so this is what "P25-like" is measured as.
+    entry(
+        "p25-frame-sync",
+        Decoder,
+        Some("public-safety"),
+        0.8,
+        TRUNK_SYNC_NOTE,
+    ),
+    entry(
+        "dmr-frame-sync",
+        Decoder,
+        Some("public-safety"),
+        0.8,
+        TRUNK_SYNC_NOTE,
+    ),
+    entry(
+        "nxdn-frame-sync",
+        Decoder,
+        Some("public-safety"),
+        0.8,
+        TRUNK_SYNC_NOTE,
+    ),
 ];
 
 /// Service family names that pass through unchanged (each one accepted by
@@ -437,6 +512,19 @@ const SERVICE_PASSTHROUGH: &[(&str, &str)] = &[
     ("fsk-ism", "ism"),
     ("ook-ism", "ism"),
     ("lora", "lora"),
+    // T-953: the 929-932 MHz paging allocation, and the frequency-hopping *behaviour* the
+    // detector measures directly. `flex`/`pocsag` name the service because nothing else carries
+    // those air interfaces; a bare `2fsk` at 929 MHz still names nothing (the rule above).
+    ("paging", "paging"),
+    ("flex", "paging"),
+    ("pocsag", "paging"),
+    ("fhss", "fhss"),
+    // T-979: UHF television and the Part 74 low power auxiliary use that shares its channels.
+    ("tv-broadcast", "tv-broadcast"),
+    ("atsc", "tv-broadcast"),
+    ("dtv", "tv-broadcast"),
+    ("wireless-mic", "wireless-mic"),
+    ("low-power-auxiliary", "wireless-mic"),
 ];
 
 /// Canonical services the band plan can suggest as allocation-only candidates.
@@ -452,6 +540,9 @@ const ALLOCATION_SERVICES: &[&str] = &[
     "cellular",
     "public-safety",
     "ism",
+    "paging",
+    "tv-broadcast",
+    "wireless-mic",
 ];
 
 /// What a real emission of a service **measures like**: the occupied-bandwidth window the
@@ -561,6 +652,34 @@ const SERVICE_SHAPES: &[ServiceShape] = &[
         "Part 15 covers a 20 kHz OOK remote, a 500 kHz LoRa chirp and a 20 MHz WLAN channel: no \
          width supports or contradicts the allocation",
     ),
+    // T-953: 929-932 MHz paging. FLEX (1600/3200/6400 bit/s, 2- or 4-level FSK at +/-4.8 kHz)
+    // and POCSAG (512-2400 bit/s 2-FSK at +/-4.5 kHz) sit in 25 kHz channels; a paging transmitter
+    // keys up per batch, so it is not required to be continuous.
+    shape(
+        "paging",
+        Some([4e3, 30e3]),
+        false,
+        "FLEX / POCSAG FSK at +/-4.5-4.8 kHz deviation in a 25 kHz paging channel (47 CFR Part \
+         22 Subpart E, 90.494): ~10-20 kHz occupied",
+    ),
+    // T-979: the two services the 470-608 MHz rows added. Both are strongly discriminating, and
+    // against each other: a 6 MHz DTV channel is not a wireless microphone, and a 200 kHz mic is
+    // not a television station. That is exactly the discrimination T-990 exists to disclose, and
+    // it is why the fragments the explorer saw inside channels 29/30 could never be either.
+    shape(
+        "tv-broadcast",
+        Some([4.5e6, 6.5e6]),
+        true,
+        "8VSB occupies the 5.381 MHz Nyquist band of its 6 MHz channel (ATSC A/53 Part 2 §5.1.2; \
+         47 CFR 73.603 for the channel), and a DTV transmitter is on air continuously",
+    ),
+    shape(
+        "wireless-mic",
+        Some([10e3, 200e3]),
+        false,
+        "47 CFR 74.861(e): a low power auxiliary station in the TV bands is authorised 200 kHz, \
+         and an analogue mic at +/-15-75 kHz deviation occupies a fraction of it",
+    ),
 ];
 
 /// Whether an emitter's measured occupancy supports a service (T-990).
@@ -630,6 +749,10 @@ pub fn service_label(service: &str) -> &'static str {
         "public-safety" => "Public safety / land mobile",
         "ism" => "ISM / Part 15 device",
         "lora" => "LoRa (Part 15)",
+        "paging" => "Paging (929-932 MHz)",
+        "fhss" => "Frequency-hopping system (Part 15 §15.247)",
+        "tv-broadcast" => "TV broadcast",
+        "wireless-mic" => "Wireless microphone (Part 74)",
         UNIDENTIFIED => "Unidentified emission",
         RECEIVER_ARTEFACT => "Receiver artefact",
         _ => "Other service",
@@ -647,6 +770,25 @@ pub struct Occupancy {
     pub symbol_rate_hz: Option<f64>,
 }
 
+/// A measured frequency-hopping set (T-953): what the tracker linked, as evidence.
+///
+/// A [`HopSetSummary`] only exists after the tracker's
+/// own gate has held — ≥ 3 channels with ≥ 2 links each, ≥ 10 hops, over half of each member's
+/// bursts linked, every member above `min_channel_snr_db`, and the periodic-emitter veto passed
+/// (`hk_detect::track`, §7). That gate *is* the measurement of hopping, so nothing is re-gated
+/// here.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HopSet {
+    /// Member channels.
+    pub channels: usize,
+    /// Hops linked.
+    pub hops: u64,
+    /// Channel raster, Hz, when one was fitted.
+    pub raster_hz: Option<f64>,
+    /// Mean dwell, s.
+    pub dwell_s: Option<f64>,
+}
+
 /// Evidence about an emitter's family.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Evidence<'a> {
@@ -656,6 +798,8 @@ pub enum Evidence<'a> {
     Decoder(&'a str),
     /// Occupancy.
     Occupancy(Occupancy),
+    /// A measured hop set (T-953).
+    HopSet(HopSet),
 }
 
 /// The outcome of mapping evidence.
@@ -728,6 +872,25 @@ fn map_name(name: &str) -> FamilyCall {
 pub fn service_family(evidence: &Evidence<'_>) -> FamilyCall {
     match evidence {
         Evidence::Label(l) | Evidence::Decoder(l) => map_name(l),
+        // T-953: the detector linked dwells across channels, which is a measurement of hopping
+        // and of nothing else. It suggests `fhss` — a *behaviour*, not a system: what hops here
+        // could be a Part 15 §15.247 device, a cordless phone, a telemetry link or a radar. It is
+        // shape evidence, so it ranks and never sets a status (see the module docs).
+        Evidence::HopSet(h) => FamilyCall {
+            service: Some("fhss"),
+            confidence: HOP_SET_CONFIDENCE,
+            reason: format!(
+                "{} channels linked by {} hops{}{}: a frequency-hopping emission",
+                h.channels,
+                h.hops,
+                h.raster_hz
+                    .map(|r| format!(" on a {:.1} kHz raster", r / 1e3))
+                    .unwrap_or_default(),
+                h.dwell_s
+                    .map(|d| format!(", {:.1} ms dwell", d * 1e3))
+                    .unwrap_or_default(),
+            ),
+        },
         Evidence::Occupancy(o) => {
             let continuous = o.duty_cycle.is_some_and(|d| d >= CONTINUOUS_DUTY);
             let [lo, hi] = WIDEBAND_FM_OBW_HZ;
@@ -750,6 +913,26 @@ pub fn service_family(evidence: &Evidence<'_>) -> FamilyCall {
             }
         }
     }
+}
+
+/// Confidence of the `fhss` suggestion a measured hop set carries (T-953).
+///
+/// Not 1.0, and not a measurement of *what* is hopping. The tracker's link rule can in principle
+/// chain independent emitters whose bursts abut — which is exactly what its channel count, link
+/// fraction, SNR floor and periodic veto bound, and why they are not re-applied here — and
+/// "something hops across these channels" identifies no system. It is well above
+/// [`MIN_CONFIDENCE`] because the hopping itself was measured, and it is *shape* evidence, so it
+/// can rank an explanation and can never set a `known_status`.
+pub const HOP_SET_CONFIDENCE: f64 = 0.8;
+
+/// The family evidence of a measured hop set (T-953): `fhss`, as a suggestion.
+pub fn hop_set_family(h: &HopSetSummary) -> FamilyCall {
+    service_family(&Evidence::HopSet(HopSet {
+        channels: h.channels_hz.len(),
+        hops: h.hops,
+        raster_hz: h.raster_hz,
+        dwell_s: h.dwell_s,
+    }))
 }
 
 /// The family evidence of a closed channel track: its occupancy. A mostly suspect track (spur,
@@ -841,6 +1024,37 @@ pub enum ExplanationEvidence {
         /// Why.
         reason: String,
     },
+    /// A pilot tone measured from the signal that identifies a channelised service (T-979).
+    ///
+    /// This is the evidence an ATSC 8VSB explanation rests on: a CW line on the lower edge of the
+    /// emission's own 5.381 MHz flat band, which the standard puts 309.440 559 kHz above the
+    /// 6 MHz channel's lower edge. The measurement comes first; [`Self::nominal_hz`] and the ppm
+    /// exist only when the measured channel landed on a known grid.
+    Pilot {
+        /// Standard the pilot belongs to, e.g. `atsc-8vsb`.
+        standard: String,
+        /// Measured pilot frequency, Hz.
+        measured_hz: f64,
+        /// One-sigma uncertainty of the measurement, Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sigma_hz: Option<f64>,
+        /// Where the standard puts the pilot of the channel the measurement landed on, Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nominal_hz: Option<f64>,
+        /// Measured minus nominal, Hz.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_hz: Option<f64>,
+        /// Receiver clock error that offset implies, ppm (C05 offset convention).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ppm: Option<f64>,
+        /// Channel number on the grid, when it landed on one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<u32>,
+        /// Pilot over the emission's own plateau, dB.
+        excess_db: f64,
+        /// Source of the nominal offset.
+        source: String,
+    },
     /// T-990: how the emitter's own measured occupancy reads against the shape a real emission
     /// of this service has to have. This is what stops a band-plan allocation from explaining,
     /// by itself, an emission whose measurements contradict it.
@@ -884,6 +1098,39 @@ pub enum ExplanationEvidence {
         #[serde(default = "detected_center")]
         center_source: String,
     },
+}
+
+/// Metadata key under which [`crate::atsc`] stores a measured channel pilot (T-979).
+pub const PILOT_METADATA_KEY: &str = "pilot";
+
+/// The service a [`PILOT_FINGERPRINT_KEY`] measurement is evidence for.
+pub const PILOT_SERVICE: &str = "tv-broadcast";
+
+/// The [`ExplanationEvidence::Pilot`] row in a pilot annotation's `metadata`, if it carries one.
+///
+/// Reading it back here is what makes an ATSC explanation *cite the pilot it was measured from*
+/// instead of asserting a family and leaving the reader to trust it.
+pub fn pilot_evidence(metadata: &serde_json::Value) -> Option<ExplanationEvidence> {
+    let p = metadata.get(PILOT_METADATA_KEY)?;
+    let f = |k: &str| p.get(k).and_then(serde_json::Value::as_f64);
+    Some(ExplanationEvidence::Pilot {
+        standard: p.get("standard")?.as_str()?.to_owned(),
+        measured_hz: f("measured_hz")?,
+        sigma_hz: f("sigma_hz"),
+        nominal_hz: f("nominal_hz"),
+        offset_hz: f("offset_hz"),
+        ppm: f("ppm"),
+        channel: p
+            .get("channel")
+            .and_then(serde_json::Value::as_u64)
+            .map(|c| c as u32),
+        excess_db: f("excess_db")?,
+        source: p
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ATSC A/53 Part 2 §5.1.2")
+            .to_owned(),
+    })
 }
 
 /// `Raster.center_source` of the emitter's detected centre.
@@ -1702,6 +1949,12 @@ pub fn explain_emitter(
         artefact.as_ref(),
         coincidence.as_ref(),
     );
+    // T-979: the explanation cites the pilot the family was measured from.
+    if let Some(pilot) = crate::atsc::pilot_evidence(repo, id)? {
+        if let Some(c) = all.iter_mut().find(|c| c.service == PILOT_SERVICE) {
+            c.evidence.insert(0, pilot);
+        }
+    }
     if refined.is_some() {
         for ev in all.iter_mut().flat_map(|x| x.evidence.iter_mut()) {
             if let ExplanationEvidence::Raster { center_source, .. } = ev {
@@ -2013,7 +2266,12 @@ mod tests {
         }
         for (s, canonical) in SERVICE_PASSTHROUGH {
             assert!(is_service_family(s), "{s}");
-            assert!(ALLOCATION_SERVICES.contains(canonical) || *canonical == "lora");
+            // `lora` and `fhss` are evidence-only services: something has to be measured for
+            // them to be named, so the band plan never suggests them on its own (T-953).
+            assert!(
+                ALLOCATION_SERVICES.contains(canonical) || matches!(*canonical, "lora" | "fhss"),
+                "{canonical}"
+            );
             assert_ne!(service_label(canonical), "Other service");
         }
         let wfm = service_family(&Evidence::Label("wfm"));
@@ -2047,6 +2305,90 @@ mod tests {
         assert_eq!(occ(333e3, None).service, None, "duty unknown");
         assert_eq!(occ(2.0e6, Some(1.0)).service, None, "too wide");
         assert_eq!(occ(14e3, Some(1.0)).service, None, "narrow fragment");
+    }
+
+    /// T-953: a ~25 kHz FSK burst at 929.6 MHz gets the paging allocation as a ranked
+    /// **explanation** and nothing more. Before T-953 the compact table held no row between
+    /// 894 MHz and 960 MHz, so the explorer's FLEX pager emitters came back with `explanations: []`
+    /// — not a wrong suggestion, no suggestion at all.
+    #[test]
+    fn t953_a_pager_burst_at_929_6_mhz_is_explained_by_the_paging_allocation_and_not_identified() {
+        // The evidence a blind run actually holds there: a modulation label, which names no
+        // service (the module's rule, unchanged).
+        let r = rank_explanations(
+            &table(),
+            &[ev("2fsk", 0.9, "fsk-demod@1")],
+            929.6125e6,
+            25e3,
+        );
+        let paging = r
+            .iter()
+            .find(|e| e.service == "paging")
+            .unwrap_or_else(|| panic!("no paging explanation in {r:#?}"));
+        assert!(paging.rank <= TOP_K as u32, "rank {}", paging.rank);
+        assert_eq!(paging.label, "Paging (929-932 MHz)");
+        assert_eq!(paging.status, KnownStatus::Known, "the band expects paging");
+        assert_eq!(
+            paging.prior_ref.as_deref(),
+            Some("us-47cfr2106-compact:paging-929")
+        );
+        // A suggestion, never an identification: no signal evidence backs it, and nothing that
+        // can set a status does.
+        assert!(paging.has_flag("allocation-only"), "{:?}", paging.flags);
+        assert!(paging.evidence_confidence < 1e-9);
+        assert!(paging.status_evidence_confidence < MIN_CONFIDENCE);
+        let (status, _, _) = status_from(&r);
+        assert_eq!(
+            status,
+            KnownStatus::Unknown,
+            "a band-plan row must never identify an emitter"
+        );
+    }
+
+    /// T-953: the same allocation, once something *decodes* the service, is what promotes it —
+    /// the decoder arbitrates, the band plan only agrees.
+    #[test]
+    fn t953_a_decoded_pager_is_identified_by_the_decode_and_agreed_with_by_the_band_plan() {
+        let r = rank_explanations(
+            &table(),
+            &[ev("flex", 0.95, "decoder:flex")],
+            929.6125e6,
+            25e3,
+        );
+        let top = &r[0];
+        assert_eq!(top.service, "paging");
+        assert!(!top.has_flag("allocation-only"), "{:?}", top.flags);
+        assert!(top.status_evidence_confidence >= MIN_CONFIDENCE);
+        assert_eq!(status_from(&r).0, KnownStatus::Known);
+    }
+
+    /// T-953: a measured hop set suggests `fhss`, above the band's own allocation-only row, and
+    /// still sets no status — the hopping was measured, the system was not identified.
+    #[test]
+    fn t953_a_hopping_population_in_the_ism_band_is_explained_as_frequency_hopping() {
+        let call = service_family(&Evidence::HopSet(HopSet {
+            channels: 25,
+            hops: 312,
+            raster_hz: Some(400e3),
+            dwell_s: Some(0.4e-3),
+        }));
+        assert_eq!(call.confident_service(), Some("fhss"));
+        assert!(call.reason.contains("frequency-hopping"), "{}", call.reason);
+        let r = rank_explanations(
+            &table(),
+            &[ev("fhss", HOP_SET_CONFIDENCE, FAMILY_MAP_VERSION)],
+            915e6,
+            12e6,
+        );
+        let top = &r[0];
+        assert_eq!(top.service, "fhss", "{r:#?}");
+        assert_eq!(top.label, "Frequency-hopping system (Part 15 §15.247)");
+        assert!(top.has_flag("shape-only"), "{:?}", top.flags);
+        assert!(top.evidence_confidence > ALLOCATION_ONLY_SCORE);
+        // The Part 15 band itself is still suggested beside it.
+        assert!(r.iter().any(|e| e.service == "ism"), "{r:#?}");
+        // Shape evidence ranks and suggests; it never sets a status.
+        assert_eq!(status_from(&r).0, KnownStatus::Unknown);
     }
 
     #[test]

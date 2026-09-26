@@ -158,7 +158,7 @@ test("focusing a signal switches the inventory tab to the row's state", () => {
 
 test("outputs upsert by id and remove", () => {
   const s = createStore(initialState());
-  const e: OutputEntry = { id: "o1", kind: "audio", label: "101.300", sub: "audio", state: "opening", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: "e1", pipelineId: null, message: null };
+  const e: OutputEntry = { id: "o1", kind: "audio", label: "101.300", sub: "audio", state: "opening", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: "e1", pipelineId: null, outputId: null, message: null };
   s.set(upsertOutput(e));
   s.set(upsertOutput({ ...e, state: "live" }));
   assert.equal(s.get().outputs.length, 1);

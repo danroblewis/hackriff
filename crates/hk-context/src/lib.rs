@@ -34,9 +34,12 @@ pub mod feeds;
 pub mod geo;
 pub mod gnss_service;
 pub mod known_status;
+// T-569 (ADR-0021 §9): suggestions computed AFTER a sealed `Resolution`, attached beside it and
+// never onto it.
 pub mod multipath; // T-222 (C40): content-correlated multipath, wired to the record
 pub mod passes; // T-276 (C29 → C04): TLE pass prediction and reservations
 pub mod priors;
+pub mod synth_explain;
 pub mod utc;
 
 // ADR-0012 §11 (pre-added by T-113; the owners fill them in).

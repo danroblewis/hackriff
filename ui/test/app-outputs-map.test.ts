@@ -194,8 +194,10 @@ test("the badge: per frame at the box's top-right, one glyph per kind, --lvl pul
 
 test("the surface draws the halo and the badge from ONE activity map, and right-click picks the box like a click does", () => {
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(src, /signalMarkBoxes\(rows, focusId, isUnexplained, activityNow\(\)\)/, "the detections layer reads it per frame");
-  assert.match(src, /pinLayer\.update\([^;]*activityNow\(\)\)/, "the badge layer reads the same map on the same frame");
+  // T-1004 added the fifth argument: whether THIS pane owns the selection (a pane that does not
+  // draws the linked ghost). The activity map is still read per frame, in the same call.
+  assert.match(src, /signalMarkBoxes\(rows, focusId, isUnexplained, activityNow\(\), !ownsSelection\(pane\.id\)\)/, "the detections layer reads it per frame");
+  assert.match(src, /pinLayer\.update\([^;]*activityNow\(\),/, "the badge layer reads the same map on the same frame");
   assert.match(src, /boxActivity\(s\.outputs, s\.servedOutputs\.pipelines, s\.servedOutputs\.recordings\)/, "from the backend's records");
   const ctxHandler = src.slice(src.indexOf("onContext: (p, e) => {"), src.indexOf("onContext: (p, e) => {") + 1200);
   assert.match(ctxHandler, /pinLayer\.pick\(/, "right-click / long-press hits a detection's box through the polygon pick");

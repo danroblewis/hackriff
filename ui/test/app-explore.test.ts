@@ -14,7 +14,7 @@ import {
 } from "../src/app/explore/focus";
 import {
   clearUserBand, CLUSTER_CHIP_TITLE, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText,
-  explanationChip, explanationReasonText, explanationState, liveEdgeS,
+  explanationChip, explanationReasonText, explanationState, IDENTITY_CHIP_TITLE, identityChip, liveEdgeS,
   loadInventoryRows, nextInventorySort, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
   type Classification, type Row, FALLBACK_ROWS,
@@ -147,6 +147,36 @@ test("clusterChip: names the group and says the rows measure alike — never 'du
   );
   // The count and the label come from the server; the client computes neither.
   assert.equal(clusterChip(makeRow({ cluster_id: null, cluster_group: null })), null);
+});
+
+// T-967: the explorer's field report — a CRC-valid RDS PI/PS decode read "unknown"/"100% unk" in
+// the Confirmed list because nothing rendered `identity_label`/`identity_label_share`, even though
+// the row already carried them. RED without the fix: `identityChip` did not exist.
+test("identityChip: the voted label beside its code, the label's frame share worded as such and only under 100%, else the bare code", () => {
+  // No decoded identity at all: no chip.
+  assert.equal(identityChip(makeRow({ identity_scheme: null })), null);
+  // A label with a settled (100%) vote share: no redundant percentage.
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 1 })),
+    { cls: "identity", text: "KROQ · A1B2", title: IDENTITY_CHIP_TITLE },
+  );
+  // A split vote: the label's share of the session's frames, worded as a share of frames so it
+  // never reads as confidence in the code (T-967 N2).
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92 })),
+    { cls: "identity", text: "KROQ · A1B2 · 92% of frames", title: IDENTITY_CHIP_TITLE },
+  );
+  // No label decoded yet: the bare code, so a decoded-but-unlabelled identity (an ICAO address,
+  // an MMSI) still shows something rather than nothing.
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "adsb-icao", identity_value: "a1b2c3", identity_label: null, identity_label_share: null })),
+    { cls: "identity", text: "a1b2c3", title: IDENTITY_CHIP_TITLE },
+  );
+  // A gated row: "withheld", never the identity — matching the focus panel's identity box.
+  assert.deepEqual(
+    identityChip(makeRow({ identity_scheme: "rds-pi", identity_value: undefined, identity_label: null, identity_label_share: null, withheld: true })),
+    { cls: "identity", text: "withheld", title: IDENTITY_CHIP_TITLE },
+  );
 });
 
 test("rowSeenText: confirmed shows on-air duty and count (GAP 2 interim); candidates show a rate", () => {
@@ -930,10 +960,17 @@ test("T-386/T-389: the sidebar list and the surface's marks come from ONE collec
   // T-522 moved the composition into `paneMarkBoxes` (so the found-signal toggle has one place to
   // gate), but the rows and selections still flow straight from the store, through it, to
   // `signalMarkBoxes`/`selectionMarkBoxes` — no second filter appeared.
-  assert.match(src, /paneMarkBoxes\(Object\.values\(s\.inventory\.rows\).*s\.selections\.list/,
-    "the marks are composed from the store's rows and selections, straight through");
-  assert.match(src, /signalMarkBoxes\(rows, focusId\)/, "…into the same signalMarkBoxes…");
-  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox\)/, "…and the same selectionMarkBoxes");
+  // T-1002 named WHICH rows without adding a filter: `paneRows(s.inventory, pane.id)` is the
+  // pane's own answer from the store (`inventory.panes[id]`, written by that pane's own query), and
+  // it still flows straight through the one composition. The invariant is unchanged and stricter —
+  // the boxes and the list are one collection *per pane* — so a second, client-side window filter
+  // over the rows would still be the regression this test exists to catch.
+  assert.match(src, /paneMarkBoxes\(Object\.values\(paneRows\(s\.inventory, pane\.id\)\).*s\.selections\.list/,
+    "the marks are composed from this pane's rows and the store's selections, straight through");
+  // T-1004 added the linked-focus flag (a pane that does not own the selection draws its ghost); the
+  // rows and the focus still go straight through to the one `signalMarkBoxes`.
+  assert.match(src, /signalMarkBoxes\(rows, focusId, undefined, undefined, linkedFocus\)/, "…into the same signalMarkBoxes…");
+  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox, linkedFocus\)/, "…and the same selectionMarkBoxes");
   assert.match(src, /markQuads\(boxesFor\(pane\), edge, pane\.box, pane\.rect\)/,
     "placed in the pane's own box and rect — the renderer's mapping, not a second one");
   // And the sidebar's window is the pane's window: `mirror()` is the ONE writer of `live.view`
@@ -970,7 +1007,12 @@ test("T-386 CLOCK GUARD: no clock of the browser's own reaches the Explore sideb
   const inv = bare("src/app/explore/inventory.ts");
   for (const word of clocks.slice(1)) assert.ok(!inv.includes(word), `inventory.ts must not contain "${word}"`);
   assert.equal(inv.match(/Date\.now/g)?.length, 1, "the one page-lifecycle stamp, and no second clock");
-  assert.match(inv, /setInventoryRows\(rows, Date\.now\(\) \/ 1000\)/, "and it is that one");
+  // T-1002: read once per load and handed to each pane's write-back, so N panes are still one
+  // stamp — and still not a capture time. The pane windows themselves come from `liveEdgeS`/the
+  // pane's own frozen instant, which is what the rest of this guard protects.
+  assert.match(inv, /const loadedAtS = Date\.now\(\) \/ 1000;/, "and it is that one");
+  assert.match(inv, /setInventoryRows\(rows, loadedAtS\)/, "…passed to the row writer, never re-read");
+  assert.match(inv, /setPaneInventory\(spec\.id, \{ rows, window \}, loadedAtS\)/, "…and to each pane's");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----
@@ -1182,6 +1224,30 @@ test("loadInventoryRows: THE REQUEST — both Candidate and Confirmed queries ca
   await loadInventoryRows(ctx, () => {});
   assert.equal(paramsFor("candidate").get("relations"), "all");
   assert.equal(paramsFor("confirmed").get("relations"), "all");
+});
+
+test("loadInventoryRows: THE REQUEST — the decoded identity rides the one list response, never a per-row /decode fetch (T-967)", async () => {
+  const withPi = makeRow({
+    id: "station", state: "confirmed",
+    identity_scheme: "rds-pi", identity_value: "A1B2", identity_label: "KROQ", identity_label_share: 0.92,
+  });
+  const { ctx, paths, atLiveEdge } = windowCtx({ confirmed: [withPi], candidate: [] });
+  atLiveEdge(CAPTURE_EDGE_S);
+  await loadInventoryRows(ctx, () => {});
+  // The row the store now holds carries the identity fields straight through, unchanged — the
+  // client reads them off the one response it already made, and adds nothing of its own.
+  const stored = ctx.store.get().inventory.rows.station;
+  assert.equal(stored.identity_label, "KROQ");
+  assert.equal(stored.identity_label_share, 0.92);
+  // Never a decode lookup per row: the whole point of serving the summary on the list response is
+  // that a page of rows costs one request, not one plus N.
+  assert.ok(
+    !paths.some((p) => p.includes("/decode")),
+    `loading the list must not also fetch per-row decodes: ${JSON.stringify(paths)}`,
+  );
+  // And the rendered row: the same fixture through identityChip, the function the sidebar's row
+  // renderer calls — this is "the rendered row" for a row with no DOM under node:test.
+  assert.deepEqual(identityChip(stored), { cls: "identity", text: "KROQ · A1B2 · 92% of frames", title: IDENTITY_CHIP_TITLE });
 });
 
 test("renderedInventory: an artifact-of row IS listed and boxed (T-587) — suppressed-by/duplicate-of stay hidden (T-219, unchanged)", () => {

@@ -408,6 +408,9 @@ proposal that fails any line is wrong, not a trade-off.
   the guard is a `ui/test` assertion of the *request the client builds* (the T-367 lesson).
 - [ ] **The view opens on the observed extent from the coverage map** (`surface/bootstrap.ts`), never
   on the whole 1 MHz–6 GHz midpoint and never derived from `frequency.current` (`docs/16 §8`, T-376).
+- [ ] **A visible tile is never abandoned** (§10.9, T-1057). Every pending visible address is re-requested
+  with jittered backoff until it is served or the route states it does not exist; the coverage survey may
+  turn a place grey and may never leave it pending; a retune refreshes the survey before it may veto.
 
 ---
 
@@ -456,8 +459,8 @@ Everything else sits in exactly one band:
 | Band | z | Space | Members | Laid out |
 |---|---|---|---|---|
 | **0** | `0` | **content** | the one `<canvas>`: tiles, traces, coverage plane, every overlay stroke, HUD ticks | **every render frame** |
-| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz); the active pane's outline (§10.7), placed from the same frame's pane rectangles | **every render frame, in the same pass as band 0** |
-| **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, follow-live FAB, pane-status readout, HUD axis *labels* | on interaction |
+| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz); the active pane's outline (§10.7); **each pane's own Live/Freeze button** (T-1001), all placed from the same frame's pane rectangles | **every render frame, in the same pass as band 0** |
+| **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, pane-status readout, HUD axis *labels* | on interaction |
 | **3** | `30` | screen | the bottom sheet; the Research slide-in | on interaction |
 | **4** | `40` | screen | transients: MapTip, retune offer, mode banner, error toasts | on interaction |
 
@@ -473,7 +476,8 @@ Two rules make the table load-bearing rather than decorative:
 ### 10.2 Chrome docking, fade, and what fade may never hide
 
 Chrome docks to viewport edges as floating translucent panels: Go-to top-left; layers / tools /
-Research top-right; zoom right; follow-live FAB bottom-right above the sheet; pane status bottom-left.
+Research top-right; zoom right; pane status bottom-left. (T-1001: follow-live is no longer chrome at
+all — each pane carries its own Live/Freeze button inside its rectangle, in band 1.)
 Chrome **fades to ~35 % opacity after ~6 s idle** and returns on any pointer, key or focus event.
 **No overlay is draggable or repositionable; users choose visibility only** (§10.6 rule 3): each
 dock above is the one position this section gives it, no dock position is read from or written to
@@ -553,8 +557,8 @@ vocabulary exactly as before, and that is the control the mode's own tests are w
 
 ### 10.5 Responsive, touch and accessibility floors
 
-- Usable to **400 px** wide with **no horizontal page scroll**; one-handed reach for the sheet, the
-  FAB and the tool buttons.
+- Usable to **400 px** wide with **no horizontal page scroll**; one-handed reach for the sheet, each
+  pane's Live button and the tool buttons.
 - **Touch:** pinch = zoom (view), two-finger drag = pan (view), long-press = MapTip, region select =
   the retune *offer*. Touch never crosses the view/device line by accident.
 - **Hit targets >= 24 px**; pin glyphs >= 11 px with a >= 24 px hit area.
@@ -652,9 +656,10 @@ partly planned; the tickets that close the gaps are named per principle.*
    red on injected violations (a row-click jump, a row-click retune, a keyboard twin, a body listener,
    a jump behind a helper, and a jump swapped into each real Explore row) and green when the same call
    moves onto a per-row button.
-5. **The existing small controls are right; keep them.** The +/- zoom cluster, the follow-live
-   reticle FAB, the map-type/layers button and the Go-to frequency box (T-802) are the model for
-   rule 4, and are not to be replaced or enlarged.
+5. **The existing small controls are right; keep them.** The +/- zoom cluster, the map-type/layers
+   button and the Go-to frequency box (T-802) are the model for rule 4, and are not to be replaced
+   or enlarged. (T-1001 moved the follow-live reticle FAB into each pane as a small labelled
+   Live/Freeze button — same rule, one per pane instead of one for the hidden active pane.)
 6. **The map is GIS, not Google Maps: features are drawn at their true extent; markers are a
    generalization, never the representation** (user, 2026-09-24 19:35, after T-809's pins on
    staging: "a point doesn't represent something meaningful on a waterfall graph. A signal has a
@@ -706,7 +711,7 @@ or the one chosen by key — and it is **visible**:
 | **Go-to** (and its retune offer) | the active pane | a "pane N" tag in the box; the input's accessible name |
 | **Zoom** +/- | the active pane | a number badge on the stack; the buttons' titles |
 | **Layers** (base style, coverage, overlays) | the active pane | a number badge on the button; the menu head and every section heading |
-| **Follow-live FAB** (until each pane has its own Live, T-c) | the active pane | a number badge; its title and accessible name |
+| **Live / Freeze** (T-1001) | **its own pane** — never the active one | it is *inside* that pane's rectangle, and says "Live · pane N" while there are two or more |
 | **Viewport menu**: Close, Whole surface | the active pane | the menu head, "Viewport · pane N of M" |
 | **Tools** (Measure, Annotate, Pin) | the pane the stroke is made on — which the press makes active | the outline moves to it at the press |
 | **Colour scale** | **every pane** (docs/16 §8.5a: one scale, stated) | the layers menu's "every pane" section |
@@ -722,12 +727,86 @@ while the chrome goes on acting on another pane is the defect this section close
 |---|---|
 | `]` / `[` | the next / previous pane becomes active (layout order, wrapping) |
 | `1`-`9` | pane N becomes active |
-| `L` | toggles Live on the **active** pane — the FAB's own press: freeze a following pane, re-pin a frozen one |
+| `L` | toggles Live on the **active** pane — by pressing that pane's own Live button (T-1001), so the key and the button cannot differ |
 
 **Nothing here reaches a device route** (§10.4): which pane is active is view state, and `L` is a
 coordinate change on one pane. Guarded by `ui/test/app-active-pane.test.ts` (naming, the notifying
 accessor, right-click, the keys, the wiring) and `ui/e2e/app-active-pane.e2e.mjs` (click, right-click
 and keys each move the outline and the named chrome in the same event, at 1280 and 400 px).
+
+### 10.8 The inventory is per pane (normative, T-1002, 2026-09-25)
+
+*Same review, the half §10.7 could not reach: the chrome now says which pane it acts on, but the
+DATA every pane drew still came from one window.*
+
+**Principle: the inventory is time-scoped to the view, and a pane IS a view** (CLAUDE.md's signal
+model, ADR-0017 §2.1). Each pane has its own `(time × frequency)` window, so:
+
+- **Each pane's detections are queried for its own window.** One `GET /api/inventory?state=candidate`
+  with that pane's `t0`/`t1` and `f_lo`/`f_hi`, and one `state=confirmed` with that pane's own `at`
+  (the instant it shows: its frozen time, or the capture clock's live edge while it follows). A pane
+  frozen on a past signal and a pane at the live edge are two windows and two answers.
+- **A pane draws its own rows and no others** — the mark boxes, the `detections` overlay, the
+  artefact links and the pins over them. A pane that has not been answered yet draws **nothing**
+  rather than borrowing another pane's: a box is a claim about *this* pane's window.
+- **The lists follow the active pane and name it.** The Candidate/Confirmed lists (and the focus
+  panel and the menus, which read the same rows) are the ACTIVE pane's — so pressing pane 1 re-scopes
+  them in the same dispatch as the outline — and the heading and each tab's accessible name carry the
+  same words the outline does ("Candidates · pane 1 of 2"), nothing extra with one pane open (§10.6
+  rule 1).
+- **Touching one pane moves nothing in another.** Scrubbing, freezing or re-activating pane 1 changes
+  pane 1's query and the lists' scope; pane 2 goes on asking about the live edge and its boxes do not
+  move. The queries are re-asked when **any** pane's window moves, a pane opens or closes, or the
+  active pane changes — not on the time cursor alone, which is only the active pane's.
+
+Still no device route, and no new route at all: the same `/api/inventory` read, asked once per pane.
+Guarded by `ui/test/app-pane-inventory.test.ts` (the requests the client builds, per pane) and
+`ui/e2e/app-pane-inventory.e2e.mjs` (two windows asked about from one page, pane 2 advancing while
+pane 1 sits in the past, the lists named, at 1280 and 400 px).
+
+---
+
+### 10.9 A visible tile is never abandoned (normative, T-1057, 2026-09-25)
+
+*The user, via the supervisor: "Sometimes there are black bars in the waterfall, representing tiles that
+haven't been loaded yet; sometimes those never load. If a tile fails to load at all it should be
+re-requested. It seems like they are getting abandoned. Left alone long enough, all tiles on the screen
+should load. I don't think we should ever see the black tiles."*
+
+**The invariant.** Every pending **visible** address is re-requested, with jittered backoff, **until it
+is served or the route states the place does not exist**. Nothing else ends the asking. Three corollaries,
+each of which was a live defect:
+
+1. **Only "there is no such node" is permanent.** `hk-api` says that with a **404** (`tiles.rs`: *"scheme
+   … has no node at (level_f …, level_t …)"*). Every other refusal — a `400`, a `500`, a `501`, an
+   unreadable body, a batch answer that named no entry for the address — is about **this place at this
+   moment**, and goes on a **per-address** jittered ladder (`ui/src/surface/retry.ts`: 500 ms doubling to
+   30 s, the same ladder shape as `controls/backoff.ts`, additive jitter so a herd cannot re-arrive on one
+   tick). T-479's rule that every status the route could emit is terminal was too wide by exactly one
+   notch: the route uses `400` both for an address that can never exist *and* for a tile whose level
+   cannot be folded **yet**, so one frame of the second meaning cost that place for the rest of the session.
+2. **The coverage survey may turn a place GREY; it may never leave it PENDING.** T-580/T-905's
+   short-circuit (never-swept spectrum costs no round trip) is granted only where the survey will
+   actually draw grey for the place. A survey that settles a place while having no evidence *inside* it
+   draws nothing and also stops every lane requesting it — neither grey nor a tile, which is the black bar
+   arrived at from the coverage side.
+3. **A retune refreshes the survey before it may veto a request.** A survey taken before the radio moved
+   cannot speak for any instant after it, so a place that **reaches past** the retune is owed a request
+   until a survey whose evidence reaches past it lands — and the retune asks for that survey at once,
+   because a surface with nothing following the live edge never asks for another one on its own
+   (`preview.ts`'s cadence is `POSITIVE_INFINITY` there). Places that end **before** the retune keep the
+   veto and the saving: the radio cannot retroactively have sampled a band it was not tuned to.
+
+**Never at frame rate, either.** The flood T-479 fixed (157 requests in 700 ms for one place) is
+prevented by the **wait**, not by permanence: a place is asked at most once per interval, and only while
+something draws it — the ladder issues nothing, so a place nobody is looking at is never re-asked. The
+cost of a permanently-refused visible place is therefore two requests a minute; the cost of the other
+mistake is a bar of the waterfall that stays black until the page is reloaded. Those are not symmetric.
+
+Guarded by `ui/test/surface-tile-never-abandoned.test.ts` (30 % of answers dropped/refused/unreadable at
+random on a seeded schedule, every visible address served in the end, no PENDING or REFUSED quad left in
+the final frame's draw list; the pacing bound; the ladder's arithmetic; the survey and retune rules; the
+batch layer's own entries) and `ui/test/surface-cache.test.ts` (the status enumeration, place by place).
 
 ---
 
@@ -743,13 +822,13 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Full-bleed shell, z-bands | MAP-01 | `map.chrome` | - | - |
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
-| Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
-| Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
+| Per-pane Live/Freeze (T-1001), zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
+| Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (**one pair of queries per pane**, each carrying that pane's own window — T-1002, §10.8; the lists show the ACTIVE pane's and name it), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
 | Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/observations` (the past-surveys pages), `/api/history` (served; no client reads it since T-445 retired the spectrum-grid pane) | - |
 | Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
 | Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
-| Detections layer | MAP-08 | `explore` (existing rows) | `GET /api/events` | - |
+| Detections layer | MAP-08 | `explore` (existing rows, **per pane** - T-1002 §10.8) | `GET /api/events` | - |
 | Pins + clusters | MAP-09/10 | `map.pins` (ephemeral) | `GET /api/events`, `GET /api/tiles/events` | - |
 | Artifacts layer | MAP-11 | `explore` (existing rows) | `GET /api/inventory` (`relation`) | - |
 | Band-plan priors layer | MAP-12 | `priors` | **`GET /api/priors`** *(reserved - MAP-12)* | - |
@@ -757,12 +836,18 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST /api/measurements`, `PUT`/`DELETE /api/measurements/{id}`** - cursors only, never a `value` |
 | Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST /api/annotations`, `PUT`/`DELETE /api/annotations/{id}`** |
 | Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST /api/views`, `PUT`/`DELETE /api/views/{id}`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
+| Scan plan overlay (small Scan button in the Go-to cluster; plan panel; the `scan` layer) | T-1008 | `map.scan` (the controller's plan/draft; progress from the shell's existing control-state poll, `device.scan`) | `GET /api/control/scan?windows=1` (the price of the plan as drawn **and the steps the engine will take** — the client draws them, never tiles a range itself) | `POST /api/control/scan` **only on the panel's explicit Start/Resume press** (commissions retunes, T-452), `POST /api/control/scan/stop` (surrenders the radio; never refused) |
+| Measurement box menu (right-click / long-press a Measure box) | T-1009 | `map.scan` (the plan it opens) + `research` (the marker it writes) | `GET /api/collections` (which collection a marker is filed in), `GET /api/control/scan?windows=1&device_id=…` (the plan it opens, priced on the chosen radio) | `POST /api/iqbuffer/clip` (the box's time window, band-filtered, off the chosen radio's ring — a read of the ring, not a device route), `POST /api/collections` + `POST /api/collections/{id}/markers` (Save as marker). **Scan** only *opens* the plan overlay above — Start stays that panel's own explicit press |
 | Export menu | MAP-23 | `research` | **`GET /api/research/export`** (T-823: one read-only GET, optionally narrowed to a collection - the bundle is the server's) | - (the client only names and saves the file; a share link is a later addition) |
 
 **Three rules this table encodes.**
 
-1. **Only two rows in the whole table reach a device route**, and both need an explicit press on a
-   **small** control: Go-to, and the Selected tab's compact action cluster (§10.6 rule 4). A per-row
+1. **Only three rows in the whole table reach a device route**, and each needs an explicit press on a
+   **small** control: Go-to, the Selected tab's compact action cluster (§10.6 rule 4), and the scan
+   plan's Start (T-1008 — a *commission* of retunes, T-452, taken on its own press; opening, dragging
+   and pricing the plan are reads). The measurement-box menu (T-1009) is **not** a fourth: choosing
+   "Scan this region with <device>" opens that same plan overlay, bounded by the box and bound to the
+   radio the user named, and the commissioning press is still the panel's own Start. A per-row
    **Go** button in the Explore drawer or Research may *raise* the gated retune offer, which is itself
    the band-4 transient that needs its own press. Everything else is a view change or a durable-state write.
 2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client

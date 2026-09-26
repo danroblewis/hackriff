@@ -148,6 +148,12 @@ impl FakeRun {
         Arc::new(Self(Mutex::new(RunState {
             live: true,
             content_class: class,
+            content_classes: vec![hk_api::ClassBand {
+                lo_hz: 99.6e6,
+                hi_hz: 102.0e6,
+                content_class: class,
+                source: "test".to_owned(),
+            }],
             center_hz: 100.8e6,
             sample_rate_hz: 2.4e6,
             segment: 0,
@@ -1237,6 +1243,13 @@ fn replayed_recordings_refuse_device_settings_and_accept_display_settings() {
     assert_eq!(state.body["live"], json!(false));
     assert!(state.body["device"].is_null());
     assert_eq!(state.body["run"]["display"]["fft_size"], json!(2048));
+    // T-991: the window's content classes per sub-band.
+    let bands = &state.body["run"]["content_classes"];
+    assert_eq!(bands[0]["lo_hz"], json!(99.6e6), "{bands}");
+    assert_eq!(bands[0]["hi_hz"], json!(102.0e6), "{bands}");
+    assert!(bands[0]["content_class"].is_string(), "{bands}");
+    assert!(bands[0]["content_permitted"].is_boolean(), "{bands}");
+    assert_eq!(bands[0]["source"], json!("test"), "{bands}");
     // Display limits (T-067) are reported even without a live device.
     let limits = &state.body["display_limits"];
     assert!(limits["fft_size_min"].as_u64().unwrap() > 0);

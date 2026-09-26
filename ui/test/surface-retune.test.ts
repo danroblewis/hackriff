@@ -38,7 +38,8 @@ import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { readoutOf } from "../src/surface/chrome";
 import { PaneModel, type PaneState, type PaneStatus } from "../src/surface/panes";
 import {
-  acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneAction,
+  acceptGoLive, acceptPaneRetune, acceptPaneWidth, coveringWindow, goLiveOfferLabel, goToSpanHz, isGoLiveOffer,
+  offerAcceptable, offerLabel, paneRetuneAction,
   paneRetuneOffer, paneWidthAction, paneWidthOffer, widthOfferAcceptable, widthOfferLabel,
   type PaneRetuneOffer, type PaneRetuneSite, type PaneWidthOffer, type PaneWidthSite,
 } from "../src/surface/retune";
@@ -810,4 +811,109 @@ test("T-947 THE FIX: the go-to offer's request names the current/default span, n
   const oDefault = paneWidthOffer(pane, goToSpanHz(noCurrent, 2e6), noCurrent, T0);
   assert.ok(oDefault.plan.ok && Math.abs(oDefault.plan.spanHz - 2e6) < 1e3,
     `expected ~2 MHz default, got ${oDefault.plan.ok && oDefault.plan.spanHz}`);
+});
+
+// ---------------------------------------------------------------------------
+// 5. T-1004 (MMAP split view): a frozen pane's offer, taken as "go live at this frequency"
+// ---------------------------------------------------------------------------
+//
+// The refusal above is right about a retune and wrong as an ending: the user typed a frequency into
+// a frozen viewport, and what they meant is reachable — come back to the live edge, and tune there.
+// So the SAME offer is re-read as a go-live. The claims:
+//
+//  1. Nothing about the refusal is loosened: `widthOfferAcceptable` and `paneWidthAction` still say
+//     no to a frozen pane, so no existing path can retune one.
+//  2. The label says BOTH halves and names the capture it will ask for.
+//  3. Taking it unfreezes FIRST and only then reaches the one gate — a pane left frozen never
+//     commands the radio.
+//  4. A pane that moved between paint and press refuses AND IS LEFT FROZEN (T-407, extended: a
+//     half-taken go-live would have thrown away the past window the user was looking at).
+//  5. An unachievable plan is not a go-live: going live would not make it reachable.
+
+const frozen = (m: PaneModel, id: string) => { m.panTime(id, -60 * S); return paneWidthOffer(m.get(id)!, 2e6, GRID, T0); };
+
+test("T-1004: a frozen pane's offer is a GO-LIVE, and the plain retune paths still refuse it", () => {
+  const m = model();
+  const p = m.list()[0].id;
+  const o = frozen(m, p);
+  assert.equal(o.block, "past");
+  assert.equal(isGoLiveOffer(o), true);
+  // Unchanged: a frozen pane is not retunable by any path that existed before this ticket.
+  assert.equal(widthOfferAcceptable(o), false);
+  assert.equal(paneWidthAction(o), null);
+  // The label states the act and the capture, and names the same numbers the plan carries.
+  const label = goLiveOfferLabel(o);
+  assert.match(label, /This viewport is frozen/);
+  assert.match(label, /Go live at 100\.8\d* MHz/);
+  assert.match(label, /captures 2\.000 MHz there/);
+  // A pane FOLLOWING the live edge is not a go-live: its ordinary offer is already takeable.
+  const fresh = model();
+  const liveId = fresh.list()[0].id;
+  const live = paneWidthOffer(fresh.get(liveId)!, 2e6, GRID, T0);
+  assert.equal(live.block, null);
+  assert.equal(live.following, true);
+  assert.equal(isGoLiveOffer(live), false);
+  assert.equal(goLiveOfferLabel(live), widthOfferLabel(live), "a live pane's offer is worded as it always was");
+
+  // THE CASE THE TIME EXTENT MISSES (found at 400 px, 2026-09-25): a pane frozen a moment ago still
+  // ENDS at the live edge, so `block` is null — and every row captured from here on still lands
+  // where it is not looking. It is a go-live, decided by `following`, not by the time extent.
+  fresh.pause(liveId, T0);
+  const justFrozen = paneWidthOffer(fresh.get(liveId)!, 2e6, GRID, T0);
+  assert.equal(justFrozen.block, null, "the fixture no longer exercises the frozen-AT-the-edge case");
+  assert.equal(justFrozen.following, false);
+  assert.equal(isGoLiveOffer(justFrozen), true, "a pane frozen at the edge was offered a plain retune");
+});
+
+test("T-1004: an unachievable plan is never a go-live — going live would not make it reachable", () => {
+  const m = model();
+  const p = m.list()[0].id;
+  m.panTime(p, -60 * S);
+  const wide = paneWidthOffer(m.get(p)!, 25e6, GRID, T0); // > max_live_span_hz
+  assert.equal(wide.block, "past");
+  assert.equal(isGoLiveOffer(wide), false);
+  assert.match(goLiveOfferLabel(wide), /survey overview/, "the front end's refusal is still the sentence");
+  const noGrid = paneWidthOffer(m.get(p)!, 2e6, null, T0);
+  assert.equal(isGoLiveOffer(noGrid), false);
+});
+
+test("T-1004: taking a go-live UNFREEZES first and only then reaches the one gate, once", async () => {
+  const m = model();
+  const p = m.list()[0].id;
+  const o = frozen(m, p);
+  const site = widthSiteOver(m);
+  const { ctx, calls } = deviceSpyCtx();
+  // What the pane's follow state was at the instant the device was called: the order is the claim.
+  const followedAtCall: boolean[] = [];
+  const post = ctx.client.post.bind(ctx.client) as (path: string, body: unknown) => Promise<unknown>;
+  (ctx.client as { post: unknown }).post = (path: string, body: unknown) => {
+    followedAtCall.push(m.isFollowing(p));
+    return post(path, body);
+  };
+  const out = await acceptGoLive(ctx, site, o, (id) => m.follow(id));
+  assert.equal(out.ok, true, `the go-live was refused: ${JSON.stringify(out)}`);
+  assert.equal(m.isFollowing(p), true, "the pane did not return to the live edge");
+  // One capture command through the gate (`applyDeviceAction` posts the covering window when the
+  // width in force is wrong, else the centre) — never two, and never one per half of the act.
+  assert.equal(calls.length, 1, `expected exactly one device command: ${JSON.stringify(calls)}`);
+  assert.match(calls[0].path, /\/api\/control\/(window|center)$/);
+  assert.ok(followedAtCall.length > 0 && followedAtCall.every(Boolean),
+    "the radio was commanded while the pane was still frozen — unfreeze must come first");
+  assert.equal(site.invalidations, 1, "the growing edge was not invalidated after the retune");
+});
+
+test("T-1004: a pane that moved between paint and press refuses AND is left frozen", async () => {
+  const m = model();
+  const p = m.list()[0].id;
+  const o = frozen(m, p);
+  const site = widthSiteOver(m);
+  const { ctx, calls } = deviceSpyCtx();
+  m.panFreq(p, 40e6); // the view moved after the label was painted
+  const out = await acceptGoLive(ctx, site, o, (id) => m.follow(id));
+  assert.deepEqual(out, { ok: false, reason: "moved" });
+  assert.equal(m.isFollowing(p), false, "a refused go-live threw away the user's frozen window");
+  assert.deepEqual(calls, [], "a refused go-live reached the radio");
+  // And a pane that is not frozen at all is not this path's to take.
+  assert.deepEqual(await acceptGoLive(ctx, site, { ...o, following: true }, (id) => m.follow(id)),
+    { ok: false, reason: "not_acceptable" });
 });

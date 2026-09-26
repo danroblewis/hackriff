@@ -86,3 +86,7 @@ mod t849_voice_frames;
 
 #[path = "acceptance/t330_algid.rs"]
 mod t330_algid;
+
+/// T-977: the hunt's verdict on a channel it looked at and did NOT confirm reaches the emitter row.
+#[path = "acceptance/t977_cc_verdict.rs"]
+mod t977_cc_verdict;
