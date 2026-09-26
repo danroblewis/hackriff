@@ -29181,7 +29181,7 @@ tasks:
   - id: T-991
     milestone: M2-hardening
     title: Content class computed for the whole window from one sub-band (152-162 MHz reads restricted-paging)
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: CONTENT-CLASS
@@ -29204,6 +29204,7 @@ tasks:
       Observed, not chased: Recordings with no sample rate (fs=inf) now summarise to metadata-only rather than restricted-paging (both refuse content); no test asserted the old label. | Part 90 land-mobile 157.45-160.6 MHz stays fail-closed metadata-only; no prior was added for it.
       Resources: 222 CPU-s, peak 3.3 GB
     branch: task-t991
+    commit: fddb0b7b
   - id: T-992
     milestone: MAUTO
     title: "T-926 live-air verification: unprompted FM/RDS ratio >= 90 % over 88-108 MHz after the fix (needs ~15 min of radio in a scheduled window)"
