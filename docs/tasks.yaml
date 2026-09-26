@@ -29164,7 +29164,7 @@ tasks:
   - id: T-985
     milestone: MAUTO
     title: Explorer window-3 captures into fixtures/ (NBFM+CTCSS 461.125, DMR BS 464.6125) with hidden truth, CTCSS + DMR sync oracles, 4 new use cases
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
@@ -29184,6 +29184,7 @@ tasks:
     dispatch: manual
     model_reason: "sonnet/high: two oracles (CTCSS, DMR sync) plus fixtures and four use cases"
     branch: task-t985
+    commit: 6839a5fb
   - id: T-986
     milestone: MAUTO
     title: "All captured signals decode: CTCSS tone decode (461.125, 233.6 Hz) and DMR identification/header (464.6125) members - failing-first blind tests"
