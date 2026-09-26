@@ -4,7 +4,7 @@
   "id": "aprs",
   "version": 1,
   "name": "APRS: AX.25 UI frames over Bell 202 AFSK 1200",
-  "description": "T-952: no AFSK1200/AX.25 path existed (docs/06 gap, explorer 2026-09-25). NBFM discriminator -> Bell 202 tone-pair subcarrier (1700 Hz centre, mark 1200 Hz / space 2200 Hz) -> FSK discriminator (deviation 500 Hz) -> 1200 Bd clock recovery -> NRZI decode (transition-is-0) -> zero-bit destuffing over the WHOLE continuous line (bitstuff, T-613, bits mode: flags pass through unstuffed, so this must run before framing -- destuffing an already sync_search-cut frame would misalign every octet after the first stuffed bit) -> flag-delimited HDLC framing (0x7E, terminator the next flag, bit_order lsb: every AX.25 octet incl. the flag is sent LSB first, and by this point the line is destuffed so its octets are aligned) -> CRC-16/X-25 FCS check -> address/control/PID/info fields. sync_search's terminator match keeps the closing flag IN the frame (as ACARS's ETX/ETB does), so crc's span.end_trim_bits=8 locates the FCS eight bits before the frame end, and strip removes only the FCS -- the closing flag (0x7E) stays attached as info's last byte, exactly as ACARS keeps its ETX/ETB, and a consumer trims it (the field map notes it). The flag is only 8 bits (an HDLC design constraint, unlike ACARS's 40-bit sync word), so it chance-matches noise and idle flag runs often; crc's drop_invalid keeps only FCS-valid frames reaching fields/messages. Address octets are ASCII shifted left one bit (each callsign character read as the field's first 7 of 8 bits, the wasted low bit dropped by the length itself); destination/source are kept as raw 56-bit values (hk-recipe's `ascii` field type has no stride/skip option for AX.25's shifted encoding, so callsign text is decoded by the consumer, not this recipe -- see the field map's description). Two addresses only (destination + source, no digipeater path) for a directly-heard beacon.",
+  "description": "T-952: no AFSK1200/AX.25 path existed (docs/06 gap, explorer 2026-09-25). NBFM discriminator -> Bell 202 tone-pair subcarrier (1700 Hz centre, mark 1200 Hz / space 2200 Hz) -> FSK discriminator (deviation 500 Hz) -> 1200 Bd clock recovery -> NRZI decode (transition-is-0) -> flag-delimited HDLC framing on the STILL-STUFFED line, as the AIS recipe does (T-963/T-1054: stuffing guarantees six ones in a row only in a flag there, while destuffed data can hold 01111110; the flag is searched at every bit, since a noise-opened frame on a destuffed line only saw flags on its own 8-bit lattice and swallowed real packets; terminator the next flag, which also opens the following frame -- terminator.reopen: HDLC shares one flag between frames, so a noise-born flag or an even-length run of TXDELAY flags can never spend the real opening flag closing a junk frame) -> zero-bit destuffing per frame (bitstuff, T-613, frames mode) with bit_order lsb reassembling the octets (every AX.25 octet is sent LSB first) -> CRC-16/X-25 FCS check -> address/control/PID/info fields. sync_search's terminator match keeps the closing flag IN the frame (as ACARS's ETX/ETB does), so crc's span.end_trim_bits=8 locates the FCS eight bits before the frame end, and strip removes only the FCS -- the closing flag (0x7E) stays attached as info's last byte, exactly as ACARS keeps its ETX/ETB, and a consumer trims it (the field map notes it). The flag is only 8 bits (an HDLC design constraint, unlike ACARS's 40-bit sync word), so it chance-matches noise and idle flag runs often; crc's drop_invalid keeps only FCS-valid frames reaching fields/messages. Address octets are ASCII shifted left one bit (each callsign character read as the field's first 7 of 8 bits, the wasted low bit dropped by the length itself); destination/source are kept as raw 56-bit values (hk-recipe's `ascii` field type has no stride/skip option for AX.25's shifted encoding, so callsign text is decoded by the consumer, not this recipe -- see the field map's description). Two addresses only (destination + source, no digipeater path) for a directly-heard beacon.",
   "match": {
     "families": ["nbfm"],
     "freq_hz": [[144000000, 148000000]],
@@ -45,15 +45,9 @@
       "params": { "mode": "transition-is-0", "direction": "decode" }
     },
     {
-      "id": "destuff",
-      "block": "bitstuff",
-      "label": "HDLC zero-bit destuff (whole line, bits mode: flags pass through unstuffed)",
-      "params": { "direction": "destuff" }
-    },
-    {
       "id": "sync",
       "block": "sync_search",
-      "label": "Flag (0x7E) .. flag framing",
+      "label": "0x7E … 0x7E on the stuffed line (the flag is unique only before destuffing)",
       "params": {
         "mode": "sync-word",
         "sync_word": "0x7E",
@@ -62,9 +56,14 @@
         "polarity": "normal",
         "frame_bits": 2048,
         "include_sync": false,
-        "bit_order": "lsb",
-        "terminator": { "words": ["0x7E"], "bits": 8, "step_bits": 8, "trailer_bits": 0 }
+        "terminator": { "words": ["0x7E"], "bits": 8, "step_bits": 1, "trailer_bits": 0, "reopen": true }
       }
+    },
+    {
+      "id": "destuff",
+      "block": "bitstuff",
+      "label": "Remove zero-stuffing per frame; octets LSB first",
+      "params": { "direction": "destuff", "stuff_after": 5, "abort_ones": 7, "bit_order": "lsb" }
     },
     {
       "id": "crc",
