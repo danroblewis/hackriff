@@ -28969,7 +28969,7 @@ tasks:
   - id: T-976
     milestone: MAUTO
     title: "All captured signals decode: the P25 member (one region, C4FM 4-level, P25-like identified with evidence; decode marginal) - failing-first blind test"
-    status: in-progress
+    status: done
     priority: P1
     deps:
     - T-936
@@ -28997,6 +28997,7 @@ tasks:
       Use cases: SIGNAL-085
       Resources: 218 CPU-s, peak 1.9 GB
     branch: task-t976
+    commit: e1968042
   - id: T-977
     milestone: M3
     title: "Control-channel chain's verdict never reaches the row: P25 C4FM reads unknown/2fsk/not-searched after 10 cc demods; no route lists cc candidates"
