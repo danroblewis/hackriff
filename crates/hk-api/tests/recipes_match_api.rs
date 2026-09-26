@@ -221,6 +221,7 @@ fn a_measured_pilot_turns_an_unmeasured_expectation_into_agreement() {
                 bandwidth_hz: Some(178_500.0),
                 // Measured on the receiver clock, so never exactly 19 kHz.
                 pilot_hz: Some(19_000.4),
+                subaudible: None,
             },
             lock_quality: Some(0.98),
             evm_db: None,

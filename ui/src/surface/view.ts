@@ -37,7 +37,7 @@ import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type Pan
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
 import { rulerLabel } from "./ticks";
-import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type PaneRuler } from "./hud";
+import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type HudReserve, type PaneRuler } from "./hud";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -121,6 +121,13 @@ export interface SurfaceViewOptions {
   /** The chrome's fade, `0..1`, asked every frame; the ticks' ink is multiplied by it. Default 1. */
   hudAlpha?: (() => number) | null;
   /**
+   * T-997: the floating chrome's top-left column, in CSS px from the canvas's top-left, asked once
+   * per frame BEFORE any DOM write of this frame (so the read costs at most one layout, never a
+   * read-write thrash). A time label that would print into it is dropped — the chrome is docked
+   * down the same left edge the time ruler runs down. `null` reserves nothing.
+   */
+  hudReserve?: (() => HudReserve | null) | null;
+  /**
    * **Band-1 DOM marks** (T-809, `./pins.ts`): called once per frame, after the overlays and the
    * HUD, with the SAME pane views the data pass was handed — so a DOM mark is placed by the very
    * box and rect the tiles were, on the same frame (the one-shared-time-axis rule), never on a
@@ -197,6 +204,7 @@ export class SurfaceView {
   hudAxes: boolean;
   private readonly hud: HudAxes | null;
   private readonly hudAlpha: (() => number) | null;
+  private readonly hudReserve: (() => HudReserve | null) | null;
   private readonly dom: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
 
   constructor(opts: SurfaceViewOptions) {
@@ -207,6 +215,7 @@ export class SurfaceView {
     this.hudAxes = opts.hudAxes ?? !!opts.hud;
     this.hud = opts.hud ? new HudAxes(opts.hud) : null;
     this.hudAlpha = opts.hudAlpha ?? null;
+    this.hudReserve = opts.hudReserve ?? null;
     this.dom = opts.dom ?? null;
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattices ?? opts.lattice, opts.cache, opts.surface ?? {});
@@ -348,15 +357,16 @@ export class SurfaceView {
       const cssW = this.canvas.clientWidth;
       const dpr = cssW > 0 ? w / cssW : 1;
       const alpha = this.hudAlpha ? this.hudAlpha() : 1;
+      const reserve = this.hudReserve ? this.hudReserve() : null;
       const labels: HudLabel[] = [];
       for (const v of paneViews) {
         const s = statusById.get(v.id);
         if (!s) continue;
         const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
         rulers.push(r);
-        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        const q = hudTickQuads(r, { alpha, majorPx: 5 * dpr, minorPx: 3 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
         if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
-        labels.push(...hudLabels(r, hPx, dpr));
+        labels.push(...hudLabels(r, hPx, dpr, reserve));
       }
       this.hud?.update(labels);
     }
