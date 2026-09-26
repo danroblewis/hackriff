@@ -61,7 +61,8 @@ import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gai
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
-  widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
+  widthOfferAcceptable, widthOfferLabel, acceptGoLive, goLiveOfferLabel, isGoLiveOffer, GO_LIVE_LABEL,
+  type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import {
   commitRetuneMode, isRetuneKey, retuneModeLabel, retuneModeTarget, RetuneModeController, type RetuneModeTarget,
@@ -87,7 +88,8 @@ import {
 import {
   frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
 } from "../../surface/frontend";
-import { liveRow } from "./live-edge";
+import { flags } from "../../flags";
+import { liveRing, liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
 import { captureBanner } from "./capture-state";
@@ -175,10 +177,13 @@ export function paneMarkBoxes(
   pendingRegion: MarkRegion | null, showSignals: boolean,
   measurements: readonly MarkMeasurement[] = [], measureId: string | null = null,
   pendingMeasure: MarkRegion | null = null,
+  /** T-1004: this pane does not own the selection, so a focused mark is drawn here as the
+   * selection's linked ghost rather than as the selection itself. */
+  linkedFocus = false,
 ): MarkBox[] {
   return [
-    ...(showSignals ? signalMarkBoxes(rows, focusId) : []),
-    ...selectionMarkBoxes(sels, selId, paneBox),
+    ...(showSignals ? signalMarkBoxes(rows, focusId, undefined, undefined, linkedFocus) : []),
+    ...selectionMarkBoxes(sels, selId, paneBox, linkedFocus),
     ...measurementMarkBoxes(measurements, measureId),
     ...pendingMarkBox(pendingRegion ?? pendingMeasure),
   ];
@@ -309,11 +314,6 @@ function mount(el: HTMLElement, ctx: AppContext) {
     savePaneLayers(layersFor(paneId));
     syncLayerControls();
   };
-  // Record IQ over this viewport's span (GAP-1 interim). Its home is the viewport menu (T-882); a
-  // found signal's own clip is the detail sheet's "Record clip" (T-804).
-  const recordBtn = recordIqButton(ctx);
-  recordBtn.classList.add("map-pane-item");
-  recordBtn.dataset.paneAct = "record";
   // T-882: there is no toolbar row. Live is the follow-live FAB, Trace/Signals/Contrast are the
   // layers menu, Measure and pane management are the floating cluster's top-right (`map-controls`).
   // T-918: the canvas is full-bleed (docs/23 §10.1) — no row below the stage subtracts from it.
@@ -376,6 +376,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let renderLive: () => void = () => {};
   let renderLayers: () => void = () => {};
   let renderMeasure: () => void = () => {};
+
+  // Record IQ over this viewport's span (GAP-1 interim). Its home is the viewport menu (T-882); a
+  // found signal's own clip is the detail sheet's "Record clip" (T-804).
+  // T-1004: it is per-pane chrome (it lives in the viewport menu, named for the active pane since
+  // T-1000), so it reports which pane it acts on and whether that pane is frozen — an IQ recording
+  // runs forward from now, and a frozen viewport must not be left implying otherwise.
+  const recordBtn = recordIqButton(ctx, () => {
+    const p = preview;
+    if (!p) return null;
+    const ids = p.view.panes.list().map((x) => x.id);
+    return { frozen: !p.view.panes.isFollowing(p.activePane), pane: activePaneName(ids, p.activePane)?.label ?? null };
+  });
+  recordBtn.classList.add("map-pane-item");
+  recordBtn.dataset.paneAct = "record";
   /** Split: the new pane inherits the creating pane's registry by value (docs/24 §13.5). */
   const splitActive = (dir: "columns" | "rows" = "columns") => {
     const p = preview;
@@ -531,7 +545,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // selections, measurements and the in-progress gesture, which are the user's own interaction
     // and are always drawn — passes `false` for them.
     // T-1002: THIS pane's rows — the answer to its own (t, f) window, never the active pane's.
-    return paneMarkBoxes(Object.values(paneRows(s.inventory, pane.id)), focusId, s.selections.list, selId, pane.box, pendingRegion, false, measurements, null, pendingMeasureRegion);
+    // T-1004: a pane that does not own the selection draws it as a linked ghost.
+    return paneMarkBoxes(Object.values(paneRows(s.inventory, pane.id)), focusId, s.selections.list, selId, pane.box, pendingRegion, false, measurements, null, pendingMeasureRegion, !ownsSelection(pane.id));
   };
 
   // ---- the overlay layers (T-806 / MAP-06, docs/24 §13.2) ----
@@ -554,6 +569,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
     return activityMap;
   };
+  /**
+   * T-1004: does this pane OWN the page's one selection? Selection is global state (`focus`) —
+   * rightly, since the lists, the sheet and the canvas must agree about what is selected — but it
+   * was MADE in one pane, and drawing it as *the* selection in every pane at once says the opposite.
+   * The owner is the ACTIVE pane: a press on a feature makes its pane active in the same dispatch
+   * (T-1000), so the pane that owns the selection is the pane the user last selected in. Everywhere
+   * else the same feature is drawn as the selection's **linked ghost** (`marks.ts`'s faint brackets,
+   * `pins.ts`'s `linked` class) — the link is visible and the selection stays one place.
+   */
+  const ownsSelection = (paneId: string): boolean => !preview || preview.activePane === paneId;
   const detectionQuads: OverlayLayerFn = (pane, edge) => {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
@@ -562,8 +587,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // T-1002: the detections of THIS pane's window (`inventory.panes[pane.id]`), so a pane frozen
     // on a past signal and a pane at the live edge each draw their own — in the activity symbology
     // the box carries (T-1019's `activityNow`), which is a property of the row, not of the window.
+    // T-1004: a pane that does not own the selection draws the focused signal as a linked ghost.
     const rows = Object.values(paneRows(s.inventory, pane.id));
-    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained, activityNow()), edge, pane.box, pane.rect,
+    return markQuads(signalMarkBoxes(rows, focusId, isUnexplained, activityNow(), !ownsSelection(pane.id)), edge, pane.box, pane.rect,
       { dpr: window.devicePixelRatio || 1, generalizeBelowPx: GENERALIZE_BELOW_CSS_PX });
   };
   // T-812 (MAP-12): band-plan priors — each pane's own `GET /api/priors` answer, as dashed strokes
@@ -740,7 +766,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const layouts = panes
       .filter((v) => isLayerVisible(layersFor(v.id), "pins") && isLayerVisible(layersFor(v.id), "detections"))
       .map((v) => layoutPanePins(detectionPins(Object.values(paneRows(s.inventory, v.id))), v.id, v.box, v.rect, hPx, dpr, edge));
-    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null, activityNow());
+    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null,
+      activityNow(), preview?.activePane ?? null);
     placeTip();
   };
   /** T-1000: outline the active pane, from pane rectangles in drawing-buffer px. Set-if-changed, like
@@ -750,6 +777,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const placeActive = (panes: readonly PaneView[], hPx: number, dpr: number) => {
     const p = preview;
     const active = p ? p.activePane : null;
+    // T-1004: the Record IQ item is per-pane chrome too, and what it records depends on whether the
+    // active pane is frozen — which a scrub changes without any chrome event. Re-stated on the frame
+    // (set-if-changed inside), like every other per-pane statement here.
+    recordBtn.sync();
     const name = activePaneName(panes.map((v) => v.id), active);
     const v = name ? panes.find((x) => x.id === active) ?? null : null;
     const box = v ? outlineBox(v.rect, hPx, dpr) : null;
@@ -844,9 +875,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let traceOn = true;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
+  /**
+   * **What each pane's live lane did, this frame** (T-1042) — behind the same flag as the lane: rows
+   * painted from the ring, tile addresses those rows made unnecessary, and one row's height in px.
+   *
+   * Read by `ui/e2e/live-ring.e2e.mjs`, which can see from the pixels that the newest rows are on
+   * screen but cannot see *which lane* put them there — and "the edge kept up" is a claim about the
+   * lane. Written from the `PaneReport` the data pass just produced, in the pass that produced it,
+   * and only when the numbers change. Presentation metadata: commands nothing, and absent entirely
+   * with the flag off.
+   */
+  let ringDiag = "";
+  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number }>();
+  const stateRing = (report: PaneReport) => {
+    ringReports.set(report.id, { rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10 });
+    const next = JSON.stringify([...ringReports].map(([id, r]) => ({ id, ...r })));
+    if (next === ringDiag) return;
+    ringDiag = next;
+    stage.dataset.liveRing = next;
+  };
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
+    if (flags().liveRing) stateRing(report);
     const s = p.view.surface;
     const dev = pane.device ?? "any";
     // **The pane's OWN lattice, off the report the data pass just produced** (T-505). Since the
@@ -1193,6 +1244,22 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const pressGotoOffer = (): void => {
     const p = preview;
     if (!p || !lastPaintedGoto) return;
+    // T-1004: on a FROZEN pane the same offer is takeable as "go live at this frequency" — the pane
+    // returns to the live edge (view state, `panes.follow`) and only then is the capture taken,
+    // through the same gate. `acceptGoLive` owns the order and both guards; this supplies the one
+    // thing it cannot do for itself, which is moving this host's pane and re-publishing the window.
+    if (isGoLiveOffer(lastPaintedGoto)) {
+      void acceptGoLive(ctx, {
+        offerNow: widthOfferNow,
+        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      }, lastPaintedGoto, (paneId) => {
+        p.view.panes.follow(paneId);
+        lastMirror = ""; mirror(); renderLive(); viewMoved();
+      }).then((r) => {
+        if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
+      });
+      return;
+    }
     void acceptPaneWidth(ctx, {
       // Re-derive at the SAME asked span the offer was painted for — `acceptPaneWidth` passes it
       // back in, exactly as T-407's guard requires (comparing a fresh offer to itself proves
@@ -1452,6 +1519,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
+        // T-1042 / LSR-1, behind `?live-ring=1` (`src/flags.ts`): the published spectrum rows every
+        // FOLLOWING pane paints its live edge from, read in the render pass. Off, this is `null` and
+        // the surface is drawn from tiles exactly as before — one flag, one lane, no second picture.
+        liveRing: flags().liveRing ? () => liveRing.frame() : null,
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,
@@ -1833,7 +1904,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const wo = widthOfferNow(pv.activePane, gotoSpanHz());
         if (!wo) { lastPaintedGoto = null; return null; }
         lastPaintedGoto = wo;
-        return { why: widthOfferLabel(wo), enabled: widthOfferAcceptable(wo), press: pressGotoOffer };
+        // T-1004: a frozen pane's offer is disabled as "past" — true of a retune, and a dead end for
+        // the user who just typed a frequency into it. The same offer is takeable as a GO-LIVE, so it
+        // is offered as one, named as one, and takes both acts in one press.
+        return isGoLiveOffer(wo)
+          ? { label: GO_LIVE_LABEL, why: goLiveOfferLabel(wo), enabled: true, press: pressGotoOffer }
+          : { why: widthOfferLabel(wo), enabled: widthOfferAcceptable(wo), press: pressGotoOffer };
       },
       layerMenu: (): LayerMenu => {
         const reg = layersFor(pv.activePane);

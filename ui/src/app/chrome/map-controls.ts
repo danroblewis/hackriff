@@ -53,7 +53,13 @@ export interface PaneControl {
 }
 
 /** What the Go-to offer shows: the words and acceptability `retune.ts` computed, and the press. */
-export interface GotoOffer { why: string; enabled: boolean; press(): void }
+export interface GotoOffer {
+  why: string; enabled: boolean; press(): void;
+  /** T-1004: the button's word, when the press is not a plain retune — a frozen pane's offer is
+   * taken as "go live at this frequency" (unfreeze, then tune there), and a button still reading
+   * "Retune" would name half of what it does. Absent = "Retune". */
+  label?: string;
+}
 
 /** One row of the layers menu: a base style (radio) or an overlay (checkbox). Display only. */
 export interface LayerRow {
@@ -563,6 +569,7 @@ export function mountMapControls(host: MapControlHost): {
     shown = host.gotoOffer();
     if (!shown) { hideOffer(); return; }
     offerWhy.textContent = shown.why;
+    offerGo.textContent = shown.label ?? "Retune";
     offerGo.disabled = !shown.enabled;
     offer.hidden = false;
     offerOverlay.open(true);
@@ -752,7 +759,9 @@ export function mountMapControls(host: MapControlHost): {
     if (!shown) return;
     shown = host.gotoOffer();
     if (!shown) hideOffer();
-    else { offerWhy.textContent = shown.why; offerGo.disabled = !shown.enabled; }
+    // T-1004: the BUTTON's word is re-derived too, not only the sentence — a pane that froze or
+    // went live since the offer was painted must not keep "Go live here" / "Retune" from before.
+    else { offerWhy.textContent = shown.why; offerGo.textContent = shown.label ?? "Retune"; offerGo.disabled = !shown.enabled; }
   };
   // A gesture moved the view: the Go-to offer describes a window the pane has left.
   const viewMoved = () => { hideOffer(); };
