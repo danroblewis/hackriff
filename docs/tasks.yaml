@@ -28845,7 +28845,7 @@ tasks:
   - id: T-971
     milestone: MAUTO
     title: "FM/RDS sub-2: continuous RDS accumulation on the detection row (PS/RT/PTY), not a 4-group PI snapshot"
-    status: in-progress
+    status: done
     priority: P1
     deps:
     - T-926
@@ -28872,6 +28872,7 @@ tasks:
       Observed, not chased: Load flake for the deflaker: hk-pipeline data_path a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait. It is a real-time-paced 2.5 s tone replay at 1090 MHz and took 121 s under load avg ~30, which fired its 120 s wait_guarded watchdog ('the run did not finish; the watchdog stopped it'). It passes alone in 69 s. | The follow cost scales with the source rate, because the DDC's first stage runs at the input rate. It measured 64 ns/sample unloaded (0.15 cores/station at 2.4 Msps) and 129 ns/sample under load. At 20 Msps that is about 1.3 cores/station, so the 1.5-core admission lets only about 1 follow run at 20 Msps. A cheaper follow front end (e.g. a PFB channel pick shared across stations) would lift that; not done here. | Not run: the tests/e2e acceptance guard fm_stations (T-926) and the captured-signals set. They are RC-tier; the follow only adds rows after the window, and the PI identity path is unchanged. | Stations beyond the concurrency/CPU cap still get their window written as before. They are followed only after a running follow ends (600 s budget or silence) and their channel's 30 s cooldown passes. The chain re-attaches on the next confirmed track. There is no explicit follow queue. | The UI does not yet render the new rds-pi fields (rt, ps_current, ps_sequence, af_mhz, ct). The focus panel's 'Decoded summary' reads /api/inventory/{id}/decode fields as committed, so showing RadioText is a UI-side follow-up if it isn't already generic.
       Use cases: SIGNAL-062
       Resources: 286 CPU-s, peak 4.1 GB
+    commit: 85e198a0
   - id: T-972
     milestone: M2-hardening
     title: "api_contract inventory_entry_promote_and_delete: by-id fetch returns a different id than the listed row under load"
