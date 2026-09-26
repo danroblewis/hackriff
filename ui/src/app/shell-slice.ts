@@ -3,7 +3,7 @@
 // Device tab keeps the full control state it needs in its own review slice, never here.
 import type { CenterGrid, FftBounds } from "../navigation";
 import type { AttachedDevice } from "../surface/panedevice";
-import type { CaptureState } from "../controls/model";
+import type { CaptureState, ScanState } from "../controls/model";
 import type { AppState } from "./state";
 
 /** T-264 (ADR-0017 TM-8): `history` is the durable all-time catalogue (workflow #3), a surface of
@@ -54,6 +54,10 @@ export interface DeviceSlice {
    * reject on a device it has not been told about.
    */
   fftBounds: FftBounds | null;
+  /** T-1008: `/api/control/state`'s `scan` (T-452) as served — the compact form, without windows —
+   * so the map's scan overlay learns of a sweep and its progress from the poll that already runs.
+   * Null on a replay (nothing can be swept) or before the state loads. */
+  scan?: ScanState | null;
 }
 
 /** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. `gotoSpanHz`
