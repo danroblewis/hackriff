@@ -687,6 +687,11 @@ pub(crate) struct Shared {
     /// by the `hk-survey` reader and applied to every classification of a window captured under
     /// that state.
     pub receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-978: the one-shot spectrum hand-off behind the overlap re-analysis
+    /// ([`crate::overlap`]). The **detect reader** publishes a snapshot when the inventory has
+    /// asked for one; the **detect writer** takes it, measures every region stage 4 could not
+    /// resolve and applies the verdict. Nothing is copied while no overlap is unresolved.
+    pub region_spectrum: Arc<crate::overlap::RegionSpectrum>,
     /// T-484: the hand-off to the view lattice's writer thread. The **spectrum** reader fills it
     /// (the finest node is that reader's own rows); the **history** reader owns the writer thread
     /// that drains it and the T-446 decision about sealing. `None` when the view lattice is off or
@@ -944,6 +949,10 @@ struct Common {
     db_path: PathBuf,
     survey_id: SurveyId,
     counters: Arc<Counters>,
+    /// T-978: one spectrum hand-off for the whole run ([`crate::overlap`]), so what the overlap
+    /// re-analysis cost the reader and the writer is one measured number per run and not one per
+    /// segment.
+    region_spectrum: Arc<crate::overlap::RegionSpectrum>,
     product: Arc<Mutex<FloorProduct>>,
     display: Arc<DisplayControl>,
     switch: Arc<SwitchableControl>,
@@ -1413,6 +1422,7 @@ impl Pipeline {
             db_path,
             survey_id: survey.id,
             counters,
+            region_spectrum: Arc::default(),
             compute,
             occupancy,
             retention,
@@ -1750,6 +1760,7 @@ fn start_segment(
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
         compute: common.compute.clone(),
+        region_spectrum: Arc::clone(&common.region_spectrum),
         view_queue: common.view.is_some().then(|| {
             Arc::new(crate::history::ViewQueue::new(
                 crate::history::VIEW_QUEUE_FRAMES,
@@ -3671,7 +3682,23 @@ impl PipelineHandle {
             detections_stored,
             emitters,
             always_on_lost_samples: lost,
-            counters: counters.to_json(),
+            counters: {
+                let mut c = counters.to_json();
+                let o = common.region_spectrum.stats();
+                if let Some(m) = c.as_object_mut() {
+                    m.insert(
+                        "overlap".into(),
+                        serde_json::json!({
+                            "requested": o.requested,
+                            "published": o.published,
+                            "measured": o.measured,
+                            "publish_nanos": o.publish_nanos,
+                            "measure_nanos": o.measure_nanos,
+                        }),
+                    );
+                }
+                c
+            },
             errors,
         })
     }

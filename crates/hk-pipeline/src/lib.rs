@@ -70,6 +70,7 @@ pub mod attention; // T-119
 pub mod candidates; // T-128
 pub mod observe; // T-115
 pub mod occupancy; // T-118
+pub mod overlap; // T-978: the spectrum hand-off behind the overlap re-analysis
 pub mod presence; // T-388
 pub mod reports; // T-121
 pub mod retention; // T-904
