@@ -31629,6 +31629,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1072 worker 2026-09-26: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
+
+      2026-09-26 coordinator: T-1078's worker (fog-of-war past the geometry check with the shared helper) hit a THIRD fog-of-war red, reproduced twice: 'the pane REQUESTED a tile over band C, spectrum the coverage survey settles as never sampled - T-580's short-circuit did not fire'. Suspect T-1057 (landed 03:14: the survey may only turn a place GREY, a retune refreshes the survey before it may veto) - it changed exactly when the survey vetoes. Own it here with the band-A/re-sweep reads, or split with evidence.
   - id: T-1078
     milestone: MUI
     title: "RC P1: canvas-journey, scan-everything, live-edge fail T-521's '<200 px of the pane uncovered by floating chrome' - move T-1072's clearBand into the one shared pane-geometry helper"
@@ -31683,6 +31685,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: app-detail - T-517's step control is not beside the sweep (scan panel layout moved)
+
+      2026-09-26 coordinator: likely the same cause, seen by T-1078's worker in scan-everything.e2e.mjs test 1 ('the Survey-sweep panel...'): the step <select> renders DUPLICATE options - expected ['coarse','fine'], got ['coarse','coarse','fine','fine'] - i.e. two step controls (or one filled twice) where there should be one beside the sweep; suspects T-1008's plan overlay + T-1009's per-front-end scans rendering the control twice. Own both specs here.
   - id: T-1081
     milestone: MUI
     title: "RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)"
@@ -31811,6 +31815,43 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(events_and_presence)'`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator deflaker 2026-09-26: events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5
+  - id: T-1088
+    milestone: MUI
+    title: 1736 magenta 'error ink' pixels on the canvas in NORMAL operation (x~2, rgb 255,64,217) before any failure - canvas-journey test 4 cannot run (unmasked by T-1078)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-MAGENTA
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      UNMASKED BY T-1078 (handback 2026-09-26 ~06:45; its shared pane-geometry fix lets canvas-journey past the geometry check): canvas-journey.e2e.mjs test 4 'a killed backend degrades to grey with no purple and no re-render thrash' fails on its own precondition: '1736 magenta pixels were already on screen BEFORE the stream was killed (e.g. {x:2,y:423,rgb:[255,64,217]}), so this test cannot attribute any to the loss'. Magenta/purple is the canvas's 'this should never be on screen' mark (the error/unknown ink the test guards against); 1736 px of it in NORMAL operation, at the left edge (x=2), is a real rendering defect: some layer draws the error ink (or an uninitialised texture / a new chrome colour collides with it) before any failure.
+      DELIVER: reproduce alone on a FRESH hk; screenshot + locate what paints (255,64,217) at x~2 (a pane's left gutter? a new layer from today's landings - T-1041 trace layer, T-1047/T-1042 live ring, T-1048 metrics, T-1056 sheet, T-996 scale layer?); fix the PRODUCT so normal operation never paints that ink. If the colour is a legitimate new mark that happens to be magenta, change the MARK (the test's premise - no purple unless something failed - is the product rule), with evidence. Then let test 4 run its real assertion.
+      ACCEPTANCE: canvas-journey test 4 green alone 3/3 on a FRESH hk (0 magenta before the kill; after the kill, grey with no purple).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1078 worker 2026-09-26: 1736 magenta 'error ink' pixels on the canvas in NORMAL operation (x~2, rgb 255,64,217) before any failure - canvas-journey test 4 cannot run (unmasked by T-1078)
+  - id: T-1089
+    milestone: M2-hardening
+    title: hk-api shutdown_leaves_no_thread_writing_under_the_handlers_directory fails ALONE on main a9f82aa1 ('no handler ever ran'), green on d91603f4 - bisect (T-1063's accept-loop 503 is the prime suspect)
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: API-HTTP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      RED ON MAIN, FAILS ALONE (T-1065's worker, 2026-09-26 ~06:50): hk-api `shutdown::shutdown_leaves_no_thread_writing_under_the_handlers_directory` fails ALONE 3/3 in 0.1-0.3 s with 'no handler ever ran' (shutdown.rs:102) - and IDENTICALLY at gated main a9f82aa1 built in a scratch worktree with no T-1065 code (exit 100). It PASSED on d91603f4. Between them landed (05:53 batch) T-1011, T-980, T-1063, T-1010, T-1069, T-986, T-1043, T-950; the two touching crates/hk-api/src/http.rs are T-1063 (cefdf5ba: 503 + Retry-After at a connection cap, in two pools - it changed the accept loop) and T-1043 (7e63d83d: /ws/spectrum/rows). Prime suspect T-1063: a test whose handler 'never ran' is what an accept loop answering 503 from the accept thread (or counting the connection in the wrong pool, or a cap of 0 in a test config) would produce. The 05:53 merge gate PASSED with it, so the gate's environment differs from a worker worktree - the same fails-in-worktree/passes-in-gate shape as T-1075 and T-974; name the deciding difference.
+      DELIVER: reproduce alone; `git bisect` d91603f4..a9f82aa1 with the one test; fix the PRODUCT (a request under the cap must reach its handler; shutdown must still leave no thread writing under the handlers dir). Pin it with the test as-is (never loosened) plus a unit test for the found cause.
+      ACCEPTANCE: the test green alone 10/10 in a worker worktree; the bisected commit and the gate-vs-worktree difference named.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-api -E 'binary(shutdown)'`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1065 worker 2026-09-26: hk-api shutdown_leaves_no_thread_writing_under_the_handlers_directory fails ALONE on main a9f82aa1 ('no handler ever ran'), green on d91603f4 - bisect (T-1063's accept-loop 503 is the prime suspect)
+
+      2026-09-26 coordinator: it RUNS AND PASSES in the merge gate (06:34 batch on base 4bdd4115: PASS 0.335 s) while failing alone 3/3 in a worker worktree at a9f82aa1 - so the deciding factor is the environment (gate-target dir/profile, env vars, TMPDIR/handlers-dir location, ports), not the code alone. Find that difference first; a test that passes only in the gate's environment hides a real defect in others (a user's hk serve runs in neither).
+    high_effort_reason: regression bisect on the HTTP accept path (connection pools) + the gate-vs-worktree environment difference; hard debugging
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
