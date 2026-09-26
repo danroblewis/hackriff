@@ -30298,7 +30298,8 @@ tasks:
   - id: T-1037
     milestone: MLIVE
     title: "Tiles reveal coarse-first then ATOMICALLY per row/viewport - never black: the coarsest covering level in one batch as stand-in, the target level per row, one swap per row; PENDING only when no ancestor exists at any level"
-    status: todo
+    status: in-progress
+    branch: task-t1037
     priority: high
     deps: []
     parallel_group: TILE-REVEAL
@@ -30370,7 +30371,8 @@ tasks:
   - id: T-1041
     milestone: MMAP
     title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"
-    status: todo
+    status: in-progress
+    branch: task-t1041
     priority: high
     deps: []
     parallel_group: MAP-TRACE
@@ -30388,7 +30390,8 @@ tasks:
   - id: T-1042
     milestone: MLIVE
     title: "LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)"
-    status: todo
+    status: in-progress
+    branch: task-t1042
     priority: high
     deps: []
     parallel_group: LSR-1
