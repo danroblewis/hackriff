@@ -10,8 +10,8 @@
 #     (T-631), and note that hk-e2e only started reading this file at all in T-631.
 #   - hk-pipeline: tests named listen*/retune*/lossless*/refine*/stream* exercise
 #     live retune/listen/streaming timing against a running pipeline, and
-#     replumb_never_pays_for_the_ring (T-536) asserts a wall-clock bound on how long a
-#     re-plumb may stall capture.
+#     replumb_never_pays_for_the_ring (T-536) drives whole re-plumbs against a running
+#     pipeline (its wall-clock stall bound is in the `timing` tier since T-973).
 #   - hk-api, hk-cli: bind real TCP/WebSocket ports and (hk-cli) spawn the daemon
 #     process, so concurrent runs can collide on ports or process lifecycle.
 #   - hk-core: ring_concurrency/ring_stress race real reader/writer threads against
@@ -204,9 +204,25 @@ fail-fast = false
 # T-913 a fifth beside it: what the DETECT WRITER pays while that pass runs (the figure the
 # pass's own report cannot give). T-901
 # added the /ws/tiles/rows push-cadence bound, whose deterministic half is hk-store's
-# deferred-seal tests. T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
+# deferred-seal tests. T-939 added the detection reader's 20 Msps throughput bound — it streams a
+# paced 20 Msps front end for 10 s of wall clock and asserts the reader is never lapped and
+# analyses essentially all of it, which is a property of the box's headroom above all; its
+# deterministic halves gate normally (hk-core's ring reader-independence tests and
+# hk-pipeline::waterfall_survives_drops). T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
 # audio branch against the legacy Listen chain, same IQ); its audio/RDS/refinement parity half
-# gates normally (hk-pipeline::listen_recipe_parity).
+# gates normally (hk-pipeline::listen_recipe_parity). T-1036 added hk-model's batched
+# detection-insert floor (ADR-0006's write-throughput risk): it was 173 of the gate log's
+# mentions - 9.6 s and green alone, 37.7 s with four agents on the box, 59.3 s at load 30, and
+# 234 rows/s against a 1000 rows/s floor here with a single other test beside it. The bound is
+# unchanged and nothing is #[ignore]d: the run was SPLIT, and its deterministic half
+# (hk-model::detection_writes_are_all_readable_and_the_rate_is_reported - every written row read
+# back through the region query, the rate computed from those rows and stated) gates normally.
+# T-973 added the bound on how long a re-plumb with the IQ ring open may stall the always-on readers (T-536's 1 s): measured, the
+# stall is hk-history's segment-end tile writes and fsyncs (0.2-0.9 s at load ~25, 1.8 s and
+# 13.1 s during gates) with the ring's share zero, so on a shared box it measures the disk. Its
+# deterministic half, the ring's allocation paid by its own thread and a re-plumb completing
+# with that allocation still outstanding, gates normally
+# (hk-pipeline::replumb_never_pays_for_the_ring::a_re_plumb_never_pays_for_the_iq_ring).
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
@@ -217,6 +233,9 @@ not (
   or test(the_retention_index_build_is_measured_per_row)
   or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
   or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
+  or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
+  or test(the_detection_write_rate_clears_its_floor)
+  or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
 )
 '''
 
@@ -272,6 +291,17 @@ test-group = 'e2e-bounded'
 
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'
+test-group = 'heavy-serial'
+
+# T-869 (ADR-0015 LP-5): the opener-switch tests each drive a whole mock-SDR run with an audio
+# pipeline attached — the same class as the hk-pipeline listen tests above, which the filter
+# already catches two of BY NAME (`two_listeners…`, `…serves_the_station…`). Pinning the binary
+# serialises the file as one instead of half of it: the unpinned half was load the serialised
+# tests around it still paid for (the group runs one at a time, but shares the box with
+# everything outside it), and it was measured turning `listen_recipe_parity` — whose audio
+# correlation bound is what LP-4 froze — red beside it while that test passed alone.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(listen_pipeline_switch)'
 test-group = 'heavy-serial'
 
 # T-SDET (2026-09-22): the blanket `package(hk-api) or package(hk-cli)` this replaces cost 244 s of
@@ -484,4 +514,7 @@ or test(a_detect_writer_waits_at_most_one_batch_behind_a_prune_pass)
 or test(the_retention_index_build_is_measured_per_row)
 or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
 or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
+or test(the_detection_reader_keeps_up_with_a_20_msps_front_end)
+or test(the_detection_write_rate_clears_its_floor)
+or test(a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second)
 '''

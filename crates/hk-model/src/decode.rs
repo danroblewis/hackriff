@@ -45,6 +45,81 @@ pub struct EstimatedParams {
     /// the pilot locked (T-037b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pilot_hz: Option<f64>,
+    /// Sub-audible squelch signalling (CTCSS tone / DCS code) measured blind from the FM
+    /// discriminator output (T-988, SIGNAL-090). `None` when nobody looked (not an FM channel, or
+    /// too little on-air audio); a look that found nothing is `Some` with `kind: none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subaudible: Option<Subaudible>,
+}
+
+/// What a sub-audible squelch analysis concluded (T-988).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubaudibleKind {
+    /// Too little on-air audio analysed yet to say anything.
+    Measuring,
+    /// A sub-audible line matched a standard (EIA/TIA) CTCSS tone within the stated tolerance.
+    Ctcss,
+    /// A clean sub-audible line off every standard tone (reported raw, never snapped).
+    Tone,
+    /// A DCS (CDCSS) code word stream.
+    Dcs,
+    /// Analysed and found no sub-audible signalling — "no tone", not "never looked".
+    None,
+}
+
+/// One sub-audible line (T-988).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubaudibleTone {
+    /// Measured frequency, Hz (to about 0.1 Hz).
+    pub measured_hz: f64,
+    /// Line power over the median of the 55–270 Hz band, dB.
+    pub snr_db: f64,
+    /// Nearest standard CTCSS tone within `tolerance_hz`, Hz; `None` off the table.
+    #[serde(default)]
+    pub table_hz: Option<f64>,
+    /// `measured_hz − table_hz`, Hz.
+    #[serde(default)]
+    pub delta_hz: Option<f64>,
+    /// Snap tolerance applied, Hz.
+    pub tolerance_hz: f64,
+}
+
+/// A decoded DCS code (T-988).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DcsCode {
+    /// Three octal digits, e.g. `023`.
+    pub code: String,
+    /// `normal` or `inverted`.
+    pub polarity: String,
+    /// Valid code words received at the chosen bit phase.
+    pub words: u32,
+    /// The same bit stream read as other standard codes (DCS aliasing: `023` normal is
+    /// bit-for-bit `047` inverted), e.g. `["047I"]`. The stream alone cannot tell them apart.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// Sub-audible squelch signalling measured on an FM channel (T-988): a CTCSS tone, a DCS code,
+/// or an explicit "none". Measured blind from the discriminator, never looked up.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Subaudible {
+    /// The conclusion.
+    pub kind: SubaudibleKind,
+    /// On-air (squelch-open) audio analysed, s.
+    pub analysed_s: f64,
+    /// Sub-audible lines, strongest first: the tone (`ctcss`/`tone`), then a second tone when
+    /// two are present. Empty otherwise.
+    #[serde(default)]
+    pub tones: Vec<SubaudibleTone>,
+    /// The DCS code (`kind: dcs`).
+    #[serde(default)]
+    pub dcs: Option<DcsCode>,
+    /// Why nothing was reported (`kind: none`), e.g. a harmonic comb rather than a tone.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Detector id and version.
+    pub detector: String,
 }
 
 /// A demodulation session on a channel (docs/07 §2.14).

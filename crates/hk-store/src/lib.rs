@@ -23,6 +23,7 @@ pub mod dataset; // T-205
 pub mod decoded;
 pub mod history;
 pub mod iqbuffer; // T-157
+pub mod ml; // T-844: the durable half of C38 shadow mode (ADR-0016 §6)
 pub mod outputs;
 pub mod radiometry;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon

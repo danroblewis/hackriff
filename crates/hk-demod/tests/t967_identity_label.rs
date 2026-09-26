@@ -63,7 +63,10 @@ fn session_with_ps(frames: &[&str], t0_s: i64) -> AnalogSession {
                   "phase_error_rms_rad": 0.05, "first_lock_s": 0.01},
         "stereo": true, "deemphasis_tau_s": 75e-6, "audio_rate_hz": 48e3,
         "rds": {
-            "pi": {"pi": PI, "votes": 97, "total_votes": 100, "share": 0.97},
+            // T-962: a committed PI (97 in-window votes, far over the commit bar); a
+            // provisional one is not an identity and would carry no label.
+            "pi": {"pi": PI, "votes": 97, "total_votes": 100, "share": 0.97,
+                   "window_votes": 97, "provisional": false},
             "pi_abstain": null, "pi_votes": {"1694": 97, "1695": 3},
             "ps_frames": counts, "frame_log": frame_log,
             "pty": 10, "tp": true, "ta": false, "group_types": {"0A": 40, "2A": 20},

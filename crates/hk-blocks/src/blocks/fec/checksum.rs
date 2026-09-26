@@ -145,11 +145,19 @@ impl Block for Checksum {
             self.bits.clear();
             extend_bits(&mut self.bits, f.bytes, 0, len);
             let upstream_clean = !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
+            // The tally sees the bits the check covers (`start_bit` .. the end of the check
+            // field), never the whole frame: the degenerate-frame guard must trim the register
+            // off the *covered* span (T-928, ADR-0022 §4.3.1 hole A).
+            let covered = result.map_or(0..0, |(_, cpos)| self.span.start..cpos + self.width);
+            // The cancelling prefix of a sum-type checksum is a whole **unit**, not the check
+            // field: with `unit_bits > width`, trimming only `width` leaves most of the
+            // cancelling unit inside the span, nothing looks idle, and `U ‖ 0…0` counts as an
+            // independent trial at every width (T-921 hole D).
             self.ev.record(
-                &self.bits,
+                &self.bits[covered],
                 ok && upstream_clean,
                 self.width as f64,
-                self.width,
+                self.width.max(self.unit),
             );
             self.meter.push(!ok);
             if ok {

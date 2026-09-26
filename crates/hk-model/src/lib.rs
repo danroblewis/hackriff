@@ -89,9 +89,9 @@ pub use context::{
     CorrelationType, Evidence, Explanation, ExternalEvent, Geo,
 };
 pub use decode::{
-    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, DecodeEvidence,
+    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, DcsCode, Decode, DecodeEvidence,
     DecodeIdentitySummary, DecodeProvenance, DecodeView, Demodulation, EstimatedParams, Framing,
-    WITHHELD_LABEL,
+    Subaudible, SubaudibleKind, SubaudibleTone, WITHHELD_LABEL,
 };
 pub use detection::{
     BurstLengths, Detection, DetectionFlags, MAX_TRACK_PAGE, PageRequest, SegmentKind,
@@ -100,7 +100,8 @@ pub use detection::{
 pub use emitter::{
     Appearance, Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation,
     FRAMING_IDENTITY_SCHEME, Identity, IdentityScheme, KnownStatus, KnownStatusChange,
-    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, Recurrence, StatusAuthor,
+    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, RDS_PI_COMMIT_VOTES,
+    RDS_PI_COMMIT_WINDOW_NS, Recurrence, StatusAuthor, VoteWindow,
 };
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,
@@ -143,10 +144,12 @@ pub use recording::{
 };
 pub use region::{FreqRange, Region, TimeRange};
 pub use relate::{
-    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, OVERLAP_MIN_FRACTION,
-    ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RelationVisibility, RowEvidence,
-    TunedLo, distinct_chains, distinguishing_evidence, overlap_fraction, predict_artifacts,
-    present_only_with, rank_score,
+    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, MeasuredEmission,
+    OVERLAP_MIN_FRACTION, REGION_IDENTITY, REGION_MERGE_UNCOVERED, REGION_MIN_BINS,
+    REGION_NO_EMISSION, REGION_OFF_CENTRE, REGION_ROW_UNEXPLAINED, REGION_TOO_COARSE, ReceiveChain,
+    RegionMeasurement, RegionVerdict, RelationAuthor, RelationClaim, RelationKind,
+    RelationVisibility, RowEvidence, TunedLo, distinct_chains, distinguishing_evidence,
+    overlap_fraction, predict_artifacts, present_only_with, rank_score, region_verdicts,
 };
 pub use repo::{
     AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
@@ -154,14 +157,15 @@ pub use repo::{
     BOOKMARKS_COLLECTION, BOOKMARKS_COLLECTION_COLOR, BOOKMARKS_COLLECTION_NAME, BOOKMARKS_MAX,
     Bookmark, BookmarkKind, COLLECTION_NAME_MAX, COLLECTION_NOTE_MAX, COLLECTIONS_MAX, Collection,
     CollectionSummary, EmitterSynthesis, EmitterUpsert, HarmonicFamilyRow, LIFECYCLE_TEXT_MAX,
-    LatestMeasurement, MARKERS_PER_COLLECTION_MAX, MAX_FAMILY_CANDIDATES, MAX_LO_SPAN_HZ,
-    MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, Marker, MarkerWindow, PROVENANCE_TEXT_MAX,
-    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning,
-    RepoBatch, RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict,
-    SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
-    SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS,
-    Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
-    TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
+    LatestMeasurement, MARKERS_PER_COLLECTION_MAX, MAX_ARTEFACT_DETECTIONS, MAX_FAMILY_CANDIDATES,
+    MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, Marker, MarkerWindow,
+    PROVENANCE_TEXT_MAX, ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX,
+    RETUNE_RULE, ReceiverArtefactShare, RefinedTuning, RepoBatch, RepoError, Repository,
+    RetuneFamily, RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX,
+    SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX,
+    SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink, SelectionLinkKind, SelectionWatch,
+    StorePage, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ,
+    UnresolvedRegion, UserBand, ViewTier, authored_block,
 };
 // T-904 per-frame detection retention and rollup (docs/07 §2.9).
 pub use repo::{

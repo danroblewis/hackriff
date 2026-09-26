@@ -17,28 +17,52 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { Browser } from "./harness.mjs";
-import { FOLLOWING, paneAct, rehomedHitTest } from "./app-chrome.mjs";
+import { FOLLOWING, LIVE_BTN, liveBtn, paneAct, rehomedHitTest } from "./app-chrome.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
 /** The controls T-882's hit test must find, so an empty result cannot come from matching nothing.
- * The fixed ones are literal: closed = Go-to input, Layers, Research (T-821), Measure, Annotate and
- * Pin (T-820), Viewport, zoom in/out, FAB (10); the viewport menu = its × (T-900), Split, Close, Whole surface, Record IQ
+ * The closed cluster is asserted BY NAME (T-1022), never by a bare count: T-993 moved the retired top
+ * bar's Review into the top-right cluster and added a ⋯ settings menu (Theme), and a count of 10
+ * could not say whether 12 meant those two or a doubled Zoom button. The set: Go-to input, Layers,
+ * Research (T-821), Measure, Annotate and Pin (T-820), Viewport, Review and ⋯ More (T-993), zoom
+ * in/out. (T-1001 retired the FAB: Live/Freeze is a button inside each PANE, on the canvas, not in
+ * the cluster — its own pressability is asserted below.) The mode switch, device state and nudges T-993 floated are not in `CLOSED` —
+ * `app-top-chrome.e2e.mjs` owns them. The viewport menu = its × (T-900), Split, Close, Whole
+ * surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
  * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
  * rows outside it: the coverage-fog row (T-807), the trace strip and the three colour-scale rows
  * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
+// T-1028 added the Retune-mode chip to the cluster; T-1001 took the follow-live FAB out of it. Both
+// landed against a list written before the other, so the set is stated here once, true of the
+// cluster the page actually mounts.
+const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Retune mode",
+  "Viewport", "Review", "More: settings", "Zoom in", "Zoom out"];
+
+/** The rehomed controls are exactly the named set: none missing, none extra, none twice, and no two
+ * drawn over each other. */
+function assertClosedSet(hits, where = "") {
+  const extra = hits.names.filter((n, i) => !CLOSED_NAMES.includes(n) || hits.names.indexOf(n) !== i);
+  const missing = CLOSED_NAMES.filter((n) => !hits.names.includes(n));
+  assert.deepEqual({ missing, extra }, { missing: [], extra: [] },
+    `the floating cluster's controls are not the documented set${where}: ${JSON.stringify(hits.names)}`);
+  assert.deepEqual(hits.overlaps, [], `floating controls drawn over each other${where}`);
+}
+
 async function rehomedCounts(page) {
   await page.waitFor("the registry to state the reserved Bookmarks collection",
     `(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '').includes('"collection:00000000-0000-7000-8000-000000000b00"')`,
     { timeoutMs: 30000 });
   const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
   assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
-  return { closed: 10, pane: 5, layers: registry.length + 1 + 1 + 3 };
+  // The viewport menu: its ×, Split ⇔, Split ⇕ and the rows ⇄ columns flip (T-1005), Close,
+  // Whole surface, Record IQ, and T-1006's per-device capture offer.
+  return { closed: CLOSED_NAMES.length, pane: 8, layers: registry.length + 1 + 1 + 3 };
 }
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {
@@ -155,6 +179,7 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   const want = await rehomedCounts(page);
   const hits = await rehomedHitTest(page);
   t.diagnostic(`rehomed controls tested: ${JSON.stringify(hits.counts)}`);
+  assertClosedSet(hits);
   assert.deepEqual(hits.counts, want, "a rehomed control is missing from the cluster");
   assert.deepEqual([...hits.closed, ...hits.pane, ...hits.layers], [],
     "a rehomed control is not clickable at its own centre — something is drawn over it, or it is "
@@ -193,7 +218,8 @@ test("a drag on the app's surface moves the view and still reaches no device rou
 });
 
 test("T-802: the floating controls are pressable, move only the view, and offer (never command) a retune", async (t) => {
-  // MAP-02 in a real browser: Go-to, layers, zoom and the follow-live FAB float over the canvas,
+  // MAP-02 in a real browser: Go-to, layers and zoom float over the canvas (T-1001: and each pane
+  // carries its own Live/Freeze button inside its rectangle),
   // each is clickable at its own centre (T-528's hit test — a control a user can see is a control a
   // user can press), each changes the SCREEN, and none reaches a device route. A Go-to to spectrum
   // no tuned window covers shows the retune offer; the test does not press it, and asserts that
@@ -206,12 +232,12 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
-     !!document.querySelector('.map-ctl .map-fab') &&
+     !!document.querySelector('.map-ctl .map-zoom-in') && !!document.querySelector('${LIVE_BTN}') &&
      / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
     { timeoutMs: 60000 });
 
   const covered = JSON.parse(await page.eval(`JSON.stringify(
-    ['.map-goto input', '.map-layers-btn', '.map-zoom-in', '.map-zoom-out', '.map-fab'].map((sel) => {
+    ['.map-goto input', '.map-layers-btn', '.map-zoom-in', '.map-zoom-out', '${LIVE_BTN}'].map((sel) => {
       const el = document.querySelector(sel); const r = el.getBoundingClientRect();
       const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
       return { sel, w: r.width, h: r.height, on: top ? (top.className?.baseVal ?? top.className ?? top.tagName) : 'nothing',
@@ -228,13 +254,15 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.click("document.querySelector('.map-zoom-out')");
   await page.waitFor("zoom-out to change the pane's window", `(${headline}) !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
 
-  // The FAB is the retired Live button too (T-882): a press freezes the following pane, and the
-  // next re-pins it to the growing edge. Both states are stated on the FAB itself.
-  await page.click("document.querySelector('.map-fab')");
-  await page.waitFor("the FAB to say the pane is frozen", `document.querySelector('.map-fab').classList.contains('frozen')`, { timeoutMs: 10000 });
-  await page.click("document.querySelector('.map-fab')");
-  await page.waitFor("the FAB to follow the live edge again",
-    `${FOLLOWING} && document.querySelector('.map-fab').getAttribute('aria-pressed') === 'true'`,
+  // T-1001: the pane's OWN Live button (inside its rectangle) is the retired Live button's press:
+  // it freezes the following pane, and the next press re-pins it to the growing edge. Both states
+  // are stated on the button itself.
+  await page.click(liveBtn(1));
+  await page.waitFor("the pane's Live button to say it is frozen",
+    `${liveBtn(1)}.classList.contains('frozen')`, { timeoutMs: 10000 });
+  await page.click(liveBtn(1));
+  await page.waitFor("the pane's Live button to follow the live edge again",
+    `${FOLLOWING} && ${liveBtn(1)}.getAttribute('aria-pressed') === 'true'`,
     { timeoutMs: 10000 });
 
   // Layers opens a menu and closes again.
@@ -380,12 +408,20 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   // device route.
   //
   // The fog's key is not the only key in the menu: T-813 gave the detections overlay its symbology
-  // key (`markKeyEntries`) in the Overlays section. So the fog key is read off the coverage row it
-  // belongs to and the symbology key off the detections row, each exactly and in order, and the
-  // menu-wide list must be exactly the two in section order — a key row anywhere else, a fog row
-  // leaking out of the Coverage section or a symbology row leaking into it is red.
+  // key (`markKeyEntries`) in the Overlays section, and T-898 (d4d4ce7d) gave the retune-history
+  // overlay its own — one row per front end, or a single "No route in view" row (`none`) when no
+  // tune record covers the window. So each key is read off the ROW it belongs to, the two fixed
+  // ones exactly and in order; the set of rows that carry a key at all is stated here, so a key
+  // appearing on a row that should have none is still red; and the menu-wide list must be exactly
+  // those rows' keys concatenated in DOM order — a fog row leaking out of the Coverage section, a
+  // symbology row leaking into it, or a key `li` belonging to no row is red.
+  //
+  // The retune key's CONTENT is not a literal: it names the devices whose tune records cover the
+  // window, which is data, not symbology. Its row's presence and non-emptiness are asserted; what
+  // it says about a device is `surface/tunepath.ts`'s unit tier.
   const FOG_KEY = ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"];
   const MARK_KEY = ["confirmed", "candidate", "unexplained", "artifact", "curated"];
+  const KEYED_ROWS = ["coverage", "detections", "tune"];
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -398,20 +434,28 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   const state = `JSON.stringify({
     fog: document.querySelector('#map-layers [data-axis=data] input[data-layer="coverage"]')?.checked ?? null,
     key: [...document.querySelectorAll('#map-layers .map-layer-key li')].map((e) => e.dataset.mark),
-    rowKey: Object.fromEntries(["coverage", "detections"].map((id) => {
-      const next = document.querySelector('#map-layers input[data-layer="' + id + '"]')?.closest('label')?.nextElementSibling;
-      return [id, next?.matches('.map-layer-key') ? [...next.querySelectorAll('li')].map((e) => e.dataset.mark) : null];
-    })),
+    rows: [...document.querySelectorAll('#map-layers input[data-layer]')].map((i) => {
+      const next = i.closest('label')?.nextElementSibling;
+      return [i.dataset.layer, next?.matches('.map-layer-key') ? [...next.querySelectorAll('li')].map((e) => e.dataset.mark) : null];
+    }),
     drawsDetections: JSON.parse(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '[]').some((l) => l.id === "detections"),
     said: document.querySelector('.sf-fog').hidden ? "" : document.querySelector('.sf-fog').textContent,
     head: document.querySelector('#map-layers h4')?.textContent,
   })`;
   const one = JSON.parse(await page.eval(state));
   assert.equal(one.fog, true, "the coverage fog must be shown by default: grey is the survey");
-  assert.deepEqual(one.rowKey.coverage, FOG_KEY, "the coverage row's key: the fog's rows, all present, in order, contiguous");
+  const rowKey = Object.fromEntries(one.rows);
+  assert.deepEqual(rowKey.coverage, FOG_KEY, "the coverage row's key: the fog's rows, all present, in order, contiguous");
   assert.equal(one.drawsDetections, true, "this build draws no detections overlay, so T-813's key has no row to sit under");
-  assert.deepEqual(one.rowKey.detections, MARK_KEY, "the detections row's key: T-813's symbology, in its own section");
-  assert.deepEqual(one.key, [...FOG_KEY, ...MARK_KEY], "the menu's keys: the fog's under Coverage, then the symbology's under Overlays, and no other");
+  assert.deepEqual(rowKey.detections, MARK_KEY, "the detections row's key: T-813's symbology, in its own section");
+  assert.deepEqual(one.rows.filter(([, k]) => k !== null).map(([id]) => id), KEYED_ROWS,
+    `exactly these rows carry a key, in section order: ${JSON.stringify(one.rows)}`);
+  assert.ok(Array.isArray(rowKey.tune) && rowKey.tune.length > 0 && rowKey.tune.every((m) => typeof m === "string" && m.length > 0),
+    `the retune row's key (T-898): a row per front end, or the "no route in view" row — never empty: ${JSON.stringify(rowKey.tune)}`);
+  assert.deepEqual(one.key, one.rows.flatMap(([, k]) => k ?? []),
+    "the menu's keys: each row's own, in section order, and no key li outside a row that has one");
+  assert.deepEqual(one.key.slice(0, FOG_KEY.length + MARK_KEY.length), [...FOG_KEY, ...MARK_KEY],
+    "the fog's key under Coverage, then the symbology's under Overlays");
   assert.equal(one.said, "");
 
   await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);
@@ -589,6 +633,7 @@ for (const width of [1000, 920, 420]) test(`T-882: at ${width} px every rehomed 
   const want = await rehomedCounts(page);
   const hits = await rehomedHitTest(page);
   t.diagnostic(`at ${width} px: ${JSON.stringify(hits)}`);
+  assertClosedSet(hits, ` at ${width} px`);
   assert.deepEqual(hits.counts, want, "a rehomed control is missing");
   assert.deepEqual([...hits.closed, ...hits.pane, ...hits.layers], [], `a rehomed control is not pressable at ${width} px`);
   // The viewport menu open, kept as an artifact: the proposed home for pane management (T-882's
