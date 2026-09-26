@@ -128,7 +128,8 @@ pub use run::{
     InventoryHold, MAX_RECOVERY_ATTEMPTS, MAX_START_SKEW, Pipeline, PipelineController,
     PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunDevice,
     RunSummary, SegmentHold, SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT,
-    open_mock_replay, open_replay, recovery_backoff, replay_block_len, replay_once,
+    open_mock_replay, open_mock_replay_with_block_len, open_replay, recovery_backoff,
+    replay_block_len, replay_once,
 };
 pub use stats::Counters;
 pub use survey::{ReceiverSurvey, SurveyCadence, SurveyCounts};

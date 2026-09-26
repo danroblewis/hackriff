@@ -43,7 +43,7 @@ use hk_model::sigmf::SigmfMeta;
 use hk_model::{ContentClass, FreqRange, Provenance, Region, Timestamp};
 use hk_pipeline::{
     Pipeline, PipelineConfig, PipelineHandle, RunSummary, SourceInfo, TrackInventory,
-    open_mock_replay, replay_plan, source_class,
+    open_mock_replay, open_mock_replay_with_block_len, replay_plan, source_class,
 };
 use num_complex::{Complex, Complex32};
 use serde_json::json;
@@ -88,6 +88,9 @@ pub struct BlindSource {
     pub demod_freq_hz: Option<[f64; 2]>,
     /// Device controls applied during the run.
     pub steps: &'static [DeviceStep],
+    /// Samples per device transfer (`None`: the replay's 5 ms blocks). T-926: a live HackRF's
+    /// transfers are 65 536 samples, which divide none of the stage lengths a chain collects.
+    pub transfer_len: Option<usize>,
 }
 
 /// `ScanPlan.extra` for `source`.
@@ -240,17 +243,19 @@ pub struct BlindDevice {
 /// Opens the mock SDR over `blinded` with `steps` scripted.
 fn open_device(
     blinded: Blinded,
-    steps: &'static [DeviceStep],
+    source: &BlindSource,
     end: MockEnd,
     pacing: Pacing,
 ) -> BlindDevice {
+    let steps = source.steps;
     let meta = SigmfMeta::read(&blinded.meta).unwrap();
     let mut centres: Vec<f64> = meta.captures.iter().filter_map(|c| c.frequency).collect();
     centres.dedup();
     let class = source_class(&meta);
     let (source, info, device, mock, served): (Box<dyn Source>, _, _, _, _) = if centres.len() <= 1
     {
-        let r = open_mock_replay(&blinded.meta, pacing, end).unwrap();
+        let r = open_mock_replay_with_block_len(&blinded.meta, pacing, end, source.transfer_len)
+            .unwrap();
         let control = r.source.mock_control();
         let served = vec![r.source.recording().path.clone()];
         (Box::new(r.source), r.info, r.device, vec![control], served)
@@ -591,9 +596,10 @@ pub fn replay_config(
     pacing: Pacing,
 ) -> (PipelineConfig, BlindDevice) {
     assert!(matches!(pacing, Pacing::Unpaced), "acceptance runs unpaced");
+    let source = BlindSource::default();
     let dev = open_device(
-        blind_copy(meta, "dev", &BlindSource::default()),
-        &[],
+        blind_copy(meta, "dev", &source),
+        &source,
         MockEnd::Stop,
         Pacing::Unpaced,
     );
@@ -652,7 +658,7 @@ fn configure(
     let dir = TempDir::new(tag);
     let mut plan = plan_extra(&source);
     merge_json(&mut plan, extra);
-    let replay = open_device(blinded, source.steps, end, pacing);
+    let replay = open_device(blinded, &source, end, pacing);
     let cfg = device_config(&dir.0, &replay, plan);
     BlindConfig { dir, cfg, replay }
 }
