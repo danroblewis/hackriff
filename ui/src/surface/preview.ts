@@ -664,6 +664,18 @@ export interface PreviewOptions {
    * drawn, and never a snapshot taken on a poll and laid out against a scroll (T-388).
    */
   liveRing?: (() => RingFrame | null) | null;
+  /**
+   * **Told the `PaneReport`s this frame drew with, unconditionally** (T-1052).
+   *
+   * `trace` is also handed every `PaneReport`, but only when the trace LAYER is on ([[tracePx]]
+   * `> 0`) — a rendering choice — and T-1042's live-ring diagnostic (`ringRows`/`ringTiles`/
+   * `ringRowPx` on the report) is a fact about the ring lane, not about that layer. Coupling the two
+   * meant T-1041 defaulting the trace layer off (2026-09-25) silently stopped the diagnostic from
+   * ever being written, which `ui/e2e/live-ring.e2e.mjs` could only see as an empty `[]` — not a
+   * wrong number, no statement at all. This hook is read every frame regardless of the trace layer,
+   * so a live-ring reader never depends on an unrelated layer's on/off state.
+   */
+  onReports?: ((reports: readonly PaneReport[]) => void) | null;
 }
 
 /**
@@ -708,6 +720,8 @@ export class SurfacePreview {
   /** The anchored range this host returns to, validated once. See [[anchorOf]]. */
   private readonly anchor: { lo: number; hi: number; source: string };
   private readonly surveyFn: ((path: string) => Promise<unknown>) | null;
+  /** [[PreviewOptions.onReports]]: told every `PaneReport`, regardless of the trace layer. */
+  private readonly onReports: ((reports: readonly PaneReport[]) => void) | null;
   private readonly nowMs: () => number;
   private surveyInFlight = false;
   /** When the next survey may be asked, ms; 0 = at the first frame. */
@@ -727,6 +741,7 @@ export class SurfacePreview {
     this.windowsFn = opts.windows ?? null;
     this.edgeSeen = probe.origin.edgeNs;
     this.surveyFn = opts.survey ?? null;
+    this.onReports = opts.onReports ?? null;
     this.nowMs = opts.now ?? (() => Date.now());
     // A historical surface (no edge) follows nothing, so it never opens a feed.
     this.rowFeeds = opts.rows && this.edgeFn
@@ -852,6 +867,7 @@ export class SurfacePreview {
   frame(): SurfaceFrame {
     this.maybeSurvey();
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
+    this.onReports?.(this.lastFrame.reports);
     if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
     // **After the refresh, never before** (T-538): both end up spending the same four slots, and the
     // live edge must have had its chance at one before a guess is allowed to take it. In practice

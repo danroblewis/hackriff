@@ -8847,3 +8847,96 @@ use_cases:
   fit_flags: null
   fit_note: 'SIGNAL-036 is the ISS APRS digipeater relay specifically (with Doppler tracking); this is the everyday terrestrial APRS network heard directly from ground stations and digipeaters, same AFSK1200/AX.25 decode with no satellite pass or Doppler correction needed.'
   test_tier: offline-recorded
+- id: SIGNAL-090
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: Conventional Land-Mobile Voice (LMR/GMRS/FRS)
+  name: NBFM land-mobile/GMRS voice with blind CTCSS/DCS identification
+  summary: 'Blind-detect narrowband FM land-mobile voice bursts (FCC Part 90 business, GMRS/FRS and similar) as time-frequency regions, and identify the sub-audible CTCSS tone or DCS code carried on them from the FM discriminator output alone, matched against the standard tone/code tables, without ever pre-tuning to a known repeater''s PL tone. Added 2026-09-25 from a live 461.125/462.225 MHz explorer-agent capture (T-985) whose 8.1 s NBFM burst and measured 233.6 Hz tone the app detected only as an unclassified candidate with no tone field anywhere.'
+  band: 460-467 MHz FCC Part 90 land-mobile / Part 95 GMRS-FRS (the capability is general to any NBFM channel carrying CTCSS/DCS, not specific to this band)
+  tx: none
+  receiver_hint: HackRF/RTL-SDR
+  refs:
+  - label: sigidwiki CTCSS
+    url: https://www.sigidwiki.com/wiki/CTCSS
+  - label: FCC 47 CFR Part 90 (Private Land Mobile Radio)
+    url: https://www.ecfr.gov/current/title-47/chapter-I/subchapter-D/part-90
+  - label: FCC 47 CFR Part 95 (GMRS/FRS)
+    url: https://www.ecfr.gov/current/title-47/chapter-I/subchapter-D/part-95
+  capabilities:
+  - cfar-detection
+  - analog-demod
+  - param-estimation
+  - known-signal-priors
+  - signal-inventory
+  hardware_fit: native
+  accessory: null
+  fit_flags: null
+  fit_note: 'No existing use case covered sub-audible CTCSS/DCS identification: NBFM voice detection generically exists, but nothing measures the squelch tone that actually identifies a repeater/system, which is exactly what a land-mobile/GMRS scanner needs to tell channels apart. The explorer''s own capture found a real, strong (23-25 dB) tone the app could not report anywhere.'
+  test_tier: offline-recorded
+- id: SIGNAL-091
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: Conventional Land-Mobile Voice (LMR/GMRS/FRS)
+  name: Conventional DMR (Tier II) blind 4FSK detection plus sync identification
+  summary: 'Blind-detect a bursty 12.5 kHz 4-level FSK land-mobile channel and identify it as DMR by finding the ETSI TS 102 361-1 BS/MS data and voice frame sync patterns at 4800 sym/s, distinguishing a conventional single-repeater DMR channel from SIGNAL-082''s trunked-system control-channel following. Added 2026-09-25 from a live 464.6125 MHz explorer-agent capture (T-985) whose 4-level deviation histogram and dozens of BS-sourced DATA sync hits the app''s blind detection saw only as an unclassified, strong (+24 dB) candidate.'
+  band: 450-470 MHz UHF land-mobile (DMR also runs VHF/700/800 MHz)
+  tx: none
+  receiver_hint: HackRF/RTL-SDR
+  refs:
+  - label: ETSI TS 102 361-1 (DMR air interface)
+    url: https://www.etsi.org/deliver/etsi_ts/102300_102399/10236101/
+  - label: sigidwiki DMR
+    url: https://www.sigidwiki.com/wiki/DMR
+  capabilities:
+  - cfar-detection
+  - modulation-classifier
+  - blind-symbol-estimation
+  - digital-demod
+  - known-signal-priors
+  - signal-inventory
+  hardware_fit: native
+  accessory: null
+  fit_flags: null
+  fit_note: 'SIGNAL-082 covers only trunked DMR Tier III/Capacity Plus following, which needs control-channel/LCN machinery this simpler conventional repeater case does not; a channel this strong and this classifiable had no id, and no DMR classification or sync search at all in the app.'
+  test_tier: offline-recorded
+- id: SIGNAL-092
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: Aviation Data Links & Aircraft-as-Sensors
+  name: Airband AM voice (ATC/ATIS/AWOS)
+  summary: 'Blind-detect and demodulate AM voice on the 118-136.975 MHz civil aviation band, including scheduled ATIS/AWOS information loops, distinct from the ADS-B/UAT/ACARS/VDL2 data links SIGNAL-001-004 already cover. Added 2026-09-25 after an explorer-agent window-3 sweep (T-985) found no existing use case for plain airband AM voice, despite the app already attaching an "Aviation voice (VHF AM)" band-plan explanation to dozens of noise candidates with nothing measured behind it.'
+  band: 118-136.975 MHz
+  tx: none
+  receiver_hint: RTL-SDR
+  refs:
+  - label: sigidwiki Airband
+    url: https://www.sigidwiki.com/wiki/Airband
+  capabilities:
+  - cfar-detection
+  - analog-demod
+  - known-signal-priors
+  - signal-inventory
+  hardware_fit: native
+  accessory: null
+  fit_flags: null
+  fit_note: 'AM demodulation is generically supported, but no use case named the everyday airband voice channel a plain aircraft-band scanner listens to; this also becomes the acceptance target for the app''s existing "Aviation voice (VHF AM)" explanation, which the explorer found attached to unmeasured noise 52 times in 8 minutes at an antenna that heard no real airband traffic at all.'
+  test_tier: offline-recorded
+- id: SIGNAL-093
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: 'Maritime, GMDSS & Legacy Navigation'
+  name: Marine VHF voice
+  summary: 'Blind-detect and demodulate NBFM voice on the international marine VHF channels (Ch 16, 156.800 MHz distress/calling, plus the working and ship/shore duplex channels around 157/161 MHz), distinct from the AIS and DSC digital signalling SIGNAL-015/017 already cover on the same band. Added 2026-09-25 after an explorer-agent window-3 sweep at 152.4-162.4 MHz (T-985) found the whole band misclassified `content_class: restricted-paging` with no voice use case to test the band plan against.'
+  band: 156-162.425 MHz (international marine VHF Ch 1-88)
+  tx: none
+  receiver_hint: RTL-SDR
+  refs:
+  - label: ITU/USCG marine VHF channel plan
+    url: https://www.navcen.uscg.gov/marine-vhf-channels
+  capabilities:
+  - cfar-detection
+  - analog-demod
+  - known-signal-priors
+  - signal-inventory
+  hardware_fit: native
+  accessory: null
+  fit_flags: null
+  fit_note: 'SIGNAL-015/017 cover AIS and DSC digital signalling on the same band; this is the plain analog voice case, currently untested, and its absence let a band-plan bug (the whole 152-162 MHz window classed `restricted-paging`) go unnoticed for lack of anything to check it against.'
+  test_tier: offline-recorded
