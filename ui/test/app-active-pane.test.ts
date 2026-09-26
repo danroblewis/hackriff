@@ -187,7 +187,10 @@ test("the outline is the pane's own rectangle, GL device px to CSS px from the t
 
 test("the surface places the outline per frame and on every change; the chrome names the pane", () => {
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(host, /dom: \(panes, edge, hPx, dpr\) => \{ pinsFrame\(panes, edge, hPx, dpr\); placeActive\(panes, hPx, dpr\); \}/,
+  // T-1001 added the panes' own Live buttons to the same hook; the outline's claim is unchanged.
+  const domAt = host.indexOf("dom: (panes, edge, hPx, dpr)");
+  const domHook = host.slice(domAt, host.indexOf("});", domAt));
+  assert.ok(/pinsFrame\(panes, edge, hPx, dpr\);/.test(domHook) && /placeActive\(panes, hPx, dpr\);/.test(domHook),
     "the outline must be placed in the render frame's dom hook, from the frame's own pane rectangles");
   assert.match(host, /pv\.onActiveChange\(activeChanged\)/, "the chrome must hear every active-pane change");
   const changed = host.slice(host.indexOf("const activeChanged"), host.indexOf("pv.onActiveChange(activeChanged)"));
@@ -195,12 +198,15 @@ test("the surface places the outline per frame and on every change; the chrome n
     assert.ok(changed.includes(call), `an active-pane change does not call ${call}`);
   }
   assert.match(host, /activeName: \(\) => activePaneName\(/, "the chrome and the outline must share one name");
-  assert.match(host, /controls\.toggleFollow\(\)/, "L must be the FAB's own press");
+  // T-1001: the FAB retired, so `L` presses the ACTIVE pane's own Live button — the very element
+  // the user clicks, so the key and the button still cannot do different things.
+  assert.match(host, /liveButtons\?\.buttonFor\(pv\.activePane\)\?\.click\(\)/, "L must press the active pane's own Live button");
 
   const chrome = readFileSync("src/app/chrome/map-controls.ts", "utf8");
   const sync = chrome.slice(chrome.indexOf("const syncActive"), chrome.indexOf('goto.addEventListener("submit"'));
   assert.ok(sync.length > 200 && sync.length < 2000, "the syncActive slice is not the function");
-  for (const named of ["gotoPane", "layersBtn", "zoom.", "fab.", "paneHead"]) {
+  // T-1001: `fab.` left the list with the FAB — a per-pane Live button names its own pane.
+  for (const named of ["gotoPane", "layersBtn", "zoom.", "paneHead"]) {
     assert.ok(sync.includes(named), `syncActive does not name the pane on ${named}`);
   }
   // Global chrome (docs/23 §10.7): the colour scale and the outputs are never named per pane.

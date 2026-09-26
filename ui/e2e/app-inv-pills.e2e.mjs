@@ -21,7 +21,7 @@ const SHOTS = process.env.HK_E2E_SHOTS ?? null;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
 
 /** Every other piece of chrome the pills share the screen with. */
-const OTHER_CHROME = ".map-goto, .map-nudge, .map-status, .map-topright, .map-zoom, .map-fab, .map-offer:not([hidden]), .map-mode:not([hidden]), .sheet";
+const OTHER_CHROME = ".map-goto, .map-nudge, .map-status, .map-topright, .map-zoom, .sf-pane-live-btn, .map-offer:not([hidden]), .map-mode:not([hidden]), .sheet";
 
 /** Boxes of everything `sel` matches that is actually drawn, with a name. */
 const rects = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})]
@@ -58,7 +58,7 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
     // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
     await page.waitForSurfaceMounted({ timeoutMs: 60000 });
     await page.waitFor("the surface, its floating chrome, the sheet and both pills",
-      `!!document.querySelector('.map-topright button') && !!document.querySelector('.map-ctl .map-fab') &&
+      `!!document.querySelector('.map-topright button') && !!document.querySelector('.map-ctl .map-zoom-in') &&
        document.querySelector('.sheet')?.dataset.snap === 'peek' &&
        document.querySelectorAll('.map-inv .map-pill').length === 2 &&
        document.querySelectorAll('.sf-hud-label.time').length > 0`, { timeoutMs: 60000 });
