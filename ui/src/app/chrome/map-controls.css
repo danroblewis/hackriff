@@ -77,12 +77,49 @@
 .map-goto:focus-within { border-color: var(--amber); }
 .map-hint { color: var(--dim); font-size: 11px; }
 
+/* T-996: the left column under the nudge row — the T-997 inventory pills, the capture block, the Go-to offer and (at or below
+   1180 px) the tool-mode banner — is one STACK in flow (`map-controls.ts`), each block starting where
+   the one above it ended. The fixed `top:` per block it replaces assumed each block's height, and
+   the offer was drawn over the width presets as soon as a block wrapped (400 px). The stack is the
+   only in-flow child of the cluster and is itself pointer-transparent; it starts under the nudge row
+   and so below the top-right cluster, which is why its blocks may use the full width. */
+.map-ctl > .map-stack {
+  position: static; pointer-events: none; margin-top: 88px; width: min(460px, 100%);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+}
+.map-stack > * { pointer-events: auto; max-width: 100%; box-sizing: border-box; }
+.map-stack > [hidden] { display: none; }
+
 /* The retune offer under Go-to. Never faded (§10.2). */
-.map-offer { top: 44px; left: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; max-width: min(460px, calc(100% - var(--topright-w, 132px))); border-color: var(--amber); }
+.map-offer { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-color: var(--amber); }
 .map-offer-why { flex: 1; min-width: 0; font-size: 11.5px; }
 .map-offer-go { min-height: 28px; border: 1px solid var(--amber); color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
 .map-offer-go:disabled { opacity: .5; cursor: not-allowed; }
 .map-offer-x { min-width: 28px; min-height: 28px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+
+/* T-996: the active viewport's capture controls, under the nudges — "the Retune button stays where
+   Go-to lives". Two small rows: the persistent Retune with the destination it would take (the
+   painted-offer rule, T-476/T-407: a press lands where the row SAID, so the sentence is on screen
+   beside the button, never only in a tooltip), and the capture-width presets. Never faded: it is a
+   device command with a stated destination (§10.2). Hidden entirely when the host offers none. */
+.map-retune { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px; border-color: var(--amber); }
+.map-retune-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.map-retune-why { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-retune-go {
+  flex: none; min-height: 26px; border: 1px solid var(--amber); color: var(--amber);
+  background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; font: 12px var(--ui);
+}
+.map-retune-go:disabled { opacity: .5; cursor: not-allowed; }
+/* T-1028: retune mode's line about this viewport (pending / settling / asking / the result). */
+.map-retune-status { font-size: 11px; color: var(--text); overflow-wrap: anywhere; }
+.map-retune-row[hidden] { display: none; }
+.map-widths { display: flex; gap: 4px; flex-wrap: wrap; }
+.map-width {
+  min-height: 24px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 6px;
+  background: none; color: var(--muted); font: 11px var(--mono); cursor: pointer;
+}
+.map-width:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+.map-width:disabled { opacity: .45; cursor: not-allowed; }
 
 /* Layers: top-right, its panel beneath it. T-1025: eight chips in a row, not one box. */
 .map-topright { top: 0; right: 0; }
@@ -114,7 +151,7 @@
 .map-pane-item:disabled { opacity: .5; cursor: not-allowed; }
 
 /* T-882: measure mode's banner (the mockup's `#mode`), top-centre under Go-to's row. Never faded. */
-.map-mode { top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
+.map-mode { position: absolute; top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
 
 /* T-1028: retune mode's chip and its banner. The chip is lit like any pressed mode button; a HELD
    key (the momentary form, `R` down) is marked as well as lit, because "this ends when I let go" is
@@ -176,10 +213,17 @@
 .bar #review-btn .rv-ico { display: none; }
 .bar #review-btn .rv-n { margin-left: 4px; color: var(--coral); }
 .bar #review-btn .rv-n::before { content: "("; } .bar #review-btn .rv-n::after { content: ")"; }
-.map-more-menu { width: min(220px, 100%); }
+/* T-1007 widened this below, where the settings groups are styled. */
 .map-more-body #theme-btn { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
 .map-more-body #theme-btn:hover { background: var(--raise); }
 .map-more-body { display: flex; flex-direction: column; gap: 4px; }
+/* T-1053: the mode chips folded into ⋯ on a phone — the same buttons, as labelled menu rows. The
+   word is shown only here; in the chip row the icon is the face and the aria-label the name. */
+.map-ibtn-word { display: none; }
+.map-more-tools { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.map-more-tools .map-ibtn { width: auto; height: auto; min-height: 30px; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font: 12px var(--ui); text-align: left; }
+.map-more-tools .map-ibtn svg { width: 16px; height: 16px; flex: none; }
+.map-more-tools .map-ibtn-word { display: inline; }
 
 /* T-1008: the Scan button, inside the Go-to glass (small: it commands the radio), and its plan
    panel bottom-left above the map strip — beside the frequency axis the plan is drawn along, and
@@ -224,14 +268,15 @@
 .map-nudge { top: 44px; left: 0; display: flex; align-items: center; padding: 3px 6px; min-height: 36px; box-sizing: border-box; }
 .map-nudge .nudge-btn { min-height: 28px; min-width: 28px; }
 
-/* ---- T-997: the inventory pills, the left stack's third row -------------------------------------
+/* ---- T-997: the inventory pills, the first row of the left stack -------------------------------
    The lists' counts used to be a chip pinned at MID-HEIGHT on the left edge (T-895) — over each
    pane's time ruler (`surface/hud.ts` prints the time labels down that edge), belonging to no
    cluster. They are two small pills here instead: docked under Go-to and the nudge row, in one
    fixed position at every width, fading with the rest of the cluster (`map-fade`), and each opening
    the bottom sheet on its own list (`chrome/inv-pills.ts`). No hamburger glyph: the pills ARE the
-   affordance. Every row below them moves down by one row's height — the left stack is a stack. */
-.map-inv { top: 88px; left: 0; display: flex; align-items: center; gap: 2px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; }
+   affordance. T-996: they are the FIRST block of `.map-stack` (in flow, not a `top:` constant), so
+   the capture block, the Go-to offer and the mode banner start under them and never overlap them. */
+.map-inv { display: flex; align-items: center; gap: 2px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; }
 .map-pill { display: flex; align-items: baseline; gap: 4px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 7px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
 .map-pill:hover { background: var(--raise); }
 .map-pill:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
@@ -240,13 +285,16 @@
 .map-pill-n.confirmed { color: var(--teal); }
 .map-pill small { color: var(--muted); font-size: 11px; }
 .map-pill-sep { color: var(--dim); }
-.map-offer { top: 132px; }
 
 /* Not enough room for the pill between Go-to and the cluster: it drops under the cluster (right),
    beside the nudges (left); the tool-mode banner moves below both rows. */
 @media (max-width: 1180px) {
   .map-status { top: 44px; left: auto; right: 0; transform: none; max-width: calc(100% - 8px); }
-  .map-mode { top: 176px; }
+  /* T-996: the banner joins the left column's stack, under the pills, the capture block and the offer. */
+  .map-stack > .map-mode { position: static; transform: none; }
+  /* In flow the retune-mode banner is simply the next block; its wide-screen offset (below the
+     tool-mode banner, both absolute) would be a gap here. */
+  .map-stack > .map-retune-mode { margin-top: 0; }
 }
 @media (max-width: 900px) {
   .map-status .readouts { display: none; }
@@ -255,7 +303,13 @@
    eight of them, the nudges drop their label, and the pill states the device by its dot and label
    on the row under the nudges. */
 @media (max-width: 600px) {
-  .map-ctl { --topright-w: 328px; } /* T-1025, +T-1028's chip: 9 × 32 + 8 × 4 + 8 */
+  /* T-1053: five chips here — Measure, Annotate, Pin and Retune mode fold into ⋯ (`FOLD_QUERY`),
+     because nine reached 80 % of a 400 px pane (a bar by another name) and left Go-to 4 px of
+     input. 5 × 32 + 4 × 4 + 8. */
+  .map-ctl { --topright-w: 184px; }
+  /* T-1025: no painted chip wider than a third of the pane on the top edge — Go-to included; the
+     canvas shows between it and the cluster. */
+  .map-goto { width: min(calc(100% / 3), calc(100% - var(--topright-w))); }
   .map-topright { gap: 4px; }
   .map-status { gap: 4px; }
   .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }
@@ -270,10 +324,23 @@
   .map-nudge .nudge-label { display: none; }
   .map-nudge .nudge-btn { padding: 2px 4px; }
   .map-status { top: 88px; gap: 6px; padding-right: 8px; }
+  /* The status pill takes the row at 88 px here and is as wide as the phone, so the whole stack —
+     the T-997 pills first — starts under it: one position per width, never an overlap. */
+  .map-ctl > .map-stack { margin-top: 132px; }
   .map-status .mode { padding: 4px 7px; font-size: 11.5px; }
-  /* T-997: the status pill takes the row at 88 px here and is as wide as the phone, so the pills
-     drop under it rather than beside it — one fixed position per width, never an overlap. */
-  .map-inv { top: 132px; }
-  .map-offer { top: 176px; }
-  .map-mode { top: 220px; }
 }
+
+/* ---- T-1007: the ⋯ menu is the settings menu ------------------------------------------------------
+   Theme plus every preference that used to be in Review: colour scale (auto-contrast), the time
+   ruler's labels, the front ends and which viewport's grey reads which, and the capture window the
+   backend reports. Groups reuse the layers menu's row/axis rules; only the extra shapes are here. */
+.map-more-menu { width: min(300px, 100%); }
+.map-settings-rows { margin-top: 6px; }
+.map-settings-rows .map-layers-axis h4 { margin: 0 0 6px; font: 600 10.5px/1.3 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.map-row-sel, .map-row-read { justify-content: space-between; gap: 8px; cursor: default; }
+.map-row-sel select { max-width: 55%; background: none; border: 1px solid var(--line); border-radius: 6px; color: var(--text); font: 12px var(--ui); padding: 2px 4px; min-height: 26px; }
+.map-row-read strong { font: 12px var(--mono); color: var(--text); }
+.map-device { padding: 2px 0 4px; }
+.map-device-name { font: 12px var(--ui); color: var(--text); }
+.map-device small { margin-left: 6px; color: var(--muted); font-size: 10.5px; }
+.map-device .mono { font-family: var(--mono); font-size: 10px; word-break: break-all; }

@@ -127,8 +127,13 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  */
 const GREY_RGB = [Math.round(0.155 * 255), Math.round(0.16 * 255), Math.round(0.18 * 255)];
 
-/** The pane's retune control, and the device routes a press may reach. */
-const PANE_ACTION = '.hk-surface-viewport[data-viewport="pane"] .hk-surface-action';
+/**
+ * The pane's retune control, and the device routes a press may reach.
+ *
+ * T-996 moved it out of the retired per-viewport panel into the floating cluster, under Go-to: same
+ * offer, same painted-offer consent, same gated `DeviceAction` on the press — a different parent.
+ */
+const PANE_ACTION = '.map-retune-go';
 const ZOOM = { shift: true }; // a FREQUENCY zoom; T-472 stops a plain wheel at either axis's bound.
 
 // ---------------------------------------------------------------------------
@@ -255,7 +260,7 @@ async function open({ port = PORT_BASE, mockFault = null } = {}) {
     const note = (await page.$text(".sf-note")) ?? "";
     assert.ok(!/could not be addressed|WebGL2 is unavailable/.test(note), `the surface refused to mount: ${note}`);
     await page.waitFor("a pane readout to exist",
-      `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 20000 });
+      `!!document.querySelector('.sf-scale')?.dataset.pane`, { timeoutMs: 20000 });
     await page.waitFor("the per-pane retune control to be on the page",
       `!!document.querySelector('${PANE_ACTION}')`, { timeoutMs: 20000 });
     // The instruments must have actually installed, or every claim below is about nothing.
@@ -274,18 +279,27 @@ async function open({ port = PORT_BASE, mockFault = null } = {}) {
 // Reading the page, and reading the server
 // ---------------------------------------------------------------------------
 
-/** Every viewport row, as the user reads it. From the DOM, never from client bookkeeping (T-454). */
-const ROWS = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => {
-  const b = v.querySelector('.hk-surface-action');
+/**
+ * Every viewport, as the user reads it. From the DOM, never from client bookkeeping (T-454).
+ *
+ * T-996: the per-viewport panel is retired, so a pane states itself in two places the frame writes
+ * together — its own scale block bottom-right (`.sf-scale`, whose dataset is the frame's own report:
+ * the level and tier it drew at, its tile counts, and the Hz/px the bar's length was chosen under)
+ * and the one status line bottom-left (`.sf-where`, the active pane's window). The capture control
+ * is the cluster's. Same facts, same frame; a different set of elements to read them off.
+ */
+const ROWS = `JSON.stringify([...document.querySelectorAll('.sf-scale')].map((v) => {
+  const b = document.querySelector('.map-retune-go');
   return {
-    id: v.querySelector('.hk-surface-id')?.textContent ?? '',
-    viewport: v.getAttribute('data-viewport'),
-    following: v.getAttribute('data-following') === 'true',
-    where: v.querySelector('.hk-surface-where')?.textContent ?? '',
-    level: v.querySelector('.hk-surface-level')?.textContent ?? '',
-    counts: v.querySelector('.hk-surface-counts')?.textContent ?? '',
+    id: v.dataset.pane ?? '',
+    viewport: 'pane',
+    following: v.dataset.following === 'true',
+    where: (v.dataset.where ?? '') + ' · ' + (v.dataset.when ?? ''),
+    level: v.dataset.level ?? '',
+    counts: v.dataset.counts ?? '',
+    spanS: Number(v.dataset.spanS),
     disabled: b ? b.disabled : null,
-    why: v.querySelector('.hk-surface-why')?.textContent ?? '',
+    why: document.querySelector('.map-retune-why')?.textContent ?? '',
   };
 }))`;
 
@@ -297,7 +311,7 @@ const pane0 = async (page) => {
 };
 
 /**
- * The pane's frequency window, parsed from `.hk-surface-where`.
+ * The pane's frequency window, parsed from the scale block's `data-where` (T-996; it was `.hk-surface-where`).
  *
  * Numbers, never the string: T-478. The readout states MHz to 3 dp, so it is known to about ±500 Hz
  * — every comparison against it carries that as its tolerance, and nothing here compares it for
@@ -635,7 +649,7 @@ async function sampleGrey(page, rect, { n = 5, gapMs = 2000 } = {}) {
  * 33.7 % of the same pane grey against the same 88.8 % from the server. The number was not noisy;
  * the question was.
  *
- * `.hk-surface-counts` is the frame's own report — `${tiles} tiles · ${fallbacks} coarse stand-ins ·
+ * The scale block's `data-counts` (T-996) is the frame's own report — `${tiles} tiles · ${fallbacks} coarse stand-ins ·
  * ${pending} pending` — which is `PaneReport`, i.e. what the renderer actually drew with, not a
  * second calculation that could disagree with the pixels. It is the same instrument `surface-colour`
  * pins residency with, for the same reason.
@@ -747,7 +761,7 @@ async function reopen(page, backend) {
   await page.waitFor("the app's surface to finish addressing",
     `(document.querySelector('.sf-note')?.textContent ?? "").length > 0`, { timeoutMs: 60000 });
   await page.waitFor("a pane readout to exist",
-    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 20000 });
+    `!!document.querySelector('.sf-scale')?.dataset.pane`, { timeoutMs: 20000 });
   await page.waitFor("the per-pane retune control to be on the page",
     `!!document.querySelector('${PANE_ACTION}')`, { timeoutMs: 20000 });
   await page.frames(4);
@@ -782,20 +796,14 @@ const recent = () => { const now = Date.now() / 1000; return [now - RECENT_S, no
  * the window, so the window's older edge lies less than one step past the oldest tick. `null` when
  * the ruler states fewer than two time ticks.
  */
-function paneSpanBoundS(ruler) {
-  const m = /time (.*)$/.exec(ruler ?? "");
-  if (!m) return null;
-  const unit = { ms: 1e-3, s: 1, m: 60, h: 3600 };
-  const ages = m[1].split(",").map((x) => {
-    const mm = /([\d.]+) m ([\d.]+) s/.exec(x);
-    if (mm) return Number(mm[1]) * 60 + Number(mm[2]);
-    const t = /([\d.]+) (ms|s|h)/.exec(x);
-    return t ? Number(t[1]) * unit[t[2]] : NaN;
-  }).filter(Number.isFinite).sort((a, b) => a - b);
-  if (ages.length < 2) return null;
-  let gap = 0;
-  for (let i = 1; i < ages.length; i++) gap = Math.max(gap, ages[i] - ages[i - 1]);
-  return ages[ages.length - 1] + gap;
+function paneSpanBoundS(stated) {
+  // T-996: the pane's OWN time span, off the scale block's dataset — the exact seconds the frame
+  // laid that pane out with. It used to be inferred from the ruler SENTENCE (the largest stated age
+  // plus the widest gap between marks), which was a bound rather than the number, because a
+  // sentence was all the retired panel offered. The dataset is what the bar's length was computed
+  // from, so it cannot disagree with the pixels.
+  const v = Number(stated);
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 /**
@@ -808,10 +816,9 @@ function paneSpanBoundS(ruler) {
 async function waitForRecordToCover(page, backend, view, { timeoutMs = 60000 } = {}) {
   const t0 = Date.now();
   for (;;) {
-    const ruler = await page.eval(
-      `document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-ruler')?.textContent ?? ""`);
+    const ruler = await page.eval(`document.querySelector('.sf-scale')?.dataset.spanS ?? ""`);
     const paneS = paneSpanBoundS(ruler);
-    assert.ok(paneS !== null, `the pane's ruler states no time extent to bound: ${JSON.stringify(ruler)}`);
+    assert.ok(paneS !== null, `the pane states no time extent to bound: ${JSON.stringify(ruler)}`);
     const h = (await get(backend,
       `/api/coverage?f_lo=${Math.round(view.loHz)}&f_hi=${Math.round(view.hiHz)}&cells=1`)).horizon;
     assert.ok(typeof h?.recording_began_s === "number", `the server names no recording_began_s: ${JSON.stringify(h)}`);
@@ -842,10 +849,9 @@ async function waitForBodyObserved(page, backend, view) {
   const t0 = Date.now();
   let paneS = null, bodyS = 0, last = null, first = null;
   for (;;) {
-    const ruler = await page.eval(
-      `document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-ruler')?.textContent ?? ""`);
+    const ruler = await page.eval(`document.querySelector('.sf-scale')?.dataset.spanS ?? ""`);
     paneS = paneSpanBoundS(ruler);
-    assert.ok(paneS !== null, `the pane's ruler states no time extent to bound: ${JSON.stringify(ruler)}`);
+    assert.ok(paneS !== null, `the pane states no time extent to bound: ${JSON.stringify(ruler)}`);
     const now = Date.now() / 1000;
     const bodyT1 = now - paneS * LIVE_EDGE_ZONE;
     bodyS = paneS * (1 - LIVE_EDGE_ZONE);

@@ -67,9 +67,11 @@ const clearPoint = (x0, x1) => `JSON.stringify((() => {
   }
   return null; })())`;
 
-/** Each pane's follow state, from its own status row (`data-following`, written per frame). */
-const FOLLOWS = `JSON.stringify(Object.fromEntries([...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]')]
-  .map((r) => [r.querySelector('.hk-surface-id').textContent, r.dataset.following === 'true'])))`;
+/** Each pane's follow state, from its own scale block (`data-following`, written per frame). T-996
+ * retired the per-viewport status rows from the app; the scale block is where a pane states itself
+ * now, from the same frame's statuses (`data-pane` is the pane id the row's id cell showed). */
+const FOLLOWS = `JSON.stringify(Object.fromEntries([...document.querySelectorAll('.sf-scale:not([hidden])')]
+  .map((r) => [r.dataset.pane, r.dataset.following === 'true'])))`;
 
 for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: the active pane is outlined and named; click, right-click and keys move both at once`, async (t) => {
   const browser = await Browser.open();
@@ -78,8 +80,8 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the floating cluster to mount", "!!document.querySelector('.map-pane-btn') && !!document.querySelector('.sf-active-pane')", { timeoutMs: 30000 });
-  await page.waitFor("a pane row with its level stated",
-    "!!document.querySelector('.hk-surface-viewport[data-viewport=\"pane\"] .hk-surface-level')?.textContent", { timeoutMs: 90000 });
+  await page.waitFor("a pane's scale block with its level stated",
+    "!!document.querySelector('.sf-scale:not([hidden])')?.dataset.level", { timeoutMs: 90000 });
 
   // One pane: nothing to disambiguate, so no outline and no badge (docs/23 §10.6 P1).
   const one = JSON.parse(await page.eval(NAMED));
@@ -151,7 +153,7 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: t
   }
 
   // `L` toggles Live on the ACTIVE pane (pane 1) and leaves pane 2 alone.
-  const ids = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"] .hk-surface-id')].map((e) => e.textContent))`));
+  const ids = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('.sf-scale:not([hidden])')].map((e) => e.dataset.pane))`));
   const activeId = await page.eval("document.querySelector('.sf-active-pane').dataset.paneId");
   const otherId = ids.find((i) => i !== activeId);
   assert.ok(activeId && otherId, `two pane rows expected: ${JSON.stringify({ ids, activeId })}`);

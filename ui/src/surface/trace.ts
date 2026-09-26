@@ -462,6 +462,17 @@ export interface TracePath {
   readonly rgb: Float32Array;
   readonly alpha: number;
   readonly widthPx: number;
+  /**
+   * **Which vertices are a MEASURED column's own value**, as point indices into `xy` — the rest are
+   * [[TRACE_SUBDIV]] interpolation between two of them (and the two end caps, which repeat their
+   * neighbour's value across the column's frequency extent).
+   *
+   * Only one reader needs the distinction and it is the honest subject of T-475's equality: at a
+   * measured column the trace's dB **is** a cell's dB, so its colour must be that cell's colour,
+   * while between two of them the monotone interpolant is a value no cell carries and a pixel
+   * comparison against the cells is asking a question the picture cannot answer. See [[coreSamples]].
+   */
+  readonly measured: Uint32Array;
 }
 
 export interface TraceStyle {
@@ -592,7 +603,11 @@ export function tracePaths(
   const emit = (c0: number, c1: number): void => {
     const len = c1 - c0;
     const xs: number[] = [], ys: number[] = [], rgb: number[] = [];
-    const push = (x: number, db: number) => {
+    // The vertices that carry a measured column's own value rather than an interpolated one; see
+    // [[TracePath.measured]]. Recorded where the points are pushed, so the two cannot drift apart.
+    const measured: number[] = [];
+    const push = (x: number, db: number, exact = false) => {
+      if (exact) measured.push(xs.length);
       xs.push(x); ys.push(yOf(db));
       const c = rgbOf(db);
       rgb.push(c[0], c[1], c[2]);
@@ -600,9 +615,10 @@ export function tracePaths(
     const [firstX0] = edge(c0);
     const lastX1 = edge(c1 - 1)[1];
     if (len === 1) {
-      // One column, alone between two gaps: a flat tick the width of the column it measured.
-      push(firstX0, cols[c0]);
-      push(lastX1, cols[c0]);
+      // One column, alone between two gaps: a flat tick the width of the column it measured. Both
+      // ends carry that column's own value, so both are measured vertices.
+      push(firstX0, cols[c0], true);
+      push(lastX1, cols[c0], true);
     } else {
       const v = new Float64Array(len);
       const mid = new Float64Array(len);
@@ -617,7 +633,7 @@ export function tracePaths(
       const m = monotoneSlopes(v, 1);
       // A half-column cap at each end, so a run covers exactly the frequency extent it measured —
       // the same extent the per-column quads used to cover, and what the band-edge check reads.
-      push(firstX0, v[0]);
+      push(firstX0, v[0], true);
       for (let i = 0; i < len - 1; i++) {
         const y0 = v[i], y1 = v[i + 1], m0 = m[i], m1 = m[i + 1];
         for (let k = 0; k < subdiv; k++) {
@@ -625,16 +641,18 @@ export function tracePaths(
           const t2 = t * t, t3 = t2 * t;
           const db = (2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * m0
             + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * m1;
-          push(mid[i] + (mid[i + 1] - mid[i]) * t, db);
+          // k === 0 is the column's own midpoint and its own value; the rest interpolate.
+          push(mid[i] + (mid[i + 1] - mid[i]) * t, db, k === 0);
         }
       }
-      push(mid[len - 1], v[len - 1]);
-      push(lastX1, v[len - 1]);
+      push(mid[len - 1], v[len - 1], true);
+      push(lastX1, v[len - 1], true);
     }
     out.push({
       kind, id, alpha, widthPx,
       xy: Float32Array.from(xs.flatMap((x, i) => [x, ys[i]])),
       rgb: Float32Array.from(rgb),
+      measured: Uint32Array.from(measured),
     });
   };
 
@@ -645,6 +663,151 @@ export function tracePaths(
     else if (!ok && run >= 0) { emit(run, c); run = -1; }
   }
   if (run >= 0) emit(run, n);
+  return out;
+}
+
+/**
+ * **One point of a stroke the trace pass drew: where its CORE is on the screen, and the colour it
+ * was stroked in** (T-1050).
+ *
+ * ## Why the page has to state this
+ *
+ * T-475's claim is an equality — *the same dB is the same colour on the trace and in the cells* —
+ * and `ui/e2e/app-trace.e2e.mjs` reads it off a real framebuffer, which means it has to find the
+ * stroke's core among the pixels. While the trace had a strip of its own that was a question the
+ * pixels could answer: the band was backdrop, so the brightest pixel in a column was the core.
+ * Since T-1041 the layer is drawn **over the pane's own rows**, and both halves of the old rule
+ * broke at once:
+ *
+ *  - where the claim HOLDS, the core pixel is *identical* to the cell under it, so a difference
+ *    against a trace-off baseline — the instrument that says which pixels are the layer's — throws
+ *    away exactly the pixels that pass and keeps the ones that fail;
+ *  - the bloom is achromatic (`shade: "mono"`) and 18 % opaque, so over a cell it is a lightened,
+ *    desaturated copy of *that cell* — brighter than a dark core and chromatic — and "the brightest
+ *    pixel in the stroke" returns the bloom. Measured on the T-1041 misses: bloom `[76,169,193]`
+ *    against a cell `[31,185,203]`, and the property read 57.8 % of columns where it holds.
+ *
+ * Guessing the core's row from stroke geometry in the test was the third attempt and is the wrong
+ * shape of instrument anyway: it re-derives in the test what the renderer already knows, which is
+ * the T-388 family (two derivations of one picture).
+ *
+ * So the page states it. This is the **geometry and the ink of the vertices that were handed to the
+ * GPU** — read off the very `TracePath`s `TracePass.draw` submitted, never recomputed from `cmap`
+ * and never from the pane box a second time — and the test reads the *colour* out of the
+ * framebuffer at the position stated here. What the test then asserts is therefore two things a
+ * statement alone could not fake: that the pixel at the stated place carries the stated ink (the
+ * layer drew what it says it drew), and that the same pixel is a colour the waterfall paints in
+ * that column (T-475's equality). A wrong statement of position fails the first; a diverged ramp
+ * fails the second.
+ *
+ * `xPx`/`yPx` are **CSS px from the canvas element's top-left** — the frame of reference a screenshot
+ * and `getBoundingClientRect` share — so nothing downstream has to know about GL's upside-down
+ * viewport or the device-pixel ratio. `rgb` is 0–255, `round(255 · v)` of the vertex's own linear
+ * colour, which is what the fragment shader writes into the drawing buffer at full coverage.
+ */
+export interface TraceCoreSample {
+  readonly xPx: number;
+  readonly yPx: number;
+  readonly rgb: readonly [number, number, number];
+  /**
+   * **This pixel is a MEASURED column's own dB**, not a point on the interpolant between two of them
+   * ([[TracePath.measured]]) — the only samples T-475's equality can be asked of, because only they
+   * are a dB some cell under the trace also carries. Always true when `onlyMeasured` was asked for.
+   */
+  readonly measured: boolean;
+}
+
+/**
+ * The core of `paths` as [[TraceCoreSample]]s, **one per device pixel column**, in increasing x.
+ *
+ * ## Why this is a pixel-centre walk and not a list of the vertices
+ *
+ * A vertex is on the stroke's centreline, but a *pixel* is only fully covered if its own centre is
+ * within `half − 1` px of that line (`tracepass.ts`: `cov = clamp((1 − |e|) · halfPx)`), and rounding
+ * a vertex to the nearest pixel centre moves it by up to 0.707 px diagonally — which on a 3 px stroke
+ * leaves ≈ 0.79 coverage, i.e. a fifth of the bloom-over-cell behind it mixed in. Measured, reporting
+ * vertices: 58 of 110 stated samples carried the stated ink, and the misses were all that shape
+ * (`said [42,187,194]`, pixel `[48,166,172]` — duller and desaturated, which is the achromatic bloom
+ * showing through).
+ *
+ * Walking pixel **columns** removes the rounding instead of tolerating it: for each column the
+ * centreline's y at that column's own centre `x = i + 0.5` is where the stroke is, and the pixel row
+ * whose centre is nearest to it is off by at most 0.5 px *vertically*, hence at most 0.5 px
+ * perpendicular however steep the segment is — fully covered for any `widthPx ≥ 3`. So every column a
+ * path crosses yields exactly one sample, and it is a pixel the shader wrote the vertex colour into
+ * without blending. The colour is interpolated along the segment the same way the rasteriser
+ * interpolates it, because that is the colour that pixel was given.
+ *
+ * `measured` marks the columns that hold a measured vertex, i.e. where the dB is a cell's own dB and
+ * not a point on the interpolant between two columns — the only ones whose colour a cell can be asked
+ * about. (Measured over every column instead: 84–88 % matched, with every miss on the steep flank of
+ * the FM carrier, where 5.6 px of interpolation climbs between two pooled columns whose own colours
+ * are 20/255 apart. That is the interpolant being drawn honestly, not the ramp diverging, and it does
+ * not belong in the same number.)
+ *
+ * **`onlyMeasured` is a COST option, and the caller on the render path uses it.** This runs in the
+ * frame it describes, so its cost is paid whether or not anyone reads it: measured at a 1440 px pane,
+ * 256 pooled columns, `JSON.stringify` included — 0.86 ms and a 36.8 kB payload per frame reporting
+ * every column, 0.49 ms / 6.0 kB walking every column but reporting only the measured ones, and
+ * **0.28 ms / 6.0 kB** skipping the allocation for the rest. On a 16 ms budget the first is 5 %,
+ * which is not a diagnostic's share of a frame; the last is what `ui/src/app/centre/surface.ts` asks
+ * for, and nothing at all with the layer off (its default).
+ *
+ * `canvasHPx` is the drawing buffer's height in device px (GL's y runs up from its bottom, and `rect`
+ * is in that frame); `dpr` scales device px to the CSS px a screenshot and `getBoundingClientRect`
+ * are indexed by. A path narrower than 3 px is skipped rather than reported unreliably: the caller
+ * asks about the core, and a 1.4 px max-hold has none.
+ */
+export function coreSamples(
+  paths: readonly TracePath[],
+  rect: PaneRect,
+  canvasHPx: number,
+  dpr: number,
+  { onlyMeasured = false }: { onlyMeasured?: boolean } = {},
+): TraceCoreSample[] {
+  const out: TraceCoreSample[] = [];
+  const s = dpr > 0 ? dpr : 1;
+  if (!(rect.w > 0) || !(rect.h > 0)) return out;
+  const seen = new Set<number>();
+  for (const p of paths) {
+    const half = Math.max(0.5, p.widthPx / 2);
+    if (half < 1.5) continue;
+    const n = p.xy.length >> 1;
+    const xAt = (i: number) => rect.x + ((p.xy[2 * i] + 1) / 2) * rect.w;
+    const yAt = (i: number) => canvasHPx - (rect.y + ((p.xy[2 * i + 1] + 1) / 2) * rect.h);
+    // The pixel columns a measured vertex falls in — the ones whose dB is a cell's dB.
+    const exact = new Set<number>();
+    for (const i of p.measured) {
+      const x = xAt(i);
+      if (Number.isFinite(x)) exact.add(Math.floor(x));
+    }
+    for (let i = 0; i < n - 1; i++) {
+      // Ordered by x so the walk is one direction; the colours travel with their ends.
+      const fwd = xAt(i) <= xAt(i + 1);
+      const a = fwd ? i : i + 1, b = fwd ? i + 1 : i;
+      const x0 = xAt(a), x1 = xAt(b), y0 = yAt(a), y1 = yAt(b);
+      if (!Number.isFinite(x0) || !Number.isFinite(x1) || !Number.isFinite(y0) || !Number.isFinite(y1)) continue;
+      const dx = x1 - x0;
+      for (let col = Math.ceil(x0 - 0.5); col + 0.5 <= x1; col++) {
+        if (col < 0 || seen.has(col)) continue;
+        const isMeasured = exact.has(col);
+        if (onlyMeasured && !isMeasured) continue;
+        const t = dx > 1e-9 ? (col + 0.5 - x0) / dx : 0;
+        const yTop = y0 + (y1 - y0) * t;
+        const row = Math.round(yTop - 0.5);
+        if (!(row >= 0)) continue;
+        seen.add(col);
+        const mix = (k: number) => p.rgb[3 * a + k] + (p.rgb[3 * b + k] - p.rgb[3 * a + k]) * t;
+        out.push({
+          xPx: (col + 0.5) / s,
+          yPx: (row + 0.5) / s,
+          rgb: [Math.round(255 * mix(0)), Math.round(255 * mix(1)), Math.round(255 * mix(2))],
+          measured: isMeasured,
+        });
+      }
+    }
+  }
+  out.sort((a, b) => a.xPx - b.xPx);
   return out;
 }
 

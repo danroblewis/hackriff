@@ -544,7 +544,9 @@ test("the surface host WIRES the mode: the gesture hook, both key edges, the chi
   assert.match(src, /retuneMode\.moved\(pane\)/, "a gesture's MOVES do not re-arm the settle");
   assert.match(src, /addEventListener\("keydown", onRetuneKeyDown\)/, "`R` down is not wired");
   assert.match(src, /addEventListener\("keyup", onRetuneKeyUp\)/, "`R` up is not wired: the mode could never be released");
-  assert.match(src, /chromeStatus: retuneStatusFor/, "the pane's status line is not wired");
+  // T-996 retired the per-viewport rows `chromeStatus` rendered on; the same line is said on the
+  // floating capture block beside Retune, through the cluster's `paneStatus` (integration, T-996).
+  assert.match(src, /paneStatus: \(\) => retuneStatusFor\(/, "the pane's status line is not wired");
   assert.match(src, /setRetuneMode: \(on\) => retuneMode\.setSticky\(on\)/, "the chip cannot reach the mode");
   assert.match(src, /commitRetuneMode\(/, "the commit does not go through the mode's one gated path");
   // And the mode is never turned on by the mount: off by default is a property of the code, not of

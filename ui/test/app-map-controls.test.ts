@@ -163,7 +163,12 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   assert.match(ts, /class: "map-ibtn map-measure-btn"/);
   assert.match(ts, /class: "map-ibtn map-pane-btn"/);
   for (const act of ["split", "close", "whole"]) assert.match(ts, new RegExp(`paneItem\\("${act}"`));
-  assert.match(ts, /"data-axis": "scale", role: "radiogroup"/);
+  // T-1007 moved the colour scale one menu across — out of Layers (a per-pane picture) and into the
+  // ⋯ settings menu, which is where the view-wide preferences now live. Still in the cluster, still
+  // one radio group over the one range mode: the assertion follows the control, it is not dropped.
+  const settings = readFileSync("src/app/chrome/settings.ts", "utf8");
+  assert.match(settings, /group\("scale", "Colour scale[^"]*", "Colour scale, every pane", "radiogroup"/);
+  assert.doesNotMatch(ts, /"data-axis": "scale"/, "the colour scale is still offered by the layers menu too");
   assert.match(ts, /fade\.hold\("pane-menu", open\)/, "an open viewport menu must not fade");
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.doesNotMatch(host, /sf-bar|sf-actions|sf-live|sf-tracebtn|sf-contrast|sf-vscale|sf-signalsbtn|sf-measurebtn/,
@@ -172,45 +177,69 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   // (docs/23 §10.1: no chrome subtracts from the canvas). The statuses that were rows under the
   // stage float over it in one bottom-left stack, as screen-space chrome, with the readout.
   assert.match(host, /el\.replaceChildren\(stage\);/, "the stage is the surface's only row: full-bleed, nothing above or below it");
-  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome", "data-open": "false" \}, statusBody, statusLine\)/,
-    "the statuses float over the stage as one chrome stack, collapsed by default");
+  // T-996: the statuses float over the stage as ONE LINE — no white per-viewport panel, no `More`.
+  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome" \}, fogEl, priorsEl, statusLine, said\)/,
+    "the statuses do not float over the stage as one line with its conditional statements");
   assert.match(host, /paneMenuExtras: \[recordBtn\]/, "Record IQ has a home in the viewport menu");
 });
 
-// T-919 (user P1, docs/23 §10.6 rule 1 + §10.2): the floating status is a COMPACT LINE that
-// expands on demand and has a visible dismiss — it is not a permanent 560 x 184 px panel over the
-// waterfall. What is compiled in here is the composition and the toggle; that the collapsed box is
-// actually small, that the tier/level statement is in it in every state, and that expand / collapse
-// / dismiss work on the real page are `ui/e2e/app-status.e2e.mjs`'s to measure.
-test("T-919: the status box is a collapsed line by default, with a toggle and a dismiss that never hides the honesty statements", () => {
+// T-996 (user, 2026-09-25, map-UI nit-picks via the supervisor): the white per-viewport panel
+// ("100.980 MHz ± 937 kHz · LIVE") and the `More` expansion behind it are RETIRED. What is on the
+// picture instead: a Google-Maps-style scale bar bottom-right of every pane, and one line
+// bottom-left. What is compiled in here is the composition; that the bar's pixels match the pane's
+// own Hz/px and s/px at three zooms, and that it all fits at 400 px, is `ui/e2e/app-status.e2e.mjs`.
+test("T-996: no white centre/span panel and no `More` expansion — a scale bar per pane and one status line", () => {
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  // The paragraphs — the ones that made it tall — are the BODY, and the body starts hidden.
-  assert.match(host, /class: "sf-status-body", id: "sf-status-body", hidden: true \},\s*\n?\s*traceEl, ringEl, fogEl, priorsEl, note\)/,
-    "the sentences are not the collapsible body, or the body does not start closed");
-  // The line is always on the picture, and carries the per-viewport level/tier row (§10.2: an
-  // honesty statement is never hidden) and the colour-scale sentence (T-470).
-  assert.match(host, /class: "sf-status-line" \},\s*\n?\s*chrome, readout,/,
-    "the always-visible line must carry the viewport level readout and the colour-scale readout");
+  // Gone: the panel, its toggle, its dismiss, and the per-viewport rows the app used to mount.
   for (const [re, why] of [
-    [/class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded"/, "no accessible expand control"],
-    [/class: "sf-status-close", type: "button", "aria-label": "Close the status detail"/, "no visible dismiss (P1)"],
-    [/trackOverlay\("surface-status", \(\) => setStatusOpen\(false\)\)/, "the detail is not on the one Escape stack (T-900)"],
-    [/statusClose\.addEventListener\("click", \(\) => setStatusOpen\(false\)\)/, "the dismiss does not close the detail"],
-  ] as const) assert.match(host, re, why);
-  // Dismissing returns to the LINE, never to nothing: nothing removes or hides `statusEl` itself.
-  assert.doesNotMatch(host, /statusEl\.hidden|statusLine\.hidden|statusEl\.remove\(\)/,
-    "the status line itself can be hidden, which would switch an honesty statement off");
+    [/sf-status-toggle/, "the `More` toggle is still built"],
+    [/sf-status-body/, "the expansion body is still built"],
+    [/sf-status-close/, "the expansion's dismiss is still built"],
+    [/class: "sf-chrome"/, "the app still mounts the white per-viewport panel"],
+    [/setStatusOpen/, "the expand/collapse machinery is still here"],
+  ] as const) assert.doesNotMatch(host, re, why);
+  // The app no longer hands `SurfaceChrome` an element at all (the developer preview still does).
+  assert.doesNotMatch(host, /\bchrome, minimapPx|chromeAction, onChromeAction/,
+    "the surface still mounts the per-viewport chrome rows");
+
+  // There: the per-pane scale layer, placed inside the render frame from that frame's own statuses.
+  assert.match(host, /class: "sf-scales"/, "no scale-bar layer over the canvas");
+  assert.match(host, /new ScaleBars\(scaleEl\)/);
+  assert.match(host, /const scaleFrame = \([^]*?statuses: readonly PaneStatus\[\],[^]*?\) => \{/,
+    "the scale bars are not built from the frame's own per-viewport statuses");
+  assert.match(host, /scaleFrame\(panes, hPx, dpr, statuses\);/,
+    "the scale bars are not laid out in the render frame (a poll would state last second's zoom)");
+  assert.match(host, /scaleMarkOf\(/);
+  // The KEPT readout: where the viewport is looking, and peak dB only under the pointer.
+  assert.match(host, /class: "sf-where"/, "the centre/span/LIVE readout was dropped, not kept");
+  assert.match(host, /setText\(whereEl, \[st\.freqLabel, st\.timeLabel/,
+    "the kept readout is not written from the frame's own status");
+  assert.match(host, /hoverPeak = slicePk \?/, "peak dB is not carried to the hover readout");
+  assert.match(host, /const peak = hoverPeak && hit && hit\.pane\.id === preview\?\.activePane/,
+    "peak dB is not scoped to the pane under the pointer");
+
+  // T-476/T-496's device controls kept their arithmetic and moved to where Go-to lives.
+  assert.match(host, /paneRetune: \(\) => chromeAction\(pv\.activePane\)/);
+  assert.match(host, /pressPaneRetune: \(\) => pressRetune\(pv\.activePane\)/);
+  assert.match(host, /paneWidths: \(\) => widthActions\(pv\.activePane\)/);
+  assert.match(host, /renderRetune\(\);/, "the cluster's Retune is not re-derived per render frame");
+  const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  assert.match(ts, /class: "map-glass map-retune"/, "the capture controls have no home under Go-to");
+  assert.match(ts, /retuneGo\.addEventListener\("click", \(\) => \{ if \(!retuneGo\.disabled\) host\.pressPaneRetune\?\.\(\); \}\)/,
+    "the Retune press is not a plain click on a persistent button (T-407: never a gesture threshold)");
+  // A width preset crosses as an OPAQUE key: the cluster routes the press back by the key it was
+  // handed and never parses what it means (the host does, on the other side of the boundary).
+  assert.match(ts, /host\.pressPaneWidth\?\.\(rec\.key\)/);
+  assert.doesNotMatch(ts, /WIDTH_PRESETS|Number\(rec\.key\)/, "the cluster learned what a width preset means");
+
   const css = readFileSync("src/app/centre/centre.css", "utf8");
   assert.match(css, /\.sf-status \{[\s\S]*?max-width: min\(560px, calc\(100% - 80px\)\)/,
     "the status has no width bound, or runs under the right-edge cluster");
-  assert.match(css, /\.sf-status:not\(\[data-open="true"\]\) \.sf-chrome \{[^}]*max-height: 46px/,
-    "the collapsed viewport row is not bounded to a line");
-  // What the collapse may NOT put away: the level/tier (§10.2) and the offer's own sentence, which
-  // is what a press consents to (T-476's painted-offer rule).
-  for (const keep of ["hk-surface-level", "hk-surface-why"]) {
-    assert.doesNotMatch(css, new RegExp(`\\.sf-status:not\\(\\[data-open="true"\\]\\) \\.${keep} \\{[^}]*display: none`),
-      `the collapsed line hides .${keep}`);
-  }
+  assert.match(css, /\.sf-scale \{[\s\S]*?translate: calc\(-100% - 56px\) calc\(-100% - 12px\)/,
+    "the scale block is not anchored inside its pane's bottom-right corner");
+  assert.match(css, /\.sf-scales \{[^}]*pointer-events: none/,
+    "the scale layer can take a pan from the surface under it");
+  assert.doesNotMatch(css, /\.sf-status:not\(\[data-open="true"\]\)/, "the collapse rules survive the retired panel");
 });
 
 test("T-995: with no minimap, the Zoom-out press reaches the WHOLE device range — the lock holds until time is saturated", () => {
@@ -256,7 +285,18 @@ class FakeEl {
   setAttribute(k: string, v: string) { this.attrs[k] = v; if (k === "class") v.split(/\s+/).forEach((c) => c && this.classes.add(c)); if (k === "hidden") this.hidden = true; }
   getAttribute(k: string) { return this.attrs[k] ?? null; }
   removeAttribute(k: string) { delete this.attrs[k]; }
-  append(...c: (FakeEl | string)[]) { for (const x of c) if (typeof x !== "string") this.children.push(x); else this.textContent += x; }
+  /** T-1053: a node has one parent — appending it elsewhere MOVES it, as the DOM does. */
+  parentElement: FakeEl | null = null;
+  private adopt(x: FakeEl) {
+    const old = x.parentElement;
+    if (old) { const i = old.children.indexOf(x); if (i >= 0) old.children.splice(i, 1); }
+    x.parentElement = this;
+  }
+  append(...c: (FakeEl | string)[]) { for (const x of c) if (typeof x !== "string") { this.adopt(x); this.children.push(x); } else this.textContent += x; }
+  before(...c: FakeEl[]) {
+    const p = this.parentElement!;
+    for (const x of c) { p.adopt(x); p.children.splice(p.children.indexOf(this), 0, x); }
+  }
   replaceChildren(...c: FakeEl[]) { this.children = []; this.append(...c); }
   addEventListener(t: string, fn: Handler) { (this.handlers[t] ??= []).push(fn); }
   removeEventListener() {}
@@ -477,6 +517,136 @@ test("T-1028: the retune-mode chip states the mode, toggles it, and still reache
     if (realFetch) g.fetch = realFetch; else delete g.fetch;
   }
   assert.deepEqual(fetched, [], "the chip itself must reach nothing: it changes what a GESTURE means");
+});
+
+test("T-1028 x T-996: retune mode's pane status is SAID on the capture block beside Retune", () => {
+  // T-1028 put this line on the per-viewport row; T-996 retired those rows from the app, so the
+  // line moved to the floating capture block. A retune the user's own pan asked for must never be
+  // silent: shown while the host says something, hidden (not emptied) when it says nothing, and
+  // shown even when the viewport offers no Retune of its own.
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    let said: string | null = null;
+    let offer: { label: string; why: string; enabled: boolean } | null = null;
+    const host = {
+      ...paneActions(m, () => id),
+      measuring: () => false, setMeasuring() {},
+      paneRetune: () => offer, pressPaneRetune() {},
+      paneStatus: () => said,
+      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const block = root.find("map-retune")!;
+    const line = root.find("map-retune-status")!;
+    const row = root.find("map-retune-row")!;
+    assert.equal(block.hidden, true, "nothing to offer and nothing to say: no block");
+    assert.equal(line.getAttribute("role"), "status", "a retune the pan asked for must reach a screen reader");
+
+    said = "Retuning to 433.92 MHz (settling…)";
+    c.syncRetune();
+    assert.equal(block.hidden, false, "retune mode is acting on the viewport and the map says nothing");
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent, said);
+    assert.equal(row.hidden, true, "a Retune button with no offer behind it was shown");
+
+    offer = { label: "Retune", why: "to 433.92 MHz", enabled: true };
+    c.syncRetune();
+    assert.equal(row.hidden, false, "the viewport's own Retune was hidden by the status line");
+    assert.equal(line.hidden, false);
+
+    said = null;
+    c.syncRetune();
+    assert.equal(line.hidden, true, "the line claims a retune after the mode stopped saying one");
+    assert.equal(block.hidden, false, "the persistent Retune went with the status line");
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+  }
+});
+
+// T-1053: nine chips reached 80 % of a 400 px pane — a bar by another name (T-1025) — and squeezed
+// Go-to's input to 4 px. On a phone the four MODE chips fold into the ⋯ menu; what is asserted here
+// is that the SAME elements move (so their handlers and pressed state go with them), both ways, as
+// the width changes. That the result fits, is pressable and reads as chips is the browser tier's
+// (`app-top-chrome`, `app-phone`, `app-surface` at 420 px).
+test("T-1053: on a phone the mode chips fold into the ⋯ menu and come back when the pane widens", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window, matchMedia: g.matchMedia };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  let phone = true;
+  let onChange: (() => void) | null = null;
+  const asked: string[] = [];
+  g.matchMedia = (q: string) => {
+    asked.push(q);
+    return { get matches() { return phone; }, addEventListener: (_t: string, fn: () => void) => { onChange = fn; } };
+  };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    let on = false;
+    const host = {
+      ...paneActions(m, () => id),
+      measuring: () => false, setMeasuring() {},
+      annotating: () => null, setAnnotating() {},
+      retuneMode: () => ({ on, held: false }),
+      setRetuneMode: (next: boolean) => { on = next; },
+      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const root = mountMapControls(host).el as unknown as FakeEl;
+    assert.deepEqual(asked, ["(max-width: 600px)"], "the fold follows the stylesheet's phone breakpoint");
+    const row = root.find("map-topright")!, tools = root.find("map-more-tools")!, pane = root.find("map-pane-btn")!;
+    const MODES = ["map-measure-btn", "map-annotate-btn", "map-pin-btn", "map-retune-btn"];
+    const kids = (el: FakeEl) => el.children.map((c) => [...c.classes].find((k) => k.endsWith("-btn") || k.endsWith("-home")));
+
+    // Phone: the row keeps the panels' buttons; the four modes are the ⋯ menu's Tools, in order.
+    assert.deepEqual(kids(tools), MODES, "the mode chips are not in the ⋯ menu on a phone");
+    assert.equal(tools.hidden, false, "the ⋯ menu's Tools group is hidden while it holds the modes");
+    assert.deepEqual(kids(row), ["map-layers-btn", "map-research-btn", "map-pane-btn", "map-review-home", "map-more-btn"],
+      "the phone's chip row: five small chips, the modes moved (never copied) out of it");
+    // The moved chip is the same control: its press still reaches the host and states the mode.
+    const chip = tools.children[3];
+    chip.fire("click");
+    assert.equal(on, true, "a folded retune chip no longer reaches the host");
+    assert.equal(chip.getAttribute("aria-pressed"), "true");
+
+    // Wider: they come back into the row, before the viewport button, and Tools is empty and hidden.
+    phone = false;
+    onChange!();
+    assert.deepEqual(kids(tools), [], "the modes stayed in the ⋯ menu on a wide pane");
+    assert.equal(tools.hidden, true);
+    assert.deepEqual(kids(row).slice(0, 7), ["map-layers-btn", "map-research-btn", ...MODES, "map-pane-btn"],
+      "the modes did not return to their place in the row");
+    assert.equal(row.children.indexOf(pane), 6);
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+    if (saved.matchMedia) g.matchMedia = saved.matchMedia; else delete g.matchMedia;
+  }
 });
 
 test("T-1028: the cluster module still names no route, no client and no DeviceAction", () => {

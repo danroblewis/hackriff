@@ -27,8 +27,9 @@ import { parseFrequency } from "../../controls/freq";
 import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
+import { renderSettings, type SettingsHost } from "./settings";
+import type { RowAction, WidthAction } from "../../surface/chrome";
 import { registerMapHome } from "./top-chrome";
-import { getTimeLabelMode, onTimeLabelMode, setTimeLabelMode, type TimeLabelMode } from "../../surface/hud";
 import { registerMapInvHome } from "./inv-home";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
@@ -84,9 +85,6 @@ export interface LayerMenu {
   data?: LayerRow[];
   overlays: LayerRow[];
   viewWide: LayerRow[];
-  /** The colour scale (T-470/T-528, rehomed from the toolbar by T-882): exactly one of the surface's
-   * range modes, view-wide, plus the sentence stating the range it produces. Absent = not offered. */
-  scale?: { rows: LayerRow[]; note: string };
 }
 
 /** The menu's writes. Every one is presentation state; none can reach a route. */
@@ -96,8 +94,6 @@ export interface LayerMenuHost {
   /** Toggle one of the active pane's layers — an overlay, or a `data` row (the coverage fog). */
   toggleOverlay(id: string): void;
   toggleViewWide(id: string): void;
-  /** Choose the colour-scale mode (a display range, never a gain). Optional: a host with no scale. */
-  setScale?(id: string): void;
 }
 
 /**
@@ -147,7 +143,7 @@ export interface PaneDeviceMenu {
   offer: { label: string; why: string; enabled: boolean };
 }
 
-export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
+export interface MapControlHost extends LayerMenuHost, PaneMenuHost, SettingsHost {
   zoom(factor: number): void;
   /** Measurement mode (T-822): whether a plain drag measures instead of panning. */
   measuring(): boolean;
@@ -175,6 +171,25 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   centreHz(): number | null;
   /** The retune offer for the active pane when no tuned window covers it, else null. */
   gotoOffer(): GotoOffer | null;
+  /**
+   * T-996: the ACTIVE viewport's own persistent Retune (T-476) and capture-width presets (T-496),
+   * rehomed here from the retired per-viewport panel — "the Retune button stays where Go-to lives"
+   * (user, 2026-09-25). Strings and a bit, exactly as `RowAction`/`WidthAction` always were: this
+   * cluster still learns nothing about tuning, and the press is a callback the host routes through
+   * its own gated `DeviceAction` path. Asked EVERY FRAME (`syncRetune`), because the sentence names
+   * the window the viewport is showing now — a label from a 1 s poll names somewhere it is not.
+   */
+  paneRetune?(): RowAction | null;
+  pressPaneRetune?(): void;
+  paneWidths?(): readonly WidthAction[];
+  pressPaneWidth?(key: string): void;
+  /**
+   * T-1028 × T-996: one sentence about a retune that retune mode has pending, settling or in flight
+   * for the active viewport (`null` when nothing is). T-1028 said it on the per-viewport row, which
+   * T-996 retired from the app, so it is said here, on the capture block beside Retune — the one
+   * place on the map where a gesture moving the radio is reported. Asked every frame, like the rest.
+   */
+  paneStatus?(): string | null;
   /** Tell the rest of the page the view moved (the surface's `mirror`). */
   viewChanged(): void;
   toast(text: string): void;
@@ -204,6 +219,11 @@ const MODE_TEXT = {
 /** T-1028's banner, on its own because retune mode is not a tool mode: it re-binds no gesture — a
  * drag still pans and a wheel still zooms — it changes what the view coming to REST means. Its own
  * line so it can be shown beside a tool mode rather than instead of one. */
+/** T-1053: the width at which the mode chips fold into ⋯ — `map-controls.css`'s phone breakpoint. */
+export const FOLD_QUERY = "(max-width: 600px)";
+/** A folded chip's name, shown only while it sits in the ⋯ menu (the chip row shows the icon). */
+const foldWord = (w: string) => h("span", { class: "map-ibtn-word", "aria-hidden": "true" }, w);
+
 const RETUNE_TEXT = "Retune mode: the radio follows this viewport — pan or zoom, and when the view settles it tunes there. Too wide to capture tunes the widest window centred on it. Press R (or the chip) to stop.";
 
 /**
@@ -339,6 +359,8 @@ function layerKey(entries: readonly LegendEntry[]): HTMLElement {
  */
 export function mountMapControls(host: MapControlHost): {
   el: HTMLElement; viewMoved(): void; syncLayers(): void; syncMeasure(): void; syncResearch(): void;
+  /** T-996: re-read the active viewport's Retune / width offers. Called per RENDER FRAME. */
+  syncRetune(): void;
   tuningChanged(): void;
   /** T-1028: re-state retune mode's chip and banner (the `R` key, or a retune becoming pending). */
   syncRetuneMode(): void;
@@ -367,6 +389,20 @@ export function mountMapControls(host: MapControlHost): {
   const offerOverlay = trackOverlay("retune-offer", () => hideOffer());
   const hideOffer = () => { shown = null; offer.hidden = true; offerOverlay.open(false); };
 
+  // T-996: the ACTIVE viewport's persistent capture controls, under Go-to — "the Retune button
+  // stays where Go-to lives", beside the nudges and the Go-to offer, which is where every device
+  // command on this map already is. Small and never faded (it is a device command with a stated
+  // destination, docs/23 §10.2), and shown only while the host offers one for this viewport.
+  const retuneWhy = h("span", { class: "map-retune-why" });
+  const retuneGo = h("button", { type: "button", class: "map-retune-go" }, "Retune") as HTMLButtonElement;
+  const widthRow = h("div", { class: "map-widths", role: "group", "aria-label": "Capture width" });
+  // T-1028: what retune mode is doing to this viewport now. `role="status"` so a screen reader hears
+  // a retune the user's own pan asked for; hidden (not emptied) when there is nothing to say.
+  const retuneStatus = h("span", { class: "map-retune-status", role: "status", hidden: true });
+  const retuneRow = h("div", { class: "map-retune-row" }, retuneGo, retuneWhy);
+  const retune = h("div", { class: "map-glass map-retune", role: "group", "aria-label": "Capture this viewport", hidden: true },
+    retuneRow, widthRow, retuneStatus);
+
   const layersBtn = h("button", {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-layers",
@@ -381,7 +417,7 @@ export function mountMapControls(host: MapControlHost): {
   const measureBtn = h("button", {
     type: "button", class: "map-ibtn map-measure-btn", "aria-label": "Measure", "aria-pressed": "false",
     title: "Measure: drag on the surface to read Δf/Δt between two points and save it. Esc exits.",
-  }, svg(["path", "M3 17l14-14 4 4L7 21H3v-4z"], ["path", "M13 7l2 2M10 10l2 2M7 13l2 2"])) as HTMLButtonElement;
+  }, svg(["path", "M3 17l14-14 4 4L7 21H3v-4z"], ["path", "M13 7l2 2M10 10l2 2M7 13l2 2"]), foldWord("Measure")) as HTMLButtonElement;
   // T-820 (MAP-20): Annotate (bare drag = a box, bare click = a text note) and Pin (bare click = a
   // marker; drag still pans), the other two columns of docs/23 §10.4's table, beside Measure. Each
   // asks for a label; the surface mount saves it (an authoring act, never a device route).
@@ -390,12 +426,12 @@ export function mountMapControls(host: MapControlHost): {
     hidden: !host.setAnnotating,
     title: "Annotate: drag on the surface to draw an annotation box, or click to drop a text note; "
       + "you are asked for its label, and it is saved as an annotation (docs/25 §5). Esc exits.",
-  }, svg(["path", "M4 4h16v12H8l-4 4z"], ["path", "M8 8h8M8 12h5"])) as HTMLButtonElement;
+  }, svg(["path", "M4 4h16v12H8l-4 4z"], ["path", "M8 8h8M8 12h5"]), foldWord("Annotate")) as HTMLButtonElement;
   const pinBtn = h("button", {
     type: "button", class: "map-ibtn map-pin-btn", "aria-label": "Pin", "aria-pressed": "false",
     hidden: !host.setAnnotating,
     title: "Pin: click on the surface to drop a labelled marker there, saved as an annotation. Dragging still pans. Esc exits.",
-  }, svg(["path", "M6 21V4"], ["path", "M6 4h12l-3 4 3 4H6"])) as HTMLButtonElement;
+  }, svg(["path", "M6 21V4"], ["path", "M6 4h12l-3 4 3 4H6"]), foldWord("Pin")) as HTMLButtonElement;
   // T-1028: retune mode's chip, beside the tool-mode buttons — the same shape of control (a mode
   // that changes what a gesture means) and the only one that can reach the front end. The title
   // says both forms, because a mode whose momentary key is undiscoverable is a mode nobody holds.
@@ -405,7 +441,7 @@ export function mountMapControls(host: MapControlHost): {
     title: "Retune mode: while on, panning or zooming tunes the radio to the viewport when the gesture settles "
       + "(a view wider than one capture window tunes the widest window centred on it). Off by default — "
       + "then a pan never commands the radio. Tap R to latch it, or hold R for one gesture.",
-  }, svg(["circle", 12, 12, 3], ["path", "M12 2v3M12 19v3M2 12h3M19 12h3"], ["path", "M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"])) as HTMLButtonElement;
+  }, svg(["circle", 12, 12, 3], ["path", "M12 2v3M12 19v3M2 12h3M19 12h3"], ["path", "M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"]), foldWord("Retune mode")) as HTMLButtonElement;
   const paneBtn = h("button", {
     type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, front end, record",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
@@ -421,21 +457,21 @@ export function mountMapControls(host: MapControlHost): {
   const moreClose = h("button", {
     type: "button", class: "map-layers-close map-more-close", "aria-label": "Close the settings menu — back to the map", title: "Close (Esc)",
   }, "×") as HTMLButtonElement;
-  // T-998: the time ruler's wording — "seconds ago" or the local clock — a per-viewer preference.
-  const timeModeBtn = h("button", {
-    type: "button", class: "map-pane-item map-time-mode", "data-time-mode": getTimeLabelMode(),
-    title: "Time ruler labels: relative (12 s ago) or local clock time (HH:MM:SS). Display only.",
-  }) as HTMLButtonElement;
-  const paintTimeMode = (m: TimeLabelMode) => {
-    timeModeBtn.setAttribute("data-time-mode", m);
-    timeModeBtn.textContent = m === "absolute" ? "Time ruler: clock time" : "Time ruler: seconds ago";
-  };
-  paintTimeMode(getTimeLabelMode());
-  onTimeLabelMode(paintTimeMode);
-  timeModeBtn.addEventListener("click", () => setTimeLabelMode(getTimeLabelMode() === "absolute" ? "relative" : "absolute"));
-  const moreBody = h("div", { class: "map-more-body" }, timeModeBtn);
+  // T-1007: the ⋯ menu is THE settings menu — Theme (the node T-993 moved here) plus every
+  // preference that used to sit in Review: the colour scale (and with it auto-contrast), the time
+  // ruler's labels (T-998's seconds-ago / local-clock preference, `surface/hud.ts`'s
+  // `TimeLabelMode`, offered here as one radio group rather than a second toggle), the front ends
+  // and which viewport's grey reads which, and the capture window the backend reports. `./settings.ts` renders the groups; each press is presentation state.
+  const moreBody = h("div", { class: "map-more-body" });
+  const settingsList = h("div", { class: "map-settings-rows" });
+  // T-1053: on a phone the four MODE chips (Measure, Annotate, Pin, Retune mode) fold into the ⋯
+  // menu, so the top-right row stays five small chips — Layers, Research, Viewport, Review, ⋯ —
+  // instead of nine reaching across the pane (T-1025: chips, not a bar) and squeezing Go-to to a
+  // sliver. The SAME elements move (`foldForWidth`, below): their handlers, pressed state and the
+  // retune chip's held marker go with them, and a mode that is on is still said by its banner.
+  const moreTools = h("div", { class: "map-more-tools", role: "group", "aria-label": "Tools", hidden: true });
   const moreMenu = h("div", { class: "map-glass map-pane-menu map-more-menu", id: "map-more-menu", role: "group", "aria-label": "Settings", hidden: true },
-    h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreBody);
+    h("div", { class: "map-layers-head" }, h("span", {}, "Settings"), moreClose), moreTools, moreBody, settingsList);
   // T-993: the retired bar's other homes. T-1025: the mode switch and the device/stream state are
   // SEPARATE chips in a `map-chips` row that paints nothing of its own and takes no pointer, so the
   // canvas shows (and drags) between them; the tuning nudges (T-409, device commands through the one gated DeviceAction path) sit
@@ -517,7 +553,14 @@ export function mountMapControls(host: MapControlHost): {
   const layersPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
   layersBtn.append(layersPane);
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, retuneBanner, statusHome, topright, layers, paneMenu, moreMenu, host.scan?.panel ?? null, zoom);
+  // T-996: the left column under the nudges is a STACK, not a set of fixed `top:` constants — the
+  // T-997 inventory pills, the persistent capture block, the transient Go-to offer and (below
+  // 1180 px) the tool-mode banner are each as tall as their words make them, so a fixed top per
+  // block is exactly how the offer came to be drawn over the width presets at 400 px. In flow, each
+  // starts where the last ended; the pills lead it, so their one fixed place under Go-to holds.
+  // T-1028's retune-mode banner joins it under the tool-mode banner (beside it, never instead).
+  const stack = h("div", { class: "map-stack" }, invHome, retune, offer, modeBanner, retuneBanner);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, stack, statusHome, topright, layers, paneMenu, moreMenu, host.scan?.panel ?? null, zoom);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
@@ -594,8 +637,7 @@ export function mountMapControls(host: MapControlHost): {
     const act = document.activeElement as HTMLElement | null;
     const refocus = act && layersList.contains(act)
       ? (act.dataset.base ? `[data-base="${act.dataset.base}"]` : act.dataset.layer ? `[data-layer="${act.dataset.layer}"]`
-        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]`
-          : act.dataset.scale ? `[data-scale="${act.dataset.scale}"]` : null)
+        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]` : null)
       : null;
     const row = (l: LayerRow, input: HTMLInputElement, press: () => void) => {
       input.checked = l.on;
@@ -624,12 +666,6 @@ export function mountMapControls(host: MapControlHost): {
         ...m.viewWide.map((l) => row(l,
           h("input", { type: "checkbox", "data-view-layer": l.id }) as HTMLInputElement,
           () => host.toggleViewWide(l.id))))] : []),
-      ...(m.scale && host.setScale ? [h("div", { class: "map-layers-axis", "data-axis": "scale", role: "radiogroup", "aria-label": "Colour scale, every pane" },
-        h("h4", {}, "Colour scale · every pane · one at a time"),
-        ...m.scale.rows.map((l) => row(l,
-          h("input", { type: "radio", name: "map-scale", value: l.id, "data-scale": l.id }) as HTMLInputElement,
-          () => host.setScale!(l.id))),
-        h("div", { class: "map-layers-note sf-range-note" }, m.scale.note))] : []),
       h("div", { class: "map-layers-note" }, "Unknowns are never hidden by default. Toggling a layer changes this pane's picture only — never what is captured or detected."),
     );
     if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
@@ -684,10 +720,26 @@ export function mountMapControls(host: MapControlHost): {
     moreMenu.hidden = !open;
     moreBtn.setAttribute("aria-pressed", String(open));
     moreBtn.setAttribute("aria-expanded", String(open));
-    if (open) { if (layersOpen) setLayersOpen(false); if (paneOpen) setPaneOpen(false); }
+    if (open) { renderSettings(settingsList, host, () => setMoreOpen(false)); if (layersOpen) setLayersOpen(false); if (paneOpen) setPaneOpen(false); }
     fade.hold("more-menu", open); // an open menu never fades
   };
   moreBtn.addEventListener("click", () => setMoreOpen(!moreOpen));
+  // T-1053: a folded mode chip pressed from the ⋯ menu turns its mode on (its own handler) and
+  // closes the menu, so the drag that mode is for lands on the map rather than on an open menu.
+  moreTools.addEventListener("click", (e) => {
+    if ((e.target as Element | null)?.closest?.("button")) setMoreOpen(false);
+  });
+  // T-1053: the fold follows the width, live — a rotated phone or a resized window re-homes them.
+  const folded = [measureBtn, annotateBtn, pinBtn, retuneBtn];
+  const narrow = typeof matchMedia === "function" ? matchMedia(FOLD_QUERY) : null;
+  const foldForWidth = () => {
+    const fold = !!narrow?.matches;
+    if (fold && folded[0].parentElement !== moreTools) moreTools.append(...folded);
+    else if (!fold && folded[0].parentElement !== topright) paneBtn.before(...folded);
+    moreTools.hidden = !fold;
+  };
+  narrow?.addEventListener?.("change", foldForWidth);
+  foldForWidth();
   moreClose.addEventListener("click", () => { setMoreOpen(false); moreBtn.focus(); });
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
@@ -742,17 +794,63 @@ export function mountMapControls(host: MapControlHost): {
   const zoomBy = (k: number) => { host.zoom(k); hideOffer(); host.viewChanged(); };
   zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
+  // ---- T-996: the active viewport's Retune and width presets, re-asked every frame ----
+  //
+  // Same discipline the per-viewport row had (T-476/T-496/T-407): buttons are created once and only
+  // ever UPDATED — a button rebuilt each frame is a button that cannot be pressed, because the
+  // element under the finger between pointerdown and pointerup would be a different one — and each
+  // width button reads its `key` fresh from its own record, never a value closed over at mint time,
+  // so the list can change WHICH preset a position stands for without the listener naming a stale
+  // one. A refusal is STATED (disabled, with `why` beside it and as the title), never hidden: a
+  // control that vanishes teaches nothing, which is the complaint T-476 exists for.
+  const widthBtns: { el: HTMLButtonElement; key: string }[] = [];
+  const setText = (e: HTMLElement, t: string) => { if (e.textContent !== t) e.textContent = t; };
+  const apply = (b: HTMLButtonElement, a: RowAction) => {
+    setText(b, a.label);
+    if (b.title !== a.why) b.title = a.why;
+    b.disabled = !a.enabled;
+    b.setAttribute("aria-disabled", a.enabled ? "false" : "true");
+  };
+  const syncRetune = () => {
+    const a = host.paneRetune?.() ?? null;
+    const said = host.paneStatus?.() ?? null;
+    const show = !!a || said !== null;
+    if (retune.hidden === show) retune.hidden = !show;
+    if (retuneRow.hidden === !!a) retuneRow.hidden = !a;
+    if (a) { apply(retuneGo, a); setText(retuneWhy, a.why); }
+    if (retuneStatus.hidden !== (said === null)) retuneStatus.hidden = said === null;
+    if (said !== null) setText(retuneStatus, said);
+    const ws = host.paneWidths?.() ?? [];
+    while (widthBtns.length < ws.length) {
+      const rec = { el: h("button", { type: "button", class: "map-width" }) as HTMLButtonElement, key: "" };
+      rec.el.addEventListener("click", () => { if (!rec.el.disabled) host.pressPaneWidth?.(rec.key); });
+      widthBtns.push(rec);
+      widthRow.append(rec.el);
+    }
+    while (widthBtns.length > ws.length) widthBtns.pop()!.el.remove();
+    if (widthRow.hidden !== (ws.length === 0)) widthRow.hidden = ws.length === 0;
+    ws.forEach((w, i) => { widthBtns[i].key = w.key; apply(widthBtns[i].el, w); });
+  };
+  retuneGo.addEventListener("click", () => { if (!retuneGo.disabled) host.pressPaneRetune?.(); });
+
   const syncResearch = () => researchBtn.setAttribute("aria-pressed", String(!!host.research?.isOpen()));
   researchBtn.addEventListener("click", () => { host.research?.toggle(); syncResearch(); });
   syncResearch();
 
   syncActive();
   syncMeasure();
+  syncRetune();
   syncRetuneMode();
   registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
   registerMapInvHome(invHome);
-  /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
-  const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
+  /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. The
+   * settings menu re-states too: its range sentence follows auto-contrast, and its front-end list
+   * follows the control-state poll. */
+  const syncLayers = () => {
+    if (layersOpen) renderLayers();
+    if (paneOpen) syncPaneMenu();
+    if (moreOpen) renderSettings(settingsList, host, () => setMoreOpen(false));
+  };
   /**
    * T-955: **the front end's tuned window changed** (a retune by this page, another client or the
    * API). A painted Go-to offer was computed against the OLD tuning — "Retune to 162.2 MHz" still on
@@ -771,5 +869,5 @@ export function mountMapControls(host: MapControlHost): {
   };
   // A gesture moved the view: the Go-to offer describes a window the pane has left.
   const viewMoved = () => { hideOffer(); };
-  return { el, viewMoved, syncLayers, syncMeasure, syncResearch, syncActive, tuningChanged, syncRetuneMode };
+  return { el, viewMoved, syncLayers, syncMeasure, syncResearch, syncRetune, syncActive, tuningChanged, syncRetuneMode };
 }

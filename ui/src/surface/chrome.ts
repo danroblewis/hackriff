@@ -163,6 +163,21 @@ export interface Readout {
 }
 
 /**
+ * What the frame actually drew for one viewport, in words: resident tiles, coarse stand-ins,
+ * not-yet-arrived, behind the edge, never sampled.
+ *
+ * Exported (T-996) because the scale-bar layer states the same report on its own element's dataset
+ * and there must be exactly ONE formatting of it — the map's per-pane block and this readout are two
+ * views of one `PaneStatus`, not two derivations.
+ */
+export function paneCountsText(s: PaneStatus): string {
+  return `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending`
+    + ` · ${s.behind} behind the edge${s.surveyed ? ` · ${s.surveyed} never sampled` : ""}`
+    + `${s.blank ? ` · ${s.blank} drew nothing` : ""}`
+    + `${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`;
+}
+
+/**
  * The chrome's view model, from the statuses the renderer reported.
  *
  * `minimapId` names which row is the map. It is a label, not a separate code path: the minimap's
@@ -204,7 +219,7 @@ export function readoutOf(
       // appended rather than folded into any of the others for the same reason `behind` was:
       // "never looked" is not "not arrived yet", and a readout that cannot say which is which is
       // the grey-vs-pending confusion one level up.
-      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge${s.surveyed ? ` · ${s.surveyed} never sampled` : ""}${s.blank ? ` · ${s.blank} drew nothing` : ""}${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`,
+      counts: paneCountsText(s),
       // T-916: named beside the counts, because it is the same kind of statement as `level` — what
       // the pixels on this pane were actually measured at. Absent when every shadow here was read
       // at the pane's own level, which is the case the readout has nothing extra to say about.

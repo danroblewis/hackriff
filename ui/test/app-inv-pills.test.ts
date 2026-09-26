@@ -141,15 +141,19 @@ test("layout: the pills are a row of the top-left stack, and nothing of the left
   const sheet = readFileSync("src/app/chrome/sheet.css", "utf8");
   const phone = readFileSync("src/app/chrome/phone.css", "utf8");
   // Docked top-left, under Go-to (0) and the nudge row (44) — never at mid-height, so never over
-  // the time ruler's labels down each pane's left edge.
-  assert.match(ctl, /\.map-inv \{ top: 88px; left: 0;/);
-  assert.doesNotMatch(ctl, /\.map-inv[^{]*\{[^}]*top: 50%/);
-  // The rows below it moved down by one row: the offer and the measure banner, at both breakpoints.
-  assert.match(ctl, /\.map-offer \{ top: 132px; \}/);
-  assert.match(ctl, /\.map-inv \{ top: 132px; \}[\s\S]*\.map-offer \{ top: 176px; \}[\s\S]*\.map-mode \{ top: 220px; \}/);
+  // the time ruler's labels down each pane's left edge. T-996: the pills are the FIRST block of the
+  // left column's in-flow stack, which starts under the nudge row (88 px) and, at phone width, under
+  // the status pill (132 px) — so they hold one fixed place per width, as before.
+  assert.match(ctl, /\.map-ctl > \.map-stack \{\s*position: static; pointer-events: none; margin-top: 88px;/);
+  assert.match(ctl, /@media \(max-width: 600px\) \{[\s\S]*\.map-ctl > \.map-stack \{ margin-top: 132px; \}/);
+  assert.doesNotMatch(ctl.replace(/\/\*[\s\S]*?\*\//g, ""), /\.map-inv[^{]*\{[^}]*top:/, "the pills are in flow, never at a fixed top (least of all 50%)");
+  // The rows below it follow it down: the capture block, the offer and the measure banner are the
+  // stack's later blocks, in that order, so each starts where the pills end. T-1028's retune-mode
+  // banner is the last block, under the tool-mode banner (it may be on beside a tool mode).
+  const pills = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  assert.match(pills, /h\("div", \{ class: "map-stack" \}, invHome, retune, offer, modeBanner, retuneBanner\)/);
   // It fades with the rest of the cluster by being IN the cluster (`map-fade`), not by a rule of
   // its own in phone.css.
-  const pills = readFileSync("src/app/chrome/map-controls.ts", "utf8");
   assert.match(pills, /class: "map-glass map-inv map-fade"/);
   assert.doesNotMatch(phone.replace(/\/\*[\s\S]*?\*\//g, ""), /map-inv|side-chip/);
   // No floating left column, collapsed or open, anywhere.

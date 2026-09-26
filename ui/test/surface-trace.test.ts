@@ -48,7 +48,7 @@ import { TileCache } from "../src/surface/tilecache";
 import type { TileData } from "../src/surface/tile";
 import {
   HOLD_INK, LiveRow, SHADOW_ALPHA, TRACE_SUBDIV, levelFrac, liveFrameFits, maxHoldColumns, peakOf,
-  afterglowAbsence, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
+  afterglowAbsence, coreSamples, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
   type LiveFrame, type TracePath,
 } from "../src/surface/trace";
 import { cmap } from "../src/cmap";
@@ -1025,6 +1025,67 @@ test("T-475: the trace's own pass has NO SAMPLER — it can colour, but it can n
   assert.match(bare, /in vec4 aRgba/, "its colour arrives as a vertex attribute, not as a ramp it owns");
   // And the data pass is not reachable from it: it binds no texture and shares no display range.
   assert.ok(!/uLo|uHi|bindTexture/.test(bare), "the trace pass must not touch the data pass's state");
+});
+
+// ## `coreSamples` — about **the statement the page makes of where it stroked** (T-1050)
+//
+// The e2e tier's T-475 check reads the trace's colour out of a real framebuffer, and since T-1041 the
+// layer is drawn OVER the cells it is a spectrum of: a pixel read cannot tell the stroke's core from
+// its own achromatic bloom blended over a coloured cell, and where the equality HOLDS the core pixel
+// is identical to the cell, so a difference against a trace-off baseline keeps only the failures.
+// `coreSamples` is what the page states instead — the geometry and ink of the vertices handed to the
+// GPU — and the tests here are about that arithmetic: the GL y flip, the pixel CENTRES (a rounded
+// vertex is only ~0.79 covered on a 3 px stroke, which is what made the first version of the e2e read
+// return 58 of 110), the colour coming off the path's own attribute, and which columns are a measured
+// column rather than a point on the interpolant. They are NOT about what the shader then wrote: only
+// the browser tier can say that, and it does, by requiring the stated pixel to carry the stated ink.
+test("coreSamples states one fully-covered pixel centre per column, in screen px, with its own ink", () => {
+  // A flat slice: two measured columns at one dB, so the curve is a horizontal line and every
+  // column's colour is that dB's ramp colour.
+  const db = -75;
+  const paths = tracePaths(Float32Array.from([db, db]), PANE, STRIP, LO, HI, "trace-slice", "p",
+    { widthPx: 3 });
+  const canvasH = 700;
+  const got = coreSamples(paths, STRIP, canvasH, 1);
+  assert.ok(got.length >= STRIP.w - 2, `one sample per column: ${got.length} of ~${STRIP.w}`);
+  // In screen px from the canvas's top-left: GL's y runs UP from the drawing buffer's bottom, and
+  // the band sits at y 500..596 of a 700 px buffer, so a line at the middle of the scale is at
+  // 700 - (500 + 96 * levelFrac) from the top.
+  const want = canvasH - (STRIP.y + STRIP.h * levelFrac(db, LO, HI));
+  for (const c of got) {
+    near(c.yPx, Math.round(want - 0.5) + 0.5, 1e-9);
+    // Every x is a pixel CENTRE, which is the only place the stroke's coverage is saturated.
+    near(c.xPx - Math.floor(c.xPx), 0.5, 1e-9);
+  }
+  // The colour is the path's own vertex ink — `cmap` of the same normalisation the tile shader uses.
+  const [r, g, b] = cmap(levelFrac(db, LO, HI));
+  assert.deepEqual(got[10].rgb, [Math.round(255 * r), Math.round(255 * g), Math.round(255 * b)]);
+  // Columns in increasing x, each one once.
+  const xs = got.map((c) => c.xPx);
+  assert.deepEqual(xs, [...xs].sort((a, c) => a - c));
+  assert.equal(new Set(xs).size, xs.length);
+  // Measured columns are the two the data had, not the interpolation between them: `TRACE_SUBDIV`
+  // points per interval, and a 1000 px band over 2 columns is 500 px each.
+  const measured = got.filter((c) => c.measured);
+  assert.ok(measured.length >= 2 && measured.length <= 4,
+    `the two measured columns (plus their end caps), not the interpolant: ${measured.length}`);
+  assert.ok(measured.length * TRACE_SUBDIV < got.length, "the interpolated columns are reported too");
+});
+
+test("coreSamples scales by the device pixel ratio and refuses a stroke with no core", () => {
+  const paths = tracePaths(Float32Array.from([-75, -60]), PANE, STRIP, LO, HI, "trace-slice", "p",
+    { widthPx: 3 });
+  const one = coreSamples(paths, STRIP, 700, 1);
+  const two = coreSamples(paths, STRIP, 700, 2);
+  // Same drawing buffer, twice the ratio: the same pixels, named in half as many CSS px.
+  near(two[0].xPx, one[0].xPx / 2, 1e-9);
+  near(two[0].yPx, one[0].yPx / 2, 1e-9);
+  // A 1.4 px max-hold has no fully-covered pixel to read a colour out of, so none is claimed.
+  const thin = tracePaths(Float32Array.from([-75, -60]), PANE, STRIP, LO, HI, "trace-hold", "p",
+    { widthPx: 1.4, ink: [1, 0.45, 0.85] });
+  assert.deepEqual(coreSamples(thin, STRIP, 700, 1), []);
+  // And a band with no area states nothing rather than dividing by it.
+  assert.deepEqual(coreSamples(paths, { ...STRIP, h: 0 }, 700, 1), []);
 });
 
 test("the renderer's one display range is what the trace reads — Surface still owns it", () => {

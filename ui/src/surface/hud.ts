@@ -113,7 +113,8 @@ export function compactRulerAge(label: string): string {
   return label === "live edge" ? "now" : label.replace(/ /g, "");
 }
 
-/** How the time ruler words its marks (T-998): "seconds ago" or local clock. Per viewer. */
+/** How the time ruler words its marks (T-998): "seconds ago" or local clock. Per viewer. Chosen in
+ * the ⋯ settings menu's "Time ruler" group (T-1007, `app/chrome/settings.ts`). */
 export type TimeLabelMode = "relative" | "absolute";
 const TIME_MODE_KEY = "hk-hud-time-labels";
 let timeMode: TimeLabelMode | null = null;

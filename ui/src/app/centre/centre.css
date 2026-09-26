@@ -11,20 +11,16 @@
 .surface [hidden] { display: none !important; }
 
 /* T-882: the toolbar row (`.sf-bar`) is gone. Its controls float over the canvas
-   (`chrome/map-controls.ts`); its two readouts float here, bottom-left above the map strip — the
-   colour scale stated (T-470: a fixed range that clips is only honest if the range is read) and the
-   hover readout. Status text, so it never takes the pointer from the surface under it.
-   T-918: the rows that used to sit UNDER the stage (trace, IQ ring, fog, priors, per-viewport
-   level, orientation note) subtracted ~120 px from the canvas, against docs/23 §10.1 ("no chrome
-   subtracts from it"). They float in the same bottom-left stack now, the readout nearest the map
-   strip, capped below the vertically centred side chip and scrolling past that. Honesty statements:
-   never faded (docs/23 §10.2).
-   T-919: that stack reached ~560 x 184 px — a large PERMANENT overlay, against P1 (§10.6 rule 1:
-   an overlay exists to be closed, and its default state is its smallest). So it is a compact LINE
-   by default (`.sf-status-line`: the viewport's where/level-tier with its Retune, the colour scale,
-   the hover readout) with the paragraphs behind a toggle and a visible dismiss (`.sf-status-body`).
-   Never faded, and never closeable to nothing: the tier/level and the scale are on the picture in
-   every state. */
+   (`chrome/map-controls.ts`); its readouts float here, bottom-left above the map strip.
+   T-918: nothing under the stage subtracts from the canvas (docs/23 §10.1).
+   T-919 made that stack a collapsed line with a `More` expansion.
+   T-996 (user, 2026-09-25) retires the expansion and the white per-viewport panel entirely. What is
+   on the picture now:
+     - bottom-LEFT, one line: where the active viewport is looking, the colour scale, and the hover
+       readout (which carries peak dB, on demand). Above it, only when the viewer has asked for that
+       state: the fog note and the ranked band-plan priors.
+     - bottom-RIGHT, per pane: the scale bars and that pane's honesty tier (`.sf-scale`).
+   Never faded: these are honesty statements (docs/23 §10.2). */
 .sf-status {
   position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 0px) + 30px); /* clear of the HUD's frequency labels */
   /* Clear of the right-edge cluster at every width: at 420 px the zoom stack docks above the FAB
@@ -32,76 +28,90 @@
   max-width: min(560px, calc(100% - 80px));
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none;
 }
-/* T-919: the SENTENCES, shown on demand. Same stack of statements as before, same never-faded
-   chrome band — what changed is that they are not on the picture until they are asked for. */
-.sf-status-body {
-  pointer-events: auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%;
-  max-height: max(60px, calc(50% - var(--map-strip, 0px) - 66px)); overflow-y: auto;
-}
-.sf-status-body > * { flex: none; border: 1px solid var(--line); border-radius: 6px;
-  background: color-mix(in srgb, var(--panel) 82%, transparent); }
-.sf-status-body > :empty { display: none; }
+/* The frame's own report of what it drew — the trace's slice and max-hold, the IQ-ring rules, the
+   coverage census. T-996 takes these OFF the picture (the user: "also unnecessary", "can probably
+   go") without deleting them: they are what `ui/e2e` checks the pixels against, and the facts they
+   describe are still drawn — the two capture rules as their two lines, the spectrum as its trace,
+   never-sampled spectrum as the grey. Out of the accessibility tree too (`aria-hidden`), so a
+   per-frame sentence cannot spam a screen reader. */
+.sf-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
-/* The always-visible line: the viewport's level/tier (the honesty statement §10.2 names, and the
-   row carrying T-476's persistent Retune), the colour-scale sentence (T-470), the hover readout,
-   and the two small controls that open and close the detail. ONE row: the level keeps its width and
-   the scale sentence is what gives way, so the tier and the two numbers survive the narrowest case. */
+/* The two CONDITIONAL statements above the line — each on screen only because the viewer put it
+   there (fog hidden on this pane; the priors layer switched on), so neither is permanent chrome.
+   Same small panel as the line, bounded so a long list of priors scrolls rather than growing. */
+.sf-status > .sf-fog, .sf-status > .sf-priors {
+  pointer-events: auto; max-width: 100%; min-width: 0; max-height: 28vh; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.sf-fog { font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px; overflow-wrap: anywhere; }
+
+/* The one line: where this viewport is looking, the scale it is painted on, and what is under the
+   pointer. One row at every width — it is a line, not a panel. */
 .sf-status-line {
   pointer-events: auto; display: flex; flex-wrap: nowrap; align-items: center; gap: 2px 6px;
   max-width: 100%; min-width: 0; padding: 2px 4px;
   border: 1px solid var(--line); border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 82%, transparent);
 }
-.sf-status-line > .sf-chrome { border: 0; background: none; padding: 0 4px; flex: 0 1 auto; min-width: 0; max-width: 52%; }
 .sf-status-line > .sf-readout { flex: 1 1 0; min-width: 0; }
-.sf-status-btns { display: flex; align-items: center; gap: 2px; flex: none; margin-left: auto; }
-.sf-status-toggle, .sf-status-close {
-  min-height: 20px; padding: 0 6px; border: 1px solid transparent; border-radius: 6px;
-  background: none; color: var(--muted); font: 11px var(--ui); line-height: 1; cursor: pointer;
-}
-.sf-status-close { min-width: 22px; font-size: 15px; }
-.sf-status-toggle:hover, .sf-status-toggle:focus-visible,
-.sf-status-close:hover, .sf-status-close:focus-visible { border-color: var(--line); color: var(--text); }
-
-/* Collapsed, the viewport row is ONE LINE: the level/tier it was drawn at, and its Retune. What is
-   put away is either detail (the row's id, the frame's tile counts, the offer's sentence, the
-   intermediate ruler, the width presets) or already stated elsewhere on the picture: the pane's
-   window is the HUD's own frequency and time labels (T-805). All of it is one press away. (The
-   minimap's row is gone with the minimap, T-995.) */
-.sf-status:not([data-open="true"]) .sf-chrome { max-height: 46px; } /* the level line, plus the offer's line when one is painted */
-.sf-status:not([data-open="true"]) .hk-surface-viewport { flex-wrap: nowrap; overflow: hidden; }
-.sf-status:not([data-open="true"]) .hk-surface-level-note { display: none; }
-.sf-status:not([data-open="true"]) .hk-surface-id { display: none; }
-.sf-status:not([data-open="true"]) .hk-surface-where { display: none; }
-.sf-status:not([data-open="true"]) .hk-surface-counts { display: none; }
-.sf-status:not([data-open="true"]) .hk-surface-ruler { display: none; }
-.sf-status:not([data-open="true"]) .hk-surface-widths { display: none; }
-/* The offer's SENTENCE stays with its button, always: the painted-offer discipline (T-476/T-407) is
-   that a press lands where the row SAID, so a pressable control whose destination is not on screen
-   is the one thing this collapse may not do. It takes its own line, clipped to one — the sentence
-   leads with the destination, the button's title carries it whole, and expanding shows it in full. */
-.sf-status:not([data-open="true"]) .hk-surface-why {
-  flex-basis: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
-}
-/* The one control on the row keeps its size whatever the width: T-476 made Retune persistent
-   because the user's report was that it appeared only sporadically, and a button squeezed out of a
-   nowrap row is the same absence by another route. The level beside it is what ellipsises. */
-.sf-status:not([data-open="true"]) .hk-surface-action { flex: none; }
-.sf-status:not([data-open="true"]) .hk-surface-level { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-/* At phone width there is no room for the level and the scale on one row, and ellipsising both
-   would cut the tier out of the one statement that may not be cut. They wrap instead (§10.5). */
-@media (max-width: 600px) {
-  .sf-status-line { flex-wrap: wrap; }
-  .sf-status-line > .sf-chrome { max-width: 100%; }
-}
 .sf-readout {
-  display: flex; flex-direction: column; gap: 2px; border: 0;
+  display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; border: 0;
   padding: 3px 8px; pointer-events: none; min-width: 0;
   background: none;
   font: 11px var(--mono); color: var(--muted);
 }
+/* The kept centre/span/LIVE readout. Brighter than the rest of the line: it is the answer to "where
+   am I", which the retired panel used to own. */
+.sf-where { color: var(--text); white-space: nowrap; }
 .sf-range, .sf-hover { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.sf-hover:empty { display: none; }
+.sf-hover:empty, .sf-where:empty { display: none; }
+
+/* ---- T-996: the scale bars (`surface/scale.ts`), bottom-right of EACH pane ----
+   Band 2: DOM over the canvas, placed every render frame at the pane's own bottom-right corner
+   (the inline transform is that corner; the translate below insets the block from it). Pointer
+   transparent, like every other band-2 layer, so a bar never takes a pan from the surface. */
+.sf-scales { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
+.sf-scale {
+  /* The inline transform is the pane's own bottom-right corner; this insets the block from it. The
+     RIGHT inset clears the floating cluster's zoom stack, which docks against the same edge — a
+     legend that collided with a control would be neither readable nor pressable (docs/23 §10.6). */
+  position: absolute; left: 0; top: 0; translate: calc(-100% - 56px) calc(-100% - 12px);
+  display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+  font: 11px var(--mono); color: #d5dee2;
+  text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+}
+.sf-scale-row { display: flex; align-items: center; gap: 6px; }
+.sf-scale-row b { font-weight: 600; }
+/* The bar itself. The FREQUENCY bar is horizontal with end caps, like a map's distance bar; the
+   TIME bar is vertical, because down IS time on this surface. Its length is the claim, so it is
+   drawn in a flat ink over a dark rule and never scaled by anything but its own width/height. */
+.sf-scale-row i {
+  display: block; background: #d5dee2; box-shadow: 0 0 2px rgba(0, 0, 0, .95);
+}
+.sf-scale-row.freq i { height: 3px; border-left: 1px solid transparent; }
+.sf-scale-row.freq i { border-radius: 1px; position: relative; }
+.sf-scale-row.freq i::before, .sf-scale-row.freq i::after {
+  content: ""; position: absolute; top: -3px; width: 2px; height: 9px; background: inherit;
+}
+.sf-scale-row.freq i::before { left: 0; }
+.sf-scale-row.freq i::after { right: 0; }
+.sf-scale-row.time { flex-direction: row-reverse; align-items: flex-end; }
+.sf-scale-row.time i { width: 3px; border-radius: 1px; position: relative; }
+.sf-scale-row.time i::before, .sf-scale-row.time i::after {
+  content: ""; position: absolute; left: -3px; height: 2px; width: 9px; background: inherit;
+}
+.sf-scale-row.time i::before { top: 0; }
+.sf-scale-row.time i::after { bottom: 0; }
+/* The honesty tier and the cell size the pixels are made of (docs/16 §8.5a: "same ramp, same scale,
+   STATED level"). Tiny, beside the bars, per pane — a wide or deep zoom says `overview` here. */
+.sf-scale-level { font-size: 10px; color: #9fb0ba; }
+/* T-1006's device pill (whose coverage decides this pane's grey), on the pane's own block since
+   T-996 retired the per-viewport row it was drawn on. A stale pin (a front end this run does not
+   hold) is marked, never silently reset. */
+.sf-scale-device { font-size: 10px; padding: 0 6px; border: 1px solid #6b7488; border-radius: 999px; white-space: nowrap; }
+.sf-scale-device[hidden] { display: none; }
+.sf-scale[data-device-stale="true"] .sf-scale-device { color: #e8a33d; border-color: #e8a33d; }
 
 .sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }
 /* T-508: capture recovering or ended, said over the picture. A frozen edge that looks live is the
@@ -119,44 +129,18 @@
   touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none;
 }
 
-/* T-444's retune offer used to live in this bar, appearing only when a pan left the tuned window.
-   T-476 made it a PERSISTENT PER-PANE control, so it moved to the viewport rows in `.sf-chrome` and
-   is styled by `ui/src/surface/surface.css` (`.hk-surface-action` / `.hk-surface-why`) beside the
-   readout it belongs to. Nothing in this bar is per-viewport, which is why it could not stay here. */
+/* T-444's retune offer used to live in a toolbar row, appearing only when a pan left the tuned
+   window; T-476 made it PERSISTENT and per-pane, on the viewport rows. T-996 retired those rows and
+   moved the control to the floating cluster, under Go-to (`chrome/map-controls.css`'s `.map-retune`)
+   — "the Retune button stays where Go-to lives", with the capture-width presets beside it.
 
-/* docs/16 §8.5a: the anti-divergence guarantee is "same ramp, same scale, STATED level" — two
-   viewports at different (level_f, level_t) legitimately differ, and the map, being device-wide, is
-   nearly always one of them. Stating it is the fix; hiding it is what invites the bug report. */
-.sf-chrome {
-  border-top: 1px solid var(--line); background: var(--panel);
-  font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
-  max-height: 84px; overflow-y: auto;
-}
+   The per-viewport level statement (docs/16 §8.5a's "same ramp, same scale, STATED level") moved
+   with it, to each pane's own scale block (`.sf-scale-level`, above): stated where the pixels it
+   describes are, rather than in a panel listing every viewport. `.sf-chrome` is still built by the
+   `/surface.html` developer preview, and is styled by `ui/src/surface/surface.css`.
 
-/* The orientation sentence (T-450's `orientationNote`): what fraction of the surface was ever
-   sampled, and where this view opened. A nearly-grey first screen with this line is a finding; the
-   same screen without it is a bug report. */
-.sf-note { border-top: 1px solid var(--line); background: var(--panel); padding: 4px 12px; font-size: 11px; color: var(--muted); }
-
-/* T-457: what the spectrum trace above each viewport is currently saying — the newest frame's peak,
-   the max-hold's peak over the viewport's own window, and the measured dB range both are drawn on.
-   Stated rather than settable: the range comes from the tiles' own `range_db`, and a hand-set one
-   would be a user overriding a measurement (docs/16 §8.5b finding 1). */
-.sf-trace {
-  border-top: 1px solid var(--line); background: var(--panel);
-  font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-
-/* T-506: the IQ horizon and the retention bound, in words, beside the two rules that draw them on
-   every pane (green solid: oldest IQ; magenta dashed: retention bound). The swatches repeat the
-   rules' own inks so the sentence can be matched to the line without a legend. Wraps rather than
-   truncating: "no IQ and no audio" is the clause that must never be cut off. */
-.sf-ring {
-  border-top: 1px solid var(--line); background: var(--panel);
-  font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
-  overflow-wrap: anywhere;
-}
+   `.sf-trace`, `.sf-ring` and `.sf-note` are the frame's own sentences, now inside `.sf-said`
+   (above) and off the picture: they need no panel styling of their own. */
 
 /* T-805 (MAP-05): the HUD axes' labels. Band 2 — screen-space text over the canvas — but every label
    is placed per render frame by `surface/hud.ts` from the same ruler the ticks (band 0, on the canvas)

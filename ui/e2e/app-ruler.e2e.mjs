@@ -82,10 +82,13 @@ for (const [W, H] of [[1280, 800], [400, 820]]) test(`at ${W} px the time ruler 
 
   await check("relative", "following, relative");
 
+  // T-1007: the mode is chosen in the ⋯ settings menu's "Time ruler" radio group (one control over
+  // T-998's one preference), so switching is pressing the OTHER mode's radio.
   const toggle = async () => {
+    const other = (await page.eval("localStorage.getItem('hk-hud-time-labels')")) === "absolute" ? "relative" : "absolute";
     await page.click("document.querySelector('.map-more-btn')");
     await page.waitFor("the ⋯ menu", "!document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
-    await page.click("document.querySelector('#map-more-menu .map-time-mode')");
+    await page.click(`document.querySelector('#map-more-menu [data-ruler="${other}"]')`);
     await page.click("document.querySelector('#map-more-menu .map-more-close')");
     await page.waitFor("the ⋯ menu to close", "document.querySelector('#map-more-menu').hidden", { timeoutMs: 5000 });
     await page.frames(3);

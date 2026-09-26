@@ -82,8 +82,12 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 // 8959 / 8991 in lanes 1 and 2 - none of them in backend.mjs's FORBIDDEN set at any lane base.
 const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 8;
 
-const PANE_ROW = '.hk-surface-viewport[data-viewport="pane"]';
-const PANE_ACTION = `${PANE_ROW} .hk-surface-action:not([hidden])`;
+// T-996 retired the app's per-viewport rows: a pane states itself on its own scale block
+// (`.sf-scale`, the frame's own report in its dataset — `canvas-journey.e2e.mjs`'s reading), and its
+// persistent Retune is the floating cluster's, for the active pane (`.map-retune-go`). Same facts,
+// same frame; a different set of elements to read them off.
+const PANE_ROW = '.sf-scale:not([hidden])';
+const PANE_ACTION = '.map-retune:not([hidden]) .map-retune-go';
 // T-529 added `window`: a retune to a region is now ONE device action carrying centre and span
 // together (`POST /api/control/window`) instead of a `rate` post followed by a `center` one. It
 // belongs here for both of this file's uses. In `assertNoDeviceCalls` its absence silently WEAKENED
@@ -105,18 +109,19 @@ const C_HZ = 200.0e6, C_VIEW_SPAN_HZ = 250e3;
 // Reading the page
 // ---------------------------------------------------------------------------
 
-const ROWS = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => {
-  const b = v.querySelector('.hk-surface-action');
-  const ruler = v.querySelector('.hk-surface-ruler');
+const ROWS = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((v) => {
+  const b = document.querySelector('${PANE_ACTION}');
   return {
-    id: v.querySelector('.hk-surface-id')?.textContent ?? '',
-    viewport: v.getAttribute('data-viewport'),
-    where: v.querySelector('.hk-surface-where')?.textContent ?? '',
-    counts: v.querySelector('.hk-surface-counts')?.textContent ?? '',
-    hasButton: !!b && !b.hidden,
+    id: v.dataset.pane ?? '',
+    viewport: 'pane',
+    where: v.dataset.where ?? '',
+    counts: v.dataset.counts ?? '',
+    hasButton: !!b,
     disabled: b ? b.disabled : null,
-    why: v.querySelector('.hk-surface-why')?.textContent ?? '',
-    ruler: (ruler && !ruler.hidden) ? (ruler.textContent ?? '') : '',
+    why: document.querySelector('.map-retune-why')?.textContent ?? '',
+    // The pane's own time span in seconds (T-996: the scale block's \`data-span-s\`, the exact number
+    // the frame laid the pane out with — it was inferred from the retired row's ruler sentence).
+    ruler: v.dataset.spanS ?? '',
   };
 }))`;
 const rows = async (page) => JSON.parse(await page.eval(ROWS));
@@ -126,7 +131,7 @@ const pane0 = async (page) => {
   return r;
 };
 
-/** The pane's frequency window, parsed from `.hk-surface-where` (T-478: numbers, never the string). */
+/** The pane's frequency window, parsed from the scale block's `data-where` (T-996; it was `.hk-surface-where`) (T-478: numbers, never the string). */
 function windowOf(where) {
   const m = /^([\d.]+) MHz ± ([\d.]+) (Hz|kHz|MHz|GHz)/.exec(where);
   assert.ok(m, `the pane readout is not a frequency window: ${JSON.stringify(where)}`);
@@ -284,20 +289,12 @@ async function waitForResident(page, {
  * `canvas-journey.e2e.mjs` uses): the oldest time tick's age plus the widest gap between ticks.
  * `null` when the ruler states fewer than two time ticks.
  */
-function paneSpanBoundS(ruler) {
-  const m = /time (.*)$/.exec(ruler ?? "");
-  if (!m) return null;
-  const unit = { ms: 1e-3, s: 1, m: 60, h: 3600 };
-  const ages = m[1].split(",").map((x) => {
-    const mm = /([\d.]+) m ([\d.]+) s/.exec(x);
-    if (mm) return Number(mm[1]) * 60 + Number(mm[2]);
-    const t = /([\d.]+) (ms|s|h)/.exec(x);
-    return t ? Number(t[1]) * unit[t[2]] : NaN;
-  }).filter(Number.isFinite).sort((a, b) => a - b);
-  if (ages.length < 2) return null;
-  let gap = 0;
-  for (let i = 1; i < ages.length; i++) gap = Math.max(gap, ages[i] - ages[i - 1]);
-  return ages[ages.length - 1] + gap;
+function paneSpanBoundS(stated) {
+  // T-996: the pane's OWN time span, off the scale block's dataset (as canvas-journey reads it) —
+  // the exact seconds the frame laid the pane out with, where the retired row's ruler sentence only
+  // gave a bound (the largest stated age plus the widest gap between marks).
+  const v = Number(stated);
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 /**
@@ -1244,7 +1241,7 @@ async function draw(page, {
   acceptTimeoutMs = 180000,
 } = {}) {
   await page.frames(4);
-  const counts = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
+  const counts = `(document.querySelector('${PANE_ROW}')?.dataset.counts ?? '')`;
   // **A pane over never-swept spectrum holds no tiles and never will** (T-580). The original
   // predicate here was `0 pending` AND at least one tile, because until T-580 every place on
   // screen was a tile and `0 tiles` could only mean the pane had not started. Since T-580 the
@@ -1330,7 +1327,7 @@ async function draw(page, {
  * The box is read either side of the shot and the pair retaken if it moved, so the pixels and the
  * coordinates they are indexed by come from the same layout. See [[draw]] for what a stale one costs.
  */
-const PANE_COUNTS = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
+const PANE_COUNTS = `(document.querySelector('${PANE_ROW}')?.dataset.counts ?? '')`;
 async function snapPane(page, { tries = 4 } = {}) {
   let before = await paneGeometry(page), img = null, after = before;
   for (let i = 0; i <= tries; i++) {
