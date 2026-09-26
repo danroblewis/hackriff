@@ -408,6 +408,9 @@ proposal that fails any line is wrong, not a trade-off.
   the guard is a `ui/test` assertion of the *request the client builds* (the T-367 lesson).
 - [ ] **The view opens on the observed extent from the coverage map** (`surface/bootstrap.ts`), never
   on the whole 1 MHz–6 GHz midpoint and never derived from `frequency.current` (`docs/16 §8`, T-376).
+- [ ] **A visible tile is never abandoned** (§10.9, T-1057). Every pending visible address is re-requested
+  with jittered backoff until it is served or the route states it does not exist; the coverage survey may
+  turn a place grey and may never leave it pending; a retune refreshes the survey before it may veto.
 
 ---
 
@@ -737,6 +740,50 @@ Still no device route, and no new route at all: the same `/api/inventory` read, 
 Guarded by `ui/test/app-pane-inventory.test.ts` (the requests the client builds, per pane) and
 `ui/e2e/app-pane-inventory.e2e.mjs` (two windows asked about from one page, pane 2 advancing while
 pane 1 sits in the past, the lists named, at 1280 and 400 px).
+
+---
+
+### 10.9 A visible tile is never abandoned (normative, T-1057, 2026-09-25)
+
+*The user, via the supervisor: "Sometimes there are black bars in the waterfall, representing tiles that
+haven't been loaded yet; sometimes those never load. If a tile fails to load at all it should be
+re-requested. It seems like they are getting abandoned. Left alone long enough, all tiles on the screen
+should load. I don't think we should ever see the black tiles."*
+
+**The invariant.** Every pending **visible** address is re-requested, with jittered backoff, **until it
+is served or the route states the place does not exist**. Nothing else ends the asking. Three corollaries,
+each of which was a live defect:
+
+1. **Only "there is no such node" is permanent.** `hk-api` says that with a **404** (`tiles.rs`: *"scheme
+   … has no node at (level_f …, level_t …)"*). Every other refusal — a `400`, a `500`, a `501`, an
+   unreadable body, a batch answer that named no entry for the address — is about **this place at this
+   moment**, and goes on a **per-address** jittered ladder (`ui/src/surface/retry.ts`: 500 ms doubling to
+   30 s, the same ladder shape as `controls/backoff.ts`, additive jitter so a herd cannot re-arrive on one
+   tick). T-479's rule that every status the route could emit is terminal was too wide by exactly one
+   notch: the route uses `400` both for an address that can never exist *and* for a tile whose level
+   cannot be folded **yet**, so one frame of the second meaning cost that place for the rest of the session.
+2. **The coverage survey may turn a place GREY; it may never leave it PENDING.** T-580/T-905's
+   short-circuit (never-swept spectrum costs no round trip) is granted only where the survey will
+   actually draw grey for the place. A survey that settles a place while having no evidence *inside* it
+   draws nothing and also stops every lane requesting it — neither grey nor a tile, which is the black bar
+   arrived at from the coverage side.
+3. **A retune refreshes the survey before it may veto a request.** A survey taken before the radio moved
+   cannot speak for any instant after it, so a place that **reaches past** the retune is owed a request
+   until a survey whose evidence reaches past it lands — and the retune asks for that survey at once,
+   because a surface with nothing following the live edge never asks for another one on its own
+   (`preview.ts`'s cadence is `POSITIVE_INFINITY` there). Places that end **before** the retune keep the
+   veto and the saving: the radio cannot retroactively have sampled a band it was not tuned to.
+
+**Never at frame rate, either.** The flood T-479 fixed (157 requests in 700 ms for one place) is
+prevented by the **wait**, not by permanence: a place is asked at most once per interval, and only while
+something draws it — the ladder issues nothing, so a place nobody is looking at is never re-asked. The
+cost of a permanently-refused visible place is therefore two requests a minute; the cost of the other
+mistake is a bar of the waterfall that stays black until the page is reloaded. Those are not symmetric.
+
+Guarded by `ui/test/surface-tile-never-abandoned.test.ts` (30 % of answers dropped/refused/unreadable at
+random on a seeded schedule, every visible address served in the end, no PENDING or REFUSED quad left in
+the final frame's draw list; the pacing bound; the ladder's arithmetic; the survey and retune rules; the
+batch layer's own entries) and `ui/test/surface-cache.test.ts` (the status enumeration, place by place).
 
 ---
 

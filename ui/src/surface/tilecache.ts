@@ -165,6 +165,7 @@ import {
 import { BYTES_PER_CELL, TileBusyError, TileDecodeError, weakerTier, type TileData } from "./tile";
 import { CELL } from "./cellrule";
 import { RowAccumulator, type ColumnAddr, type GapBlock, type RowBlock, type RowResolution, type TileRows, type WantedColumn } from "./rowfeed";
+import { RetryLadder, jittered } from "./retry";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
 export interface TileTextures<T> {
@@ -315,6 +316,11 @@ export interface TileCacheOptions {
    * 11.4 ms: guessing *fast* and being wrong is the failure this exists to stop.
    */
   serverMsGuess?: number;
+  /** The per-address retry ladder's first wait and its ceiling, ms (T-1057, `./retry.ts`). Defaults
+   * [[RETRY_BASE_MS]] / [[RETRY_MAX_MS]]; a test pins them to keep a fake clock's arithmetic readable.
+   * Its jitter comes from [[random]] — one source of jitter per cache. */
+  retryBaseMs?: number;
+  retryMaxMs?: number;
   /**
    * **How long a resident tile may go without a successful re-read before it is reported STALE**
    * (T-1039), ms. Default [[DEFAULT_STALE_AFTER_MS]].
@@ -325,7 +331,9 @@ export interface TileCacheOptions {
    */
   staleAfterMs?: number;
   /** The source of jitter for backoff delays (T-1039), `[0, 1)`. Injectable so a test can pin the
-   * spread; defaults to `Math.random`. */
+   * spread; defaults to `Math.random`. **Every** backoff in this file draws on it — the two gates
+   * below and T-1057's per-address ladder — because "one shared source of jitter" is the same kind of
+   * fact as one clock, and two knobs for it would be two ways to pin the same thing. */
   random?: () => number;
 }
 
@@ -351,19 +359,6 @@ export const DEFAULT_STALE_AFTER_MS = 30_000;
  */
 export const STALE_CADENCE_MARGIN = 2;
 
-/**
- * **Jittered backoff** (T-1039): `base` plus up to `base × spread` of randomness, so a batch of
- * requests that all failed together (a retune, a reload, a network drop) do not all retry on the
- * exact same tick and hammer the route the instant it comes back — the same herd this file already
- * avoids for the live-edge lane by construction, applied here to the retry clock itself. `rand` is
- * `[0, 1)`; the jitter is additive and never shortens the wait below `base`, so it can only ever make
- * the ladder more spread out, never less patient.
- */
-function jittered(base: number, rand: () => number): number {
-  const r = rand();
-  const spread = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
-  return base + base * 0.5 * spread;
-}
 
 export interface TileCacheStats {
   uploads: number;
@@ -388,8 +383,17 @@ export interface TileCacheStats {
   /** Refreshes whose answer actually replaced a resident tile — the number that says rows reached
    * the texture, as against merely having been asked for. */
   edgeRefreshApplied: number;
-  /** Places the route answered *no* to permanently, and that are never asked for again (T-479). */
+  /**
+   * Places the route said **do not exist**, and that are never asked for again (T-479, narrowed by
+   * T-1057 to exactly that answer: a `404`/`410`, which is the route's own way of saying there is no
+   * such node). Every other refusal is now a place on the retry ladder, counted by
+   * [[retryScheduled]] — because a place that merely failed is a place that is still owed a request.
+   */
   terminalFailures: number;
+  /** Refusals that put a place on the per-address retry ladder (T-1057, `./retry.ts`): the route
+   * answered, but not with a tile, and asking again later can change that. Counts attempts, so it
+   * grows by one per refusal of the same place — `retryingPlaces` is how many places are owed one. */
+  retryScheduled: number;
   /**
    * Of [[edgeRefreshes]], the ones issued for a tile the live edge has **already passed** (T-495):
    * the completing re-ask that closes a tile whose last rows were recorded while it was off screen.
@@ -632,6 +636,23 @@ export class TileCache<T> {
    * *ask again* — the same shape as `BiasTee::Unknown` not being `Off`, in the retry direction.
    */
   private terminal = new Map<string, string>();
+  /**
+   * **Places that failed and are owed another request, with the wait between attempts** (T-1057,
+   * `./retry.ts`).
+   *
+   * The user's report was black bars in the waterfall that never fill. [[terminal]]'s default was
+   * the cause: T-479 made *everything the route said* permanent, so a `400` "this tile's level cannot
+   * be built from the levels below it" — the pyramid still folding, seconds from being answerable —
+   * ended the asking for that place for the rest of the session, exactly like a `400` for an address
+   * that can never exist. One status, two meanings, and the client picked the wrong one.
+   *
+   * So the enumeration is inverted again, but one notch rather than all the way back to T-479's
+   * flood: **terminal is now only what the route states as nonexistent** ([[statedNonexistent]]),
+   * and every other refusal lands here, on a jittered ladder that keeps the place askable for as
+   * long as something draws it. The flood T-479 fixed cannot come back through this door, because
+   * the ladder's whole job is that the same place is not asked twice inside its wait.
+   */
+  private readonly retry: RetryLadder;
   /** Keys being re-fetched **while their copy stays resident and drawn** (T-460). The set is what
    * lets [[insert]] tell a revalidation, which replaces, from a duplicate, which never uploads. */
   private refreshing = new Set<string>();
@@ -844,7 +865,8 @@ export class TileCache<T> {
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
-    edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
+    edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, retryScheduled: 0,
+    edgeRefreshCompletions: 0,
     silentFailures: 0, speculativeIssued: 0, speculativeHits: 0, aheadIssued: 0,
     rowsPushed: 0, rowTilesSynthesized: 0,
   };
@@ -862,6 +884,10 @@ export class TileCache<T> {
     this.now = opts.now ?? (() => Date.now());
     this.staleAfterMs = Math.max(0, opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS);
     this.random = opts.random ?? Math.random;
+    // **The ladder shares this cache's clock and its one source of jitter**, so a test that drives
+    // one drives both, and so no backoff here can be paced by a browser clock while everything else
+    // is paced by a fake one (T-1057 × T-1039).
+    this.retry = new RetryLadder(this.now, this.random, opts.retryBaseMs, opts.retryMaxMs);
   }
 
   get residentTiles(): number { return this.map.size; }
@@ -960,13 +986,33 @@ export class TileCache<T> {
     // **Asked, and no usable answer came back** — the other half of [[Residency.failed]] (T-499).
     // The place is still queued (recovery needs it to be), but while the route is silent it is not
     // *arriving*, and a renderer that draws it as "loading" is promising what it cannot deliver.
-    return this.silences > 0 ? { kind: "pending", failed: true } : { kind: "pending" };
+    //
+    // A place inside its own retry wait reads the same way (T-1057), and for the same reason: it is
+    // owed a request, the request is coming, and it is not on the wire now. `failed` is the honest
+    // mark for that; what changed is only that the place is no longer *abandoned* behind it.
+    return this.silences > 0 || this.retry.has(key)
+      ? { kind: "pending", failed: true }
+      : { kind: "pending" };
   }
 
-  /** Why this place will never be drawn, or `null`. `"…"` is the route's own words (T-479). */
-  refusalFor(addr: TileAddr): string | null { return this.terminal.get(keyOf(addr)) ?? null; }
-  /** How many places the route has refused permanently. */
+  /** Why this place has no tile in hand, or `null` — the route's own words (T-479), for a place the
+   * route says does not exist and for one waiting out the retry ladder alike (T-1057). A readout that
+   * needs to tell those apart asks [[retryingIn]]: a number means another attempt is coming. */
+  refusalFor(addr: TileAddr): string | null {
+    const key = keyOf(addr);
+    return this.terminal.get(key) ?? this.retry.whyOf(key);
+  }
+  /** How many places the route has said do NOT EXIST — the only permanent refusal left (T-1057). */
   get terminalPlaces(): number { return this.terminal.size; }
+  /** How many places failed and are owed another attempt (T-1057). Never permanent: each is asked
+   * again, jittered, as soon as its wait passes and something still draws it. */
+  get retryingPlaces(): number { return this.retry.size; }
+  /** ms until this place is asked again, 0 if it may go now, `null` if it has not failed (T-1057).
+   * What a readout says instead of implying a place is loading when it is waiting. */
+  retryingIn(addr: TileAddr): number | null { return this.retry.dueIn(keyOf(addr)); }
+  /** Consecutive refusals of this place (T-1057) — the ladder's own step, for a readout and for the
+   * tests that assert the wait doubles rather than repeating. */
+  retryAttempts(addr: TileAddr): number { return this.retry.attemptsOf(keyOf(addr)); }
 
   /** Resident lookup with no scheduling and no pin: how a fallback search asks about ancestors
    * without queueing a fetch for every level it tries. */
@@ -1101,9 +1147,14 @@ export class TileCache<T> {
   private schedule(addr: TileAddr, low = false): void {
     const key = keyOf(addr);
     if (this.map.has(key) || this.inflight.has(key) || this.queued.has(key)) return;
-    // The route has already said this place is not askable. A renderer calls `acquire` for it on
+    // The route has already said this place does not exist. A renderer calls `acquire` for it on
     // every frame, so without this the refusal is re-issued at frame rate (T-479).
     if (this.terminal.has(key)) return;
+    // **Refused, and not yet due** (T-1057). This is the whole of "never at frame rate, never
+    // abandoned": the place stays a place this cache intends to fetch, and the only thing the wait
+    // withholds is *this* frame's attempt. The lane asks again next frame, and the frame after the
+    // wait passes is the one that queues it.
+    if (!this.retry.ready(key)) return;
     // A place whose silent probe just failed waits behind the others (T-903, [[silenced]]).
     // `low` (T-1038's child prefetch) goes to the back of the line too: a guess about the next zoom
     // must never be served before something the pane is drawing now.
@@ -1822,6 +1873,9 @@ export class TileCache<T> {
     this.speculativeResident.delete(key);
     // A retune drops the look-ahead copy too; the next row may be asked for again.
     this.aheadAsked.delete(key);
+    // …and so may a place that was refused: what the route could not build before the retune it may
+    // be able to build after it, so the wait is not carried across (T-1057).
+    this.retry.clear(key);
     this.pushed.drop(addr);
     this.standInFrame.delete(key);
     this.bytes -= e.data.bytes;
@@ -1849,6 +1903,7 @@ export class TileCache<T> {
     this.lastGoodAt.clear();
     this.staleScope.clear();
     this.terminal.clear();
+    this.retry.clearAll();
     this.silences = 0;
     this.silentUntil = 0;
     this.silenced.clear();
@@ -2144,6 +2199,9 @@ export class TileCache<T> {
       (data) => {
         this.observe(started);
         this.succeeded();
+        // The place answered, so its ladder is over: a later failure starts at the first step rather
+        // than inheriting a 30 s wait from a network blip an hour ago (T-1057).
+        this.retry.clear(key);
         // A tile the retune overtook is requeued, not kept: `insert` says which happened, and the
         // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
         // would see this very request still outstanding and silently drop the retry.
@@ -2339,9 +2397,25 @@ export class TileCache<T> {
     // It is not grey: `acquire` still answers `pending`, and only a `coverage` state byte can produce
     // grey (ui/src/surface/cellrule.ts), so a refused place stays structurally distinguishable from
     // one the radio never looked at.
+    //
+    // **T-1057 narrows "terminal" to the one answer that ends the asking: the route saying the place
+    // does not exist.** Everything else the route can answer — `400` for a level that cannot be
+    // folded *yet*, `500` for a poisoned store, `401` before a token is renewed, a body that did not
+    // decode, a batch answer that named no entry — is a fact about this place at this moment, and the
+    // user's rule is that a visible place is re-asked until it is served or stated nonexistent. Those
+    // go on the per-address ladder ([[retry]]): asked again, later, and only while something draws it.
     if (!retryable(err)) {
-      this.terminal.set(keyOf(addr), describeFailure(err));
-      this.stats.terminalFailures++;
+      const key = keyOf(addr);
+      const why = describeFailure(err);
+      if (statedNonexistent(err)) {
+        this.terminal.set(key, why);
+        this.stats.terminalFailures++;
+        return false;
+      }
+      this.retry.fail(key, why);
+      this.stats.retryScheduled++;
+      // Not re-queued here: the ladder is a permission, not a schedule, so the place goes back on
+      // the wire when the lane that wants it asks again and the wait has passed ([[schedule]]).
       return false;
     }
     // **The server said nothing, so back off the transport** (T-499). Terminal would be wrong — a
@@ -2500,13 +2574,20 @@ export class TileCache<T> {
  *     a `502 Bad Gateway` is a proxy saying the origin did not. It is case 2 wearing a status line,
  *     and counting it as an answer left a live-edge tile terminal until a resize re-addressed it.
  *
- * Everything the server *said* is terminal — a status (400, 404, 413, 500), **and a body this client
- * could not read**. The second half was missing, and merging T-467 proved why it matters rather than
- * arguing it: the new coverage encoding made a stale fixture's `200` responses undecodable, and
- * because a `TileDecodeError` carries no HTTP status it fell into case 2 and was re-asked at frame
- * rate — **157 times in 700 ms**, the very storm T-479 exists to stop, wearing different clothes.
- * A 200 whose body does not decode is an answer; it is just not a readable one, and asking again
- * gets the same bytes back.
+ * Everything the server *said* is **not retryable on the next frame** — a status (400, 404, 413, 500),
+ * **and a body this client could not read**. The second half was missing, and merging T-467 proved why
+ * it matters rather than arguing it: the new coverage encoding made a stale fixture's `200` responses
+ * undecodable, and because a `TileDecodeError` carries no HTTP status it fell into case 2 and was
+ * re-asked at frame rate — **157 times in 700 ms**, the very storm T-479 exists to stop, wearing
+ * different clothes. A 200 whose body does not decode is an answer; it is just not a readable one.
+ *
+ * **What `false` means here changed with T-1057, and this is the important line.** It no longer means
+ * *never again*: it means *not on the transport's silence ladder, and not at frame rate*. Such a place
+ * goes to [[TileCache.retry]]'s per-address jittered ladder unless [[statedNonexistent]] — the user's
+ * rule is that a visible place is re-asked until it is served or the route says there is no such
+ * place, and "asking again gets the same bytes back" turned out to be false for the two refusals that
+ * actually filled the user's screen with black: a `400` from a level the pyramid has not folded yet,
+ * and a `200` truncated by a flaky network.
  *
  * The status is read structurally rather than by `instanceof` so this does not couple to which error
  * class the fetch layer builds for an HTTP failure; `TileDecodeError` is named because it is the
@@ -2558,6 +2639,38 @@ function retryable(err: unknown): boolean {
  */
 function fromTheRoute(status: number): boolean {
   return status < 500 || status === 500 || status === 501 || status === 503;
+}
+
+/**
+ * **Did the route state that this place DOES NOT EXIST?** (T-1057.)
+ *
+ * The one answer that ends the asking, and therefore the one thing [[TileCache.terminal]] may still
+ * be built from. The user's rule is *"if a tile fails to load at all it should be re-requested …
+ * left alone long enough, all tiles on the screen should load"*, whose only stopping condition is
+ * the route saying there is nothing there.
+ *
+ * `hk-api` says exactly that with a **404**: `crates/hk-api/src/tiles.rs` answers *"scheme … has no
+ * node at (level_f …, level_t …): its axes are level_f 0..N and level_t 0..M"* for an address off the
+ * lattice, and the same for the off-diagonal of a welded ladder. **410** is here because it is the
+ * same statement about a place that existed once; nothing in this repo sends it, and a proxy that
+ * does means it about the URL either way.
+ *
+ * **Why `400` is NOT in this set, although T-479's storm was a 400.** The route uses `400` for two
+ * incompatible things: *"f_index is outside the addressable spectrum"* (permanent) and *"this tile's
+ * level cannot be built from the levels below it"* / *"no store level can back this tile inside the
+ * work budget"* (transient — the pyramid is still folding, or the history has not reached that level
+ * yet). The status cannot tell them apart, so the question becomes which way to be wrong: a permanent
+ * 400 on the ladder costs two requests a minute, while a transient 400 read as permanent costs a bar
+ * of the waterfall that stays black until the page is reloaded. That is the same asymmetry T-523 wrote
+ * down one status class over, and it resolves the same way. T-479's storm is prevented by the ladder's
+ * wait, not by permanence — and the address arithmetic that produced it now answers 404 in any case.
+ *
+ * Read structurally, like [[fromTheRoute]], so this does not couple to which error class the fetch
+ * layer builds.
+ */
+function statedNonexistent(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  return status === 404 || status === 410;
 }
 
 /** The route's own words for a refusal, for the readout and for a test's failure message. */
