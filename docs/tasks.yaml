@@ -30197,7 +30197,7 @@ tasks:
   - id: T-1033
     milestone: MAUTO
     title: "explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it"
-    status: todo
+    status: done
     priority: low
     deps: []
     parallel_group: OPS-EXPLORER
@@ -30222,6 +30222,7 @@ tasks:
       Commits: 760aea81, 7472bb42, 208917c5, 8a332a37, 84cf7610
       Observed, not chased: The whole test_explorer_launcher.py suite is Darwin-only (pytestmark skipif) and this worker is Linux, so the two new/fixed tests still can't be executed for real here - only collected and lint-checked. Round 1's reviewer already ran both for real on Darwin and confirmed the cleanup-rescan test is a genuine red-on-old/green-on-fix; the corrected pid-reuse assertion (_exited_uncollected instead of os.kill(pid,0)) should be spot-checked there too on the next pass.
       Resources: 8 CPU-s, peak 0.4 GB — LEAKED 4 processes (killed at reap)
+    commit: 3a7ef63d
   - id: T-1034
     milestone: MLIVE
     title: "Departed-band fog gap: after a nudge the band's LAST live rows get no shadow at the finest level (tiles answer shadow.runs=0, stages=[], 2.6 s unsearched) - blank, not fog, until zoom-out"
