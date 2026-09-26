@@ -89,7 +89,7 @@ use hk_model::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::family::{explain_emitter, track_family};
+use crate::family::{explain_emitter, hop_set_family, track_family};
 
 /// Producer name of track and hop-set sightings in a [`MeasurementKey`].
 pub const TRACK_PRODUCER: &str = "hk-track";
@@ -1685,6 +1685,18 @@ impl TrackInventory {
     }
 }
 
+/// A hop set's sighting, carrying the `fhss` family its own linking measured (T-953).
+///
+/// `hop_set_sighting` leaves `classification: None`, which is why a hopping population read
+/// `family: null` with no explanation but the band's own allocation. The suggestion is written as
+/// [`crate::family::FAMILY_MAP_VERSION`] shape evidence, so it ranks an explanation and can never
+/// set a `known_status` — the hopping was measured, the *system* was not identified.
+fn hop_set_classified(h: &hk_detect::track::HopSetSummary) -> hk_model::Sighting {
+    let mut s = hop_set_sighting(h);
+    s.classification = hop_set_family(h).classification(s.seen.end);
+    s
+}
+
 impl Inventory for TrackInventory {
     fn region_spectrum(&mut self, spectrum: Arc<crate::overlap::RegionSpectrum>) {
         self.spectrum = Some(spectrum);
@@ -1741,7 +1753,7 @@ impl Inventory for TrackInventory {
                         self.retract(repo, m, emitter, h.time.end)?;
                     }
                 }
-                let (emitter, _) = self.offer(repo, &hop_set_sighting(h), None)?;
+                let (emitter, _) = self.offer(repo, &hop_set_classified(h), None)?;
                 // T-886: a member's observations did not vanish, they became the set's. A chain
                 // measuring one of those channels writes its row against the set's entry rather
                 // than dropping the measurement for want of one.
@@ -1750,7 +1762,7 @@ impl Inventory for TrackInventory {
                 }
             }
             TrackEvent::HopSetClosed(h) => {
-                self.offer(repo, &hop_set_sighting(h), None)?;
+                self.offer(repo, &hop_set_classified(h), None)?;
             }
             TrackEvent::Merged { from, into, at } => {
                 self.bound.remove(from);

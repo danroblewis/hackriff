@@ -1322,7 +1322,8 @@ fn classification_json(r: &hk_model::RecordedClassification) -> Value {
 }
 
 /// T-163 (ADR-0013 gap 7a) `estimated_params` object: one field per [`hk_model::EstimatedParams`]
-/// measurement, plus `modulation` (the demodulation's `mode`, e.g. `wfm`, `2fsk`) and provenance.
+/// measurement, plus `modulation` (the demodulation's `mode`, e.g. `wfm`, `2fsk`), `duration_s`
+/// (the session's own extent — a burst's length, T-953) and provenance.
 /// A field the estimator never measured for this signal (e.g. `symbol_rate_hz` on an analog FM
 /// station) is `null`, exactly like the stored [`hk_model::EstimatedParams`] — never a fabricated
 /// default. `t_s` and `source_session` match `/api/inventory/{id}/decode`'s `at`/`source_session`
@@ -1332,6 +1333,11 @@ fn estimated_params_json(d: &Demodulation) -> Value {
     json!({
         "modulation": d.mode,
         "symbol_rate_hz": p.symbol_rate_hz,
+        // T-953: the session's own extent, in seconds. For the burst demodulators this is the
+        // burst length the `/ws/open/bits` tap reports per burst and the inventory could not state
+        // at all; for a continuous session it is how long the session ran. Read off the stored
+        // row's `time`, so it is a measurement like the rest and never a default.
+        "duration_s": d.time.duration_ns() as f64 / 1e9,
         "mod_order": p.mod_order,
         "deviation_hz": p.deviation_hz,
         "cfo_hz": p.cfo_hz,
