@@ -122,6 +122,42 @@ export function drawerScope(s: AppState, historyS = HISTORY_S): DrawerScope | nu
 export const scopeKey = (sc: DrawerScope | null): string =>
   sc === null ? "" : `${sc.region?.id ?? "view"}:${sc.loHz}:${sc.hiHz}`;
 
+// ---- T-1061: material-change rescope + settle ---------------------------------------------
+//
+// THE DEFECT. `scopeKey` above changes on the exact Hz, so a trackpad zoom's every intermediate
+// frame re-asked all four windowed questions PLUS the unscoped observation log and coverage plane:
+// one 24-event zoom measured 264 requests, 100 of them /api/inventory-shaped GETs, in real Chrome
+// (request-volume-review-2026-09-26.md). None of that intermediate geometry is worth a fresh
+// answer: a view that pans 2 % or zooms 5 % looks, to every one of these questions, like the view
+// it just answered.
+//
+// THE FIX, same shape as `centre/nudge.ts`'s "how far is worth reacting to" rule: [[materialScopeKey]]
+// buckets the view so it changes only when the span crosses a `MATERIAL_SPAN_RATIO` zoom step or the
+// low edge moves a `MATERIAL_MOVE_FRACTION` cell at the CURRENT bucket's scale — "current-level
+// cells", so a pan is judged against how much is on screen, not a fixed Hz distance. A region
+// selected/cleared is never bucketed: it changes what the questions are ABOUT (T-943), so it always
+// re-asks, at once, never behind the settle timer below (mountExploreDrawer's `rescope`).
+export const MATERIAL_MOVE_FRACTION = 0.25;
+export const MATERIAL_SPAN_RATIO = 1.5;
+
+/** A string that changes only on a MATERIAL view change (a region change is judged separately, by
+ * its own id, never bucketed — see above). `null`/degenerate scopes fall back to the exact key so
+ * they are never silently swallowed. */
+export function materialScopeKey(sc: DrawerScope | null): string {
+  if (sc === null) return "";
+  if (sc.region !== null) return `region:${sc.region.id}`;
+  const span = sc.hiHz - sc.loHz;
+  if (!(span > 0) || !Number.isFinite(span)) return `view:${sc.loHz}:${sc.hiHz}`;
+  const level = Math.round(Math.log(span) / Math.log(MATERIAL_SPAN_RATIO));
+  const levelSpan = MATERIAL_SPAN_RATIO ** level;
+  const cell = levelSpan * MATERIAL_MOVE_FRACTION;
+  return `view:${level}:${Math.round(sc.loHz / cell)}`;
+}
+
+/** How long an intermediate view (a drag or a trackpad zoom in flight) must stop changing before it
+ * is worth a fresh rescope. */
+export const RESCOPE_SETTLE_MS = 300;
+
 /** The one sentence saying which window the rows below are about — never left implied, because the
  * rows look identical either way (P4: the drawer states what it is a view of). */
 export function scopeLine(sc: DrawerScope | null): string {
@@ -484,6 +520,13 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
   let selected: string | null = null;
   let seq = 0;
   const surveys = new SurveyLog();
+  // T-1061: the questions that answer "where have I looked at all" (the unscoped coverage plane,
+  // the observation log) do not move with an intermediate view — only [[refresh]] (initial load, the
+  // 30 s tick, a region select/deselect) touches them; [[refreshView]] reuses the last answer.
+  let lastCov: CoverageResp | null = null;
+  let lastMaterialKey = "";
+  let lastRegionId: string | null = null;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
   // T-943: right-click / long-press a row for the same actions the sheet and the surface offer.
   bindContextTrigger(listEl, (x, y, target) => {
@@ -537,6 +580,15 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
   const get = async <T,>(path: string): Promise<T | null> => {
     try { return await ctx.client.get<T>(path); } catch { return null; }
   };
+  const applyItems = (sc: DrawerScope, ev: EventsResp | null, st: StrongestResp | null,
+    sch: SchedulerResponse | null, cov: CoverageResp | null, edge: number) => {
+    scope = sc;
+    items = itemsInScope([...unknownItems(ev), ...strongestItem(st), ...quietItems(sch),
+      ...surveyWindowItems(surveys.wins, edge, 4, surveys.truncatedBefore), ...surveyItems(cov, 2), ...neverLookedItems(cov)], sc);
+    render();
+  };
+  /** Every question, including the two scoped to the whole tunable range (the observation log,
+   * the unscoped coverage plane). The initial load, the 30 s tick, and a region select/deselect. */
   const refresh = async () => {
     const my = ++seq;
     const s = ctx.store.get();
@@ -553,15 +605,52 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
       surveys.refresh(get, edge),
     ]);
     if (my !== seq) return;
-    scope = sc;
-    items = itemsInScope([...unknownItems(ev), ...strongestItem(st), ...quietItems(sch),
-      ...surveyWindowItems(surveys.wins, edge, 4, surveys.truncatedBefore), ...surveyItems(cov, 2), ...neverLookedItems(cov)], sc);
-    render();
+    lastCov = cov;
+    lastMaterialKey = materialScopeKey(sc);
+    lastRegionId = sc.region?.id ?? null;
+    applyItems(sc, ev, st, sch, cov, edge);
+  };
+  /**
+   * T-1061: a re-scope from an intermediate view (a drag or trackpad zoom's every frame, ~100
+   * requests measured over one gesture — request-volume-review-2026-09-26.md). Fires only the
+   * three questions that actually depend on the exact window; the observation log and the unscoped
+   * coverage plane answer "where have I looked at all" and are reused as last read by [[refresh]].
+   */
+  const refreshView = async (sc: DrawerScope) => {
+    const my = ++seq;
+    const s = ctx.store.get();
+    const edge = s.live.edgeTS;
+    if (edge === null) return;
+    const req = drawerRequests(sc);
+    const [ev, st, sch] = await Promise.all([
+      get<EventsResp>(req.events), get<StrongestResp>(req.strongest), get<SchedulerResponse>(req.scheduler),
+    ]);
+    if (my !== seq) return;
+    applyItems(sc, ev, st, sch, lastCov, edge);
   };
   render();
   void refresh();
-  // A new scope (a region selected, deselected, or the view moved to another band) re-asks at once:
-  // the 30 s poll would otherwise leave the previous window's rows under a "Selected region" title.
-  ctx.store.select((s) => scopeKey(drawerScope(s)), function rescope() { void refresh(); });
+  // T-1061: a region selected/cleared re-asks EVERYTHING at once (what the questions are about
+  // changed, T-943); an intermediate view re-asks only once it settles and only when it moved
+  // materially (`materialScopeKey`) — single in flight, a fresh gesture superseding the last
+  // (`settleTimer` reset, `seq` drops a stale answer landing after it).
+  ctx.store.select((s) => scopeKey(drawerScope(s)), function rescope() {
+    const sc = drawerScope(ctx.store.get());
+    const regionId = sc?.region?.id ?? null;
+    if (regionId !== lastRegionId) {
+      if (settleTimer !== null) { clearTimeout(settleTimer); settleTimer = null; }
+      void refresh();
+      return;
+    }
+    if (sc === null || materialScopeKey(sc) === lastMaterialKey) return;
+    if (settleTimer !== null) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      const settled = drawerScope(ctx.store.get());
+      if (settled === null || (settled.region?.id ?? null) !== regionId) return; // superseded by a region change
+      lastMaterialKey = materialScopeKey(settled);
+      void refreshView(settled);
+    }, RESCOPE_SETTLE_MS);
+  });
   setInterval(() => { void refresh(); }, REFRESH_MS);
 };

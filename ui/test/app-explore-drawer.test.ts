@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { drawerRequests, drawerScope, foldSurveyRecords, groupItems, itemsInScope, peekLine, quietItems, scopeKey, scopeLine, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type DrawerItem, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { drawerRequests, drawerScope, foldSurveyRecords, groupItems, itemsInScope, materialScopeKey, peekLine, quietItems, scopeKey, scopeLine, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type DrawerItem, type DrawerScope, type EventsResp } from "../src/app/chrome/explore-drawer";
 import { PaneModel } from "../src/surface/panes";
 import { surveyUrl } from "../src/surface/survey";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
@@ -528,4 +528,55 @@ test("T-1030: the drawer's four requests are distinguishable on the wire from th
   assert.ok(req.scheduler.startsWith("/api/scheduler?"), req.scheduler);
   assert.match(surveyUrl(0, 9_830_400_000, 0, 1e9), /(^|&)rows=2(&|$)/);
   assert.doesNotMatch(surveyUrl(0, 9_830_400_000, 0, 1e9), /(^|&)cells=64(&|$)/);
+});
+
+// ---- T-1061: material-change rescope + settle ----------------------------------------------
+//
+// request-volume-review-2026-09-26.md: a 24-event trackpad zoom fired 264 requests (100 of them
+// /api/inventory-shaped), because `scopeKey` above re-asked all four windowed questions PLUS the
+// unscoped coverage plane and the observation log on every intermediate frame. The fix: a settled,
+// materially-different view re-asks only the three questions that depend on the exact window
+// (events/strongest/scheduler); the unscoped coverage plane and the observation log wait for the
+// 30 s tick or a region change (T-943's rescope, unaffected — the region select/deselect below).
+
+test("T-1061: materialScopeKey ignores a sub-threshold pan or zoom, but changes on a real move, a real zoom, or a region", () => {
+  const view = (loHz: number, hiHz: number): DrawerScope => ({ loHz, hiHz, t0: 0, t1: 1, region: null });
+  const base = view(400e6, 500e6); // span 100 MHz
+  assert.equal(materialScopeKey(view(400.1e6, 500.1e6)), materialScopeKey(base), "a sub-pixel pan is not material");
+  assert.notEqual(materialScopeKey(view(430e6, 530e6)), materialScopeKey(base), "moving most of a span is material");
+  assert.notEqual(materialScopeKey(view(430e6, 450e6)), materialScopeKey(base), "a 5x zoom is material");
+  const region: DrawerScope = { ...base, region: { id: "s1", f_lo: 400e6, f_hi: 500e6 } };
+  assert.notEqual(materialScopeKey(region), materialScopeKey(base), "a region is never bucketed with the view");
+  assert.equal(materialScopeKey(null), "");
+});
+
+test("T-1061: 24 intermediate view changes in ~400 ms settle into ONE set of [events, strongest, scheduler]; observations and the unscoped coverage plane are not re-asked", async () => {
+  const m = await mountedDrawer({ edge: 1000 });
+  const before = m.calls.length;
+  // A trackpad zoom: 24 steps, each a tiny move over the last but a large one over the whole run —
+  // never a region, so this is exactly the intermediate-view case the settle timer exists for.
+  for (let i = 1; i <= 24; i++) {
+    const span = 100e6 * 0.9 ** i;
+    m.store.set(() => ({ live: { ...m.store.get().live, view: { loHz: 450e6 - span / 2, hiHz: 450e6 + span / 2 } } }));
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  const asked = m.calls.slice(before);
+  const windowed = asked.filter((c) => /^\/api\/(events|analysis\/strongest|scheduler)/.test(c));
+  assert.equal(windowed.length, 3, `exactly one settled set of three, got ${JSON.stringify(asked)}`);
+  assert.equal(asked.filter((c) => c.startsWith("/api/observations")).length, 0, "observations count 0");
+  assert.equal(asked.filter((c) => c.startsWith("/api/coverage")).length, 0, "the unscoped coverage plane waits for the 30 s tick");
+});
+
+test("T-1061: a region select/deselect still rescopes at once (all four questions, no settle wait)", async () => {
+  const m = await mountedDrawer({ edge: 1000 });
+  const before = m.calls.length;
+  m.store.set(() => ({ selections: { list: [REGION], sync: "" }, focus: { kind: "selection", id: "s1" } }));
+  await m.flush(); // no real-time wait: a region change is never behind the settle timer
+  const asked = m.calls.slice(before).filter((c) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c));
+  assert.equal(asked.length, 4, `the region re-asked everything at once, got ${JSON.stringify(m.calls.slice(before))}`);
+  const before2 = m.calls.length;
+  m.store.set(() => ({ selections: { list: [], sync: "" }, focus: { kind: "none" } }));
+  await m.flush();
+  const afterDeselect = m.calls.slice(before2).filter((c) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c));
+  assert.equal(afterDeselect.length, 4, "deselecting re-asks everything at once too");
 });
