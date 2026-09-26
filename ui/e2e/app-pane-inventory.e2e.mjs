@@ -37,10 +37,12 @@ const LISTS = `JSON.stringify((() => {
   };
 })())`;
 
-/** Each pane's own window, off its own status row (`data-t0-ns`/`data-t1-ns`, written per FRAME
- * for EVERY pane — not the active one's readout). */
-const WINDOWS = `JSON.stringify(Object.fromEntries([...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]')]
-  .map((r) => [r.querySelector('.hk-surface-id').textContent,
+/** Each pane's own window, off its own scale block (`data-pane`, `data-t0-ns`/`data-t1-ns`, written
+ * per FRAME for EVERY pane — not the active one's readout). T-996 retired the per-viewport status
+ * row this used to read; the pane's scale block carries the same state (T-1081). */
+const WINDOWS = `JSON.stringify(Object.fromEntries([...document.querySelectorAll('.sf-scale:not([hidden])')]
+  .filter((r) => r.dataset.pane)
+  .map((r) => [r.dataset.pane,
     { t0: Number(r.dataset.t0Ns), t1: Number(r.dataset.t1Ns), following: r.dataset.following === 'true' }])))`;
 
 /** A point inside the canvas, in page px, within [x0, x1] and away from the floating chrome. */
@@ -68,8 +70,8 @@ for (const [width, height] of [[1280, 800], [400, 820]]) test(`at ${width} px: e
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the floating cluster to mount", "!!document.querySelector('.map-pane-btn')", { timeoutMs: 30000 });
-  await page.waitFor("a pane row with its own window stated",
-    "Number(document.querySelector('.hk-surface-viewport[data-viewport=\"pane\"]')?.dataset.t1Ns) > 0", { timeoutMs: 90000 });
+  await page.waitFor("a pane's scale block with its own window stated",
+    "Number(document.querySelector('.sf-scale:not([hidden])')?.dataset.t1Ns) > 0", { timeoutMs: 90000 });
   await page.waitFor("the Explore lists to mount",
     "!!document.querySelector('.side-inv .tab[data-tab=\"candidate\"]')", { timeoutMs: 30000 });
 

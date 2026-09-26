@@ -98,9 +98,26 @@ export interface Page { entries: Row[]; next_cursor: string | null }
 
 /** Loads one tab's page, reusing the old page's query builder (T-080: candidates and confirmed are
  * always separate `state=` queries, never the combined default). */
-export async function fetchInventoryPage(client: InventoryClient, state: InventoryTab, f: Filters, cursor?: string | null): Promise<Page> {
-  return client.get<Page>(inventoryQuery(state, f, cursor));
+export async function fetchInventoryPage(
+  client: InventoryClient, state: InventoryTab, f: Filters, cursor?: string | null, signal?: AbortSignal,
+): Promise<Page> {
+  const path = inventoryQuery(state, f, cursor);
+  return signal ? client.get<Page>(path, { signal }) : client.get<Page>(path);
 }
+
+/**
+ * How long one inventory load (every pane's two list queries and, when a list is empty, its
+ * coverage question) may take before it is abandoned, ms (T-1081).
+ *
+ * The poll that drives [[loadInventoryRows]] is serial — the next ask is scheduled only once the
+ * last one settles (`startPoll`) — so a load waiting on ONE GET the server never answers stopped
+ * every later ask, for every pane, for as long as the browser cared to hold the socket: the lists
+ * froze on whatever window they last answered and a split pane's list never loaded (RC
+ * 2026-09-26: `app-pane-inventory` saw no inventory request at all for 40 s under load). Well above
+ * a healthy answer, well below the browser's own timeout, and a few poll periods long, so the
+ * bound is one this code chose. The same shape as T-927's density deadline.
+ */
+export const INVENTORY_LOAD_TIMEOUT_MS = 15_000;
 
 /** Row rate assumed before the spectrum header has arrived — hk-pipeline's `spectrum_rows_per_s`,
  * and the same fallback `centre/live-spectrum.ts` uses for its own row period. */
@@ -279,7 +296,31 @@ export function confirmedFilters(state: WindowState): Filters {
  * that pane's: the panes beside it are asking their own questions and their answers do not move.
  * Neither list is filtered here — the client chooses only *which window to ask about*.
  */
-export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void): Promise<void> {
+export async function loadInventoryRows(
+  ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void,
+  deadlineMs: number = INVENTORY_LOAD_TIMEOUT_MS,
+): Promise<void> {
+  // T-1081: one deadline over the whole load. At `deadlineMs` every GET it made is aborted AND the
+  // load rejects — a client that ignores its signal cannot hold the poll either — and nothing it
+  // answers afterwards is written back (a late answer is about a window the next load re-asks).
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      ac.abort();
+      reject(new Error(`inventory load timed out after ${deadlineMs} ms`));
+    }, deadlineMs);
+  });
+  try {
+    await Promise.race([loadAllPanes(ctx, onMore, ac.signal), deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function loadAllPanes(
+  ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void, signal: AbortSignal,
+): Promise<void> {
   const state = ctx.store.get();
   const edge = liveEdgeS(state);
   // The one page-lifecycle stamp in this module, read once per load and handed to every pane's
@@ -291,18 +332,18 @@ export async function loadInventoryRows(ctx: AppContext, onMore: (tab: Inventory
   const inv = state.inventory;
   const specs = Object.values(inv.panes).map((p) => p.spec);
   if (specs.length === 0) {
-    await loadPaneRows(ctx, stateSpec(state), edge, loadedAtS, onMore);
+    await loadPaneRows(ctx, stateSpec(state), edge, loadedAtS, onMore, signal);
     return;
   }
   const activeId = inv.active?.id ?? "";
-  await Promise.all(specs.map((spec) => loadPaneRows(ctx, spec, edge, loadedAtS, spec.id === activeId ? onMore : null)));
+  await Promise.all(specs.map((spec) => loadPaneRows(ctx, spec, edge, loadedAtS, spec.id === activeId ? onMore : null, signal)));
 }
 
 /** One pane's two queries, its coverage question and its write-back. Errors propagate to the
  * caller's one handler, exactly as the single-window load's did. */
 async function loadPaneRows(
   ctx: AppContext, spec: PaneWindowSpec, edge: number | null, loadedAtS: number,
-  onMore: ((tab: InventoryTab, more: boolean) => void) | null,
+  onMore: ((tab: InventoryTab, more: boolean) => void) | null, signal: AbortSignal,
 ): Promise<void> {
   const w = paneWindow(spec, edge);
   // T-379: no live edge reported yet — the window is *unknown*. Asking unwindowed would list
@@ -314,9 +355,10 @@ async function loadPaneRows(
     return;
   }
   const [confirmed, candidate] = await Promise.all([
-    fetchInventoryPage(ctx.client, "confirmed", paneConfirmedFilters(spec, edge)),
-    fetchInventoryPage(ctx.client, "candidate", paneCandidateFilters(spec, w)),
+    fetchInventoryPage(ctx.client, "confirmed", paneConfirmedFilters(spec, edge), null, signal),
+    fetchInventoryPage(ctx.client, "candidate", paneCandidateFilters(spec, w), null, signal),
   ]);
+  if (signal.aborted) return;
   onMore?.("confirmed", !!confirmed.next_cursor);
   onMore?.("candidate", !!candidate.next_cursor);
   const rows: Record<string, Row> = {};
@@ -324,7 +366,8 @@ async function loadPaneRows(
   // The window's own coverage, asked for only when the list came back empty — the one case where
   // the difference between "nothing was on the air" and "nothing ever looked here" is the whole
   // message. It is the backend's `Coverage` (T-368), read as served; nothing here decides it.
-  const coverage = candidate.entries.length === 0 ? await specCoverage(ctx.client, spec, w) : "observed";
+  const coverage = candidate.entries.length === 0 ? await specCoverage(ctx.client, spec, w, signal) : "observed";
+  if (signal.aborted) return;
   const window = { t0: w.t0, t1: w.t1, coverage };
   if (spec.id === "") {
     ctx.store.set(setInventoryRows(rows, loadedAtS));
@@ -423,14 +466,13 @@ export async function windowCoverage(
 /** [[windowCoverage]] for one pane's window (T-1002): the same question, asked over the band that
  * pane is showing rather than the app's mirrored one. */
 export async function specCoverage(
-  client: Pick<InventoryClient, "get">, spec: PaneWindowSpec, w: { t0: number; t1: number },
+  client: Pick<InventoryClient, "get">, spec: PaneWindowSpec, w: { t0: number; t1: number }, signal?: AbortSignal,
 ): Promise<WindowCoverage> {
   const band = paneBand(spec);
   if (!band || !(w.t1 > w.t0)) return null;
   try {
-    const body = await client.get<CoverageResponse>(
-      `/api/coverage?f_lo=${band.lo}&f_hi=${band.hi}&cells=1&t0=${w.t0}&t1=${w.t1}`,
-    );
+    const path = `/api/coverage?f_lo=${band.lo}&f_hi=${band.hi}&cells=1&t0=${w.t0}&t1=${w.t1}`;
+    const body = await (signal ? client.get<CoverageResponse>(path, { signal }) : client.get<CoverageResponse>(path));
     const cells = surveyCells(body);
     // Not asked about, or served nothing: unknown. Never "unobserved" by default — that would be a
     // measurement claim made out of a missing answer. The route's own `"unknown"` state (T-423 —
