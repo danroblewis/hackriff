@@ -14,14 +14,23 @@
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { OUTPUTS_SUBJECT, liveOnlyNote } from "../live-only";
+import { subscribeChanges } from "../net";
 import { dismissOutputsStrip, outputsStripShown, setMode, setServedOutputs, toast, type OutputEntry } from "../state";
 import type { ServedPipeline, ServedRecording } from "./activity";
 import { getAudioSession, setOutputsRefresher, stopOutput } from "./api";
 import { copyAddressText, levelPct, outputsCountText } from "./outputs";
 
-/** How often the open-output records are re-read (ms): a started decode or recording is badged
- * within this, and an ended one loses its badge within it. */
+/** How often the open-output records are re-read absent a `/ws/changes` push (ms; T-1066): a started
+ * decode or recording is badged within this even on a server too old for the feed, and — while a
+ * `records` output is actually running — this is also the rate meter's own sample cadence (the
+ * frames counter GROWS under an active pipeline; that is not a "write" the feed reports, docs/api.md
+ * §`/ws/changes`), so it stays short rather than the default `startWatch` fallback. */
 export const SERVED_OUTPUTS_POLL_MS = 1000;
+
+/** The fallback cadence with nothing `records`-shaped active (T-1066): `/ws/changes` pushes on any
+ * start/stop instantly, so idling here no longer costs the poll rate above — only this slow clock,
+ * matched to `startWatch`'s own default. */
+const IDLE_POLL_MS = 30_000;
 
 function copyAddress(ctx: AppContext, tcpTarget: string | null) {
   if (!tcpTarget) { ctx.store.set(toast("No address for this stream yet.")); return; }
@@ -124,12 +133,26 @@ function mount(el: HTMLElement, ctx: AppContext) {
       }
     } finally {
       inflight = false;
-      if (again) { again = false; void poll(); } else timer = window.setTimeout(() => void poll(), SERVED_OUTPUTS_POLL_MS);
+      if (again) {
+        again = false;
+        void poll();
+      } else {
+        // Fast while a records output is actually running (its frames counter GROWS between writes,
+        // which `/ws/changes` does not report — docs/api.md); otherwise the slow fallback, since a
+        // start/stop now arrives instantly over the change feed below.
+        const active = ctx.store.get().outputs.some((o) => o.kind === "records");
+        timer = window.setTimeout(() => void poll(), active ? SERVED_OUTPUTS_POLL_MS : IDLE_POLL_MS);
+      }
     }
   };
   // A menu action that just opened or closed an output asks for the records now, so the badge does
   // not wait out a whole poll interval (it still only shows what the server then answers).
   setOutputsRefresher(() => { void poll(); });
+  // T-1066: `/ws/changes` on either route this poll reads — a start/stop lands within its tick
+  // rather than waiting out `IDLE_POLL_MS`. The unsubscribes are never called: this mount lives as
+  // long as the page (`AreaMounts` has no teardown here, matching the poll it replaces).
+  subscribeChanges("/api/pipelines", () => void poll());
+  subscribeChanges("/api/outputs", () => void poll());
   void poll();
 }
 

@@ -6,7 +6,7 @@ import type { ControlClient } from "../../controls/client";
 import type { AppContext, MountFn } from "../context";
 import { h } from "../dom";
 import { PIPELINES_SUBJECT, liveOnlyNote } from "../live-only";
-import { startPoll } from "../net";
+import { startWatch } from "../net";
 import { setMode, toast } from "../state";
 import { selectNode, selectPipeline } from "./slice";
 
@@ -144,7 +144,12 @@ export function subscribeDecodeFeed(ctx: AppContext, cb: (f: DecodeFeed) => void
       // Seeded at seq 0: the first poll is asked after those creates returned, so it is authoritative.
       created: new Map([...(seed?.values() ?? [])].map((p) => [p.id, { p, seq: 0 }])),
     };
-    c.stopPoll = startPoll(
+    // T-1066: `/ws/changes` on `/api/pipelines` replaces the 2 s clock for the common case (a create
+    // or a stop bumps it); the fallback stays short enough that a pipeline's own progress (frames,
+    // stage stats — not a version-bumping write) is still not stale for long on a server too old for
+    // the feed, or between real writes.
+    c.stopPoll = startWatch(
+      "/api/pipelines",
       async () => {
         const asked = ++c.seq;
         const r = await ctx.client.get<{ pipelines: Pipeline[] }>("/api/pipelines");

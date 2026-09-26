@@ -31,7 +31,7 @@
 // as the canvas's grey and its honesty tiers: never imply data the front end cannot deliver.
 import type { AppContext } from "../context";
 import { h } from "../dom";
-import { startPoll } from "../net";
+import { subscribeChanges } from "../net";
 import { setCaptureWindow, setIqAvailability, toast, type AppState } from "../state";
 import { timelineRequest } from "../../navigators";
 import { captureWindow, currentSpan, iqAvailability, type RecordingsIqResponse, type TimelineResponse } from "./capture-window";
@@ -57,7 +57,12 @@ export const IQ_AVAILABILITY_REQUEST = "/api/recordings";
 /** Start polling the capture window and the raw-IQ-available spans. Returns the stop function. */
 export function startCaptureClock(ctx: AppContext): () => void {
   const { store, client } = ctx;
-  return startPoll(async () => {
+  let stopped = false, running = false, pending = false, timer = 0;
+  const read = async () => {
+    if (stopped) return;
+    if (running) { pending = true; return; }
+    running = true;
+    clearTimeout(timer);
     const [tl, rec] = await Promise.all([
       client.get<TimelineResponse>(CAPTURE_CLOCK_REQUEST).catch(() => null),
       client.get<RecordingsIqResponse>(IQ_AVAILABILITY_REQUEST).catch(() => null),
@@ -66,7 +71,19 @@ export function startCaptureClock(ctx: AppContext): () => void {
     // our own invention.
     store.set(setCaptureWindow(captureWindow(tl)));
     store.set(setIqAvailability(rec === null ? null : iqAvailability(rec)));
-  }, CAPTURE_CLOCK_MS);
+    running = false;
+    if (stopped) return;
+    if (pending) { pending = false; void read(); } else timer = window.setTimeout(() => void read(), CAPTURE_CLOCK_MS);
+  };
+  // T-1066: `/ws/changes` fires this early on a manual record start/stop or a clip, but the ring
+  // rolling forward and the retention window advancing are neither — they are the run happening, not
+  // a write (docs/api.md `/ws/changes`) — so `CAPTURE_CLOCK_MS` stays the fallback clock rather than
+  // `startWatch`'s slower default: the fall-back-to-a-browser-clock/default-span rule this file
+  // exists to uphold binds the CADENCE too, not just what a failed read produces.
+  const unTl = subscribeChanges("/api/timeline", () => void read());
+  const unRec = subscribeChanges("/api/recordings", () => void read());
+  void read();
+  return () => { stopped = true; clearTimeout(timer); unTl(); unRec(); };
 }
 
 interface RecordSession { id: string; active: boolean; elapsed_s: number; max_s: number }
@@ -130,14 +147,28 @@ export function recordIqButton(ctx: AppContext, at: () => RecordPane | null = ()
     if (btn.dataset.scope !== scope) btn.dataset.scope = scope;
   };
   btn.sync = render;
-  const pollSession = () => startPoll(async () => {
-    if (!session) return;
-    const r = await client.get<{ recordings: RecordSession[] }>("/api/outputs");
-    const found = r.recordings.find((s) => s.id === session!.id) ?? null;
-    session = found;
-    render();
-    if (!found || !found.active) { store.set(toast("IQ recording finished.")); stopPoll?.(); }
-  }, 2000);
+  // T-1066: the session's own end is a write (`/api/outputs/record/stop` or the run finishing it
+  // server-side) that bumps `/api/outputs`, so `/ws/changes` catches it early; the 2 s fallback below
+  // only matters on an older server or while the socket is down. `startWatch` is not used here
+  // because the poll must stop entirely once the session ends (`stopPoll`), which its own unsubscribe
+  // already does — a plain function local to this closure keeps that one-shot lifecycle explicit.
+  const pollSession = () => {
+    let stopped = false, timer = 0, un = () => {};
+    const run = async () => {
+      if (stopped || !session) return;
+      clearTimeout(timer);
+      const r = await client.get<{ recordings: RecordSession[] }>("/api/outputs");
+      const found = r.recordings.find((s) => s.id === session!.id) ?? null;
+      session = found;
+      render();
+      if (!found || !found.active) { store.set(toast("IQ recording finished.")); stop(); return; }
+      if (!stopped) timer = window.setTimeout(() => void run(), 2000);
+    };
+    const stop = () => { stopped = true; clearTimeout(timer); un(); };
+    un = subscribeChanges("/api/outputs", () => void run());
+    void run();
+    return stop;
+  };
 
   btn.addEventListener("click", () => {
     if (session?.active) {

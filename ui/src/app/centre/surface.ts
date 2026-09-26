@@ -83,16 +83,16 @@ import {
 import { ringMaxHoldColumns, ringRowAt, sampleRingRow } from "../../surface/livering";
 import type { OverlayQuad } from "../../surface/minimap";
 import { boxOf, type PaneState, type PaneStatus } from "../../surface/panes";
-import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
+import { parsePaths, pathQuads, PATHS_ROUTE, pathsRequest, type MarkPath } from "../../surface/paths";
 // T-898: the device's OWN route through frequency (`GET /api/tune-history`), drawn like a
 // directions line — one per front end, in the same render pass as the tiles.
 import {
-  parseTuneHistory, tuneHistoryRequest, tuneKeyEntries, tuneQuads, type TunePath,
+  parseTuneHistory, TUNE_HISTORY_ROUTE, tuneHistoryRequest, tuneKeyEntries, tuneQuads, type TunePath,
 } from "../../surface/tunepath";
 // T-981: front-end events (`GET /api/frontend/events`) — clipped whole-span rows marked as the
 // radio's own energy, in the same render pass as the tiles.
 import {
-  frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
+  FRONTEND_EVENTS_ROUTE, frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
 } from "../../surface/frontend";
 import { flags } from "../../flags";
 import { fmtLiveMetrics, liveMetrics } from "../../surface/livemetrics";
@@ -104,10 +104,10 @@ import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { menuDevices, openMeasurementMenu, openSelectionMenu, openSignalMenu } from "../menu";
 import { boxActivity, type BoxActivity } from "../dock/activity";
-import { startPoll } from "../net";
+import { startPoll, startWatch } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
-import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
+import { ANNOTATIONS_ROUTE, boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
 import { closeCard, focusSelection, focusSignal, paneRows, setInventoryPanes } from "../explore/slice";
 import type { PaneWindowSpec } from "../explore/pane-window";
 import { gotoTimeWindow, gotoWindow, openReview, requestGoto, reviewAt, setNavigation, toast, type AppState, type ReviewTab } from "../state";
@@ -2323,7 +2323,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
       },
       toggleViewWide: (id) => { if (id === "trace") setTrace(!traceOn); },
       setScale: (id) => { const m = scaleMode(id); if (m) setMode(m); },
-      viewChanged: () => { lastMirror = ""; mirror(); renderLive(); },
+      viewChanged: () => {
+        lastMirror = ""; mirror(); renderLive();
+        // T-1066: a pan/zoom settle changed the box these four read, which `/ws/changes` cannot see
+        // (the route didn't change; the window on it did) — so ask for the new window now rather than
+        // waiting out the slow fallback.
+        void refreshPaths(); void refreshTuneHistory(); void refreshFrontEndEvents(); void refreshAnnotationsInView();
+      },
       toast: (text) => store.set(toast(text)),
       research: {
         isOpen: () => store.get().research.open,
@@ -2497,41 +2503,48 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane
     // with the layer off costs nothing; with it off everywhere there is no request at all. Read
     // only: a path is a view over stored detections and reaches no device.
-    startPoll(async () => {
+    // T-1066: these four read a window that PANNING changes, not only a write — so each is also
+    // called directly from `viewChanged` (a pan/zoom settle, below) for the case `/ws/changes` cannot
+    // see: the same route, a different box. `startWatch`'s own trigger (a write) and its slow
+    // fallback cover the rest — a stale layer over a STILL view, or a server too old for the feed.
+    const refreshPaths = async () => {
       const url = pathsRequest(pv.view.panes.list()
         .filter((x) => isLayerVisible(layersFor(x.id), "paths"))
         .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
       if (!url) { paths = []; return; }
       const body = await client.get<unknown>(url).catch(() => null);
       if (body) paths = parsePaths(body);
-    }, 2000);
+    };
+    startWatch(PATHS_ROUTE, refreshPaths, 30_000);
 
     // T-898: the `tune` layer's records — the device's own retune route — on the same terms: one
     // read over the union of the boxes of the panes showing the layer, nothing when none does.
-    startPoll(async () => {
+    const refreshTuneHistory = async () => {
       const url = tuneHistoryRequest(pv.view.panes.list()
         .filter((x) => isLayerVisible(layersFor(x.id), "tune"))
         .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
       if (!url) { tunePaths = []; return; }
       const body = await client.get<unknown>(url).catch(() => null);
       if (body) tunePaths = parseTuneHistory(body);
-    }, 2000);
+    };
+    startWatch(TUNE_HISTORY_ROUTE, refreshTuneHistory, 30_000);
 
     // T-981: the `frontend` layer's records — front-end events — on the same terms: one read over
     // the union of the time spans of the panes showing the layer, nothing when none does.
-    startPoll(async () => {
+    const refreshFrontEndEvents = async () => {
       const url = frontEndRequest(pv.view.panes.list()
         .filter((x) => isLayerVisible(layersFor(x.id), "frontend"))
         .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
       if (!url) { frontEndEvents = []; return; }
       const body = await client.get<unknown>(url).catch(() => null);
       if (body) frontEndEvents = parseFrontEndEvents(body);
-    }, 2000);
+    };
+    startWatch(FRONTEND_EVENTS_ROUTE, refreshFrontEndEvents, 30_000);
 
     // T-820 / MAP-20: the annotations in view, read back from the store — which is what makes one
     // drawn before a reload visible after it. The window is the union of the panes' boxes as last
     // drawn; a GET is a read of research state and never reaches a device route.
-    startPoll(async () => {
+    const refreshAnnotationsInView = async () => {
       const views = preview?.lastFrame?.views ?? [];
       if (views.length === 0) return;
       const w = {
@@ -2539,7 +2552,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         t0S: Math.min(...views.map((v) => v.box.t0Ns)) / S_TO_NS, t1S: Math.max(...views.map((v) => v.box.t1Ns)) / S_TO_NS,
       };
       annotations = await fetchAnnotations(ctx, w);
-    }, 2000);
+    };
+    startWatch(ANNOTATIONS_ROUTE, refreshAnnotationsInView, 30_000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
     // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a
@@ -2608,7 +2622,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // The one poll that fills the navigation slice: the achievable-centre grid the retune offer plans
   // against, and the active capture windows the map lights as segments. Moved here verbatim from
   // the retired `navigators.ts`, which was its only reader.
-  startPoll(async () => {
+  startWatch("/api/navigation", async () => {
     const body = await client.get<NavigationGrid & Parameters<typeof activeWindows>[0]>("/api/navigation").catch(() => null);
     if (!body) return;
     windows = activeWindows(body);

@@ -59,6 +59,11 @@ export interface MarkPath {
  * their boxes, or `null` when there is nothing to ask about (no pane showing the layer, or no
  * live edge yet). A viewport route answers about a viewport, so all four bounds are always sent.
  */
+/** The bare route (T-1066): what `startWatch`/`subscribeChanges` watch for a version bump, so the
+ * mount naming it never has to spell `"/api/paths"` itself (`surface-cutover.test.ts`'s thin-client
+ * route guard). */
+export const PATHS_ROUTE = "/api/paths";
+
 export function pathsRequest(boxes: readonly Box[]): string | null {
   const ok = boxes.filter((b) => b.f1Hz > b.f0Hz && b.t1Ns > b.t0Ns && b.t0Ns > 0);
   if (ok.length === 0) return null;
@@ -66,7 +71,7 @@ export function pathsRequest(boxes: readonly Box[]): string | null {
   const f1 = Math.max(...ok.map((b) => b.f1Hz));
   const t0 = Math.min(...ok.map((b) => b.t0Ns)) / S_TO_NS;
   const t1 = Math.max(...ok.map((b) => b.t1Ns)) / S_TO_NS;
-  return `/api/paths?f_lo=${f0}&f_hi=${f1}&t0=${t0}&t1=${t1}`;
+  return `${PATHS_ROUTE}?f_lo=${f0}&f_hi=${f1}&t0=${t0}&t1=${t1}`;
 }
 
 /** The wire answer (`docs/api.md` "GET /api/paths") → [[MarkPath]]s. Anything malformed is dropped

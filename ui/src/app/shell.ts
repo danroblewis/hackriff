@@ -7,7 +7,7 @@ import type { ControlState } from "../controls/model";
 import { placeTopChrome } from "./chrome/top-chrome";
 import type { AppContext } from "./context";
 import { byId, h } from "./dom";
-import { apiConnFor, startPoll, storeToken } from "./net";
+import { apiConnFor, startWatch, storeToken } from "./net";
 import { cycleTheme, requestGoto, setMode, toast, toggleReview, type AppState, type Mode, type Prefs } from "./state";
 
 export const PREFS_KEY = "hk-mui-prefs";
@@ -151,7 +151,7 @@ export function mountShell(ctx: AppContext) {
     if (badge) { badge.textContent = n > 0 ? count : ""; badge.hidden = n <= 0; }
     btn.setAttribute("aria-label", n > 0 ? `Review (${count})` : "Review");
   }, { immediate: true });
-  startPoll(async () => {
+  startWatch("/api/anomalies", async () => {
     const r = await client.get<{ anomalies: readonly unknown[] }>("/api/anomalies?status=open&limit=100");
     store.set((s) => (s.openAlarms === r.anomalies.length ? {} : { openAlarms: r.anomalies.length }));
   }, 30_000);
@@ -180,8 +180,8 @@ export function mountShell(ctx: AppContext) {
     location.reload();
   });
 
-  startPoll(async () => {
+  startWatch("/api/control/state", async () => {
     const cs = await client.get<ControlState>("/api/control/state");
     store.set((s) => ({ device: deviceFrom(cs), conn: s.conn.api === "ok" ? s.conn : { ...s.conn, api: "ok", message: "" } }));
-  }, 2000, (e) => store.set((s) => ({ conn: { ...s.conn, ...apiConnFor(e) } })));
+  }, 30_000, (e) => store.set((s) => ({ conn: { ...s.conn, ...apiConnFor(e) } })));
 }
