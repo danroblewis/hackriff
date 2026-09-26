@@ -19004,7 +19004,7 @@ tasks:
   - id: T-569
     milestone: MAUTO
     title: "MAUTO: a database suggestion explains a result and never becomes one - explanations[] beside a sealed Resolution, enforced by the crate graph"
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: W
     model: opus
@@ -19055,6 +19055,7 @@ tasks:
       Observed, not chased: LOAD-FLAKE for the deflaker: hk-model repo::tests::detection_write_throughput_is_reported fails under load (59.3 s at load avg 30) and passes alone in 9.6 s on the same tree. Its assertion is a write-throughput bound, i.e. a docs/10 §3.6 `timing`-tier test living in the default set. | ENVIRONMENT, not a code defect: /home/ubuntu was at 100% (0-4 GB free) during this run and sccache started failing every C compile with `sccache: encountered fatal error / io error: unexpected end of file`, which broke `just precheck` twice with `error occurred in cc-rs ... status 254` on hk-liquid-sys. Re-running with RUSTC_WRAPPER= succeeded (fmt clean, clippy clean). Space was consumed by per-worktree target dirs (t1023 28G, t979 24G, t953 23G, t977 21G, ...) plus ~19 GB of stale tmp/hk-e2e-data-* dirs 9+ hours old; I deleted only the stale tmp dirs and my own worktree target (`cargo clean`, 17.4 GiB) after my tests and precheck passed, taking the box from 2.5 GB to 20 GB free. A worktree/target reaper looks worth owning (pipeline manager). | tests/e2e/tests/acceptance/mauto_corpus.rs still builds its Resolution rows by hand with a note that they move behind the device path when the sealed Resolution lands; adding the field required touching three literals there. Not re-scoped here.
       Use cases: RESEARCH-007, RESEARCH-013
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 56d7ca3e
   - id: T-570
     milestone: MAUTO
     title: "MUI: the trace panel - why not PSK, answered with five distinct served answers and no signal logic in the client"
