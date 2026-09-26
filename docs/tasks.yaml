@@ -30076,7 +30076,8 @@ tasks:
   - id: T-1015
     milestone: M2-hardening
     title: Listen level_dbfs while squelch is closed reads the dropped demod audio (docs say 'delivered'); stereo halves its time constant; docs + WFM/AGC and squelch-closed tests
-    status: todo
+    status: in-progress
+    branch: task-t1015
     priority: low
     deps:
     - T-966
