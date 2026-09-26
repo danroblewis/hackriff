@@ -131,6 +131,8 @@ pub(super) enum SmallFile {
     RecordingBegan,
     /// This store's edge: newest frame end and watermark (T-942).
     Edge,
+    /// The last-known ledger (T-1058).
+    Ledger,
 }
 
 #[derive(Debug)]

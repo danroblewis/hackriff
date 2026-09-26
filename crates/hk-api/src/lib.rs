@@ -46,6 +46,7 @@ pub mod http;
 pub mod inspector;
 pub mod inventory;
 pub mod iqbuffer; // T-157
+pub mod lastknown; // T-1058: the fog-of-war's last-known ledger over a pane's window
 pub mod live_control;
 pub mod measurements; // T-818 MAP-18
 pub mod ml; // T-844: C38 models, modes and the durable shadow log

@@ -146,7 +146,7 @@ pub(crate) struct Header {
     pub raw_payload_len: u64,
 }
 
-fn q_db(v: f32) -> i16 {
+pub(super) fn q_db(v: f32) -> i16 {
     if v.is_finite() {
         (v * 100.0).round().clamp(-32767.0, 32767.0) as i16
     } else if v == f32::INFINITY {
@@ -173,7 +173,7 @@ fn q_db_scale(v: f32, scale: f32) -> i16 {
     }
 }
 
-fn dq_db(v: i16) -> f32 {
+pub(super) fn dq_db(v: i16) -> f32 {
     if v == UNKNOWN_DB {
         f32::NAN
     } else {

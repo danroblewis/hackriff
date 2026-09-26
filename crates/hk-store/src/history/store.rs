@@ -13,6 +13,7 @@ use super::codec;
 use super::config::{Geometry, PyramidConfig, RetentionOverride};
 use super::deferred::{Body, EncodeArgs, Job, PendingWrites, SmallFile, Unwritten, WrittenBatch};
 use super::frame::{FrameInput, NoiseShape, RegridPlan};
+use super::ledger::{LEDGER_FILE, Ledger, LedgerAnswer, LedgerStats};
 use super::live::{LiveTile, ROW_ACC_BYTES_PER_CELL, RowAcc};
 use super::stats::{db, hist_percentile};
 use super::tile::{ColEntry, FrontEndState, ProvenanceStep, ProvenanceSummary, Tile};
@@ -346,6 +347,11 @@ pub struct Pyramid {
     /// Cell shape of the last STFT resolution seen.
     shape_cache: Option<(hk_dsp::spectrum::Resolution, f32)>,
     stats: PyramidStats,
+    /// T-1058: the last-known ledger — per source × level-0 frequency cell, the newest value, kept
+    /// as rows arrive. See [`super::ledger`].
+    ledger: Ledger,
+    /// T-1058: one frame's `(level-0 cell, max-hold dB)`, noted into the ledger after the fold.
+    ledger_row: Vec<(i64, f32)>,
 }
 
 /// Retention ages of one `(level, f_block)` under the region overrides (T-126).
@@ -377,6 +383,10 @@ pub(super) const RECORDING_BEGAN_FILE: &str = "recording_began";
 /// scheme 1's level 2, and then refuses everything the next run records as late (the T-942
 /// defect). Written on the same seal/checkpoint path as [`RECORDING_BEGAN_FILE`].
 pub(super) const EDGE_FILE: &str = "edge";
+
+/// T-1058: a seal rewrites the ledger file at most this often, in data time (a checkpoint or close
+/// always does).
+const LEDGER_SAVE_INTERVAL_NS: i64 = 10_000_000_000;
 
 /// Producer tiles one [`Pyramid::materialize`] call may fold, over the whole recursion.
 ///
@@ -516,6 +526,8 @@ impl Pyramid {
             retention_visits: 0,
             shape_cache: None,
             stats: PyramidStats::default(),
+            ledger: Ledger::new(&geom),
+            ledger_row: Vec::new(),
             cfg: config,
             geom,
             root,
@@ -525,7 +537,96 @@ impl Pyramid {
         p.load_edge();
         p.recover()?;
         p.load_recording_began();
+        p.load_ledger();
         Ok(p)
+    }
+
+    /// Reads [`LEDGER_FILE`] (T-1058). Without a readable one, a store that already holds history
+    /// starts an **incomplete** ledger: it will know everything from here on, but its "never
+    /// observed" is no longer proof about the time before.
+    fn load_ledger(&mut self) {
+        let path = self.root.join(LEDGER_FILE);
+        if let Some(l) = fs::read(&path).ok().and_then(|b| self.ledger.decode(&b)) {
+            self.ledger = l;
+            return;
+        }
+        if self.resumed_from_ns.is_some() || self.resumed_edge.is_some() {
+            self.ledger.set_incomplete();
+        }
+    }
+
+    /// Writes [`LEDGER_FILE`] when the ledger changed (temp → fsync → rename, like tiles), on the
+    /// seal/checkpoint path the other small files ride. `force` is the checkpoint/close case; a
+    /// seal writes it at most every [`LEDGER_SAVE_INTERVAL_NS`] of data time, so a store sealing
+    /// every few seconds (the view lattice's level 0) does not rewrite it at that rate. A crash
+    /// loses at most that much of the ledger's newest values — never an older value, which the
+    /// file already holds.
+    fn save_ledger(&mut self, force: bool) -> Result<(), StoreError> {
+        if !self.ledger.dirty
+            || (!force
+                && self.ledger.saved_at_ns != i64::MIN
+                && self.latest_ns.saturating_sub(self.ledger.saved_at_ns) < LEDGER_SAVE_INTERVAL_NS)
+        {
+            return Ok(());
+        }
+        let bytes = self.ledger.encode();
+        self.ledger.dirty = false;
+        self.ledger.saved_at_ns = self.latest_ns;
+        self.ledger.file_bytes = bytes.len() as u64;
+        let path = self.root.join(LEDGER_FILE);
+        let tmp = self
+            .root
+            .join(format!("{LEDGER_FILE}.tmp{}", std::process::id()));
+        if self.defer_writes {
+            self.write_queue.push(Job {
+                path,
+                tmp,
+                body: Body::Bytes {
+                    what: SmallFile::Ledger,
+                    bytes,
+                },
+            });
+            return Ok(());
+        }
+        let write = || -> std::io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            fs::rename(&tmp, &path)
+        };
+        if let Err(e) = write() {
+            let _ = fs::remove_file(&tmp);
+            self.ledger.dirty = true;
+            return Err(StoreError::Io { path, source: e });
+        }
+        Ok(())
+    }
+
+    /// **The last-known ledger's answer over a frequency window (T-1058)**: per column of
+    /// `freq` (`nf` of them), the newest value there before `before` (`None`: whenever), max-held
+    /// over this store's time cell of `t_cell_ns` so it is the value this store's own cell holds for
+    /// the band's last row. `source` is one front end ([`super::source_key`]), `None` every one.
+    /// No tile is read and nothing is searched: O(cells of the window this ledger holds).
+    pub fn last_known_ledger(
+        &self,
+        source: Option<u64>,
+        freq: FreqRange,
+        nf: usize,
+        t_cell_ns: i64,
+        before: Option<Timestamp>,
+    ) -> LedgerAnswer {
+        self.ledger.columns(
+            source,
+            freq,
+            nf,
+            t_cell_ns,
+            before.map_or(i64::MAX, Timestamp::as_unix_nanos),
+        )
+    }
+
+    /// Size and state of the last-known ledger (T-1058).
+    pub fn ledger_stats(&self) -> LedgerStats {
+        self.ledger.stats()
     }
 
     /// Reads [`RECORDING_BEGAN_FILE`]; without one, a store that already holds tiles (written
@@ -960,9 +1061,11 @@ impl Pyramid {
             geom,
             next_seal_ns,
             touched,
+            ledger_row,
             ..
         } = self;
         touched.clear();
+        ledger_row.clear();
         let cells = &plan.cells;
         let peak = frame.peak.unwrap_or(frame.psd);
         // T-584: whether this frame landed in an already-closed time cell anywhere.
@@ -1025,6 +1128,7 @@ impl Pyramid {
                     |fl| plan.mean(s, fl) as f32 + margin,
                 );
                 tile.add_value(t_in, f, v_db, pk_db, v_lin, dur_s, &hist_cfg);
+                ledger_row.push((s.cell, pk_db));
                 if late {
                     tile.add_late_occupancy(t_in, f, v_db, thr, dur_s);
                 } else {
@@ -1039,6 +1143,12 @@ impl Pyramid {
             tile.prov
                 .add_frame(frame, &state, step.as_ref(), cell_shape, values);
             i = j;
+        }
+        // T-1058: this row is the newest sample of every cell it reached — O(cells), a max and a
+        // time per cell per time level. Measured in `tests/ledger.rs`.
+        if let (Some(a), Some(b)) = (cells.first(), cells.last()) {
+            self.ledger
+                .note_row(frame.source, tc, (a.cell, b.cell + 1), &self.ledger_row);
         }
         if live && !self.touched.is_empty() {
             // T-584: this frame's own values — including the in-place update of a cell whose
@@ -1264,6 +1374,7 @@ impl Pyramid {
         self.save_source_states()?;
         self.save_recording_began()?;
         self.save_edge()?;
+        self.save_ledger(false)?;
         self.enforce_budget()
     }
 
@@ -2344,6 +2455,7 @@ impl Pyramid {
                             SmallFile::SourceStates => self.state_dirty = true,
                             SmallFile::RecordingBegan => self.began_persisted = false,
                             SmallFile::Edge => self.edge_persisted = (i64::MIN, i64::MIN),
+                            SmallFile::Ledger => self.ledger.dirty = true,
                         }
                         first_err.get_or_insert(StoreError::Io {
                             path: job.path,
@@ -2849,7 +2961,8 @@ impl Pyramid {
         result?;
         self.save_source_states()?;
         self.save_recording_began()?;
-        self.save_edge()
+        self.save_edge()?;
+        self.save_ledger(true)
     }
 
     /// Checkpoints and closes. Dropping without `close` loses at most one checkpoint interval of

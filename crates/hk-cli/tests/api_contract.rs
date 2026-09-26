@@ -10510,6 +10510,272 @@ fn a_nudged_away_band_is_fog_at_the_finest_level_up_to_its_last_live_row() {
     stop_server(serving);
 }
 
+/// T-1058, **the user's fog-of-war bug, through the mock SDR: a departed band is fog at every zoom
+/// and every distance, from the last-known LEDGER — nothing searched, nothing left unsearched —
+/// and the ledger survives a restart.**
+///
+/// The user: "If I zoom in close enough that the most recent sample for a region is outside of the
+/// viewport, it does not render. If I pan down so that the last seen sample is in the viewport,
+/// SOME of the tiles resolve, but not all." The shadow used to be a bounded search per tile; at the
+/// finest level the band's last row lies many search steps away and the budget ran out.
+///
+/// Band A (the fixture's whole window) is measured at the data edge, the radio moves 10 MHz away
+/// through the device route, and the data edge is let run eight finest tiles past A's last row —
+/// every instant read off the wire. Then, at (0, 0), (1, 0), (2, 1) and (3, 2): every live-edge tile
+/// over A's band carries, in every column, fog down every row before the data edge; every carried
+/// value was last seen at A's last row (`/api/lastknown`'s, the same instant for every column);
+/// `search.ran` is false and `search.unsearched` is empty. Then the server is stopped and started
+/// again on the same data directory, tuned to B: the same finest tile, and `/api/lastknown`, still
+/// carry A's last row — the ledger was persisted, not rebuilt.
+#[test]
+fn a_departed_band_is_fog_at_every_zoom_from_the_ledger_and_survives_a_restart() {
+    let dir = temp_data_dir();
+    let (_guard, serving, addr) = start_server_fft(dir.clone(), None, 1024);
+    const N: u64 = 32;
+    let n = N as usize;
+    let tile = |lf: u32, lt: u32, fi: u64, ti: u64| {
+        format!("/api/tiles?level_f={lf}&level_t={lt}&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let (st, probe) = get(addr, &tile(0, 0, 0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let geom = |lf: u32, lt: u32| {
+        (
+            f_cell * f64::from(1u32 << lf) * N as f64,
+            t_cell * f64::from(1u32 << lt) * N as f64,
+        )
+    };
+    let (w0, h0) = geom(0, 0);
+    let (band_lo, band_hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+    let probe_fi = (FIXTURE_CENTER_HZ / w0) as u64;
+    let edge_at = |addr| {
+        get(addr, &tile(0, 0, probe_fi, (unix_now() / h0) as u64)).1["shadow"]["edge_s"].as_f64()
+    };
+    let mut armed = 0.0f64;
+    wait_for(
+        "band A to be measured at the data edge",
+        Duration::from_secs(60),
+        || {
+            let Some(e) = edge_at(addr) else {
+                return false;
+            };
+            let v = get(addr, &tile(0, 0, probe_fi, (e / h0) as u64)).1;
+            let (Some(t0), Some(g)) =
+                (v["extent"]["t0_s"].as_f64(), v["grid"]["max_db"].as_array())
+            else {
+                return false;
+            };
+            match (0..n).rev().find(|&r| !g[r * n + n / 2].is_null()) {
+                Some(r) => {
+                    armed = t0 + r as f64 * t_cell;
+                    true
+                }
+                None => false,
+            }
+        },
+    );
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let b_center = step * ((FIXTURE_CENTER_HZ + 10e6) / step).round();
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{b_center:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // Eight finest tiles past A's last row: at (0, 0) the live-edge tile is far from it.
+    let away_s = 8.0 * h0;
+    wait_for(
+        "the data edge to run eight finest tiles past the retune",
+        Duration::from_secs(180),
+        || edge_at(addr).is_some_and(|e| e > armed + away_s + h0),
+    );
+    let edge = edge_at(addr).expect("an edge");
+
+    // One array over A's whole window: every column known, all last seen at the same row.
+    let lastknown = |addr| {
+        let (st, v) = get(
+            addr,
+            &format!("/api/lastknown?f_lo={band_lo}&f_hi={band_hi}&cols=64"),
+        );
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+    let lk = lastknown(addr);
+    let states = lk["states"].as_array().unwrap().clone();
+    assert_eq!(states[1], json!("known"), "{lk}");
+    let lts: Vec<f64> = lk["last_t_s"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(lk["state"].as_array().unwrap())
+        // The two outermost columns can hold only the window's rolled-off edge bins.
+        .skip(1)
+        .take(62)
+        .map(|(t, s)| {
+            assert_eq!(s, &json!(1), "every column of A is known: {lk}");
+            t.as_f64().unwrap()
+        })
+        .collect();
+    let a_last = lts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let a_first = lts.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        a_last - a_first <= t_cell + 1e-6,
+        "A's columns were all last seen at its last row: {a_first}..{a_last}"
+    );
+    assert!(
+        a_last >= armed && a_last <= armed + away_s,
+        "A's last row {a_last} is after it was armed ({armed}) and before the edge ran away"
+    );
+    assert_eq!(lk["complete"], json!(true), "{lk}");
+
+    let tiles_over_a = |lf: u32, lt: u32, ti: u64| {
+        let (w, _) = geom(lf, lt);
+        ((band_lo / w).ceil() as u64..(band_hi / w).floor() as u64).map(move |fi| (fi, ti))
+    };
+    // Checks one tile over A's band; returns its shadow's (column → last_t) for the finest level.
+    let check = |addr, lf: u32, lt: u32, fi: u64, ti: u64| {
+        let (_, h) = geom(lf, lt);
+        let dt = h / N as f64;
+        let (st, v) = get(addr, &tile(lf, lt, fi, ti));
+        assert_eq!(st, 200, "{v}");
+        let sh = &v["shadow"];
+        let at = format!("({lf}, {lt}) tile {fi}/{ti}");
+        assert_eq!(
+            sh["search"]["unsearched"],
+            json!([]),
+            "{at}: {}",
+            sh["search"]
+        );
+        assert_eq!(sh["search"]["ran"], json!(false), "{at}: {}", sh["search"]);
+        assert_eq!(
+            sh["ledger"]["columns_searched"],
+            json!(0),
+            "{at}: {}",
+            sh["ledger"]
+        );
+        let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+        let tile_edge = sh["edge_s"].as_f64().unwrap();
+        let grid = v["grid"]["max_db"].as_array();
+        let arr = |k: &str| sh[k].as_array().unwrap().clone();
+        let (f, row, rows, t, src) = (
+            arr("f"),
+            arr("row"),
+            arr("rows"),
+            arr("last_t_s"),
+            arr("src"),
+        );
+        let mut covered = vec![false; n * n];
+        for i in 0..f.len() {
+            let c = f[i].as_u64().unwrap() as usize;
+            let r0 = row[i].as_u64().unwrap() as usize;
+            let last_t = t[i].as_f64().unwrap();
+            let source = &sh["sources"][src[i].as_u64().unwrap() as usize];
+            if source["from"] == json!("ledger") {
+                assert!(
+                    (last_t - a_last).abs() <= t_cell + 1e-6,
+                    "{at} column {c}: the ledger carries A's last row {a_last}, not {last_t}: {sh}"
+                );
+            } else {
+                assert_eq!(source["from"], json!("this-tile"), "{at}: {source}");
+                assert!(
+                    (last_t - a_last).abs() <= dt + t_cell + 1e-6,
+                    "{at} column {c}: A's last row as this tile measured it, {last_t} vs {a_last}"
+                );
+            }
+            for r in r0..r0 + rows[i].as_u64().unwrap() as usize {
+                covered[r * n + c] = true;
+            }
+        }
+        for c in 0..n {
+            for r in 0..n {
+                if t0 + r as f64 * dt >= tile_edge {
+                    continue;
+                }
+                let measured = grid.is_some_and(|g| g[r * n + c].is_number());
+                assert!(
+                    measured || covered[r * n + c],
+                    "{at} column {c} row {r}: not measured and no fog, before the data edge \
+                     {tile_edge}: {}",
+                    sh["ledger"]
+                );
+            }
+        }
+        (v["grid"]["observed_cells"].as_u64().unwrap_or(0), f.len())
+    };
+    let mut checked = 0;
+    for (lf, lt) in [(0u32, 0u32), (1, 0), (2, 1), (3, 2)] {
+        let (_, h) = geom(lf, lt);
+        let ti = ((edge - h / N as f64) / h) as u64;
+        for (fi, ti) in tiles_over_a(lf, lt, ti) {
+            let (observed, runs) = check(addr, lf, lt, fi, ti);
+            if (lf, lt) == (0, 0) {
+                assert_eq!(
+                    observed, 0,
+                    "A's last row is far outside the finest live-edge tile"
+                );
+                assert!(runs >= n, "every column carries fog");
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 4, "{checked}");
+    // The finest tile, remembered for after the restart.
+    let fine_ti = ((edge - h0 / N as f64) / h0) as u64;
+    let fine_fi = tiles_over_a(0, 0, fine_ti).next().unwrap().0;
+    stop_server(serving);
+
+    // **Restart**, on the same data directory, tuned to B from the start: A is never looked at
+    // again, and its fog must still be there.
+    let serving = start(&ServeOptions {
+        source: ServeSource::HackRf {
+            spec: format!("mock:{}", fixture_path().display()),
+            extra: Vec::new(),
+            live: LiveArgs {
+                center_hz: b_center,
+                ..LiveArgs::default()
+            },
+        },
+        data_dir: Some(dir),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(64 << 20),
+        },
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = serving.server.local_addr();
+    let lk2 = lastknown(addr);
+    assert_eq!(lk2["ledger"]["loaded"], json!(true), "{lk2}");
+    assert_eq!(lk2["complete"], json!(true), "{lk2}");
+    assert_eq!(
+        lk2["last_t_s"], lk["last_t_s"],
+        "the ledger after a restart is the ledger before it"
+    );
+    let (_, runs) = check(addr, 0, 0, fine_fi, fine_ti);
+    assert!(
+        runs >= n,
+        "the finest tile still carries fog after the restart"
+    );
+    eprintln!(
+        "T-1058: {checked} departed tiles fogged from the ledger at 4 levels; A last seen \
+         {a_last:.3} (armed {armed:.3}), edge {edge:.3}; ledger {}; restart kept it",
+        lk["ledger"]
+    );
+    stop_server(serving);
+}
+
 /// deflake-0922: **`horizon.recording_began_s` is when THIS server began sampling, and a retune
 /// does not move it into the past.**
 ///

@@ -133,6 +133,7 @@ mod config;
 mod deferred;
 mod export;
 pub mod frame;
+mod ledger;
 mod live;
 mod query;
 pub mod shape;
@@ -158,6 +159,7 @@ pub use export::{
 pub use frame::{
     DbScratch, FrameInput, FrameOrigin, FrontEnd, GainState, NoiseShape, PortTag, source_key,
 };
+pub use ledger::{LedgerAnswer, LedgerColumn, LedgerStats, LedgerValue};
 pub use query::{
     CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, FilterSummary,
     LAST_KNOWN_MAX_TOP_ROWS, LastKnown, LastKnownCell, LastKnownSearch, LastKnownStage,
