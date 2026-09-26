@@ -28872,7 +28872,7 @@ tasks:
   - id: T-977
     milestone: M3
     title: "Control-channel chain's verdict never reaches the row: P25 C4FM reads unknown/2fsk/not-searched after 10 cc demods; no route lists cc candidates"
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: TRUNK-CC-VERDICT
@@ -28902,6 +28902,7 @@ tasks:
       Use cases: SIGNAL-085
       Resources: 5 CPU-s, peak 0.3 GB
     branch: task-t977
+    commit: 9d37bcf3
   - id: T-978
     milestone: M2-hardening
     title: "Overlapping candidate boxes for one emission are never re-analysed (852.86: 9.3 + 26.2 kHz; 861.43: 557 kHz merge)"
