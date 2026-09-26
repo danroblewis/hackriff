@@ -79,6 +79,7 @@ pub mod config;
 pub mod detector;
 pub mod frontend;
 pub mod integrated;
+pub mod overlap;
 pub mod record;
 pub mod rules;
 pub mod step;
@@ -103,6 +104,7 @@ pub use config::{
 pub use detector::{Detector, DetectorStats, SegmentInfo};
 pub use frontend::{FrameVerdict, FrontEndConfig, FrontEndMonitor};
 pub use integrated::{IntegratedEmitter, IntegratedEvaluation, IntegratedSnapshot, SpanMeasure};
+pub use overlap::{OverlapConfig, measure_region};
 pub use record::{
     Candidate, CloseReason, ConfirmReason, Confirmation, DetectionRecord, DetectorEvent,
     ImageEvidence,

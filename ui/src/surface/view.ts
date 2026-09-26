@@ -36,7 +36,7 @@ import {
 import { OverlayPass } from "./overlay";
 import { TracePass } from "./tracepass";
 import type { TracePath } from "./trace";
-import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type PaneStatus } from "./panes";
+import { PaneModel, levelDivergenceNote, paneStatuses, type Divider, type FreqWindow, type PaneStatus } from "./panes";
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
 import { rulerLabel } from "./ticks";
@@ -266,7 +266,8 @@ export class SurfaceView {
    * `windows` is the backend's list of currently-active capture windows; `[]` means none was
    * reported, and then no segment is lit.
    */
-  frame(edgeNs: number, windows: readonly ActiveWindow[] = []): SurfaceFrame {
+  /** The canvas area the panes are laid out in: its width, height and the GL `y` it starts at. */
+  private paneArea(): { w: number; paneH: number; inset: number; mapH: number } {
     const w = this.canvas.width, hPx = this.canvas.height;
     // The minimap takes a strip along the bottom of the SAME canvas — it is a viewport on this
     // surface, so it is laid out in this surface's pixels, not in a widget of its own.
@@ -276,6 +277,34 @@ export class SurfaceView {
     const insetTop = Math.max(0, Math.min(Math.floor(this.insetTopPx), Math.floor(hPx / 3)));
     const mapH = Math.max(0, Math.min(Math.floor(this.minimapPx), Math.floor((hPx - inset - insetTop) / 2)));
     const paneH = Math.max(1, hPx - inset - insetTop - mapH);
+    return { w, paneH, inset, mapH };
+  }
+
+  /**
+   * T-1005: every pane's whole rectangle (its trace strip included) in canvas GL device px, from the
+   * layout as it stands NOW — not the last frame's, which after a split or close is stale. Used to
+   * find the pane under the pointer after a close.
+   */
+  paneRects(): Map<string, PaneRect> {
+    const a = this.paneArea();
+    const out = new Map<string, PaneRect>();
+    for (const [id, r] of this.panes.rects(a.w, a.paneH)) out.set(id, { ...r, y: r.y + a.inset + a.mapH });
+    return out;
+  }
+
+  /** T-1005: the layout's dividers in canvas GL device px, laid out exactly as [[frame]] lays out
+   * the panes this frame (so a drag handle placed from them sits in the gap between the panes). */
+  dividers(): Divider[] {
+    const a = this.paneArea();
+    const dy = a.inset + a.mapH;
+    return this.panes.dividers(a.w, a.paneH).map((d) => ({
+      ...d, parent: { ...d.parent, y: d.parent.y + dy }, rect: { ...d.rect, y: d.rect.y + dy },
+    }));
+  }
+
+  frame(edgeNs: number, windows: readonly ActiveWindow[] = []): SurfaceFrame {
+    const { w, paneH, inset, mapH } = this.paneArea();
+    const hPx = this.canvas.height;
     this.panes.setViewport(w, paneH);
     // The map is laid out in the same pixels, and it needs them for the same reason the panes do:
     // T-486's dead zone is a number of *device pixels*, so a viewport that does not know its own

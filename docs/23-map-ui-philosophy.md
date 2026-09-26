@@ -708,6 +708,36 @@ coordinate change on one pane. Guarded by `ui/test/app-active-pane.test.ts` (nam
 accessor, right-click, the keys, the wiring) and `ui/e2e/app-active-pane.e2e.mjs` (click, right-click
 and keys each move the outline and the named chrome in the same event, at 1280 and 400 px).
 
+### 10.8 The inventory is per pane (normative, T-1002, 2026-09-25)
+
+*Same review, the half §10.7 could not reach: the chrome now says which pane it acts on, but the
+DATA every pane drew still came from one window.*
+
+**Principle: the inventory is time-scoped to the view, and a pane IS a view** (CLAUDE.md's signal
+model, ADR-0017 §2.1). Each pane has its own `(time × frequency)` window, so:
+
+- **Each pane's detections are queried for its own window.** One `GET /api/inventory?state=candidate`
+  with that pane's `t0`/`t1` and `f_lo`/`f_hi`, and one `state=confirmed` with that pane's own `at`
+  (the instant it shows: its frozen time, or the capture clock's live edge while it follows). A pane
+  frozen on a past signal and a pane at the live edge are two windows and two answers.
+- **A pane draws its own rows and no others** — the mark boxes, the `detections` overlay, the
+  artefact links and the pins over them. A pane that has not been answered yet draws **nothing**
+  rather than borrowing another pane's: a box is a claim about *this* pane's window.
+- **The lists follow the active pane and name it.** The Candidate/Confirmed lists (and the focus
+  panel and the menus, which read the same rows) are the ACTIVE pane's — so pressing pane 1 re-scopes
+  them in the same dispatch as the outline — and the heading and each tab's accessible name carry the
+  same words the outline does ("Candidates · pane 1 of 2"), nothing extra with one pane open (§10.6
+  rule 1).
+- **Touching one pane moves nothing in another.** Scrubbing, freezing or re-activating pane 1 changes
+  pane 1's query and the lists' scope; pane 2 goes on asking about the live edge and its boxes do not
+  move. The queries are re-asked when **any** pane's window moves, a pane opens or closes, or the
+  active pane changes — not on the time cursor alone, which is only the active pane's.
+
+Still no device route, and no new route at all: the same `/api/inventory` read, asked once per pane.
+Guarded by `ui/test/app-pane-inventory.test.ts` (the requests the client builds, per pane) and
+`ui/e2e/app-pane-inventory.e2e.mjs` (two windows asked about from one page, pane 2 advancing while
+pane 1 sits in the past, the lists named, at 1280 and 400 px).
+
 ---
 
 ## 11. Panel -> state -> route: the frontend/API map (normative)
@@ -723,12 +753,12 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
 | Per-pane Live/Freeze (T-1001), zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
-| Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
+| Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (**one pair of queries per pane**, each carrying that pane's own window — T-1002, §10.8; the lists show the ACTIVE pane's and name it), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
 | Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/observations` (the past-surveys pages), `/api/history` (served; no client reads it since T-445 retired the spectrum-grid pane) | - |
 | Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
 | Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
-| Detections layer | MAP-08 | `explore` (existing rows) | `GET /api/events` | - |
+| Detections layer | MAP-08 | `explore` (existing rows, **per pane** - T-1002 §10.8) | `GET /api/events` | - |
 | Pins + clusters | MAP-09/10 | `map.pins` (ephemeral) | `GET /api/events`, `GET /api/tiles/events` | - |
 | Artifacts layer | MAP-11 | `explore` (existing rows) | `GET /api/inventory` (`relation`) | - |
 | Band-plan priors layer | MAP-12 | `priors` | **`GET /api/priors`** *(reserved - MAP-12)* | - |

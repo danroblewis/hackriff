@@ -51,9 +51,11 @@
 import { CMAP_GLSL } from "../cmap";
 import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, SHADOW_MARK, tierByte, type DrawKind } from "./cellrule";
 import {
-  ancestor, coarsestCovering, extentOf, keyOf, levelCapF, levelCapT, oneTier, tierFor, tilesFor,
+  ancestor, coarsestCovering, extentOf, intersects, keyOf, levelCapF, levelCapT, oneTier, tierFor,
+  tilesFor,
   type Box, type Lattice, type LatticeSet, type TileAddr, type ViewTier,
 } from "./lattice";
+import { ringCovers, ringPlan, type LiveRingSource, type RingDraw, type RingFrame } from "./livering";
 import { TileCache, type TileEntry, type TileTextures, type Viewport } from "./tilecache";
 import type { TileData } from "./tile";
 import type { Survey } from "./survey";
@@ -188,6 +190,24 @@ export interface PaneReport {
   /** Of [[rowsHeld]], rows revealed **partially** because the bound expired rather than because the
    * row completed: what arrived is on screen with stand-ins under the rest. */
   readonly rowsLate: number;
+  /**
+   * **Rows this pane painted from the live ring** (T-1042, `./livering.ts`): the published
+   * `spectrum/live` rows drawn straight at the live edge, so the newest rows are on screen because
+   * they were recorded rather than when a tile can be produced for them.
+   *
+   * `0` on every pane that has no ring — a frozen one, a host that passes none, or a pane zoomed out
+   * past the rows' own resolution ([[ringRowPx]] under `MIN_ROW_PX`, where the pyramid's folds are
+   * the honest answer). It is the number that says the live lane is working.
+   */
+  readonly ringRows: number;
+  /** **Tile addresses the ring's own extent made unnecessary**: everything this pane shows of them
+   * is painted from rows, so they were neither drawn nor requested. Counted apart from `surveyed`
+   * (the other not-asked count) because the reason is different: there *is* data, and it is already
+   * on the screen from a fresher source. */
+  readonly ringTiles: number;
+  /** One ring row's height in this pane, device px — the eligibility measurement, reported rather
+   * than hidden so a pane that stood the ring aside can say why. `0` with no ring. */
+  readonly ringRowPx: number;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -379,11 +399,26 @@ function compile(gl: GL, type: number, src: string): WebGLShader {
 /** A tile's pair of textures. Two planes because the wire has two planes (ui/src/surface/tile.ts). */
 export interface TilePlanes { readonly value: WebGLTexture; readonly state: WebGLTexture }
 
+/**
+ * A pair of planes to upload: `nt` rows of `nf` cells, row-major, earliest row first.
+ *
+ * Widened from [[TileData]] (T-1042) so the **live ring**'s buffers go up through the same two
+ * `texSubImage2D` calls a tile's do. The alternative was a second uploader, and a second uploader is
+ * a second set of texture parameters — the NEAREST/CLAMP pair that keeps a cell a measurement rather
+ * than an interpolation is stated once, in [[GlTileTextures.plane]], and must stay that way.
+ */
+export interface PlaneSource {
+  readonly nf: number;
+  readonly nt: number;
+  readonly value: Float32Array;
+  readonly state: Uint8Array;
+}
+
 /** Uploads decoded tiles as an R16F measurement plane and an R8 state plane: 3 bytes a cell. */
 export class GlTileTextures implements TileTextures<TilePlanes> {
   constructor(private readonly gl: GL) {}
 
-  upload(data: TileData): TilePlanes {
+  upload(data: PlaneSource): TilePlanes {
     const gl = this.gl;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     const value = this.plane(gl.R16F, data.nf, data.nt);
@@ -394,7 +429,7 @@ export class GlTileTextures implements TileTextures<TilePlanes> {
   }
 
   /** Rewrite rows `[row0, row0 + rows)` of both planes in place: a pushed row's upload (T-893). */
-  patch(t: TilePlanes, data: TileData, row0: number, rows: number): void {
+  patch(t: TilePlanes, data: PlaneSource, row0: number, rows: number): void {
     const gl = this.gl, nf = data.nf;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.bindTexture(gl.TEXTURE_2D, t.value);
@@ -420,6 +455,16 @@ export class GlTileTextures implements TileTextures<TilePlanes> {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return t;
   }
+}
+
+/** One pane's ring texture, and how far into the ring it has been uploaded (T-1042). */
+interface RingTex {
+  readonly planes: TilePlanes;
+  readonly epoch: number;
+  readonly nf: number;
+  readonly capacity: number;
+  /** The ring's `writes` count at the last upload: the rows since are what still has to go up. */
+  uploaded: number;
 }
 
 export interface SurfaceOptions {
@@ -543,6 +588,20 @@ export class Surface {
    * comes out of a coverage state byte and out of nothing else. */
   private greyTex: TilePlanes | null = null;
 
+  /**
+   * **The live ring, per pane** (T-1042 / LSR-1, `./livering.ts`): the published `spectrum/live`
+   * rows a following pane paints its live edge from.
+   *
+   * `null` (the default) is the pre-LSR renderer, byte for byte: nothing is asked of the source, no
+   * extent is excluded from the tile lane, and every pane is drawn from tiles alone. That is what the
+   * feature flag switches — the host passes a source or it does not.
+   */
+  private rings: LiveRingSource | null = null;
+  /** Each pane's ring texture, and how much of the ring has been uploaded into it. Keyed by pane, so
+   * a pane that stops following (or closes) leaves one entry, dropped on the first frame it asks for
+   * no ring. */
+  private ringTex = new Map<string, RingTex>();
+
   constructor(
     readonly canvas: HTMLCanvasElement,
     lattice: Lattice | LatticeSet,
@@ -586,6 +645,19 @@ export class Surface {
   /** Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580). */
   setSurvey(s: Survey | "awaiting" | null): void { this.survey = s; }
   get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /**
+   * **Where each pane's live rows come from** (T-1042), or `null` for none — which is the renderer's
+   * default and the behaviour every existing test and every unflagged page keeps.
+   *
+   * The source is asked per pane per frame. Nothing here decides *which* panes have a ring: follow,
+   * pause and the device are the host's (see [[LiveRingSource]]), exactly as the row-feed lane's
+   * following-pane question is `SurfacePreview`'s.
+   */
+  setLiveRings(src: LiveRingSource | null): void {
+    this.rings = src;
+    if (!src) this.dropRings();
+  }
 
   /**
    * **May no request be started for this place?** (T-905) — the cache's gate for every miss lane.
@@ -699,6 +771,9 @@ export class Surface {
     // its own cannot say a tile is no longer wanted once one viewport (the minimap) is the size of
     // the surface. See TileCache.setViewports.
     const viewports: Viewport[] = [];
+    /** The panes drawn this frame, so a ring texture cannot outlive the pane it was made for
+     * (T-1042): a closed split's would otherwise hold megabytes for a viewport that is gone. */
+    const drawn = new Set<string>();
     let lo = Infinity, hi = -Infinity;
     // T-528's accumulator, built fresh every frame and discarded with it — nothing about the range
     // may outlive the geometry it was measured over. `null` in every other mode, so the per-cell
@@ -711,6 +786,7 @@ export class Surface {
       const measure = vscale && pane.scales !== false ? vscale : null;
       const r = pane.rect;
       if (!(r.w > 0) || !(r.h > 0)) continue;
+      drawn.add(pane.id);
       gl.viewport(r.x, r.y, r.w, r.h);
       gl.enable(gl.SCISSOR_TEST);
       gl.scissor(r.x, r.y, r.w, r.h);
@@ -770,6 +846,12 @@ export class Surface {
         }
       };
       let drawnToNs = -Infinity;
+      // **The live rows this pane paints its edge from** (T-1042), and the extent they make the tile
+      // lane's business no longer. Asked, planned and discarded inside this frame, from this frame's
+      // box — the same rule every other rectangle here obeys.
+      const ring = this.rings?.ringFor(pane.id) ?? null;
+      const plan = ring ? ringPlan(ring, pane.box, r.h) : null;
+      let ringRows = 0, ringTiles = 0;
       // Every level pair this cache holds anything at, read **once per pane per frame** — what makes
       // the stand-in search unbounded in depth and still cheap ([[fallbackFor]]).
       const levels = this.cache.residentLevels(lat.scheme);
@@ -784,29 +866,43 @@ export class Surface {
       }
       for (const [tIndex, row] of rows) {
         // Pass one: **resolve** every address of the row — the same side effects, in the same order,
-        // as when each was resolved and drawn in one step (the survey short-circuit first, then
-        // `acquire`, which is what schedules the fetch and pins the copy). Nothing is drawn yet,
-        // because whether this row's own tiles may be drawn is not known until all of them have been
-        // asked about.
-        const plan: RowPlan[] = [];
+        // as when each was resolved and drawn in one step (the ring's extent first, then the survey
+        // short-circuit, then `acquire`, which is what schedules the fetch and pins the copy).
+        // Nothing is drawn yet, because whether this row's own tiles may be drawn is not known until
+        // all of them have been asked about.
+        const resolved: RowPlan[] = [];
         let missing = 0;
         for (const a of row) {
+          // **The ring's extent short-circuits the tile lane** (T-1042): everything this pane shows of
+          // this address is already painted from rows that arrived before any tile for them could be
+          // produced, so it is neither drawn nor *requested*. Before `isResident` and before
+          // `acquire`, for the same reason T-580's survey check is: the cheapest answer is the one
+          // that costs no request at all. It is not `missing` either — nothing is coming for it and
+          // nothing needs to: the row gate below must not hold a row open on an address the rows
+          // already cover (T-1037 × T-1042).
+          if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) { ringTiles++; continue; }
           const region = extentOf(lat, a);
           // **Ask the coverage map first** (T-580). A resident copy is always drawn — it is the finer
           // answer — but a place the survey settles as never sampled is not requested at all, and a
           // surface still waiting for its survey requests nothing yet.
           if (!this.cache.isResident(a)) {
-            if (awaiting) { plan.push({ addr: a, region, kind: "awaiting" }); continue; }
+            if (awaiting) { resolved.push({ addr: a, region, kind: "awaiting" }); continue; }
             const through = this.surveyedThrough(region);
-            if (through !== null) { plan.push({ addr: a, region, kind: "surveyed", through }); continue; }
+            if (through !== null) { resolved.push({ addr: a, region, kind: "surveyed", through }); continue; }
           }
           const res = this.cache.acquire(a);
-          if (res.kind === "resident") { plan.push({ addr: a, region, kind: "resident", entry: res.entry }); continue; }
+          if (res.kind === "resident") { resolved.push({ addr: a, region, kind: "resident", entry: res.entry }); continue; }
           // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
           // waiting for one — the route refused it, or the server is unreachable and this client is
           // backing off — and painting it as PENDING is a progress bar that never finishes.
-          plan.push({ addr: a, region, kind: res.failed ? "refused" : "pending" });
-          missing++;
+          resolved.push({ addr: a, region, kind: res.failed ? "refused" : "pending" });
+          // **A place with no visible area cannot be part of a reveal** (T-1037). `tilesFor` emits a
+          // phantom column or row for a box whose edge lands exactly on a tile boundary (see
+          // [[spanTiles]]); nothing is drawn for it and no viewport wants it, so it is never resident
+          // — and counted here it would hold its row open for the whole bound on every frame, for
+          // ever. It is still asked for, drawn and counted exactly as before: only the row's
+          // completeness ignores it, and about that the answer is simply true.
+          if (intersects(lat, a, pane.box)) missing++;
         }
         // Pass two: **the row's reveal gate** — all of it, or (after the bound) what arrived with
         // stand-ins under the rest.
@@ -815,14 +911,14 @@ export class Surface {
         else if (missing > 0) rowsLate++;
         // Pass three: draw. Exactly one of the branches below puts something on the screen for each
         // address, and none of them can produce grey: grey comes only from a coverage state byte.
-        for (const p of plan) {
+        for (const p of resolved) {
           if (p.kind === "awaiting") { pending++; continue; }
           if (p.kind === "surveyed") {
             const through = p.through;
             if (through > p.region.t0Ns) {
-              const drawn = through >= p.region.t1Ns ? p.region : { ...p.region, t1Ns: through };
-              this.drawSurveyed(pane, drawn, r);
-              drawnToNs = Math.max(drawnToNs, drawn.t1Ns);
+              const shownTo = through >= p.region.t1Ns ? p.region : { ...p.region, t1Ns: through };
+              this.drawSurveyed(pane, shownTo, r);
+              drawnToNs = Math.max(drawnToNs, shownTo.t1Ns);
             }
             surveyed++;
             continue;
@@ -898,11 +994,36 @@ export class Surface {
       if (coarse) {
         for (const a of coarse.addrs) {
           if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          // The ring's extent short-circuits this lane too (T-1042's rule, applied to T-1037's set):
+          // a stand-in for a place the published rows already paint stands in for nothing, and the
+          // cheapest answer is the one that costs no request at all.
+          if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) continue;
           this.cache.prefetch(a, COARSE_LANE);
         }
       }
+      // **The rows, last** (T-1042): submitted after every tile, so where a ring row and a tile cell
+      // describe the same instant the ROW is what is seen. That is the ordering the live-rendering
+      // invariant asks for — the row exists, so it is on screen — and it is why a tile only partly
+      // under the ring is still drawn: the part the rows do not reach keeps its measurement.
+      //
+      // It is also why the row gate above can never withhold a live row (T-1037): the gate is about
+      // the TILE lane, and these rows are not in it.
+      if (ring && plan) {
+        const planes = plan.draws.length ? this.ringPlanes(pane.id, ring) : null;
+        if (planes) {
+          for (const d of plan.draws) {
+            this.drawRing(pane, ring, planes, d, r);
+            ringRows += d.span.rows;
+            drawnToNs = Math.max(drawnToNs, d.region.t1Ns);
+          }
+        }
+      } else if (this.ringTex.has(pane.id)) {
+        // The pane asked for no ring this frame (it froze, or the host withdrew the source): its
+        // texture is memory held for a claim nobody is making any more.
+        this.dropRing(pane.id);
+      }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, rowsHeld, rowsLate });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, rowsHeld, rowsLate, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0 });
     }
     gl.disable(gl.SCISSOR_TEST);
     // **The reveal gate remembers only rows that are on screen now** (T-1037). A row's wait is a
@@ -910,6 +1031,7 @@ export class Surface {
     // clock running, or coming back to it would reveal a half-arrived row instantly — and nothing
     // here may grow with how far the view has travelled.
     for (const k of this.rowWaitSince.keys()) if (!this.rowSeen.has(k)) this.rowWaitSince.delete(k);
+    for (const id of this.ringTex.keys()) if (!drawn.has(id)) this.dropRing(id);
     if (this.autoScale && lo < hi) {
       // One range for every pane, moved gently: two panes showing the same energy must not read as
       // two strengths on one screen (T-397's honesty problem, one layer up). This is the **opt-in**
@@ -1147,6 +1269,111 @@ export class Surface {
   }
 
   /**
+   * **This pane's ring texture, caught up to the rows that have arrived** (T-1042).
+   *
+   * Per pane, and rebuilt whenever the ring's `epoch` moves — a retune ends a band, and patching
+   * rows of the new one into the old one's texture would leave the two interleaved in the same
+   * picture. Otherwise only the **rows appended since the last frame** are uploaded: two
+   * `texSubImage2D` calls at most (one where the ring wrapped), of `nf` cells each, at the ~25–40
+   * rows a second the stream publishes. Nothing re-uploads the whole ring per frame, which is the
+   * cost that would make a ring worse than the tiles it replaces.
+   */
+  private ringPlanes(paneId: string, ring: RingFrame): TilePlanes {
+    const tex = new GlTileTextures(this.gl);
+    // The ring's buffers as the uploader reads them: `capacity` rows of `nf` cells.
+    const planes: PlaneSource = { nf: ring.nf, nt: ring.capacity, value: ring.value, state: ring.state };
+    let held = this.ringTex.get(paneId);
+    if (held && (held.epoch !== ring.epoch || held.nf !== ring.nf || held.capacity !== ring.capacity)) {
+      tex.destroy(held.planes);
+      this.ringTex.delete(paneId);
+      held = undefined;
+    }
+    if (!held) {
+      held = {
+        planes: tex.upload(planes), epoch: ring.epoch, nf: ring.nf, capacity: ring.capacity,
+        uploaded: ring.writes,
+      };
+      this.ringTex.set(paneId, held);
+      return held.planes;
+    }
+    // The rows this texture has not seen, newest-capacity at most: a page that was in a background
+    // tab for a minute has had the whole ring rewritten under it, and patching a million rows to
+    // arrive at the same bytes is work with no picture in it.
+    const behind = Math.min(ring.capacity, ring.writes - held.uploaded);
+    if (behind > 0) {
+      const first = (ring.writes - behind) % ring.capacity;
+      const runs: [number, number][] = first + behind <= ring.capacity
+        ? [[first, behind]]
+        : [[first, ring.capacity - first], [0, behind - (ring.capacity - first)]];
+      for (const [row0, rows] of runs) tex.patch(held.planes, planes, row0, rows);
+      held.uploaded = ring.writes;
+    }
+    return held.planes;
+  }
+
+  /**
+   * One run of ring rows, over the region of the surface it was recorded across.
+   *
+   * Drawn through the **same program, ramp, display range and cell rule** as a tile — one `uValue`
+   * sampler over dBFS/Hz, one `uState` sampler over the coverage codes — because "same measurement,
+   * same colour" may not depend on which lane a row reached the screen by. The tier is `live-iq`:
+   * these are the front end's own FFT rows, the finest thing this client can be shown, and saying so
+   * is what keeps the three honesty tiers readable (docs/16 §8.3).
+   *
+   * `uSrcPx` is the on-screen size of one measured cell — one bin by one row — so the survey-overview
+   * lattice mark, were a ring ever drawn coarser than its rows, would state the replication instead
+   * of smoothing it. (It cannot be: `ringPlan` stands the ring aside below `MIN_ROW_PX`.)
+   */
+  private drawRing(pane: PaneView, ring: RingFrame, planes: TilePlanes, d: RingDraw, rect: PaneRect): void {
+    const gl = this.gl;
+    const clip = toClip(d.region, pane.box);
+    const u0 = (d.region.f0Hz - ring.f0Hz) / (ring.f1Hz - ring.f0Hz);
+    const u1 = (d.region.f1Hz - ring.f0Hz) / (ring.f1Hz - ring.f0Hz);
+    // The run's rows, mapped by the run's own measured cadence: the row holding `t` is
+    // `row0 + (t - t0) / (t1 - t0) * rows`, in texture rows, and `v` is that over the capacity.
+    const dt = d.span.t1Ns - d.span.t0Ns;
+    const row = (t: number) => d.span.row0 + ((t - d.span.t0Ns) / dt) * d.span.rows;
+    const v0 = row(d.region.t0Ns) / ring.capacity;
+    const v1 = row(d.region.t1Ns) / ring.capacity;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, planes.value);
+    gl.uniform1i(this.u.uValue, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, planes.state);
+    gl.uniform1i(this.u.uState, 1);
+    gl.uniform1i(this.u.uKind, KIND_TILE);
+    gl.uniform1f(this.u.uFallback, 0);
+    gl.uniform1i(this.u.uTier, tierByte("live-iq"));
+    gl.uniform4f(this.u.uRect, clip[0], clip[1], clip[2], clip[3]);
+    gl.uniform2f(this.u.uUv0, u0, v0);
+    gl.uniform2f(this.u.uUv1, u1, v1);
+    const wPx = ((clip[2] - clip[0]) / 2) * rect.w, hPx = ((clip[3] - clip[1]) / 2) * rect.h;
+    gl.uniform2f(this.u.uSizePx, wPx, hPx);
+    // `nt` is the texture's rows and `dv` the fraction of it on screen, exactly as `drawRegion`
+    // passes them, so this comes out as the height of one ring row in device pixels.
+    const src = sourceCellPx(
+      { nf: ring.nf, nt: ring.capacity, measured: { nf: ring.nf, nt: ring.capacity } },
+      u1 - u0, v1 - v0, wPx, hPx,
+    );
+    gl.uniform2f(this.u.uSrcPx, src[0], src[1]);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    this.drawCalls++;
+  }
+
+  /** Release one pane's ring texture. */
+  private dropRing(paneId: string): void {
+    const held = this.ringTex.get(paneId);
+    if (!held) return;
+    new GlTileTextures(this.gl).destroy(held.planes);
+    this.ringTex.delete(paneId);
+  }
+
+  /** Release every ring texture: the source was withdrawn, or the renderer is being disposed. */
+  private dropRings(): void {
+    for (const id of [...this.ringTex.keys()]) this.dropRing(id);
+  }
+
+  /**
    * A place the coverage survey settled as never sampled (T-580), drawn through the ordinary tile
    * path from ONE `UNOBSERVED` state byte — so grey here, as everywhere, comes out of the cell rule's
    * unobserved branch and out of no flat colour chosen in this file.
@@ -1154,13 +1381,10 @@ export class Surface {
   private drawSurveyed(pane: PaneView, region: Box, rect: PaneRect): void {
     const gl = this.gl;
     if (!this.greyTex) {
+      // One cell, one state byte: everything else a tile carries is about a tile, and since T-1042
+      // the uploader asks for the planes ([[PlaneSource]]) and nothing else.
       this.greyTex = new GlTileTextures(gl).upload({
-        addr: { device: "any", scheme: "survey", levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 1 },
-        key: "survey", nf: 1, nt: 1, t1Ns: null, asOfNs: null,
-        value: new Float32Array([NaN]), state: new Uint8Array([CELL.UNOBSERVED]),
-        tier: "survey-overview", answeredLevel: 0, fold: { frequency: "exact", time: "exact" },
-        measured: { nf: 1, nt: 1 }, rangeDb: null, bytes: 3,
-        serverInFlightLimit: null, serverInFlightShare: null,
+        nf: 1, nt: 1, value: new Float32Array([NaN]), state: new Uint8Array([CELL.UNOBSERVED]),
       });
     }
     const clip = toClip(region, pane.box);
@@ -1214,6 +1438,7 @@ export class Surface {
   dispose(): void {
     if (this.greyTex) new GlTileTextures(this.gl).destroy(this.greyTex);
     this.greyTex = null;
+    this.dropRings();
     this.cache.dispose();
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }

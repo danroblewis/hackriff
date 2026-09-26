@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, type Lattice, type LatticeSet, type TileAddr } from "../src/surface/lattice";
 import {
-  PaneModel, boxOf, freezeAt, following, levelDivergenceNote, paneStatuses,
+  PaneModel, activeAfterClose, boxOf, freezeAt, following, levelDivergenceNote, paneStatuses,
   type PaneState, type TimeWindow,
 } from "../src/surface/panes";
 import { Surface } from "../src/surface/surface";
@@ -695,4 +695,101 @@ test("T-486: a model that was never given a viewport has NO dead zone — fail c
   m.panTime(p.id, -1e6);
   m.settleTime(p.id, T0);
   assert.equal(m.isFollowing(p.id), false, "with no viewport, any scrub at all is a scrub");
+});
+
+// ——— T-1005: the split layout's controls ———
+
+test("T-1005: a divider drag is one number — both panes' rectangles move together, and nothing else changes", () => {
+  const m = model({ gapPx: 0 });
+  const a = m.list()[0].id;
+  const b = m.split(a, "columns")!;
+  const before = { a: m.get(a), b: m.get(b) };
+  const [d] = m.dividers();
+  assert.equal(m.dividers().length, 1);
+  assert.deepEqual({ dir: d.dir, frac: d.frac, paneId: d.paneId, path: d.path }, { dir: "columns", frac: 0.5, paneId: a, path: "" });
+  assert.equal(d.rect.x, W / 2, "the divider is not in the gap between the panes");
+  // Through the pane-addressed setter (the drag's path when a pane is on the first side).
+  assert.equal(m.setSplitFraction(a, 0.3), true);
+  let r = m.rects();
+  assert.equal(r.get(a)!.w, W * 0.3);
+  assert.equal(r.get(b)!.x, W * 0.3, "the second pane did not re-lay-out with the first");
+  assert.equal(r.get(b)!.w, W * 0.7);
+  assert.equal(m.dividers()[0].rect.x, W * 0.3, "the divider did not move with the fraction");
+  // By path, clamped: a pane is never dragged out of existence.
+  assert.equal(m.setDividerFraction("", 0.99), true);
+  r = m.rects();
+  assert.equal(r.get(a)!.w, W * 0.95);
+  assert.equal(m.setDividerFraction("ab", 0.5), false, "a path that names no split moved something");
+  // Layout only: neither pane's view moved.
+  assert.deepEqual({ a: m.get(a), b: m.get(b) }, before);
+});
+
+test("T-1005: rows split the height with the first pane on top; a flip re-orients and keeps both views", () => {
+  const m = model({ gapPx: 0 });
+  const a = m.list()[0].id;
+  const b = m.split(a, "rows")!;
+  m.setSplitFraction(a, 0.25);
+  const r = m.rects();
+  // GL convention: y up. The first pane is the TOP band, a quarter of the height.
+  assert.deepEqual(r.get(a), { x: 0, y: H * 0.75, w: W, h: H * 0.25 });
+  assert.deepEqual(r.get(b), { x: 0, y: 0, w: W, h: H * 0.75 });
+  const [d] = m.dividers();
+  assert.equal(d.dir, "rows");
+  assert.equal(d.rect.y, H * 0.75, "the divider is not between the top and bottom pane");
+  assert.equal(m.splitDirOf(a), "rows");
+  const views = { a: m.get(a), b: m.get(b) };
+  assert.equal(m.setSplitDir(b, "columns"), true);
+  assert.equal(m.splitDirOf(a), "columns");
+  assert.deepEqual(m.rects().get(a), { x: 0, y: 0, w: W * 0.25, h: H }, "the flip lost the fraction");
+  assert.deepEqual({ a: m.get(a), b: m.get(b) }, views, "a flip moved a view");
+  m.close(b);
+  assert.equal(m.splitDirOf(a), null, "a single pane has no split to flip");
+  assert.equal(m.setSplitDir(a, "rows"), false);
+  assert.deepEqual(m.dividers(), []);
+});
+
+test("T-1005: a divider between two splits is addressable by its path", () => {
+  const m = model({ gapPx: 0 });
+  const a = m.list()[0].id;
+  const b = m.split(a, "columns")!;
+  const a2 = m.split(a, "rows")!;
+  const b2 = m.split(b, "rows")!;
+  const root = m.dividers().find((d) => d.path === "")!;
+  assert.equal(root.paneId, null, "the root divider sits between two splits, so no pane owns it");
+  assert.equal(m.dividers().length, 3);
+  assert.equal(m.setDividerFraction("", 0.4), true);
+  const r = m.rects();
+  for (const id of [a, a2]) assert.equal(r.get(id)!.w, W * 0.4);
+  for (const id of [b, b2]) assert.equal(r.get(id)!.x, W * 0.4);
+});
+
+test("T-1005: after a close the pane under the pointer is active, else the live one — never 'the first' by default", () => {
+  const m = model({ gapPx: 0 });
+  const a = m.list()[0].id;
+  const b = m.split(a, "columns")!;
+  const c = m.split(b, "columns")!;
+  m.pause(a, T0); // a: frozen on the past; b, c: live
+  m.close(b);
+  const panes = m.list(), rects = m.rects();
+  // The pointer over what is now the frozen pane: that one, even though it is not live.
+  assert.equal(activeAfterClose(panes, rects, { x: 10, y: 10 }, b), a);
+  // Over the right-hand pane: that one.
+  assert.equal(activeAfterClose(panes, rects, { x: W - 10, y: 10 }, b), c);
+  // No pointer on the canvas: the live pane, not the first one in layout order.
+  assert.equal(activeAfterClose(panes, rects, null, b), c);
+  assert.equal(activeAfterClose(panes, rects, { x: -5, y: 10 }, b), c);
+  // Nobody live: the previous active pane if it survived, else the first.
+  m.pause(c, T0);
+  assert.equal(activeAfterClose(m.list(), rects, null, c), c);
+  assert.equal(activeAfterClose(m.list(), rects, null, b), a);
+});
+
+test("T-1005: the app wires the divider drag, the per-pane close and rows/columns", () => {
+  const chrome = readFileSync("src/app/centre/split-chrome.ts", "utf8");
+  assert.match(chrome, /m\.setSplitFraction\(d\.paneId, frac\)/, "the divider drag does not reach setSplitFraction");
+  const host = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(host, /p\.closePane\(gone, split\.pointerGl\(\)\)/, "a close does not hand the pointer to the after-close rule");
+  assert.match(host, /split\.place\(panes, hPx, dpr\)/, "the split chrome is not placed in the frame's dom hook");
+  const ctl = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  for (const act of ["split-rows", "flip"]) assert.match(ctl, new RegExp(`paneItem\\("${act}"`));
 });
