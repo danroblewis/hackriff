@@ -29617,7 +29617,7 @@ tasks:
   - id: T-1004
     milestone: MMAP
     title: "Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost"
-    status: in-progress
+    status: done
     branch: task-t1004
     priority: medium
     deps:
@@ -29644,6 +29644,7 @@ tasks:
       Commits: 31ab9b30, d710aaa2, 4913314c
       Observed, not chased: ui/e2e/app-outputs-map.e2e.mjs fails at its 400 px leg independently of this ticket — on base 954e342f and on merged main 4720410a. The predicate at app-outputs-map.e2e.mjs:134 wants a detection pin at least 12x12 px inside the clamped canvas whose centre point hits .sf-canvas; the dumped state shows three confirmed pins (widths 33/12/15 px) and an open toast ('Analog WFM: audio + RDS: p1 running on the signal'), so an overlay on the press point is the likely cause. Under a parallel 6-spec run the same spec failed EARLIER instead ('the GL overlay drew no active halo outside the box (0 -> 0)'), so there may be a second, load-sensitive failure in it. Worth a deflaker. | LOAD FLAKES seen while verifying the first merge, all green on a re-run at lower load: 'hk serve did not come up on http://127.0.0.1:<port> in 20 s' (app-drawer-goto), a page 'timeout' !== 'load' (app-active-pane), and app-split-frozen's selection wait timing out at 20 s while its backend had taken 154 s to start. Load average was 60-88 then; at 12-25 the same specs run in 3-17 s each. The harness's 20 s waits are tight for this box under four agents. | This branch has now been rebuilt onto main twice in one evening (4720410a, then a3ee7d20), each time for a two-line-scale overlap in ui/src/app/chrome/map-controls.ts and ui/src/surface/retune.ts — the MMAP split-view group (T-1000/T-1001/T-1006/T-1028/T-995/T-1004) is all editing the same two files. Sequencing those tickets, or landing them as one batch, would cost less than the conflict round-trips. | The ticket carries no use_cases field and the spec asserts UI behaviour (pane-scoped controls, the single gated DeviceAction path), not a docs/05 id, so use_cases is left empty rather than invented.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: cb8fb543
   - id: T-1005
     milestone: MMAP
     title: "Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close"
