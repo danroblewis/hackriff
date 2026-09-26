@@ -105,7 +105,7 @@ use hk_core::scheduler::{
 use hk_model::{FreqRange, Timestamp};
 use serde_json::{Value, json};
 
-use crate::live_control::{DeviceAction, LiveControl, LiveControlError};
+use crate::live_control::{DeviceAction, LiveControl, LiveControlError, SelectError};
 
 /// Nanoseconds in a second.
 const NS_PER_S: f64 = 1e9;
@@ -501,6 +501,14 @@ impl ScanRunner {
         self
     }
 
+    /// The front end this runner sweeps, as it identifies itself (`None` when the source reports
+    /// no identity — never a placeholder, the T-325 rule). This is the key a `device_id` selector
+    /// resolves against ([`ScanRunners::select`], T-1009) and what the served state carries.
+    #[must_use]
+    pub fn device_id(&self) -> Option<&str> {
+        self.shared.live.device_id()
+    }
+
     /// Whether this front end can be swept at all, and why not when it cannot.
     ///
     /// A source that cannot be tuned, or that states no frequency range, is **not** scannable, and
@@ -857,6 +865,119 @@ impl Drop for ScanRunner {
     }
 }
 
+/// **Every front end's scan runner** (T-1009), in composition order — the run's default first.
+///
+/// T-452 composed one runner over the run's default front end, because the arbitration it
+/// implements (an explicit user device action wins; the sweep yields, keeps its place and says so)
+/// is written about *one radio*. With several front ends that argument does not change: it is
+/// **per radio**, and a sweep of B has no business yielding to a retune of A. So the runners are
+/// held as a collection keyed the way every other device-facing route is keyed — by `device_id`,
+/// with the first as the default — and each one arbitrates over its own device alone.
+///
+/// A measurement box's "Scan this region with &lt;device&gt;" (T-1009) is what needs this: the user
+/// picks which radio sweeps the region they drew, so the choice has to reach the engine.
+#[derive(Clone, Default)]
+pub struct ScanRunners {
+    runners: Vec<Arc<ScanRunner>>,
+}
+
+impl std::fmt::Debug for ScanRunners {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.runners.iter()).finish()
+    }
+}
+
+impl ScanRunners {
+    /// The runners `runners` addresses, in order (the first is the default).
+    #[must_use]
+    pub fn new(runners: Vec<Arc<ScanRunner>>) -> Self {
+        Self { runners }
+    }
+
+    /// No sweepable front end (a replay, or a server composed without a scan runner).
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Exactly one runner — today's single-SDR run, where the selector may be omitted.
+    #[must_use]
+    pub fn one(runner: Arc<ScanRunner>) -> Self {
+        Self {
+            runners: vec![runner],
+        }
+    }
+
+    /// True when nothing here can sweep.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.runners.is_empty()
+    }
+
+    /// How many front ends this run can sweep.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.runners.len()
+    }
+
+    /// The **default** runner: the first, which is the run's primary front end's.
+    #[must_use]
+    pub fn primary(&self) -> Option<&Arc<ScanRunner>> {
+        self.runners.first()
+    }
+
+    /// Every runner, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<ScanRunner>> {
+        self.runners.iter()
+    }
+
+    /// Every sweepable `device_id`, in order (a front end reporting none contributes nothing —
+    /// "nothing said" is never a key, the T-325 rule).
+    #[must_use]
+    pub fn device_ids(&self) -> Vec<String> {
+        self.runners
+            .iter()
+            .filter_map(|r| r.device_id().map(str::to_owned))
+            .collect()
+    }
+
+    /// The runner for `device_id`, or the default when none is named.
+    ///
+    /// `None` resolves to the primary: a **read** (pricing a pass, reporting where a sweep is) has
+    /// a defined answer for the run's default radio, and `device_id` in the answer says which one
+    /// it was. Committing a radio is stricter — [`Self::select_to_commission`] refuses to guess.
+    pub fn select(&self, device_id: Option<&str>) -> Result<&Arc<ScanRunner>, SelectError> {
+        match device_id {
+            None => self.runners.first().ok_or(SelectError::NotLive),
+            Some(want) => self
+                .runners
+                .iter()
+                .find(|r| r.device_id() == Some(want))
+                .ok_or_else(|| SelectError::Unknown {
+                    requested: want.to_owned(),
+                    available: self.device_ids(),
+                }),
+        }
+    }
+
+    /// The runner a **commissioning** request names: as [`Self::select`], except that omitting the
+    /// selector on a run holding more than one sweepable front end is refused rather than guessed.
+    ///
+    /// Starting a sweep commits a radio to hundreds of retunes over the next minutes or hours. The
+    /// same rule the six device routes obey — "a client must name a device to move one" — applies
+    /// the moment a request *commits* one, and guessing here would silently commandeer whichever
+    /// front end happened to be composed first.
+    pub fn select_to_commission(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<&Arc<ScanRunner>, SelectError> {
+        if device_id.is_none() && self.runners.len() > 1 {
+            return Err(SelectError::Ambiguous(self.device_ids()));
+        }
+        self.select(device_id)
+    }
+}
+
 fn now_ns() -> i64 {
     Timestamp::now().as_unix_nanos()
 }
@@ -1069,6 +1190,8 @@ mod tests {
         /// reprograms the synthesiser, restarts the stream, and on a class or rate boundary the run
         /// re-plumbs behind it — and that cost is what the scan's price used to omit.
         retune_delay: Mutex<Duration>,
+        /// T-1009: the identity a `device_id` selector resolves against.
+        id: String,
     }
 
     impl Fake {
@@ -1097,7 +1220,14 @@ mod tests {
                 calls: AtomicU64::new(0),
                 rates: Mutex::new(Vec::new()),
                 retune_delay: Mutex::new(Duration::ZERO),
+                id: "fake:1".to_owned(),
             })
+        }
+        /// T-1009: the same front end under another identity, for a two-radio run.
+        fn named(id: &str) -> Arc<Self> {
+            let mut f = Self::new();
+            Arc::get_mut(&mut f).expect("sole owner").id = id.to_owned();
+            f
         }
         /// The same front end left at a narrow window, as a live run at 2.4 Msps is.
         fn at_rate(rate_hz: f64) -> Arc<Self> {
@@ -1133,7 +1263,7 @@ mod tests {
                 .clone()
         }
         fn device_id(&self) -> Option<&str> {
-            Some("fake:1")
+            Some(&self.id)
         }
         fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1493,6 +1623,79 @@ mod tests {
         assert_eq!(r.json()["state"], "running");
         assert_eq!(r.json()["yielded"], Value::Null);
         r.stop();
+    }
+
+    /// T-1009: **which radio a sweep is about.** A run holds one runner per front end, and the
+    /// selector resolves the way every other device-facing route's does — except that a request
+    /// which COMMITS a radio (a start) refuses to guess on a multi-radio run, while a read (the
+    /// state, a price) answers for the default one and says which that was.
+    #[test]
+    fn a_runner_is_selected_by_device_id_and_a_commission_never_guesses() {
+        let a = Arc::new(ScanRunner::new(Fake::named("fake:a")));
+        let b = Arc::new(ScanRunner::new(Fake::named("fake:b")));
+        let runners = ScanRunners::new(vec![Arc::clone(&a), Arc::clone(&b)]);
+
+        assert_eq!(runners.len(), 2);
+        assert_eq!(runners.device_ids(), vec!["fake:a", "fake:b"]);
+        // Named: that radio's runner, each time.
+        assert!(Arc::ptr_eq(runners.select(Some("fake:b")).unwrap(), &b));
+        assert!(Arc::ptr_eq(runners.select(Some("fake:a")).unwrap(), &a));
+        // A read with no selector is the default front end — and the answer names it.
+        assert!(Arc::ptr_eq(runners.select(None).unwrap(), &a));
+        assert_eq!(runners.select(None).unwrap().json()["device_id"], "fake:a");
+        // A start with no selector on a two-radio run is refused, not guessed: starting commits a
+        // radio to hundreds of retunes, and picking whichever was composed first is commandeering.
+        let e = runners.select_to_commission(None).expect_err("ambiguous");
+        assert_eq!(e.code(), "device_required");
+        assert_eq!(e.http_status(), 400);
+        assert!(e.to_string().contains("fake:b"), "{e}");
+        // A name this run does not hold is refused too, never the default as a fallback.
+        let e = runners.select(Some("fake:c")).expect_err("unknown");
+        assert_eq!(e.code(), "unknown_device");
+        assert_eq!(e.http_status(), 404);
+
+        // One front end: the selector may be omitted, including to commission — today's run.
+        let one = ScanRunners::one(Arc::clone(&a));
+        assert!(Arc::ptr_eq(one.select_to_commission(None).unwrap(), &a));
+        assert!(ScanRunners::none().select(None).is_err());
+    }
+
+    /// T-1009: **the arbitration is per radio.** A sweep on B has no business stopping because the
+    /// user retuned A, so a yield is noted on the runner the action's own radio owns and on no
+    /// other. (The routing of a request to that runner is `control.rs`; this is the property the
+    /// routing relies on: two runners are two independent sweeps.)
+    #[test]
+    fn one_radios_sweep_does_not_yield_to_another_radios_tune() {
+        let (fa, fb) = (Fake::named("fake:a"), Fake::named("fake:b"));
+        let a = ScanRunner::new(fa);
+        let b = ScanRunner::new(fb);
+        a.start(&ScanRequest {
+            freq: Some(FreqRange::new(100e6, 160e6)),
+            dwell_s: Some(0.01),
+            step: None,
+        })
+        .expect("a starts");
+        b.start(&ScanRequest {
+            freq: Some(FreqRange::new(100e6, 160e6)),
+            dwell_s: Some(0.01),
+            step: None,
+        })
+        .expect("b starts");
+
+        let y = a
+            .note_user_device_action(DeviceAction::Retune)
+            .expect("a yields to its own radio's tune");
+        assert_eq!(a.json()["state"], "yielded", "{}", a.json());
+        assert_eq!(
+            b.json()["state"],
+            "running",
+            "b's sweep is over another radio: {}",
+            b.json()
+        );
+        a.unyield(&y);
+        assert_eq!(a.json()["state"], "running", "{}", a.json());
+        a.stop();
+        b.stop();
     }
 
     /// An idle scan has nothing to yield, so a user action is not reported as preempting one.
