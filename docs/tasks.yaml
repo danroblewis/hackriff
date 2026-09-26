@@ -30831,7 +30831,6 @@ tasks:
     milestone: MLIVE
     title: "LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles"
     status: in-progress
-    branch: task-t1044
     priority: medium
     deps:
     - T-1042
@@ -30846,6 +30845,17 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles
+
+      Review found: e2e unmet + resume walk fetched an unbounded gap and discarded it. Fixed: walk bounded to ring window, ring's band; on completion resident tiles over the gap are re-asked; e2e ui/e2e/live-ring-resume.e2e.mjs added (passes alone x3); decoder i64 refused every real block (t0_ns > 2^53) - fixed with unit test.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-26 07:12).
+      Review fix. (1) Added ui/e2e/live-ring-resume.e2e.mjs: an init-script WebSocket proxy drops the app's /ws/spectrum/live and refuses reconnects for ~2 s; asserts the pane is never a flat fill while dark, then that the page resubscribed to /ws/spectrum/rows with t_from (ring's last t1) and t_to, the server accepted it, walked 13 blocks (1-2 DISCONTINUITY), none unreadable, and the ring resumes painting. Passes alone 3/3 on a fresh hk. (2) The resume walk is now bounded to the ring's own window (GapResume.onRow maxRows) and uses the ring's band (not the header's); and it is no longer thrown away: when the walk ends, resident tiles over the gap are re-asked via TileCache.coverageChanged (new SurfacePreview.regionChanged, wired by setResumeSink) instead of waiting for the refresh lane. Walked rows are deliberately not painted into the ring (the gap is the tile lane's). (3) The per-row frame() allocation is now gated on GapResume.pending. (4) Real bug the e2e exposed: panerows' i64 refused any absolute capture ns > 2^53, so every real block was unreadable (22/22); fixed, with a unit test at a real 1.79e18 ns row. Merged gated main 4bdd4115.
+      Tests: node ui/test/run.mjs (all UI unit files, + tsc --noEmit) -> exit 0 (117/117 test files passed, tsc clean); node ui/e2e/run.mjs live-ring-resume (alone, fresh hk, x3) -> exit 0 (passed 3/3)
+      precheck exit 0
+      Commits: 24b46df3
+      Observed, not chased: ui/e2e/live-ring.e2e.mjs (LSR-1) fails on this branch alone at 'waiting for the chrome to report a viewport' (.hk-surface-viewport[data-viewport=pane]): T-996 (already in merged main) stopped passing `chrome` to the preview so that selector no longer exists - the spec is stale against main, not touched by this diff | live-ring-resume + live-ring run concurrently on two lanes: resume spec failed at 115 s (not reproduced alone 3x) - load-flake candidate for the deflaker
+      Resources: 293 CPU-s, peak 4.8 GB
+    branch: task-t1044
   - id: T-1045
     milestone: MLIVE
     title: "LSR-4: per-device live publishers spectrum/live/<device>; a pane's device selects its stream"

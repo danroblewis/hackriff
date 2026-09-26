@@ -271,6 +271,49 @@ function spansOf(order: readonly number[], times: Float64Array, periodNs: number
   return out;
 }
 
+/**
+ * **Resume after a dropped socket** (T-1044 / LSR-3).
+ *
+ * The ring holds the rows it was given and *only* those: when the `spectrum/live` socket drops for a
+ * while, the rows recorded in the meantime never reach it. The ring already refuses to stretch over
+ * that ([[GAP_FACTOR]], header rule 2), so the gap is exactly the extent the tile lane does not skip
+ * and the tiles below it fill it — no black. What this adds is the *request*: the reconnecting client
+ * resubscribes to the row route with `t_from` = the last row it holds's end (`t1`) and `t_to` = the
+ * first row of the resumed stream, so the server walks the store for precisely the gap and flags any
+ * part it did not have `DISCONTINUITY` (docs/api.md, `GET /ws/spectrum/rows`).
+ *
+ * Pure bookkeeping: [[noteClose]] remembers the last `t1` the ring held, and [[onRow]] — given the
+ * first row after the reconnect — says whether a gap opened and over which capture-time range. Times
+ * are the rows' own; nothing here reads a clock.
+ */
+export class GapResume {
+  private t1Ns: number | null = null;
+
+  /** A drop is waiting for its first resumed row: the only time [[onRow]] has anything to say. */
+  get pending(): boolean { return this.t1Ns !== null; }
+
+  /** The socket dropped: remember where the ring's newest run ends (`null` if it holds nothing). */
+  noteClose(fr: RingFrame | null): void {
+    this.t1Ns = fr?.live ? Math.floor(fr.live.t1Ns) : null;
+  }
+
+  /**
+   * The first row of the resumed stream arrived at `tNs`. Returns the range to fetch, or `null` when
+   * the stream simply continues (within [[GAP_FACTOR]] periods) or there is nothing to resume from.
+   * **Bounded**: the range never reaches back further than `maxRows` periods before the new row —
+   * what the ring could hold; older than that is the pyramid's, and an hour-long sleep must not be
+   * walked row by row. One-shot: the note is consumed either way.
+   */
+  onRow(tNs: number, rowPeriodNs: number, maxRows = Infinity): { readonly tFromNs: number; readonly tToNs: number } | null {
+    const from = this.t1Ns;
+    this.t1Ns = null;
+    if (from === null || !Number.isFinite(tNs) || !(rowPeriodNs > 0)) return null;
+    const to = Math.floor(tNs);
+    if (to - from <= (GAP_FACTOR - 1) * rowPeriodNs) return null;
+    return { tFromNs: Math.max(from, to - Math.floor(maxRows * rowPeriodNs)), tToNs: to };
+  }
+}
+
 /** One quad: the run, and the region of the surface it is painted over in this pane. */
 export interface RingDraw {
   readonly span: RingSpan;
