@@ -2463,13 +2463,19 @@ def test_a_landed_remote_claims_worktree_is_removed_on_its_host_and_nothing_else
                                        check=True, capture_output=True, text=True).stdout.strip()
     g(local_repo, "init", "-q", "-b", "main")
     g(local_repo, "commit", "-q", "--allow-empty", "-m", "main")
+    wts = {}
+    (local_repo / "f").write_text("a\n")
+    g(local_repo, "add", "f")
+    g(local_repo, "commit", "-q", "-m", "f")
     subprocess.run(["rm", "-rf", str(far / "repo")], check=True)
     subprocess.run(["git", "clone", "-q", str(local_repo), str(far / "repo")], check=True)
-    wts = {}
-    for t, extra in (("t1", False), ("t2", True), ("t3", False), ("t4", False)):
-        g(far / "repo", "worktree", "add", "-q", "-b", f"task-{t}", str(far / "repo" / ".claude" / "worktrees" / t))
-        if extra:
-            g(far / "repo" / ".claude" / "worktrees" / t, "commit", "-q", "--allow-empty", "-m", "not on main")
+    for t, extra in (("t1", ""), ("t2", "commit"), ("t3", ""), ("t4", ""), ("t6", "edit"), ("t7", "")):
+        w = far / "repo" / ".claude" / "worktrees" / t
+        g(far / "repo", "worktree", "add", "-q", "-b", f"task-{t}", str(w))
+        if extra == "commit":
+            g(w, "commit", "-q", "--allow-empty", "-m", "not on main")
+        if extra == "edit":
+            (w / "f").write_text("an uncommitted edit\n")
         wts[t] = f"{local_repo}/.claude/worktrees/{t}"
     (local_ops / "hosts").mkdir()
     (local_ops / "hosts" / "node2.json").write_text(json.dumps({"reachable": True, "at": time.time()}))
@@ -2480,17 +2486,23 @@ def test_a_landed_remote_claims_worktree_is_removed_on_its_host_and_nothing_else
               "T-2": {"ticket": "T-2", "host": "node2", "wt": wts["t2"], "state": "merged"},
               "T-3": {"ticket": "T-3", "host": "node2", "wt": wts["t3"], "state": "merged"},
               "T-5": {"ticket": "T-5", "host": "node2", "wt": wts["t3"], "state": "running"},   # a fix run shares t3
-              "T-4": {"ticket": "T-4", "host": "node2", "wt": wts["t4"], "state": "running"}}
+              "T-4": {"ticket": "T-4", "host": "node2", "wt": wts["t4"], "state": "running"},
+              "T-6": {"ticket": "T-6", "host": "node2", "wt": wts["t6"], "state": "merged"},
+              "T-7": {"ticket": "T-7", "host": "node2", "wt": wts["t7"], "state": "merged"},
+              "T-8": {"ticket": "T-8", "host": "node2", "wt": wts["t7"], "state": "error", "started": time.time()}}
     (local_ops / "bulk-in-progress").write_text("base=x\n")
     assert R.reap_remote_worktrees(claims, dry=False) is False            # main is provisional: nothing
     (local_ops / "bulk-in-progress").unlink()
     assert R.reap_remote_worktrees(claims, dry=False) is True
     left = {p.name for p in (far / "repo" / ".claude" / "worktrees").iterdir()}
-    assert left == {"t2", "t3", "t4"}, said
+    assert left == {"t2", "t3", "t4", "t6", "t7"}, said       # t6: tracked edit; t7: a recent error claim's resume
     assert claims["T-1"].get("wt_removed") and not claims["T-2"].get("wt_removed")
     assert any("t2" in m and "commits main lacks" in m for m in said)
-    assert R.reap_remote_worktrees(claims, dry=False) is False            # once: nothing left to do, nothing said again
-    assert sum("t2" in m for m in said) == 1
+    assert claims["T-2"]["wt_kept_main"] and any("t6" in m and "tracked edits" in m for m in said)
+    visits = []
+    monkeypatch.setattr(R, "remote_leaked", lambda c, cl, dry: visits.append(c["ticket"]) or [])
+    assert R.reap_remote_worktrees(claims, dry=False) is False            # nothing new until main moves
+    assert visits == [] and sum("t2" in m for m in said) == 1
 
 
 def test_a_host_under_the_disk_floor_takes_no_work(remote_host, monkeypatch):
