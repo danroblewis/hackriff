@@ -30070,6 +30070,42 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q py/tests/test_explorer_launcher.py`, `just lint-py`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator triage 2026-09-25: explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it
+  - id: T-1034
+    milestone: MLIVE
+    title: "Departed-band fog gap: after a nudge the band's LAST live rows get no shadow at the finest level (tiles answer shadow.runs=0, stages=[], 2.6 s unsearched) - blank, not fog, until zoom-out"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: SHADOW-DEPARTED
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER BUG, P1, user-visible (user 2026-09-25 ~14:50, asked twice: "Be sure to file tickets to fix this"): "If I have the waterfall going for a while, then I nudge it +1/2 to the right, the fog-of-war applies correctly for the 99.5 to 100.2 tiles, but the 100.2 to 100.8 tiles do not load. Also happens after a refresh. The issue goes away if I zoom out."
+      REPRODUCED SERVER-SIDE on staging (supervisor, full table in ~/.hackriff-ops/handoffs/coordinator-1500-departed-band-fog-gap.md): after a nudge 99.6-102.0 -> 100.8-103.2 MHz (2.4 Msps), live-edge level (0,0) tiles 664-667 (99.60-100.20, an older departed window) answer short_circuit with shadow 256/256 (fog OK), but 668-670 (100.20-100.65, tuned until the nudge) answer short_circuit=true with shadow.runs=0, own_level.columns_found=0, stages=[], reach_s null, search.unsearched=[[t, t+2.6 s]] - the band's LAST live rows get NO shadow at the finest level; 671 partial. At (2,1) tile 167 has observed_cells=182 so zoom-out 'fixes' it. Not a client cache (persists over refresh). This is the T-881/T-911/T-916 case ('a departed band's newest rows read as shadow, never never-observed grey') failing at the finest level - a NEW defect, not a reopening (both done).
+      LIKELY AREA: hk-api tiles.rs / hk-store query.rs shadow search - the bounded reach / block-end row from the T-911 review round, or the own-level search skipping the unsealed live tile of the previous time block.
+      ACCEPTANCE (blind, deterministic, through the mock SDR): tune A, run N seconds, retune +1/2 span, request the live-edge finest tiles across the departed band: every column of every departed tile carries a shadow run whose last_t_s is the band's last live row (within one row of the retune instant), search.unsearched == [], and the same at (1,0) and (2,1). Red on current main first. A ui/e2e spec asserts no blank column between the fog and the tuned window after a nudge at 1280x800 (run against a FRESH hk - main's seeded target/debug/hk has been stale). Grey stays genuinely-unobserved only.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-api tiles / hk-store query binaries you touch, the new e2e alone on ports >= 9216, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 ~14:50 via supervisor (staging, reproduced server-side): Departed-band fog gap: after a nudge the band's LAST live rows get no shadow at the finest level (tiles answer shadow.runs=0, stages=[], 2.6 s unsearched) - blank, not fog, until zoom-out
+    core_interface: true
+    high_effort_reason: shadow search across the tile pyramid (hk-api tiles.rs / hk-store query.rs) is the honesty contract for what the canvas shows as last-known vs never-observed; the fix sits in the bounded reach / block boundary logic of three prior tickets
+  - id: T-1035
+    milestone: MLIVE
+    title: "Canvas client hammers a dead backend (40-49 failed requests per 5 s, no backoff): canvas-journey #4 red on main 3/3 - bounded backoff after connection failures, no re-render thrash"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI-DEAD-BACKEND
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (coordinator triage 2026-09-25 16:51-17:00, fresh hk built 16:29, base 954e342f, alone on own ports, 3/3 runs at load 23-39): ui/e2e/canvas-journey.e2e.mjs test #4 'a killed backend degrades to grey with no purple and no re-render thrash' fails every run at canvas-journey.e2e.mjs:1753: 'the client is still hammering a dead server: 49 failed requests in the first 5 s and 29 in the second. Re-asking cannot revive a dead stream.' (runs 2/3: 44 -> 40, 40 -> 27). Not a load flake (fails every run alone). Logs: scratchpad run{1,2,3}.log of the coordinator session. Earlier workers misfiled it as a load flake.
+      DELIVER: find which client paths keep re-asking a dead server (tile fetches, /ws streams reconnecting, coverage/timeline polls) and make them back off - one shared, bounded exponential backoff after consecutive connection failures, reset on the first success; a dead stream is not re-opened in a tight loop; the canvas degrades to grey (unobserved-by-this-client) with no purple and no re-render thrash. Presentation-side only (thin client). Red on current main first (the spec already is); prove the backoff with a ui/test on the request scheduler (fake clock), plus the e2e green 5/5 alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the spec alone on ports >= 9216 against a FRESH hk), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator triage 2026-09-25 (fresh hk, 3/3 alone): Canvas client hammers a dead backend (40-49 failed requests per 5 s, no backoff): canvas-journey #4 red on main 3/3 - bounded backoff after connection failures, no re-render thrash
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
