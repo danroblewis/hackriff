@@ -1461,6 +1461,8 @@ Messages are JSON text, in order:
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …), plus one field this route itself adds: **`t`**, the server's own wall clock (`Timestamp::now`, not the run's sample clock) at the instant the response was built — bare name, Unix seconds, per the units convention (T-351). Without it a caller could not tell a fresh read from a cached one, or measure its own clock skew against this device. Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
 
+**The spectrum reader's row fold (T-1048, LSR-7)** is reported under `"spectrum"`: `rows`, `rows_gated`, `errors` (already existing), plus `fold_ns_last`/`fold_ns_max`/`fold_ns_total` — the newest, largest and summed cost (ns) of dB-converting and wire-serializing one row (`fold_ns_total / rows` is the mean), timed at `hk_pipeline::spectrum::Output::row`'s one call site (T-453: capture-thread cost measured, never assumed). **Not per-subscription**: today's `/ws/spectrum/live` folds a row once and every watcher gets the same bytes, because the whole stream has one canonical geometry; a genuinely per-pane fold is LSR-2's (`/ws/spectrum/rows`) to add, at this same measurement point, once it lands.
+
 **Compute providers (T-056, ADR-0007)** are reported under `"compute"`. They are chosen once per run and never change mid-run.
 
 | Field | Type | Meaning |

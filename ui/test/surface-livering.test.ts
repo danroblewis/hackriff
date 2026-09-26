@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import { cmap } from "../src/cmap";
 import { CELL } from "../src/surface/cellrule";
 import { LiveRing, type RingFrame } from "../src/surface/livering";
+import { lastRowArrival, liveMetrics } from "../src/surface/livemetrics";
 import { extentOf, keyOf, oneTier, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { SurfacePreview, type SurfaceProbe } from "../src/surface/preview";
 import { Surface, type PaneView } from "../src/surface/surface";
@@ -267,6 +268,53 @@ test("LSR-1: a retune rebuilds the ring's texture and releases the old one; a wi
   const before = h.g.deleted.length;
   h.surface.setLiveRings(null);
   assert.ok(h.g.deleted.length > before, "a withdrawn ring source left its textures behind");
+});
+
+// ——— T-1048 / LSR-7: row t vs rAF, measured at the same draw call ———
+
+test("LSR-7: a following pane painted from the ring states its arrival→paint latency; the no-ring control states null", async () => {
+  liveMetrics.reset();
+  lastRowArrival.set(performance.now() - 7); // the newest row "arrived" 7 ms ago
+  const h = harness();
+  // A pane wholly under the ring (as test 1 above) needs no tile fetch at all, so its very first
+  // `render` call — before any `drive` settling — is already the frame that paints the row.
+  const box = { ...BAND, t0Ns: EDGE - TILE_NS, t1Ns: EDGE };
+  const pane: PaneView[] = [{ id: "p1", rect: { x: 0, y: 0, w: W, h: H }, box }];
+  h.surface.setLiveRings(source(ringOf(LAT.cells, EDGE, BAND)));
+  const [withRing] = h.surface.render(pane);
+  assert.notEqual(withRing.ringLatencyMs, null, "a pane painted from the ring reported no latency sample");
+  assert.ok(Number.isFinite(withRing.ringLatencyMs), `ringLatencyMs was ${withRing.ringLatencyMs}`);
+  assert.equal(liveMetrics.snapshot().latency.n, 1, "the shared meter recorded no latency sample");
+
+  const h2 = harness();
+  await h2.drive(pane);
+  const [noRing] = h2.surface.render(pane);
+  assert.equal(noRing.ringLatencyMs, null, "a pane with no ring must not report a latency number");
+});
+
+test("LSR-7: latency is recorded once per NEW row, not once per frame a stalled edge is redrawn", async () => {
+  liveMetrics.reset();
+  lastRowArrival.set(performance.now() - 7);
+  const h = harness();
+  const box = { ...BAND, t0Ns: EDGE - TILE_NS, t1Ns: EDGE };
+  const pane: PaneView[] = [{ id: "p1", rect: { x: 0, y: 0, w: W, h: H }, box }];
+  // One ring frame, reused across every render call below: the newest row's `t1Ns` never advances.
+  const ring = ringOf(LAT.cells, EDGE, BAND);
+  h.surface.setLiveRings(source(ring));
+  h.surface.render(pane);
+  h.surface.render(pane);
+  h.surface.render(pane);
+  assert.equal(liveMetrics.snapshot().latency.n, 1,
+    `one row held across 3 render calls produced ${liveMetrics.snapshot().latency.n} latency samples, not 1`);
+
+  // A fresh row and a pane whose box has advanced to the new live edge with it — as a real following
+  // pane's does every frame — is a second, distinct sample.
+  const ring2 = ringOf(LAT.cells + 1, EDGE + PERIOD, BAND);
+  h.surface.setLiveRings(source(ring2));
+  lastRowArrival.set(performance.now() - 3);
+  const pane2: PaneView[] = [{ id: "p1", rect: { x: 0, y: 0, w: W, h: H }, box: { ...box, t0Ns: box.t0Ns + PERIOD, t1Ns: box.t1Ns + PERIOD } }];
+  h.surface.render(pane2);
+  assert.equal(liveMetrics.snapshot().latency.n, 2, "a genuinely new row did not produce a new sample");
 });
 
 // ——— the host's half: WHICH panes have a ring ———
