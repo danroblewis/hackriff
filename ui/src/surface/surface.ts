@@ -146,6 +146,14 @@ export interface PaneReport {
    * measured cells on the screen, `blank` left the pane's PENDING ground showing over a tile the
    * client is holding. A rising `blank` is the "we have it but didn't render it" failure. */
   readonly blank: number;
+  /**
+   * **Resident tiles drawn stale** (T-1039): the last good copy stayed on screen — a failed or slow
+   * revalidation never clears what is drawn — but it has gone longer than
+   * [[TileCacheOptions.staleAfterMs]] without a fresh answer, so the honesty tier says so rather than
+   * silently trusting it forever. Counted apart from `behind`/`blank`: those are about how far a
+   * tile's own evidence reaches, this is about how long ago it was last confirmed at all.
+   */
+  readonly stale: number;
   /** **How far short of its own window top this pane was actually drawn, in ns.** `0` when the
    * tiles in hand reach the top of the pane. Positive when the newest thing drawn is older than
    * the instant the pane is showing — which is what the horizon clip does to a pane whose window
@@ -853,7 +861,7 @@ export class Surface {
         child: child ?? undefined,
         standIn: coarse ? { levelF: coarse.levelF, levelT: coarse.levelT } : undefined,
       });
-      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0;
+      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0, stale = 0;
       let rowsHeld = 0, rowsLate = 0;
       // T-916: the shadow's provenance, counted over the tiles this pane actually DREW (stand-ins
       // included — their cells are what is on the screen here), so the readout names a coarser
@@ -962,6 +970,9 @@ export class Surface {
             const shown = this.drawUpToHorizon(pane, lat, p.region, p.entry, "tile", r);
             if (shown.behind) behind++;
             if (shown.drawn) drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); else blank++;
+            // **State N** (T-1039): the copy stayed on screen — nothing here ever clears it — but it
+            // may have gone longer than `staleAfterMs` without a confirmed answer.
+            if (this.cache.isStale(p.addr)) stale++;
             // The cells of this tile that are inside this pane's box — the measurement the viewport
             // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
             // the region are the same box — **clipped at the horizon** (T-532) when the answer stops
@@ -1055,7 +1066,7 @@ export class Surface {
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
       reports.push({
-        id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank,
+        id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, stale,
         shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, rowsHeld, rowsLate, ringRows, ringTiles,
         ringRowPx: plan?.rowPx ?? 0, ringFrame: ring, ringCover: plan?.cover ?? null,
       });

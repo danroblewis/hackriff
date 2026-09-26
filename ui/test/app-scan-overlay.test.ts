@@ -300,3 +300,54 @@ test("CONTROLLER: a replay offers no scan, says why, and sends nothing", async (
     assert.equal(ctl.model(), null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 3. T-1009: a plan over a region the user DREW, on the radio they picked
+// ---------------------------------------------------------------------------
+
+test("T-1009: a measurement box opens the plan bounded by ITS region, on the chosen radio, and every request carries that device_id", async () => {
+  await withController(async ({ ctl, calls, mod }) => {
+    ctl.update(idle);
+    // The box the Measure tool drew: 98–102 MHz. No inset — the region IS the region measured.
+    ctl.openPlanOver({ loHz: 98e6, hiHz: 102e6 }, "mock:rtl");
+    await settle();
+    const m = ctl.model()!;
+    assert.equal(m.state, "plan");
+    assert.equal(m.loHz, 98e6, "the overlay is bounded by the box, not by the viewport");
+    assert.equal(m.hiHz, 102e6);
+    assert.equal(calls[0].path,
+      mod.scanPriceRequest({ loHz: 98e6, hiHz: 102e6 }, mod.MAP_SCAN_DWELL_S, "fine", "mock:rtl"),
+      "the price is asked of the radio the user picked");
+    assert.ok(calls.every((c) => c.m === "GET"), "opening a plan still reaches no device route");
+
+    // Start commissions THAT radio: the selector is on the body, not guessed by the server.
+    (ctl.panel as unknown as FakeEl).find("map-scan-go")!.fire("click");
+    await settle();
+    const post = calls.find((c) => c.m === "POST")!;
+    assert.equal(post.path, mod.SCAN_START_PATH);
+    assert.deepEqual(post.body, mod.scanStartBody({ loHz: 98e6, hiHz: 102e6 }, mod.MAP_SCAN_DWELL_S, "fine", "mock:rtl"));
+
+    // While it runs, the panel follows THAT radio's sweep out of `scans`, not the default one's.
+    const mine: ScanState = { ...running(2, 3), device_id: "mock:rtl" };
+    ctl.update(idle, true, [idle, mine]);
+    assert.equal(ctl.model()!.state, "running", "the chosen radio's sweep is the one drawn");
+    assert.equal(ctl.model()!.dwellStep, 2);
+
+    // Stop names the same radio — surrendering that radio, never all of them by accident.
+    await ctl.stop();
+    const stop = calls.filter((c) => c.m === "POST").at(-1)!;
+    assert.equal(stop.path, mod.SCAN_STOP_PATH);
+    assert.deepEqual(stop.body, { device_id: "mock:rtl" });
+  });
+});
+
+test("T-1009: a region with no width is refused with a reason, and nothing is asked of the server", async () => {
+  await withController(async ({ ctl, calls, toasts }) => {
+    ctl.update(idle);
+    ctl.openPlanOver({ loHz: 100e6, hiHz: 100e6 }, "mock:rtl");
+    await settle();
+    assert.equal(ctl.model(), null);
+    assert.equal(calls.length, 0);
+    assert.match(toasts.at(-1)!, /no width/);
+  });
+});
