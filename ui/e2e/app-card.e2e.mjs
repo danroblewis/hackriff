@@ -30,9 +30,12 @@ import { settled } from "./app-chrome.mjs";
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const SHOTS = process.env.HK_E2E_SHOTS;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
-// The minimap strip along the canvas's bottom edge (`MINIMAP_PX` in `app/centre/surface.ts`): a click
-// there is a click on the minimap, not on bare map.
-const MINIMAP_PX = 110;
+// The panes' bottom edge: the canvas's own bottom inset (`canvas.dataset.insetBottom`, the lift
+// `surface.ts` states). A press below it is not on the map. T-995 retired the minimap strip that used
+// to sit above that inset (`MINIMAP_PX`, 110 device px) — the panes now run down to the inset, so the
+// map's bottom is the inset itself, read off the page rather than restated (integration of T-995).
+const PANE_BOTTOM = `(document.querySelector('.sf-canvas').getBoundingClientRect().bottom
+  - (Number(document.querySelector('.sf-canvas').dataset.insetBottom ?? 0) || 0))`;
 
 /** Everything about the card, in one read. */
 const CARD = `JSON.stringify((() => {
@@ -51,12 +54,13 @@ const card = async (page) => JSON.parse(await page.eval(CARD));
  * **One in-page function chooses the box AND the point to press it at, together** (T-1032).
  *
  * The first version asked for a box whose whole rectangle was inside the canvas and clear of the
- * minimap strip, then computed a press point from that rectangle afterwards. Both halves were wrong
+ * strip along its bottom edge, then computed a press point from that rectangle afterwards. Both
+ * halves were wrong
  * under load, in ways that cost three different reds:
  *
  *  - **An ongoing signal's box grows to the live edge by design** (ADR-0017/0019: `[start, end?]`,
- *    ongoing until an end is found), so its bottom edge reaches the bottom of the canvas — where the
- *    minimap strip is. Requiring the whole box to be inside therefore asks a product invariant not to
+ *    ongoing until an end is found), so its bottom edge reaches the panes' own bottom edge (T-995's
+ *    inset, `PANE_BOTTOM`). Requiring the whole box to be inside therefore asks a product invariant not to
  *    hold: the spec passed only while the fixture's signals were still young. Measured on a box at
  *    load 7: three confirmed pins, every one rejected, and 120 s of waiting for a box that would
  *    never appear. What a click needs is ONE point, so one point is what is required.
@@ -74,8 +78,7 @@ const pickBox = ({ exclude = null, only = null } = {}) => `(() => {
   const cv = document.querySelector('.sf-canvas');
   if (!cv) return null;
   const c = cv.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const y1 = c.bottom - ${MINIMAP_PX} / dpr - 2;   // above the minimap strip: a click there is the minimap
+  const y1 = ${PANE_BOTTOM} - 2;   // inside the panes: a press below their bottom inset is not on the map
   const skip = ${JSON.stringify(exclude)}, only = ${JSON.stringify(only)};
   const canvasAt = (x, y) => document.elementFromPoint(x, y)?.classList.contains('sf-canvas');
   const pins = [...document.querySelectorAll('.sf-pins .sf-pin')];
@@ -107,8 +110,8 @@ const pickBox = ({ exclude = null, only = null } = {}) => `(() => {
       if (!canvasAt(q.cx, q.cy) || !alone(q.cx, q.cy, p)) continue;
       q.press = { x: q.cx, y: q.cy, offCentre: false };
     } else {
-      // The part of the box that is on the canvas and clear of the minimap — an ongoing box's own
-      // bottom is the live edge, which is under that strip.
+      // The part of the box that is on the canvas and above the panes' bottom inset — an ongoing
+      // box's own bottom is the live edge, which sits at that edge.
       const vx0 = Math.max(r.x, c.x + 2), vx1 = Math.min(r.right, c.right - 2);
       const vy0 = Math.max(r.y, c.y + 2), vy1 = Math.min(r.bottom, y1);
       if (vx1 - vx0 < 4 || vy1 - vy0 < 4) continue;
@@ -137,14 +140,14 @@ const boxToPress = async (page, opts = {}) =>
   JSON.parse(await page.eval(`JSON.stringify(${pickBox(opts)})`));
 
 /** A point on the canvas that is BARE MAP: no pin/box hit area, no floating chrome, no card, not the
- * minimap strip — and the browser's own hit test agrees the canvas is what is there. */
+ * inset below the panes — and the browser's own hit test agrees the canvas is what is there. */
 const BARE_AT = `(() => {
   const c = document.querySelector('.sf-canvas').getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const boxes = [...document.querySelectorAll('.sf-pins .sf-pin, .map-ctl > *, .sheet, .sf-readout, .sf-chrome, .sf-note, .sf-status-line, .sf-scale, .sf-maptip, .research:not([hidden])')]
     .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
   const free = (x, y) => !boxes.some((r) => x >= r.x - 8 && x <= r.right + 8 && y >= r.y - 8 && y <= r.bottom + 8);
-  const y1 = c.bottom - ${MINIMAP_PX} / dpr - 8;
+  const y1 = ${PANE_BOTTOM} - 8;
   for (let fy = 0.75; fy > 0.1; fy -= 0.05) {
     for (let fx = 0.5; fx < 0.98; fx += 0.04) {
       const x = c.x + c.width * fx, y = c.y + (y1 - c.y) * fy;
@@ -282,8 +285,7 @@ async function agreesWithBox(page, box, { timeoutMs = 5000 } = {}) {
  * pressable detection. */
 async function markRegion(page) {
   const r = await page.$rect(".sf-canvas");
-  const dpr = await page.eval("window.devicePixelRatio || 1");
-  const bottom = r.y + r.h - MINIMAP_PX / dpr - 40;
+  const bottom = (await page.eval(PANE_BOTTOM)) - 40;
   // The drag starts on the MAP: at phone width T-996's left column (Retune + widths, the offer)
   // spans the whole width a quarter of the way down, so the start moves below it — the first point
   // the canvas is what a press lands on.
@@ -300,7 +302,7 @@ async function markRegion(page) {
  *
  * `page.click` reads a rect in one evaluation and presses in the next, and the card is an element
  * whose height the product re-applies whenever the map's chrome is re-measured (`sheet.ts`'s
- * `relayout`, called when the minimap re-fits) — so under load its head, and the × in it, can move
+ * `relayout`, called from the surface's own `fit`) — so under load its head, and the × in it, can move
  * between the two. The press then lands in the body below the button and NOTHING happens, which is
  * the `5 s wait for the card's x` red: not the close handler being lost, but the press missing it.
  * `app-chrome.mjs`'s `arrived` is the same fix for the animated case and is used first here.
@@ -371,9 +373,9 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
     await shot("1-no-card");
 
     // ---- (2) clicking a detection box opens the card on that box ----
-    // A pressable box: one with a point inside it that is on the canvas and clear of the minimap —
-    // NOT one whose whole rectangle is inside the canvas, which an ongoing signal's box never is
-    // (it grows to the live edge; see `pickBox`).
+    // A pressable box: one with a point inside it that is on the canvas and above the panes' bottom
+    // inset — NOT one whose whole rectangle is inside the canvas, which an ongoing signal's box never
+    // is (it grows to the live edge; see `pickBox`).
     //
     // The lane's readiness page already waits for observed coverage before any spec starts, but a
     // page that bootstrapped while its server was still warming opens on the WHOLE 1 MHz – 6 GHz
