@@ -30726,7 +30726,7 @@ tasks:
   - id: T-1050
     milestone: MMAP
     title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
-    status: in-progress
+    status: done
     branch: task-t1050
     priority: high
     deps:
@@ -30743,6 +30743,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1041 worker 2026-09-25: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+    commit: 0220a629
   - id: T-1051
     milestone: MMAP
     title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
