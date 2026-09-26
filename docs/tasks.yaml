@@ -30106,6 +30106,22 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the spec alone on ports >= 9216 against a FRESH hk), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator triage 2026-09-25 (fresh hk, 3/3 alone): Canvas client hammers a dead backend (40-49 failed requests per 5 s, no backoff): canvas-journey #4 red on main 3/3 - bounded backoff after connection failures, no re-render thrash
+  - id: T-1036
+    milestone: M2-hardening
+    title: "hk-model detection_write_throughput_is_reported asserts a wall-clock throughput bound in the default tier (fails under load, passes alone; 173 gate-log mentions): split - correctness in default, the bound to the timing tier"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: DEFLAKE-HKMODEL-THROUGHPUT
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RECURRING GATE NOISE (173 mentions in ops merge-runner.log): hk-model repo::tests::detection_write_throughput_is_reported asserts a wall-clock WRITE-THROUGHPUT bound. It fails in whole-crate runs under load (T-569's worker 2026-09-25: 59.3 s at load 30; an earlier worker: 37.7 s with four agents on the box) and passes alone (9.6 s; 1.6 s). docs/10 §3.6 (user 2026-09-22): a test whose ASSERTION is a latency/throughput bound lives in the `timing` tier - .config/nextest.toml's default-filter keeps it out of every gate run and `just timing` runs it alone on a quiet box or nightly. It is not in the timing set today.
+      DELIVER (deflaker; deflake-triage rules): split the test: a deterministic correctness half stays in the default tier (the throughput is REPORTED - the numbers are computed and stated, the rows written are all read back - no wall-clock bound), and the throughput BOUND moves to the timing tier via .config/nextest.toml (name it explicitly; `just nextest-config-check` green; `just timing` lists it). Nothing deleted, no bound loosened, no #[ignore]. Prove the default half still goes red if the reporting breaks.
+      TESTING PROTOCOL (CLAUDE.md): targeted only (`cargo nextest run -p hk-model --lib -E 'test(/detection_write_throughput/)'`, `just nextest-config-check`, `just precheck hk-model`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-569 worker + coordinator 2026-09-25: hk-model detection_write_throughput_is_reported asserts a wall-clock throughput bound in the default tier (fails under load, passes alone; 173 gate-log mentions): split - correctness in default, the bound to the timing tier
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
