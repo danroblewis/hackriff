@@ -31715,7 +31715,8 @@ tasks:
   - id: T-1081
     milestone: MUI
     title: "RC P1: app-pane-inventory - with two panes the client requested NO per-pane inventory in 40 s (split panes' lists never load?)"
-    status: todo
+    status: in-progress
+    branch: task-t1081
     priority: P1
     deps: []
     parallel_group: UI-INV-REQ
