@@ -10700,6 +10700,128 @@ fn row_push_route_serves_an_address_range_growing_or_sealed() {
     stop_server(serving);
 }
 
+/// T-1040: `GET /ws/tiles/changes`, as `docs/api.md` documents it, on a real `hk serve` whose
+/// mock SDR is retuned.
+///
+/// - `subscribed` first, stating the band each front end is on;
+/// - **one** `coverage_changed` per move, naming the band left (`departed`), the band arrived at
+///   (`arrived`), their union (`f_lo`, `f_hi`) and the instant of the move (`t`);
+/// - **the departed band's fog is there within that one event**: the coverage map over the band
+///   left, from `t` to the event's own `as_of_s`, is `unobserved` in every cell — read the moment
+///   the event arrives, with no timer and no wait in between;
+/// - an unknown parameter is refused on the socket (`4400`), and no token is `401`.
+#[test]
+fn coverage_changed_is_pushed_once_per_retune_and_the_departed_fog_is_already_served() {
+    let (_dir_guard, serving, addr) = start_server();
+    let text = |ws: &mut Ws| -> Option<Value> {
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => return Some(serde_json::from_str(&t).unwrap()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    };
+
+    // ---- the gate and the refusal ----
+    match connect_ws(addr, "/ws/tiles/changes") {
+        Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status().as_u16(), 401),
+        other => panic!("no token must be 401, got {:?}", other.map(|_| ())),
+    }
+    let mut ws = connect_ws(addr, &format!("/ws/tiles/changes?token={TOKEN}&t_from=0")).unwrap();
+    let v = text(&mut ws).expect("refusal");
+    assert_eq!(
+        (v["type"].as_str(), v["status"].as_u64()),
+        (Some("refused"), Some(400)),
+        "{v}"
+    );
+    let mut code = None;
+    while let Ok(m) = ws.read() {
+        if let Message::Close(f) = m {
+            code = f.map(|f| u16::from(f.code));
+        }
+    }
+    assert_eq!(code, Some(4400));
+
+    // ---- the band the radio is on, from the socket itself ----
+    let mut ws = connect_ws(addr, &format!("/ws/tiles/changes?token={TOKEN}")).unwrap();
+    let s = text(&mut ws).expect("subscribed");
+    assert_eq!(s["type"], "subscribed", "{s}");
+    let band = |b: &Value| (b["f_lo"].as_f64().unwrap(), b["f_hi"].as_f64().unwrap());
+    let mut before = s["tuned"].as_array().unwrap().first().map(band);
+    let mut seq = 0;
+    if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+        s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    }
+    if before.is_none() {
+        // The record had nothing yet: the radio's first band arrives as a change with no departure.
+        let e = text(&mut ws).expect("the first band");
+        assert_eq!(e["type"], "coverage_changed", "{e}");
+        assert_eq!(e["departed"], Value::Null, "{e}");
+        before = Some(band(&e["arrived"]));
+        seq = e["seq"].as_u64().unwrap();
+    }
+    let (lo0, hi0) = before.unwrap();
+    assert!(
+        lo0 < FIXTURE_CENTER_HZ && FIXTURE_CENTER_HZ < hi0,
+        "the fixture's band: {lo0}..{hi0}"
+    );
+
+    // ---- retune well clear of it ----
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 20e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+
+    let e = text(&mut ws).expect("a coverage_changed for the retune");
+    assert_eq!(e["type"], "coverage_changed", "{e}");
+    assert_eq!(e["seq"], json!(seq + 1), "one move, one event: {e}");
+    assert_eq!(band(&e["departed"]), (lo0, hi0), "{e}");
+    let (lo1, hi1) = band(&e["arrived"]);
+    assert!(
+        lo1 < moved && moved < hi1,
+        "arrived where it was tuned: {e}"
+    );
+    assert_eq!(
+        band(&e),
+        (lo0.min(lo1), hi0.max(hi1)),
+        "f_lo/f_hi is the union: {e}"
+    );
+    let t = e["t"].as_f64().expect("t");
+    let as_of = e["as_of_s"].as_f64().expect("as_of_s");
+    assert!(as_of > t, "{e}");
+
+    // ---- the departed band's fog, read the instant the event lands ----
+    let (dlo, dhi) = (lo0, hi0.min(lo1));
+    let (st, c) = get(
+        addr,
+        &format!("/api/coverage?f_lo={dlo}&f_hi={dhi}&t0={t}&t1={as_of}&cells=8&rows=1"),
+    );
+    assert_eq!(st, 200, "{c}");
+    assert_eq!(
+        (
+            c["any"]["observed_cells"].as_u64(),
+            c["any"]["unobserved_cells"].as_u64()
+        ),
+        (Some(0), Some(8)),
+        "the band left is fog from `t`, with no timer between the event and the answer: {c}"
+    );
+
+    // ---- stated once: nothing further while the radio stays put ----
+    if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+        s.set_read_timeout(Some(Duration::from_millis(1500)))
+            .unwrap();
+    }
+    if let Ok(Message::Text(t)) = ws.read() {
+        panic!("a second event with no move: {t}");
+    }
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");

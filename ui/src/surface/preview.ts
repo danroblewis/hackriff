@@ -45,6 +45,7 @@ import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
 import { LiveRowFeeds, type RowOpener } from "./rowfeed";
+import { CoverageChangeFeed, type ChangeOpener, type CoverageChange } from "./changefeed";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
@@ -653,6 +654,14 @@ export interface PreviewOptions {
    * lane next comes round. Omitted, the live edge advances by polling alone (T-460), as before.
    */
   rows?: RowOpener | null;
+  /**
+   * **The transport for `GET /ws/tiles/changes`** (T-1040, `./changefeed.ts`'s [[wsChangeOpener]]
+   * in a browser). Supplied with an `edge`, one socket carries every front-end move: on each
+   * `coverage_changed` the survey is re-asked at once and exactly the resident tiles the move
+   * rewrote are re-fetched in one batch. Omitted, a move is learnt when the survey timer and the
+   * refresh lane next come round, as before.
+   */
+  changes?: ChangeOpener | null;
 }
 
 /**
@@ -707,6 +716,8 @@ export class SurfacePreview {
   readonly surveyRequests: string[] = [];
   /** Pushed rows for the following panes' columns (T-893); null without a transport or an edge. */
   readonly rowFeeds: LiveRowFeeds | null;
+  /** The front-end move feed (T-1040); null without a transport or an edge. */
+  readonly changeFeed: CoverageChangeFeed | null;
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
@@ -720,6 +731,9 @@ export class SurfacePreview {
     // A historical surface (no edge) follows nothing, so it never opens a feed.
     this.rowFeeds = opts.rows && this.edgeFn
       ? new LiveRowFeeds(opts.rows, (col, block) => this.view.surface.cache.applyRows(col, block), { now: this.nowMs })
+      : null;
+    this.changeFeed = opts.changes && this.edgeFn
+      ? new CoverageChangeFeed(opts.changes, (c) => { this.coverageChanged(c); }, { now: this.nowMs })
       : null;
     this.view = new SurfaceView({
       canvas: opts.canvas,
@@ -826,6 +840,7 @@ export class SurfacePreview {
    * and a lit segment placed from a fixed historical instant would be a live claim with no live
    * evidence. */
   frame(): SurfaceFrame {
+    this.changeFeed?.keep();
     this.maybeSurvey();
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
     if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
@@ -873,6 +888,19 @@ export class SurfacePreview {
     // lane: its coarse rows commit every 2^level cells, and the route's feeds are few (16 a server).
     // A pane that froze drops out of `panes`, which closes its feeds — pausing never follows.
     this.rowFeeds?.want(this.view.surface.cache.liveColumns(this.view.surface.lat, f.edgeNs, panes));
+  }
+
+  /**
+   * **A front end moved** (T-1040): re-lay the fog now and re-fetch exactly the tiles it rewrote.
+   *
+   * The survey is what draws the fog for places no tile answers, so it is made due at once rather
+   * than at its next [[SURVEY_EVERY_MS]]; the resident tiles meeting `[f_lo, f_hi] × [t, ∞)` on
+   * either lattice are re-asked together ([[TileCache.coverageChanged]]). Returns how many.
+   */
+  coverageChanged(c: CoverageChange): number {
+    this.surveyNextAt = 0;
+    const { detail, overview } = this.view.surface.tiers;
+    return this.view.surface.cache.coverageChanged([detail, overview], c);
   }
 
   /**
@@ -980,6 +1008,7 @@ export class SurfacePreview {
     this.disposed = true;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.rowFeeds?.close();
+    this.changeFeed?.close();
     this.view.dispose();
   }
 
