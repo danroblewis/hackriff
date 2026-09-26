@@ -2316,6 +2316,9 @@ struct OwnSearch {
     known: hk_store::LastKnown,
     /// Per level of `store`: `(f_cell_hz, t_cell_ns)`.
     levels: Vec<(f64, i64)>,
+    /// T-1034: the newest instant, over the tile's columns, the tune record bounded the search at
+    /// (margin included), or `None` when the record made no claim.
+    record_bound_ns: Option<i64>,
 }
 
 /// Levels of `store`'s geometry as `(f_cell_hz, t_cell_ns)`.
@@ -2327,6 +2330,78 @@ fn store_levels(state: &ApiState, store: TileStore) -> Result<Vec<(f64, i64)>, A
             .map(|g| (g.f_cell_hz, g.t_cell_ns))
             .collect())
     })
+}
+
+/// How far back the tune record is read for [`record_quiet_after`]: the pinned search's own reach
+/// at the finest node (`PINNED_REACH_BLOCKS` × 2.56 s ≈ 11 minutes), with room. Older than this
+/// the record makes no claim, and a pinned search reads whatever it reaches there exactly as
+/// before T-1034. Bounded so the record read stays one page on a busy log.
+const QUIET_LOOKBACK_NS: i64 = 15 * 60 * 1_000_000_000;
+
+/// **T-1034: per column of `freq` (`n` of them), the newest instant before `before_ns` at which
+/// the tune record says ANY radio was looking at it** — the bound [`hk_store::LastKnownSearch::quiet_after`]
+/// needs to cross, without reading, the time a departed band spent unobserved.
+///
+/// A span counts for every column its frequency extent, widened by `pad_hz` each side, overlaps:
+/// the store's cells take a frame's edge bins, which reach half a bin past the tuned window, and a
+/// column the record calls quiet must really hold nothing. A column no span reaches gets the oldest instant the
+/// record speaks for (`max(before − lookback, oldest_record)`); `None` — no claim at all — when
+/// this server has no tune history, no record reaches back into the window, or a source answered
+/// with a cut list (then "no span" proves nothing). The same record decides grey: this is exactly
+/// the claim the coverage plane makes about those cells, used to skip a read instead of to draw.
+fn record_quiet_after(
+    state: &ApiState,
+    freq: FreqRange,
+    n: usize,
+    before_ns: i64,
+    lookback_ns: i64,
+    pad_hz: f64,
+) -> Option<Vec<i64>> {
+    let from = before_ns.saturating_sub(lookback_ns.max(0));
+    if n == 0 || from >= before_ns || !(freq.hi_hz > freq.lo_hz) {
+        return None;
+    }
+    let pad = if pad_hz.is_finite() {
+        pad_hz.max(0.0)
+    } else {
+        0.0
+    };
+    let wide = FreqRange::new(freq.lo_hz - pad, freq.hi_hz + pad);
+    let ev = crate::coverage::Evidence::collect(
+        state,
+        wide,
+        TimeRange::new(
+            Timestamp::from_unix_nanos(from),
+            Timestamp::from_unix_nanos(before_ns),
+        ),
+    );
+    if !ev.has_source() || ev.truncated {
+        return None;
+    }
+    let floor = from.max(ev.oldest_record?.as_unix_nanos());
+    if floor >= before_ns {
+        return None;
+    }
+    let f_cell = (freq.hi_hz - freq.lo_hz) / n as f64;
+    let mut after = vec![floor; n];
+    for sp in &ev.spans {
+        let (t0, t1) = (sp.time.start.as_unix_nanos(), sp.time.end.as_unix_nanos());
+        if t0 >= before_ns || t1 <= floor {
+            continue;
+        }
+        let lo = ((sp.freq.lo_hz - pad - freq.lo_hz) / f_cell).floor();
+        let hi = ((sp.freq.hi_hz + pad - freq.lo_hz) / f_cell).ceil();
+        if !(lo.is_finite() && hi.is_finite()) {
+            // A span the record cannot place is not evidence of quiet anywhere.
+            return None;
+        }
+        let (lo, hi) = (lo.max(0.0) as usize, (hi.max(0.0) as usize).min(n));
+        let end = t1.min(before_ns);
+        for a in &mut after[lo.min(hi)..hi] {
+            *a = (*a).max(end);
+        }
+    }
+    Some(after)
 }
 
 /// Runs a last-known search to completion, one lock hold per step. Returns it and the holds taken.
@@ -2411,8 +2486,30 @@ fn shadow(
     });
     let own = match own_level {
         Some(l) => {
+            let (f_cell, _) = own_levels[usize::from(l)];
+            // T-1034: the tune record's word on when each column was last looked at, so the
+            // pinned search crosses the time the band spent unobserved without reading it. One
+            // output row of margin past every instant the record names: a row the record ends in
+            // is always read whole. Half a cell of frequency margin: a window's edge bin reaches
+            // half a bin past its tuned edge, and a whole cell would claim, at an exact cell
+            // boundary, one more column the window never reaches — a column the search then never
+            // resolves, which holds every other column's bound at the live edge.
+            let quiet = record_quiet_after(
+                state,
+                key.region.freq,
+                n,
+                t0,
+                QUIET_LOOKBACK_NS,
+                f_cell / 2.0,
+            )
+            .map(|v| {
+                v.into_iter()
+                    .map(|a| a.saturating_add(key.t_cell_ns))
+                    .collect::<Vec<_>>()
+            });
+            let quiet_bound = quiet.as_ref().and_then(|v| v.iter().copied().max());
             let search = with_tile_history(state, tile_store, |p| {
-                Ok(p.last_known_search_at(
+                let s = p.last_known_search_at(
                     usize::from(l),
                     key.region.freq,
                     Timestamp::from_unix_nanos(t0),
@@ -2420,7 +2517,11 @@ fn shadow(
                     key.t_cell_ns,
                     budget,
                     budget,
-                ))
+                );
+                Ok(match quiet {
+                    Some(q) => s.quiet_after(q),
+                    None => s,
+                })
             })?;
             let (k, c) = run_search(state, tile_store, search)?;
             chunks += c;
@@ -2429,6 +2530,7 @@ fn shadow(
                 level: l,
                 known: k,
                 levels: own_levels,
+                record_bound_ns: quiet_bound,
             })
         }
         None => None,
@@ -2585,11 +2687,16 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
             "columns_used": sh.from_own.iter().filter(|&&f| f).count(),
             "source_cells": o.source_cells,
             "stages": o.stages.iter().map(stage_json).collect::<Vec<_>>(),
+            // T-1034: past this instant (Unix s) the tune record proves no column of this tile
+            // was being looked at, so nothing after it was read — null when the record made no
+            // claim (no tune history, a cut record, or none reaching back far enough).
+            "record_bound_s": own.record_bound_ns.map(s_of),
             "rule": "T-911: searched FIRST, at the tile's own level in the store that answers \
                 the tile, so a carried value is a cell of exactly the time-frequency box the \
                 band's last live row was drawn with: the shadow keeps the colour that row had. \
                 Newest block first over the last PINNED_REACH_BLOCKS blocks, skipping blocks that \
-                hold nothing over this tile without reading a cell; the ladder (`search`) is read \
+                hold nothing over this tile, and (T-1034) the time after `record_bound_s` the tune \
+                record proves no radio was looking here, without reading a cell; the ladder (`search`) is read \
                 only for the columns this does not resolve, with the budget this search left.",
         })
     });
@@ -6862,6 +6969,152 @@ mod tests {
         assert_eq!(never["shadow"]["runs"], json!(0), "{}", never["shadow"]);
         assert_eq!(never["coverage"]["horizon"]["as_of_s"], json!(s_of(record)));
         assert_eq!(drawn_grey(&never).len(), rows_in_next(record) * N);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-1034's fixture: **a nudge**. The radio watches bands X and Y (tiles `F_INDEX`, `F_INDEX + 1`)
+    /// for `depart` rows of tile `T_INDEX`, then retunes by half its span to Y and Z
+    /// (`F_INDEX + 1`, `F_INDEX + 2`) and stays there until `end` rows. All three are in ONE
+    /// frequency block of the store's level 0 (1024 cells), so every time block after the retune
+    /// holds a tile over X's range — none of it X's. The new window's frames reach one cell below
+    /// its tuned edge, into X's top column, as a real window's edge bin does (staging's tile 671).
+    /// The observation log holds both dwells, as the tune record does on a live server.
+    fn state_nudged(dir: &std::path::Path, depart: i64, end: i64) -> (ApiState, i64, i64) {
+        let mut p = hk_store::Pyramid::open(dir, PyramidConfig::default()).unwrap();
+        let g = p.geometry().clone();
+        let (t_cell, f_cell) = (g.levels[0].t_cell_ns, g.levels[0].f_cell_hz);
+        let band = |b: i64| (F_INDEX + b) as f64 * f_cell * N as f64;
+        let t0 = T_INDEX * t_cell * N as i64;
+        // Two bins a cell, so each frame lays one value per cell.
+        let bin_hz = f_cell / 2.0;
+        for k in 0..end {
+            let t = Timestamp::from_unix_nanos(t0 + k * t_cell);
+            let (lo, cells) = if k < depart {
+                (band(0), 2 * N)
+            } else {
+                (band(1) - f_cell, 2 * N + 1)
+            };
+            // X's columns each carry their own level, so a carried value is checkable per column.
+            let psd: Vec<f32> = (0..2 * cells)
+                .map(|i| 1e-9 * (1.0 + (i / 2 % 7) as f32))
+                .collect();
+            p.ingest(&hk_store::history::FrameInput::new(
+                t,
+                t_cell,
+                lo,
+                bin_hz,
+                hk_model::PowerUnit::Dbfs,
+                &psd,
+            ))
+            .unwrap();
+        }
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        store.append(&dwell(band(0), band(2), t0, t0 + depart * t_cell));
+        store.append(&dwell(
+            band(1),
+            band(3),
+            t0 + depart * t_cell,
+            t0 + end * t_cell,
+        ));
+        store.flush();
+        let state = ApiState {
+            history: Some(Arc::new(std::sync::Mutex::new(p))),
+            observations: Some(store),
+            ..ApiState::default()
+        };
+        (state, t0, t_cell)
+    }
+
+    /// **T-1034, the user's bug: after a nudge, the departed band's newest half is blank, not fog,
+    /// at the finest level — until zoom-out.**
+    ///
+    /// "If I have the waterfall going for a while, then I nudge it +1/2 to the right, the
+    /// fog-of-war applies correctly for the 99.5 to 100.2 tiles, but the 100.2 to 100.8 tiles do
+    /// not load." Staging answered those tiles `shadow.runs = 0`, `own_level.columns_found = 0` and
+    /// one time block `unsearched`. The tile's own-level search (T-911) skips time blocks holding no
+    /// tile over its frequency, but a block of the store spans far more frequency than a tile: after
+    /// a small retune the NEW window holds a tile in the departed band's frequency block in every
+    /// block since, each was read in full for nothing, and ~8 blocks exhausted the budget before
+    /// the band's last live row. The older departed half sat in a block the new window never
+    /// touches, so the skip worked there — exactly the split the user saw.
+    ///
+    /// The tune record says when each column was last looked at; the search now crosses the rest
+    /// without reading it. Asserted: every column of the departed tile carries a run over every
+    /// row the grid does not measure, the value carried is the band's last live row — last seen at
+    /// the retune — and nothing is left unsearched.
+    ///
+    /// RED before T-1034: the departed tile carries no run in X's columns, and the search reports
+    /// a block unsearched.
+    #[test]
+    fn a_nudged_away_band_carries_its_last_live_row_through_every_block_the_new_window_filled() {
+        let dir = temp_dir("t1034-nudge");
+        let (depart, blocks_after) = (30i64, 10i64);
+        let end = (blocks_after + 1) * N as i64;
+        let (state, t0, t_cell) = state_nudged(&dir, depart, end);
+        let s_of = |rows: i64| (t0 + rows * t_cell) as f64 / 1e9;
+
+        // The band's last live rows, as the tile that holds them drew them.
+        let here = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let grid = here["grid"]["max_db"].as_array().unwrap().clone();
+        let last_live: Vec<f64> = (0..N)
+            .map(|f| {
+                grid[(depart as usize - 1) * N + f]
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("row {} col {f} measured", depart - 1))
+            })
+            .collect();
+
+        // The live-edge tile of the departed band, ten time blocks after the retune.
+        let away = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + blocks_after)).unwrap();
+        let sh = &away["shadow"];
+        assert_eq!(
+            sh["search"]["unsearched"],
+            json!([]),
+            "the departed band's past is searched, not left: {}",
+            sh["search"]
+        );
+        let edge = sh["edge_s"].as_f64().unwrap();
+        let t0_s = away["extent"]["t0_s"].as_f64().unwrap();
+        let dt = away["extent"]["t_cell_s"].as_f64().unwrap();
+        let measured = |r: usize, f: usize| {
+            away["grid"]["max_db"]
+                .as_array()
+                .is_some_and(|g| g[r * N + f].is_number())
+        };
+        let plane = shadow_plane(&away);
+        for f in 0..N {
+            for r in 0..N {
+                if t0_s + r as f64 * dt >= edge || measured(r, f) {
+                    continue;
+                }
+                let (db, t, _, fill) = plane[r * N + f].clone().unwrap_or_else(|| {
+                    panic!(
+                        "column {f} row {r} of the departed band is BLANK — no shadow run: {}",
+                        sh["search"]
+                    )
+                });
+                assert_eq!(fill, "forward", "({r}, {f})");
+                if f + 1 < N {
+                    // Below the new window's edge bin: the band's last live row, last seen at
+                    // the retune.
+                    assert_eq!(t, s_of(depart), "({r}, {f}) last seen at the retune");
+                    assert_eq!(db, last_live[f], "({r}, {f}) the last live row's value");
+                }
+            }
+        }
+        assert!(drawn_grey(&away).is_empty(), "{:?}", drawn_grey(&away));
+        // Crossed, not read: the own-level search read the departure's block and the newest
+        // block (for the one column the new window's edge reaches), nothing between.
+        let own = &sh["search"]["own_level"];
+        assert_eq!(own["columns_found"], json!(N), "{own}");
+        assert!(
+            own["stages"].as_array().unwrap().len() <= 2,
+            "the blocks between were crossed without a read: {own}"
+        );
+        assert!(own["record_bound_s"].is_f64(), "{own}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
