@@ -30606,7 +30606,8 @@ tasks:
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
-    status: todo
+    status: in-progress
+    branch: task-t1048
     priority: medium
     deps:
     - T-1042
