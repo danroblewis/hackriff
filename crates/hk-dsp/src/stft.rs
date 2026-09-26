@@ -36,9 +36,10 @@
 //! its nominal span, though: when its next segment would end beyond `frame_samples()` from the
 //! frame's first sample (or the stream resumes on a different clock), the averaging in progress
 //! is emitted first, whatever it holds. Each such frame says what it is —
-//! [`Resolution::n_avg`](crate::spectrum::Resolution) the segments averaged, `sample_count` the samples its segments span *including* the loss
-//! between them, `discontinuity` carrying `GAP` and `dropped_samples` the loss — and bridged gaps
-//! are counted in [`StftStats::gaps_bridged`], not in `resets`. Without it a stream that loses
+//! [`Resolution::n_avg`](crate::spectrum::Resolution) the segments averaged, `sample_count` the
+//! samples its segments span *including* the loss between them, `discontinuity` carrying `GAP`
+//! and `dropped_samples` the loss — and bridged gaps are counted in [`StftStats::gaps_bridged`],
+//! not in `resets`. Without it a stream that loses
 //! samples more often than once per frame emits **no frame at all** (T-1071: a 19.2 Msps coarse
 //! scan step losing ~80 % of its samples in ~17 k-sample pieces never reached a 192 k-sample
 //! partial row, so the spectrum history of that step was empty).
