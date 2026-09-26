@@ -235,6 +235,12 @@ export interface Viewport {
    * instead would stop cancellation cancelling, which is the T-443 defect.
    */
   readonly standIn?: { readonly levelF: number; readonly levelT: number };
+  /**
+   * **The child level for the centre third of the viewport** (T-1038): the finer level a one-step
+   * zoom-in lands on, held resident before the zoom so it draws without a PENDING quad. Matched
+   * exactly on level and against `box` (the centre third), so it keeps that set alive and nothing else.
+   */
+  readonly child?: { readonly levelF: number; readonly levelT: number; readonly box: Box };
 }
 
 /**
@@ -1063,10 +1069,10 @@ export class TileCache<T> {
    * lane's addresses out of another's request, so the coarse stand-in enumeration is one answer and
    * not a few addresses riding in whichever chunk of a viewport's own tiles they landed in.
    */
-  prefetch(addr: TileAddr, lane?: string): void {
+  prefetch(addr: TileAddr, lane?: string, low = false): void {
     if (this.map.has(keyOf(addr))) { this.peek(addr, true); return; }
     if (lane !== undefined) this.lanes.set(keyOf(addr), lane);
-    this.schedule(addr);
+    this.schedule(addr, low);
   }
 
   /**
@@ -1092,14 +1098,16 @@ export class TileCache<T> {
    * viewports the user has already left, and under FIFO the ones that finally arrive are for the
    * wrong place. That is what makes map clients feel laggy (§5.5 cap (1)).
    */
-  private schedule(addr: TileAddr): void {
+  private schedule(addr: TileAddr, low = false): void {
     const key = keyOf(addr);
     if (this.map.has(key) || this.inflight.has(key) || this.queued.has(key)) return;
     // The route has already said this place is not askable. A renderer calls `acquire` for it on
     // every frame, so without this the refusal is re-issued at frame rate (T-479).
     if (this.terminal.has(key)) return;
     // A place whose silent probe just failed waits behind the others (T-903, [[silenced]]).
-    if (this.silenced.delete(key)) this.queue.unshift(addr);
+    // `low` (T-1038's child prefetch) goes to the back of the line too: a guess about the next zoom
+    // must never be served before something the pane is drawing now.
+    if (this.silenced.delete(key) || low) this.queue.unshift(addr);
     else this.queue.push(addr);
     this.queued.add(key);
     if (this.queue.length > this.maxQueue) {
@@ -1172,6 +1180,8 @@ export class TileCache<T> {
     // for. Matched exactly, so it keeps that set alive and nothing else.
     const si = v.standIn;
     if (si && a.levelF === si.levelF && a.levelT === si.levelT) return true;
+    const ch = v.child;
+    if (ch && a.levelF === ch.levelF && a.levelT === ch.levelT && intersects(l, a, ch.box)) return true;
     return a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
       a.levelT >= v.levelT && a.levelT <= v.levelT + 1;
   }

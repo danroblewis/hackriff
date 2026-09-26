@@ -30433,8 +30433,7 @@ tasks:
   - id: T-1038
     milestone: MLIVE
     title: "Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget"
-    status: in-progress
-    branch: task-t1038
+    status: done
     priority: high
     deps:
     - T-1037
@@ -30449,10 +30448,21 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget
+    branch: task-t1038
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 22:58).
+      Added the child-level prefetch: each pane's viewport now also asks for the (levelF-1, levelT-1) tiles under its centre third, at lowest queue priority (back of the LIFO) and with the same survey/ring short-circuits. Viewport.child keeps them alive in TileCache.wants(), so cancellation does not drop them. Spy-client test: on a warm view a one-level zoom-in issues 0 requests at the target level under the centre third and draws 0 PENDING pixels; red proof with pinParents off shows it does request them. The parent pin and coarse stand-in (overview) were already there. NOT done: whole-retained-window overview-tier residency and separate byte-budget accounting (the child set is ~0.44 viewport of tiles, under the existing 96 MB budget); no e2e/screenshots run; the acceptance's 'no requests' means target-level tiles, since a new coarse stand-in set (T-1037) is still asked for on a zoom. Needs Opus review (rendering path).
+      Tests: node ui/test/run.mjs surface (44 files, incl. surface-child-prefetch) + tsc --noEmit -> exit 0 (44/44 test files passed; tsc clean)
+      precheck exit 0
+      Commits: 90bf841a
+      Observed, not chased: surface-child-prefetch: cold 3-frame render of a 16x12-tile pane shows cancelled=15 (queue overflow drop, pre-existing, unrelated to child)
+      Resources: 46 CPU-s, peak 0.7 GB
+    commit: c87e54ab
   - id: T-1039
     milestone: MLIVE
     title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
-    status: todo
+    status: in-progress
+    branch: task-t1039
     priority: high
     deps:
     - T-1037
@@ -30729,7 +30739,8 @@ tasks:
   - id: T-1053
     milestone: MMAP
     title: "Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout"
-    status: todo
+    status: in-progress
+    branch: task-t1053
     priority: high
     deps: []
     parallel_group: UI-T1028-FOLLOWUP
@@ -30746,6 +30757,51 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY UI-stack integrator 2026-09-25 (red on main 6f38fbb8, fresh hk): Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout
+  - id: T-1054
+    milestone: MAUTO
+    title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
+    status: todo
+    priority: high
+    deps:
+    - T-963
+    parallel_group: HDLC-SHARED-FLAG
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus re-review of T-963 (2026-09-25, PASS; derived from the code, not yet run on air). Real-air frame loss in HDLC framing for continuously demodulated channels (AIS; the same shape applies to any HDLC recipe over a continuous line, e.g. AX.25/APRS T-952):
+      - After a terminator match, sync_search resets its search (crates/hk-blocks/src/blocks/framing/sync_search.rs:165-166), so a closing flag never also opens the next frame as it does in HDLC.
+      - The two fixed AIS channels are demodulated continuously; the gaps between bursts produce random bits, which match 0x7E about once per 256 bits. That opens a junk frame that the next 0x7E closes ~256 bits later, so the search is mid-junk-frame roughly half the time.
+      - A real burst's opening flag arriving while a junk frame is open is consumed CLOSING the junk frame; the real frame's stuffed data can never contain 0x7E, so the real frame is missed. Estimated ~half of real frames lost.
+      - Neither test shows it: the Rust test (crates/hk-blocks/tests/ais_recipe.rs, framing/tests.rs) pads with idle ones, and the Python oracle (py/fixtures/ais_ref.py) searches every flag pair.
+      DELIVER: a failing-first test that feeds random (noise) bits between real AIS frames through the recipe and asserts every real frame decodes (red today); then the fix - a sync_search terminator option that also re-opens a frame on the same flag (shared-flag HDLC semantics), default unchanged for existing recipes; enable it in recipes/ais.recipe.json (and check T-952's AX.25 recipe). This changes the ADR-0011 sync_search contract: update its block row and state the default. Also the reviewer's nit: refuse bitstuff bit_order: lsb with direction: stuff (crates/hk-blocks/src/blocks/symbol/bitstuff.rs:205), since the reversal would happen after stuffing.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-blocks -E 'binary(ais_recipe)'; the framing lib tests; just precheck hk-blocks), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-963 2026-09-25 (re-filed: first filed as T-1013 on task-t963, lost in a board merge): HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)
+  - id: T-1055
+    milestone: MSCAN
+    title: "After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation"
+    status: todo
+    priority: high
+    deps:
+    - T-964
+    parallel_group: SCAN-SHADOW
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (explorer, 2026-09-25; T-964's Opus review). T-964 fixed the /api/coverage census (a `bands` share: any frequency cell sampled in the window) and the orientation sentence, but NOT the canvas symptom its ticket promised: "after 'Scan everything', the whole 1 MHz-6 GHz surface shows where it looked".
+      Evidence: ~/.hackriff-ops/explorer/journal-20260925.md:262-281, shots/0512-scan-whole-surface.png and 0513-scan-whole-surface-2.png - the 237 s pass is an honest thin diagonal at the top of a 1.7 h time axis (correct per-instant coverage), but NO last-known shadow lights the swept range afterwards. The shadow ("fog of war") tier (T-485, T-519/520/521, all done) renders only in ui/src/app/centre/surface.ts:751 (persistenceSlices); the shots are from the surface preview page (ui/src/surface/preview-main.ts), so either the preview never draws shadows or the shadow did not render at the overview tier - not verified which.
+      DELIVER:
+      1. Reproduce through the mock SDR: run a full-range scan pass, then load BOTH the app page and the surface preview page zoomed out to 1 MHz-6 GHz; the swept range must show as last-known shadow (dim, distinct from live and from grey) wherever it was sampled, on both pages. Fix whichever is missing (the preview page's rendering, or the shadow at the overview tier). Grey stays genuinely unobserved.
+      2. ui/src/surface/preview-main.ts:119-120 still prints 'coverage map: ... (4.3 % sampled)' (the time x frequency share) directly under T-964's new banner ('100 % ... was ever sampled') - relabel it (e.g. '4.3 % of cells') or quote census.bands, so the screen does not contradict itself; and T-964's headline wording 'of this surface was ever sampled' should say 'of this frequency range' since the number is a frequency-axis share.
+      3. Explain in the API docs (docs/api.md, /api/coverage) that with no t0/t1 the window defaults to the capture window (the IQ ring's span, crates/hk-api/src/coverage.rs:2077-2091), which is why the explorer's un-timed query read 'observed only for the step in progress' - and have the scan UI query the pass's own time window.
+      4. crates/hk-api/src/coverage.rs:332-345 observation_spans reads at most MAX_RECORD_LIMIT records with no paging; a full pass writes ~418 records, so ~24 passes in one window silently truncate /api/coverage (and bands): page it or state the truncation in the response. Fix docs/api.md ~l.799's example counts (observed 2 + excluded 1 + unobserved 2 on a 4-cell grid).
+      Related: T-1008 (scan as a buttoned map overlay) draws the plan and progress; this ticket is what remains visible AFTER a scan.
+      ACCEPTANCE: e2e through the mock SDR - after one full pass, zoomed out, both pages show the swept cells as shadow and the unswept as grey (assert pixels/tier per cell against /api/coverage); the two coverage lines agree; truncation test.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on your own ports >= 9216; the hk-cli scan_coverage binary; api_contract with docs/api.md together), then HAND BACK with screenshots. Never `just gate`.
+    notes: |
+      FOUND BY user feature (scan + fog of war) via explorer; review of T-964 2026-09-25 (re-filed: first filed as T-1014 on task-t964, lost in a board merge): After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

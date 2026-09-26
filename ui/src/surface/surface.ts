@@ -240,6 +240,12 @@ export const REVEAL_HOLD_MS = 300;
  */
 export const COARSE_LANE = "coarse";
 
+/** The middle third of a box on both axes, with the child levels it is prefetched at (T-1038). */
+function centreThird(b: Box, levelF: number, levelT: number): { levelF: number; levelT: number; box: Box } {
+  const df = (b.f1Hz - b.f0Hz) / 3, dt = (b.t1Ns - b.t0Ns) / 3;
+  return { levelF, levelT, box: { f0Hz: b.f0Hz + df, f1Hz: b.f1Hz - df, t0Ns: b.t0Ns + dt, t1Ns: b.t1Ns - dt } };
+}
+
 /**
  * One address of a tile row, **resolved but not yet drawn** (T-1037).
  *
@@ -834,8 +840,14 @@ export class Surface {
       const coarse = this.coarseStandIn && !awaiting && tier !== "overview"
         ? coarsestCovering(lat, pane.box, levelF, levelT, pane.device ?? "any")
         : null;
+      // **The child level for the centre third** (T-1038): what a one-step zoom-in lands on. Not on
+      // the overview tier (nothing finer to promise there) and not while the survey is awaited.
+      const child = this.pinParents && !awaiting && tier !== "overview" && (levelF > 0 || levelT > 0)
+        ? centreThird(pane.box, Math.max(0, levelF - 1), Math.max(0, levelT - 1))
+        : null;
       viewports.push({
         box: pane.box, levelF, levelT, lat,
+        child: child ?? undefined,
         standIn: coarse ? { levelF: coarse.levelF, levelT: coarse.levelT } : undefined,
       });
       let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0, stale = 0;
@@ -997,6 +1009,14 @@ export class Surface {
           // is not worth a request either (T-580).
           if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
           this.cache.prefetch(a);
+        }
+      }
+      // The child prefetch: lowest priority (back of the LIFO), and the same short-circuits.
+      if (child) {
+        for (const a of tilesFor(lat, child.box, child.levelF, child.levelT, pane.device ?? "any")) {
+          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
+          if (plan?.cover && ringCovers(plan.cover, extentOf(lat, a), pane.box)) continue;
+          this.cache.prefetch(a, undefined, true);
         }
       }
       // **Last on the queue, so FIRST off it** (T-1037). The queue is LIFO, and a stand-in that lands
