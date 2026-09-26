@@ -644,6 +644,22 @@ def test_dmr_reference_oracle_finds_no_sync_in_random_symbols():
     assert worst <= 1
 
 
+def test_dmr_slot_grid_identifies_only_syncs_on_the_30ms_burst_grid():
+    """T-986: DMR is identified from sync *structure*, not a count alone -- syncs a whole number of
+    30 ms bursts apart (with a little position jitter) identify it; as many syncs at random times,
+    or too few on the grid, do not."""
+    rng = np.random.default_rng(986)
+    on_grid = [6.9 + dmr_ref.BURST_S * k + rng.normal(0, 5e-5)
+               for k in sorted(rng.choice(270, size=40, replace=False))]
+    assert dmr_ref.slot_grid_fraction(on_grid) == 1.0
+    assert dmr_ref.identify(on_grid)
+    random_times = sorted(rng.uniform(0, 8.1, size=40))
+    assert dmr_ref.slot_grid_fraction(random_times) < dmr_ref.MIN_SLOT_GRID_FRACTION
+    assert not dmr_ref.identify(random_times)
+    assert not dmr_ref.identify(on_grid[: dmr_ref.MIN_IDENT_SYNCS - 1])
+    assert dmr_ref.slot_grid_fraction([1.0]) is None and not dmr_ref.identify([1.0])
+
+
 def test_dmr_reference_oracle_reports_four_level_payload():
     rng = np.random.default_rng(9)
     fs = 48_000.0

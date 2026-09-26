@@ -240,6 +240,38 @@ def level_count(freq: np.ndarray, syncs: list[dict], off: float, sps: float) -> 
             "n_symbols": int(len(vals))}
 
 
+#: ETSI TS 102 361-1 §4.2: a DMR burst (one TDMA timeslot) is **30 ms**, two of them make the
+#: 60 ms TDMA frame, and every burst carries its SYNC (or embedded signalling) at the same place in
+#: the middle. So a real DMR emission's syncs are spaced by whole multiples of 30 ms -- a structural
+#: check a chance correlation in noise or voice cannot pass, independent of the sync count (T-986).
+BURST_S = 0.030
+#: How close a sync spacing must be to a whole number of bursts, s: ~2.4 symbols at 4800 Bd, far
+#: wider than a clean sync's position error (under one symbol) and far narrower than the 30 ms grid.
+SLOT_GRID_TOL_S = 0.5e-3
+#: At least this many syncs before a slot-grid verdict is meaningful (7 spacings).
+MIN_IDENT_SYNCS = 8
+#: Share of consecutive sync spacings that must sit on the 30 ms grid to identify DMR.
+MIN_SLOT_GRID_FRACTION = 0.9
+
+
+def slot_grid_fraction(times_s: list[float]) -> float | None:
+    """Share of consecutive sync spacings within ``SLOT_GRID_TOL_S`` of a whole multiple of
+    ``BURST_S``; ``None`` with fewer than two syncs (no spacing to measure)."""
+    t = np.sort(np.asarray(times_s, dtype=float))
+    if len(t) < 2:
+        return None
+    d = np.diff(t)
+    resid = np.abs(d - np.round(d / BURST_S) * BURST_S)
+    return float(np.mean((resid <= SLOT_GRID_TOL_S) & (np.round(d / BURST_S) >= 1)))
+
+
+def identify(times_s: list[float]) -> bool:
+    """DMR identified from sync evidence alone: at least ``MIN_IDENT_SYNCS`` syncs, and at least
+    ``MIN_SLOT_GRID_FRACTION`` of their spacings on the 30 ms burst grid."""
+    frac = slot_grid_fraction(times_s)
+    return len(times_s) >= MIN_IDENT_SYNCS and frac is not None and frac >= MIN_SLOT_GRID_FRACTION
+
+
 def decode(x: np.ndarray, fs: float) -> dict:
     """Decodes DMR 4FSK frame-sync events from complex baseband ``x`` already centred on the
     channel and low-passed to about its occupied bandwidth (12.5 kHz nominal). ``fs`` should be
@@ -251,8 +283,11 @@ def decode(x: np.ndarray, fs: float) -> dict:
     by_pattern: dict[str, int] = {}
     for s in syncs:
         by_pattern[s["pattern"]] = by_pattern.get(s["pattern"], 0) + 1
+    times_s = [s["sample"] / fs for s in syncs]
     return {
         "n_syncs": len(syncs),
+        "slot_grid_fraction": slot_grid_fraction(times_s),
+        "identified_dmr": identify(times_s),
         "syncs": syncs,
         "syncs_by_pattern": by_pattern,
         "sync_rate_bd": SYNC_RATE_BD,

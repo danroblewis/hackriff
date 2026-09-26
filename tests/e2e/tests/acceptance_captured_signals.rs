@@ -19,7 +19,9 @@
 //! decode path and the attachment of a decode to its station are sound, run by default.
 //!
 //! The whole argument — what each test proves, what each red measured today, and which ticket must
-//! delete each `#[ignore]` — is in [`captured_signals`]'s module documentation.
+//! delete each `#[ignore]` — is in [`captured_signals`]'s module documentation. The window-3
+//! land-mobile members (T-986: the DMR emissions and the settled "no CTCSS tone" at 461.125 MHz,
+//! tests `w3_*`) are argued in [`captured_signals_w3`]'s.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -32,3 +34,6 @@ mod blind;
 
 #[path = "acceptance/captured_signals.rs"]
 mod captured_signals;
+
+#[path = "acceptance/captured_signals_w3.rs"]
+mod captured_signals_w3;

@@ -191,3 +191,31 @@ in this pass's provenance, unlike T-935's FM/RDS pair's unknown).
   re-measured as matching or disagreeing with the explorer's claim, since that claim is explicitly
   for an earlier, wider observation window and not asserted for this specific clip.
 
+
+### Settled (T-986): 461.125 MHz is DMR, and neither claimed tone is a CTCSS tone
+
+Before the "all captured signals decode" members asserted a tone, T-986 ran **both** oracles on
+the 461.125 MHz burst and looked at the whole sub-audible band rather than its strongest bin.
+Re-run on this clip, the explorer's `tools/nbfm3.py` still reads **233.0 Hz** and `ctcss_ref.py`
+still reads **99.88 Hz** — and both are lines of the same thing: the burst's discriminator carries
+a **comb on a 16.67 Hz grid** (66.6, 100.0, 166.7, 200.0, 216.7, 233.3 Hz …, each 20–28 dB over the
+band median). 16.67 Hz is 1/60 ms, DMR's two-slot TDMA frame (ETSI TS 102 361-1 §4.2); 100 Hz is
+its 6th harmonic and 233.3 Hz its 14th (a lock-in at 233.6 Hz drifts −0.27 Hz/s, so the line is at
+233.33 Hz, not the table's 233.6). `dmr_ref.py` then finds **105 DMR BS-data syncs** in
+`[6.9 s, 15.0 s)`, every spacing a whole number of 30 ms bursts (±0.08 ms), many at Hamming 0, and
+**none** in `[0, 6.5 s)`. The "8.1 s NBFM voice burst" is a DMR base-station transmission; a
+4FSK TDMA emission carries no analogue sub-audible tone, so the evidence-supported value is **no
+CTCSS tone** — T-988's comb guard reaches the same answer on this clip
+(`crates/hk-demod/tests/subaudible_window3.rs`).
+
+The build script now runs `dmr_ref.py` over **every** window-3 emission (`hackriff:truth.dmr`,
+with `slot_grid_fraction` and `identified_dmr` = at least 8 syncs and at least 90 % of their
+spacings within 0.5 ms of a whole number of 30 ms bursts, `dmr_ref.identify`), and records the
+settlement on the 461.125 MHz emission as `ctcss.settled` (`subaudible_kind: "none"`, with both
+disputed tones' places on the frame comb). The explorer's claim and `ctcss_ref.py`'s measurement
+stay beside it, unedited. The same screen also identifies **462.225 MHz** (36 syncs on the grid,
+spread from 0.75 s — its own emission, not an image of 461.125 MHz, which starts at 6.9 s) and, in
+`dmr-464p6125-bs`, **463.4 MHz** (152 syncs, continuous — the "continuous unknown" carrier is a
+second DMR repeater). A continuous carrier at 461.9875 MHz shows 60/120/180/240 Hz mains-hum
+lines, not the comb, and 1 chance sync: not DMR. So window 3 holds four DMR emissions and no
+CTCSS-toned NBFM at all; the blind members are `tests/e2e/tests/acceptance/captured_signals_w3.rs`.

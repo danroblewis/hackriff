@@ -395,6 +395,10 @@
             ],
             "n_symbols": 18876
           },
+          "slot_grid_fraction": 1.0,
+          "identified_dmr": true,
+          "first_sync_s": 3.7834,
+          "last_sync_s": 4.9834,
           "decoder": "py/fixtures/dmr_ref.py (independent oracle: FM discriminator + 4800 Bd 4-level-sliced 48-bit DMR SYNC-pattern correlation (both bit orders/polarities, all four ETSI SYNC patterns), then a 4-level re-slice of the data following each sync)",
           "oracle_agrees_with_explorer_sync_count": false,
           "explorer_claim": {
@@ -426,7 +430,23 @@
         "channel_hz": 463400000.0,
         "decoded": false,
         "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
-        "dmr": null,
+        "dmr": {
+          "n_syncs": 152,
+          "syncs_by_pattern": {
+            "BS_data": 152
+          },
+          "sync_rate_bd": 4800.0,
+          "slot_grid_fraction": 1.0,
+          "identified_dmr": true,
+          "identify_rule": ">= 8 syncs and >= 0.9 of their spacings within 0.5 ms of a whole number of 30 ms bursts",
+          "first_sync_s": 0.0027,
+          "last_sync_s": 4.9828,
+          "window": {
+            "t_start_s": 0.0,
+            "duration_s": 5.0
+          },
+          "decoder": "py/fixtures/dmr_ref.py (independent oracle: FM discriminator + 4800 Bd 4-level-sliced 48-bit DMR SYNC-pattern correlation (both bit orders/polarities, all four ETSI SYNC patterns), then a 4-level re-slice of the data following each sync)"
+        },
         "ctcss": null,
         "t_start_s": 0.0,
         "duration_s": 5.0
@@ -449,7 +469,21 @@
         "channel_hz": 463487500.0,
         "decoded": false,
         "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
-        "dmr": null,
+        "dmr": {
+          "n_syncs": 0,
+          "syncs_by_pattern": {},
+          "sync_rate_bd": 4800.0,
+          "slot_grid_fraction": null,
+          "identified_dmr": false,
+          "identify_rule": ">= 8 syncs and >= 0.9 of their spacings within 0.5 ms of a whole number of 30 ms bursts",
+          "first_sync_s": null,
+          "last_sync_s": null,
+          "window": {
+            "t_start_s": 0.0,
+            "duration_s": 5.0
+          },
+          "decoder": "py/fixtures/dmr_ref.py (independent oracle: FM discriminator + 4800 Bd 4-level-sliced 48-bit DMR SYNC-pattern correlation (both bit orders/polarities, all four ETSI SYNC patterns), then a 4-level re-slice of the data following each sync)"
+        },
         "ctcss": null,
         "t_start_s": 0.0,
         "duration_s": 5.0
@@ -472,7 +506,23 @@
         "channel_hz": 464700000.0,
         "decoded": false,
         "decode_note": "Not decoded: blind detection + sync/tone identification only; no DMR payload (data/voice) content is stored (CLAUDE.md legal guardrails).",
-        "dmr": null,
+        "dmr": {
+          "n_syncs": 4,
+          "syncs_by_pattern": {
+            "BS_data": 4
+          },
+          "sync_rate_bd": 4800.0,
+          "slot_grid_fraction": 1.0,
+          "identified_dmr": false,
+          "identify_rule": ">= 8 syncs and >= 0.9 of their spacings within 0.5 ms of a whole number of 30 ms bursts",
+          "first_sync_s": 0.4791,
+          "last_sync_s": 4.8591,
+          "window": {
+            "t_start_s": 0.0,
+            "duration_s": 5.0
+          },
+          "decoder": "py/fixtures/dmr_ref.py (independent oracle: FM discriminator + 4800 Bd 4-level-sliced 48-bit DMR SYNC-pattern correlation (both bit orders/polarities, all four ETSI SYNC patterns), then a 4-level re-slice of the data following each sync)"
+        },
         "ctcss": {
           "tone_hz_measured": 66.74504047019275,
           "tone_snr_db": 5.947663602291479,

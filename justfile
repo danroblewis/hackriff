@@ -593,7 +593,10 @@ acceptance-mauto *args:
 # identifying. The set grows by one line in `captured_signals::CAPTURES`. A milestone exit target,
 # not a regression gate: four controls are green and six red proofs are `#[ignore]`d until
 # T-926/T-937/T-938/T-940 land - run those with `just acceptance-captured-signals --run-ignored
-# all`. Extra args go to the runner (see `_e2e-run`).
+# all`. T-986 added the window-3 members (`w3_*`, SIGNAL-090/091): four DMR emissions identified by
+# an independent sync oracle, and the settled "no CTCSS tone" on 461.125 MHz; two green controls,
+# four red proofs for T-989 and a 450-470 MHz band-plan row. Its 15 s capture is EXTERNAL and is
+# skipped when no store holds it. Extra args go to the runner (see `_e2e-run`).
 acceptance-captured-signals *args:
     #!/usr/bin/env bash
     set -euo pipefail
