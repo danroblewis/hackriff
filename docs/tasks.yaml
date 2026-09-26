@@ -30433,7 +30433,8 @@ tasks:
   - id: T-1038
     milestone: MLIVE
     title: "Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget"
-    status: todo
+    status: in-progress
+    branch: task-t1038
     priority: high
     deps:
     - T-1037
