@@ -29188,7 +29188,8 @@ tasks:
   - id: T-986
     milestone: MAUTO
     title: "All captured signals decode: CTCSS tone decode (461.125, 233.6 Hz) and DMR identification/header (464.6125) members - failing-first blind tests"
-    status: todo
+    status: in-progress
+    branch: task-t986
     priority: P1
     deps:
     - T-936
@@ -29815,7 +29816,8 @@ tasks:
   - id: T-1010
     milestone: M2-hardening
     title: "On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame"
-    status: todo
+    status: in-progress
+    branch: task-t1010
     priority: normal
     deps:
     - T-954
@@ -30649,7 +30651,7 @@ tasks:
   - id: T-1047
     milestone: MLIVE
     title: "LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold"
-    status: in-progress
+    status: done
     branch: task-t1047
     priority: medium
     deps:
@@ -30665,6 +30667,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold
+
+      Review (fix attempt 1) found: ring max-hold columns were computed over report.ringCover's (narrow, ring-band-clipped) frequency window but folded into pane.box-indexed columns by index, so a pane wider than the tuned band would land the ring's max-hold at the wrong frequencies (ui/src/app/centre/surface.ts:965). Fixed by building the ringMaxHoldColumns call's box from the pane's own full frequency window (matching hold's n-column domain) with only the TIME axis narrowed to ringCover's t0Ns/t1Ns; sampleRingRow already returns NaN for columns outside the ring's own band, so widening the frequency window costs nothing. Corrected ringMaxHoldColumns' docstring in livering.ts to state the contract explicitly, and added a regression test (ui/test/livering.test.ts) with a pane 4x wider than the ring's band asserting the peak lands in the pane's correct column, not shifted to column 0. Also merged main in (T-1037's rowsHeld/rowsLate landed on PaneReport concurrently; resolved by keeping both sets of fields). just test-ui: 106/106 files green; targeted livering/surface-trace/surface-reveal/surface-livering suites all green.
+
+      Gate (fix attempt 2) found one uncommitted file left after fix attempt 1: docs/tasks.yaml, holding the just task note entry from attempt 1 itself (legitimate board content from the sanctioned tool, not a hand-edit). Merge target e48d0eff was already an ancestor of task-t1047 (no re-merge needed). Committed the note as 12697dd4; no code change. just test-ui: 106/106 files green.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:20).
+      Gate (fix attempt 2) found one uncommitted file left in the worktree after fix attempt 1: docs/tasks.yaml, holding the notes-block entry written by `just task note T-1047` during attempt 1 (legitimate board content from the sanctioned tool, not a hand-edit) — it was written after the merge commit and never got committed. The merge target named in the gate finding (e48d0eff) was already an ancestor of task-t1047 (attempt 1's merge already pulled it in), so no re-merge was needed. Committed the stray note (12697dd4), then committed the note recording this fix itself (d082cc52) — that command also touches tasks.yaml, so it had to be committed too or the same UNCOMMITTED finding would recur. No code changed in this pass. Working tree is now clean (git status --short empty) with everything on task-t1047.
+      Tests: just test-ui -> exit 0 (106/106 test files passed (build + tsc + full node unit suite) — no code changed since the last green run, re-run to confirm the clean tree still builds)
+      precheck exit 0
+      Commits: 12697dd4, d082cc52
+      Observed, not chased: `just task note` leaves docs/tasks.yaml modified but uncommitted, which is exactly what tripped this gate finding — a worker (or the runner) that calls it as its last action before hand-back should commit immediately after, or the note-then-handback sequence will keep re-triggering this UNCOMMITTED check on every fix-and-return cycle that ends with a note.
+      Use cases: SIGNAL-012
+      Resources: 3 CPU-s, peak 0.3 GB
+    commit: a2ff4ceb
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
@@ -30712,7 +30728,7 @@ tasks:
   - id: T-1050
     milestone: MMAP
     title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
-    status: in-progress
+    status: done
     branch: task-t1050
     priority: high
     deps:
@@ -30729,6 +30745,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1041 worker 2026-09-25: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+    commit: 0220a629
   - id: T-1051
     milestone: MMAP
     title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
@@ -30750,7 +30767,7 @@ tasks:
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
-    status: in-progress
+    status: done
     branch: task-t1052
     priority: medium
     deps: []
@@ -30765,11 +30782,11 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone and in the stated order on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1037 worker 2026-09-25 (proven on main 8ac9cfb9): live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom
+    commit: 6b8452db
   - id: T-1053
     milestone: MMAP
     title: "Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout"
-    status: in-progress
-    branch: task-t1053
+    status: done
     priority: high
     deps: []
     parallel_group: UI-T1028-FOLLOWUP
@@ -30786,10 +30803,21 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY UI-stack integrator 2026-09-25 (red on main 6f38fbb8, fresh hk): Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout
+    branch: task-t1053
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:55).
+      The three reds had two causes. (a) At 400 px T-1028's chip made the top-right cluster nine chips (320 px = 80% of the pane, app-top-chrome's bar-shape rule), and Go-to's width (100% - 328px) left a 4 px input: the covered `mono` element in app-phone and in app-surface's 420 px T-882 test. Product fix: under 600 px (FOLD_QUERY, the stylesheet's phone breakpoint) the four MODE chips (Measure, Annotate, Pin, Retune mode) move into a Tools group at the top of the ⋯ menu as labelled rows. A matchMedia listener moves the same elements both ways, so handlers, pressed state and the retune held marker go with them. Each mode's banner still says it is on, and a press from the menu closes it. The phone row is now five chips (184 px), and Go-to is capped at a third of the pane so T-1025's chip rule holds with canvas between them. (b) The T-807 key-rows red came from T-981 (76902708), not T-1028: the new `frontend` layer's key row. KEYED_ROWS now lists it and asserts its fixed ['frontend'] key. Retune mode was already in CLOSED_NAMES. The shared rehomedHitTest now also opens ⋯ and hit-tests the folded rows, so the closed-set check holds by role at every width. No assertion was loosened. New unit test: app-map-controls T-1053 (red on the old module).
+      Tests: HK_E2E_PORT=9216 npm run e2e -- app-top-chrome (on unmodified main, fresh hk) -> exit 1 (at 400 px: DIV.map-chips map-topright is bar-shaped); HK_E2E_PORT=9216 npm run e2e -- app-phone (on unmodified main) -> exit 1 (mono (Go-to input) 4 px wide, covered); HK_E2E_PORT=9216 npm run e2e -- app-surface (on unmodified main) -> exit 1 (T-807 keyed rows lack frontend; T-882 at 420 px: mono covered); npm test -- app-map-controls (new test on the old map-controls.ts) -> exit 1 (T-1053 fold test fails, 15 others pass); HK_E2E_PORT=9216 npm run e2e -- app-top-chrome (x3, fresh hk, 1280 + 400) -> exit 0 (3/3 green); HK_E2E_PORT=9216 npm run e2e -- app-phone (x3) -> exit 0 (3/3 green); HK_E2E_PORT=9216 npm run e2e -- app-surface (x3) -> exit 0 (3/3 green); HK_E2E_PORT=9216 npm run e2e -- app-ruler / app-inv-pills (400 px neighbours) -> exit 0 (green); HK_E2E_PORT=9216 npm run e2e -- scan-overlay (rerun) -> exit 0 (green on rerun and on the old code; one earlier red was a load flake (load avg ~39) in scan-step timing); npm test -- app-map-controls -> exit 0 (16 passed); just test-ui -> exit 0 (105/105 test files passed)
+      precheck exit 0
+      Commits: bf7d2920
+      Observed, not chased: scan-overlay.e2e.mjs 'Start: the steps the engine executes ... are the steps the overlay drew' failed once under load avg ~39: executed step 0 was centred on 96323737 Hz, but the overlay drew step 0 at 94861849 Hz (the log shows a 94861849 step began 0.56 s before the Start timestamp). It passed on an immediate rerun and on the old code. It looks like a start-instant race to hand to the deflaker, not a product regression.
+      Resources: 261 CPU-s, peak 3.5 GB
+    commit: 538a64dc
   - id: T-1054
     milestone: MAUTO
     title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
-    status: todo
+    status: in-progress
+    branch: task-t1054
     priority: high
     deps:
     - T-963
