@@ -447,7 +447,7 @@ class AudioPanel {
   private raf = 0;
   private dirty = false;
 
-  constructor(el: HTMLElement, private ctx: AppContext, private emitterId: string, outputId: string, private hasRds: boolean) {
+  constructor(el: HTMLElement, private ctx: AppContext, private emitterId: string, outputId: string) {
     this.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg") as SVGSVGElement;
     this.svg.setAttribute("viewBox", "0 0 300 64");
     this.svg.setAttribute("preserveAspectRatio", "none");
@@ -475,11 +475,6 @@ class AudioPanel {
   }
 
   private async loadDecode() {
-    // No RDS sibling output on this signal's pipeline: nothing to read (a mono/AM audio panel).
-    if (!this.hasRds && !this.ctx.store.get().inventory.rows[this.emitterId]?.identity_value) {
-      this.rdsEl.replaceChildren();
-      return;
-    }
     const view = await loadDecodeView(this.ctx.client, this.ctx.store.get(), this.emitterId);
     const row = this.ctx.store.get().inventory.rows[this.emitterId];
     renderRdsBox(this.rdsEl, view, rdsIdentity(row));
@@ -559,7 +554,7 @@ class OutputPanels {
           ? new RdsPanel(panelEl, this.ctx, current.emitterId)
           : current.kind === "digital"
             ? new DigitalPanel(panelEl, this.ctx, current.pipelineId)
-            : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId, current.rdsSibling !== null);
+            : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId);
       }
     }
     const empty = panelsEmptyText(this.sources);
