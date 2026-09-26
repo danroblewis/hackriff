@@ -28919,7 +28919,8 @@ tasks:
   - id: T-976
     milestone: MAUTO
     title: "All captured signals decode: the P25 member (one region, C4FM 4-level, P25-like identified with evidence; decode marginal) - failing-first blind test"
-    status: todo
+    status: in-progress
+    branch: task-t976
     priority: P1
     deps:
     - T-936
@@ -30985,7 +30986,8 @@ tasks:
   - id: T-1060
     milestone: MUI
     title: "P1: Inventory reloads on every intermediate wheel/pointer view (100 of 264 requests per trackpad zoom) - one subscription, quantized material window key, 300 ms settle, one in flight per pane (latest-wins, the superseded request never issued)"
-    status: todo
+    status: in-progress
+    branch: task-t1060
     priority: P1
     deps: []
     parallel_group: UI-INV-REQ
@@ -31003,7 +31005,8 @@ tasks:
   - id: T-1061
     milestone: MUI
     title: "P1: Explore drawer rescopes on every intermediate view (~100 requests per trackpad zoom) - material-change rescope + settle; /api/observations and whole-range coverage on the 30 s timer only"
-    status: todo
+    status: in-progress
+    branch: task-t1061
     priority: P1
     deps: []
     parallel_group: UI-DRAWER-REQ
@@ -31041,7 +31044,8 @@ tasks:
   - id: T-1063
     milestone: M2-hardening
     title: "P1: hk-api drops connections SILENTLY at max_connections (EOF storm behind cloudflared) - answer 503 + Retry-After from the accept thread, log + count it, WebSocket upgrades in their own pool, HTTP cap 64 -> 256"
-    status: todo
+    status: in-progress
+    branch: task-t1063
     priority: P1
     deps: []
     parallel_group: API-HTTP
@@ -31080,7 +31084,8 @@ tasks:
   - id: T-1065
     milestone: M2-hardening
     title: "Server change notifications instead of client polling: a `changed {route, version}` message (on /ws/presence or a new /ws/changes) for control/state, outputs, pipelines, annotations, paths, tune-history, frontend events, timeline/recordings, navigation, coverage; each write bumps a version; ETag/If-None-Match on control/state"
-    status: todo
+    status: in-progress
+    branch: task-t1065
     priority: high
     deps: []
     parallel_group: API-HTTP
@@ -31216,7 +31221,8 @@ tasks:
   - id: T-1072
     milestone: MUI
     title: "fog-of-war.e2e red ALONE on main: T-521's 'less than 200 px of the pane is uncovered by floating chrome' fails since full bleed/floating chrome - fix the chrome if it covers the map, else re-measure with the same intent"
-    status: todo
+    status: in-progress
+    branch: task-t1072
     priority: high
     deps: []
     parallel_group: UI-FOG-SPEC
