@@ -91,6 +91,21 @@ retune to a window of another class is refused (`hk_api::LiveControl`).
 
 `HK_TOKEN` sets a fixed token of at least 16 characters.
 
+### Client flags (`src/flags.ts`)
+
+Flags are **query parameters on the page**, off by default, and each switches a *lane* — never an
+honesty rule (a mark's claim is not a flag).
+
+- **`?live-ring=1` — the live ring (T-1042 / LSR-1).** Every pane that is following the live edge
+  paints its newest rows straight from `/ws/spectrum/live` (`src/surface/livering.ts`), and the tile
+  lane skips the extent those rows cover: rows at the edge, the pyramid below them, which is the
+  live-rendering invariant ("rows append as they are recorded; live is never gated on tile
+  generation"). Off, the surface is drawn from tiles exactly as before.
+  `HK_UI_LIVE_RING=1` is the same switch for a shell: `ui/e2e/harness.mjs`'s `appUrl` turns it into
+  the query parameter, so `HK_UI_LIVE_RING=1 node e2e/run.mjs live-ring` and a page opened by hand
+  agree. The page states what the lane did per pane in `.sf-stage[data-live-ring]` (rows painted,
+  tile addresses excluded, one row's height in px) while the flag is on.
+
 Replay notes:
 - Each `--loop` pass is a new stream, and the page reconnects on its own.
 - Only the first pass is written to history, because later passes repeat the same timestamps.

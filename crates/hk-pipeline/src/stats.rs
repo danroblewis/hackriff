@@ -360,6 +360,18 @@ counter_group!(
         cc_demods,
         /// Candidates the per-pass admission cap refused a demodulation.
         cc_admission_refused,
+        /// T-977: channels demodulated because **blind detection already has an emitter** there,
+        /// not because occupancy made them control-channel candidates. An intermittent burst train
+        /// never reaches `MIN_CC_FCO` and never will — it is not a control channel — but the run
+        /// has already committed an emitter at that frequency, so a demodulation spent saying
+        /// *what it is* is spent on a question that has an answer. Counted apart from
+        /// `cc_candidates` because it is a different admission rule, and it shares one budget with
+        /// them: `cc_demods` still never exceeds the spec's `max_demods` per pass.
+        cc_emitter_candidates,
+        /// T-977: per-channel verdicts filed onto an inventory emitter for a channel that was
+        /// demodulated and **not** confirmed. The row is what moves that emitter off
+        /// `resolution: not-searched`; before it, a rejected candidate left no trace but a counter.
+        cc_verdicts,
         /// T-546: hunt passes where the receiver's own offset from the channel grid was **fitted
         /// and found to exceed the raster tolerance** (docs/19 §7.6a). It is a property of the
         /// receiver, not of any signal, so one pass counts once however many channels it
@@ -1100,6 +1112,9 @@ pub struct Counters {
     /// T-904: the detection store's size and the retention thread's last pass
     /// (`/api/status` `storage`).
     pub storage: crate::retention::StorageCounters,
+    /// T-981: the front end's clip state per spectrum row, and the front-end events
+    /// (`/api/status` `frontend`, `GET /api/frontend/events`).
+    pub frontend: crate::frontend::FrontEndReport,
 }
 
 impl Counters {
@@ -1151,6 +1166,7 @@ impl Counters {
             "compute": self.compute.to_json(),
             "observations": self.observations.to_json(),
             "storage": self.storage.to_json(),
+            "frontend": self.frontend.to_json(),
         })
     }
 

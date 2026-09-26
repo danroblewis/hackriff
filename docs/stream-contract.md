@@ -130,7 +130,7 @@ Each record is a 32-byte little-endian header followed by the payload:
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | record type: 1 = data, 2 = dropped marker, 3 = status (1.1, §12) |
-| 1 | u8 | flags: bit 0 `GATED`, bit 1 `DISCONTINUITY`, bit 2 `OVERLOAD`, bit 3 `BURST_START`, bit 4 `BURST_END` |
+| 1 | u8 | flags: bit 0 `GATED`, bit 1 `DISCONTINUITY`, bit 2 `OVERLOAD` (sticky tune-state), bit 3 `BURST_START`, bit 4 `BURST_END`, bit 5 `CLIPPED` (this record's own samples clipped, T-981), bit 6 `FRONTEND_EVENT` (clipped and a whole-span energy step: the front end's energy, not a signal's, T-981) |
 | 2 | u16 | reserved, 0 |
 | 4 | u32 | payload length. For `GATED` records this is the withheld length: lengths are metadata, and no payload bytes follow. |
 | 8 | u64 | `seq` |
@@ -593,7 +593,7 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
   - A jump in `sample_index` is a gap (squelch closed, or samples skipped to stay live), and the next record is flagged `DISCONTINUITY`. A `seq` gap is loss.
 - **Status records** (type 3):
   - 32-byte header; the payload is a flat JSON object of numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`, enforced by `Publisher::publish_status`), so no free text rides on it.
-  - Audio fields: `level_dbfs` (T-966: the delivered audio's own level — the smoothed RMS of the samples the type-1 records carry, after demod, AGC and the ±1 clamp, so it never reads above 0 dBFS; distinct from `snr_db`, which is pre-demod DDC channel power against the noise estimate), `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`, sent about every 250 ms.
+  - Audio fields: `level_dbfs` (T-966: the delivered audio's own level — a ~50 ms meter sample (`level_tau_s`) on a ~250 ms status tick, not an interval RMS, computed from the samples the type-1 records carry, after demod, AGC and the ±1 clamp, so it never reads above 0 dBFS and is the mean power over both channels on a two-channel stream, with the smoothing time constant computed per audio *frame* — 1 sample mono, `L, R` stereo — so a stereo stream keeps `level_tau_s`, not half of it; distinct from `snr_db`, which is pre-demod DDC channel power against the noise estimate. **While `squelch_open` is false, `level_dbfs` reads the documented silence floor** (`hk_demod::audio::SILENCE_FLOOR_DBFS`, -120 dBFS), never the discarded demod output the squelch withholds (T-1015): nothing is delivered while closed, so nothing is measured, and on reopening the meter restarts from the newly-delivered audio rather than resuming a value the closed period left stale), `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`, sent about every 250 ms.
   - Refinement fields (T-070): `refined_center_hz` and `refined_bandwidth_hz` (the refined channel in force, absent when not refined) and `refine_updates` (background re-refinements that retuned the channel after passing the hysteresis).
   - Stereo fields (1.5, T-874; two-channel streams only, absent on mono): `stereo` (boolean: L−R is being decoded now, i.e. the pilot is locked) and `stereo_lock_losses` (locked → unlocked transitions since the stream began, including a demodulator rebuilt by an in-place retune or refinement while locked).
   - Recipe audio (T-866): the same record also carries the pipeline's per-node `<node>.<metric>` batch (§14.3 keys) on the same tick — one record, two vocabularies.

@@ -2,7 +2,8 @@
 // (`ui/src/app/chrome/map-controls.ts`). These are the selectors and the one helper the specs share
 // to reach them, so a spec says "split the viewport", not how the menu is built.
 
-/** Open the viewport menu (top-right) and press one of its items: "split", "close" or "whole".
+/** Open the viewport menu (top-right) and press one of its items: "split", "split-rows", "flip",
+ * "close" or "whole".
  * A real click on both, so an item a user cannot press fails here. */
 export async function paneAct(page, act) {
   await page.click("document.querySelector('.map-pane-btn')");
@@ -10,12 +11,17 @@ export async function paneAct(page, act) {
   await page.click(`document.querySelector('#map-pane-menu [data-pane-act="${act}"]')`);
 }
 
-/** The retired `.sf-live` button's state, read off the FAB that replaced it: true when following. */
-export const FOLLOWING = "document.querySelector('.map-fab').classList.contains('following')";
+/** T-1001: the follow-live FAB retired — Live/Freeze is a button INSIDE each pane's rectangle, one
+ * per pane. This is the first pane's; `liveBtn(n)` names any pane's by its position. */
+export const LIVE_BTN = ".sf-pane-live-btn";
+export const liveBtn = (n = 1) => `document.querySelectorAll('${LIVE_BTN}')[${n - 1}]`;
+/** Whether the first pane is following the live edge, read off its own Live button. */
+export const FOLLOWING = `${liveBtn(1)}.classList.contains('following')`;
 
-/** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state. */
-export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out, .map-fab";
-/** Inside the viewport menu: Split, Close, Whole surface, Record IQ. */
+/** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state.
+ * (T-1001: the FAB left this list with the FAB; each pane's Live button is on the canvas.) */
+export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out";
+/** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ, per-device (T-1006). */
 export const PANE_ITEMS = "#map-pane-menu button";
 /** Inside the layers menu: Signals (the detections overlay), Trace (view-wide) and the colour scale. */
 export const LAYER_ITEMS = "#map-layers input[data-layer], #map-layers input[data-view-layer], #map-layers input[data-scale]";

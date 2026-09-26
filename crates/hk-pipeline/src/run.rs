@@ -56,7 +56,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::chains::spec::ChainSpec;
-use crate::class::{class_name, source_class, window_class};
+use crate::class::{SubBandClass, class_name, source_class, window_class, window_class_map};
 use crate::config::{DisplayPatch, DisplaySettings, PipelineConfig, detection_resolution};
 use crate::control::{SchedState, SwitchableControl};
 use crate::events::{Candidate, ControlEvent};
@@ -687,6 +687,11 @@ pub(crate) struct Shared {
     /// by the `hk-survey` reader and applied to every classification of a window captured under
     /// that state.
     pub receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-978: the one-shot spectrum hand-off behind the overlap re-analysis
+    /// ([`crate::overlap`]). The **detect reader** publishes a snapshot when the inventory has
+    /// asked for one; the **detect writer** takes it, measures every region stage 4 could not
+    /// resolve and applies the verdict. Nothing is copied while no overlap is unresolved.
+    pub region_spectrum: Arc<crate::overlap::RegionSpectrum>,
     /// T-484: the hand-off to the view lattice's writer thread. The **spectrum** reader fills it
     /// (the finest node is that reader's own rows); the **history** reader owns the writer thread
     /// that drains it and the T-446 decision about sealing. `None` when the view lattice is off or
@@ -694,6 +699,10 @@ pub(crate) struct Shared {
     pub view_queue: Option<Arc<crate::history::ViewQueue>>,
     /// T-844: the run's C38 shadow stage, observed at the classifier's call site.
     pub ml: Option<Arc<crate::ml::MlStage>>,
+    /// T-977: the last completed control-channel hunt pass, with the verdict on every channel it
+    /// looked at. One `Option`, replaced per pass — the durable half of a verdict is the
+    /// `emitter_synthesis` row the same pass writes.
+    pub cc_verdicts: Arc<crate::ccverdict::CcVerdictLog>,
 }
 
 impl Shared {
@@ -813,8 +822,13 @@ pub struct RetuneOutcome {
 pub struct ControlStatus {
     /// Device settings can be changed (a live, window-classed source).
     pub live: bool,
-    /// Content class of the running segment.
+    /// Content class of the running segment: the summary of [`Self::content_classes`] for what
+    /// covers the whole window (its IQ, spectrum stream, recordings).
     pub content_class: ContentClass,
+    /// The window's content classes per sub-band, at the resolution of its allocations (T-991,
+    /// [`crate::class::window_class_map`]); a single entry for a source whose class is not the
+    /// window's derived one (a recording's own `hackriff:content_class`).
+    pub content_classes: Vec<SubBandClass>,
     /// Requested centre, Hz.
     pub center_hz: f64,
     /// Requested sample rate, Hz.
@@ -836,6 +850,21 @@ pub struct ControlStatus {
     pub recording: RecordingStatus,
     /// Control counters.
     pub stats: Value,
+}
+
+/// The per-sub-band class map `/api/status` reports (T-991): the window's derived map when the
+/// run's class is the one derived from its window, else the run's own class over the whole
+/// window (a recording tagged with `hackriff:content_class` is not re-derived per sub-band).
+fn status_class_map(class: ContentClass, center_hz: f64, rate_hz: f64) -> Vec<SubBandClass> {
+    if window_class(center_hz, rate_hz) == class {
+        return window_class_map(center_hz, rate_hz);
+    }
+    vec![SubBandClass {
+        lo_hz: center_hz - rate_hz / 2.0,
+        hi_hz: center_hz + rate_hz / 2.0,
+        content_class: class,
+        source: "source class".to_owned(),
+    }]
 }
 
 /// Whether a run's front end is delivering samples (T-508).
@@ -920,6 +949,10 @@ struct Common {
     db_path: PathBuf,
     survey_id: SurveyId,
     counters: Arc<Counters>,
+    /// T-978: one spectrum hand-off for the whole run ([`crate::overlap`]), so what the overlap
+    /// re-analysis cost the reader and the writer is one measured number per run and not one per
+    /// segment.
+    region_spectrum: Arc<crate::overlap::RegionSpectrum>,
     product: Arc<Mutex<FloorProduct>>,
     display: Arc<DisplayControl>,
     switch: Arc<SwitchableControl>,
@@ -938,6 +971,10 @@ struct Common {
     listen: Arc<Mutex<crate::config::ListenSettings>>,
     /// Burst taps (T-060), closed when the run ends.
     bursts: Arc<crate::chains::taps::BurstHub>,
+    /// T-977: the last control-channel hunt pass, with its per-channel verdicts. Run-wide rather
+    /// than per segment: a re-plumb starts a new segment and the answer to "what did the hunt last
+    /// decide" does not become unknown because the front end was re-tuned.
+    cc_verdicts: Arc<crate::ccverdict::CcVerdictLog>,
     /// Compute providers (T-056): built once per run, so no segment changes provider.
     compute: hk_dsp::compute::Compute,
     /// Occupancy engine and series (T-118), closed when the run ends.
@@ -965,6 +1002,9 @@ struct Common {
     /// the run, not the segment: a re-plumb landing back on the same device, tune and gain is the
     /// same receiver, and re-measuring it would pay twice for an unchanged answer.
     receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-979: the run's 8VSB television survey, measured once per capture state by every segment's
+    /// `hk-atsc` reader. A window narrower than one 6 MHz channel never reaches it.
+    atsc: Arc<crate::atsc::AtscSurvey>,
     /// T-439: the **view-scheme** pyramid (`docs/16` §6.2/§8.2), opened beside the floor product's
     /// scheme-1 pair and written by every segment's history reader. It is the surface the unified
     /// canvas addresses with independent `(level_f, level_t)`, and its finest node is the *live
@@ -1376,11 +1416,13 @@ impl Pipeline {
             view,
             iq_buffer,
             receiver: Arc::default(),
+            atsc: Arc::default(),
             gnss,
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
             counters,
+            region_spectrum: Arc::default(),
             compute,
             occupancy,
             retention,
@@ -1403,6 +1445,7 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             detection_fft_len: cfg.settings.fft_len,
             bursts: Arc::default(),
+            cc_verdicts: Arc::default(),
             // T-115: never fails the run; a log that cannot open is reported and skipped.
             scheduler: Arc::new(crate::control::SchedulerHub::default()),
             observations: crate::observe::ObservationLog::open(
@@ -1713,9 +1756,11 @@ fn start_segment(
         successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
         seal_at_end: !common.defer_seal,
         bursts: Arc::clone(&common.bursts),
+        cc_verdicts: Arc::clone(&common.cc_verdicts),
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
         compute: common.compute.clone(),
+        region_spectrum: Arc::clone(&common.region_spectrum),
         view_queue: common.view.is_some().then(|| {
             Arc::new(crate::history::ViewQueue::new(
                 crate::history::VIEW_QUEUE_FRAMES,
@@ -1801,6 +1846,13 @@ fn start_segment(
                 "hk-survey",
                 Box::new(move || crate::survey::run(s, r)),
             )?);
+        }
+        {
+            // T-979: the 8VSB television survey. One window per capture state, on its own thread.
+            // A tuned span narrower than one 6 MHz channel short-circuits in the reader, so a
+            // capture that cannot hold an ATSC emission pays one comparison per block.
+            let (s, a) = (Arc::clone(&shared), Arc::clone(&common.atsc));
+            workers.push(spawn("hk-atsc", Box::new(move || crate::atsc::run(s, a)))?);
         }
         {
             // T-322: the C36 L1 dwell reader. It holds nothing until C04 grants a scheduled L1 step,
@@ -2625,6 +2677,7 @@ impl PipelineController {
         ControlStatus {
             live: st.live,
             content_class: st.class,
+            content_classes: status_class_map(st.class, st.window.0, st.window.1),
             center_hz: st.window.0,
             sample_rate_hz: st.window.1,
             segment: st.segment,
@@ -3242,6 +3295,12 @@ impl PipelineHandle {
         Arc::clone(&self.vlf)
     }
 
+    /// T-977: the last completed control-channel hunt pass, with the verdict on every channel it
+    /// looked at (`GET /api/trunking/cc-candidates`).
+    pub fn cc_verdicts(&self) -> Arc<crate::ccverdict::CcVerdictLog> {
+        Arc::clone(&self.sup.common.cc_verdicts)
+    }
+
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while
     /// [`Self::wait`] owns the handle.
     pub fn stopper(&self) -> Stopper {
@@ -3485,6 +3544,11 @@ impl PipelineHandle {
         Arc::clone(&self.sup.common.receiver)
     }
 
+    /// The run's 8VSB television survey (T-979): what it has measured, and how often.
+    pub fn atsc_survey(&self) -> Arc<crate::atsc::AtscSurvey> {
+        Arc::clone(&self.sup.common.atsc)
+    }
+
     /// The run's C36 L1 dwell service (T-322): what C04 granted, what acquisition found, and how
     /// much of it reached C30.
     pub fn gnss(&self) -> Arc<crate::gnss::GnssDwell> {
@@ -3618,7 +3682,23 @@ impl PipelineHandle {
             detections_stored,
             emitters,
             always_on_lost_samples: lost,
-            counters: counters.to_json(),
+            counters: {
+                let mut c = counters.to_json();
+                let o = common.region_spectrum.stats();
+                if let Some(m) = c.as_object_mut() {
+                    m.insert(
+                        "overlap".into(),
+                        serde_json::json!({
+                            "requested": o.requested,
+                            "published": o.published,
+                            "measured": o.measured,
+                            "publish_nanos": o.publish_nanos,
+                            "measure_nanos": o.measure_nanos,
+                        }),
+                    );
+                }
+                c
+            },
             errors,
         })
     }
