@@ -90,8 +90,8 @@ pub use context::{
 };
 pub use decode::{
     Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, DcsCode, Decode, DecodeEvidence,
-    DecodeProvenance, DecodeView, Demodulation, EstimatedParams, Framing, Subaudible,
-    SubaudibleKind, SubaudibleTone, WITHHELD_LABEL,
+    DecodeIdentitySummary, DecodeProvenance, DecodeView, Demodulation, EstimatedParams, Framing,
+    Subaudible, SubaudibleKind, SubaudibleTone, WITHHELD_LABEL,
 };
 pub use detection::{
     BurstLengths, Detection, DetectionFlags, MAX_TRACK_PAGE, PageRequest, SegmentKind,

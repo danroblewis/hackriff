@@ -34,6 +34,10 @@
 .side-inv .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
 .side-inv .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
 .side-inv .chip.cluster { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+/* T-967: the decoded identity (RDS PS, callsign, …) — teal like `.chip.known`, since it is
+   stronger evidence than a bare family match, and filled so it reads as the strongest of the row's
+   chips rather than one more outline among several. */
+.side-inv .chip.identity { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 35%, transparent); background: var(--teal-soft); }
 /* T-587: an explained receiver artefact — deliberately neutral grey (`--dim`), distinct from the
    teal/lavender "known"/"unknown" family chips and the coral off-raster flag, so it never reads as
    a claim about the air (it is the opposite: the backend has explained the reading away). The

@@ -24,7 +24,7 @@ import {
   type Loaded,
 } from "./focus";
 import {
-  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, loadInventoryRows,
+  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, identityChip, loadInventoryRows,
   nextInventorySort, promoteEntry, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   liveEdgeS, sortInventoryRows, viewWindow, windowKey, type Row,
 } from "./inventory";
@@ -115,7 +115,11 @@ const mountInventory: MountFn = (el, ctx) => {
     // hover title, so it can't be missed the way T-587's field report was.
     const artifact = explanationChip(r);
     const reasonText = explanationReasonText(r);
-    const chips = [...rowChips(r), ...(cluster ? [cluster] : []), ...(artifact ? [artifact] : [])]
+    // T-967: the decoded identity, right beside the family it decorates — the explorer's field
+    // report was a CRC-valid RDS PI/PS decode reading "unknown"/"100% unk" because nothing in the
+    // list rendered it, even though the focus panel already had the data.
+    const identity = identityChip(r);
+    const chips = [...rowChips(r), ...(identity ? [identity] : []), ...(cluster ? [cluster] : []), ...(artifact ? [artifact] : [])]
       .map((c) => h("span", { class: `chip ${c.cls}`, title: c.title }, c.text));
     const dotsEl = r.state === "candidate" && recurrenceDots(r).length
       ? h("span", { class: "dots" }, ...recurrenceDots(r).map((v) => h("i", { style: `height:${2 + Math.round(v * 8)}px` })))

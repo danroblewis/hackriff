@@ -294,6 +294,75 @@ pub struct DecodeView {
     pub labels_withheld: bool,
 }
 
+/// A backend-rendered summary of a decoded identity for a list row (T-967): the stable,
+/// human-readable label the identity's decoder **voted** over its latest committed session, and
+/// how much of that session's evidence agreed with it. Thin-client rule (CLAUDE.md): the UI
+/// renders `label` as given and never parses a decode's raw fields to build one itself.
+///
+/// Served only for schemes whose built-in decoder writes an explicit per-session summary row —
+/// today RDS (`rds-pi`, see [`rds_session_summary`]). Every other scheme has none, and is served
+/// no summary rather than a guess from similarly-named fields: a per-decoder declared label field
+/// is its own contract, not something this module infers from key names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecodeIdentitySummary {
+    /// The decoder's own session label, trimmed — for RDS the **most frequent** complete PS frame
+    /// of the session (the vote `hk_demod::RdsReport::ps` takes), never the latest fragment: a
+    /// station scrolling song/artist text through PS sends many fragments, one of which is always
+    /// the newest.
+    pub label: String,
+    /// The fraction, 0–1, of the session's complete PS frames that read exactly `label` — the
+    /// label's own vote share (the same figure the decoder's Label annotation carries as its
+    /// confidence). `None` when the summary row recorded no frame counts. Deliberately **not** the
+    /// PI vote share (`pi_share`), which is confidence in the code, not in the name.
+    pub label_share: Option<f64>,
+}
+
+/// The built-in RDS decoder's id (`hk_demod::RDS_DECODER_ID`; `hk-model` cannot depend on
+/// `hk-demod`, and `hk-demod`'s T-967 test writes rows through the real writer and reads them
+/// back here, which pins the two together).
+pub(crate) const RDS_DECODER_ID: &str = "hk-rds";
+
+/// The frame model of the RDS decoder's once-per-session summary row (`hk_demod::rds_decodes`):
+/// the accepted PI's vote, the most frequent PS frame (`ps`) and every PS frame's count
+/// (`ps_frames`, most frequent first). The per-frame rows (`rds-group-0-ps-frame`) are the raw
+/// fragments and are never read for the summary.
+pub(crate) const RDS_SUMMARY_FRAME_MODEL: &str = "rds-pi";
+
+/// The [`DecodeIdentitySummary`] an RDS session summary row states, or `None` when `d` is not one
+/// (another decoder, a per-frame row) or voted no PS. Reads `ps` and `ps_frames` exactly as
+/// `hk_demod::rds_decodes` writes them.
+pub(crate) fn rds_session_summary(d: &Decode) -> Option<DecodeIdentitySummary> {
+    if d.decoder_id != RDS_DECODER_ID || d.frame_model != RDS_SUMMARY_FRAME_MODEL {
+        return None;
+    }
+    let raw = d.metadata.get("ps")?.as_str()?;
+    let label = raw.trim();
+    if label.is_empty() {
+        return None;
+    }
+    // `ps_frames`: `[[text, count], …]`. The label's share is its own count over all counts.
+    let label_share = d
+        .metadata
+        .get("ps_frames")
+        .and_then(Value::as_array)
+        .and_then(|frames| {
+            let (mut total, mut mine) = (0u64, None);
+            for f in frames {
+                let n = f.get(1)?.as_u64()?;
+                total += n;
+                if f.get(0)?.as_str()? == raw {
+                    mine = Some(n);
+                }
+            }
+            let mine = mine?;
+            (total > 0).then(|| mine as f64 / total as f64)
+        });
+    Some(DecodeIdentitySummary {
+        label: label.to_owned(),
+        label_share,
+    })
+}
+
 /// What a bitstream carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

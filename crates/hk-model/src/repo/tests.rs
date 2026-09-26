@@ -2073,6 +2073,93 @@ fn signal_062_rds_pi_identity_and_ps_label() {
     );
 }
 
+/// T-967 N1: the list-row identity summary is served only from a decoder's explicit session
+/// summary (RDS: `hk-rds`'s `rds-pi` row — the real writer's shape is tested end to end in
+/// `hk-demod`'s `t967_identity_label`). Nothing is guessed from similarly-named fields: an RDS
+/// per-frame fragment, a recipe-written `rds-pi` row and another scheme's `callsign`/`ps` keys all
+/// read as no summary.
+#[test]
+fn t_967_identity_summary_reads_only_the_decoders_explicit_summary_row() {
+    let mut b = base();
+    let pi = DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: "A1B2".into(),
+    };
+    let decode = |decoder: &str, frame_model: &str, identity: &DecodedIdentity, md, secs| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: decoder.into(),
+        decoder_version: "0.1.0".into(),
+        frame_model: frame_model.into(),
+        metadata: md,
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(identity.clone()),
+        content_class: ContentClass::Unrestricted,
+        t: t(secs),
+        provenance: None,
+    };
+    assert_eq!(b.repo.latest_decode_identity_summary(&pi).unwrap(), None);
+
+    // A per-frame fragment and a recipe-written row under the same identity: no summary.
+    b.repo
+        .insert_decode(&decode(
+            "hk-rds",
+            "rds-group-0-ps-frame",
+            &pi,
+            json!({"pi": "A1B2", "ps": "NOW PLAY"}),
+            10,
+        ))
+        .unwrap();
+    b.repo
+        .insert_decode(&decode(
+            "recipe:rds",
+            "rds-pi",
+            &pi,
+            json!({"ps": "GUESSED "}),
+            11,
+        ))
+        .unwrap();
+    assert_eq!(b.repo.latest_decode_identity_summary(&pi).unwrap(), None);
+
+    // The decoder's summary row: its voted PS, and that PS's own share of the frames (not
+    // `pi_share`), even though a later fragment exists.
+    b.repo
+        .insert_decode(&decode(
+            "hk-rds",
+            "rds-pi",
+            &pi,
+            json!({"pi": "A1B2", "pi_share": 0.97, "ps": "KROQ    ",
+                   "ps_frames": [["KROQ    ", 3], ["NOW PLAY", 1]]}),
+            5,
+        ))
+        .unwrap();
+    assert_eq!(
+        b.repo.latest_decode_identity_summary(&pi).unwrap(),
+        Some(DecodeIdentitySummary {
+            label: "KROQ".into(),
+            label_share: Some(0.75),
+        })
+    );
+
+    // Another scheme with label-like keys: no summary (no guessing by key name).
+    let icao = DecodedIdentity {
+        scheme: IdentityScheme::AdsbIcao,
+        value: "a1b2c3".into(),
+    };
+    b.repo
+        .insert_decode(&decode(
+            "adsb",
+            "adsb-ident",
+            &icao,
+            json!({"callsign": "UAL123", "flight": "UA123", "ps": "X", "share": 1.0}),
+            10,
+        ))
+        .unwrap();
+    assert_eq!(b.repo.latest_decode_identity_summary(&icao).unwrap(), None);
+}
+
 /// AWARE-053: an emitter that matches priors but is not expected here gets
 /// `known_status: unexpected-here` as an appended status entry, the inventory region query
 /// surfaces it, and later changes keep the earlier entries.
