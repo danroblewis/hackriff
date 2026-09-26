@@ -30155,7 +30155,7 @@ tasks:
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
-    status: in-progress
+    status: done
     branch: task-t1021
     priority: normal
     deps:
@@ -30179,6 +30179,7 @@ tasks:
       Commits: 22b952a0, 10ef281e, a3a66d98
       Observed, not chased: Residual: the worst remaining hold is a LIVE-EDGE coarse tile. T-1018's live-edge exception reads it finest-first from level 0: (3,1) = 1,048,576 cells in 4 chunks of ~262k (chunk = whole output rows under TILE_MAX_SOURCE_CELLS = MAX_API_CELLS = 500k). One such hold was 663 ms wall / 540 ms CPU and caused the 1.5 s spike in the green run. The lever is a per-hold cell cap decoupled from the servability budget (chunk_rows is shared with servable/materialize_cost_bound, so shrinking the constant would move which levels are affordable). Not changed here. | The shadow last-known search takes up to 10 lock holds per tile, including tiles the coverage map already answered (answered level -1), which makes it the largest hold COUNT per request (16-21 holds/tile). A per-step lock cost worth measuring separately. | Sealed tiles are decoded from disk inside the history lock (hk-store store.rs read_sealed -> codec::decode -> fs::read). On a loaded box, part of the off-CPU hold time is plausibly this I/O; reading the file outside the lock would be the 'read nodes without the ingest lock' option. Not measured separately. | At load >~30 the view writer can fall below 25 rows/s from CPU starvation alone, even with priority (a per-request-budget variant still lagged 3.9 s). The timing-tier test is honest only on a quiet box, as the tier says. | Load flake for the deflaker, seen twice in two merges: hk-cli api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding (T-700/T-1019) orders the gzipped sizes of six separate reads of a LIVE, growing tile. Under load it failed with f16+gzip 82503 > json+gzip 79506 B, then compact+gzip 57070 > f16+gzip 56775 B; alone it passes (e.g. 53293 < 54561 B). Reading a sealed tile would make it deterministic.
       Resources: 374 CPU-s, peak 4.5 GB
+    commit: 04316e64
   - id: T-1022
     milestone: MMAP
     title: "app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)"
