@@ -28335,7 +28335,7 @@ tasks:
   - id: T-953
     milestone: M3
     title: "Burst emitters get no family/params: burst-tap symbol rates never reach estimated_params; unknown at 0.999 confidence; no paging band-plan prior"
-    status: in-progress
+    status: done
     branch: task-t953
     priority: P2
     deps: []
@@ -28356,6 +28356,7 @@ tasks:
       2026-09-25 review-fix round (worker, recovered the killed agent's uncommitted edits): (1) hk-demod consensus now refuses k-times harmonic locks (bits with <20% single-symbol runs, the receiver's own HARMONIC_SINGLE_RUN_MIN, now shared) - a 1600 Bd FLEX population otherwise agreed 11/11 on 4800 Bd and stored it; new blind test a_1600_bd_pager_population_stores_1600_bd_or_abstains_never_its_harmonic (red with the gate disabled, green with it); corrected the standard-rate spacing claim (50000/57600 Bd are 15.2% apart). (2) fuse: hk-classify sets every known likelihood to 0 at open_set=1.0, so the 0.9 unknown cap spreads the residual uniformly and ranks nothing - docs/api.md/tests no longer claim otherwise; new test pins ranking below saturation; the WFM-at-0.999 case is T-970. (3) ADR-0016 s3 amendment records the cap. Merged gated main 72f9d76c.
 
       2026-09-25 recovery: stranded after the ~12:50 bulk conflict-skip; merged gated base 673a5d4e. Conflicts: (1) hk-model classify/mod.rs - T-970 landed its own MAX_UNKNOWN_CONFIDENCE = 0.9 (abstention hold in hk-classify::classifier::cap_unknown, excess to admissible families); T-953's is the same constant applied in fuse (residual by likelihood order) plus max_confidence_of. Kept ONE constant with a merged doc stating one rule (unknown's reported posterior never exceeds 0.9 wherever computed; fuse applies it first, the classifier's hold covers abstentions built outside fusion) and max_confidence_of. ADR-0016: T-953's section-3 step-1 amendment and T-970's 4.4 amendment B now cross-reference each other as one constant, one rule. (2) known_status.rs / family.rs: kept T-953's paging/fhss AND T-979's tv-broadcast/wireless-mic entries; T-990's new SERVICE_SHAPES table must cover every ALLOCATION_SERVICES entry, so added a 'paging' shape (4-30 kHz, not continuous: FLEX/POCSAG FSK in 25 kHz channels). (3) docs/api.md estimated_params: kept T-953's duration_s and T-988's subaudible. Tests: hk-model/hk-context/hk-classify 824 pass, hk-demod lib 65, hk-pipeline lib 333, hk-api 334, hk-cli api_contract 75; precheck clean.
+    commit: b5b639d6
   - id: T-954
     milestone: M2-hardening
     title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
