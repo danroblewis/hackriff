@@ -50,7 +50,8 @@ def _never_the_real_ops_dir(tmp_path_factory, monkeypatch):
     real checkout) - a test that reaches tick(), sync_board or reap_worktrees must patch REPO or stub them."""
     ops = tmp_path_factory.mktemp("ops")
     for name in ("CLAIMS", "NEEDS", "DONE", "LOG", "WORKDIR", "MERGE_QUEUE", "BULKMARK", "LANDED", "DEFLAKE_REQUESTS",
-                 "MERGE_NEEDS", "MERGE_LOG", "HOSTS_FILE", "STRANDED"):
+                 "MERGE_NEEDS", "MERGE_LOG", "HOSTS_FILE", "STRANDED",
+                 "MERGE_ATTEMPTS"):
         monkeypatch.setattr(R, name, str(ops / pathlib.Path(getattr(R, name)).name))
     monkeypatch.setattr(R, "PROJECTS", str(ops / "projects"))
     monkeypatch.setattr(R, "S", str(ops))
@@ -2385,3 +2386,44 @@ def test_nothing_happens_while_a_merge_is_staged_and_a_dry_run_writes_nothing(st
     before = (ops / "stranded.json").read_text()
     R.rescue_stranded(claims, dry=True)
     assert queue() == ["task-t905"] and needs() == [] and (ops / "stranded.json").read_text() == before
+
+
+@pytest.mark.parametrize("state", ["gate-failed", "review-failed", "blocked", "cancel-proposed", "killed", "conflict",
+                                   "error", "uncommitted", "running", "fix-held", "limited"])
+def test_a_branch_whose_claim_is_not_queued_is_never_requeued(stranded, state):
+    """Review 2026-09-26: only a claim in exactly `queued` is ready; a stopped run is not, even when a bulk
+    CONFLICT line names its branch (the line is one its own path already took, so it is not 'undecided')."""
+    claims, needs, queue, ops = stranded
+    line = f"{time.strftime('%m-%d %H:%M', time.localtime(time.time() - 40 * 60))}  task-t901  T-901  CONFLICT(skipped from bulk)"
+    with open(ops / "merge-needs-attention.txt", "a") as f:
+        f.write(line + "\n")
+    claims["T-901"] = dict(claims["T-901"], state=state, gate_fails_seen=[line])
+    R.rescue_stranded(claims, dry=False)
+    assert "task-t901" not in queue() and not [ln for ln in needs() if "task-t901" in ln]
+
+
+def test_a_tip_the_merge_runner_recorded_as_failed_is_never_requeued(stranded):
+    """merge-attempts.txt (T-534): a queued claim, or a coordinator branch, whose tip is its failed tip is not
+    re-queued every 30 min; a new tip on the same branch is."""
+    claims, needs, queue, ops = stranded
+    tip = lambda b: R.sh(["git", "rev-parse", b]).strip()  # noqa: E731
+    (ops / "merge-attempts.txt").write_text(f"task-t901 {'0' * 40} 1\ntask-t901 {tip('task-t901')} 2\n"
+                                            f"task-t903 {tip('task-t903')} 1\ntask-t904 {tip('task-t904')} 1\n")
+    R.rescue_stranded(claims, dry=False)
+    assert queue() == ["task-t905"]                                      # neither the claim's nor the coordinator's
+    assert [ln.split()[2] for ln in needs()] == ["task-t902"]            # a failed conflicting tip: not said either
+    (ops / "merge-attempts.txt").write_text(f"task-t901 {'0' * 40} 1\n")  # the branch moved past its failed tip
+    R.rescue_stranded(claims, dry=False)
+    assert "task-t901" in queue()
+
+
+def test_while_a_batch_gates_the_gated_base_is_what_a_branch_is_measured_against(stranded):
+    """main holds the ungated batch then; merge_target() is the marker's base=, the last gated main. task-t902
+    conflicts with main's newest commit but not with the base, and task-t908 is the batch itself."""
+    claims, needs, queue, ops = stranded
+    base = R.sh(["git", "rev-parse", "main^1^1"]).strip()
+    (ops / "bulk-in-progress").write_text(f"base={base}\nbranches=task-t908\n")
+    assert R.merge_target() == base
+    R.rescue_stranded(claims, dry=False)
+    assert "task-t902" in queue() and "task-t908" not in queue()
+    assert not [ln for ln in needs() if "task-t902" in ln]

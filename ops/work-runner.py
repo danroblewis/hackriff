@@ -1819,7 +1819,7 @@ def release_stale_claims(claims, tasks_by_id):
 
 STRANDED = f"{S}/stranded.json"
 STRANDED_AFTER_S = 30 * 60
-_LIVE_CLAIM = ("running", "fix-held", "limited")
+MERGE_ATTEMPTS = f"{S}/merge-attempts.txt"   # the merge runner's "<branch> <failed tip> <n>" ledger (T-534)
 
 
 def rescue_stranded(claims, dry):
@@ -1829,7 +1829,9 @@ def rescue_stranded(claims, dry):
     Candidates are only what is already known: runner claims in state `queued`, and branches named by a
     `CONFLICT(skipped from bulk)` line in merge-needs-attention.txt within 24 h. One stranded > 30 min
     that merges cleanly onto main is re-queued (the conflict path's 'merges cleanly now'); one that does
-    not gets ONE `STRANDED` attention line per branch tip. Never one under a review hold."""
+    not gets ONE `STRANDED` attention line per branch tip. Never one under a review hold, one whose claim
+    is in any state but `queued` (a failed/blocked/cancel/killed run is not ready), or one whose tip is
+    the tip the merge runner recorded as failed (re-queueing an unchanged failed tip teaches nothing)."""
     if os.path.exists(f"{REPO}/.git/MERGE_HEAD"):
         return                                 # a staged merge is in no list: the next tick decides
     now = time.time()
@@ -1854,12 +1856,20 @@ def rescue_stranded(claims, dry):
     except (OSError, ValueError):
         st = {}
     first, said = st.get("first", {}), st.get("said", [])
+    failed = {}
+    try:
+        for ln in open(MERGE_ATTEMPTS):
+            f = ln.split()
+            if len(f) >= 2:
+                failed[f[0]] = f[1]            # the last line per branch wins, as in the runner
+    except OSError:
+        pass
     waiting, target, statuses = branches_waiting(), merge_target(), None
     stranded = {}
     for b, tid in cands.items():
         c = claims.get(by_branch.get(b), {})
         if (b in waiting or b in unseen or os.path.exists(f"{S}/review-hold/{b}")
-                or c.get("state") in _LIVE_CLAIM or commits_ahead(b, target) <= 0):
+                or (c and c.get("state") != "queued") or commits_ahead(b, target) <= 0):
             continue
         stranded[b] = first.get(b, now)
         if now - stranded[b] <= STRANDED_AFTER_S:
@@ -1868,15 +1878,15 @@ def rescue_stranded(claims, dry):
             statuses = board_statuses()
         if not statuses or statuses.get(tid) in ("done", "cancelled", "cancel-proposed"):
             continue                           # unreadable board, or it landed as a rebuilt branch
+        tip = sh(["git", "rev-parse", "-q", "--verify", b]).strip()
+        if not tip or f"{b}@{tip}" in said or (failed.get(b) and tip.startswith(failed[b])):
+            continue
         mins = int((now - stranded[b]) / 60)
         if merges_cleanly(b, target):
             log(f"STRANDED {tid}: {b} ahead of main and in no queue for {mins} min - merges cleanly now - re-queued")
             if not dry:
                 enqueue(b, c.get("wt"))
                 del stranded[b]
-            continue
-        tip = sh(["git", "rev-parse", "-q", "--verify", b]).strip()
-        if f"{b}@{tip}" in said:
             continue
         if dry:
             log(f"DRY-RUN would say STRANDED {tid} {b}")
