@@ -482,7 +482,10 @@ def test_a_pid_whose_identity_changed_before_the_final_kill_is_not_killed(tmp_pa
     The stub `ps` above makes the identity check see a DIFFERENT process at the final-kill instant
     than it did when the kill sequence started. The fix must withhold the -KILL; the rogue - which
     ignores TERM, so only a delivered -KILL would end it - must still be alive once the window is
-    done handling it."""
+    done handling it. (Review round 1: `os.kill(pid, 0)` passes either way - it still succeeds on a
+    zombie the old script's -KILL left uncollected, since nothing here reaps it until `finally` - so
+    the check has to be `_exited_uncollected`, which tells a genuinely still-running process apart
+    from one that was killed and is merely waiting to be reaped.)"""
     ps_stub = _identity_stub_ps(tmp_path)
     p, env, ops, radio_log, ps_file, kept_pid, kept_datadir = _watched_window(
         tmp_path, extra_env={"EXPLORER_PS_BIN": str(ps_stub)})
@@ -499,7 +502,10 @@ def test_a_pid_whose_identity_changed_before_the_final_kill_is_not_killed(tmp_pa
                   _log_has(ops, "rogue server's ring reaped"))
         log = (ops / "explorer" / "window.log").read_text()
         assert f"ALERT: rogue hk serve detected (pid {rogue.pid}, data-dir {rogue_datadir})" in log
-        os.kill(rogue.pid, 0)  # still alive: the -KILL was correctly withheld, not delivered
+        # Not `os.kill(rogue.pid, 0)`: that succeeds on a zombie too, so it can't tell "still
+        # genuinely running" (the -KILL withheld, as it must be) from "killed, not yet reaped"
+        # (the old script's bug). `_exited_uncollected` reads the process state instead.
+        assert not _exited_uncollected(rogue), "the rogue was killed despite its identity mismatch"
     finally:
         _stop(p)
         rogue.kill()
