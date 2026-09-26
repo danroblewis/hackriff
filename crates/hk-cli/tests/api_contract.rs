@@ -12349,7 +12349,17 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     assert_eq!(p["budget"]["step_span_hz"], json!(1.8e6), "{p}");
     let duty = p["budget"]["duty"].as_f64().unwrap_or_default();
     assert!((duty - 1.0 / 12.0).abs() < 1e-9, "duty is dwell/pass: {p}");
+    // T-965: nothing has retuned this front end under a scan yet, so there is no measurement of
+    // what a step pays beyond its dwell — and `null` is not zero. The pass length is the dwells,
+    // and the statement says in words that it is a floor rather than implying it is the answer.
+    assert_eq!(p["budget"]["dwell_total_s"], json!(144.0), "{p}");
+    assert_eq!(p["budget"]["step_overhead_s"], Value::Null, "{p}");
+    assert_eq!(p["budget"]["overhead_measured"], json!(false), "{p}");
     let statement = p["budget"]["statement"].as_str().unwrap_or_default();
+    assert!(
+        statement.contains("a floor, not the answer"),
+        "an unmeasured per-step cost must be admitted, not priced at zero: {statement:?}"
+    );
     assert!(
         statement.contains("12 steps") && statement.contains("144.0 s pass"),
         "the statement must carry this plan's own numbers: {statement:?}"
@@ -12416,6 +12426,44 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
     assert!(
         (88e6..=108e6).contains(&swept),
         "a step must land inside the range asked for: {v}"
+    );
+
+    // T-965: **a step has now been timed, so the stated pass length includes what it cost.**
+    // The live defect this closes: `Scan everything (fast)` priced 418 steps x 0.3 s as 125.4 s
+    // and took 237 s, because the price counted the listening and not the retuning. The served
+    // budget is repriced from this scan's own retunes, and `pass_s` is the listening plus the
+    // measured per-step cost, once per step.
+    let b = &v["scan"]["budget"];
+    assert_eq!(b["overhead_measured"], json!(true), "{b}");
+    let overhead_s = b["step_overhead_s"]
+        .as_f64()
+        .expect("a measured per-step cost once a step has been timed");
+    assert!(
+        (0.0..30.0).contains(&overhead_s),
+        "a measured retune cost, not a guess: {b}"
+    );
+    let dwell_total_s = b["dwell_total_s"].as_f64().expect("dwell total");
+    let steps = b["steps"].as_f64().expect("steps");
+    let pass_s = b["pass_s"].as_f64().expect("pass");
+    assert!(
+        (pass_s - (dwell_total_s + steps * overhead_s)).abs() < 1e-6,
+        "pass_s must be the listening plus the measured per-step cost: {b}"
+    );
+    // And the progress block states the same measurement, so the stated pass and the measured one
+    // can be compared without recomputing either.
+    let pr = &v["scan"]["progress"];
+    assert_eq!(
+        pr["measured_step_overhead_s"].as_f64(),
+        Some(overhead_s),
+        "{pr}"
+    );
+    assert!(
+        (pr["measured_pass_s"].as_f64().expect("measured pass") - pass_s).abs() < 1e-6,
+        "{pr}"
+    );
+    assert!(
+        pr["elapsed_s"].as_f64().unwrap_or(-1.0) >= 0.0,
+        "a running scan states how long it has been going: {pr}"
     );
 
     // **Coverage honesty, which is the whole point of the feature.** T-406's finding was that a
