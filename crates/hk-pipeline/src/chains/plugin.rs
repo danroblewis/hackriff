@@ -321,10 +321,10 @@ fn run_inner(
     let mut repo = Repository::open(&shared.db_path)?;
     // T-1017: the plugin's **declared** identity label, recorded beside the rows it describes, so
     // the list surfaces render the label this manifest named — and no label at all for a plugin
-    // that declared none, whatever its fields are called.
-    if let Some(decl) = &m.output.identity_label {
-        repo.declare_identity_label(decl)?;
-    }
+    // that declared none, whatever its fields are called. The whole (0- or 1-element) set is
+    // recorded, so a manifest edited to drop its declaration withdraws the stored one instead of
+    // going on labelling its rows (review finding 2).
+    repo.declare_identity_labels(&m.id, m.output.identity_label.as_slice())?;
     let ingest = Arc::new(Mutex::new(match publisher {
         Some(p) => Ingest::with_republish(repo, p),
         None => Ingest::new(repo),

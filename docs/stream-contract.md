@@ -302,7 +302,7 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
 - `from` is `field` (the metadata field already holds the 0–1 figure) or `vote-counts` (it holds a `[[value, count], …]` table, and the figure is this label's own count over every count, so a decoder that keeps a tally need not also compute a share);
 - `meaning` is required with a confidence: `vote-share`, `crc-valid-rate` or `decoder-score`. A bare number beside a name is not self-describing, and the client words it from the meaning;
 - under a class that forbids content (§6) the declared fields must also be allowlisted in `output.metadata_keys`, or the manifest is **rejected**: the host would otherwise strip the very field the manifest promises and the plugin would silently never show a label;
-- the declaration is recorded in the store beside the rows it describes, so the label survives the process that decoded them, and a re-loaded manifest replaces its own earlier declaration.
+- the declaration is recorded in the store beside the rows it describes, so the label survives the process that decoded them. A load **reconciles** the plugin's whole set: a re-loaded manifest replaces its earlier declaration, and one edited to *remove* the block withdraws it — "a plugin that declares no label shows none" holds after an edit, not only at first install.
 
 A recipe declares the same thing as `outputs[].decode.identity_label` (`{field, confidence: {field, from, meaning}}`, ADR-0011), where `field` must be one of that mapping's own `decode.metadata` paths — a recipe cannot declare a field its writer never stores.
 

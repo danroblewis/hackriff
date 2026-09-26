@@ -19,7 +19,6 @@ use crate::decode::{
 };
 use crate::emitter::DecodedIdentity;
 use crate::ids::{DecodeId, EmitterId};
-use crate::region::TimeRange;
 use crate::time::Timestamp;
 
 /// Shortest metadata value treated as a possible identifier when checking labels.
@@ -484,54 +483,88 @@ impl Repository {
         Ok(reg)
     }
 
-    /// Records a decoder's identity-label declaration (T-1017), replacing any earlier one for the
-    /// same `(decoder_id, frame_model)` — a recipe or plugin that is re-loaded with a changed
-    /// manifest declares the new shape, and the old one does not linger.
+    /// Records what `decoder_id` currently declares about its identity labels (T-1017):
+    /// `decls` are upserted and **every other declaration of that decoder is removed**.
+    ///
+    /// It is a reconciliation rather than an upsert because a *removed* declaration must stop
+    /// serving a label: a plugin or recipe re-loaded with its `identity_label` block deleted, or
+    /// moved to a different `frame_model`, would otherwise keep labelling its rows from a stored
+    /// row nothing declares any more — "a decoder that declares no label shows none" has to hold
+    /// after an edit, not only at first install (T-1017 review finding 2). Callers therefore pass
+    /// the decoder's **whole** current set, including the empty set.
     ///
     /// Declarations are stored, not held in the process, because the decoder writing rows and the
     /// server rendering them use different connections and outlive each other: a database must
     /// serve the same label after the pipeline that decoded it has gone.
-    pub fn declare_identity_label(&mut self, decl: &IdentityLabelDecl) -> Result<(), RepoError> {
-        let (from, field, meaning) = match &decl.confidence {
-            None => (None, None, None),
-            Some(c) => (
-                Some(c.source.kind()),
-                Some(c.source.field()),
-                Some(c.meaning.as_str()),
-            ),
-        };
+    pub fn declare_identity_labels(
+        &mut self,
+        decoder_id: &str,
+        decls: &[IdentityLabelDecl],
+    ) -> Result<(), RepoError> {
+        if decls.iter().any(|d| d.decoder_id != decoder_id) {
+            return Err(RepoError::Invalid(
+                "every declaration must name the decoder it is recorded for".into(),
+            ));
+        }
         let tx = self.write_tx()?;
-        tx.execute(
-            "INSERT INTO identity_label_decl (decoder_id, frame_model, label_field, \
-             confidence_from, confidence_field, confidence_meaning, declared_t) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT (decoder_id, frame_model) DO UPDATE SET label_field = excluded.label_field, \
-             confidence_from = excluded.confidence_from, \
-             confidence_field = excluded.confidence_field, \
-             confidence_meaning = excluded.confidence_meaning, declared_t = excluded.declared_t",
-            params![
-                decl.decoder_id,
-                decl.frame_model,
-                decl.label_field,
-                from,
-                field,
-                meaning,
-                Timestamp::now().as_unix_nanos()
-            ],
-        )?;
+        for decl in decls {
+            let (from, field, meaning) = match &decl.confidence {
+                None => (None, None, None),
+                Some(c) => (
+                    Some(c.source.kind()),
+                    Some(c.source.field()),
+                    Some(c.meaning.as_str()),
+                ),
+            };
+            tx.execute(
+                "INSERT INTO identity_label_decl (decoder_id, frame_model, label_field, \
+                 confidence_from, confidence_field, confidence_meaning, declared_t) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT (decoder_id, frame_model) DO UPDATE SET \
+                 label_field = excluded.label_field, \
+                 confidence_from = excluded.confidence_from, \
+                 confidence_field = excluded.confidence_field, \
+                 confidence_meaning = excluded.confidence_meaning, declared_t = excluded.declared_t",
+                params![
+                    decl.decoder_id,
+                    decl.frame_model,
+                    decl.label_field,
+                    from,
+                    field,
+                    meaning,
+                    Timestamp::now().as_unix_nanos()
+                ],
+            )?;
+        }
+        // Whatever this decoder no longer declares. Scoped to the decoder, so one recipe's
+        // `messages` output can never withdraw a sibling output's declaration.
+        let mut sql = String::from("DELETE FROM identity_label_decl WHERE decoder_id = ?1");
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&decoder_id];
+        if !decls.is_empty() {
+            sql.push_str(" AND frame_model NOT IN (");
+            for (i, d) in decls.iter().enumerate() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push_str(&format!("?{}", i + 2));
+                args.push(&d.frame_model);
+            }
+            sql.push(')');
+        }
+        tx.execute(&sql, args.as_slice())?;
         tx.commit()?;
         Ok(())
     }
 
     /// The decoded identity's summary for a list row (`/api/inventory` and `/api/events`'s
     /// `identity_label` / `identity_label_share` / `identity_label_meaning`) under the built-in
-    /// declarations only, over all time — the convenience form of
-    /// [`Repository::latest_decode_identity_summary_in`].
+    /// declarations only, as of now — the convenience form of
+    /// [`Repository::latest_decode_identity_summary_as_of`].
     pub fn latest_decode_identity_summary(
         &self,
         identity: &DecodedIdentity,
     ) -> Result<Option<DecodeIdentitySummary>, RepoError> {
-        self.latest_decode_identity_summary_in(identity, &IdentityLabelRegistry::builtin(), None)
+        self.latest_decode_identity_summary_as_of(identity, &IdentityLabelRegistry::builtin(), None)
     }
 
     /// The decoded identity's summary for a list row (T-967; declared contract T-1017): the label
@@ -544,20 +577,29 @@ impl Repository {
     /// [`Repository::decodes_for_identity`]), for a row whose own class hides its metadata, and
     /// when no declared row holds a non-empty label.
     ///
-    /// **`window` scopes the answer to the viewed time window** (CLAUDE.md: the inventory is
-    /// time-scoped to the view). A scrubbed pane therefore shows the label that was known *inside
-    /// its window*, not one decoded minutes after it; `None` scopes to all time, which is what an
-    /// unwindowed query asks.
+    /// **`as_of` is an upper bound in capture time, and only an upper bound** — the view's own
+    /// moment (a window's `t1`, or the caller's live edge `at`). `None` means now, i.e. the latest
+    /// of all time.
+    ///
+    /// The bound is one-sided **because an identity learned earlier stays known**: presence is one
+    /// interval `[start, end?]`, ongoing until an end is affirmatively detected (ADR-0017/0019), and
+    /// a decoder's summary row is stamped with the **start** of the session it summarises
+    /// (`hk_demod::rds_decodes`). A lower bound would therefore drop the name of a station that is
+    /// *still on air*: an RDS session running 10:00–10:30 carries `t = 10:00`, so a 10:10–10:15
+    /// window — or any live-following pane whose window has moved past the session's start — would
+    /// show the bare PI beside a label it had already decoded (T-1017 review finding 1). What the
+    /// ticket's rule forbids is the opposite direction only: a pane scrubbed into the past must not
+    /// show a name **decoded after** the moment it is looking at.
     ///
     /// Reads **one** row per declaration — the newest with a non-empty label, over
     /// `idx_decode_identity` newest first — so the label is never the newest per-frame fragment (a
     /// scrolling song/artist PS), and a list page pays one identity-class scan and one indexed
     /// lookup per declaration per row.
-    pub fn latest_decode_identity_summary_in(
+    pub fn latest_decode_identity_summary_as_of(
         &self,
         identity: &DecodedIdentity,
         declarations: &IdentityLabelRegistry,
-        window: Option<TimeRange>,
+        as_of: Option<Timestamp>,
     ) -> Result<Option<DecodeIdentitySummary>, RepoError> {
         if declarations.is_empty() {
             return Ok(None);
@@ -581,29 +623,28 @@ impl Repository {
             // `[A-Za-z0-9_]` segments only), so it can hold no quote and inject nothing.
             sql.push_str(&decl.label_json_path());
             sql.push_str("') IS NOT NULL");
-            if window.is_some() {
-                sql.push_str(" AND t >= ?5 AND t <= ?6");
+            if as_of.is_some() {
+                sql.push_str(" AND t <= ?5");
             }
             sql.push_str(" ORDER BY t DESC, decode_id DESC LIMIT 1");
             let scheme = identity.scheme.as_string();
             let mut stmt = tx.prepare_cached(&sql)?;
             let read = |r: &rusqlite::Row<'_>| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?));
-            let row = match window {
+            let row = match as_of {
                 None => stmt
                     .query_row(
                         params![scheme, identity.value, decl.decoder_id, decl.frame_model],
                         read,
                     )
                     .optional()?,
-                Some(w) => stmt
+                Some(t) => stmt
                     .query_row(
                         params![
                             scheme,
                             identity.value,
                             decl.decoder_id,
                             decl.frame_model,
-                            w.start.as_unix_nanos(),
-                            w.end.as_unix_nanos()
+                            t.as_unix_nanos()
                         ],
                         read,
                     )

@@ -2205,7 +2205,7 @@ fn t_1017_identity_label_is_served_only_where_a_decoder_declared_one() {
     assert_eq!(builtin.get("plug-pager", "pager-session"), None);
     assert_eq!(
         b.repo
-            .latest_decode_identity_summary_in(&ric, &builtin, None)
+            .latest_decode_identity_summary_as_of(&ric, &builtin, None)
             .unwrap(),
         None
     );
@@ -2223,14 +2223,16 @@ fn t_1017_identity_label_is_served_only_where_a_decoder_declared_one() {
         }),
     )
     .unwrap();
-    b.repo.declare_identity_label(&decl).unwrap();
+    b.repo
+        .declare_identity_labels("plug-pager", std::slice::from_ref(&decl))
+        .unwrap();
     let declared = b.repo.identity_label_declarations().unwrap();
     assert_eq!(declared.get("plug-pager", "pager-session"), Some(&decl));
     // The built-in RDS declaration is still in force beside it.
     assert!(declared.get("hk-rds", "rds-pi").is_some());
     assert_eq!(
         b.repo
-            .latest_decode_identity_summary_in(&ric, &declared, None)
+            .latest_decode_identity_summary_as_of(&ric, &declared, None)
             .unwrap(),
         Some(DecodeIdentitySummary {
             label: "FIRE DISPATCH".into(),
@@ -2242,28 +2244,30 @@ fn t_1017_identity_label_is_served_only_where_a_decoder_declared_one() {
     // Re-declaring replaces: a field the decoder does not write states no label, and the old
     // declaration does not linger.
     b.repo
-        .declare_identity_label(
-            &IdentityLabelDecl::new("plug-pager", "pager-session", "not_written", None).unwrap(),
+        .declare_identity_labels(
+            "plug-pager",
+            &[IdentityLabelDecl::new("plug-pager", "pager-session", "not_written", None).unwrap()],
         )
         .unwrap();
     let replaced = b.repo.identity_label_declarations().unwrap();
     assert_eq!(
         b.repo
-            .latest_decode_identity_summary_in(&ric, &replaced, None)
+            .latest_decode_identity_summary_as_of(&ric, &replaced, None)
             .unwrap(),
         None
     );
 
     // A declaration with no confidence: the label, and an honestly null share.
     b.repo
-        .declare_identity_label(
-            &IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap(),
+        .declare_identity_labels(
+            "plug-pager",
+            &[IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap()],
         )
         .unwrap();
     let no_conf = b.repo.identity_label_declarations().unwrap();
     assert_eq!(
         b.repo
-            .latest_decode_identity_summary_in(&ric, &no_conf, None)
+            .latest_decode_identity_summary_as_of(&ric, &no_conf, None)
             .unwrap(),
         Some(DecodeIdentitySummary {
             label: "FIRE DISPATCH".into(),
@@ -2272,17 +2276,79 @@ fn t_1017_identity_label_is_served_only_where_a_decoder_declared_one() {
         })
     );
 
+    // A decoder re-loaded with its declaration REMOVED withdraws it: "declares no label shows none"
+    // has to hold after an edit, not only at first install (T-1017 review finding 2). Another
+    // decoder's declaration — here a second row kind of the same plugin, and the built-in RDS one —
+    // is untouched, so one reconciliation can never erase a sibling's.
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[
+                IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap(),
+                IdentityLabelDecl::new("plug-pager", "pager-net", "net_name", None).unwrap(),
+            ],
+        )
+        .unwrap();
+    b.repo.declare_identity_labels("plug-pager", &[]).unwrap();
+    let withdrawn = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(withdrawn.get("plug-pager", "pager-session"), None);
+    assert_eq!(withdrawn.get("plug-pager", "pager-net"), None);
+    assert!(
+        withdrawn.get("hk-rds", "rds-pi").is_some(),
+        "withdrawing one decoder's declarations leaves every other decoder's alone"
+    );
+    assert_eq!(
+        b.repo
+            .latest_decode_identity_summary_as_of(&ric, &withdrawn, None)
+            .unwrap(),
+        None
+    );
+    // And a reconciliation that drops only *one* of two row kinds keeps the other.
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[
+                IdentityLabelDecl::new("plug-pager", "pager-session", "alias", None).unwrap(),
+                IdentityLabelDecl::new("plug-pager", "pager-net", "net_name", None).unwrap(),
+            ],
+        )
+        .unwrap();
+    b.repo
+        .declare_identity_labels(
+            "plug-pager",
+            &[IdentityLabelDecl::new("plug-pager", "pager-net", "net_name", None).unwrap()],
+        )
+        .unwrap();
+    let one = b.repo.identity_label_declarations().unwrap();
+    assert_eq!(one.get("plug-pager", "pager-session"), None);
+    assert!(one.get("plug-pager", "pager-net").is_some());
+    // A set naming another decoder is refused rather than written under the wrong key.
+    assert!(
+        b.repo
+            .declare_identity_labels(
+                "plug-pager",
+                &[IdentityLabelDecl::new("other", "f", "a", None).unwrap()]
+            )
+            .is_err()
+    );
+
     // Declarations are validated at the boundary: the paths reach a JSON path and a SQL predicate.
     assert!(IdentityLabelDecl::new("d", "f", "a'b", None).is_err());
     assert!(IdentityLabelDecl::new("d", "f", "", None).is_err());
     assert!(IdentityLabelDecl::new("", "f", "a", None).is_err());
 }
 
-/// T-1017: the label is **scoped to the viewed window** (CLAUDE.md: the inventory is time-scoped to
-/// the view), so a pane scrubbed into the past shows the label known inside its window and not one
-/// decoded after it. The unwindowed form still answers over all time.
+/// T-1017: the label is scoped to the **view's own moment**, as an upper bound and only an upper
+/// bound (review finding 1).
+///
+/// A pane scrubbed into the past must not show a name decoded **after** the moment it is looking at.
+/// But a summary row is stamped with the **start** of the session it summarises, and an identity
+/// learned earlier stays known while the emission is still on air (ADR-0017/0019's
+/// ongoing-until-ended interval), so a row *older* than the view must still be served — a lower
+/// bound would strip the name off a station that is still transmitting, which is exactly what the
+/// first implementation of this rule did.
 #[test]
-fn t_1017_identity_label_is_scoped_to_the_viewed_window() {
+fn t_1017_identity_label_is_bounded_above_by_the_views_moment_and_never_below() {
     let mut b = base();
     let pi = DecodedIdentity {
         scheme: IdentityScheme::RdsPi,
@@ -2303,20 +2369,29 @@ fn t_1017_identity_label_is_scoped_to_the_viewed_window() {
         t: t(secs),
         provenance: None,
     };
+    // Two sessions: one summarised at t=100, a later one at t=500.
     b.repo.insert_decode(&summary("KOLD    ", 100)).unwrap();
     b.repo.insert_decode(&summary("KNEW    ", 500)).unwrap();
     let reg = b.repo.identity_label_declarations().unwrap();
-    let label = |w: Option<TimeRange>| {
+    let label = |as_of: Option<Timestamp>| {
         b.repo
-            .latest_decode_identity_summary_in(&pi, &reg, w)
+            .latest_decode_identity_summary_as_of(&pi, &reg, as_of)
             .unwrap()
             .map(|s| s.label)
     };
-    let win = |a, z| Some(TimeRange::new(t(a), t(z)));
+    // No bound: the latest of all time.
     assert_eq!(label(None).as_deref(), Some("KNEW"));
-    assert_eq!(label(win(50, 200)).as_deref(), Some("KOLD"));
-    assert_eq!(label(win(400, 600)).as_deref(), Some("KNEW"));
-    assert_eq!(label(win(0, 50)), None);
+    // A view at t=200 knows the session that began at 100 and not the one at 500.
+    assert_eq!(label(Some(t(200))).as_deref(), Some("KOLD"));
+    // A view whose whole window lies INSIDE the first session — the live-following and scrubbed
+    // cases the review named (an RDS session 10:00–10:30 seen at 10:10) — still shows its name.
+    assert_eq!(label(Some(t(120))).as_deref(), Some("KOLD"));
+    assert_eq!(label(Some(t(499))).as_deref(), Some("KOLD"));
+    // At and after the later session's row, the later name.
+    assert_eq!(label(Some(t(500))).as_deref(), Some("KNEW"));
+    assert_eq!(label(Some(t(9_000))).as_deref(), Some("KNEW"));
+    // Before anything was decoded, no name: the row shows its bare code, never a future label.
+    assert_eq!(label(Some(t(50))), None);
 }
 
 /// T-1017 (T-967 re-review): a restricted, metadata-only decode naming the same identity alongside
@@ -2359,7 +2434,7 @@ fn t_1017_a_restricted_decode_of_the_same_identity_withholds_the_label() {
     let reg = b.repo.identity_label_declarations().unwrap();
     assert_eq!(
         b.repo
-            .latest_decode_identity_summary_in(&pi, &reg, None)
+            .latest_decode_identity_summary_as_of(&pi, &reg, None)
             .unwrap()
             .map(|s| s.label)
             .as_deref(),
@@ -2378,7 +2453,7 @@ fn t_1017_a_restricted_decode_of_the_same_identity_withholds_the_label() {
         .unwrap();
     let withheld = b
         .repo
-        .latest_decode_identity_summary_in(&pi, &reg, None)
+        .latest_decode_identity_summary_as_of(&pi, &reg, None)
         .unwrap();
     crate::set_content_gating(false);
     assert_eq!(withheld, None);

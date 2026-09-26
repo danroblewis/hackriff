@@ -107,11 +107,13 @@ fn emitter_json(
     };
     // T-1017: the decoder's **declared** identity label, rendered by the same backend code
     // `/api/inventory` renders it with, and scoped to **this query's window** — the catalogue of a
-    // period must not name a station from a label decoded after it. `None` on a withheld row and
-    // without a decoded identity, exactly as `identity_value` is.
+    // period must not name a station from a label decoded after it, so the window's own `t1` is the
+    // bound (one-sided: a session that began before this window and is still on air keeps its
+    // name). `None` on a withheld row and without a decoded identity, exactly as `identity_value`
+    // is.
     let summary = match &entry.identity {
         InventoryIdentity::Clear { identity, .. } => repo
-            .latest_decode_identity_summary_in(identity, labels, Some(window))
+            .latest_decode_identity_summary_as_of(identity, labels, Some(window.end))
             .map_err(|_| failed())?,
         InventoryIdentity::None | InventoryIdentity::Withheld { .. } => None,
     };

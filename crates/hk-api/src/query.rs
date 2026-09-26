@@ -1569,12 +1569,20 @@ pub fn inventory_entry_json_at(
         // identity-class scan and one indexed row per entry (see the method).
         //
         // T-1017: the label is the one its decoder **declared** (`labels`, read once for the whole
-        // page by the caller), and it is scoped to **this query's window** — the inventory is
+        // page by the caller), and it is scoped to **the view's own moment** — the inventory is
         // time-scoped to the view (CLAUDE.md), so a scrubbed pane must not show a name decoded
-        // after the window it is looking at.
+        // after the moment it is looking at. That moment is the request's `t1` when it named a
+        // window and the caller's live edge `at` otherwise, which is what scopes the **Confirmed**
+        // list too: it is sent unwindowed with only `at` (`ui/src/app/explore/inventory.ts`), and
+        // was therefore the one surface still showing an all-time label on a scrubbed pane.
+        //
+        // The bound is one-sided, on purpose (see the method): an identity learned earlier stays
+        // known, and a summary row is stamped with the **start** of the session it summarises, so a
+        // lower bound would strip the name off a station that is still on air.
+        let label_as_of = window.map(|w| w.end).or(at);
         let identity_summary = match &entry.identity {
             InventoryIdentity::Clear { identity, .. } => {
-                repo.latest_decode_identity_summary_in(identity, labels, window)?
+                repo.latest_decode_identity_summary_as_of(identity, labels, label_as_of)?
             }
             InventoryIdentity::None | InventoryIdentity::Withheld { .. } => None,
         };
