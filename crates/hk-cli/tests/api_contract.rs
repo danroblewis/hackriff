@@ -10530,6 +10530,9 @@ fn a_nudged_away_band_is_fog_at_the_finest_level_up_to_its_last_live_row() {
 #[test]
 fn a_departed_band_is_fog_at_every_zoom_from_the_ledger_and_survives_a_restart() {
     let dir = temp_data_dir();
+    // Guarded for the whole test (T-232), not only by `start_server_fft`'s guard: the directory
+    // outlives the first server and is reopened by the second, and this binding is dropped last.
+    let _dir_guard = TempDataDirGuard::new(dir.clone());
     let (_guard, serving, addr) = start_server_fft(dir.clone(), None, 1024);
     const N: u64 = 32;
     let n = N as usize;
