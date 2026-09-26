@@ -29188,7 +29188,8 @@ tasks:
   - id: T-986
     milestone: MAUTO
     title: "All captured signals decode: CTCSS tone decode (461.125, 233.6 Hz) and DMR identification/header (464.6125) members - failing-first blind tests"
-    status: todo
+    status: in-progress
+    branch: task-t986
     priority: P1
     deps:
     - T-936
@@ -29815,7 +29816,8 @@ tasks:
   - id: T-1010
     milestone: M2-hardening
     title: "On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame"
-    status: todo
+    status: in-progress
+    branch: task-t1010
     priority: normal
     deps:
     - T-954
@@ -30814,7 +30816,8 @@ tasks:
   - id: T-1054
     milestone: MAUTO
     title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
-    status: todo
+    status: in-progress
+    branch: task-t1054
     priority: high
     deps:
     - T-963
