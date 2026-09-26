@@ -231,6 +231,22 @@ test("T-955: a pane FOLLOWING at the wrong frequency is brought to the tuned liv
   assert.deepEqual(calls, [], "follow-live reached the control client");
 });
 
+test("T-1001 + T-1006: each pane's press asks for ITS OWN tuned window — two radios, two live edges", () => {
+  const { m, p1, p2 } = twoPanes();
+  const OTHER = { centerHz: 433.92e6, spanHz: 2e6 };
+  const asked: string[] = [];
+  // The surface resolves the window per pane (a pane pinned to a radio reads that radio's window);
+  // here pane 2 stands for a pane pinned to the second front end.
+  const acts = paneLiveActions(m, (id) => { asked.push(id); return id === p2 ? OTHER : TUNED; });
+  acts.press(p1);
+  acts.press(p2);
+  assert.ok(asked.includes(p1) && asked.includes(p2), "the window was not asked for by pane");
+  assert.equal(m.get(p1)!.freq.centerHz, TUNED.centerHz, "pane 1 was not brought to its own radio's window");
+  assert.equal(m.get(p2)!.freq.centerHz, OTHER.centerHz, "pane 2 was brought to the OTHER radio's live edge");
+  assert.equal(acts.atLiveEdge(p1), true);
+  assert.equal(acts.atLiveEdge(p2), true);
+});
+
 test("T-955: a FROZEN pane off the tuned window is brought to the tuned live edge in both axes", () => {
   const { m, id } = driftedFollowing();
   m.pause(id);

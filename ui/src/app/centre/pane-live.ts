@@ -82,24 +82,26 @@ export function liveState(following: boolean, atTuned = following): LiveState {
  * The follow/freeze arithmetic, **per pane id**, over a real `PaneModel`. Nothing here reads which
  * pane is active: every method is told which pane it acts on.
  *
- * `tuned` is the front end's OWN current centre/span (`frequency.current`, off the navigation poll
- * the host already runs), read only for a button's state and on an explicit press — never at open
+ * `tunedWindow(id)` is THAT PANE's front end's own current centre/span (T-1006: the pinned radio's
+ * `windows` entry, or `frequency.current` for a pane on `any`, off the navigation poll the host
+ * already runs), read only for a button's state and on an explicit press — never at open
  * (see `surface/bootstrap.ts`'s recency-narrowed opening) and never as a background correction.
  * `onFollow` is told when a pane was moved to or off the live edge, so the map strip follows with
  * it, exactly as the FAB's `paneActions` did.
  */
 export function paneLiveActions(
   panes: PaneLiveControl,
-  tunedWindow?: () => TunedWindow | null,
+  tunedWindow?: (id: string) => TunedWindow | null,
   onFollow?: (on: boolean) => void,
 ) {
-  const tuned = (): TunedWindow | null => tunedWindow?.() ?? null;
-  const atLiveEdge = (id: string): boolean => panes.atTunedLiveEdge(id, tuned());
+  // T-1006: the window is asked for BY PANE — each pane may be pinned to its own front end.
+  const tuned = (id: string): TunedWindow | null => tunedWindow?.(id) ?? null;
+  const atLiveEdge = (id: string): boolean => panes.atTunedLiveEdge(id, tuned(id));
   const followLive = (id: string): void => {
     // T-442: following is a coordinate change on the pane, nothing more — the SDR, the ring and
     // detection never paused, so there is nothing to resume anywhere but the screen.
     // T-955: and to the TUNED window's live edge — frequency too, when the pane has drifted off it.
-    panes.followTuned(id, tuned());
+    panes.followTuned(id, tuned(id));
     onFollow?.(true);
   };
   const pauseLive = (id: string): void => {
