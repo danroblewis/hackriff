@@ -28896,7 +28896,7 @@ tasks:
   - id: T-975
     milestone: MAUTO
     title: Explorer P25 capture into fixtures/ with hidden truth (852.859 MHz intermittent C4FM, 2.4 Msps) + a P25 sync reference oracle
-    status: in-progress
+    status: done
     branch: task-t975
     priority: P1
     deps: []
@@ -28912,11 +28912,15 @@ tasks:
       MAC ONLY (capture in ~/.hackriff-ops). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 recovery: T-975's commit (9672ba74 on task-t985, 432aad8a on task-t975) lands through task-t985, which was brought up to gated main; queue task-t985 only, not task-t975.
+
+      2026-09-26 coordinator: landed via T-985's merge 6839a5fb (every file of 432aad8a is on main: fixtures/hackrf/explorer-2026-09-25/p25-852p86-2p4M.*, py/fixtures/p25_ref.py, build_explorer_2026_09_25.py, manifest, tooling test); branch task-t975 is redundant.
     dispatch: manual
+    commit: 6839a5fb
   - id: T-976
     milestone: MAUTO
     title: "All captured signals decode: the P25 member (one region, C4FM 4-level, P25-like identified with evidence; decode marginal) - failing-first blind test"
-    status: todo
+    status: in-progress
+    branch: task-t976
     priority: P1
     deps:
     - T-936
@@ -29042,6 +29046,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): another carrier case: 146.561 MHz is a continuous UNMODULATED carrier with mains hum; the app detected it blind and Listen chose nbfm 0.75, but it is never classed as a carrier. Include it: an unmodulated carrier (with or without hum) is classified CW/carrier.
+
+      2026-09-26 coordinator (recovery merge e539c7a5): after main's T-948 (a narrow line inside the 15 kHz DC tolerance gets no inventory entry), cw_carrier_is_not_a_burst_train's carrier moved 12 kHz -> -120 kHz off centre; the scene still yields one 'unmodulated carrier (possible spur/LO)' row and 0 FSK bursts. Consequence stated for the record: the field case that started T-980 (a carrier 12 kHz off centre) is now dropped by T-948 as DC, not explained - T-948's rule, accepted.
     model_reason: "opus/medium: estimator and burst-chain changes on the detection path"
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 13:38).
@@ -30790,6 +30796,10 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+
+      2026-09-26 coordinator: the UI-stack integrator also saw app-trace fail IDENTICALLY on main 1090f468 (fresh hk, alone): the T-475 afterglow test and 'the trace is the spectrum at the viewport's time position' - besides heldObservation. Note T-1041 made the trace a layer OFF by default: a spec that asserts the trace must switch the layer on through the product's own control first. Own all app-trace reds on main here (or say which are a different defect).
+
+      2026-09-26 coordinator: the handback (c635e59c) fixes the product defect (a following pane's trace = the newest row, liveFrameFits) and every app-trace test but the afterglow-while-scrubbed park, which is split to T-1074. T-1051 closes on c635e59c once merged onto the UI stack (conflicts with T-996's app-trace.e2e.mjs/surface.ts).
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
@@ -30886,6 +30896,8 @@ tasks:
       FOUND BY user feature (scan + fog of war) via explorer; review of T-964 2026-09-25 (re-filed: first filed as T-1014 on task-t964, lost in a board merge): After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation
 
       2026-09-26 coordinator: T-1058 (the user's last-known LEDGER design) replaces the per-tile shadow search that also makes the swept range's shadow unreliable after a scan - build this ticket's canvas item on T-1058's ledger once it lands (the ledger gives every swept cell its last sample, no search); this ticket keeps its other items (contradictory coverage lines, un-timed /api/coverage window, record-limit truncation).
+
+      2026-09-26 coordinator: the worker's handback (branch task-t1055, queued) delivers the scan-shadow e2e, paged /api/coverage + sources[].truncated, and the census wording; the user-visible symptom's upstream causes are filed as T-1070 (pyramid levels >= 1 empty in a live run) and T-1071 (fast pass keeps no history after its rate change), with T-1058 (last-known ledger) for the shadow. This ticket closes on its deliverables; the symptom lives on in those three.
     deps: [T-964, T-1058]
   - id: T-1056
     milestone: MMAP
@@ -30954,7 +30966,7 @@ tasks:
   - id: T-1059
     milestone: M2-hardening
     title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
-    status: in-progress
+    status: done
     branch: task-t1059
     priority: medium
     deps: []
@@ -30970,6 +30982,295 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q <the task-CLI tests>`, `just lint-py`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-26 (T-1055 duplicate deps): task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys
+    commit: "69930016"
+  - id: T-1060
+    milestone: MUI
+    title: "P1: Inventory reloads on every intermediate wheel/pointer view (100 of 264 requests per trackpad zoom) - one subscription, quantized material window key, 300 ms settle, one in flight per pane (latest-wins, the superseded request never issued)"
+    status: in-progress
+    branch: task-t1060
+    priority: P1
+    deps: []
+    parallel_group: UI-INV-REQ
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review section 'Initiators' 1): ui/src/app/centre/surface.ts:1080 mirror() runs on every onView (surface/input.ts:172) and writes live.view, time.spanS and setInventoryPanes(specs); ui/src/app/explore/index.ts:184 subscribes reload to s.time (sameCursor compares spanS exactly) AND :187 to paneSpecsKey (pane-window.ts:115 specKey = exact loHz|hiHz|spanS). A uniform zoom changes both -> each wheel event = two loadInventoryRows = 4 /api/inventory (+ specCoverage cells=1). No settle, no coalescing.
+      DELIVER: drop the s.time subscription for the pane path (the spec carries spanS/tS); specKey -> a quantized key; a viewport-scoped fetch is issued once per SETTLED (>= 300 ms since the last view change), MATERIAL (window moved >= 25 % of its span or span changed >= 1.5x, measured in cells of the current lattice level so it is the same rule at every zoom) change; loadInventoryRows/loadPaneRows: one in flight per pane, latest-wins, a superseded request is NEVER ISSUED (abort does not reach hk-api - tilecache.ts:36-38). Files: ui/src/app/explore/index.ts:182-194, pane-window.ts, inventory.ts.
+      ACCEPTANCE (spy client, ui/test/app-pane-inventory.test.ts / app-explore.test.ts): 24 pane-spec publishes 16 ms apart -> the spy's call list after settle is exactly [inventory?state=confirmed..., inventory?state=candidate...] for the FINAL window; a publish moving < 25 % of span at the same level -> []; the 5 s poll still fires; a region select still reloads at once.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): P1: Inventory reloads on every intermediate wheel/pointer view (100 of 264 requests per trackpad zoom) - one subscription, quantized material window key, 300 ms settle, one in flight per pane (latest-wins, the superseded request never issued)
+  - id: T-1061
+    milestone: MUI
+    title: "P1: Explore drawer rescopes on every intermediate view (~100 requests per trackpad zoom) - material-change rescope + settle; /api/observations and whole-range coverage on the 30 s timer only"
+    status: in-progress
+    branch: task-t1061
+    priority: P1
+    deps: []
+    parallel_group: UI-DRAWER-REQ
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review 'Initiators' 2): ui/src/app/chrome/explore-drawer.ts:129 scopeKey is the exact loHz:hiHz; :565 store.select(scopeKey, rescope -> refresh()) issues /api/events, /api/analysis/strongest, /api/scheduler, /api/coverage?f_lo=1e6&f_hi=6e9&cells=64 and SurveyLog.refresh (/api/observations ... limit=10000) per key change; seq only discards stale ANSWERS, every request is still sent. The observations page (7-day log over 1 MHz-6 GHz) and the unscoped coverage plane do not depend on the view at all.
+      DELIVER: scopeKey -> quantized/material (same rule as the inventory ticket: >= 25 % of span moved or span x1.5, in current-level cells), 300 ms settle, single in flight; surveys.refresh and the unscoped coverage move out of rescope to the 30 s tick. A region select/deselect still rescopes immediately.
+      ACCEPTANCE (spy client, ui/test/app-explore-drawer.test.ts): 24 view changes in 400 ms -> exactly one set [events, strongest, scheduler] after settle and observations count 0; a region select -> one rescope at once.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): P1: Explore drawer rescopes on every intermediate view (~100 requests per trackpad zoom) - material-change rescope + settle; /api/observations and whole-range coverage on the 30 s timer only
+  - id: T-1062
+    milestone: MUI
+    title: Fold window coverage into GET /api/inventory (window.coverage for the queried [t0,t1]x[f_lo,f_hi]) so the client's per-empty-page /api/coverage cells=1 round trip (48-77 per zoom gesture) disappears
+    status: todo
+    priority: high
+    deps:
+    - T-1060
+    parallel_group: API-HTTP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review 'Initiators' 3): ui/src/app/explore/inventory.ts:417-435 specCoverage asks /api/coverage cells=1 whenever the candidate page is empty - a second round trip for something the server knew when it answered.
+      DELIVER: GET /api/inventory returns window.coverage (observed/unobserved for the queried window; record-derived per T-368, grey = unobserved, never a default); docs/api.md + crates/hk-cli/tests/api_contract.rs together (T-079); remove specCoverage from the client. Depends on the inventory-request ticket (same inventory.ts).
+      ACCEPTANCE: contract test asserts the field and its observed/unobserved semantics on a mock-SDR run with a retune; spy test asserts no /api/coverage after an empty candidate page.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): Fold window coverage into GET /api/inventory (window.coverage for the queried [t0,t1]x[f_lo,f_hi]) so the client's per-empty-page /api/coverage cells=1 round trip (48-77 per zoom gesture) disappears
+    core_interface: true
+  - id: T-1063
+    milestone: M2-hardening
+    title: "P1: hk-api drops connections SILENTLY at max_connections (EOF storm behind cloudflared) - answer 503 + Retry-After from the accept thread, log + count it, WebSocket upgrades in their own pool, HTTP cap 64 -> 256"
+    status: in-progress
+    branch: task-t1063
+    priority: P1
+    deps: []
+    parallel_group: API-HTTP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review 'Initiators' 5): crates/hk-api/src/http.rs accept_loop at max_connections (64) does `continue; // dropped` (~:702) - no response, no log, no counter; WebSockets (17-19 per tab: /ws/spectrum/live, /ws/presence, 14-17 /ws/tiles/rows) share the same 64 slots as HTTP. Locally Chrome's 6-per-host cap hides it; cloudflared multiplexes a gesture into 100+ concurrent origin connections, the overflow is dropped -> 'Unable to reach the origin service: EOF'.
+      DELIVER: at the cap answer `503 Service Unavailable`, `Retry-After: 1`, `Connection: close` from the accept thread (canned bytes, no handler thread); log at most once per second with the count; expose the counter on /api/health (docs/api.md + api_contract.rs, T-079). WebSocket upgrades counted in their own pool so tile-row sockets cannot exhaust HTTP slots; HTTP cap 64 -> 256 (256 KB stacks -> <= 64 MB worst case; state it). The client's tile/inventory fetchers must treat 503 as retryable (T-1057 owns the tile side - cross-reference, do not duplicate).
+      ACCEPTANCE (hk-api test): open max+1 connections -> the extra gets a 503 with Retry-After, not EOF; the counter and a log line name it; a WS upgrade beyond the HTTP cap still succeeds while its own pool has room.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): P1: hk-api drops connections SILENTLY at max_connections (EOF storm behind cloudflared) - answer 503 + Retry-After from the accept thread, log + count it, WebSocket upgrades in their own pool, HTTP cap 64 -> 256
+    core_interface: true
+  - id: T-1064
+    milestone: M2-hardening
+    title: "P1: HTTP/1.1 keep-alive with idle reaping in hk-api (0 % connection reuse today: every response is Connection: close, one request per connection) - T-573's keep-alive half never landed"
+    status: todo
+    priority: P1
+    deps:
+    - T-1063
+    parallel_group: API-HTTP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review 'Initiators' 5): every response carries `Connection: close` (http.rs ~:951, ~:1524) and handle_connection (~:1213) reads exactly one request; 0 % reuse over 837 measured requests. T-573 ('HTTP keep-alive and a BATCH /api/tiles endpoint', done) delivered the batch endpoint; the keep-alive half is not in the code - say in the result why, and correct T-573's result by note.
+      DELIVER: handle_connection loops until `Connection: close`, a 15 s idle timeout, or a WebSocket upgrade; respond* stop emitting `Connection: close` for keep-alive requests; idle keep-alive connections are counted separately from active ones and at the cap an idle one is reaped before a new connection is refused (the 503 path from the depends-on ticket). Same file as that ticket -> serial (group HTTP-CONN). Real-time-adjacent: the accept loop gates every route - no per-request cost regression; measure.
+      ACCEPTANCE (hk-api test): two requests over one TCP connection both answered; an idle connection closed after the timeout; at the cap a new connection is accepted by reaping an idle one before refusing; a WS upgrade on a reused connection works.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): P1: HTTP/1.1 keep-alive with idle reaping in hk-api (0 % connection reuse today: every response is Connection: close, one request per connection) - T-573's keep-alive half never landed
+    core_interface: true
+  - id: T-1065
+    milestone: M2-hardening
+    title: "Server change notifications instead of client polling: a `changed {route, version}` message (on /ws/presence or a new /ws/changes) for control/state, outputs, pipelines, annotations, paths, tune-history, frontend events, timeline/recordings, navigation, coverage; each write bumps a version; ETag/If-None-Match on control/state"
+    status: in-progress
+    branch: task-t1065
+    priority: high
+    deps: []
+    parallel_group: API-HTTP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review 'Initiators' 4): steady state following live, one pane, nothing moving = 7.3 req/s besides WS (1 s: outputs, pipelines; 2 s: control/state 10 KB, annotations, paths, tune-history, frontend/events, survey coverage cells=2048; 5 s: inventory x2, timeline, recordings; 10/15/30 s others). Freezing the view saves nothing (6.7 req/s). None of these answers changes between polls in the common case.
+      DELIVER (server half; the client half is its own ticket): a versioned change feed - each listed route's backing state bumps a version on write, and the socket pushes `changed {route, version}` (coalesced, at most a few per second per route); plus ETag/If-None-Match -> 304 on control/state (10 KB every 2 s today). docs/api.md + api_contract.rs (T-079). Stream contract = core interface.
+      ACCEPTANCE: contract/component test - a write to each listed route's state produces exactly one `changed` for that route (coalesced under a burst); no write for 30 s -> no messages; control/state with a matching If-None-Match -> 304.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): Server change notifications instead of client polling: a `changed {route, version}` message (on /ws/presence or a new /ws/changes) for control/state, outputs, pipelines, annotations, paths, tune-history, frontend events, timeline/recordings, navigation, coverage; each write bumps a version; ETag/If-None-Match on control/state
+
+      2026-09-26 coordinator: T-1040 (coverage_changed event on the tile/row socket, queued) adds crates/hk-api/src/changes.rs - a change feed already. BUILD ON IT (extend its route/version set) rather than a second mechanism; if it cannot carry these routes, say why with evidence.
+    core_interface: true
+  - id: T-1066
+    milestone: MUI
+    title: "Client pollers become watchers: net.ts startWatch(route, fetch, fallbackMs = 30_000) fetches on a `changed` version bump and on the slow fallback only; steady state following live <= 1 req/s besides WS"
+    status: todo
+    priority: high
+    deps:
+    - T-1065
+    parallel_group: UI-WATCH
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      DELIVER (client half of the change feed): ui/src/app/net.ts gains startWatch(route, fetch, fallbackMs = 30_000); convert the pollers in shell.ts:139,168, dock/index.ts:127 (SERVED_OUTPUTS_POLL_MS = 1000), decode/pipelines.ts:147, centre/surface.ts:2187-2304 (paths, tune-history, frontend/events, annotations, navigation), capture-clock.ts:60,133 (timeline/recordings - the capture clock must not fall back to a browser clock or default span, CLAUDE.md), map/research.ts:346. Budget: idle following live <= 1 req/s besides WS.
+      ACCEPTANCE (spy client): 30 s with no `changed` message -> <= 1 request per route; one `changed` -> exactly one fetch of that route; a socket drop -> the fallback poll keeps the data fresh and the watch resubscribes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): Client pollers become watchers: net.ts startWatch(route, fetch, fallbackMs = 30_000) fetches on a `changed` version bump and on the slow fallback only; steady state following live <= 1 req/s besides WS
+  - id: T-1067
+    milestone: MUI
+    title: "Request-budget browser e2e (ui/e2e/request-budget.e2e.mjs, CDP page.requests): idle following live <= 30 API requests / 30 s; a 24-event trackpad burst <= 14 non-tile + <= 8 tile requests; a 300 px drag the same; freeze + scrub <= 10; connectionReused >= 90 %"
+    status: todo
+    priority: medium
+    deps:
+    - T-1060
+    - T-1061
+    - T-1062
+    - T-1064
+    - T-1066
+    parallel_group: UI-REQ-BUDGET
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      DELIVER: ui/e2e/request-budget.e2e.mjs driving the real app page `/` via the repo's CDP harness (ui/e2e/harness.mjs, Network domain), phases as in the review's Method (cold load, 30 s idle following live, one wheel step, a 24 x deltaY -15 / 16 ms trackpad burst in and out, a 300 px drag, freeze + 60 px scrub). Budgets: idle following live <= 30 API requests per 30 s (<= 1 req/s besides WS); one wheel step <= 10 incl. tiles; a burst <= 14 non-tile API requests after settle and <= 8 tile requests; a 300 px drag the same; freeze + scrub <= 10; Network.responseReceived connectionReused true for >= 90 %. Each failure message names the route counts, so a regression says which route broke the budget. Depends on the fixes it asserts (it is red today with the review's numbers).
+      ACCEPTANCE: the spec green alone 3/3 on a FRESH hk at ports >= 9216 with all dependencies landed; and shown red (with the route table) against a build that reverts the inventory settle.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): Request-budget browser e2e (ui/e2e/request-budget.e2e.mjs, CDP page.requests): idle following live <= 30 API requests / 30 s; a 24-event trackpad burst <= 14 non-tile + <= 8 tile requests; a 300 px drag the same; freeze + scrub <= 10; connectionReused >= 90 %
+  - id: T-1068
+    milestone: MLIVE
+    title: One multiplexed /ws/tiles/rows socket per pane instead of one per tile column (14-17 sockets per tab, a new set at every zoom level)
+    status: todo
+    priority: medium
+    deps:
+    - T-1063
+    - T-1064
+    parallel_group: API-HTTP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER (2026-09-26 00:20, via supervisor; measured review ~/.hackriff-ops/handoffs/request-volume-review-2026-09-26.md): "Every time I zoom, even a tiny bit, over a hundred requests are made ... We don't need hundreds of requests every time I slightly zoom in." Same night the staging tunnel logged 8 622 "Unable to reach the origin service: EOF" in 15 min (4 721 on /api/inventory). Measured in real Chrome via CDP: one 24-event trackpad zoom = 264 requests in (326 out), 100 of them /api/inventory; idle following live = 7.3 req/s; every request a new TCP connection.
+      CAUSE (review 'WebSockets per tab'): 14-17 /ws/tiles/rows sockets per tab, one per tile column, a new set at every zoom level; each holds a connection slot for its life.
+      DELIVER: one /ws/tiles/rows socket per pane carrying subscribe/unsubscribe for tile columns (addresses) over one connection; the server multiplexes row pushes onto it; the per-column socket form retires (or stays for one migration window, stated). Files: ui/src/app/centre/live-edge.ts (+ rowfeed.ts), crates/hk-api rows stream, docs/api.md + api_contract.rs (T-079). Live rows must stay steady (T-893's stall finding; T-453 capture-thread rule: measure per-row cost). Coordinate with LSR-2 (T-1043 /ws/spectrum/rows) - if that socket can carry the tile-row subscription, say so with evidence rather than build a second multiplexer.
+      ACCEPTANCE: a zoom across 3 levels holds exactly one rows socket per pane (CDP count in the request-budget e2e or its own spec); rows keep arriving at the live edge through the zoom; contract test for subscribe/unsubscribe.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / the crate's binaries / api_contract / e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`. A client test asserts the REQUEST the client builds (spy client), never only the response (T-367 rule).
+    notes: |
+      FOUND BY user 2026-09-26 via supervisor (request-volume review): One multiplexed /ws/tiles/rows socket per pane instead of one per tile column (14-17 sockets per tab, a new set at every zoom level)
+    core_interface: true
+  - id: T-1069
+    milestone: M2-hardening
+    title: listen_identifies_ctcss_67p0 fails alone intermittently (67.0 Hz, the lowest CTCSS tone, settles to subaudible:none on a clean 38 dB station) - red in bulk 1090f468 and on T-988's branch 09-25 13:35
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: PIPE-SUBAUDIBLE
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      RED UNDER SOME CONDITION, FAILS ALONE (runner triage, 2026-09-26 00:29-00:50): hk-pipeline::listen_subaudible listen_identifies_ctcss_67p0 (T-988's test, on main) failed in bulk base=1090f468 (T-1009/1043/1021/1048/1040 - none touches the listen/demod path; hk-pipeline src changes there are counters only) AND failed ALONE on that merge tree (4.36 s): status {"subaudible":"none","subaudible_s":8.0,"snr_db":38.6,"squelch_open":true,"frames":803}; the same test alone on main 1090f468 PASSED. Earlier: failed alone on 2026-09-25 13:35 (T-988's branch, runner triage, panicked at listen_subaudible.rs:303 - the `assert_eq!(v["subaudible"], "ctcss")`). So the 67.0 Hz case (the LOWEST CTCSS tone) is marginal: sometimes 8 s of a clean 38 dB station settles to 'none'. Other tones (131.8, 233.6) and DCS have not been seen red.
+      DELIVER (deflake-triage skill): reproduce it in isolation (loop the one binary, e.g. 30x `cargo nextest run -p hk-pipeline -E 'binary(listen_subaudible) & test(ctcss_67p0)'`, count reds); find the condition - suspects: the 67 Hz tone near the sub-audible filter's lower edge / the audio high-pass or de-emphasis corner (T-1015 changed stereo time constants and level reporting 2026-09-25 20:35), the settle window vs the tone detector's integration time (8 s seen, too few cycles for the Goertzel/PLL lock at 67 Hz?), start-phase dependence of the synthetic source, or settled_status reading before the detector's first decision. FIX THE PRODUCT (or the fixture if it is the synthetic source that is wrong, with evidence) so 67.0 Hz is identified deterministically; never loosen the assertion, never retry. Prove the fix goes red when the defect returns.
+      ACCEPTANCE: 50/50 green alone and 10/10 under `just test-crate hk-pipeline`; all listen_subaudible tones green; a named test pins the found condition.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY merge-runner triage 2026-09-26 00:50: listen_identifies_ctcss_67p0 fails alone intermittently (67.0 Hz, the lowest CTCSS tone, settles to subaudible:none on a clean 38 dB station) - red in bulk 1090f468 and on T-988's branch 09-25 13:35
+    high_effort_reason: intermittent DSP defect at the sub-audible detector's low edge; hard debugging (deflake-triage) on the real-time listen path
+  - id: T-1070
+    milestone: MLIVE
+    title: "P1: spectrum-history pyramid levels >= 1 hold nothing in a live run - a zoomed-out tile has grid 0 while coverage says observed (the whole-surface view has no data to draw)"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: STORE-PYRAMID
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY T-1055's worker (2026-09-26 00:35, branch task-t1055 result, mock SDR): "the spectrum-history pyramid's levels >= 1 hold nothing in a live run, so the moment a tile is answered from level 1 it has grid 0 and shadow 0 while coverage still says observed 25 - that is exactly the user's whole-surface view over a 1.7 h time axis, which has no data to draw at all." This is the user's T-1055 symptom ("after a full scan the canvas does not show where it looked") at every zoomed-out view, and it violates the CLAUDE.md live-tile invariant: "a level that downsamples every N rows adjusts its in-progress top row as rows arrive and commits every N - the same rule at 2, 4, 8, 16, 32. Coarse levels are incrementally maintained structures, not batch materialize-on-demand work."
+      DELIVER: reproduce first through the mock SDR (hk serve --device mock:..., a live run of a few minutes, then /api/tiles at level 0, 1, 2, ... over the same window: grid cell counts per level) and state which it is - levels never written by the live view writer (crates/hk-pipeline/src/history.rs view_writer / hk-store Pyramid::ingest), written but not sealed/readable until a batch, evicted by T-1023's budget, or read at the wrong address. Fix it so every level >= 1 carries the downsampled rows of a live run as they arrive (in-progress top row adjusted per row, committed every N). Measure the per-row capture-thread cost before/after (T-453: state the number). Cross-reference T-1058 (last-known ledger: the shadow plane) - that ticket owns shadow; this one owns the grid.
+      ACCEPTANCE (mock SDR, deterministic, hk-store/hk-api tests + api_contract where a route changes): after N rows at level 0, every level L >= 1 over the same window has floor(N / 2^L) committed rows plus an in-progress top row whose values fold what arrived; a tile answered from level 1..k over a live run has grid > 0 where coverage says observed; ui/e2e: the whole-surface zoomed-out view over a live run draws measured cells, not blank.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, hk-pipeline history, hk-api tiles, api_contract, the e2e alone on ports >= 9216 against a FRESH hk; just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1055 worker 2026-09-26: P1: spectrum-history pyramid levels >= 1 hold nothing in a live run - a zoomed-out tile has grid 0 while coverage says observed (the whole-surface view has no data to draw)
+    core_interface: true
+  - id: T-1071
+    milestone: MLIVE
+    title: "P1: a coarse 'Scan everything (fast)' pass retains no spectrum history after its rate change - the swept range leaves nothing on the canvas"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: PIPE-SCAN-HISTORY
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY T-1055's worker (2026-09-26 00:35, branch task-t1055 result, mock SDR): "a coarse pass, which is what 'Scan everything (fast)' runs, retains no spectrum history at all after its rate change, so after THAT pass there is nothing to shadow." The user's T-1055 symptom for the one-click fast scan: the survey leaves no trace on the canvas.
+      DELIVER: reproduce through the mock SDR (the 'Scan everything (fast)' pass via the gated scan route, then /api/tiles + /api/coverage over the swept range) and find where the rate change drops history - the history writer not re-plumbed after the rate change (compare T-? 'After a retune the spectrum-history pyramid stops recording' - a retune fix that may not cover a RATE change), the fast pass's rows gated out as sweep/survey frames, or rows rejected as 'late'/'rejected' by the view writer (history.rs view_late/view_rejected counters: report them). Fix it so every coarse-pass step's rows reach the pyramid at their own frequency/time with provenance (device, rate, step), so the canvas shows the swept range as observed (and T-1058's ledger then has its last-known). Measure the per-row cost (T-453).
+      ACCEPTANCE (mock SDR, deterministic): after a 'Scan everything (fast)' pass over a fixture range, /api/tiles over the swept range at the survey-overview level has grid > 0 in every swept step's columns and none outside; view_rejected/view_late stay 0 for the pass; ui/e2e scan-shadow (T-1055's spec) extended to the FAST pass green alone 3/3 on a FRESH hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1055 worker 2026-09-26: P1: a coarse 'Scan everything (fast)' pass retains no spectrum history after its rate change - the swept range leaves nothing on the canvas
+    high_effort_reason: real-time history path across a rate change (scheduler/scan re-plumb + view writer); hard debugging
+  - id: T-1072
+    milestone: MUI
+    title: "fog-of-war.e2e red ALONE on main: T-521's 'less than 200 px of the pane is uncovered by floating chrome' fails since full bleed/floating chrome - fix the chrome if it covers the map, else re-measure with the same intent"
+    status: in-progress
+    branch: task-t1072
+    priority: high
+    deps: []
+    parallel_group: UI-FOG-SPEC
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-26 by the UI-stack integrator; ui/e2e/fog-of-war.e2e.mjs fails identically on 1090f468 and on the T-996/T-1026/T-1007 stack, fresh hk built from 1090f468's crates, spec alone on ports >= 9216): the T-521 check "less than 200 px of the pane is uncovered by floating chrome" fails - so the migrated reads after it (the pane's scale block and the Retune control in the floating cluster, done on the stack) never run. Since T-521 the map went full bleed with floating chrome (T-995, T-1025 top chrome, T-1041 trace layer off, T-1056 sheet floats over the canvas, T-1053 folded mode chips) - either the chrome now covers too much of the pane at the spec's viewport (a PRODUCT regression: fix the chrome) or the spec measures coverage with a stale list of what counts as chrome/pane. Decide with evidence (screenshot + the measured uncovered rect), fix the product if the map is covered, update the measurement only if its premise changed (same intent, never a looser number). The fog-of-war flake history (7 reds in 7 d, 'passes alone') is separate; this one FAILS ALONE.
+      ACCEPTANCE: fog-of-war green alone 3/3 on a FRESH hk, including its migrated scale-block/Retune reads.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY UI-stack integrator 2026-09-26: fog-of-war.e2e red ALONE on main: T-521's 'less than 200 px of the pane is uncovered by floating chrome' fails since full bleed/floating chrome - fix the chrome if it covers the map, else re-measure with the same intent
+  - id: T-1073
+    milestone: MUI
+    title: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
+    status: todo
+    priority: high
+    deps:
+    - T-1007
+    parallel_group: UI-TOPCHROME-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON task-t1007 ONLY (UI-stack integrator 2026-09-26, sha 28257a9d): ui/e2e/app-top-chrome.e2e.mjs failed 3 of 3 alone, each at a different width with a different message ('the canvas moved by itself', 'gap changed'); green on task-t996 and task-t1026 (the same stack below it). T-1007 adds the settings rows to the ⋯ menu beside T-1053's folded mode chips. Looks like T-1031's canvas-sample class (sample hits a box/guide/grey), but 3/3 alone on one branch and 0 on its parents is not proven a flake. Triage (deflake-triage): run it alone on t1026 vs t1007 10x each; if t1007 moves the canvas or the chip gap (the menu's size, a relayout on open/close, a settings poll re-rendering the cluster), fix the product; if it is the sample point, make the sample deterministic (T-1031's rule) and prove it red when the defect returns. Never loosen an assertion.
+      ACCEPTANCE: app-top-chrome green alone 10/10 on main with T-1007 landed, at 1280x800 and 400 px.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY UI-stack integrator 2026-09-26: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
+  - id: T-1074
+    milestone: MUI
+    title: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
+    status: todo
+    priority: high
+    deps:
+    - T-1051
+    parallel_group: UI-TRACE-HOLD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      SPLIT FROM T-1051 (its handback 2026-09-26 01:44, branch task-t1051 c635e59c): every app-trace test is green 3/3 at 2 lanes EXCEPT 'T-475: the AFTERGLOW ... while SCRUBBED', which ran past the spec's 600 s deadline 3/3 at 2 lanes and alone needed 1-7 attempts (~45 s per failed attempt; one run 307 s). Cause located: scrubOntoCell (ui/e2e/app-trace.e2e.mjs) parks by FREEZING AT THE LIVE EDGE and waiting for a cell - the still-being-written edge cell - with failed attempts bounded only by the 180 s waitWhileWorking cap.
+      DELIVER: first log why each park attempt fails (one console.error of `last` in scrubOntoCell's catch) under HK_E2E_CONCURRENCY=2; then park deterministically - freeze and drag back into SEALED history as the 'scrubbed into the past' test already does (passes in 10-25 s at 2 lanes) - and bound failed attempts by the pane's report stalling, not a wall-clock cap. Same assertion (the afterglow while scrubbed), never looser. If a park attempt fails because of a product defect (the frozen pane never reports a cell), fix the product.
+      OBSERVED (T-1051, not chased): /api/tiles/batch took 10-40 s per 2-4 addresses on a debug hk at load ~35 - if the log shows the park waits on that, say so with numbers (T-1021 owns tile-lock hold).
+      ACCEPTANCE: app-trace whole spec green 3/3 alone AND 3/3 at 2 lanes (with live-edge) on a FRESH hk, the afterglow test under 60 s each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone/at 2 lanes on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1051 worker 2026-09-26: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
