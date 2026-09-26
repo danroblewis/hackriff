@@ -30838,7 +30838,7 @@ tasks:
   - id: T-1044
     milestone: MLIVE
     title: "LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles"
-    status: in-progress
+    status: done
     priority: medium
     deps:
     - T-1042
@@ -30864,6 +30864,7 @@ tasks:
       Observed, not chased: ui/e2e/live-ring.e2e.mjs (LSR-1) fails on this branch alone at 'waiting for the chrome to report a viewport' (.hk-surface-viewport[data-viewport=pane]): T-996 (already in merged main) stopped passing `chrome` to the preview so that selector no longer exists - the spec is stale against main, not touched by this diff | live-ring-resume + live-ring run concurrently on two lanes: resume spec failed at 115 s (not reproduced alone 3x) - load-flake candidate for the deflaker
       Resources: 293 CPU-s, peak 4.8 GB
     branch: task-t1044
+    commit: d2485a47
   - id: T-1045
     milestone: MLIVE
     title: "LSR-4: per-device live publishers spectrum/live/<device>; a pane's device selects its stream"
