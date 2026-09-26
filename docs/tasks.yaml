@@ -29685,7 +29685,7 @@ tasks:
   - id: T-1018
     milestone: MLIVE
     title: "Coarse /api/tiles reads fold from the FINEST affordable level and never read their own pre-built T-585 node: read the exact node first, else the cheapest candidate ((3,1) 150 ms -> ~25 ms)"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: TILE-READ
@@ -29713,6 +29713,7 @@ tasks:
       Commits: 819a70ad, 2fb5d753, c577e087, 3c5421b7, d2d3bf9f
       Observed, not chased: hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops fails alone on main code (decoded.rs:1529), load avg ~30. | From round 1, still present on main: hk-api ondemand::silent_peers_... (wall-clock record rate) and hk-cli api_contract ws_stream_header_matches_the_stream_contract / recipe_and_pipeline_routes_match_the_documented_shapes / a_retune_keeps_connected_stream_consumers_connected fail alone on main's code. | At the live edge a coarse tile now costs what it did before T-1018 (finest-first) until its rows fold, about seal_lag later. The saving applies to every tile wholly behind the fold edge, which is all history plus most of a zoomed-out screen.
       Resources: 266 CPU-s, peak 3.0 GB
+    commit: 797bc93f
   - id: T-1019
     milestone: MLIVE
     title: "Tile body still carries three 65 536-element JSON grid planes (coverage duplicated per cell, frames, occupancy_max): compact them like max_db f16 (850 kB -> ~200 kB, 12 ms per-tile floor -> ~3 ms)"
