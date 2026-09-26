@@ -29505,6 +29505,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it
+
+      Conflict-fix round 3 (2026-09-25): merged gated base 6f029754 (bulk base; includes T-1001, which has landed) into task-t1002 as e001db4c. One conflict, docs/23 §11 table: kept T-1001's 'Per-pane Live/Freeze (T-1001)' row AND T-1002's per-pane inventory-queries row. surface.ts auto-merged; checked that T-1001's per-pane Live press runs mirror() -> publishPanes(), so the pressed pane's window is re-published, and that T-994/T-1019 box activity (keyed by emitter id) is applied to each pane's own paneRows. Not stacked on task-t1001 (already in base; merge-tree t1001 x t1002 now clean). just test-ui 100/100 files, tsc clean. Browser specs (app-active-pane, app-pane-inventory, app-outputs-map) NOT run: just builders never safe over 20 min (load 30-43 / 28 cores), so no fresh hk.
     high_effort_reason: per-pane inventory queries change how the time-scoped inventory invariant is served (one query per pane window, lists bound to the active pane) - backend query shape + client data flow
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 19:49).
