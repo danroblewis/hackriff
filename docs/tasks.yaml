@@ -31179,7 +31179,7 @@ tasks:
   - id: T-1058
     milestone: MLIVE
     title: "Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it"
-    status: in-progress
+    status: done
     branch: task-t1058
     priority: high
     deps: []
@@ -31197,6 +31197,7 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor: Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it
     core_interface: true
     high_effort_reason: the user's design replaces the shadow mechanism across hk-store ingest, the tile route and a new route; persisted state + capture-thread cost (T-453) + the ADR-0020 last-known tier contract
+    commit: b71c830d
   - id: T-1059
     milestone: M2-hardening
     title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
