@@ -276,6 +276,7 @@ pub(super) fn start(
                 crate::history::VIEW_QUEUE_FRAMES,
             ))
         }),
+        cc_verdicts: Arc::clone(&common.cc_verdicts),
         survey_id: common.survey_id,
         fs,
         fft_len,
