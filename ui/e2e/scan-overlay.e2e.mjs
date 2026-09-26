@@ -89,20 +89,21 @@ async function serverSteps(backend, lo, hi) {
   return a.proposed.plan.windows.map((w) => [w.lo_hz, w.hi_hz, w.center_hz]);
 }
 
-/** Lime hatch pixels (`SCAN_INK` 0.62/1.0/0.22, blended) in a vertical stripe of the screenshot. */
-function limeIn(img, x0, x1, y0, y1) {
-  let n = 0, total = 0;
+/** Lime-ish pixels (`SCAN_INK` 0.62/1.0/0.22, blended) in a vertical stripe: `n` in `img`, and
+ * `fresh` — lime in `img` but not at the same pixel of `base`. The capture rules (the green IQ
+ * horizon, T-506) are green too and run full-width across the pane, so the plan's claim is made on
+ * what turned lime when Scan was pressed, not on every green pixel. */
+function limeIn(img, x0, x1, y0, y1, base = null) {
+  const lime = (d, i) => { const [r, g, b] = [d[i], d[i + 1], d[i + 2]]; return g > 90 && g - b > 45 && g - r > 25; };
+  let n = 0, fresh = 0, total = 0;
   for (let y = Math.max(0, Math.round(y0)); y < Math.min(img.height, Math.round(y1)); y++) {
     for (let x = Math.max(0, Math.round(x0)); x < Math.min(img.width, Math.round(x1)); x++) {
       const i = (y * img.width + x) * 4;
-      const [r, g, b] = [img.data[i], img.data[i + 1], img.data[i + 2]];
       total++;
-      // Lime over grey: green well above blue and red. Grey (r = g = b), the white/grey chrome
-      // text and the cyan-to-yellow ramp stops never have green this far above BOTH.
-      if (g > 90 && g - b > 45 && g - r > 25) n++;
+      if (lime(img.data, i)) { n++; if (!base || !lime(base.data, i)) fresh++; }
     }
   }
-  return { n, total };
+  return { n, fresh, total };
 }
 
 let canvasRect = null;
@@ -120,7 +121,7 @@ test("Scan opens a plan over the view: the steps drawn are the server's price, h
   for (let i = 0; i < 3; i++) { await page.click("document.querySelector('.map-zoom-out')"); await page.frames(3); }
   await page.frames(10);
   const posts0 = page.requests.filter((r) => r.method === "POST").length;
-  const before = await page.shot();
+  const before = await page.shot(path.join(ART, "scan-overlay-before-1280x800.png"));
 
   await page.click("document.querySelector('.map-scan-btn')");
   await page.waitFor("the plan to be priced with its steps",
@@ -159,10 +160,11 @@ test("Scan opens a plan over the view: the steps drawn are the server's price, h
   for (const [f0, f1] of greyInPlan) {
     const x0 = cssX(pane, f0) + 1, x1 = cssX(pane, f1) - 1;
     inkBefore += limeIn(before, x0, x1, y0, y1).n;
-    const a = limeIn(after, x0, x1, y0, y1);
-    inkAfter += a.n; px += a.total;
+    const a = limeIn(after, x0, x1, y0, y1, before);
+    inkAfter += a.fresh; px += a.total;
   }
-  assert.equal(inkBefore, 0, "no plan ink was on the grey before Scan was pressed");
+  // Before Scan the grey carries at most the capture rules' thin green lines — never a hatch.
+  assert.ok(inkBefore / px < 0.02, `no plan hatch was on the grey before Scan was pressed (${inkBefore}/${px} px green)`);
   assert.ok(inkAfter / px > 0.05, `grey inside the plan carries its hatch (${inkAfter}/${px} px)`);
   assert.ok(inkAfter / px < 0.6, `…as a hatch, not a wash: the grey still shows between the lines (${inkAfter}/${px})`);
 });
@@ -232,7 +234,7 @@ test("Start: the steps the engine executes (the scheduler's log) are the steps t
   let raw = [];
   const t1 = Date.now();
   for (;;) {
-    const q = new URLSearchParams({ f_lo: String(planned.lo_hz - 5e6), f_hi: String(planned.hi_hz + 5e6), t0: String(startS), t1: String(Date.now() / 1000 + 1), limit: "1000" });
+    const q = new URLSearchParams({ f_lo: String(planned.lo_hz - 5e6), f_hi: String(planned.hi_hz + 5e6), t0: String(startS - CAPTURE_LAG_S), t1: String(Date.now() / 1000 + 1), limit: "1000" });
     const obs = await api(backend, `/api/observations?${q}`);
     raw = (obs.records ?? []).filter((r) => r.record === "dwell").map((r) => ({
       c: r.window?.center_hz, tier: r.tier, reason: r.reason?.code, start: (r.observed?.start_ns ?? 0) / 1e9 - startS,

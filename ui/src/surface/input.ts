@@ -97,6 +97,22 @@ export interface SurfaceInputOptions {
   onAnnotateBox?: (r: SurfaceRegion) => void;
   /** A tap in a tool mode that drops a point annotation: `"text"` in Annotate, `"marker"` in Pin. */
   onAnnotatePoint?: (p: { pane: string; at: GlPoint }, kind: "text" | "marker") => void;
+  /**
+   * **A view-moving gesture touched a PANE** (T-1028), so a host that is in retune mode knows when
+   * to act and when a gesture ended.
+   *
+   * `ended: false` is "the view moved just now"; `ended: true` is the gesture's own end — the
+   * pointer released, or a pinch's second finger lifted — which is the same commit point T-486's
+   * follow/pause decision is made at, for the same reason: a gesture is over when the browser says
+   * it is over, not when a timer guesses. A wheel has no end and only ever reports `false`; the
+   * host is the one that decides what stillness means.
+   *
+   * **This file still reaches nothing.** It reports that a pane's view moved; what that means is the
+   * host's, exactly as `measureMode` and `annotateMode` are. The map strip is deliberately not
+   * reported: it is a navigator onto the surface, not a pane's window, and nothing about dragging it
+   * says where the radio should look.
+   */
+  onGesture?: (g: { pane: string; ended: boolean }) => void;
   /** **Ctrl+Shift+wheel adjusts the shadow's brightness instead of zooming** (T-526) — a client-only
    * display preference, never a view or device change. `notches` is the gesture's own signed count
    * (positive brightens); the host clamps and persists (`./shadow-gain.ts`) and calls
@@ -148,7 +164,20 @@ export function attachSurfaceInput(
       y: canvas.height - (e.clientY - r.top) * (canvas.height / Math.max(1, r.height)),
     };
   };
-  const moved = () => opts.onView?.();
+  /**
+   * A viewport moved. `pane` names the pane when the gesture was on one (T-1028's hook); the map
+   * strip passes none, because it is not a pane's window.
+   */
+  const moved = (pane: string | null = null, ended = false) => {
+    opts.onView?.();
+    if (pane) opts.onGesture?.({ pane, ended });
+  };
+  /** Make the pane under `p` active (the map strip is not a pane and changes nothing). */
+  const activate = (p: GlPoint) => {
+    if (preview.onMap(p)) return;
+    const pane = preview.paneAt(p);
+    if (pane) preview.activePane = pane;
+  };
 
   let dragging:
     | {
@@ -161,6 +190,16 @@ export function attachSurfaceInput(
       undecided: boolean; t0: number; press: GlPoint;
       /** T-1008: a host handle this stroke grabbed ([[SurfaceInputOptions.grabHandle]]). */
       handle?: { move(p: GlPoint): void; end(): void } | null;
+      /**
+       * **Did this stroke actually MOVE the view?** (T-1028, found by review.)
+       *
+       * `settle` runs for every primary press on a pane — it is T-486's follow/pause commit, and a
+       * click legitimately reaches it — so "the stroke ended" is not the same statement as "a
+       * gesture happened". Retune mode acts on the second, and the first cut reported the first:
+       * with the mode on, clicking a signal box to focus it posted a window to the radio. A click is
+       * not a pan, and this flag is the difference, set only where a viewport was really moved.
+       */
+      panned: boolean;
     }
     | null = null;
 
@@ -170,7 +209,7 @@ export function attachSurfaceInput(
   // finger is ignored. When a pinch ends, the finger left down does nothing until it lifts: carrying
   // it on as a pan would move the view by however far the fingers drifted apart.
   const fingers = new Map<number, { x: number; y: number }>();
-  let pinch: { map: boolean; pane: string | null; spread: number; mid: { x: number; y: number } } | null = null;
+  let pinch: { map: boolean; pane: string | null; spread: number; mid: { x: number; y: number }; panned: boolean } | null = null;
   const spreadMid = () => {
     const [a, b] = [...fingers.values()];
     return { spread: Math.hypot(a.x - b.x, a.y - b.y), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
@@ -199,7 +238,14 @@ export function attachSurfaceInput(
   // Nothing here moves a viewport, so a region stroke is not a pan: T-444's offer is neither
   // invalidated nor created by one, which is correct — the viewport did not move.
   const onDown = (e: PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0) {
+      // T-1000: a right (or middle) press on a pane still says which pane the user is pointing at,
+      // so it sets the active pane exactly as a primary press does — before this, a right-click
+      // opened a pane's context menu while the chrome went on acting on whichever pane was pressed
+      // last. It starts no stroke: nothing pans, marks or measures, and nothing reaches a device.
+      if (!isTouch(e)) activate(point(e));
+      return;
+    }
     if (isTouch(e)) {
       if (fingers.size >= 2) return; // a third finger means nothing
       fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -214,7 +260,7 @@ export function attachSurfaceInput(
         const map = d ? d.map : preview.onMap(p);
         const pane = map ? null : d?.pane ?? preview.paneAt(p);
         if (pane) preview.activePane = pane;
-        pinch = { map, pane, spread, mid };
+        pinch = { map, pane, spread, mid, panned: false };
         canvas.setPointerCapture(e.pointerId);
         return;
       }
@@ -228,7 +274,7 @@ export function attachSurfaceInput(
     if (handle) {
       dragging = {
         x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region: null, measuring: null,
-        annotating: null, tool: null, undecided: false, t0: e.timeStamp, press: p, handle,
+        annotating: null, tool: null, undecided: false, t0: e.timeStamp, press: p, handle, panned: false,
       };
       canvas.setPointerCapture(e.pointerId);
       return;
@@ -249,7 +295,7 @@ export function attachSurfaceInput(
     const undecided = isTouch(e) && !region && !measuring && !tool;
     dragging = {
       x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region, measuring, annotating, tool,
-      undecided, t0: e.timeStamp, press: p,
+      undecided, t0: e.timeStamp, press: p, panned: false,
     };
     if (region) opts.onRegionDrag?.(region);
     if (measuring) opts.onMeasureDrag?.(measuring);
@@ -270,7 +316,11 @@ export function attachSurfaceInput(
       else if (pinch.pane) { preview.wheel(pinch.pane, at, factor, axes); preview.drag(pinch.pane, dx, dy); }
       pinch.spread = spread;
       pinch.mid = mid;
-      moved();
+      // Two fingers that have not separated or travelled have moved nothing (T-1028): the view is
+      // where it was, so there is no gesture to report and nothing for a mode to act on.
+      const moving = factor !== 1 || dx !== 0 || dy !== 0;
+      if (moving) pinch.panned = true;
+      moved(moving && !pinch.map ? pinch.pane : null);
       return;
     }
     if (!dragging || !e.buttons) { opts.onHover?.(point(e), e); return; }
@@ -293,7 +343,8 @@ export function attachSurfaceInput(
       const dx = (e.clientX - dragging.x0) * scale, dy = -(e.clientY - dragging.y0) * scale;
       if (dragging.map) preview.dragMap(dx, dy);
       else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-      moved();
+      if (dx !== 0 || dy !== 0) dragging.panned = true;
+      moved(dragging.panned && !dragging.map ? dragging.pane : null);
       return;
     }
     const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
@@ -318,7 +369,10 @@ export function attachSurfaceInput(
     }
     if (dragging.map) preview.dragMap(dx, dy);
     else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-    moved();
+    // The view moved by the distance travelled, so a zero-distance move (a coalesced jitter event at
+    // the same coordinates) moved it by zero — not a pan, and not a gesture to report (T-1028).
+    if (dx !== 0 || dy !== 0) dragging.panned = true;
+    moved(dragging.panned && !dragging.map ? dragging.pane : null);
   };
 
   // **The gesture ended, so the pane's follow/pause decision is committed now** (T-486).
@@ -330,12 +384,19 @@ export function attachSurfaceInput(
   // cause. A region stroke never panned, so there is nothing to commit for one.
   const settle = (d: {
     map: boolean; pane: string | null; region: SurfaceRegion | null; measuring: SurfaceRegion | null; annotating: SurfaceRegion | null;
+    panned: boolean;
   }) => {
     if (d.region || d.measuring || d.annotating) return;
     if (d.map) preview.endDragMap();
     else if (d.pane) preview.endDrag(d.pane);
     else return;
-    moved();
+    // **T-486's commit always runs; T-1028's gesture END is reported only if the view actually
+    // MOVED.** The two are different statements and the first cut of retune mode conflated them: a
+    // click reaches here (every release decides whether the pane ends up following), so reporting
+    // the end unconditionally made clicking a signal box post a window to the radio. `d.panned` is
+    // set only where a viewport was really moved, so a click, a tap, a long-press, a Pin-mode tap
+    // and a cancelled press all end a stroke without ever claiming a gesture happened.
+    moved(d.panned && !d.map ? d.pane : null, true);
   };
 
   // A pinch ends when either finger lifts: its target commits its follow/pause decision exactly as
@@ -343,7 +404,7 @@ export function attachSurfaceInput(
   const endPinch = () => {
     const p = pinch;
     pinch = null;
-    if (p) { settle({ map: p.map, pane: p.pane, region: null, measuring: null, annotating: null }); }
+    if (p) { settle({ map: p.map, pane: p.pane, region: null, measuring: null, annotating: null, panned: p.panned }); }
   };
 
   const onUp = (e: PointerEvent) => {
@@ -442,7 +503,8 @@ export function attachSurfaceInput(
     const { factor, axes } = wheelZoom(e);
     if (preview.onMap(p)) { preview.wheelMap(p, factor, axes); moved(); return; }
     const pane = preview.paneAt(p);
-    if (pane) { preview.activePane = pane; preview.wheel(pane, p, factor, axes); moved(); }
+    // A wheel has no release, so it is never reported as ENDED: stillness is the host's call.
+    if (pane) { preview.activePane = pane; preview.wheel(pane, p, factor, axes); moved(pane); }
   };
 
   const onDbl = (e: MouseEvent) => {
@@ -452,6 +514,9 @@ export function attachSurfaceInput(
   };
 
   const onMenu = (e: MouseEvent) => {
+    // T-1000: the menu request itself names the pane too — a keyboard's context-menu key, or a
+    // platform whose secondary click arrives with no non-primary `pointerdown` before it.
+    if (fingers.size === 0) activate(point(e));
     if (!opts.onContext) return;
     e.preventDefault();
     // A finger is still down (T-824): the browser's long-press menu, fired mid-hold. The stroke

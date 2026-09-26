@@ -194,9 +194,64 @@ pub struct AudioStatus {
     /// began, so a loss of stereo between two status records is still reported, never hidden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stereo_lock_losses: Option<u64>,
+    /// NBFM streams only (T-988): blind sub-audible squelch identification from the
+    /// discriminator — `ctcss`, `tone` (a clean line off the standard table), `dcs`, `none`
+    /// (enough on-air audio carried neither: "no tone", not absent) or `measuring`. Absent on
+    /// every other mode (nobody looked). The fields below flatten `hk_model::Subaudible`, since a
+    /// status record is flat metadata ([`AudioStatus::set_subaudible`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subaudible: Option<String>,
+    /// On-air audio the identification analysed, s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subaudible_s: Option<f64>,
+    /// The standard CTCSS tone matched (`ctcss`), Hz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctcss_hz: Option<f64>,
+    /// The measured sub-audible line (`ctcss`/`tone`), Hz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone_hz: Option<f64>,
+    /// That line over the 55–270 Hz band median, dB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone_snr_db: Option<f64>,
+    /// A second tone present, measured, Hz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone2_hz: Option<f64>,
+    /// The DCS code (`dcs`), three octal digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcs_code: Option<String>,
+    /// `normal` or `inverted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcs_polarity: Option<String>,
+    /// The same stream read in the other polarity, e.g. `047I` (DCS aliasing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcs_alias: Option<String>,
 }
 
 impl AudioStatus {
+    /// Flattens a sub-audible report into the status fields (T-988).
+    pub fn set_subaudible(&mut self, s: &hk_model::Subaudible) {
+        use hk_model::SubaudibleKind as K;
+        self.subaudible = Some(
+            match s.kind {
+                K::Measuring => "measuring",
+                K::Ctcss => "ctcss",
+                K::Tone => "tone",
+                K::Dcs => "dcs",
+                K::None => "none",
+            }
+            .into(),
+        );
+        self.subaudible_s = Some(s.analysed_s);
+        let first = s.tones.first();
+        self.ctcss_hz = first.and_then(|t| t.table_hz);
+        self.tone_hz = first.map(|t| t.measured_hz);
+        self.tone_snr_db = first.map(|t| t.snr_db);
+        self.tone2_hz = s.tones.get(1).map(|t| t.measured_hz);
+        self.dcs_code = s.dcs.as_ref().map(|d| d.code.clone());
+        self.dcs_polarity = s.dcs.as_ref().map(|d| d.polarity.clone());
+        self.dcs_alias = s.dcs.as_ref().and_then(|d| d.aliases.first().cloned());
+    }
+
     /// The status as a flat JSON object (what `Publisher::publish_status` accepts).
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
@@ -440,6 +495,51 @@ mod tests {
             (Some(true), Some(2))
         );
         assert!(metadata_is_allowlist_shaped(&v));
+    }
+
+    #[test]
+    fn subaudible_status_is_flat_metadata() {
+        use hk_model::{DcsCode, Subaudible, SubaudibleKind, SubaudibleTone};
+        let mut s = AudioStatus::default();
+        s.set_subaudible(&Subaudible {
+            kind: SubaudibleKind::Ctcss,
+            analysed_s: 4.5,
+            tones: vec![SubaudibleTone {
+                measured_hz: 131.79,
+                snr_db: 31.2,
+                table_hz: Some(131.8),
+                delta_hz: Some(-0.01),
+                tolerance_hz: 1.0,
+            }],
+            dcs: None,
+            reason: Some("free text never rides on a status record".into()),
+            detector: "hk-demod/subaudible@0.1.0".into(),
+        });
+        let v = s.to_value();
+        assert!(metadata_is_allowlist_shaped(&v), "{v}");
+        assert_eq!(
+            (v["subaudible"].as_str(), v["ctcss_hz"].as_f64()),
+            (Some("ctcss"), Some(131.8))
+        );
+        let mut s = AudioStatus::default();
+        s.set_subaudible(&Subaudible {
+            kind: SubaudibleKind::Dcs,
+            analysed_s: 3.0,
+            tones: Vec::new(),
+            dcs: Some(DcsCode {
+                code: "023".into(),
+                polarity: "normal".into(),
+                words: 17,
+                aliases: vec!["047I".into()],
+            }),
+            reason: None,
+            detector: "hk-demod/subaudible@0.1.0".into(),
+        });
+        let v = s.to_value();
+        assert!(metadata_is_allowlist_shaped(&v), "{v}");
+        assert_eq!(v["dcs_code"], "023");
+        assert_eq!(v["dcs_alias"], "047I");
+        assert!(v.get("ctcss_hz").is_none());
     }
 
     #[test]

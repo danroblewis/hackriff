@@ -9,6 +9,9 @@
 //! - [`source`]: the [`Source`] stream / [`SourceControl`] split, [`SourceCapabilities`],
 //!   [`SigmfReplaySource`], the [`HackRfSource`] and [`RtlSdrSource`] drivers (cargo features
 //!   `hackrf` / `rtlsdr`).
+//! - [`gain`]: automatic front-end gain management (T-945): the device-generic policy that walks a
+//!   device's gain stages and converges on the state whose *processed output* is best, rather than
+//!   reacting to the overload flag. Off by default; actuated through `hk_api::gain`.
 //! - [`ring`]: the single-writer, multi-reader RAM ring ([`ring_buffer`]) with exact loss
 //!   accounting and streaming or in-memory pre-trigger capture.
 //! - [`rt`]: best-effort priority and memory-lock hooks for the capture/writer thread.
@@ -19,12 +22,17 @@
 //! an owned dataflow whose chains are reader cursors over this ring).
 
 pub mod block;
+pub mod gain;
 pub mod ring;
 pub mod rt;
 pub mod scheduler;
 pub mod source;
 
 pub use block::{BlockHeader, Discontinuity, ProvenanceHandle, SampleBlock};
+pub use gain::{
+    DecodeQuality, GainController, GainError, GainLadder, GainPhase, GainPolicy, GainProbe,
+    GainProbeRecord, GainQuality, GainReport, GainScore, GainState, GainStep, GainTrigger,
+};
 pub use ring::{
     CaptureError, CaptureSegment, CaptureStatus, CapturedWindow, PreTriggerCapture, ReadChunk,
     ReadOutcome, ResyncPolicy, RingConfig, RingError, RingHandle, RingReader, RingSample,

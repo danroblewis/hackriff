@@ -335,6 +335,7 @@ fn graph() -> Graph {
             roll_off: None,
             bandwidth_hz: Some(40e3),
             pilot_hz: None,
+            subaudible: None,
         },
         lock_quality: Some(0.93),
         evm_db: Some(-17.5),

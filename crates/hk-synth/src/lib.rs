@@ -95,7 +95,10 @@ pub use score::{CalibrationSet, Scored, StageLadder, WindowEvidence, evaluate_wi
 pub use search::{JobState, NodeHeuristic, NodeView, Profile, StopReason, SynthBudget};
 pub use skeleton::{Skeleton, SlotAlternative};
 pub use template::{SaveAsTemplate, Template, save_as_template};
-pub use trace::{Outcome, Reason, Resolution, ResolutionKind, TraceNode};
+pub use trace::{
+    Outcome, Reason, Resolution, ResolutionKind, Retry, RetryOn, RetryReason, Suspected,
+    SuspectedBy, TraceNode,
+};
 pub use trace_sink::{Trace, TraceSink};
 
 /// Engine name and contract version, as provenance records carry it (`engine: "hk-synth@1"`,

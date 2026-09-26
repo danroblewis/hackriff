@@ -13,10 +13,6 @@ import * as chrome from "./app-chrome.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
-// The minimap strip's device-pixel height (`MINIMAP_PX` in `app/centre/surface.ts`), the same
-// constant every other e2e spec that measures minimap pixels reads (canvas-journey.e2e.mjs,
-// live-edge.e2e.mjs, fog-of-war.e2e.mjs, scan-everything.e2e.mjs).
-const MINIMAP_PX = 110;
 
 // Is a click at `sel`'s centre the element itself?
 const pressable = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false;
@@ -26,8 +22,8 @@ const pressable = (sel) => `(() => { const e = document.querySelector(${JSON.str
 const OVERLAYS = [
   { name: "the bottom sheet", open: ".sheet-head", close: ".sheet-close", box: ".sheet",
     isOpen: "document.querySelector('.sheet').dataset.snap !== 'peek'" },
-  { name: "the left column", open: ".side-chip", close: ".side-close", box: "#view-explore > .side",
-    isOpen: "document.querySelector('#view-explore > .side').classList.contains('is-open')" },
+  // T-997: the left inventory column and its chip are retired — the lists are sheet content now, so
+  // the sheet's own close is their dismiss (the entry above), and there is no second overlay here.
   { name: "the layers menu", open: ".map-layers-btn", close: ".map-layers .map-layers-close", box: ".map-layers",
     isOpen: "!document.querySelector('.map-layers').hidden" },
   // The viewport menu and the layers menu replace each other (one menu at a time), so it is checked
@@ -50,10 +46,10 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   t.after(() => browser.close());
   const page = await browser.page(undefined, { width, height: 860 });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  await page.waitFor("the surface, its floating controls, the sheet and the side chip",
+  await page.waitFor("the surface, its floating controls, the sheet and the inventory pills",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-layers-btn') && !!document.querySelector('.sheet-close') &&
-     !!document.querySelector('.side-chip')`, { timeoutMs: 60000 });
+     !!document.querySelector('.map-inv .map-pill')`, { timeoutMs: 60000 });
   // Every overlay starts closed (a stored snap state from nothing: fresh profile).
   if (await page.eval(OVERLAYS[0].isOpen)) {
     await page.click("document.querySelector('.sheet-close')");
@@ -69,19 +65,20 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   assert.deepEqual([bleed.x, bleed.y, bleed.w, bleed.h].map(Math.round), [0, 0, width, 860],
     `the canvas is not full-bleed at ${width} px: ${JSON.stringify(bleed)}`);
 
-  // T-933: the lifted minimap (the strip along the canvas's bottom edge, `MINIMAP_PX` tall) and the
-  // sheet's peek strip (never hidden — T-803) must not cover each other, at every width. The sheet
-  // starts at peek here (the reset above), so this is the every-width, no-interaction case the
-  // ticket's evidence measured; `insetBottom` is `surface.ts`'s own lift, read off the canvas the
-  // way the surface itself states it (`canvas.dataset.insetBottom`), never a second guess at it.
-  const dpr = await page.eval("window.devicePixelRatio || 1");
+  // T-995: the minimap is retired (user, 2026-09-25) — no map viewport row, at any width.
+  assert.equal(await page.$count('.hk-surface-viewport[data-viewport="minimap"]'), 0,
+    `a minimap viewport is still drawn at ${width} px`);
+  // T-933, carried to the panes: what used to be the minimap's lift is now the panes' bottom edge,
+  // and it must clear the sheet's peek strip (never hidden — T-803) at every width. The sheet
+  // starts at peek here (the reset above), so this is the every-width, no-interaction case;
+  // `insetBottom` is `surface.ts`'s own lift, read off the canvas the way the surface itself
+  // states it (`canvas.dataset.insetBottom`), never a second guess at it.
   const insets = await page.canvasInsets();
-  const mapTop = bleed.y + bleed.h - insets.bottom - MINIMAP_PX / dpr;
-  const mapBottom = bleed.y + bleed.h - insets.bottom;
+  const paneBottom = bleed.y + bleed.h - insets.bottom;
   const peek = await page.$rect(".sheet");
-  t.diagnostic(`at ${width} px minimap y ${Math.round(mapTop)}-${Math.round(mapBottom)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
-  assert.ok(mapBottom <= peek.y || mapTop >= peek.y + peek.h,
-    `the minimap (y ${Math.round(mapTop)}-${Math.round(mapBottom)}) and the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) overlap at ${width} px`);
+  t.diagnostic(`at ${width} px pane bottom y ${Math.round(paneBottom)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
+  assert.ok(paneBottom <= peek.y + 0.5,
+    `the panes' bottom edge (y ${Math.round(paneBottom)}) runs under the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) at ${width} px`);
 
   // (1) Each overlay alone: open from its small control, visible close, map back after.
   for (const o of OVERLAYS) {
@@ -129,7 +126,7 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
     // Nothing of the closed overlay is left over the map: a point inside where it was is not it.
     const cx = box.x + box.w / 2, cy = (y0 + y1) / 2;
     assert.equal(await page.eval(`(() => { const e = document.elementFromPoint(${cx}, ${cy});
-      return !!e?.closest(${JSON.stringify(o.box)}) && !e.closest('.side-chip'); })()`), false, `${o.name} still covers the map after its close`);
+      return !!e?.closest(${JSON.stringify(o.box)}); })()`), false, `${o.name} still covers the map after its close`);
     // ...and closed is exactly the state before it opened: re-open, close again, same columns clear.
     await page.click(`document.querySelector(${JSON.stringify(o.open)})`);
     await page.waitFor(`${o.name} to re-open`, o.isOpen, { timeoutMs: 5000 });

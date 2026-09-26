@@ -53,8 +53,19 @@ export interface DeviceSlice {
  * (T-906) is the frequency span to show, when the request names one (a past survey's band); null
  * keeps the pane's own span. Either way this is view arithmetic: the surface snaps it to a realizable
  * pane (`PaneModel`'s clamp to the zoom floor and the device range) and never reaches a device route,
- * so a span wider than the instantaneous bandwidth is a zoom over history, not a retune. */
-export interface NavSlice { gotoHz: number | null; gotoSpanHz: number | null; seq: number }
+ * so a span wider than the instantaneous bandwidth is a zoom over history, not a retune.
+ *
+ * `gotoTS`/`gotoSpanS` (T-999) name the TIME half of the same request, when it has one (a past
+ * survey's window): the instant to freeze the pane at, and, when the request names one, the time
+ * span to show — `null` keeps the pane's own. This is carried on the SAME request/seq pair as the
+ * frequency fields so one `nav` write moves both axes atomically; splitting them (as the drawer used
+ * to, writing `capture-slice`'s `reviewAt` separately) lost the time half the moment the active
+ * pane's own per-frame `mirror()` ran, because nothing read the store's `time` back into a pane. */
+export interface NavSlice {
+  gotoHz: number | null; gotoSpanHz: number | null;
+  gotoTS: number | null; gotoSpanS: number | null;
+  seq: number;
+}
 
 export interface ShellState {
   mode: Mode; theme: Theme; conn: ConnSlice; device: DeviceSlice; nav: NavSlice;
@@ -85,7 +96,7 @@ export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
   device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
-  nav: { gotoHz: null, gotoSpanHz: null, seq: 0 },
+  nav: { gotoHz: null, gotoSpanHz: null, gotoTS: null, gotoSpanS: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,
 });
@@ -95,9 +106,26 @@ export const setMode = (mode: Mode) => (): Partial<AppState> => ({ mode });
 const THEMES: readonly Theme[] = ["system", "dark", "light"];
 export const cycleTheme = (s: AppState): Partial<AppState> => ({ theme: THEMES[(THEMES.indexOf(s.theme) + 1) % THEMES.length] });
 
-export const requestGoto = (hz: number, spanHz?: number) => (s: AppState): Partial<AppState> => ({
-  nav: { gotoHz: hz, gotoSpanHz: spanHz !== undefined && Number.isFinite(spanHz) && spanHz > 0 ? spanHz : null, seq: s.nav.seq + 1 },
-});
+/** `time`, when given (T-999), names the (t0, t1) window a past-survey Go-to also asks for — a
+ * single request carrying both axes, so the surface's one `nav` subscriber moves the pane's
+ * frequency AND time together and nothing later in the frame (`mirror()`) can overwrite the half
+ * that was written some other way.
+ *
+ * `gotoTS` is the window's MIDPOINT `(t0S + t1S) / 2`, not its end: `PaneModel.goTo` takes a
+ * CENTRE (`centre/surface.ts` passes `t.tS` straight through as `centerNs`), so a `gotoTS` of `t1S`
+ * would land the pane with the whole survey window in the OLDER half of the frame and the newer
+ * half off-screen — a real gate finding (review, 2026-09-25): "centres the pane on the survey's end
+ * time t1 ... so half the window is off-screen". The midpoint is what actually shows `[t0S, t1S]`
+ * centred, matching `gotoSpanS = t1S - t0S`. */
+export const requestGoto = (hz: number, spanHz?: number, time?: { t0S: number; t1S: number }) =>
+  (s: AppState): Partial<AppState> => ({
+    nav: {
+      gotoHz: hz, gotoSpanHz: spanHz !== undefined && Number.isFinite(spanHz) && spanHz > 0 ? spanHz : null,
+      gotoTS: time && Number.isFinite(time.t0S) && Number.isFinite(time.t1S) ? (time.t0S + time.t1S) / 2 : null,
+      gotoSpanS: time && Number.isFinite(time.t1S) && Number.isFinite(time.t0S) && time.t1S > time.t0S ? time.t1S - time.t0S : null,
+      seq: s.nav.seq + 1,
+    },
+  });
 
 /** The pane frequency window a go-to request asks for (T-906): its centre and, when it names one,
  * its span — otherwise the pane keeps `currentSpanHz`. Null when there is nowhere to go. The caller
@@ -105,6 +133,14 @@ export const requestGoto = (hz: number, spanHz?: number) => (s: AppState): Parti
 export function gotoWindow(nav: NavSlice, currentSpanHz: number): { centerHz: number; spanHz: number } | null {
   if (nav.gotoHz === null || !Number.isFinite(nav.gotoHz)) return null;
   return { centerHz: nav.gotoHz, spanHz: nav.gotoSpanHz ?? currentSpanHz };
+}
+
+/** The pane time window a go-to request asks for (T-999): the instant to freeze the pane at and,
+ * when the request names one, the span to show — otherwise the pane keeps its own. Null when the
+ * request named no time (a plain frequency Go-to, which leaves the pane's time alone). */
+export function gotoTimeWindow(nav: NavSlice): { tS: number; spanS: number | null } | null {
+  if (nav.gotoTS === null || !Number.isFinite(nav.gotoTS)) return null;
+  return { tS: nav.gotoTS, spanS: nav.gotoSpanS };
 }
 
 export const toast = (text: string) => (s: AppState): Partial<AppState> => ({ toast: { text, seq: s.toast.seq + 1 } });
