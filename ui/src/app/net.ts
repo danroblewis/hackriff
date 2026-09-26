@@ -102,6 +102,104 @@ export function startPoll(task: () => Promise<void>, intervalMs: number, onError
   return () => { stopped = true; clearTimeout(timer); };
 }
 
+// ---- change-feed watching (T-1066, over T-1065's `/ws/changes`) ----
+//
+// `startPoll` above asks "did it change?" on a fixed clock; `/ws/changes` (docs/api.md, T-1065)
+// answers it from the server's side of the knowledge — one socket, twelve routes, silent while
+// nothing moves. `startWatch` is the client half: it fetches once now, again whenever `/ws/changes`
+// says the route's version moved, and otherwise only on the slow `fallbackMs` clock (a route with no
+// producer wired — a growing counter, not a write — is still covered, just at that clock's cadence;
+// docs/api.md says which routes those are). One shared socket serves every `startWatch` call in the
+// tab: the hub below opens it lazily, multiplexes by route, and reconnects (`backoffMs`) on a drop —
+// while it is down every watch's own fallback timer is what keeps data fresh, and re-subscribing on
+// reconnect is free because the subscriber map outlives the socket.
+
+interface ChangesHub { subscribe(route: string, onChanged: () => void): () => void }
+
+let changesHub: ChangesHub | null = null;
+
+/** Lazily opens the one `/ws/changes` socket this tab needs and multiplexes it by route. Guarded for
+ * environments with no `WebSocket`/`location` (headless tests): subscribers still work, just driven
+ * by their callers' own fallback timers alone. */
+function getChangesHub(): ChangesHub {
+  if (changesHub) return changesHub;
+  const subs = new Map<string, Set<() => void>>();
+  const hub: ChangesHub = {
+    subscribe(route, onChanged) {
+      let set = subs.get(route);
+      if (!set) { set = new Set(); subs.set(route, set); }
+      set.add(onChanged);
+      return () => { set!.delete(onChanged); if (set!.size === 0) subs.delete(route); };
+    },
+  };
+  changesHub = hub;
+  if (typeof WebSocket === "undefined" || typeof location === "undefined") return hub;
+  let attempt = 0;
+  const connect = () => {
+    try {
+      openStream("/ws/changes", takeToken() ?? "", {
+        onHeader: () => { attempt = 0; }, // the initial `versions` table; each watch's own fetch already primes it
+        onText: (text) => {
+          let msg: { type?: string; route?: string };
+          try { msg = JSON.parse(text) as { type?: string; route?: string }; } catch { return; }
+          if (msg.type !== "changed" || typeof msg.route !== "string") return;
+          for (const fn of subs.get(msg.route) ?? []) fn();
+        },
+        onClose: () => { attempt++; window.setTimeout(connect, backoffMs(attempt - 1)); },
+      });
+    } catch { /* no WebSocket support here (or a bad URL); the fallback clock is the whole story */ }
+  };
+  connect();
+  return hub;
+}
+
+/**
+ * The low-level half of `startWatch`, for a caller that needs its own fetch/backoff scheduling (a
+ * rate meter that must keep sampling while something it reports on is actively running, T-1066's
+ * dock poll) but still wants the instant trigger when `route`'s version moves. Returns unsubscribe.
+ */
+export function subscribeChanges(route: string, onChanged: () => void): () => void {
+  return getChangesHub().subscribe(route, onChanged);
+}
+
+/**
+ * Fetches `task` now, again on every `/ws/changes` `changed` for `route`, and otherwise every
+ * `fallbackMs` — never more often, so a route with a producer wired costs one fetch per real change
+ * plus the slow clock's floor, and a route without one degrades to a plain `startPoll` at `fallbackMs`.
+ * Overlapping triggers (a change arriving mid-fetch) coalesce into one more run, never a pile-up.
+ * Failures back off up to `fallbackMs` and reset on success, as `startPoll` does. Returns stop.
+ */
+export function startWatch(
+  route: string,
+  task: () => Promise<void>,
+  fallbackMs = 30_000,
+  onError: (e: unknown) => void = () => {},
+): () => void {
+  let stopped = false, running = false, pending = false, fails = 0, timer = 0;
+  const scheduleFallback = () => {
+    clearTimeout(timer);
+    if (stopped) return;
+    const delay = fails ? Math.min(fallbackMs, Math.max(1000, backoffMs(fails))) : fallbackMs;
+    timer = window.setTimeout(run, delay);
+  };
+  function run() {
+    if (stopped) return;
+    if (running) { pending = true; return; }
+    running = true;
+    task().then(
+      () => { fails = 0; },
+      (e: unknown) => { fails++; onError(e); },
+    ).then(() => {
+      running = false;
+      if (stopped) return;
+      if (pending) { pending = false; void run(); } else scheduleFallback();
+    });
+  }
+  const unsubscribe = getChangesHub().subscribe(route, () => void run());
+  void run();
+  return () => { stopped = true; clearTimeout(timer); unsubscribe(); };
+}
+
 // ---- binary record header (stream contract §5.2) ----
 
 export const REC_DATA = 1, REC_DROPPED = 2, REC_STATUS = 3;

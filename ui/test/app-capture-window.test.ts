@@ -401,6 +401,24 @@ test("no default span: nothing on the capture window's path can fall back to a c
   assert.doesNotMatch(src, /\d+\s*\*\s*3600/);
 });
 
+test("T-1066 review fix: a failed /api/outputs read in pollSession never strands the button on \"recording\"", () => {
+  // The bug: `run` had no `catch` around the `GET /api/outputs`, so a single rejected fetch (a
+  // dropped connection, a `503`) threw out of the whole function — no `session`/`render` update AND
+  // no reschedule — leaving the button reading "Stop (N s)" forever with nothing left polling to
+  // notice the recording actually ended. The fix keeps `startPoll`'s old guarantee (a failed task
+  // never stops the next tick from being scheduled) even though this loop is hand-rolled, not
+  // `startPoll`, because it must stop entirely once the session ends.
+  const src = readFileSync("src/app/centre/capture-clock.ts", "utf8");
+  const run = /const run = async \(\) => \{[\s\S]*?\n    \};/.exec(src);
+  assert.ok(run, "pollSession's run() must exist in its expected shape");
+  assert.match(run![0], /try \{[\s\S]*client\.get<\{ recordings: RecordSession\[\] \}>\("\/api\/outputs"\)[\s\S]*\} catch/,
+    "the /api/outputs read is inside a try/catch");
+  // The reschedule must sit AFTER the catch, not inside the try — so it still runs on a caught error.
+  const catchIdx = run![0].indexOf("} catch");
+  const rescheduleIdx = run![0].indexOf("window.setTimeout(() => void run()");
+  assert.ok(catchIdx > 0 && rescheduleIdx > catchIdx, "the reschedule must run whether or not the read failed");
+});
+
 test("T-386 CLOCK GUARD: no clock of the browser's own reaches the capture-window modules", () => {
   for (const f of ["src/app/centre/capture-window.ts", "src/app/centre/capture-clock.ts"]) {
     const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");

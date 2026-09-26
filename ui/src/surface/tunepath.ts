@@ -70,6 +70,9 @@ export interface TunePath {
  * their boxes, or `null` when there is nothing to ask about. A viewport route answers about a
  * viewport, so all four bounds are always sent.
  */
+/** The bare route (T-1066), for `startWatch`/`subscribeChanges` — see `PATHS_ROUTE`. */
+export const TUNE_HISTORY_ROUTE = "/api/tune-history";
+
 export function tuneHistoryRequest(boxes: readonly Box[]): string | null {
   const ok = boxes.filter((b) => b.f1Hz > b.f0Hz && b.t1Ns > b.t0Ns && b.t0Ns > 0);
   if (ok.length === 0) return null;
@@ -77,7 +80,7 @@ export function tuneHistoryRequest(boxes: readonly Box[]): string | null {
   const f1 = Math.max(...ok.map((b) => b.f1Hz));
   const t0 = Math.min(...ok.map((b) => b.t0Ns)) / S_TO_NS;
   const t1 = Math.max(...ok.map((b) => b.t1Ns)) / S_TO_NS;
-  return `/api/tune-history?f_lo=${f0}&f_hi=${f1}&t0=${t0}&t1=${t1}`;
+  return `${TUNE_HISTORY_ROUTE}?f_lo=${f0}&f_hi=${f1}&t0=${t0}&t1=${t1}`;
 }
 
 /** The wire answer (`docs/api.md` "GET /api/tune-history") → [[TunePath]]s. Anything malformed is

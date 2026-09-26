@@ -61,13 +61,17 @@ export function pointRequest(
   return { kind, f_lo_hz: p.fHz, f_hi_hz: p.fHz, t0_s: t, t1_s: t, label, view };
 }
 
+/** The bare route (T-1066), for `startWatch`/`subscribeChanges` — see `surface/paths.ts`'s
+ * `PATHS_ROUTE`; the same reason (the thin-client route guard, `surface-cutover.test.ts`). */
+export const ANNOTATIONS_ROUTE = "/api/annotations";
+
 /** The windowed read: every annotation whose box intersects `[f0, f1] × [t0, t1]` (Hz, capture s). */
 export function annotationsPath(w: { f0Hz: number; f1Hz: number; t0S: number; t1S: number }): string {
   const q = new URLSearchParams({
     f_lo: String(Math.max(0, Math.floor(w.f0Hz))), f_hi: String(Math.ceil(w.f1Hz)),
     t0: String(w.t0S), t1: String(w.t1S), limit: String(LIST_LIMIT),
   });
-  return `/api/annotations?${q.toString()}`;
+  return `${ANNOTATIONS_ROUTE}?${q.toString()}`;
 }
 
 /** Post one annotation and report the outcome. Returns what the server stored, or `null` on a

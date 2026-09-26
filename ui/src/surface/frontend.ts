@@ -53,12 +53,15 @@ export interface FrontEndEvent {
  * union of their time spans, or `null` when there is nothing to ask about. Events are selected by
  * time only — each spans its whole tuned window — and a pane clips what it draws.
  */
+/** The bare route (T-1066), for `startWatch`/`subscribeChanges` — see `PATHS_ROUTE`. */
+export const FRONTEND_EVENTS_ROUTE = "/api/frontend/events";
+
 export function frontEndRequest(boxes: readonly Box[]): string | null {
   const ok = boxes.filter((b) => b.f1Hz > b.f0Hz && b.t1Ns > b.t0Ns && b.t0Ns > 0);
   if (ok.length === 0) return null;
   const t0 = Math.min(...ok.map((b) => b.t0Ns)) / S_TO_NS;
   const t1 = Math.max(...ok.map((b) => b.t1Ns)) / S_TO_NS;
-  return `/api/frontend/events?t0=${t0}&t1=${t1}`;
+  return `${FRONTEND_EVENTS_ROUTE}?t0=${t0}&t1=${t1}`;
 }
 
 /** The wire answer → [[FrontEndEvent]]s. Anything malformed is dropped rather than drawn. */

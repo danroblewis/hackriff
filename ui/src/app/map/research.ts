@@ -21,7 +21,7 @@
 // THIN CLIENT: no signal logic. Figures are the backend's; this orders, filters and formats them.
 import type { AppContext, MountFn } from "../context";
 import { h } from "../dom";
-import { startPoll } from "../net";
+import { startWatch } from "../net";
 import { apiErrorText } from "../explore/format";
 import { requestGoto, toast } from "../shell-slice";
 import { reviewAt } from "../centre/capture-slice";
@@ -343,5 +343,9 @@ export const mountResearch: MountFn = (el, ctx: AppContext) => {
     tr?.scrollIntoView?.({ block: "nearest" });
   });
   // The collection layers draw whether or not the panel is open, so the data is kept fresh always.
-  startPoll(refresh, RESEARCH_REFRESH_MS);
+  // T-1066: `loadResearch` reads three routes at once (collections, markers, annotations); only
+  // `/api/annotations` is on `/ws/changes`'s route table (docs/api.md) — collections and markers have
+  // no version to watch — so it is the trigger and `RESEARCH_REFRESH_MS` is what still catches a
+  // collection/marker write.
+  return startWatch("/api/annotations", refresh, RESEARCH_REFRESH_MS);
 };
