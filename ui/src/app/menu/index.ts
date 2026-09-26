@@ -9,6 +9,8 @@ import { foundInside } from "../explore/selections";
 import type { Row } from "../explore/inventory";
 import type { Selection } from "../explore/selections";
 import { signalMenuItems, selectionMenuItems } from "./actions";
+import { measurementMenuItems, type MeasureMenuHost } from "./measure-actions";
+import type { MarkMeasurement } from "../../surface/marks";
 import { contextMenu } from "./menu";
 
 export { bindContextTrigger, type TriggerHandler } from "./trigger";
@@ -19,6 +21,15 @@ export function openSignalMenu(ctx: AppContext, row: Row, x: number, y: number):
   contextMenu().open(signalMenuItems(ctx, row), x, y);
 }
 
+/** Opens the menu for a right-clicked/long-pressed **measurement box** (T-1009): the acts a drawn
+ * region affords — scan it with a chosen radio, record its IQ from that radio's ring, save it as a
+ * durable marker. Same component, same trigger, as a detection box's menu (T-994). */
+export function openMeasurementMenu(
+  ctx: AppContext, m: MarkMeasurement, host: MeasureMenuHost, x: number, y: number,
+): void {
+  contextMenu().open(measurementMenuItems(ctx, m, host), x, y);
+}
+
 /** Opens the menu for a focused selection at client coordinates `(x, y)`; the "found inside" rows
  * (already-loaded inventory only, same source the selection focus panel reads) size "Listen to
  * all". */
@@ -27,4 +38,6 @@ export function openSelectionMenu(ctx: AppContext, sel: Selection, x: number, y:
   contextMenu().open(selectionMenuItems(ctx, sel, rows), x, y);
 }
 
-export { contextMenu, selectionMenuItems, signalMenuItems };
+export { contextMenu, selectionMenuItems, signalMenuItems, measurementMenuItems };
+export { menuDevices } from "./measure-actions";
+export type { MeasureMenuHost, MenuDevice } from "./measure-actions";
