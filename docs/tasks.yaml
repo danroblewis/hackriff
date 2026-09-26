@@ -31377,7 +31377,7 @@ tasks:
   - id: T-1069
     milestone: M2-hardening
     title: listen_identifies_ctcss_67p0 fails alone intermittently (67.0 Hz, the lowest CTCSS tone, settles to subaudible:none on a clean 38 dB station) - red in bulk 1090f468 and on T-988's branch 09-25 13:35
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: PIPE-SUBAUDIBLE
@@ -31402,6 +31402,7 @@ tasks:
       Observed, not chased: The wire cannot explain a 'none': AudioStatus::set_subaudible (crates/hk-stream/src/audio.rs:264) flattens kind/analysed_s/tones/dcs but drops hk_model::Subaudible.reason, so the failing status in this ticket's own triage ({"subaudible":"none","subaudible_s":8.0,...}) said only 'none' and diagnosing it needed a temporary eprintln inside comb(). The three 'none' paths (no band measured / no line clears the guard / harmonic comb) are indistinguishable to any client, which reads against the exploration-first honesty rule. A subaudible_reason field on the status record would have made this ticket a one-look diagnosis; out of scope here (docs/api.md + crates/hk-cli/tests/api_contract.rs would move with it). | The second-tone rule in analyse() (crates/hk-demod/src/subaudible.rs, the 8 Hz exclusion) is the same leakage hazard patched by position rather than by evidence: the comment records that a 57 dB line produced a false second tone at -3.4 Hz with a 3 Hz exclusion. It is currently saved by the separate 'within 30 dB of the first' rule, so no test fails today, and Psd::is_line is now available if that ever needs the same treatment. Not changed - no observed failure. | I could not reproduce the red from the environment the runner saw (72 runs of listen_identifies_ctcss_67p0 under 24-way self-load, plus 30 nextest runs, all green on main at 2a63ee04). The guard instrumentation showed the margin instead: members=2 at k=6,7,8 with the third-highest candidate at ~6 dB against a 10 dB threshold, i.e. ~4 dB of margin on a single noise bin. That is the marginality the bulk tree at 1090f468 (T-1009/1043/1021/1048/1040) happened to cross, and it is closed by this fix rather than by finding that tree's particular extra line.
       Use cases: SIGNAL-090
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 3b00f526
   - id: T-1070
     milestone: MLIVE
     title: "P1: spectrum-history pyramid levels >= 1 hold nothing in a live run - a zoomed-out tile has grid 0 while coverage says observed (the whole-surface view has no data to draw)"
