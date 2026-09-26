@@ -59,7 +59,10 @@ pub struct BurstStatus {
     pub payload_bits: Option<u64>,
     /// Payload bit order when packed into bytes: `msb-first` or `lsb-first`.
     pub bit_order: Option<&'static str>,
-    /// CRC result: `valid` or `invalid` (absent without a CRC model).
+    /// CRC verdict: `valid`, `invalid`, `unknown` (a CRC model exists but this frame wasn't
+    /// evaluated, e.g. truncated before the CRC field) or `absent` (no CRC model). `None` only
+    /// when the burst has no located frame at all (`framed: false`); a **framed** burst (T-954)
+    /// always carries one of the four strings, never an omitted field.
     pub crc: Option<&'static str>,
     /// Emitter the burst was stored under, once known.
     pub emitter_id: Option<EmitterId>,
@@ -74,6 +77,10 @@ fn finite(v: f64) -> Option<Value> {
 impl BurstStatus {
     /// The status record payload: a flat object, absent and non-finite fields omitted.
     pub fn to_value(&self) -> Value {
+        debug_assert!(
+            !self.framed || self.crc.is_some(),
+            "a framed burst's status record must carry a crc verdict (T-954)"
+        );
         let mut m = Map::new();
         m.insert("burst".into(), json!(self.burst));
         m.insert("symbols".into(), json!(self.symbols));
@@ -174,6 +181,17 @@ mod tests {
         assert!(metadata_is_allowlist_shaped(&v), "{v}");
         assert!(v.get("snr_db").is_none(), "non-finite omitted");
         assert_eq!(v["payload_bit"], 48);
+
+        // T-954: a framed burst's crc field is never omitted, whatever the verdict.
+        for verdict in ["valid", "invalid", "unknown", "absent"] {
+            let framed = BurstStatus {
+                framed: true,
+                crc: Some(verdict),
+                ..BurstStatus::default()
+            };
+            let v = framed.to_value();
+            assert_eq!(v["crc"], json!(verdict), "{v}");
+        }
 
         let none = OpenRequest::default();
         assert_eq!(BurstTarget::from_request(&none).unwrap(), BurstTarget::All);

@@ -68,16 +68,22 @@ for (const width of [1440, 1000, 420]) test(`at ${width} px every overlay closes
   // T-995: the minimap is retired (user, 2026-09-25) — no map viewport row, at any width.
   assert.equal(await page.$count('.hk-surface-viewport[data-viewport="minimap"]'), 0,
     `a minimap viewport is still drawn at ${width} px`);
-  // T-996's full-bleed amendment (user, 2026-09-25 20:20): "nothing reserves a band at the top or
-  // bottom of the canvas". It supersedes T-933's rule that the panes stop short of the sheet's peek
-  // strip: the panes run to the canvas's own edges (both insets 0, `canvas.dataset.inset*`, read
-  // the way the surface states them), and the peek strip floats OVER map pixels like every other
-  // overlay. What T-933 protected still holds, and is asserted: the strip covers none of the
-  // picture's honesty statements (the status line, each pane's scale block).
+  // The sheet is a closeable overlay (docs/23 P1), never a bar: it floats OVER the full-bleed canvas
+  // and the panes are not lifted clear of its peek strip (that lift, T-933's, was the black band along
+  // the bottom of the map the user saw on 2026-09-25). With no output open there is no full-width bar
+  // at all, so the panes' bottom edge IS the page's last pixel row, at every width; `insetBottom` is
+  // `surface.ts`'s own statement of the lift (`canvas.dataset.insetBottom`), never a second guess.
   const insets = await page.canvasInsets();
+  const paneBottom = bleed.y + bleed.h - insets.bottom;
   const peek = await page.$rect(".sheet");
-  t.diagnostic(`at ${width} px insets ${JSON.stringify(insets)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
-  assert.deepEqual([insets.top, insets.bottom], [0, 0], `a band is reserved at the canvas's edge at ${width} px: ${JSON.stringify(insets)}`);
+  t.diagnostic(`at ${width} px pane bottom y ${Math.round(paneBottom)}, sheet peek y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}`);
+  assert.equal(insets.bottom, 0, `the panes are lifted ${insets.bottom} px above the page's bottom edge at ${width} px with no output strip open`);
+  assert.ok(peek.y < paneBottom,
+    `the sheet's peek strip (y ${Math.round(peek.y)}-${Math.round(peek.y + peek.h)}) sits below the panes' bottom edge (y ${Math.round(paneBottom)}) at ${width} px — the panes were lifted clear of it`);
+  // T-996 (the user's 2026-09-25 20:20 full-bleed amendment): nothing is reserved at the TOP either,
+  // and what T-933's lift protected still holds — the strip covers none of the picture's honesty
+  // statements (the status line, each pane's scale block), which float clear of it instead.
+  assert.equal(insets.top, 0, `a band is reserved at the canvas's top at ${width} px`);
   const covered = await page.eval(`(() => { const s = document.querySelector('.sheet').getBoundingClientRect();
     return [...document.querySelectorAll('.sf-status-line, .sf-scale:not([hidden])')].map((e) => [e.className, e.getBoundingClientRect()])
       .filter(([, r]) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top).map(([c]) => c); })()`);

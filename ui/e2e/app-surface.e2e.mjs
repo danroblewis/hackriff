@@ -40,7 +40,8 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * cannot arrive between this read and the hit test. */
 // T-1028 added the Retune-mode chip to the cluster; T-1001 took the follow-live FAB out of it. Both
 // landed against a list written before the other, so the set is stated here once, true of the
-// cluster the page actually mounts.
+// cluster the page actually mounts. On a phone (T-1053) Measure, Annotate, Pin and Retune mode fold
+// into the ⋯ menu; `rehomedHitTest` finds and presses them there, so the set is the same at every width.
 const CLOSED_NAMES = ["Go to frequency", "Layers", "Research", "Measure", "Annotate", "Pin", "Retune mode",
   "Viewport", "Review", "More: settings", "Zoom in", "Zoom out"];
 
@@ -425,14 +426,15 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
   // ones exactly and in order; the set of rows that carry a key at all is stated here, so a key
   // appearing on a row that should have none is still red; and the menu-wide list must be exactly
   // those rows' keys concatenated in DOM order — a fog row leaking out of the Coverage section, a
-  // symbology row leaking into it, or a key `li` belonging to no row is red.
+  // symbology row leaking into it, or a key `li` belonging to no row is red. T-981 (76902708) gave
+  // the front-end overload layer its key too: one fixed `frontend` swatch, whatever is in view.
   //
   // The retune key's CONTENT is not a literal: it names the devices whose tune records cover the
   // window, which is data, not symbology. Its row's presence and non-emptiness are asserted; what
   // it says about a device is `surface/tunepath.ts`'s unit tier.
   const FOG_KEY = ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"];
   const MARK_KEY = ["confirmed", "candidate", "unexplained", "artifact", "curated"];
-  const KEYED_ROWS = ["coverage", "detections", "tune"];
+  const KEYED_ROWS = ["coverage", "detections", "tune", "frontend"];
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -463,6 +465,7 @@ test("T-807: the coverage fog is a per-pane layer you can switch off, and the pa
     `exactly these rows carry a key, in section order: ${JSON.stringify(one.rows)}`);
   assert.ok(Array.isArray(rowKey.tune) && rowKey.tune.length > 0 && rowKey.tune.every((m) => typeof m === "string" && m.length > 0),
     `the retune row's key (T-898): a row per front end, or the "no route in view" row — never empty: ${JSON.stringify(rowKey.tune)}`);
+  assert.deepEqual(rowKey.frontend, ["frontend"], "the front-end overload row's key (T-981): its one hatched swatch");
   assert.deepEqual(one.key, one.rows.flatMap(([, k]) => k ?? []),
     "the menu's keys: each row's own, in section order, and no key li outside a row that has one");
   assert.deepEqual(one.key.slice(0, FOG_KEY.length + MARK_KEY.length), [...FOG_KEY, ...MARK_KEY],
