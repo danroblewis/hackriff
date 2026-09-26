@@ -638,6 +638,14 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
     const sc = drawerScope(ctx.store.get());
     const regionId = sc?.region?.id ?? null;
     if (regionId !== lastRegionId) {
+      // T-1061 review fix: record the NEW region id now, when the request is SENT, not when its
+      // answers land — `refresh()` is async, so a quick select-then-deselect (or two selections in
+      // a row) otherwise leaves `lastRegionId` at its old value across the whole first request. A
+      // second rescope arriving before that request lands then reads `regionId === lastRegionId`,
+      // mistakes a real region change for an unmoved view, asks nothing, and lets the FIRST
+      // request's now-stale answer land unopposed (its `seq` is still current) — drawing the
+      // region's rows (or the view's) after the user has already moved past them.
+      lastRegionId = regionId;
       if (settleTimer !== null) { clearTimeout(settleTimer); settleTimer = null; }
       void refresh();
       return;

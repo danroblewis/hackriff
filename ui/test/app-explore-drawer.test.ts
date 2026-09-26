@@ -580,3 +580,51 @@ test("T-1061: a region select/deselect still rescopes at once (all four question
   const afterDeselect = m.calls.slice(before2).filter((c) => /^\/api\/(events|analysis\/strongest|scheduler|coverage)/.test(c));
   assert.equal(afterDeselect.length, 4, "deselecting re-asks everything at once too");
 });
+
+// ---- T-1061 review fix: a race between a region commit and its OWN answers landing -----------
+//
+// The bug: `lastRegionId` used to update only inside `refresh()`, after its answers land — so a
+// SECOND region change (a quick select-then-deselect) arriving before the first request's answers
+// come back compared the new region against a STALE `lastRegionId`, read it as an unmoved view,
+// asked nothing, and let the first (now superseded) request's answer land unopposed (its `seq` was
+// still current) — drawing the wrong scope's rows. The fix records the requested region id at SEND
+// time, in `rescope` itself, so a second region change is never mistaken for a no-op.
+test("T-1061 review fix: a quick region select then deselect does not leave the region's rows behind", async () => {
+  const latch = new Latch();
+  const events = (path: string) => {
+    const hz = /f_lo=98822600/.test(path) ? [98.9e6] : [401e6]; // the region's own signal vs. the view's
+    return {
+      events: hz.map((_, i) => ({ emitter_id: `e${i}`, t_start_s: 90 + i, t_end_s: null, open: true, count: 1 })),
+      emitters: hz.map((f, i) => ({ id: `e${i}`, state: "candidate", f_center_hz: f, bandwidth_hz: 180e3, known_status: "unknown", explanations: [] })),
+    };
+  };
+  const m = await mountedDrawer({ edge: 1000, events, latch });
+  latch.release(); // let the initial (unscoped) mount batch land, so the drawer starts settled
+  await m.flush();
+
+  // Select the region: its own batch starts and is held in flight (the slow tunnel from the
+  // review that was logging EOFs).
+  m.store.set(() => ({ selections: { list: [REGION], sync: "" }, focus: { kind: "selection", id: "s1" } }));
+  await m.flush();
+  assert.ok(latch.pending.some((p) => /98822600/.test(p)), "the region's own batch is in flight");
+
+  // The user deselects BEFORE it lands. This must fire its OWN (view-scoped) batch — not be
+  // swallowed as "the view didn't move" because `lastRegionId` still reads the region it is about
+  // to supersede.
+  m.store.set(() => ({ selections: { list: [], sync: "" }, focus: { kind: "none" } }));
+  await m.flush();
+  assert.ok(latch.pending.some((p) => /f_lo=400000000/.test(p)),
+    `the deselect fired its own batch rather than being treated as a no-op view change: ${JSON.stringify(latch.pending)}`);
+
+  // The stale (region) answers land FIRST, the fresh (view) answers land after — the dangerous
+  // order, exactly as T-1030 proves it for the sibling race.
+  latch.release((p) => /98822600/.test(p));
+  await m.flush();
+  latch.release();
+  await m.flush();
+
+  assert.match(m.el.all().find((e) => e.className === "drawer-scope")!.textContent, /viewed span/,
+    "the drawer settled on the deselected state, not the stale region answer");
+  const titles = m.el.all().filter((e) => e.className === "f").map((e) => e.textContent);
+  assert.ok(!titles.some((t) => t?.includes("98.900")), `the region's stale row was not rendered, got ${JSON.stringify(titles)}`);
+});
