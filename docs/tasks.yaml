@@ -30838,7 +30838,8 @@ tasks:
   - id: T-1045
     milestone: MLIVE
     title: "LSR-4: per-device live publishers spectrum/live/<device>; a pane's device selects its stream"
-    status: todo
+    status: in-progress
+    branch: task-t1045
     priority: medium
     deps:
     - T-1043
@@ -31321,7 +31322,8 @@ tasks:
   - id: T-1064
     milestone: M2-hardening
     title: "P1: HTTP/1.1 keep-alive with idle reaping in hk-api (0 % connection reuse today: every response is Connection: close, one request per connection) - T-573's keep-alive half never landed"
-    status: todo
+    status: in-progress
+    branch: task-t1064
     priority: P1
     deps:
     - T-1063
@@ -31672,7 +31674,8 @@ tasks:
   - id: T-1080
     milestone: MUI
     title: "RC P1: app-detail - T-517's step control is not beside the sweep (scan panel layout moved)"
-    status: todo
+    status: in-progress
+    branch: task-t1080
     priority: P1
     deps: []
     parallel_group: UI-SCAN-PANEL
