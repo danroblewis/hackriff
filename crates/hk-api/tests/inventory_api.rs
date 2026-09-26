@@ -862,6 +862,7 @@ fn the_inventory_row_and_filter_keep_not_searched_apart_from_unknown_and_solved(
             reason: Some(ResolutionReason::BudgetExhausted),
             suspected: None,
             summary: "9 of 11 skeletons tried; more budget is the missing ingredient".into(),
+            explanations: Vec::new(),
         }),
         receiver: None,
         job: Some(SynthesisJob {
