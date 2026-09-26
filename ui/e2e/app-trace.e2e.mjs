@@ -71,18 +71,32 @@ const isBackdrop = (r, g, b) => Math.abs(r - 10) <= 3 && Math.abs(g - 10) <= 3 &
  */
 function firstDrawnRow(img, rect, vis, { share = 0.8, depth = TRACE_PX + 8 } = {}) {
   const x0 = Math.round(rect.x), y0 = Math.round(rect.y);
+  const at = (x, y) => ((y0 + y) * img.width + (x0 + x)) * 4;
+  const drawnSomewhere = (x) => {
+    for (let y = 0; y < depth; y++) {
+      const d = at(x, y);
+      if (!isBackdrop(img.data[d], img.data[d + 1], img.data[d + 2])) return true;
+    }
+    return false;
+  };
+  // Only columns where the pane drew SOMETHING in this depth. A column that is backdrop all the way
+  // down carries no picture to be above (the canvas's own edge column, a frequency nothing has been
+  // captured at and no rule crosses), so it can neither show a reserved band nor deny one — at
+  // 400 px, where floating chrome leaves 8 columns of the top uncovered, two of them are that. It
+  // is not a way out of the claim: under a reserved band EVERY column carries picture below it and
+  // so is eligible, and the shallowest row where `share` of them are drawn is the band's own depth.
+  const cols = [];
+  for (let x = vis.lo; x <= vis.hi; x++) if (drawnSomewhere(x)) cols.push(x);
   const fills = [];
   for (let y = 0; y < depth; y++) {
-    let seen = 0, drawn = 0;
-    for (let x = vis.lo; x <= vis.hi; x++) {
-      const d = ((y0 + y) * img.width + (x0 + x)) * 4;
-      seen++;
+    let drawn = 0;
+    for (const x of cols) {
+      const d = at(x, y);
       if (!isBackdrop(img.data[d], img.data[d + 1], img.data[d + 2])) drawn++;
     }
-    fills.push(seen ? drawn / seen : 0);
+    fills.push(cols.length ? drawn / cols.length : 0);
   }
-  const at = fills.findIndex((f) => f >= share);
-  return { at, fills };
+  return { at: cols.length ? fills.findIndex((f) => f >= share) : -1, fills, cols: cols.length };
 }
 
 /**
@@ -468,17 +482,33 @@ function cellColours(img, rect, x, halfPx, rows) {
  * slice, and grey at the top of the ramp's scale is brighter than the ramp's own dark end, so
  * "the brightest pixel in the stroke" alone would sometimes return a shadow.
  */
-function coreInk(img, rect, x, top, base = null) {
+/** The bloom's own edge above the core: `(GLOW_PX − SLICE_PX) / 2`, from the product's constants. */
+const BLOOM_EDGE = 2;
+
+function coreInk(img, rect, x, top) {
   const x0 = Math.round(rect.x) + x, y0 = Math.round(rect.y);
-  let best = null, bestSum = -1;
-  for (let y = top; y <= top + 3 && y < TRACE_PX; y++) {
+  // **The core's row is GEOMETRY, not "the brightest pixel in the stroke"** (T-1041). The brightest
+  // rule worked while the band was empty: the bloom was 18 % grey over `rgb(10,10,13)`, darker than
+  // any ramp ink, so the core always won. Over the cells the bloom is 18 % grey over a cyan cell —
+  // a lightened, desaturated version of that cell, brighter than a dark-blue core — and the rule
+  // returned the bloom for most columns (measured: `ink [69,170,194]` against cells `[20,183,213]`,
+  // 15.6 % matching). The stroke's own geometry does not move: `tracepass.ts` strokes the bloom
+  // `GLOW_PX` wide and the slice `SLICE_PX` wide about the same centre, so the core begins
+  // `BLOOM_EDGE` px below the bloom's top edge and is `SLICE_PX` px thick. This takes the ramp ink
+  // in exactly those rows.
+  // Within those rows it takes the MOST SATURATED ramp pixel, for the same structural reason: the
+  // bloom is achromatic (`shade: "mono"`), so blending it over a cell can only pull that cell's
+  // chroma DOWN, while the core is the ramp colour itself at full coverage. A bloom pixel therefore
+  // never out-saturates the core it hugs — measured on the misses this replaced: bloom
+  // `[76,169,193]` chroma 117 against a cell `[31,185,203]` chroma 172.
+  let best = null, bestChroma = -1;
+  for (let y = top + BLOOM_EDGE - 1; y <= top + BLOOM_EDGE + 3 && y < TRACE_PX; y++) {
+    if (y < 0) continue;
     const d = ((y0 + y) * img.width + x0) * 4;
     const c = [img.data[d], img.data[d + 1], img.data[d + 2]];
-    // T-1041: and it must be a pixel the trace put there, not a cell the waterfall did.
-    if (!changedAt(img, base, d)) continue;
     if (!isRampInk(c[0], c[1], c[2])) continue;
-    const sum = c[0] + c[1] + c[2];
-    if (sum > bestSum) { bestSum = sum; best = c; }
+    const ch = CHROMA(c[0], c[1], c[2]);
+    if (ch > bestChroma) { bestChroma = ch; best = c; }
   }
   return best ?? [0, 0, 0];
 }
@@ -919,7 +949,7 @@ for (const [width, height] of [[1280, 800], [400, 800]]) {
 
     const off = await page.shot(path.join(ART, `app-trace-band-off-${width}x${height}.png`));
     const a = firstDrawnRow(off, dev, vis);
-    t.diagnostic(`layer OFF: the picture fills ${(a.fills[0] * 100).toFixed(0)}% of the pane's row 0, ` +
+    t.diagnostic(`layer OFF: ${a.cols} of ${vis.hi - vis.lo + 1} uncovered columns carry a picture; it fills ${(a.fills[0] * 100).toFixed(0)}% of the pane's row 0, ` +
       `${(a.fills[4] * 100).toFixed(0)}% of row 4, ${(a.fills[TRACE_PX] * 100).toFixed(0)}% of row ${TRACE_PX}; ` +
       `first row drawn across the pane: ${a.at}`);
     assert.ok(a.at >= 0 && a.at <= 12,
@@ -1307,7 +1337,14 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
-    const ink = coreInk(obs.img, obs.rect, x, s.cols[x], base);
+    // **The core is read WITHOUT the baseline mask, and that is not an oversight.** The property
+    // under test is that the trace's core is *the same colour* as the cell under it — so exactly
+    // where it holds, the core pixel is IDENTICAL to the baseline's and the mask would throw it
+    // away, leaving only the columns where the claim fails. (Measured: 14 of 154 columns compared,
+    // 9.1 % matched, with the misses' "ink" being the bloom's feather rather than the core.) The
+    // mask is used for what it can say — where the stroke IS, `s.cols[x]` above — and the core is
+    // then the fullest-coverage ramp pixel within a stroke of that top, as it always was.
+    const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
     const cells = cellColours(base, obs.rect, x, halfPx, ROWS);
     const d = nearestDist(ink, cells);
     if (d <= 8) { matched++; worst = Math.max(worst, d); }
@@ -1346,7 +1383,7 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
     if (s.cols[x] < 0) continue;
     // A third of the UNCOVERED span away, wrapping inside it, so the control never reads the panel.
     const far = vis.lo + ((x - vis.lo + Math.floor(visW / 3)) % visW);
-    if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x], base), cellColours(base, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
+    if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(base, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
   t.diagnostic(`negative control: ${shuffled}/${compared} = ${(shuffledRate * 100).toFixed(1)}% match a ` +
