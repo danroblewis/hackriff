@@ -25,6 +25,9 @@ const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 /** The page's own statement of its LSR-7 measurements. `null` until the first frame writes it. */
 const LIVE_METRICS = `JSON.parse(document.querySelector('.sf-stage')?.dataset.liveMetrics ?? 'null')`;
 
+/** The page's own statement of its live lane, per pane (`live-ring.e2e.mjs`'s LIVE_RING). */
+const LIVE_RING = `JSON.parse(document.querySelector('.sf-stage')?.dataset.liveRing ?? '[]')`;
+
 /** A window's numbers are well-formed: finite and non-negative. Not a bound on their SIZE — a
  * `NaN` or a negative duration is an arithmetic bug regardless of the machine's load; a large
  * finite number is a fact about the machine, and this function says nothing about it. */
@@ -45,6 +48,39 @@ test("LSR-7: arrival→paint latency and ring-fold cost are measured and reporte
   await page.waitFor("the app's surface to draw",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
     { timeoutMs: 60000 });
+  await page.waitFor("a pane's scale bar to say it follows the live edge",
+    `document.querySelectorAll('.sf-scale:not([hidden])[data-following="true"]').length > 0`, { timeoutMs: 30000 });
+  assert.equal(
+    await page.$count('.sf-scale:not([hidden])[data-following="true"]'), 1,
+    "no pane is following the live edge, so there is no live row to measure the paint of");
+
+  // **Establish the precondition through the product's own zoom, never trust the opening span**
+  // (T-1082, the RC red of 2026-09-26; the same premise T-1052 fixed in `live-ring.e2e.mjs`). The
+  // paint-latency meter fires only where a ring row is PAINTED (`surface.ts`: one sample per new
+  // row the pane's `cover` reaches) — correctly: a row the ring stood aside for was never painted,
+  // and a latency for it would be invented. A following pane's opening span comes from the
+  // OBSERVED extent, which grows with the backend's age, so after other specs had driven the same
+  // lane's backend the page opened wide enough to push `rowPx` under `livering.ts`'s `MIN_ROW_PX`:
+  // the ring stood aside, fold kept counting every arriving row (n=256) and latency honestly
+  // stayed at n=0. Reproduced alone on a fresh hk by running app-no-minimap + app-status first.
+  // So zoom in, bounded, until the following pane's own ring entry says it is painting rows.
+  const rect = await page.$rect(".sf-canvas");
+  assert.ok(rect && rect.w > 100 && rect.h > 100, `the canvas has no box to zoom on: ${JSON.stringify(rect)}`);
+  const point = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 3 };
+  const laneRows = (rings) => Array.isArray(rings) ? Math.max(0, ...rings.map((r) => r.rows), 0) : 0;
+  const ringFrame = await waitWhileWorking(page, () => page.eval(LIVE_RING),
+    (rings) => Array.isArray(rings) && rings.length > 0,
+    { everyMs: 300, stallMs: 15000, timeoutMs: 60000 });
+  assert.ok(ringFrame.ok, `the ring diagnostic never reported for any pane: ${JSON.stringify(ringFrame.value)}`);
+  let ring = ringFrame.value;
+  for (let i = 0; i < 40 && laneRows(ring) === 0; i++) {
+    await page.wheel(point, -240, { alt: true });
+    await page.frames(3);
+    ring = await page.eval(LIVE_RING);
+  }
+  t.diagnostic(`ring lane before metering: ${JSON.stringify(ring)}`);
+  assert.ok(laneRows(ring) > 0,
+    `zooming in 40 ticks never brought the following pane's rowPx over MIN_ROW_PX: ${JSON.stringify(ring)}`);
 
   // Both windows report at least one sample. Bounded by whether the page is still WORKING (T-491),
   // not a wall-clock guess: a slow backend under a loaded gate is a slow start, not a dead lane.

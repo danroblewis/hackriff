@@ -853,6 +853,12 @@ export interface PaneStatus {
    * move?" reads the axis itself, not a label that rounds a sub-second move to the same `−23 s`. */
   readonly t0Ns: number;
   readonly t1Ns: number;
+  /** **The pane's actual frequency window**, Hz, exactly as the frame drew it — the state
+   * `freqLabel` rounds (its centre to 1 kHz, coarser than the finest 586 Hz cell). Stated for the
+   * same reason `t0Ns`/`t1Ns` are: a caller mapping a frequency to a pixel reads the axis itself
+   * (T-1082: shadow-level's per-cell sampling read the label and landed a cell off at boundaries). */
+  readonly fLoHz: number;
+  readonly fHiHz: number;
   readonly freqLabel: string;
   readonly tiles: number;
   readonly fallbacks: number;
@@ -995,6 +1001,8 @@ export function paneStatuses(
       timeLabel: live ? "LIVE" : `−${fmtSpan((edgeNs - t.t1Ns) / 1e9)}`,
       t0Ns: t.t0Ns,
       t1Ns: t.t1Ns,
+      fLoHz: p.freq.centerHz - p.freq.spanHz / 2,
+      fHiHz: p.freq.centerHz + p.freq.spanHz / 2,
       freqLabel: `${(p.freq.centerHz / 1e6).toFixed(3)} MHz ± ${fmtBandwidth(p.freq.spanHz / 2)}`,
       tiles: r.tiles,
       fallbacks: r.fallbacks,
