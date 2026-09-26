@@ -20,7 +20,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import {
-  GAP_FACTOR, LiveRing, MIN_ROW_PX, ringCovers, ringPlan, type RingFrame,
+  GAP_FACTOR, LiveRing, MIN_ROW_PX, ringCovers, ringMaxHoldColumns, ringPlan, ringRowAt, ringSliceColumns,
+  sampleRingRow, type RingFrame,
 } from "../src/surface/livering";
 import type { Box } from "../src/surface/lattice";
 
@@ -235,4 +236,87 @@ test("LSR-1: the plan is clipped to the pane, in both axes", () => {
   const past: Box = { ...BAND, t0Ns: T0 - 100 * PERIOD, t1Ns: T0 - 10 * PERIOD };
   assert.deepEqual(ringPlan(f, past, 400).draws, []);
   assert.equal(ringPlan(f, past, 400).cover, null);
+});
+
+// T-1047 / LSR-6: the trace's slice and its ring-covered max-hold read the ring directly, so the
+// newest few seconds — which the tile lane was told to leave alone — are not read back as a gap.
+
+test("LSR-6: ringRowAt finds the row that CONTAINS an instant, and sampleRingRow pools it across frequency", () => {
+  const ring = new LiveRing({ rows: 64 });
+  fill(ring, 8, T0, -70);
+  const f = frameOf(ring);
+  // Half-way through row 3 (0-indexed): inside that row's own extent, nobody else's.
+  const at = ringRowAt(f, T0 + 3 * PERIOD + PERIOD / 2);
+  assert.ok(at, "no row found for an instant well inside the ring");
+  sameNs(at!.tNs, T0 + 3 * PERIOD, "the row's own start time");
+  const box: Box = { ...BAND, t0Ns: 0, t1Ns: 0 };
+  const cols = sampleRingRow(f, at!.slot, box, 4);
+  for (const v of cols) assert.equal(v, -70);
+  // A column outside the ring's own band: NaN, never a floor and never the neighbour's value.
+  const outside = sampleRingRow(f, at!.slot, { f0Hz: 200e6, f1Hz: 201e6, t0Ns: 0, t1Ns: 0 }, 4);
+  for (const v of outside) assert.ok(Number.isNaN(v), `expected NaN outside the ring's band, got ${v}`);
+  // Before the ring's oldest row, and past its newest extent: no row contains either instant.
+  assert.equal(ringRowAt(f, T0 - PERIOD), null);
+  assert.equal(ringRowAt(f, T0 + 100 * PERIOD), null);
+});
+
+test("LSR-6: ringSliceColumns answers only where the ring itself has a row, and falls through (null) elsewhere", () => {
+  const ring = new LiveRing({ rows: 32 });
+  const end = fill(ring, 16, T0, -50);
+  const f = frameOf(ring);
+  const box: Box = { ...BAND, t0Ns: 0, t1Ns: 0 };
+  const mid = T0 + 8 * PERIOD + PERIOD / 2;
+  const cols = ringSliceColumns(f, box, 4, mid);
+  assert.ok(cols, "the ring holds a row at this instant");
+  for (const v of cols!) assert.equal(v, -50);
+  // Older than the ring's own oldest row, and newer than its live extent: the caller falls back to
+  // the pyramid (`sliceColumns`) exactly as it did before the ring existed.
+  assert.equal(ringSliceColumns(f, box, 4, T0 - PERIOD), null);
+  assert.equal(ringSliceColumns(f, box, 4, end + 10 * PERIOD), null);
+});
+
+test("LSR-6: ringMaxHoldColumns is the column-wise max over every ring row in the window, across a gap", () => {
+  const ring = new LiveRing({ rows: 64 });
+  // A quiet run …
+  const after = fill(ring, 6, T0, -80);
+  // … a gap the ring itself splits into two spans …
+  ring.push(row(after + 6 * PERIOD, -90));
+  const end = fill(ring, 5, after + 7 * PERIOD, -90);
+  // … with one loud row in the middle of the second run.
+  ring.push(row(end, -30));
+  const f = frameOf(ring);
+  assert.equal(f.spans.length, 2, "the gap must still split the ring into two spans (LSR-1's rule)");
+  const box: Box = { ...BAND, t0Ns: T0, t1Ns: end + PERIOD };
+  const cols = ringMaxHoldColumns(f, box, 4);
+  for (const v of cols) assert.equal(v, -30, "the loudest row anywhere in the window must win");
+  // A window entirely before the ring's own data: every column stays NaN, not zero and not a floor.
+  const before: Box = { ...BAND, t0Ns: T0 - 100 * PERIOD, t1Ns: T0 - 10 * PERIOD };
+  for (const v of ringMaxHoldColumns(f, before, 4)) assert.ok(Number.isNaN(v));
+});
+
+test("LSR-6 (review fix): a pane wider than the ring's band lands the ring's max-hold at the ring's OWN frequencies, never at the pane's own left edge", () => {
+  const ring = new LiveRing({ rows: 32 });
+  // The ring's own band, one quarter-width of the wide pane used below.
+  const ringBand = { f0Hz: 100e6, f1Hz: 200e6 };
+  for (let i = 0; i < 4; i++) ring.push(row(T0 + i * PERIOD, i === 2 ? -20 : -80, ringBand));
+  const f = frameOf(ring);
+  const coverTime = { t0Ns: T0, t1Ns: T0 + 4 * PERIOD };
+  // A pane FOUR TIMES wider than the ring's band: 0..400 MHz over 4 columns of 100 MHz each, so the
+  // ring's band is exactly the pane's second column (index 1), not its first.
+  const paneWindow: Box = { f0Hz: 0, f1Hz: 400e6, ...coverTime };
+  const cols = ringMaxHoldColumns(f, paneWindow, 4);
+  assert.ok(Number.isNaN(cols[0]), "column 0 (0-100 MHz) is outside the ring's band and must stay NaN");
+  assert.equal(cols[1], -20, "column 1 (100-200 MHz) IS the ring's band, and must carry its peak");
+  assert.ok(Number.isNaN(cols[2]), "column 2 (200-300 MHz) is outside the ring's band");
+  assert.ok(Number.isNaN(cols[3]), "column 3 (300-400 MHz) is outside the ring's band");
+  // The exact bug this guards against: dividing the ring's own (clipped) band into the SAME `n`
+  // columns puts the identical peak at column 0 instead of column 1 — correct as an answer about
+  // `ringBand` alone, but the wrong column the instant it is folded by index into an array whose `n`
+  // columns span the pane's wider window instead.
+  const narrowWindow: Box = { ...ringBand, ...coverTime };
+  const wrong = ringMaxHoldColumns(f, narrowWindow, 4);
+  assert.equal(wrong[0], -20, "dividing the clipped band alone puts the peak at ITS column 0");
+  assert.notEqual(wrong[0], cols[0],
+    "…which is exactly why folding a narrow-box answer into a pane-wide array by column index is " +
+    "wrong: the same ring row lands in a different column depending on which box divided the columns");
 });

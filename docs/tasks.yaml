@@ -28338,7 +28338,7 @@ tasks:
   - id: T-954
     milestone: M2-hardening
     title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
-    status: in-progress
+    status: done
     branch: task-t954
     priority: P2
     deps: []
@@ -28354,6 +28354,23 @@ tasks:
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): the 1006 close is on EVERY WebSocket opener session, /ws/open/listen too (every listen and bits tap ended 1006 when closed) - fix at the shared opener close path.
 
       2026-09-25 09:45 coordinator: review attempt 3 (after 2 fix rounds, runner review-failed) FAILED on a real correctness bug - a vanished peer is reaped after ~40 s not ~20 s: serve() blocks on conn.lock() behind a writer stuck in sink.write (ConnSink::write holds conn for the whole write, peer timeout 20 s), and PeerGone/Detached still take the lock before shutdown (attempt 2 fixed only SlowConsumer/DrainTimeout). Fix: serve() uses try_lock and skips the close frame when busy, going straight to handle.close + shutdown; on_close for PeerGone/Detached shuts down before (or instead of) the close write, with the short close-write timeout; add a test whose records fill the send buffer so the writer holds conn mid-write (the silent_peers test's tiny Ticking records never do). Review text: ~/.hackriff-ops/work/T-954/review.json. Coordinator runs this fix round as a manual Opus worker.
+
+      Review attempt 1 FAIL: a producer-initiated end (publisher finished, or the producer dropped a slow/undrained consumer) runs the subscribe closer on hk-stream's own writer thread, which only shut the raw socket down -- serve()'s close-frame write (after its watch loop woke on the resulting EOF) always found an already-dead socket, so those sessions still read as 1006 despite docs/api.md promising 1000. Fix: Conn tracks close_sent and exposes a guarded send_close(); both the subscribe closer (mapping hk_stream::CloseReason) and serve()'s own end-of-watch code call it through the same lock, whichever gets there first wins, the other is a no-op for the frame (socket still shuts down either way). Also capped the write timeout for an already-known-unresponsive peer's close attempt to 200ms so it isn't held open for the full peer timeout twice. New test a_producer_that_finishes_on_its_own_still_closes_with_a_real_frame, confirmed red on the pre-fix closer via git stash, green with the fix.
+
+      Review attempt 2 FAIL: attempt 1's closer took conn's lock before shutdown for every CloseReason, but SlowConsumer fires on the producer's own real-time publish thread (Publisher::publish_binary/publish_status) and that lock is exactly the one a stuck writer thread (peer not reading) already holds -- the closer couldn't get it, shutdown never ran, and the producer blocked for up to the peer write timeout, starving every other consumer of the stream ('the producer never waits on a browser', bridge.rs, violated by our own fix). Fixed by splitting on_close() by reason: SlowConsumer/DrainTimeout never touch conn's lock (shutdown only, unconditional); PublisherFinished/PeerGone (called by the per-consumer writer thread only after its own last write already released the lock) and Detached (only ever serve()'s own explicit close, after it already sent its own frame) are provably safe to close with a frame. Added a deterministic unit test (a thread holds conn's lock, standing in for a stuck writer, while on_close(SlowConsumer,...) must return well under the hold time) confirmed red on the old always-lock-first logic, green with the fix; plus a second test confirming the three safe reasons still send a real frame.
+
+      Review attempt 3 fix (83f70ded+): close paths in hk-api ondemand.rs never block on conn's lock. serve() and PublisherFinished wait at most CLOSE_LOCK_WAIT (200 ms) via lock_within(); PeerGone/Detached try once; SlowConsumer/DrainTimeout never touch it; a busy lock skips the frame and the following shutdown frees the stuck writer. Every close-frame write uses CLOSE_WRITE_TIMEOUT (200 ms, set in Conn::send_close). New test a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck: 3917 ms reap-to-release on 9fbbbf88 (red), 201 ms with the fix (bound 800 ms).
+
+      2026-09-25 recovery: branch stranded after a 12:49 bulk conflict-skip; merged gated main 8ac9cfb9 (only conflict docs/tasks.yaml: took main's board, re-applied the three review-round notes and the result). Re-verified hk-api ondemand tests + precheck.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 09:30).
+      Review attempt 2 FAILED on a real regression my own attempt-1 fix introduced: the subscribe closer took conn's lock before shutting the socket down for every CloseReason, but that lock is exactly the one a writer thread stuck mid-write (a slow/non-reading peer) already holds, and CloseReason::SlowConsumer fires directly on the producer's own real-time publish thread (Publisher::publish_binary/publish_status) -- a closer that can't get the lock never reaches shutdown, so the producer itself blocked for up to the peer's write timeout, starving every other consumer of the same stream ('the producer never waits on a browser', bridge.rs's own invariant). Fixed by splitting the closer's behaviour by reason (on_close, factored out of attach() for a direct test): SlowConsumer and DrainTimeout (a shared watchdog thread, same risk) never touch conn's lock -- shutdown only, unconditional, immediate; PublisherFinished and PeerGone (both called by the per-consumer writer thread itself, only once its own last write has already returned and released the lock) and Detached (only ever serve()'s own explicit close, after it already sent its own frame) are provably safe to close with a real frame, since conn is never held when they run. Added a deterministic unit test (a thread holds conn's lock, standing in for a stuck writer, while on_close(SlowConsumer,...) must return well under the hold time) confirmed red against attempt-1's always-lock-first logic (temporarily reverted on_close in place, ran the test alone: SlowConsumer waited ~2s on the held lock), green with the fix restored; a second test confirms the three safe reasons still send a real close frame end to end.
+      Tests: cargo nextest run -p hk-api --lib -E 'test(slow_consumer_and_drain_timeout_never_wait_on_conns_lock)' -> exit 1 (with on_close temporarily reverted to attempt-1's always-lock-first behaviour: SlowConsumer waited ~2s on a lock held by a simulated stuck writer -- confirms the reviewer's exact regression); cargo nextest run -p hk-api --lib -E 'test(ondemand)' -> exit 0 (3 passed, with the split-by-reason fix restored (includes the new deterministic lock test and the safe-reasons-send-a-frame test)); cargo nextest run -p hk-api -E 'binary(ondemand) + binary(bridge) + binary(tcp_streams)' -> exit 0 (23 passed); cargo nextest run -p hk-api --lib -> exit 0 (191 passed); cargo nextest run -p hk-pipeline --lib -E 'test(taps)' -> exit 0 (4 passed (crc verdict, from the original fix)); cargo nextest run -p hk-stream --lib -E 'test(bursts)' -> exit 0 (1 passed)
+      precheck exit 0
+      Commits: d33493ba, ab934734, c899a95e, cc3c047f, 3331b798, be6a291d
+      Observed, not chased: bridge.rs's watch_peer (/ws/{stream_id}, the always-on-stream bridge) has the same bare-shutdown-only close behaviour ondemand.rs had, on both the client-detected AND producer-initiated paths -- likely reads as 1006 too. Out of scope: the ticket named the shared /ws/open/<name> opener close path specifically.
+      Resources: 11 CPU-s, peak 0.3 GB
+    commit: 01265b07
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
@@ -28537,7 +28554,7 @@ tasks:
   - id: T-963
     milestone: MAUTO
     title: AIS recipe (GMSK 9600, NRZI, HDLC, CRC-16/X.25) + a validated AIS reference oracle
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: RECIPE-AIS
@@ -28552,8 +28569,22 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: the node2 run's handback (a007f7de) was reaped as a false NO_WORK (sync-back bug), so the runner's Opus review of this sonnet output never ran; the coordinator ran it: FAIL - (1) octets sent/read MSB-first where AIS/HDLC is LSB-first (a spec-order frame fails check_crc; HDLC residue 0x5B67 vs 0xF0B8), shared by synth, oracle, recipe and Rust test so all tests passed; (2) destuff before the 0x7E flag search truncates ~40% of real frames (the test hid it with has_false_flag); (3) oracle raim/comm_state sliced one bit early. One Opus fix round running (coordinator-manual), validated against an external AIS vector; re-review follows.
+
+      2026-09-25 coordinator: fix round (74142789, Opus, coordinator-manual) after the review FAIL: octets LSB-first in synth/oracle, destuff block gains bit_order msb|lsb (frames mode only, default msb unchanged; ADR-0011 row + corrected sentence), recipe order sync (stuffed line) -> destuff -> crc, frame_bits 1260 (stuffed worst case 1236), oracle raim/comm_state slices fixed, dedupe on the whole report, training search bounded. Validated against GPSD's worked !AIVDM example (decoded independently) and the RFC 1662 residue 0xF0B8; each fix red on a007f7de, green after. Python 109, ais_recipe 3, framing/bitstuff 19. Opus RE-REVIEW PASS. Follow-up filed: shared-flag HDLC framing (noise between bursts can swallow ~half of real frames on air).
+
+      2026-09-25 recovery (merge of gated main d8bc9fa2): the follow-up ticket T-1013 (HDLC shared-flag framing; deps T-963; opus/medium; group HDLC-SHARED-FLAG) was filed only on this branch, and the board conflict was resolved by taking main's board, so T-1013's block is NOT on this branch's board any more. Coordinator: re-file it under its allocated id T-1013 from commit 9afa6317's board. Its acceptance, verbatim:
+      FOUND BY the Opus re-review of T-963 (2026-09-25, PASS; derived from the code, not yet run on air). Real-air frame loss in HDLC framing for continuously demodulated channels (AIS; the same shape applies to any HDLC recipe over a continuous line, e.g. AX.25/APRS T-952):
+      - After a terminator match, sync_search resets its search (crates/hk-blocks/src/blocks/framing/sync_search.rs:165-166), so a closing flag never also opens the next frame as it does in HDLC.
+      - The two fixed AIS channels are demodulated continuously; the gaps between bursts produce random bits, which match 0x7E about once per 256 bits. That opens a junk frame that the next 0x7E closes ~256 bits later, so the search is mid-junk-frame roughly half the time.
+      - A real burst's opening flag arriving while a junk frame is open is consumed CLOSING the junk frame; the real frame's stuffed data can never contain 0x7E, so the real frame is missed. Estimated ~half of real frames lost.
+      - Neither test shows it: the Rust test (crates/hk-blocks/tests/ais_recipe.rs, framing/tests.rs) pads with idle ones, and the Python oracle (py/fixtures/ais_ref.py) searches every flag pair.
+      DELIVER: a failing-first test that feeds random (noise) bits between real AIS frames through the recipe and asserts every real frame decodes (red today); then the fix - a sync_search terminator option that also re-opens a frame on the same flag (shared-flag HDLC semantics), default unchanged for existing recipes; enable it in recipes/ais.recipe.json (and check T-952's AX.25 recipe). This changes the ADR-0011 sync_search contract: update its block row and state the default. Also the reviewer's nit: refuse bitstuff bit_order: lsb with direction: stuff (crates/hk-blocks/src/blocks/symbol/bitstuff.rs:205), since the reversal would happen after stuffing.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-blocks -E 'binary(ais_recipe)'; the framing lib tests; just precheck hk-blocks), then HAND BACK. Never `just gate`.
+
+      2026-09-25 recovery: merged gated main d8bc9fa2 (board: took main's, re-applied the fix-round note). The textual merge compiled-broke hk-blocks framing tests: T-952 (APRS, on main) and T-963 each added an identical lsb_first_bits helper in crates/hk-blocks/src/blocks/framing/tests.rs (E0428); kept one, doc comment names both uses. hk-blocks ais_recipe + aprs_recipe + framing/bitstuff lib tests 25/25, python fixture/synth tests 110 passed, precheck hk-blocks clean.
     model_reason: "sonnet/high: a well-specified recipe over existing blocks, plus a new validated oracle"
     branch: task-t963
+    commit: 1f7120f8
   - id: T-964
     milestone: MSCAN
     title: "Scan everything (fast) does not light the coverage map: 4.3 % sampled after a full 1 MHz-6 GHz pass; /api/coverage observed only for the current step"
@@ -28879,6 +28910,8 @@ tasks:
       FILED 2026-09-25 from explorer window 2 (DMR/P25 entry + 06:18 addendum): ~/.hackriff-ops/explorer/captures/20260925/p25-852p86-2p4M.sigmf-{meta,data} + .truth.json - 5 s, 2.4 Msps at 853.3 MHz, LNA 40 / VGA 30 / amp on, 24 MB, 13:19:26Z, annotations [] (truth only in .truth.json), SIGNAL-085 (also 080/087). Truth: an intermittent P25 C4FM emission at 852.859 MHz - the explorer's numpy oracle (tools/oracle_p25.py, 24-symbol sync correlation 0x5575F5FF77FF) found 4 P25 frame syncs in this clip (0 on neighbours); RE-GRADED by the explorer: most likely a conventional/voice P25 channel, NOT an established control channel. The 8 Msps companion p25-cc-852p86 (80 MB) is NOT to be committed (the explorer suggests keeping only this one).
       DELIVER: exactly as T-935/T-960 did (fixtures/hackrf/explorer-2026-09-25/, Git LFS (<= 25 MB), hackriff:truth via py/fixtures/annotate.py so the mock SDR cannot read it, manifest.json, py/fixtures/build_explorer_2026_09_25.py extended, capture settings recorded); add a small independent P25 frame-sync reference under py/fixtures (like rds_ref.py / flex_ref.py) with a unit test on a synthetic C4FM frame, run it on the capture and record the sync count; report any disagreement, never edit the truth silently.
       MAC ONLY (capture in ~/.hackriff-ops). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 recovery: T-975's commit (9672ba74 on task-t985, 432aad8a on task-t975) lands through task-t985, which was brought up to gated main; queue task-t985 only, not task-t975.
     dispatch: manual
   - id: T-976
     milestone: MAUTO
@@ -29131,7 +29164,7 @@ tasks:
   - id: T-985
     milestone: MAUTO
     title: Explorer window-3 captures into fixtures/ (NBFM+CTCSS 461.125, DMR BS 464.6125) with hidden truth, CTCSS + DMR sync oracles, 4 new use cases
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
@@ -29144,13 +29177,19 @@ tasks:
       - ~/.hackriff-ops/explorer/captures/20260925/dmr-464p6125-bs.sigmf-{meta,data} + .truth.json - 10 s, 2.4 Msps at 464.3 MHz, 48 MB. Truth: conventional DMR base-station 4FSK at 464.6125 MHz, BS data sync x42.
       DELIVER: (1) append use cases (never renumber; docs/05 + docs/use-cases.yaml together, CLAUDE.md 'Adding a use case', sources cited): NBFM land-mobile/GMRS voice with blind CTCSS/DCS identification; conventional DMR (Tier II) blind 4FSK detection + sync identification; airband AM voice / ATIS (no SIGNAL id exists for VHF airband voice); marine VHF voice. (2) Both captures into fixtures/hackrf/explorer-2026-09-25/ as T-949 did for FLEX: each exceeds the 25 MB LFS cap, so EXTERNAL store per fixtures/README.md (status external in manifest.json, fetched with just fixtures-fetch) - unless a trimmed subclip <= 25 MB keeps the whole truth (the 8.1 s NBFM burst + tone; >= 20 DMR syncs) - decide and say which; hackriff:truth via py/fixtures/annotate.py so the mock SDR cannot read it; py/fixtures/build_explorer_2026_09_25.py extended; new use-case ids. (3) Independent oracles under py/fixtures (like rds_ref.py / p25_ref.py): a CTCSS tone estimator (NBFM discriminator -> low-pass < 300 Hz -> tone frequency to 0.1 Hz, matched to the standard EIA table) and a DMR sync reference (4FSK 4800 sym/s, BS/MS data+voice sync patterns); unit tests on synthetic signals; run both on the captures and record results; report disagreements, never edit truth silently.
       MAC ONLY (captures in ~/.hackriff-ops). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 10:25 coordinator: REBUILT. The old tip (kept as backup/task-t985-pre-rebuild) had merged a PROVISIONAL main (a345a09d) that the runner later rewound, so it carried 11 other tickets' ungated batch merges - T-939 (the 08:55 bisect culprit) among them - which is why every bulk skipped it. Rebuilt as gated main 72f9d76c + T-975's commit (9672ba74, the P25 capture) + T-985's own commit (474b098a); the only board conflict was other tickets' notes. py fixture tooling 22/22. Landing this branch lands T-975's fixture too: mark T-975 done with T-985's merge commit.
+
+      2026-09-25 recovery: task-t985 (which carries T-975's P25 commit 9672ba74) was stranded after a 12:49 bulk conflict-skip; merged gated main fc8f0b00. Conflicts: fixtures/hackrf/explorer-2026-09-25/README.md intro (kept T-960's four-FM/RDS-clip text + bias-tee unknown/off split AND this branch's P25/window-3 text) and py/fixtures/build_explorer_2026_09_25.py (docstring merged; kept both update_manifest_dmr and T-960's FM_RDS_PURPOSE). manifest.json/use-cases.yaml/docs/05 auto-merged; no duplicate manifest (name,kind,path) and SIGNAL-090..093 unique. Queue task-t985 only; it lands T-975 too.
     dispatch: manual
     model_reason: "sonnet/high: two oracles (CTCSS, DMR sync) plus fixtures and four use cases"
     branch: task-t985
+    commit: 6839a5fb
   - id: T-986
     milestone: MAUTO
     title: "All captured signals decode: CTCSS tone decode (461.125, 233.6 Hz) and DMR identification/header (464.6125) members - failing-first blind tests"
-    status: todo
+    status: in-progress
+    branch: task-t986
     priority: P1
     deps:
     - T-936
@@ -29757,8 +29796,7 @@ tasks:
   - id: T-1009
     milestone: MMAP
     title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
-    status: in-progress
-    branch: task-t1009
+    status: done
     priority: normal
     deps:
     - T-1008
@@ -29774,10 +29812,22 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu
+    branch: task-t1009
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:16).
+      A Measure box (T-822) now carries the same right-click/long-press menu a detection box got in T-994, with the three acts a drawn region affords: 'Scan this region with <device>' (one item per radio - it opens T-1008's plan overlay bounded by the box's FREQUENCY extent on that radio; the box's time extent is not a scan parameter, and Start stays the one commissioning press), 'Record IQ of this region with <device>' (POST /api/iqbuffer/clip over the box's own time window, band-filtered, off that radio's ring) and 'Save as marker' (a durable time-frequency box filed in the run's first non-reserved collection, creating 'Marked regions' if it has none - never the reserved Bookmarks, which has no time). Choosing the radio had to reach the engine, so the backend gained the selector T-1008's handback named as missing: hk-api now holds ONE ScanRunner PER FRONT END (hk_api::scan::ScanRunners), because the scan/tune arbitration is per radio - a sweep of B must not yield to a retune of A. Every scan route takes device_id: a read defaults to the run's default radio and says which in device_id, a START refuses to guess on a multi-device run (400 device_required), a STOP with no selector stops every sweep (surrendering the radio is never refusable) and an unknown id is 404 unknown_device listing the ids that do resolve; /api/control/state gains 'scans', one entry per front end. POST /api/iqbuffer/clip takes device_id too, since every front end keeps its own ring. docs/api.md, docs/23 section 11 (a new row; rule 1 still names three device-reaching rows, because the menu only OPENS the plan) and api_contract.rs moved together per T-079.
+      Tests: cargo nextest run -p hk-api --lib -E 'test(/scan::|iqbuffer::/)' -> exit 0 (18 passed (incl. the two new per-radio selection/arbitration tests)); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/t1009_a_scan|survey_sweep|coarse_sweep|t511_a_device/)' -> exit 0 (4 passed, including the new t1009_a_scan_and_a_clip_are_addressed_to_a_named_front_end); cd ui && npm test -> exit 0 (105/105 test files passed (build + tsc typecheck + node:test, incl. the new app-measure-menu suite)); cd ui && HK_E2E_PORT=9716 node e2e/run.mjs measure-scan -> exit 0 (1/1 passed on a two-mock-device run: box over grey -> menu with one Scan/Record item per radio -> second radio's Scan -> plan bounded by the box on that radio -> Start -> that radio running (the other idle) and its own dwell records inside the box)
+      precheck exit 0
+      Commits: 8bc83674
+      Observed, not chased: The two-device e2e backend needs longer than backend.mjs's fixed 20 s readiness loop under load: on a box at load average ~41 `hk serve` with two mock front ends failed to come up twice in a row (ui/e2e/backend.mjs:254 'hk serve did not come up ... in 20 s', both mock devices logged as opened), then came up in ~2-4 s once the box quietened. app-pane-device.e2e.mjs uses the same two-device startup and the same fixed timeout, so it is exposed to the same load-flake; the readiness loop has no knob. | A measurement box is laid out in capture time, so on a FOLLOWING pane it rises off the pointer position between the drag that draws it and a right-click on it (the e2e freezes the pane first, which is view state and reaches no device route). That is the invariant working, not a bug, but it does mean a user right-clicking a just-drawn box on a fast-scrolling live pane can miss it. | GET /api/iqbuffer still reports the run's DEFAULT front end's ring only; T-1009 added the device_id selector to the clip route alone, so a client cannot yet read a further front end's ring status (extent, segments) to know whether a Record IQ of a past region will find samples there.
+      Use cases: AWARE-011, AWARE-042, RESEARCH-003
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: e2f6d06c
   - id: T-1010
     milestone: M2-hardening
     title: "On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame"
-    status: todo
+    status: in-progress
+    branch: task-t1010
     priority: normal
     deps:
     - T-954
@@ -30461,7 +30511,7 @@ tasks:
   - id: T-1039
     milestone: MLIVE
     title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
-    status: in-progress
+    status: done
     branch: task-t1039
     priority: high
     deps:
@@ -30477,6 +30527,22 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload
+
+      Review fix 1/2: isStale (T-1039) originally flagged a resident tile stale on wall-clock age alone since lastGoodAt, with no check that a confirmation was actually owed. Review found three false-positive classes on a healthy network: SEALED tiles (behindTheEdge false - own fetch already reached the tile's end, nothing further ever coming), FROZEN panes' tiles (refreshEdge only revalidates viewports in its own 'following' list; a frozen pane is simply never offered again), and COARSE levels whose own refresh cadence (32s at level 5) exceeds the flat 30s default. Fixed by gating isStale on a new staleScope map, rebuilt every refreshEdge scan from the SAME predicates refreshEdge itself uses (drawnBy a following viewport + not behindTheEdge), with each in-scope tile's own threshold (max(staleAfterMs, 2x its own cadence)) stored there rather than re-derived from this.lat (a different call path, setViewports). Also fixed two stale comments the review named (main.ts pointed at tilebatch.ts instead of tilecache.ts for backoff/stale-while-revalidate; tiles-sw.ts referenced a nonexistent build:sw script). Merged e48d0eff (last gated main, T-1038's child-prefetch) with no conflicts. Tests: ui npm test 108/108 files, typecheck clean, build clean, cargo fmt clean. Commit ecb3794d.
+
+      Review fix 2/2: the offline Service Worker answer put an uncached address in 'remaining', which tilebatch.ts requeues on the very next microtask with no delay - a tight retry loop against a still-down network that never reached TileCache's own failure handling, so the jittered backoff added for this ticket never applied to it. Fixed: buildOfflineBatch now answers every requested address as its own tiles entry (a hit as 200, a miss as 502 'offline: no cached sealed tile for this address'); remaining is always empty. 502 matches the client's existing fromTheRoute rule (T-523, 'a proxy could not reach the origin') so a miss now goes through TileCache.failed()'s real silent-failure backoff instead of bypassing it. Added an end-to-end test through the real TileCache+batchedTileSource wiring reproducing the review's exact trigger (a batch mixing a cached hit and an uncached miss) and confirming the backoff holds and escalates from the second retry on; it also documents a separate, pre-existing, general TileCache behavior it surfaced (a co-occurring success in the same round trip resets the whole silence ladder, T-499's deliberate 'one completion clears it' rule) which costs at most one extra un-gated retry the very first time a batch mixes a hit and a miss, never a sustained loop. Rewrote sw-tile-cache.test.ts's buildOfflineBatch cases for the new contract. Tests: ui npm test 108/108 files, typecheck clean, build clean, cargo fmt clean. Commit 35b2d693.
+
+      Conflict fix (Opus, 2026-09-26): merged gate base 1090f468 into task-t1039 as 88a294c8. Only conflict: ui/src/surface/surface.ts PaneReport push - kept main's multi-line form with T-1042/T-1047's ringFrame/ringCover and added T-1039's stale count. docs/tasks.yaml auto-merged cleanly (T-1039 notes/result preserved). T-1035/T-1037/T-1038 were already under the previous merge; T-1039 adds no second backoff: tiles do not go through ControlClient's TransportBackoff (T-1035), they use tilecache's own T-499 silence ladder and T-454 busy AIMD, and T-1039 only jitters those two existing waits. SW offline misses answer 502, which fromTheRoute() classes as silence (retryable), never terminal. Tests: just test-ui 108/108, tsc clean. No T-1039 e2e exists on the branch (route drop/stall / SW reload), so none was run; builders was NOT safe (load 42.6, 7/4 slots) in any case.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:51).
+      Fixed the second review finding: the offline Service Worker's reconstructed batch answer listed every uncached address in `remaining`, which tilebatch.ts requeues on the very next microtask with no delay at all -- a tight retry loop against a still-unreachable network that never reached TileCache's own failure handling, so the jittered backoff this ticket adds never got a chance to apply to it. Fix: buildOfflineBatch (ui/src/sw/tile-cache-logic.ts) now answers every requested address as its own entry -- a cache hit as a normal 200, a cache miss as a 502 ('offline: no cached sealed tile for this address') -- and `remaining` is always empty. tilebatch.ts already rejects a non-200 per-entry answer with a real error object carrying that status; 502 is exactly the code TileCache's existing `fromTheRoute` rule (T-523) reads as 'a proxy could not reach the origin' -- true here, since the worker genuinely is a proxy in front of the real network -- which routes it onto the same silent-failure backoff ladder a refused socket takes rather than an immediate requeue or a terminal refusal. Added an end-to-end test in surface-tile-resilience.test.ts reproducing the review's exact trigger (a batch mixing a cached-sealed hit and an uncached miss) through the real TileCache+batchedTileSource wiring, using buildOfflineBatch as the mock transport's response (the same function the real worker calls): it confirms the miss reaches TileCache.failed()/silentFailures and that the backoff holds and escalates from the second retry onward. It also documents and asserts a separate, pre-existing, general TileCache behavior it surfaced along the way: a co-occurring SUCCESS settling in the same round trip resets the whole silence ladder (T-499's deliberate 'one completion clears it' rule, unrelated to this fix), which costs at most one extra un-gated retry the very first time a batch mixes a hit and a miss -- never a sustained loop, since the hit is resident afterward and drops out of every later request. Rewrote sw-tile-cache.test.ts's buildOfflineBatch unit tests for the new contract (every address answered, one way or the other; remaining always empty).
+      Tests: cd ui && npm test -> exit 0 (108/108 test files passed -- sw-tile-cache.test.ts 6/6 (buildOfflineBatch rewritten for the new contract), surface-tile-resilience.test.ts 4/4 (new mixed cached-hit/uncached-miss offline case), surface-cache.test.ts 63/63); cd ui && npm test -- surface-tile-resilience -> exit 0 (4 passed); cd ui && npm test -- sw-tile-cache -> exit 0 (6 passed); cd ui && npm run typecheck -> exit 0 (tsc --noEmit clean); cd ui && npm run build -> exit 0 (esbuild clean); cargo fmt --all --check -> exit 0 (clean (diff touches zero crates))
+      precheck exit 0
+      Commits: bb66b81b, ecb3794d, be75b774, 4de4f372, 35b2d693, 6f051095
+      Observed, not chased: Real-browser e2e for the SW reload-offline path is still not built: ui/e2e's harness.mjs/cdp.mjs have no Service Worker or offline-network support. Unchanged from the original handback's note -- a follow-up ticket for harness support would let this be closed with a browser-level proof. | The SW's sealed-tile cache (hk-sealed-tiles-v1) still grows without an eviction policy -- flagged by the reviewer as a non-blocking follow-up in review 1, left as-is per their own triage. | A co-occurring success in the same batch resets TileCache's whole silence ladder (T-499's pre-existing, deliberate 'one completion clears it' rule, general to the cache and not introduced by this ticket) -- costs at most one extra un-gated retry the first time an offline batch mixes a cached hit with an uncached miss, then self-corrects since the hit is resident and drops out of later requests. Asserted directly (not just described) in the new surface-tile-resilience.test.ts case. Not chased further: it is a deliberate, well-documented, general behavior outside this ticket's scope, not a defect this diff introduced.
+      Use cases: AWARE-011
+      Resources: 4 CPU-s, peak 0.4 GB
+    commit: 487b80a2
   - id: T-1040
     milestone: MLIVE
     title: coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
@@ -30620,7 +30686,7 @@ tasks:
   - id: T-1047
     milestone: MLIVE
     title: "LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold"
-    status: in-progress
+    status: done
     branch: task-t1047
     priority: medium
     deps:
@@ -30636,6 +30702,20 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold
+
+      Review (fix attempt 1) found: ring max-hold columns were computed over report.ringCover's (narrow, ring-band-clipped) frequency window but folded into pane.box-indexed columns by index, so a pane wider than the tuned band would land the ring's max-hold at the wrong frequencies (ui/src/app/centre/surface.ts:965). Fixed by building the ringMaxHoldColumns call's box from the pane's own full frequency window (matching hold's n-column domain) with only the TIME axis narrowed to ringCover's t0Ns/t1Ns; sampleRingRow already returns NaN for columns outside the ring's own band, so widening the frequency window costs nothing. Corrected ringMaxHoldColumns' docstring in livering.ts to state the contract explicitly, and added a regression test (ui/test/livering.test.ts) with a pane 4x wider than the ring's band asserting the peak lands in the pane's correct column, not shifted to column 0. Also merged main in (T-1037's rowsHeld/rowsLate landed on PaneReport concurrently; resolved by keeping both sets of fields). just test-ui: 106/106 files green; targeted livering/surface-trace/surface-reveal/surface-livering suites all green.
+
+      Gate (fix attempt 2) found one uncommitted file left after fix attempt 1: docs/tasks.yaml, holding the just task note entry from attempt 1 itself (legitimate board content from the sanctioned tool, not a hand-edit). Merge target e48d0eff was already an ancestor of task-t1047 (no re-merge needed). Committed the note as 12697dd4; no code change. just test-ui: 106/106 files green.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:20).
+      Gate (fix attempt 2) found one uncommitted file left in the worktree after fix attempt 1: docs/tasks.yaml, holding the notes-block entry written by `just task note T-1047` during attempt 1 (legitimate board content from the sanctioned tool, not a hand-edit) — it was written after the merge commit and never got committed. The merge target named in the gate finding (e48d0eff) was already an ancestor of task-t1047 (attempt 1's merge already pulled it in), so no re-merge was needed. Committed the stray note (12697dd4), then committed the note recording this fix itself (d082cc52) — that command also touches tasks.yaml, so it had to be committed too or the same UNCOMMITTED finding would recur. No code changed in this pass. Working tree is now clean (git status --short empty) with everything on task-t1047.
+      Tests: just test-ui -> exit 0 (106/106 test files passed (build + tsc + full node unit suite) — no code changed since the last green run, re-run to confirm the clean tree still builds)
+      precheck exit 0
+      Commits: 12697dd4, d082cc52
+      Observed, not chased: `just task note` leaves docs/tasks.yaml modified but uncommitted, which is exactly what tripped this gate finding — a worker (or the runner) that calls it as its last action before hand-back should commit immediately after, or the note-then-handback sequence will keep re-triggering this UNCOMMITTED check on every fix-and-return cycle that ends with a note.
+      Use cases: SIGNAL-012
+      Resources: 3 CPU-s, peak 0.3 GB
+    commit: a2ff4ceb
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
@@ -30683,7 +30763,7 @@ tasks:
   - id: T-1050
     milestone: MMAP
     title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
-    status: in-progress
+    status: done
     branch: task-t1050
     priority: high
     deps:
@@ -30700,6 +30780,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1041 worker 2026-09-25: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+    commit: 0220a629
   - id: T-1051
     milestone: MMAP
     title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
@@ -30721,7 +30802,7 @@ tasks:
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
-    status: in-progress
+    status: done
     branch: task-t1052
     priority: medium
     deps: []
@@ -30736,11 +30817,11 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone and in the stated order on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1037 worker 2026-09-25 (proven on main 8ac9cfb9): live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom
+    commit: 6b8452db
   - id: T-1053
     milestone: MMAP
     title: "Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout"
-    status: in-progress
-    branch: task-t1053
+    status: done
     priority: high
     deps: []
     parallel_group: UI-T1028-FOLLOWUP
@@ -30757,10 +30838,21 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY UI-stack integrator 2026-09-25 (red on main 6f38fbb8, fresh hk): Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout
+    branch: task-t1053
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 23:55).
+      The three reds had two causes. (a) At 400 px T-1028's chip made the top-right cluster nine chips (320 px = 80% of the pane, app-top-chrome's bar-shape rule), and Go-to's width (100% - 328px) left a 4 px input: the covered `mono` element in app-phone and in app-surface's 420 px T-882 test. Product fix: under 600 px (FOLD_QUERY, the stylesheet's phone breakpoint) the four MODE chips (Measure, Annotate, Pin, Retune mode) move into a Tools group at the top of the ⋯ menu as labelled rows. A matchMedia listener moves the same elements both ways, so handlers, pressed state and the retune held marker go with them. Each mode's banner still says it is on, and a press from the menu closes it. The phone row is now five chips (184 px), and Go-to is capped at a third of the pane so T-1025's chip rule holds with canvas between them. (b) The T-807 key-rows red came from T-981 (76902708), not T-1028: the new `frontend` layer's key row. KEYED_ROWS now lists it and asserts its fixed ['frontend'] key. Retune mode was already in CLOSED_NAMES. The shared rehomedHitTest now also opens ⋯ and hit-tests the folded rows, so the closed-set check holds by role at every width. No assertion was loosened. New unit test: app-map-controls T-1053 (red on the old module).
+      Tests: HK_E2E_PORT=9216 npm run e2e -- app-top-chrome (on unmodified main, fresh hk) -> exit 1 (at 400 px: DIV.map-chips map-topright is bar-shaped); HK_E2E_PORT=9216 npm run e2e -- app-phone (on unmodified main) -> exit 1 (mono (Go-to input) 4 px wide, covered); HK_E2E_PORT=9216 npm run e2e -- app-surface (on unmodified main) -> exit 1 (T-807 keyed rows lack frontend; T-882 at 420 px: mono covered); npm test -- app-map-controls (new test on the old map-controls.ts) -> exit 1 (T-1053 fold test fails, 15 others pass); HK_E2E_PORT=9216 npm run e2e -- app-top-chrome (x3, fresh hk, 1280 + 400) -> exit 0 (3/3 green); HK_E2E_PORT=9216 npm run e2e -- app-phone (x3) -> exit 0 (3/3 green); HK_E2E_PORT=9216 npm run e2e -- app-surface (x3) -> exit 0 (3/3 green); HK_E2E_PORT=9216 npm run e2e -- app-ruler / app-inv-pills (400 px neighbours) -> exit 0 (green); HK_E2E_PORT=9216 npm run e2e -- scan-overlay (rerun) -> exit 0 (green on rerun and on the old code; one earlier red was a load flake (load avg ~39) in scan-step timing); npm test -- app-map-controls -> exit 0 (16 passed); just test-ui -> exit 0 (105/105 test files passed)
+      precheck exit 0
+      Commits: bf7d2920
+      Observed, not chased: scan-overlay.e2e.mjs 'Start: the steps the engine executes ... are the steps the overlay drew' failed once under load avg ~39: executed step 0 was centred on 96323737 Hz, but the overlay drew step 0 at 94861849 Hz (the log shows a 94861849 step began 0.56 s before the Start timestamp). It passed on an immediate rerun and on the old code. It looks like a start-instant race to hand to the deflaker, not a product regression.
+      Resources: 261 CPU-s, peak 3.5 GB
+    commit: 538a64dc
   - id: T-1054
     milestone: MAUTO
     title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
-    status: todo
+    status: in-progress
+    branch: task-t1054
     priority: high
     deps:
     - T-963
@@ -30781,10 +30873,9 @@ tasks:
   - id: T-1055
     milestone: MSCAN
     title: "After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation"
-    status: todo
+    status: in-progress
+    branch: task-t1055
     priority: high
-    deps:
-    - T-964
     parallel_group: SCAN-SHADOW
     needs: none
     model: opus
@@ -30802,6 +30893,92 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on your own ports >= 9216; the hk-cli scan_coverage binary; api_contract with docs/api.md together), then HAND BACK with screenshots. Never `just gate`.
     notes: |
       FOUND BY user feature (scan + fog of war) via explorer; review of T-964 2026-09-25 (re-filed: first filed as T-1014 on task-t964, lost in a board merge): After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation
+
+      2026-09-26 coordinator: T-1058 (the user's last-known LEDGER design) replaces the per-tile shadow search that also makes the swept range's shadow unreliable after a scan - build this ticket's canvas item on T-1058's ledger once it lands (the ledger gives every swept cell its last sample, no search); this ticket keeps its other items (contradictory coverage lines, un-timed /api/coverage window, record-limit truncation).
+    deps: [T-964, T-1058]
+  - id: T-1056
+    milestone: MMAP
+    title: "Black bar at the bottom of the map: fit() reserved the sheet peek strip under the panes (T-933); the sheet floats over the full-bleed canvas"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: MAP-SHEET-INSET
+    needs: none
+    model: fable
+    effort: medium
+    acceptance: |
+      USER (2026-09-25 ~20:15, via supervisor): "The bottom bar looks like it should be gone." The user asked the SUPERVISOR to fix it directly (a very small change): ui/src/app/centre/surface.ts fit() (~line 2142) lifted the panes above the sheet's PEEK_PX strip (T-933's clearance) - that reserved strip was the black bar. Dropped the sheet clearance, kept only the out-strip clearance: the sheet (and the hidden-until-clicked card, T-1026) floats over the full-bleed canvas.
+      SUPERVISOR-AUTHORED at the user's request: branch task-sup-sheet-inset, commit cbe32c84 (one commit off gate base e48d0eff); ui unit 106/106, app-dismiss + app-sheet e2e green. app-phone.e2e red on base e48d0eff ('covered: mono' at 400 px) is pre-existing (T-1053 owns it).
+      NOTES: contradicts T-803's 'the sheet is never hidden / never covers' rule - superseded by T-1026 (the card is hidden until a feature is clicked) and the user's full-bleed rulings (T-995, T-1041, T-1027).
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor: Black bar at the bottom of the map: fit() reserved the sheet peek strip under the panes (T-933); the sheet floats over the full-bleed canvas
+    branch: task-sup-sheet-inset
+    dispatch: manual
+    commit: 72ef7434
+    result: |
+      LANDED 2026-09-26 00:04 in the bulk with T-1047/T-1052/T-1050/T-1053 (merge 72ef7434). Supervisor-authored at the user's request: surface.ts fit() no longer lifts the panes above the sheet's PEEK_PX strip (T-933's clearance, the black bottom bar); only the out-strip clearance remains, so the sheet/card floats over the full-bleed canvas. Branch task-sup-sheet-inset, commit cbe32c84; ui unit 106/106; app-dismiss + app-sheet e2e green.
+  - id: T-1057
+    milestone: MLIVE
+    title: "Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)"
+    status: in-progress
+    branch: task-t1057
+    priority: high
+    deps: []
+    parallel_group: TILE-NEVER-ABANDON
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER (2026-09-25 ~23:55, via supervisor; ~/.hackriff-ops/handoffs/coordinator-0010-abandoned-tiles-and-fog-ledger.md section 1): "Sometimes there are black bars in the waterfall, representing tiles that haven't been loaded yet; sometimes those never load. If a tile fails to load at all it should be re-requested. It seems like they are getting abandoned. Left alone long enough, all tiles on the screen should load. I don't think we should ever see the black tiles."
+      PLACES (ui/src/surface/tilecache.ts): failed() at :2117 (which errors re-queue - T-479 made 400s stop retrying; a transient 5xx/timeout/network error must NOT be treated like a 400); the abandoned-slot accounting abandonedUntil (:564-839) that can leave a visible tile with no lane willing to re-issue it; the coverage-survey short-circuit (T-905) when the survey is stale after a retune; the batch path (tilebatch.ts:112-161) - a batch entry with status 503/truncated/`remaining` must be re-queued per address, not dropped.
+      INVARIANT (state it in code + docs/23): a visible tile is never abandoned - every pending visible address is re-requested with jittered backoff (share T-1035/T-1039's backoff) until served or the server states it does not exist; the survey can only turn a place GREY (unobserved), never leave it PENDING; a retune refreshes the survey before it may veto a request.
+      ACCEPTANCE (spy client + fault injection in ui/test): drop/503/timeout 30 % of tile responses at random -> every visible address is eventually served and no PENDING quad remains; a retune -> the survey refreshes before vetoing; batch `remaining` entries are re-issued. Plus an e2e with the harness failing the route intermittently: no PENDING quad after it recovers.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; e2e alone on ports >= 9216 against a FRESH hk), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor: Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)
+
+      2026-09-26 coordinator, from T-1039's merge (the worker traced where the tile cache still gives up on a VISIBLE tile permanently - this ticket's targets): any 4xx, 500 or 501 from the tile route; an unreadable answer; and the batch layer's 'batch answer named no entry' case in ui/src/surface/tilebatch.ts. T-1039 added none (its SW answers 502 offline, treated as silence and retried). ALSO take over T-1039's unmet browser-test acceptance: an e2e with the harness dropping/stalling the tile route (nothing drawn is cleared, no PENDING over drawn tiles, retries back off) and a reload with the server stopped painting the last viewport's sealed tiles from the Service Worker cache.
+    high_effort_reason: the tile client's request lifecycle (retry classes, abandoned-slot accounting, the survey veto, batch remainders) - the user-visible 'black forever' rule across every lane
+  - id: T-1058
+    milestone: MLIVE
+    title: "Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it"
+    status: in-progress
+    branch: task-t1058
+    priority: high
+    deps: []
+    parallel_group: FOG-LEDGER
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER DESIGN (2026-09-25 ~23:55, via supervisor; ~/.hackriff-ops/handoffs/coordinator-0010-abandoned-tiles-and-fog-ledger.md section 2): "The fog-of-war is also not working reliably. If I zoom in close enough that the most recent sample for a region is outside of the viewport, it does not render. If I pan down so that the last seen sample is in the viewport, SOME of the tiles resolve, but not all. What we really need is to render all of the fog-of-war tiles... Store some minimal set of data for the source of the 'last sample' for a given region. It should be incredibly fast and straightforward... the server doesn't need to re-render anything."
+      WHY TODAY FAILS: the tile `shadow` plane is computed per tile by a bounded newest-first ladder search (crates/hk-store/src/history/query.rs:1454 last_known_search, :1889 last_known, budgets per_step_cells/total_cells; tiles.rs calls it per tile). At a fine zoom the departed band's last row is many search steps away and the budget runs out -> shadow.runs = 0; panning closer brings some tiles within budget and not others. T-1034 fixed one instance (the band's last live rows), not the mechanism.
+      DELIVER: an incremental last-known LEDGER in the store - per device, per finest-level frequency cell: (last max-hold dB, last capture time, epoch/tune id), updated O(bins) on every ingested row (a row IS the newest sample for every cell it covers), persisted into the retention structure so it survives restarts and evictions (T-1023's budget accounts for it); coarser views fold it (max over cells, latest time). Serving: the tile route's shadow plane reads the ledger - no search, no budget, exact at any zoom/any distance in time; plus a small GET /api/lastknown?device&f_lo&f_hi&cols (or a plane in coverage/timeline) so a pane paints fog for its whole frequency window from one array and re-lays it per frame. Coverage/grey stays record-derived (T-368); the ledger supplies only the last-known tier (ADR-0020 - cite its section; amend it). docs/api.md + api_contract.rs (T-079). MEASURE the per-row update cost on the capture thread (T-453: a max + timestamp per bin; state the number). Retire last_known_search and its budgets (or keep only for a migration window, stated).
+      ACCEPTANCE (mock SDR, deterministic): tune A 10 s, retune B, zoom to the finest level so A's last row is far outside the viewport -> every column of A's band carries a shadow whose last_t_s is A's last row, at every tile of the viewport and at every level; search.unsearched == [] (or the field retires with the search); after a restart the ledger persists; ui/e2e: after a retune, zoom in 4 levels - no black or grey inside the departed band, fog everywhere.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, hk-api tiles, api_contract, the e2e alone on ports >= 9216 against a FRESH hk, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor: Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it
+    core_interface: true
+    high_effort_reason: the user's design replaces the shadow mechanism across hk-store ingest, the tile route and a new route; persisted state + capture-thread cost (T-453) + the ADR-0020 last-known tier contract
+  - id: T-1059
+    milestone: M2-hardening
+    title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
+    status: in-progress
+    branch: task-t1059
+    priority: medium
+    deps: []
+    parallel_group: TASK-CLI
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      FOUND 2026-09-26 by the coordinator (board branch task-board-0926ax): py/hkpy/tasks.py has two defects on list-valued keys written in BLOCK style (`deps:` then `- T-964` lines at the SAME indentation as the key, which is how `just task new --depends-on` writes them):
+      1. `just task set T-1055 'deps=[T-964, T-1058]'` did not replace the block list - it appended a second `deps: [...]` key. yaml.safe_load keeps the last, so `just task validate` passed, but the block now declares `deps` twice (hkpy.boardmerge caught it: "T-1055: declares 'deps' twice, which is a lost `- id:` line") and every later board merge refuses.
+      2. `just task unset T-1055 deps` cannot remove a block list: _unset_field removes the key line but not its `- item` lines (same indentation, not recognised as continuation), producing invalid YAML - which the write-validator correctly refused and restored.
+      DELIVER: treat `- ` lines at the key's indentation directly after a key with an empty value as that key's continuation, in both set (replace the whole value) and unset (remove it); `validate` fails on any duplicate key within one ticket block (the check boardmerge already does). Tests in py/tests (test_tasks_cli or the existing task tests): set replaces a block list; unset removes it; validate rejects a duplicated key - each red on the current code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`uv run --locked --project py python -m pytest -q <the task-CLI tests>`, `just lint-py`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-26 (T-1055 duplicate deps): task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
