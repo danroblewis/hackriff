@@ -832,6 +832,25 @@ export class TileCache<T> {
   private bytes = 0;
   private busyUntil = 0;
   private limit: number;
+  /**
+   * **Slots taken under a cap this client no longer has** (T-1079): how many reads were already out
+   * the last time [[limit]] was lowered, decayed back to [[limit]] as they are released.
+   *
+   * A cap can fall under a client's feet — the route states a smaller share because another tab
+   * arrived, or a refusal halves it — and the reads it admitted before that are *already* on the
+   * route. They cannot be recalled: an abort reaches the browser and not `hk-api`, which goes on
+   * producing the tile and holding the slot ([[abandon]]), so walking away gives nothing back.
+   * There is exactly one way a client releases a slot, which is to let the read finish.
+   *
+   * So the OPERATING cap this client reports ([[inFlightLimit]]) is the new cap or what is still
+   * out under the old one, whichever is larger, and it converges on the new cap by attrition. The
+   * *issuing* budget is untouched — [[effectiveLimit]] is [[limit]] and nothing else, so no read is
+   * ever issued because of this number. That asymmetry is the whole point: it makes "a tab never
+   * has more reads out than the cap it reports" a property the readout can be asserted on
+   * (`ui/e2e/surface-contention.e2e.mjs`), while a lane that issues a read *without* taking a slot
+   * still shows up as exactly that — over the cap — because nothing here credits an issue.
+   */
+  private draining = 0;
   /** The most this client may recover to: the server's own number, never raised by anything here. */
   private ceiling: number;
   /** See [[inFlightShareStatedAt]]. */
@@ -903,9 +922,18 @@ export class TileCache<T> {
 
   get residentTiles(): number { return this.map.size; }
   get residentBytes(): number { return this.bytes; }
-  /** The AIMD cap as of **now** — the elapsed-quiet recovery is folded in on read (T-539), so a
-   * readout and a test see the same number the next pump would use. */
-  get inFlightLimit(): number { this.recoverElapsed(); return this.limit; }
+  /**
+   * The cap this client is **operating at** as of now: the AIMD cap, with the elapsed-quiet
+   * recovery folded in on read (T-539) so a readout and a test see the number the next pump would
+   * use — or, while a lowered cap is still draining, the slots it legitimately holds under the cap
+   * it had ([[draining]], T-1079). Never fewer than are out through this cache, so a tab reporting
+   * more reads out than this is reporting a lane that took no slot.
+   */
+  get inFlightLimit(): number {
+    this.recoverElapsed();
+    this.releaseDrained();
+    return Math.max(this.limit, this.draining);
+  }
   /**
    * The cap this client may recover to: the server's own number, and since T-630 **its share** of
    * it when the route states one. Shown beside the operating cap because "why is this tab only
@@ -1404,12 +1432,27 @@ export class TileCache<T> {
     return n;
   }
 
-  /** Issue every pending coverage-change re-ask in ONE turn, so they share one batch (T-1040). */
+  /**
+   * Issue the pending coverage-change re-asks in ONE turn, so they share one batch (T-1040) —
+   * **on the budget, exactly like every other read** (T-1079).
+   *
+   * It used to issue the whole pending set with no budget test at all, on the reading that a batch
+   * holds one route slot. It does not: `tiles_batch_json` takes *a slot per member*, under this
+   * client's own share, so a five-tile move against a cap of one put five reads on the route and
+   * left the tab reporting more reads out than its own operating cap — the RC red this ticket came
+   * from, and the shape that feeds a request storm. Every read — first try, retry, revalidation,
+   * look-ahead, and this one — is admitted by the same arithmetic.
+   *
+   * Budget-limited is not *dropped*: what does not fit stays in [[changedPending]] and goes out on
+   * the next pump, which every completion runs. They still go first, ahead of the ordinary queue,
+   * because they are on screen and wrong; and what does go out in one turn still goes in one batch.
+   */
   private pumpChanged(): void {
     if (!this.changedPending.size) return;
     let issued = 0;
     for (const [key, addr] of [...this.changedPending]) {
       if (issued >= TILES_BATCH_MAX_ADDRESSES) break;
+      if (this.inflight.size + this.abandonedSlots >= this.effectiveLimit) break;
       // In flight: asked again once it lands (`done` pumps). Evicted since: the miss path owns it.
       if (this.inflight.has(key)) continue;
       this.changedPending.delete(key);
@@ -1961,6 +2004,7 @@ export class TileCache<T> {
     this.bytes = 0;
     for (const [, f] of this.inflight) f.ctrl?.abort();
     this.inflight.clear();
+    this.draining = 0;
     this.abandonedUntil = [];
     this.queue = [];
     this.queued.clear();
@@ -2224,6 +2268,9 @@ export class TileCache<T> {
       let requeue = wanted;
       this.lastWireAt = Math.max(this.lastWireAt, this.now());
       this.inflight.delete(key);
+      // A slot is released by the read finishing and by nothing else, so this is where a lowered
+      // cap's charge decays back towards it (T-1079).
+      this.releaseDrained();
       // A failed re-ask leaves the copy in hand; a later event, or the survey, asks again.
       if (this.changedInflight.delete(key)) requeue = false;
       // The lane tag belongs to the request, not to the place: a re-ask from the ordinary miss path
@@ -2343,6 +2390,34 @@ export class TileCache<T> {
     return null;
   }
 
+  /**
+   * **Set the cap, charging what is already out when it FALLS** (T-1079, [[draining]]). The one
+   * place a cap reduction happens, so there is one place the charge can be forgotten.
+   *
+   * Charged only on a fall, and never by [[issue]]: an answer that restates the same cap must not
+   * hand a credit to reads that were issued over it, or a lane taking no slot would be invisible
+   * the moment the next tile landed.
+   */
+  private setLimit(next: number): void {
+    const n = Math.max(1, next);
+    if (n < this.limit) this.chargeDraining();
+    this.limit = n;
+    this.releaseDrained();
+  }
+
+  /** Remember the slots out through this cache right now — reads being waited on, plus the ones
+   * walked away from that the route is still producing ([[abandonedSlots]]). */
+  private chargeDraining(): void {
+    this.draining = Math.max(this.draining, this.inflight.size + this.abandonedSlots);
+  }
+
+  /** The other half: a charge only lasts while the read that earned it is out, so the operating cap
+   * follows the reads down to [[limit]] rather than sitting at the old one. */
+  private releaseDrained(): void {
+    if (!this.draining) return;
+    this.draining = Math.min(this.draining, Math.max(this.limit, this.inflight.size + this.abandonedSlots));
+  }
+
   /** Fold one completed request into the measured service time. Refusals are excluded: a `503`
    * returns at once and would teach the estimate that tiles are free. */
   private observe(startedAt: number): void {
@@ -2450,9 +2525,9 @@ export class TileCache<T> {
       const ownReadsRefusedIt = typeof err.held === "number"
         && err.share !== null && err.share > 0 && err.held >= err.share;
       if (typeof err.held === "number") this.reconcileHeld(err.held, false);
-      this.limit = ownReadsRefusedIt
+      this.setLimit(ownReadsRefusedIt
         ? Math.min(this.limit, this.ceiling)
-        : Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));
+        : Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling)));
       this.goodRuns = 0;
       this.refusals = Math.min(this.refusals + 1, 4);
       // The refusal itself cost the server nothing, but whatever is holding the slots has not
@@ -2539,7 +2614,7 @@ export class TileCache<T> {
     if (typeof data.serverInFlightHeld === "number") {
       this.reconcileHeld(data.serverInFlightHeld, data.serverHoldsThisRead !== false);
     }
-    this.limit = Math.min(this.limit, this.ceiling);
+    this.setLimit(Math.min(this.limit, this.ceiling));
   }
 
   /**
