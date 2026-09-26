@@ -560,7 +560,7 @@ export class PinLayer {
   /** Re-lay the layer out for this frame. `hoveredId`/`selectedId` style the states; `activity`
    * (T-994) is each feature's open outputs, by id — the backend's records, read by the caller. */
   update(layouts: readonly PaneLayout[], hoveredId: string | null, selectedId: string | null,
-    activity?: ReadonlyMap<string, FeatureActivity>): void {
+    activity?: ReadonlyMap<string, FeatureActivity>, selectedPaneId?: string | null): void {
     const doc = this.root.ownerDocument;
     this.placed = layouts.flatMap((l) => l.placed);
     this.index = new PinIndex(this.placed.filter((p) => !p.area));
@@ -592,12 +592,21 @@ export class PinLayer {
       // its symbol. `area` = a hit area over the box; `symbol` = the hit/focus point over the symbol.
       const form = p.area ? " area" : p.pin.source === "detection" ? " symbol" : "";
       const act = activity?.get(p.pin.id);
+      // T-1004: selection is one piece of page state, but it was MADE in one pane. In any other
+      // pane the same feature is the selection's linked ghost (`marks.ts` draws the faint brackets),
+      // never a second selection — so with a split view the user can see where the selection is and
+      // where it is merely mirrored. `selectedPaneId` absent (a single-pane host) = the old
+      // behaviour exactly: the selected feature is selected wherever it is placed.
+      const owns = selectedPaneId === undefined || selectedPaneId === null || p.paneId === selectedPaneId;
+      const sel = p.pin.id === selectedId && owns;
+      const linked = p.pin.id === selectedId && !owns;
       const cls = `sf-pin ${p.pin.kind} ${p.pin.source}${form}`
-        + (p.pin.id === hoveredId ? " hovered" : "") + (p.pin.id === selectedId ? " selected" : "") + (act ? " active" : "");
+        + (p.pin.id === hoveredId ? " hovered" : "") + (sel ? " selected" : "") + (linked ? " linked" : "") + (act ? " active" : "");
       if (el.className !== cls) el.className = cls;
-      const label = act ? `${pinLabel(p.pin)} · active: ${activityWords(act)}` : pinLabel(p.pin);
+      const base = linked ? `${pinLabel(p.pin)} · linked: selected in another viewport` : pinLabel(p.pin);
+      const label = act ? `${base} · active: ${activityWords(act)}` : base;
       if (el.getAttribute("aria-label") !== label) el.setAttribute("aria-label", label);
-      const pressed = String(p.pin.id === selectedId);
+      const pressed = String(sel);
       if (el.getAttribute("aria-pressed") !== pressed) el.setAttribute("aria-pressed", pressed);
       if (p.area) {
         // No glyph: an invisible, focusable hit area exactly over the box the detections layer draws.

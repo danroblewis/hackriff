@@ -79,7 +79,7 @@ import { retunePlan, type FrequencyGrid, type RetunePlan, type RetuneRefusal } f
 import type { ActiveWindow } from "../navigators";
 import { applyDeviceAction, retuneAction, type DeviceAction } from "../app/centre/view";
 import type { AppContext } from "../app/context";
-import { boxOf, timeExtentOf, type PaneState } from "./panes";
+import { boxOf, following, timeExtentOf, type PaneState } from "./panes";
 
 /**
  * The window a pane is **already covered by**, or null.
@@ -419,6 +419,13 @@ export interface PaneWidthOffer {
   readonly askedSpanHz: number;
   readonly plan: RetunePlan;
   readonly block: PaneRetuneBlock | null;
+  /**
+   * T-1004: is the pane **following the live edge**? Distinct from `block`, which asks whether the
+   * pane's window ENDS before the edge: a pane frozen a moment ago is not following and is still at
+   * the edge, so `block` is null while every row that arrives from here on lands where it is not
+   * looking. The go-live offer is about that state ([[isGoLiveOffer]]); the ordinary refusal is not.
+   */
+  readonly following: boolean;
 }
 
 /**
@@ -436,6 +443,7 @@ export function paneWidthOffer(
   return {
     paneId: pane.id, device: pane.device, askedSpanHz, plan,
     block: t.t1Ns + edgeGraceNs >= edgeNs ? null : "past",
+    following: following(pane),
   };
 }
 
@@ -502,8 +510,92 @@ export async function acceptPaneWidth(
 /** Do two width offers name the same capture configuration for the same pane and the same asked
  * span? See [[sameTarget]] — the same rationale, `askedSpanHz` standing in for the region. */
 function sameWidthTarget(a: PaneWidthOffer, b: PaneWidthOffer | null): boolean {
-  if (!b || b.paneId !== a.paneId || b.device !== a.device || b.askedSpanHz !== a.askedSpanHz) return false;
-  if (b.block !== a.block) return false;
+  // T-1004: `following` is compared beside `block` for the same reason `block` is — it decides which
+  // offer the label was (a retune or a go-live), so a pane that froze or went live between paint and
+  // press is not the offer that was read.
+  return !!b && b.block === a.block && b.following === a.following && samePlannedCapture(a, b);
+}
+
+// ---------------------------------------------------------------------------
+// T-1004 (MMAP split view): a frozen pane's offer, read as "go live at this frequency"
+// ---------------------------------------------------------------------------
+//
+// With two panes — one frozen on a past signal, one live — the Go-to entry acts on the ACTIVE pane
+// (T-1000 names which). On a FROZEN pane every offer above is `block: "past"`, stated and disabled:
+// a retune changes only what is captured from now on, so there is nothing a frozen viewport gains
+// from one. That refusal is correct and stays correct — but it is also a dead end, and the thing the
+// user actually meant by typing a frequency into a frozen pane is reachable in one act: **bring this
+// viewport back to the live edge, and tune the front end there.**
+//
+// So the SAME offer is re-read rather than a second one being planned: `block === "past"` with an
+// achievable plan is takeable as a *go-live*, and the label and the button say exactly that. Nothing
+// about the refusal is loosened — [[widthOfferAcceptable]] and [[paneWidthAction]] still say no to a
+// frozen pane, so no existing path can retune one — the go-live path unfreezes FIRST (view state,
+// no route) and only then takes the now-unblocked offer through the one gate.
+
+/** The button's word for the composite act, so a press is never read as a plain retune. */
+export const GO_LIVE_LABEL = "Go live here";
+
+/**
+ * Is this a frozen pane's offer that a **go-live** could take? A pane that is **not following the
+ * live edge**, with a plan the front end can achieve.
+ *
+ * Read off `following`, not `block`: a pane frozen this second still ends at the edge, so `block` is
+ * null — but a retune only changes what is captured *from now on*, and from now on is precisely
+ * where a frozen pane is not looking. Both frozen states therefore get the same offer. A frozen pane
+ * whose plan is refused — outside the tunable range, wider than one window, no grid — is not one:
+ * going live would not make it reachable.
+ */
+export const isGoLiveOffer = (o: PaneWidthOffer | null): boolean => !!o && !o.following && o.plan.ok;
+
+/**
+ * The sentence beside a go-live offer: **both halves of what the press does**, in the order it does
+ * them — the viewport leaves the past, and the front end is asked for this capture. It names the
+ * achievable centre and span, exactly as [[widthOfferLabel]] does, so the number on screen is the
+ * number the radio will be asked for. Not a go-live offer → the ordinary label, unchanged.
+ */
+export function goLiveOfferLabel(o: PaneWidthOffer): string {
+  if (!isGoLiveOffer(o) || !o.plan.ok) return widthOfferLabel(o);
+  const mhz = (o.plan.centerHz / 1e6).toFixed(4), span = (o.plan.spanHz / 1e6).toFixed(3);
+  return "This viewport is frozen, and a retune changes only what is captured from now on."
+    + ` Go live at ${mhz} MHz: this viewport returns to the live edge and the front end captures ${span} MHz there.`;
+}
+
+/**
+ * Take a go-live offer: **unfreeze, then retune** — one press, two acts, in that order.
+ *
+ * The order is the whole of it. Unfreezing is view state (`goLive`, the pane model's follow — no
+ * route, nothing about capture changes), so it is safe to do first and it is what makes the retune
+ * legitimate: after it the pane is at the live edge and the offer is no longer blocked, so the
+ * device action goes through [[acceptPaneWidth]]'s ordinary path — the same T-407 re-derivation, the
+ * same one gate, the same growing-edge invalidation. Nothing here constructs a `DeviceAction` of its
+ * own, and nothing here can retune a pane that is still frozen.
+ *
+ * Guarded twice, because the press is one act over a view that moves:
+ *
+ *  1. **Before** unfreezing, the painted offer is compared to a freshly derived one (T-407). A pane
+ *     that has moved since the label was drawn refuses, and is left frozen — a half-taken offer that
+ *     unfroze the user's past window and then refused the retune would be the worse outcome.
+ *  2. **After** unfreezing, the re-derived offer must be unblocked and name the SAME capture. If it
+ *     does not, the offer is refused rather than a different capture being taken; the pane stays at
+ *     the live edge it was just asked to return to, which is the half the user asked for by name.
+ */
+export async function acceptGoLive(
+  ctx: AppContext, site: PaneWidthSite, offer: PaneWidthOffer, goLive: (paneId: string) => void,
+): Promise<PaneWidthOutcome> {
+  if (!isGoLiveOffer(offer)) return { ok: false, reason: "not_acceptable" };
+  if (!sameWidthTarget(offer, site.offerNow(offer.paneId, offer.askedSpanHz))) return { ok: false, reason: "moved" };
+  goLive(offer.paneId);
+  const live = site.offerNow(offer.paneId, offer.askedSpanHz);
+  if (!live || live.block !== null || !live.following || !samePlannedCapture(offer, live)) return { ok: false, reason: "moved" };
+  return acceptPaneWidth(ctx, site, live);
+}
+
+/** Do two width offers name the same pane, device, asked span and planned capture? The half of
+ * [[sameWidthTarget]] that is about WHAT would be captured, without the `block` comparison — used by
+ * [[acceptGoLive]], where the block is exactly what the press has just changed. */
+function samePlannedCapture(a: PaneWidthOffer, b: PaneWidthOffer): boolean {
+  if (b.paneId !== a.paneId || b.device !== a.device || b.askedSpanHz !== a.askedSpanHz) return false;
   if (!a.plan.ok || !b.plan.ok) return false;
   return a.plan.centerHz === b.plan.centerHz && a.plan.spanHz === b.plan.spanHz;
 }
