@@ -28895,7 +28895,7 @@ tasks:
   - id: T-979
     milestone: M3
     title: UHF 470-608 has no band-plan data; ATSC 8VSB channels shatter into 15-60 rows labelled FM broadcast instead of one explained 6 MHz row
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: ATSC-UHF
@@ -28916,6 +28916,7 @@ tasks:
       Observed, not chased: The detector still shatters the 5.381 MHz plateau into narrow/medium fragments beside the new 6 MHz row; the blind test deliberately does not assert they are gone. Merging them belongs to the overlap-re-analysis work named in the ticket. Note main's batch landed crates/hk-detect/tests/noise_band_candidates.rs, which looks adjacent to this - worth a look before the merge ticket is scoped. Evidence: crates/hk-pipeline/tests/atsc_blind_device.rs module docs, crates/hk-pipeline/src/atsc.rs 'What it does not write'. | hk_detect::Detector::integrated_snapshot and integrated_evaluation (crates/hk-detect/src/detector.rs) have NO callers anywhere in the workspace, and hk-pipeline drops DetectorEvent::Integrated on the floor (two `=> {}` arms in crates/hk-pipeline/src/detect.rs). The emitter-level integrated spectrum is computed on the capture path every 0.25 s and thrown away - it is the natural input for wideband re-analysis (including the fragment merge above), so it is paid for but unused. | family::service_family maps ANY continuous 106-400 kHz emission to fm-broadcast at 0.6 regardless of frequency (Occupancy carries no centre), which is why DTV fragments at 560 MHz read 'FM broadcast'. Main's T-990 now discounts such a suggestion where the measurement contradicts the service, which covers much of the harm, but the label itself is still frequency-blind. Evidence: crates/hk-pipeline/src/family.rs, `Evidence::Occupancy` arm of `service_family`. Left alone: narrowing it needs a decision about whether a shape suggestion may be gated by band, which is a core-interface call.
       Use cases: AWARE-046, SIGNAL-066
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: aa6d4893
   - id: T-980
     milestone: M2-hardening
     title: A CW carrier is Confirmed as a 55 kHz unknown 12 kHz off, and the burst chains mint 186 FSK bursts from it
