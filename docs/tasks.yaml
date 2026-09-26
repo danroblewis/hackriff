@@ -30911,7 +30911,8 @@ tasks:
   - id: T-1057
     milestone: MLIVE
     title: "Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)"
-    status: todo
+    status: in-progress
+    branch: task-t1057
     priority: high
     deps: []
     parallel_group: TILE-NEVER-ABANDON
@@ -30932,7 +30933,8 @@ tasks:
   - id: T-1058
     milestone: MLIVE
     title: "Fog-of-war from an incremental LAST-KNOWN LEDGER (per device x finest f-cell: last dB, last t, epoch; O(bins) per ingested row, persisted), not a per-tile bounded ladder search - exact at any zoom and any distance; tiles' shadow plane + a small /api/lastknown read it"
-    status: todo
+    status: in-progress
+    branch: task-t1058
     priority: high
     deps: []
     parallel_group: FOG-LEDGER
@@ -30952,7 +30954,8 @@ tasks:
   - id: T-1059
     milestone: M2-hardening
     title: "task CLI mishandles block-style list keys: set appends a second 'deps' instead of replacing, unset leaves the '- item' lines (invalid YAML), validate misses duplicate keys"
-    status: todo
+    status: in-progress
+    branch: task-t1059
     priority: medium
     deps: []
     parallel_group: TASK-CLI
