@@ -29724,7 +29724,7 @@ tasks:
   - id: T-1008
     milestone: MMAP
     title: "Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop"
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: MAP-SCAN
@@ -29751,6 +29751,7 @@ tasks:
       Use cases: AWARE-011, AWARE-042
       Resources: 1337 CPU-s, peak 7.7 GB
     branch: task-t1008
+    commit: 0aa45c00
   - id: T-1009
     milestone: MMAP
     title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
