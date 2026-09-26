@@ -31869,7 +31869,8 @@ tasks:
   - id: T-1084
     milestone: MUI
     title: "RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands"
-    status: todo
+    status: in-progress
+    branch: task-t1084
     priority: P1
     deps:
     - T-1051
@@ -31927,7 +31928,8 @@ tasks:
   - id: T-1087
     milestone: M2-hardening
     title: "events_and_presence (landed 0c0005d7) may still pass a route with its own liveness rule: measure the deliberate-defect catch rate; add the wait-for-live precondition if < 5/5"
-    status: todo
+    status: in-progress
+    branch: task-t1087
     priority: normal
     deps: []
     parallel_group: CLI-EVENTS-LIVE
