@@ -31723,7 +31723,8 @@ tasks:
   - id: T-1085
     milestone: M2-hardening
     title: "listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag"
-    status: todo
+    status: in-progress
+    branch: task-t1085
     priority: high
     deps: []
     parallel_group: PIPE-LISTEN-STEREO
@@ -31742,7 +31743,8 @@ tasks:
   - id: T-1086
     milestone: M2-hardening
     title: "An on-air station reads liveness 'ended' for its first ~70 ms: silence is measured off the ring's SAMPLED edge before the detector analysed it, so an end is reported that was never detected (then revoked)"
-    status: todo
+    status: in-progress
+    branch: task-t1086
     priority: high
     deps: []
     parallel_group: PIPE-LIVENESS-HORIZON
