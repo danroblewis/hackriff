@@ -30915,7 +30915,7 @@ tasks:
   - id: T-1054
     milestone: MAUTO
     title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-963
@@ -30943,6 +30943,7 @@ tasks:
       Observed, not chased: py/fixtures/ais_ref.py still searches every flag pair, so it cannot show this class of loss. It was left as the oracle and not changed. | Shared flags add short junk frames (a flag-only frame between back-to-back flags, and idle or noise between bursts up to the next flag). The FCS refuses them: AIS crc marks them invalid, APRS drops them. The `frames` count in sync_search status therefore rises on a continuous line.
       Use cases: SIGNAL-015, SIGNAL-089
       Resources: 76 CPU-s, peak 1.9 GB
+    commit: c5cfc3cc
   - id: T-1055
     milestone: MSCAN
     title: "After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation"
