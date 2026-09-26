@@ -2427,3 +2427,34 @@ def test_while_a_batch_gates_the_gated_base_is_what_a_branch_is_measured_against
     R.rescue_stranded(claims, dry=False)
     assert "task-t902" in queue() and "task-t908" not in queue()
     assert not [ln for ln in needs() if "task-t902" in ln]
+
+
+def test_a_task_cli_that_fails_once_while_uv_builds_the_venv_is_retried(tmp_path, monkeypatch):
+    """2026-09-26 06:16: T-1075's result was lost - the first `just task` in a fresh worktree built py/.venv and
+    failed; the log showed only uv's 'Using CPython ...' banner. The board result must be written on a retry."""
+    wt = tmp_path / "wt"
+    (wt / "py" / "hkpy").mkdir(parents=True)
+    (wt / "py" / "hkpy" / "tasks.py").write_text("")
+    (tmp_path / "work" / "T-1").mkdir(parents=True)
+    monkeypatch.setattr(R, "WORKDIR", str(tmp_path / "work"))
+    monkeypatch.setattr(R, "resource_line", lambda c: "")
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    calls = []
+
+    def run(args, **kw):
+        calls.append(args[:2] if args[0] == "git" else ["cli", "result" if "result" in args else args[-1]])
+        if args[0] == "uv" and sum(1 for c in calls if c[0] == "cli") == 1:
+            return subprocess.CompletedProcess(args, 2, "", "Using CPython 3.13.9 interpreter at: /x\nerror: venv busy")
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(R.subprocess, "run", run)
+    R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
+    assert [c for c in calls if c[0] == "cli"] == [["cli", "result"], ["cli", "result"]]      # retried once
+    assert ["git", "commit"] in calls and any("board written" in m for m in said)
+    # and when it fails twice, the END of stderr (the error) is what gets logged
+    calls.clear()
+    said.clear()
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(
+        args, 2, "", "Using CPython 3.13.9 interpreter at: /x\n" + "." * 400 + "error: the real reason"))
+    R.write_result({"ticket": "T-1", "wt": str(wt)}, {"outcome": "done", "summary": "x"})
+    assert any("error: the real reason" in m for m in said)
