@@ -19,14 +19,15 @@
 //     EDGE band (anything whose box starts within 24 px of the top): no element that PAINTS a
 //     background is wider than a third of the window, the painted chips leave gaps between them,
 //     a press in a gap lands on the canvas (the row takes no pointer), and the gap's PIXELS are
-//     the canvas's, not chrome's — darker than the chip beside it, and a different dominant colour.
+//     the canvas's, not chrome's — proved by hiding the chrome and re-photographing the SAME
+//     rectangle (T-1031), never by sampling a second rectangle elsewhere on the map.
 //  4. VIEW/DEVICE LINE — nothing but the nudge press reaches a device route.
 //
 // `HK_E2E_SHOTS=<dir>` saves a screenshot per width (and one of the ⋯ menu open).
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, pixelDiff } from "./harness.mjs";
 import { startBackend } from "./backend.mjs";
 
 const SHOTS = process.env.HK_E2E_SHOTS ?? null;
@@ -74,6 +75,49 @@ const TOP_EDGE_PAINT = `JSON.stringify([...document.querySelectorAll('body *')].
   .map((b) => ({ sel: b.el.tagName + '.' + String(b.el.className?.baseVal ?? b.el.className ?? ''),
                  x: Math.round(b.r.left), w: Math.round(b.r.width), y: Math.round(b.r.top), h: Math.round(b.r.height) })))`;
 
+/**
+ * Hide the top-edge chrome (T-1031), so the SAME rectangle can be re-photographed showing only what
+ * the canvas painted under it. Everything visible whose box starts in the top edge band and is not
+ * an ancestor of the canvas is hidden at its chrome ROOT — the outermost ancestor that is still not
+ * an ancestor of the canvas — so a re-render inside a chip while the shot is taken stays hidden,
+ * and so does a background painted by a chrome element's `::before`, which no `querySelectorAll`
+ * can see. (`TOP_EDGE_PAINT`'s alpha filter is deliberately NOT applied here: the question is which
+ * pixels chrome contributes, and a wrapper that paints only through a pseudo-element reports no
+ * background of its own.) What this cannot reach is a strip painted by `html`/`body` itself, whose
+ * root is the canvas's own ancestor — assertion (1)'s bar-shape rule is what stands there.
+ * `visibility` keeps every box, so nothing reflows and the gaps measured from the DOM still
+ * describe the pixels. Returns how many roots it hid.
+ */
+const HIDE_TOP_CHROME = `(() => {
+  const canvas = document.querySelector('.sf-canvas');
+  const roots = new Set();
+  for (const e of document.querySelectorAll('body *')) {
+    const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+    if (!r.width || !r.height || r.top > 24) continue;
+    if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+    if (e.contains(canvas)) continue;
+    let root = e;
+    while (root.parentElement && root.parentElement !== document.body && !root.parentElement.contains(canvas)) {
+      root = root.parentElement;
+    }
+    roots.add(root);
+  }
+  for (const el of roots) el.setAttribute('data-e2e-chrome-hidden', '');
+  if (!document.querySelector('#e2e-hide-chrome')) {
+    const s = document.createElement('style');
+    s.id = 'e2e-hide-chrome';
+    s.textContent = '[data-e2e-chrome-hidden] { visibility: hidden !important; }';
+    document.head.append(s);
+  }
+  return roots.size;
+})()`;
+
+const SHOW_TOP_CHROME = `(() => {
+  for (const el of document.querySelectorAll('[data-e2e-chrome-hidden]')) el.removeAttribute('data-e2e-chrome-hidden');
+  document.querySelector('#e2e-hide-chrome')?.remove();
+  return document.querySelectorAll('[data-e2e-chrome-hidden]').length;
+})()`;
+
 /** (3) CHIPS, NOT A BAR — run in BOTH themes, since the theme decides which of chip and canvas is
  * the darker and a guard that only holds in one of them is off half the time. */
 async function chipsNotABar(t, page, W, theme) {
@@ -102,24 +146,49 @@ async function chipsNotABar(t, page, W, theme) {
   }).filter((h) => !/sf-canvas/.test(h.hit)))`));
   assert.deepEqual(hits, [], "a press in a gap between the top chips is swallowed by chrome instead of reaching the canvas");
 
-  // And the gap's PIXELS are the canvas's, not chrome's: its colours differ from the chip's face
-  // beside it, and its mean luma is CLOSER to the canvas's own (sampled straight below the chrome,
-  // same x) than to that chip's.
-  const img = await page.shot();
-  const refY = Math.round(Math.max(...chips.map((c) => c.y + c.h)) + 60);
+  // And the gap's PIXELS are the canvas's, not chrome's. Asked of ONE place (T-1031): photograph
+  // the band, hide the chrome, photograph the SAME band again. Where chrome paints, the pixels
+  // change; where the map shows through, they do not — beyond the canvas's own motion between two
+  // shots, which the second canvas-only shot measures at that very rectangle. The old form sampled
+  // a second rectangle 60 px below the chips and compared luma with it; that rectangle is map, so
+  // about one run in four it held a detection box, a guide line or unobserved grey and the guard
+  // decided on the map's contents instead of on the chrome. Tolerance is not the fix and is not
+  // widened: the reference moved to the same point.
+  const shown = await page.shot();
+  const hidden = await page.eval(HIDE_TOP_CHROME);
+  const bare = await page.shot();
+  const bareAgain = await page.shot();
+  assert.equal(await page.eval(SHOW_TOP_CHROME), 0, "the top chrome stayed hidden");
+  await page.frames(2);
+  t.diagnostic(`at ${W} (${theme}) hid ${hidden} chrome roots for the pixel comparison`);
+  assert.ok(hidden >= 1, "no chrome root to hide — the top-edge chips were not found");
+
   for (const g of gaps.filter((x) => x.w >= 6).slice(0, 4)) {
     const band = { y: rowY - 6, h: 12 };
-    const gap = census(img, { x: g.x + 2, y: band.y, w: g.w - 4, h: band.h });
+    const gapRect = { x: g.x + 2, y: band.y, w: g.w - 4, h: band.h };
     const left = chips.filter((c) => c.x + c.w <= g.x + 2).sort((a, b) => b.x - a.x)[0];
-    const chip = census(img, { x: left.x + 4, y: band.y, w: Math.max(4, Math.min(24, left.w - 8)), h: band.h });
-    const canvas = census(img, { x: g.x + 2, y: refY, w: g.w - 4, h: 24 });
-    t.diagnostic(`at ${W} (${theme}) gap@${g.x} ${JSON.stringify(gap)} vs chip ${left.sel} ${JSON.stringify(chip)} vs canvas@${refY} ${JSON.stringify(canvas)}`);
-    // The claim is "these pixels are the MAP's", not "they are a different colour from the chip":
-    // over a white patch of canvas a translucent white chip composites to the same white, and a
-    // guard that called that a bar would be asserting a falsehood. Distance decides instead.
-    assert.ok(Math.abs(gap.meanLuma - canvas.meanLuma) < Math.abs(gap.meanLuma - chip.meanLuma),
-      `the gap at x=${g.x} (${theme}, luma ${gap.meanLuma.toFixed(1)}) reads as the chip beside it ` +
-      `(${chip.meanLuma.toFixed(1)}), not as the canvas below it (${canvas.meanLuma.toFixed(1)}) — chrome, not map`);
+    const chipRect = { x: left.x + 4, y: band.y, w: Math.max(4, Math.min(24, left.w - 8)), h: band.h };
+    // Three numbers at the SAME rectangles: what hiding the chrome did to the gap, what it did to
+    // the chip's own face, and what the canvas did on its own over one shot's interval.
+    const gapChange = pixelDiff(shown, bare, gapRect);
+    const chipChange = pixelDiff(shown, bare, chipRect);
+    const motion = pixelDiff(bare, bareAgain, gapRect);
+    t.diagnostic(`at ${W} (${theme}) gap@${g.x} change ${gapChange.meanAbs.toFixed(2)} ` +
+      `(${(gapChange.changedShare * 100).toFixed(0)} %) vs chip ${left.sel} ${chipChange.meanAbs.toFixed(2)} ` +
+      `(${(chipChange.changedShare * 100).toFixed(0)} %) vs canvas motion ${motion.meanAbs.toFixed(2)}; ` +
+      `luma gap ${census(shown, gapRect).meanLuma.toFixed(1)} chip ${census(shown, chipRect).meanLuma.toFixed(1)}`);
+    // The control that makes the comparison mean anything: hiding a chip must change the chip's own
+    // face by more than the canvas moves by itself. Without it a hide that silently failed would
+    // leave every difference at zero and the guard would pass saying nothing.
+    assert.ok(chipChange.meanAbs > motion.meanAbs,
+      `hiding the chips changed the face of ${left.sel} by ${chipChange.meanAbs.toFixed(2)}, no more than the ` +
+      `canvas moved by itself (${motion.meanAbs.toFixed(2)}) — the chips were not hidden, so this comparison proves nothing`);
+    // And the claim itself. Distance decides, as before, but now between two measurements of the
+    // same rectangle: the gap behaves like untouched map, not like a chip being removed.
+    assert.ok(Math.abs(gapChange.meanAbs - motion.meanAbs) < Math.abs(gapChange.meanAbs - chipChange.meanAbs),
+      `the gap at x=${g.x} (${theme}) changed by ${gapChange.meanAbs.toFixed(2)} when the top chrome was hidden, ` +
+      `nearer the chip's own ${chipChange.meanAbs.toFixed(2)} than the canvas's own motion ${motion.meanAbs.toFixed(2)} ` +
+      `— chrome paints in the gap, so the chips read as a bar`);
   }
 }
 

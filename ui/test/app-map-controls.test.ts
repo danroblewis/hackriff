@@ -1,11 +1,12 @@
-// T-802 (MAP-02): the floating control cluster — Go-to, layers, zoom, the follow-live FAB.
+// T-802 (MAP-02): the floating control cluster — Go-to, layers, zoom (T-1001 retired the FAB; the
+// per-pane Live button is `ui/test/app-pane-live.test.ts`'s).
 //
 // The claims, each against what would make a degenerate implementation pass:
 //  1. **Every control is view arithmetic and reaches no route** (docs/23 §4/§10.4, the spy-client
 //     empty-call-list rule). Driven over a REAL `PaneModel` through the very `paneActions` the page
 //     mounts, with `fetch` and the app client both spied — and with the control that the pane
 //     actually moved, so "the buttons do nothing" cannot pass.
-//  2. **Zoom keeps a following pane on the growing edge; the FAB re-pins a frozen one.**
+//  2. **Zoom keeps a following pane on the growing edge.**
 //  3. **The fade is idle-driven and never fades while held** (an open menu, a focused control).
 //  4. **The only device path is the retune OFFER's explicit press**, and it is the pane row's gate:
 //     the cluster module itself names no route, no client and no `DeviceAction`.
@@ -14,7 +15,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PaneModel } from "../src/surface/panes";
 import type { Lattice } from "../src/surface/lattice";
-import { IDLE_MS, IdleFade, ZOOM_STEP, fabPress, fabState, mountMapControls, paneActions, parseGoto } from "../src/app/chrome/map-controls";
+import { IDLE_MS, IdleFade, ZOOM_STEP, mountMapControls, paneActions, parseGoto } from "../src/app/chrome/map-controls";
 import { createStore } from "../src/app/store";
 import { initialState, requestGoto } from "../src/app/state";
 import type { AppContext } from "../src/app/context";
@@ -38,7 +39,7 @@ function spyCtx() {
   return { ctx: { store, client, token: "t" } as AppContext, calls };
 }
 
-test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO route", () => {
+test("MAP-02: zoom, go-to and layer toggles change the view and reach NO route", () => {
   const fetched: unknown[] = [];
   const g = globalThis as { fetch?: unknown };
   const real = g.fetch;
@@ -50,8 +51,8 @@ test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO
     // The page's own wiring: go-to is `requestGoto` in the store, which the surface turns into
     // `setFreq` on the active pane (surface.ts's `nav.gotoHz` subscriber) — reproduced here.
     ctx.store.select((s) => s.nav.gotoHz, (hz) => { if (hz !== null) m.setFreq(id, hz, m.get(id)!.freq.spanHz); });
-    // T-995: no map strip to keep in step — the minimap is retired, so `paneActions` has no
-    // follow hook and follow/freeze is the active pane's alone.
+    // T-995: no map strip to keep in step — the minimap is retired; T-1001: follow/freeze is each
+    // pane's own button, so `paneActions` is the zoom arithmetic and nothing else.
     const acts = paneActions(m, () => id);
     const span0 = m.get(id)!.freq.spanHz;
 
@@ -63,11 +64,6 @@ test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO
 
     ctx.store.set(requestGoto(433.92e6));
     assert.equal(m.get(id)!.freq.centerHz, 433.92e6, "go-to did not move the pane");
-
-    m.pause(id);
-    assert.equal(acts.isFollowing(), false);
-    acts.followLive();
-    assert.equal(acts.isFollowing(), true, "the FAB did not re-pin the pane to the growing edge");
 
     // A layer toggle is a closure over a display flag; nothing here can be reached through it.
     let shown = true;
@@ -90,84 +86,13 @@ test("MAP-02: zooming a following pane keeps it on the growing edge", () => {
   assert.equal(m.get(id)!.time.live, true);
 });
 
-// ——— T-955: the follow-live control's states are relative to the TUNED window's live edge ———
-
-const TUNED = { centerHz: 144.6e6, spanHz: 2.4e6 };
-
-/** The explorer's 0428 pane: following live TIME at 162.2 MHz ± 7.91 MHz after the radio retuned to
- * 144.6 MHz. Built over the real PaneModel and the real `paneActions`, with fetch spied. */
-function driftedFollowing() {
-  const m = model();
-  const id = m.list()[0].id;
-  m.setFreq(id, 162.2e6, 15.82e6);
-  assert.equal(m.isFollowing(id), true, "the pane is following in time — the reported shape");
-  return { m, id };
-}
-
-test("T-955: the FAB on a pane FOLLOWING at the wrong frequency brings it to the tuned live edge — it does not freeze it", () => {
-  const fetched: unknown[] = [];
-  const g = globalThis as { fetch?: unknown };
-  const real = g.fetch;
-  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("a view control reached the network")); };
-  const { ctx, calls } = spyCtx();
-  try {
-    const { m, id } = driftedFollowing();
-    const acts = paneActions(m, () => id, undefined, () => TUNED);
-    assert.equal(acts.atLiveEdge(), false, "a pane following spectrum the radio has left is NOT at the tuned live edge");
-    assert.equal(fabState(acts.isFollowing(), acts.atLiveEdge()).offTuned, true, "the FAB must not read as plain 'following' there");
-    fabPress(acts);
-    assert.equal(m.isFollowing(id), true, "the press FROZE the pane (explorer 0430: frozen at -14 s)");
-    assert.equal(m.get(id)!.freq.centerHz, TUNED.centerHz, "the press left the pane on the stale frequency");
-    assert.equal(m.get(id)!.freq.spanHz, TUNED.spanHz);
-    assert.equal(acts.atLiveEdge(), true);
-    // …and only NOW, at the tuned live edge, does the same press freeze.
-    fabPress(acts);
-    assert.equal(m.isFollowing(id), false, "at the tuned live edge the press is the freeze");
-    assert.equal(m.get(id)!.freq.centerHz, TUNED.centerHz, "freezing moved nothing");
-    void ctx;
-  } finally { if (real) g.fetch = real; else delete g.fetch; }
-  assert.deepEqual(fetched, [], "follow-live reached fetch: it is a view change, never a device call");
-  assert.deepEqual(calls, [], "follow-live reached the control client");
-});
-
-test("T-955: a FROZEN pane off the tuned window is brought to the tuned live edge in both axes", () => {
-  const { m, id } = driftedFollowing();
-  m.pause(id);
-  const acts = paneActions(m, () => id, undefined, () => TUNED);
-  fabPress(acts);
-  assert.equal(m.isFollowing(id), true);
-  assert.equal(m.get(id)!.freq.centerHz, TUNED.centerHz);
-});
-
-test("T-955: a pane already OVERLAPPING the tuned window keeps the user's zoom — only time is re-pinned", () => {
-  const m = model();
-  const id = m.list()[0].id;
-  m.setFreq(id, 144.39e6, 200e3); // zoomed onto a few channels inside the tuned 2.4 MHz
-  m.pause(id);
-  const acts = paneActions(m, () => id, undefined, () => TUNED);
-  fabPress(acts);
-  assert.equal(m.isFollowing(id), true);
-  assert.equal(m.get(id)!.freq.centerHz, 144.39e6, "follow-live destroyed a zoom inside the tuned window");
-  assert.equal(m.get(id)!.freq.spanHz, 200e3);
-  assert.equal(acts.atLiveEdge(), true);
-});
-
-test("T-955: with no tuned window reported, the FAB is the plain time toggle and frequency is left alone", () => {
-  const { m, id } = driftedFollowing();
-  const acts = paneActions(m, () => id, undefined, () => null);
-  assert.equal(acts.atLiveEdge(), true, "nothing to be off: time decides");
-  fabPress(acts);
-  assert.equal(m.isFollowing(id), false);
-  fabPress(acts);
-  assert.equal(m.isFollowing(id), true);
-  assert.equal(m.get(id)!.freq.centerHz, 162.2e6, "no tuned window was reported: nothing to correct against");
-});
+// T-1001: follow/freeze moved OFF this cluster and into each pane's own Live button — its states
+// (T-955's three), its press and its independence per pane are `ui/test/app-pane-live.test.ts`'s.
 
 test("MAP-02: no active pane means every control is a no-op, not a throw", () => {
   const m = model();
   const acts = paneActions(m, () => null);
   acts.zoom(ZOOM_STEP);
-  acts.followLive();
   assert.equal(acts.isFollowing(), false);
 });
 
@@ -190,15 +115,12 @@ test("MAP-02: the cluster fades after idle, returns on activity, and never fades
   assert.equal(IDLE_MS, 6000, "docs/23 §10.2: ~6 s idle");
 });
 
-test("MAP-02: go-to parsing and the FAB's words", () => {
+test("MAP-02: go-to parsing", () => {
   assert.deepEqual(parseGoto("433.92M", null), { hz: 433.92e6 });
   assert.deepEqual(parseGoto("101.3", null), { hz: 101.3e6 });
   assert.deepEqual(parseGoto("+200k", 100e6), { hz: 100.2e6 });
   assert.ok("error" in parseGoto("+200k", null), "a relative entry with no tuned centre must refuse, not guess");
   assert.ok("error" in parseGoto("fm", 100e6));
-  assert.equal(fabState(true).cls, "following");
-  assert.equal(fabState(false).cls, "frozen");
-  assert.match(fabState(false).title, /capture continues/);
 });
 
 test("MAP-02: the cluster names no route; its one device path is the painted retune offer", () => {
@@ -231,30 +153,10 @@ test("MAP-02: fade rules — idle chrome dims, the offer and focused controls ne
   assert.match(ts, /fade\.hold\("layers", open\)/);
 });
 
-test("T-882: the FAB is the retired Live button too — it freezes a following pane and re-pins a frozen one, no route", () => {
-  const fetched: unknown[] = [];
-  const g = globalThis as { fetch?: unknown };
-  const real = g.fetch;
-  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("the FAB reached the network")); };
-  try {
-    const m = model();
-    const id = m.list()[0].id;
-    // T-995: no map strip to keep in step — the minimap is retired, so `paneActions` has no
-    // follow hook and follow/freeze is the active pane's alone.
-    const acts = paneActions(m, () => id);
-    assert.equal(acts.isFollowing(), true);
-    const before = m.get(id)!.time;
-    acts.pauseLive();
-    assert.equal(acts.isFollowing(), false, "the FAB did not freeze a following pane");
-    // T-442: freezing is a coordinate change — the frozen window is the one that was on screen.
-    assert.equal(m.get(id)!.time.spanNs, before.spanNs);
-    acts.followLive();
-    assert.equal(acts.isFollowing(), true);
-    paneActions(m, () => null).pauseLive(); // no active pane: a no-op, not a throw
-  } finally { if (real) g.fetch = real; else delete g.fetch; }
-  assert.deepEqual(fetched, []);
-  assert.equal(fabState(true).title.includes("freeze"), true, "the following FAB does not say a press freezes");
-});
+// T-882's claim that the FAB carried the retired toolbar `Live` button's press is now
+// T-1001's: the press lives on each pane's own button (`ui/test/app-pane-live.test.ts`), which
+// asserts the freeze, the re-pin, T-955's states and the empty call list — per pane, so a press
+// on pane 1 cannot reach pane 2.
 
 test("T-882: the rehomed controls live in the cluster — Measure, the viewport menu, the colour scale — and no toolbar row remains", () => {
   const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
@@ -428,6 +330,79 @@ test("T-955: a painted Go-to offer is withdrawn when the radio retunes onto the 
     assert.match(why.textContent, /10\.000 MHz span/, "the offer was not re-derived against the new tuned window");
   } finally {
     g.document = saved.document; g.window = saved.window;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T-1006: the front-end picker in the viewport menu
+// ---------------------------------------------------------------------------
+
+test("T-1006: the viewport menu picks the pane's front end, and no press reaches a route", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window, fetch: g.fetch };
+  const fetched: unknown[] = [];
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("the picker must not reach the network")); };
+  const picked: string[] = [];
+  let perDevice = 0;
+  // Two front ends attached, the pane on the union — the case that makes the picker necessary.
+  let pane = "any";
+  try {
+    const acts = paneActions(model(), () => model().list()[0].id);
+    const host = {
+      ...acts,
+      measuring: () => false, setMeasuring() {}, goTo() {}, centreHz: () => null,
+      gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "pane 1 of 2", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+      deviceMenu: () => ({
+        pane: "pane 1 of 2",
+        rows: [
+          { id: "any", label: "Any front end", hint: "grey is the union of every radio; a retune must name one", on: pane === "any" },
+          { id: "hackrf:aaab", label: "HackRF · 2.4 Msps", hint: "hackrf:aaab", on: pane === "hackrf:aaab" },
+          { id: "rtlsdr:1", label: "RTL-SDR · 2.4 Msps", hint: "rtlsdr:1", on: pane === "rtlsdr:1" },
+        ],
+        note: "This viewport's grey is the union of every front end.",
+        offer: { label: "One viewport per front end", why: "2 viewports, one pinned to each front end", enabled: true },
+      }),
+      setPaneDevice: (id: string) => { picked.push(id); pane = id; },
+      splitPerDevice: () => { perDevice++; },
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const btn = root.find("map-pane-btn")!, menu = root.find("map-pane-menu")!;
+    const section = menu.find("map-pane-device")!;
+    assert.equal(section.hidden, true, "the picker is built on open, not before");
+    btn.fire("click");
+    assert.equal(section.hidden, false, "opening the viewport menu must state which front end this pane draws");
+    const rows = root.find("map-pane-devices")!;
+    assert.equal(rows.children.length, 3, "the union plus both front ends");
+    const inputs = rows.children.map((l) => l.children.find((x) => x.tag === "input")!);
+    assert.deepEqual(inputs.map((i) => i.getAttribute("data-pane-device")), ["any", "hackrf:aaab", "rtlsdr:1"]);
+    assert.deepEqual(inputs.map((i) => i.checked), [true, false, false], "the pane's own choice is marked");
+    // Pressing the second radio pins the pane to it — a view change, not a device call.
+    inputs[2].fire("change");
+    assert.deepEqual(picked, ["rtlsdr:1"]);
+    assert.deepEqual(rows.children.map((l) => l.children.find((x) => x.tag === "input")!.checked), [false, false, true],
+      "the picker re-states the pane's choice in the same press");
+    // …and the split offer.
+    const perBtn = section.children.find((x) => x.getAttribute("data-pane-act") === "per-device")!;
+    assert.equal(perBtn.disabled, false);
+    perBtn.fire("click");
+    assert.equal(perDevice, 1, "'one viewport per front end' must be pressable");
+    assert.deepEqual(fetched, [], "a front-end pick reached the network: choosing whose grey a pane draws is a view change");
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+    if (saved.fetch) g.fetch = saved.fetch; else delete g.fetch;
   }
 });
 

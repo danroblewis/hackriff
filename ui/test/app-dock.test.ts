@@ -40,7 +40,7 @@ test("recordsTcpTarget and copyAddressText never include the token", () => {
 });
 
 test("outputsCountText matches the mockup's wording", () => {
-  const audio: OutputEntry = { id: "a", kind: "audio", label: "", sub: "", state: "live", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: null, pipelineId: null, message: null };
+  const audio: OutputEntry = { id: "a", kind: "audio", label: "", sub: "", state: "live", tcpTarget: null, muted: false, levelDbfs: null, recordsPerS: null, emitterId: null, pipelineId: null, outputId: null, message: null };
   const rec: OutputEntry = { ...audio, id: "b", kind: "records" };
   assert.equal(outputsCountText([]), "0 live · 0 pipelines");
   assert.equal(outputsCountText([audio]), "1 live · 0 pipelines");
@@ -86,7 +86,7 @@ test("startListen: the same emitter twice returns the existing entry without add
   const existing: OutputEntry = {
     id: "listen1", kind: "audio", label: "101.3 MHz", sub: "estimating…", state: "opening",
     tcpTarget: listenTcpTarget(target), muted: false, levelDbfs: null, recordsPerS: null,
-    emitterId: "e1", pipelineId: null, message: null,
+    emitterId: "e1", pipelineId: null, outputId: null, message: null,
   };
   ctx.store.set((s: AppState) => ({ outputs: [existing] }));
   const id = startListen(ctx, target);
