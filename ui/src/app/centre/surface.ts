@@ -68,6 +68,9 @@ import {
 import {
   commitRetuneMode, isRetuneKey, retuneModeLabel, retuneModeTarget, RetuneModeController, type RetuneModeTarget,
 } from "../../surface/retune-mode";
+import {
+  ANY_DEVICE, devicePill, deviceRows, splitPerDeviceOffer, type AttachedDevice,
+} from "../../surface/panedevice";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
@@ -706,7 +709,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const m = scaleMarkOf(
         { id: v.id, f0Hz: v.box.f0Hz, f1Hz: v.box.f1Hz, t0Ns: v.box.t0Ns, t1Ns: v.box.t1Ns, rect: v.rect },
         { tier: st.tier, tierLabel: st.tierLabel, levelLabel: st.levelLabel, freqLabel: st.freqLabel,
-          timeLabel: st.timeLabel, counts: paneCountsText(st), following: st.following },
+          timeLabel: st.timeLabel, counts: paneCountsText(st), following: st.following,
+          device: paneDevicePill(v.id) },
         hPx, dpr,
       );
       if (m) marks.push(m);
@@ -714,7 +718,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // behind the edge this viewport is parked. The same two strings the retired panel showed —
       // what changed is that they are one line on the picture instead of a panel over it.
       if (v.id === preview?.activePane) {
-        setText(whereEl, [st.freqLabel, st.timeLabel, st.device === "any" ? null : st.device].filter(Boolean).join(" · "));
+        // T-1006: whose coverage is the pane's own device pill (on its scale block), so the bare
+        // `device_id` the line used to append is not repeated here.
+        setText(whereEl, [st.freqLabel, st.timeLabel].filter(Boolean).join(" · "));
       }
     }
     scaleLayer.update(marks);
@@ -1011,6 +1017,31 @@ function mount(el: HTMLElement, ctx: AppContext) {
     else store.set(reviewAt(pane.time.centerNs / S_TO_NS + spanS / 2, spanS));
   }
 
+  // ---- which front end a pane draws, and retunes (T-1006) ----
+  //
+  // docs/16 §8 gave every pane a `device` and said what it means: it *"only chooses whose coverage
+  // decides its grey"*. With one radio the default `any` IS that radio and there was nothing to say;
+  // with two (MSDR) the pane's grey, its retune's `device_id` and the Go-to offer all depend on it,
+  // and nothing on screen said which. The pill on each pane's status row says it; the picker in the
+  // viewport menu sets it; and `surface/panedevice.ts` owns every word and every decision — this
+  // host only reads the list off the store and hands the strings on.
+  /** Every live front end this run holds, off the `/api/control/state` poll. `[]` on a replay. */
+  const attached = (): readonly AttachedDevice[] => store.get().device.devices;
+  /** T-1006: a pane's device pill — whose coverage decides its grey — for its scale block (T-996). */
+  const paneDevicePill = (paneId: string) => {
+    const pane = preview?.view.panes.get(paneId);
+    return pane ? devicePill(attached(), pane.device) : null;
+  };
+  /** How the chrome names the pane a per-pane control acts on — `activePaneName`'s words, reused so
+   * the viewport menu's device section names the pane exactly as its layers section does. */
+  const paneMenuName = (): string => {
+    const p = preview;
+    if (!p) return "this pane";
+    const ids = p.view.panes.list().map((x) => x.id);
+    const n = ids.indexOf(p.activePane) + 1;
+    return ids.length > 1 ? `pane ${n} of ${ids.length}` : "this pane";
+  };
+
   // ---- the retune control (T-444, made persistent and per-pane by T-476) ----
   //
   // It used to be one control in the toolbar, shown only when `paneRetuneOffer` produced an offer —
@@ -1034,7 +1065,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const p = preview;
     const pane = p?.view.panes.get(paneId);
     if (!p || !pane) return null;
-    return paneRetuneOffer(pane, windows, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
+    // T-1006: and WHICH front end. The offer names the `device_id` this pane's retune would carry,
+    // or blocks when the pane's `device` cannot be resolved to one radio — read off the same 2 s
+    // control-state poll the rest of the device slice comes from, never a second source.
+    return paneRetuneOffer(pane, windows, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS, attached());
   };
   /** What each row's label was last derived from — the target the user actually consented to. */
   const lastPainted = new Map<string, PaneRetuneOffer>();
@@ -1093,7 +1127,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const p = preview;
     const pane = p?.view.panes.get(paneId);
     if (!p || !pane) return null;
-    return paneWidthOffer(pane, spanHz, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
+    return paneWidthOffer(pane, spanHz, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS, attached());
   };
 
   const widthLabel = (hz: number) => hz < 1e6 ? `${Math.round(hz / 1e3)} kHz` : `${(hz / 1e6).toFixed(hz % 1e6 === 0 ? 0 : 1)} MHz`;
@@ -1165,7 +1199,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (!p || !pane) return null;
     // The pane's OWN device would choose the grid here once a pane can name one (T-1006); until
     // then there is one front end and one grid, exactly as the Retune button's `offerNow` reads it.
-    return retuneModeTarget(pane, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
+    // T-1006: the settled-view retune is a path to the front end like any other, so it names the
+    // pane's own radio — and refuses out loud when the pane's device does not resolve to one.
+    return retuneModeTarget(pane, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS, attached());
   };
   /** The last thing that happened to a pane in the mode, so the status line has something to say
    * after the retune landed rather than blanking the instant the request resolves. */
@@ -1387,6 +1423,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // where every other device command on this map already is.
         // T-1028's `chromeStatus` line is not passed either: with no rows it would render nowhere, so
         // the host says it on that same floating block (`paneStatus`, beside Retune).
+        // T-1006's `rowDevice` pill is not passed either, for the same reason: it is stated on each
+        // pane's own scale block instead (`paneDevicePill`, in `scaleFrame`), which is per pane.
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
@@ -1620,9 +1658,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
       // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
       // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
-      // NOTE for T-1006 (per-pane device): this reads the GLOBAL `frequency.current`, not the
-      // pane's own device's window.
+      // T-1006: **the ACTIVE PANE's own front end's window**, not a run-wide one. With two radios
+      // `frequency.current` is the primary's tuned state (docs/api.md: the `frequency` block is one
+      // device's, which `windows` is the enumeration of), so a pane pinned to the second radio was
+      // being brought to the FIRST radio's live edge — the follow-live control moving a pane onto a
+      // window its own device never looked through. A pane naming a device reads that device's entry
+      // in `windows`; a pane on `any` keeps the run-wide answer, which is what `any` means.
       () => {
+        const pane = pv.view.panes.get(pv.activePane);
+        if (pane && pane.device !== ANY_DEVICE) {
+          const w = windows.find((x) => x.deviceId === pane.device);
+          return w ? { centerHz: w.centerHz, spanHz: w.spanHz } : null;
+        }
         const cur = store.get().navGrid.grid?.frequency?.current;
         return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
       });
@@ -1671,6 +1718,45 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // because a retune in flight moves the ONE radio whichever pane asked, and must never be silent.
       paneStatus: () => retuneStatusFor(pv.activePane)
         ?? (retuneMode.pendingPane ? retuneStatusFor(retuneMode.pendingPane) : null),
+      // T-1006: the front-end picker for the active pane, and the "one viewport per front end"
+      // split. Every word comes from `surface/panedevice.ts`; every press is a view change.
+      deviceMenu: () => {
+        const pane = pv.view.panes.get(pv.activePane);
+        const dev = pane?.device ?? ANY_DEVICE;
+        const list = attached();
+        return {
+          pane: paneMenuName(),
+          rows: deviceRows(list, dev).map((r) => ({ id: r.id, label: r.label, hint: r.hint, on: r.on })),
+          note: devicePill(list, dev).why,
+          offer: splitPerDeviceOffer(list),
+        };
+      },
+      setPaneDevice: (id) => {
+        pv.view.panes.setDevice(pv.activePane, id);
+        // The grey, the retune offer and the trace are all functions of the pane's device, so the
+        // frame has to be re-derived — the same reason a layer toggle renders. No route is touched.
+        lastMirror = "";
+        mirror();
+        renderLive();
+      },
+      splitPerDevice: () => {
+        const offer = splitPerDeviceOffer(attached());
+        if (!offer.enabled) return;
+        // One pane per front end, the first being the pane already open. `splitActive` splits the
+        // ACTIVE pane, so each new pane inherits the layers of the one before it (T-1000's rule) and
+        // is then pinned; a run with more radios than the layout can hold simply stops when `split`
+        // declines to add one, which is the pane model's own bound, not a second policy here.
+        pv.view.panes.setDevice(pv.activePane, offer.devices[0]);
+        for (const id of offer.devices.slice(1)) {
+          const before = pv.activePane;
+          splitActive();
+          if (pv.activePane === before) break; // the layout took no more panes
+          pv.view.panes.setDevice(pv.activePane, id);
+        }
+        lastMirror = "";
+        mirror();
+        renderLive();
+      },
       goTo: (hz) => store.set(requestGoto(hz)),
       centreHz: () => store.get().device.centerHz,
       gotoOffer: () => {

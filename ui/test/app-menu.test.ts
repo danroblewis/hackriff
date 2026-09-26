@@ -66,7 +66,7 @@ function fakeCtx(handlers: Handlers = {}): AppContext {
 function seedListening(ctx: AppContext, emitterId: string): void {
   const entry: OutputEntry = {
     id: `listen-${emitterId}`, kind: "audio", label: "", sub: "", state: "live", tcpTarget: null,
-    muted: false, levelDbfs: null, recordsPerS: null, emitterId, pipelineId: null, message: null,
+    muted: false, levelDbfs: null, recordsPerS: null, emitterId, pipelineId: null, outputId: null, message: null,
   };
   ctx.store.set((s: AppState) => ({ outputs: [...s.outputs, entry] }));
 }
