@@ -14,6 +14,7 @@ import pytest
 FIXTURE_TOOLS = Path(__file__).resolve().parents[1] / "fixtures"
 sys.path.insert(0, str(FIXTURE_TOOLS))
 
+import ais_ref  # noqa: E402
 import annotate  # noqa: E402
 import fetch  # noqa: E402
 import flex_ref  # noqa: E402
@@ -216,6 +217,244 @@ def test_rds_reference_decoder_recovers_synthetic_pi_ps_and_stats(tmp_path):
     assert got["block_error_rate"] == 0.0
     assert abs(got["pilot_hz"] - 19000.0) < 0.5
     assert math.isclose(got["bitrate_bd_in_sample_clock"], got["pilot_hz"] / 16)
+
+
+def test_ais_reference_decoder_recovers_synthetic_vessels_blind(tmp_path):
+    """T-963 (SIGNAL-015): the ``ais_vessels`` scene's three Class A position reports, on the
+    two fixed marine channels, are recovered by the independent oracle from the raw IQ alone —
+    blind: `ais_ref` is never told the MMSI, message type or channel a burst is on, only the two
+    channels' offsets (a receiver would tune to, same as the fixed frequencies any AIS receiver
+    already knows) and the recording itself."""
+    from scipy import signal
+
+    from hkpy.synth import generate
+    from hkpy.synth.ais_scene import CHANNEL_HZ
+
+    out = tmp_path / "ais"
+    generate("ais_vessels", 963, out, {}, "ci8")
+    manifest = json.loads((out / "manifest.json").read_text())
+    meta_path = out / manifest["recordings"][0]
+    meta = sigmf.read_meta(meta_path)
+    fs = meta["global"]["core:sample_rate"]
+    center_hz = meta["captures"][0]["core:frequency"]
+    raw = np.fromfile(sigmf.data_path(meta_path), dtype=np.int8).astype(np.float32).reshape(-1, 2)
+    x = (raw[:, 0] + 1j * raw[:, 1]).astype(np.complex128)
+
+    truth = [a["hackriff:truth"] for a in meta["annotations"] if a["hackriff:truth"].get("role") == "emission"]
+    assert len(truth) == 3, f"3 vessels in the hidden truth, got {len(truth)}"
+
+    got = []
+    for ch_hz in CHANNEL_HZ:
+        off = ch_hz - center_hz
+        tt = np.arange(len(x)) / fs
+        base = x * np.exp(-2j * math.pi * off * tt)
+        bw = 40e3
+        base = np.convolve(base, signal.firwin(129, bw / 2, fs=fs), mode="same")
+        got += ais_ref.decode_channel(base, fs)
+
+    got_by_mmsi = {m["mmsi"]: m for m in got}
+    assert {t["mmsi"] for t in truth} == set(got_by_mmsi), (
+        f"blind decode found {sorted(got_by_mmsi)}, truth has {sorted(t['mmsi'] for t in truth)}"
+    )
+    for t in truth:
+        m = got_by_mmsi[t["mmsi"]]
+        assert m["message_type"] == t["msg_type"]
+        assert m["nav_status"] == t["nav_status"]
+        assert math.isclose(m["sog_kt"], t["sog_kt"], abs_tol=0.05)
+        assert math.isclose(m["longitude_deg"], t["longitude_deg"], abs_tol=1e-4)
+        assert math.isclose(m["latitude_deg"], t["latitude_deg"], abs_tol=1e-4)
+        assert math.isclose(m["cog_deg"], t["cog_deg"], abs_tol=0.05)
+        assert m["heading_deg"] == t["heading_deg"]
+
+
+# ---- AIS on-air conventions, validated against sources outside this repo (T-963 fix round) ----
+
+#: A published AIS position report: the worked example of GPSD's "AIVDM/AIVDO protocol
+#: decoding" (E. S. Raymond, https://gpsd.gitlab.io/gpsd/AIVDM.html, section "AIVDM/AIVDO
+#: Sentence Layer"; also in gpsd's ``test/sample.aivdm`` regression data), whose documented decode
+#: is: type 1, MMSI 477553000, status 5 (moored), turn 0, speed 0, accuracy false,
+#: lon -122.345832, lat 47.582833, course 51.0, heading 181, second 15, maneuver 0, raim false,
+#: radio 149208. The NMEA checksum (XOR between '!' and '*') is asserted too, so a mistyped
+#: sentence cannot pass.
+GPSD_AIVDM = "!AIVDM,1,1,,B,177KQJ5000G?tO`K>RA1wUbN0TKH,0*5C"
+GPSD_FIELDS = {
+    "message_type": 1, "repeat_indicator": 0, "mmsi": 477553000, "nav_status": 5, "rot": 0,
+    "sog_kt": 0.0, "position_accuracy": 0, "longitude_deg": -122.345832,
+    "latitude_deg": 47.582833, "cog_deg": 51.0, "heading_deg": 181, "timestamp_s": 15,
+    "maneuver": 0, "raim": 0, "comm_state": 149208,
+}
+
+
+def _dearmour(sentence: str) -> np.ndarray:
+    """The message bit string (MSB first) of a single-part !AIVDM sentence, decoded here from
+    the ITU-R M.1371 / IEC 61162-1 6-bit armouring, independently of ``ais_ref``/``hkpy.synth``."""
+    body = sentence[1 : sentence.index("*")]
+    xor = 0
+    for c in body:
+        xor ^= ord(c)
+    assert f"{xor:02X}" == sentence[-2:], "NMEA checksum"
+    bits = []
+    for c in sentence.split(",")[5]:
+        v = ord(c) - 48
+        v = v - 8 if v > 40 else v
+        bits += [(v >> k) & 1 for k in range(5, -1, -1)]
+    return np.array(bits, dtype=np.uint8)
+
+
+def _rfc1662_fcs16(data: bytes) -> int:
+    """RFC 1662 appendix C.2's FCS-16 (the HDLC/PPP CRC, processed as the octets go on air:
+    each LSB first). Over data || FCS (complemented, least significant octet first) it leaves
+    the good residue PPPGOODFCS16 = 0xF0B8."""
+    fcs = 0xFFFF
+    for byte in data:
+        fcs ^= byte
+        for _ in range(8):
+            fcs = (fcs >> 1) ^ 0x8408 if fcs & 1 else fcs >> 1
+    return fcs
+
+
+def _serial_fcs_residue(air: np.ndarray) -> int:
+    """The same FCS-16 as a bit-serial LFSR over the frame's bits in *transmission order* — no
+    octet packing at all, so no bit-order convention can be smuggled in."""
+    reg = 0xFFFF
+    for b in air:
+        fb = (reg ^ int(b)) & 1
+        reg >>= 1
+        if fb:
+            reg ^= 0x8408
+    return reg
+
+
+def _air_between_flags(line: np.ndarray) -> np.ndarray:
+    """Destuffs the content of a single synth frame (flag || stuffed || flag), independently of
+    the oracle's destuffer."""
+    stuffed = line[8:-8]
+    out, ones, skip = [], 0, False
+    for b in stuffed:
+        b = int(b)
+        if skip:
+            assert b == 0, "a stuffed bit must be 0"
+            skip, ones = False, 0
+            continue
+        out.append(b)
+        ones = ones + 1 if b else 0
+        if ones == 5:
+            skip = True
+    return np.array(out, dtype=np.uint8)
+
+
+def _assert_fields(got: dict, want: dict) -> None:
+    for k, v in want.items():
+        if isinstance(v, float):
+            # GPSD prints lon/lat truncated to 6 decimals (raw units are 1/600000 degree).
+            assert math.isclose(got[k], v, abs_tol=2e-6), (k, got[k], v)
+        else:
+            assert got[k] == v, (k, got[k], v)
+
+
+def test_ais_published_aivdm_vector_frames_lsb_first_and_decodes():
+    """The GPSD example sentence, independently de-armoured, is (a) exactly the bit string
+    ``hkpy.synth.ais.build_position_report`` makes from its documented fields, (b) framed by the
+    synth LSB first per octet with the FCS low octet first — checked against a frame built here
+    from RFC 1662's byte-wise FCS — and (c) decoded by ``ais_ref`` to every documented field,
+    RAIM and communication state included."""
+    from hkpy.synth import ais
+
+    msg = _dearmour(GPSD_AIVDM)
+    assert len(msg) == 168
+    built = ais.build_position_report(
+        mmsi=477553000, nav_status=5, rot=0, sog_kt=0.0, lon_deg=-73_407_500 / 600_000,
+        lat_deg=28_549_700 / 600_000, cog_deg=51.0, heading_deg=181, timestamp_s=15, comm_state=149208,
+    )
+    assert np.array_equal(built, msg)
+
+    octets = np.packbits(msg).tobytes()
+    fcs = _rfc1662_fcs16(octets) ^ 0xFFFF
+    on_air = octets + bytes([fcs & 0xFF, fcs >> 8])
+    want_air = np.array([(o >> k) & 1 for o in on_air for k in range(8)], dtype=np.uint8)
+    assert _rfc1662_fcs16(on_air) == 0xF0B8
+
+    line = ais.frame_bits(msg)
+    got_air = _air_between_flags(line)
+    assert np.array_equal(got_air, want_air), "synth frame is not LSB-first / FCS low octet first"
+
+    data_bits, ok = ais_ref.check_crc(want_air)
+    assert ok, "oracle rejects a correctly ordered on-air frame"
+    assert np.array_equal(data_bits, msg)
+    _assert_fields(ais_ref.parse_common_block(data_bits), GPSD_FIELDS)
+    got = ais_ref.decode_line_bits(np.concatenate([np.ones(16, np.uint8), line, np.ones(16, np.uint8)]))
+    assert len(got) == 1
+    _assert_fields(got[0], GPSD_FIELDS)
+
+
+def test_ais_synth_frames_leave_the_hdlc_good_fcs_residue():
+    """Every synth frame's destuffed content, run bit-serially in transmission order through the
+    HDLC FCS register, ends on 0xF0B8 (RFC 1662 C.2) — the check a real HDLC receiver makes,
+    independent of any octet packing."""
+    from hkpy.synth import ais
+
+    rng = np.random.default_rng(963)
+    for _ in range(50):
+        msg = rng.integers(0, 2, 168, dtype=np.uint8)
+        assert _serial_fcs_residue(_air_between_flags(ais.frame_bits(msg))) == 0xF0B8
+
+
+def _ais_burst_decode(msg: np.ndarray, fs: float = 96_000.0) -> list[dict]:
+    from hkpy.synth import ais
+
+    iq = ais.burst_iq(msg, fs, phase0=0.3)
+    pad = np.zeros(int(0.04 * fs), dtype=complex)  # noise-dominated: find_bursts keys on the median
+    rng = np.random.default_rng(5)
+    x = np.concatenate([pad, iq, pad])
+    x = x + 0.01 * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))
+    return ais_ref.decode_channel(x, fs)
+
+
+def test_ais_frames_whose_destuffed_content_holds_0x7e_decode():
+    """The flag is unique only on the still-stuffed line: a report whose destuffed on-air bits
+    contain 01111110 must decode whole (it truncated when destuffing ran before the flag
+    search). Such reports are common — found here by scanning MMSIs, never hand-tuned."""
+    from hkpy.synth import ais
+
+    found = 0
+    for mmsi in range(366_000_000, 366_000_400):
+        msg = ais.build_position_report(mmsi, sog_kt=7.5, lon_deg=-70.25, lat_deg=41.5,
+                                        cog_deg=90.0, heading_deg=90, timestamp_s=30)
+        air = "".join(map(str, ais.air_bits(msg)))
+        if "01111110" not in air:
+            continue
+        found += 1
+        line = ais.frame_bits(msg)
+        got = ais_ref.decode_line_bits(np.concatenate([np.ones(8, np.uint8), line]))
+        assert [m["mmsi"] for m in got] == [mmsi]
+        if found == 1:
+            burst = _ais_burst_decode(msg)
+            assert [m["mmsi"] for m in burst] == [mmsi], "IQ burst with an in-data 0x7E"
+    assert found >= 5, found
+
+
+def test_ais_raim_and_comm_state_round_trip():
+    """RAIM is bit 148 and the communication state bits 149..167 (ITU-R M.1371-5 table 45)."""
+    from hkpy.synth import ais
+
+    msg = ais.build_position_report(244_660_000, raim=1, comm_state=0x5A5A5, timestamp_s=7)
+    got = _ais_burst_decode(msg)
+    assert len(got) == 1
+    assert got[0]["raim"] == 1
+    assert got[0]["comm_state"] == 0x5A5A5
+    assert got[0]["timestamp_s"] == 7
+    assert got[0]["mmsi"] == 244_660_000
+
+
+def test_ais_oracle_keeps_distinct_reports_with_timestamp_not_available():
+    """Two different reports from one vessel with timestamp 60 ('not available') are two
+    reports, not one."""
+    from hkpy.synth import ais
+
+    a = ais.frame_bits(ais.build_position_report(211_000_001, sog_kt=1.0))
+    b = ais.frame_bits(ais.build_position_report(211_000_001, sog_kt=2.0))
+    got = ais_ref.decode_line_bits(np.concatenate([a, np.ones(20, np.uint8), b]))
+    assert sorted(m["sog_kt"] for m in got) == [1.0, 2.0]
 
 
 def test_flex_reference_oracle_finds_synthetic_sync_and_levels():

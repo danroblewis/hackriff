@@ -581,7 +581,7 @@ That one document is the whole point of the amendment: **one pipeline, two outpu
 | iq | `ofdm_demod` | **reserved name, no descriptor** (§9.2) | — | unfiled (DAB+) |
 | symbol | `mlevel_slicer` | soft → bits (k bits per symbol) | **pinned by T-612:** `levels` (power of two, 2–16), `thresholds` (`auto`: equally spaced levels fitted to the last `window` symbols; `fixed`), `fixed_levels` (hot; the M−1 thresholds), `window` (default 256), `mapping` (`gray`/`natural`/`table`, hot), `table` (hot; label per level, lowest first — C4FM dibits `[3, 2, 0, 1]`), `bit_order` (`msb`/`lsb`, hot), `invert` (hot; mirrors the levels). `status()` reports the eye opening (`quality`, `lock`) | T-612 (**implemented**) |
 | symbol | `descramble` | bits\|frames → same | **pinned (T-608):** `mode` (`additive`/`multiplicative`), `poly` (characteristic polynomial, full form: CCSDS `0x1A9`, PN9 `0x221`, BLE `0x91`), `init` (default all ones additive / zero multiplicative), `register` (`fibonacci`/`galois`: BLE's spec register), `seed_channel` (OR the channel index into `init`: BLE under `follow_hops`), `reset` (`per-frame`/`free-running`), `offset_bits` (frames: the sync word is not scrambled), `bit_order` (`serial`/`byte-lsb`). `status()` scores the input's fit to `poly` (`error_rate`, `quality`, `lock`) for RESEARCH-012 | T-608 |
-| symbol | `bitstuff` | bits\|frames → same | `flag` (0x7E), `stuff_after` (5), `direction` (`destuff`/`stuff`), `abort_ones` (7) | T-613 |
+| symbol | `bitstuff` | bits\|frames → same | `flag` (0x7E), `stuff_after` (5), `direction` (`destuff`/`stuff`), `abort_ones` (7), `bit_order` (`msb`/`lsb`, frames only: octets sent LSB first — T-963) | T-613 |
 | symbol | `codeword_map` | bits\|frames → same | `word_bits`, `value_bits`, `table[]` (index = value), `align` (`auto`/`fixed`), `on_invalid` (`drop`/`substitute`) | unfiled |
 | symbol | `despread` | soft\|bits → bits | `chips_per_symbol`, `sequences[]` (index = value), `bit_order`, `max_chip_errors` (hot) | unfiled |
 | symbol | `equalise` | iq → iq | `algorithm` (`cma`/`lms-dd`), `taps`, `samples_per_symbol`, `step` (hot), `constellation` | unfiled |
@@ -596,7 +596,7 @@ These are docs/18 §7's rows, with four deliberate differences:
   - BLE and LoRa whitening restart each packet;
   - VDL2's AVLC stuffing sits inside RS-decoded frames (SIGNAL-004).
 
-  Frames mode applies the same rule to a frame body, starting at `offset_bits`. This is the minimum shape that serves those families, not gold-plating. Streaming mode stays for self-synchronising scramblers (V.35) and for AIS/AX.25, whose flags pass through `bitstuff` intact so that `sync_search` still frames on them.
+  Frames mode applies the same rule to a frame body, starting at `offset_bits`. This is the minimum shape that serves those families, not gold-plating. Streaming mode stays for self-synchronising scramblers (V.35). AIS/AX.25 are **not** streamed (T-963): the flag is unique only on the still-stuffed line — destuffed data holds `01111110` in about 40 % of random AIS position reports — so `sync_search` frames on the stuffed bits and `bitstuff` destuffs each frame, `bit_order: lsb` reassembling HDLC's LSB-first octets.
 - **`equalise` is `iq → iq`,** placed ahead of the demodulator, not on symbols (§9.2).
 - **`ofdm_demod` is named but not pinned** (§9.2).
 
