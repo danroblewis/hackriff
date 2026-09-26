@@ -55,6 +55,14 @@
 //! stream whose source drops transfers more often than one row period used to fold **no row at
 //! all** — the reset arrived before `K` segments ever completed — while this reader lost not one
 //! ring sample of its own. See [`history_stft_config`] for the measurement and the argument.
+//!
+//! **T-1071 bridges the gap instead of resetting at it.** T-939's partial row still needed `K / 10`
+//! unbroken segments, and a coarse scan step (19.2 Msps) on a front end that delivers a fraction of
+//! that rate breaks the stream far more often: measured on the mock, ~17 k-sample pieces against
+//! a 192 k-sample minimum, so `Scan everything (fast)` folded **no row at all** at any step whose
+//! samples the front end could not keep up with, and the swept range left nothing in the pyramid.
+//! A gap on an unchanged tuning now only drops the samples that cannot form a segment across it;
+//! the row goes on averaging and closes at its row period ([`hk_dsp::StftConfig::bridge_gaps`]).
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -963,6 +971,15 @@ pub fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> StftConf
         min_segments: partial_min_segments(k),
         arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE | Discontinuity::GAP,
     });
+    // **T-1071: a gap no longer ends the row at all.** T-939's partial row still needs
+    // `partial_min_segments(k)` UNBROKEN segments, and a stream broken more often than that folded
+    // nothing again: a coarse scan step at 19.2 Msps on a front end delivering ~20 % of it (the
+    // mock, measured: ~17 k-sample pieces between gaps against a 192 k-sample minimum) left
+    // `frames` at 0 and the step's band empty in the pyramid. Bridged, a pure gap drops only the
+    // samples that cannot form a segment across it and the row keeps averaging, closing at its row
+    // period with the segments it really got (`n_avg`) over the capture time it really spans
+    // (`sample_count`, the loss included). A retune, rate or gain change still resets as above.
+    stft_cfg.bridge_gaps = true;
     stft_cfg
 }
 
@@ -1058,6 +1075,7 @@ pub(crate) fn run(
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
         set(&rc.partial_frames, st.partial_frames);
+        set(&rc.gaps_bridged, st.gaps_bridged);
     }
     // Stream end or detach: frames still in flight are folded in before the queue drains.
     //
@@ -1077,6 +1095,7 @@ pub(crate) fn run(
     set(&rc.frames, st.frames);
     set(&rc.stft_resets, st.resets);
     set(&rc.partial_frames, st.partial_frames);
+    set(&rc.gaps_bridged, st.gaps_bridged);
     drop(cursor);
     let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
     tally(h, &queue.drain(&mut p));

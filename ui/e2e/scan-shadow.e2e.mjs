@@ -40,6 +40,10 @@
 //     `shade: null` — *sampled, level not retained*. Per dwell, over 16-cell × 48-row coverage grids:
 //     `fine` 5.0/1.0/0.3 s → 135/128/140 of 135/128/142 observed cells carried a level; `coarse`
 //     5.0/1.0/0.3 s → **0** of 138/85/73. So this spec sweeps `fine`.
+//     **Fixed by T-1071**, and guarded by the second test below: the mock delivers a fraction of
+//     19.2 Msps in ~17 k-sample pieces, every gap reset the history STFT's averaging, and no row
+//     (not even T-939's `K / 10` partial one) ever completed. The STFT now averages across a pure
+//     gap and closes each row at its row period, so the fast pass's rows reach the pyramid.
 //
 // The pixel half of the ticket's acceptance was also run, on both pages, with the marks harvested
 // from the product's own legend: over the rows immediately after the pass both `/surface.html` and
@@ -69,6 +73,16 @@ const DWELL_S = 1.5;      // per sweep step
 const AWAY_DWELL_S = 18;  // after the pass, so rows exist that are past every swept row
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The FAST pass (T-1071): what `Scan everything (fast)` runs — `everythingScanQuery()` in
+ * `ui/src/controls/model.ts`, `{ dwell_s: FAST_SCAN_DWELL_S (0.3), step: "coarse" }` — confined to a
+ * fixture range so a pass takes seconds rather than the whole 1 MHz–6 GHz. The range holds the
+ * mock's own opening tune (100.8 MHz), so every column the radio sampled before, during or after
+ * the pass is inside a step's capture span, and "none outside" means exactly that. */
+const FAST_HZ = [80e6, 180e6];
+const FAST_QUERY = { dwell_s: 0.3, step: "coarse" };
+/** Columns this far past the outermost steps' CAPTURE span (centre ± rate/2) are "outside". */
+const OUTSIDE_MARGIN_HZ = 1e6;
 
 /** `GET`, riding out the route's backpressure (`503` is "ask again", never "no" — T-690). */
 async function get(backend, p, { tries = 60, waitMs = 200 } = {}) {
@@ -225,5 +239,120 @@ test("T-1055: at the zoomed-out tier the swept range carries its last-known valu
     `a completed pass over this band must read as most of the FREQUENCY axis sampled: ${JSON.stringify(bands)}`);
   for (const s of cov.sources) {
     assert.equal(s.truncated, false, `no source here is near its bound: ${JSON.stringify(s)}`);
+  }
+});
+
+
+/** Every overview-tier tile over `[fLo, fHi)` at the time tiles holding `[t0, t1]`, flattened to
+ * one list of `{ fHz, tS, level }` cells that carry a measurement (`grid.max_db` not null). */
+async function measuredCells(backend, [fLo, fHi], [t0, t1], { levelF = 6, levelT = 2 } = {}) {
+  const ax = await get(backend, "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=64&scheme=overview");
+  const tileHz = ax.axes.frequency.tile_hz * 2 ** levelF, tileS = ax.axes.time.tile_s * 2 ** levelT;
+  const out = [];
+  const tiers = new Set();
+  for (let ti = Math.floor(t0 / tileS); ti <= Math.floor(t1 / tileS); ti++) {
+    for (let fi = Math.floor(fLo / tileHz); fi * tileHz < fHi; fi++) {
+      const v = await get(backend, `/api/tiles?level_f=${levelF}&level_t=${levelT}&f_index=${fi}` +
+        `&t_index=${ti}&cells=64&scheme=overview`);
+      tiers.add(v.resolution?.source);
+      const g = v.grid;
+      if (!g?.max_db) continue;
+      for (let r = 0; r < g.nt; r++) {
+        const tS = g.t0_s + (r + 0.5) * g.t_cell_s;
+        if (tS < t0 - g.t_cell_s || tS > t1 + g.t_cell_s) continue;
+        for (let c = 0; c < g.nf; c++) {
+          if (g.max_db[r * g.nf + c] == null) continue;
+          out.push({ fHz: g.f_lo_hz + (c + 0.5) * g.f_cell_hz, fCell: g.f_cell_hz, tS });
+        }
+      }
+    }
+  }
+  return { cells: out, tiers: [...tiers] };
+}
+
+test("T-1071: a FAST (coarse, rate-changing) pass leaves its rows in the spectrum history at the survey-overview tier, in every step's columns and none outside",
+  { timeout: 600000 }, async (t) => {
+  // A FRESH hk of its own: the fast pass is the first thing it ever does after opening, so the
+  // rate change (2.4 -> 19.2 Msps) happens inside this test and not in an earlier one.
+  const backend = await startBackend({ port: PORT + 1, mockDevice: true });
+  try {
+    const waited = await until("the first folded frame",
+      async () => Number.isFinite(await dataEdge(backend).catch(() => null)), { timeoutMs: 90000 });
+    t.diagnostic(`fresh backend up, first frame after ${waited} ms`);
+    const nav = await get(backend, "/api/navigation");
+    const openingRate = nav.frequency?.current?.span_hz;
+    const before = (await get(backend, "/api/status")).history;
+
+    const passStart = Date.now() / 1000;
+    const started = await post(backend, "/api/control/scan",
+      { f_lo_hz: FAST_HZ[0], f_hi_hz: FAST_HZ[1], ...FAST_QUERY });
+    assert.equal(started.status, 200, `the fast pass was refused: ${JSON.stringify(started.body)}`);
+    const plan = started.body.scan.plan;
+    assert.equal(plan.step, "coarse", `${JSON.stringify(plan).slice(0, 400)}`);
+    assert.ok(plan.sample_rate_hz > openingRate,
+      `the point of this test is the coarse pass's RATE CHANGE: the mock opened at ${openingRate} Hz ` +
+      `and the pass runs at ${plan.sample_rate_hz} Hz`);
+    const windows = plan.windows;
+    assert.ok(windows?.length >= 3, `a pass of several steps: ${JSON.stringify(windows)}`);
+    t.diagnostic(`fast pass: ${plan.steps} steps of ${(plan.sample_rate_hz / 1e6).toFixed(1)} Msps over ` +
+      `${FAST_HZ[0] / 1e6}–${FAST_HZ[1] / 1e6} MHz, dwell ${plan.dwell_s} s (opened at ${openingRate / 1e6} Msps)`);
+    await until("the fast pass to complete",
+      async () => ((await get(backend, "/api/control/scan")).scan.progress?.pass ?? 0) >= 1,
+      { timeoutMs: 180000, everyMs: 500 });
+    const stopped = await post(backend, "/api/control/scan/stop");
+    assert.equal(stopped.status, 200, `stopping the sweep -> ${stopped.status}`);
+    const passEnd = Date.now() / 1000;
+
+    // Rows reach the pyramid asynchronously (the history reader folds behind the live edge), so
+    // the read waits — bounded — until every step's columns hold a measurement, then asserts.
+    const half = plan.sample_rate_hz / 2;
+    const centres = windows.map((w) => w.center_hz);
+    const captured = [Math.min(...centres) - half, Math.max(...centres) + half];
+    const probe = [captured[0] - 30e6, captured[1] + 30e6];
+    const stepCover = (cells, w) => {
+      const cols = new Set(cells.filter((c) => c.fHz - c.fCell / 2 >= w.lo_hz && c.fHz + c.fCell / 2 <= w.hi_hz)
+        .map((c) => Math.round(c.fHz)));
+      const want = new Set();
+      const fCell = cells[0]?.fCell ?? 400e3;
+      for (let f = Math.ceil(w.lo_hz / fCell) * fCell; f + fCell <= w.hi_hz; f += fCell) want.add(Math.round(f + fCell / 2));
+      const missing = [...want].filter((f) => !cols.has(f));
+      return { want: want.size, missing };
+    };
+    let read = null;
+    try {
+      await until("every step's columns to hold a measurement", async () => {
+        read = await measuredCells(backend, probe, [passStart, passEnd]);
+        return windows.every((w) => stepCover(read.cells, w).missing.length === 0);
+      }, { timeoutMs: 30000, everyMs: 1000 });
+    } catch { /* asserted below, with the numbers */ }
+    const after = (await get(backend, "/api/status")).history;
+    t.diagnostic(`tiers answered: ${read.tiers.join(", ")}; measured cells over the pass: ${read.cells.length}; ` +
+      `history.frames_ingested ${before.frames_ingested} -> ${after.frames_ingested}, view_frames ` +
+      `${before.view_frames} -> ${after.view_frames}`);
+
+    assert.deepEqual(read.tiers, ["survey-overview"], `the probe must read the survey-overview tier only`);
+    // 1. Every step of the pass left rows at its own frequency.
+    for (const w of windows) {
+      const { want, missing } = stepCover(read.cells, w);
+      t.diagnostic(`step ${w.step} ${(w.lo_hz / 1e6).toFixed(2)}–${(w.hi_hz / 1e6).toFixed(2)} MHz: ` +
+        `${want - missing.length}/${want} columns measured`);
+      assert.equal(missing.length, 0,
+        `step ${w.step} (${w.lo_hz / 1e6}–${w.hi_hz / 1e6} MHz) left no spectrum history in ${missing.length} of ` +
+        `${want} columns — the T-1071 symptom: the fast pass's rows never reached the pyramid ` +
+        `(first missing ${(missing[0] / 1e6).toFixed(2)} MHz)`);
+    }
+    // 2. And nothing outside what the radio captured.
+    const outside = read.cells.filter((c) => c.fHz + c.fCell / 2 < captured[0] - OUTSIDE_MARGIN_HZ ||
+      c.fHz - c.fCell / 2 > captured[1] + OUTSIDE_MARGIN_HZ);
+    assert.equal(outside.length, 0,
+      `a measurement outside every step's capture span (${captured.map((f) => (f / 1e6).toFixed(2)).join("–")} MHz): ` +
+      `${JSON.stringify(outside.slice(0, 5))}`);
+    // 3. No row of the pass was refused by either writer.
+    for (const k of ["frames_late", "frames_rejected", "view_late", "view_rejected"]) {
+      assert.equal(after[k], before[k], `history.${k} moved during the fast pass: ${before[k]} -> ${after[k]}`);
+    }
+    assert.ok(after.frames_ingested > before.frames_ingested, `no history row was ingested: ${JSON.stringify(after)}`);
+  } finally {
+    backend.stop();
   }
 });

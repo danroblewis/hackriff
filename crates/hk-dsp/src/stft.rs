@@ -29,6 +29,21 @@
 //! emits exactly the frames it would without the option, and so does a tune held for a full frame
 //! after a retune (its later gaps discard the partial averaging, as without the option).
 //!
+//! **Bridged gaps (T-1071, opt-in).** With [`StftConfig::bridge_gaps`] set, an input whose only
+//! reset reason is a [`Discontinuity::GAP`] (lost samples on an unchanged tuning) does **not**
+//! restart the averaging: the samples staged before the loss are dropped, so no segment straddles
+//! it, and the frame in progress goes on averaging the segments after it. A frame never grows past
+//! its nominal span, though: when its next segment would end beyond `frame_samples()` from the
+//! frame's first sample (or the stream resumes on a different clock), the averaging in progress
+//! is emitted first, whatever it holds. Each such frame says what it is —
+//! [`Resolution::n_avg`](crate::spectrum::Resolution) the segments averaged, `sample_count` the
+//! samples its segments span *including* the loss between them, `discontinuity` carrying `GAP`
+//! and `dropped_samples` the loss — and bridged gaps are counted in [`StftStats::gaps_bridged`],
+//! not in `resets`. Without it a stream that loses
+//! samples more often than once per frame emits **no frame at all** (T-1071: a 19.2 Msps coarse
+//! scan step losing ~80 % of its samples in ~17 k-sample pieces never reached a 192 k-sample
+//! partial row, so the spectrum history of that step was empty).
+//!
 //! **Compute providers (T-041).** The per-segment rows (window → FFT → `|X|²`) come from a
 //! [`SpectralBackend`]: the CPU reference by default, or a multi-threaded CPU, Accelerate or GPU
 //! provider chosen through [`crate::compute::Compute`]. `push` stages samples, submits every
@@ -137,6 +152,9 @@ pub struct StftConfig {
     /// ([`crate::Spectrum::interpolate_dc_notch`], T-524). For display and history STFTs only; a
     /// detection STFT leaves it `None` so interpolated cells never read as measured energy.
     pub dc_notch_half_bins: Option<usize>,
+    /// Keep averaging across a pure gap instead of resetting (T-1071; see the module docs).
+    /// `false` (the default) resets on a gap as `reset_on` says.
+    pub bridge_gaps: bool,
 }
 
 /// When a reset emits its partial frame instead of discarding it (T-139).
@@ -182,6 +200,7 @@ impl StftConfig {
             reset_on: DEFAULT_RESET_ON,
             partial: None,
             dc_notch_half_bins: None,
+            bridge_gaps: false,
         }
     }
 
@@ -250,10 +269,13 @@ pub struct StftStats {
     pub resets: u64,
     /// Segments thrown away in partial frames at a reset.
     pub segments_discarded: u64,
-    /// Frames emitted from a reset's partial averaging (T-139; included in `frames`).
+    /// Frames emitted from a reset's partial averaging (T-139), or closed short of `K` at their
+    /// nominal span across a bridged gap (T-1071); included in `frames`.
     pub partial_frames: u64,
     /// Samples reported lost (gaps and overruns).
     pub samples_dropped: u64,
+    /// Gaps the averaging continued across instead of resetting ([`StftConfig::bridge_gaps`]).
+    pub gaps_bridged: u64,
 }
 
 /// What happened to the stream, in order; replayed as rows arrive.
@@ -265,6 +287,8 @@ enum Event {
         dropped: u64,
         provenance: ProvenanceHandle,
         reset: bool,
+        /// A pure gap the averaging continues across ([`StftConfig::bridge_gaps`]).
+        bridged: bool,
         rate_changed: bool,
     },
     /// `count` consecutive segments, the first starting at stream index `first_start`.
@@ -280,6 +304,9 @@ struct Replay {
     provenance: Option<ProvenanceHandle>,
     frame: Option<SpectrumFrame>,
     frame_start: u64,
+    /// Start of the frame's most recent segment: with bridged gaps the segments are not
+    /// contiguous, so the span is `last_start + N − frame_start`, not `(count − 1)·hop + N`.
+    last_start: u64,
     frame_provenance_changed: bool,
     pending_flags: Discontinuity,
     pending_dropped: u64,
@@ -308,10 +335,20 @@ impl Replay {
                 dropped,
                 provenance,
                 reset,
+                bridged,
                 rate_changed,
             }) = self.events.pop_front()
             {
-                self.apply_input(time, flags, dropped, provenance, reset, rate_changed, emit);
+                self.apply_input(
+                    time,
+                    flags,
+                    dropped,
+                    provenance,
+                    reset,
+                    bridged,
+                    rate_changed,
+                    emit,
+                );
             }
         }
     }
@@ -324,6 +361,7 @@ impl Replay {
         dropped: u64,
         prov: ProvenanceHandle,
         reset: bool,
+        bridged: bool,
         rate_changed: bool,
         emit: &mut dyn FnMut(&SpectrumFrame),
     ) {
@@ -377,6 +415,22 @@ impl Replay {
             let projected = self.anchor.time_of(time.sample_index, fs).as_unix_nanos();
             projected.abs_diff(time.host_time.as_unix_nanos()) <= ANCHOR_SLACK_NS
         };
+        // T-1071: a bridged gap continues the averaging in progress, unless the stream resumes
+        // where its next segment would end past the frame's nominal span (a frame never covers
+        // more time than a full one; the loss then belongs to the next frame) or on
+        // another clock (its first sample's time must stay the old anchor's) — then the
+        // averaging so far is emitted first, before this input's flags and anchor apply.
+        if bridged {
+            self.stats.gaps_bridged += 1;
+            // The first segment after the gap starts at this input: it would not fit the frame.
+            let past_span = time.sample_index + self.config.welch.fft_len as u64
+                > self.frame_start + self.config.frame_samples();
+            if self.acc.count() > 0 && (past_span || !same_clock) {
+                self.stats.partial_frames += 1;
+                self.emit_frame(emit);
+                self.emitted += 1;
+            }
+        }
         if !same_clock {
             self.anchor = time;
         }
@@ -426,6 +480,19 @@ impl Replay {
     }
 
     fn on_segment(&mut self, start: u64, row: &[f32], emit: &mut dyn FnMut(&SpectrumFrame)) {
+        // T-1071: with bridged gaps a frame's segments need not be contiguous, so K of them can
+        // span more than a full frame's samples. The frame closes at its nominal span instead:
+        // rows stay one row period of capture time apart, however lossy the stream.
+        if self.config.bridge_gaps
+            && self.acc.count() > 0
+            && start + self.config.welch.fft_len as u64
+                > self.frame_start + self.config.frame_samples()
+        {
+            self.stats.partial_frames += 1;
+            self.emit_frame(emit);
+            self.emitted += 1;
+        }
+        self.last_start = start;
         if self.acc.count() == 0 {
             self.frame_start = start;
             let prov = self.provenance.as_ref().expect("input seen");
@@ -461,10 +528,10 @@ impl Replay {
             sample_index: self.frame_start,
             host_time: self.anchor.time_of(self.frame_start, fs),
         };
-        // `(count − 1)·hop + N`: `frame_samples()` for a full frame, less for a partial one.
-        let count = self.acc.count() as usize;
+        // `(count − 1)·hop + N` for contiguous segments: `frame_samples()` for a full frame, less
+        // for a partial one. Across a bridged gap (T-1071) the span includes the lost samples.
         frame.sample_count =
-            (count.saturating_sub(1) * self.config.welch.hop() + self.config.welch.fft_len) as u64;
+            self.last_start.saturating_sub(self.frame_start) + self.config.welch.fft_len as u64;
         frame.provenance_changed = self.frame_provenance_changed;
         frame.discontinuity = self.pending_flags;
         frame.dropped_samples = self.pending_dropped;
@@ -548,6 +615,7 @@ impl StftProcessor {
                 provenance: None,
                 frame: None,
                 frame_start: 0,
+                last_start: 0,
                 frame_provenance_changed: false,
                 pending_flags: Discontinuity::NONE,
                 pending_dropped: 0,
@@ -735,8 +803,12 @@ impl StftProcessor {
         if self.seg_provenance.is_none() {
             self.seg_provenance = Some(prov.clone());
         }
-        let reset = flags.bits() & self.config.reset_on.bits() != 0;
-        if reset {
+        let reasons = flags.bits() & self.config.reset_on.bits();
+        // T-1071: a pure gap on an unchanged tuning, bridged: the samples before it cannot form a
+        // segment with the ones after it, but the averaging goes on.
+        let bridged = self.config.bridge_gaps && reasons == Discontinuity::GAP.bits();
+        let reset = reasons != 0 && !bridged;
+        if reasons != 0 {
             self.staged.clear();
         }
         Event::Input {
@@ -745,6 +817,7 @@ impl StftProcessor {
             dropped,
             provenance: prov.clone(),
             reset,
+            bridged,
             rate_changed,
         }
     }

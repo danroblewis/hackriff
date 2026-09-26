@@ -106,8 +106,11 @@ counter_group!(
         /// STFT resets (discontinuities, gaps).
         stft_resets,
         /// Frames emitted from a reset's partial averaging (T-139; history reader only, included
-        /// in `frames`).
+        /// in `frames`), or closed short of `K` at their row period across a bridged gap (T-1071).
         partial_frames,
+        /// Source gaps this reader's STFT averaged across instead of resetting (T-1071; history
+        /// reader and the display stream): each is a gap that no longer costs a row.
+        gaps_bridged,
         /// CPU time of this reader's thread(s), ns (T-510, history reader; T-939, detection
         /// reader): the per-row cost of the growing edge, paid on every front end's ring whether
         /// or not anyone looks.

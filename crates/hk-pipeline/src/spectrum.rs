@@ -447,20 +447,21 @@ fn stft_for(shared: &Shared, plan: &RowPlan) -> anyhow::Result<StftProcessor> {
     )
 }
 
-/// Replaces the STFT for `plan`, carrying its counters into `bases` (frames, resets). Rows still
-/// in flight on an asynchronous provider belong to the old plan: they are published under it
-/// first (T-056), and so is the averaging in progress (T-915, [`finish`]).
+/// Replaces the STFT for `plan`, carrying its counters into `bases` (frames, resets, bridged
+/// gaps). Rows still in flight on an asynchronous provider belong to the old plan: they are
+/// published under it first (T-056), and so is the averaging in progress (T-915, [`finish`]).
 fn rebuild(
     shared: &Shared,
     plan: RowPlan,
     stft: &mut StftProcessor,
     out: &mut Output<'_>,
-    bases: &mut (u64, u64),
+    bases: &mut (u64, u64, u64),
 ) -> anyhow::Result<()> {
     finish(stft, out);
     let st = stft.stats();
     bases.0 += st.frames;
     bases.1 += st.resets;
+    bases.2 += st.gaps_bridged;
     *stft = stft_for(shared, &plan)?;
     out.set_plan(plan);
     Ok(())
@@ -512,7 +513,7 @@ pub(crate) fn run(
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
     let rc = &shared.counters.spectrum_reader;
-    let mut bases = (0u64, 0u64);
+    let mut bases = (0u64, 0u64, 0u64);
     // Was anything subscribed at the last chunk? Starts false: nothing can be subscribed before
     // the publisher has been offered, which the first chunk does.
     let mut was_watched = false;
@@ -620,6 +621,7 @@ pub(crate) fn run(
         let st = stft.stats();
         set(&rc.frames, bases.0 + st.frames);
         set(&rc.stft_resets, bases.1 + st.resets);
+        set(&rc.gaps_bridged, bases.2 + st.gaps_bridged);
     }
     // Stream end or detach: rows still in flight, and the averaging in progress (T-915), are
     // published before the publisher finishes.
@@ -627,6 +629,7 @@ pub(crate) fn run(
     let st = stft.stats();
     set(&rc.frames, bases.0 + st.frames);
     set(&rc.stft_resets, bases.1 + st.resets);
+    set(&rc.gaps_bridged, bases.2 + st.gaps_bridged);
     if let Some(e) = out.error.take() {
         return Err(e);
     }
