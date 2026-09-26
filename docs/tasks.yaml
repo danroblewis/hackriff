@@ -30588,7 +30588,7 @@ tasks:
   - id: T-1040
     milestone: MLIVE
     title: coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
-    status: in-progress
+    status: done
     branch: task-t1040
     priority: medium
     deps: []
@@ -30613,6 +30613,7 @@ tasks:
       Commits: 875da851, b4147978, 4be75dca
       Observed, not chased: No browser e2e spec or screenshot of the departed band greying without a timer wait. The contract test and the spy-client test cover it. | One event can send up to 64 tile re-fetches at once, more than the client normally keeps in flight. The batch holds one server slot at a time (T-573), but ordinary misses wait until it drains.
       Resources: 70 CPU-s, peak 3.4 GB
+    commit: d47e53f5
   - id: T-1041
     milestone: MMAP
     title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"
