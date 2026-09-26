@@ -91,6 +91,7 @@ import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { activePaneName, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
+import { mountSplitChrome } from "./split-chrome";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
 import {
@@ -235,6 +236,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // the frame was drawn with (and at once when the active pane changes), shown only while there are
   // two or more panes. Never takes the pointer: a press goes through it to the pane underneath.
   const activeEl = h("div", { class: "sf-active-pane", "aria-hidden": "true", hidden: true });
+  // T-1005: the split's own chrome — a drag handle on every divider and a × on every pane — placed
+  // per frame from the same layout the panes were drawn with (`split-chrome.ts`). Empty with one pane.
+  const split = mountSplitChrome({ canvas, preview: () => preview, closePane: (id) => closeActive(id) });
+  const splitEl = split.el;
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -255,7 +260,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, splitEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -343,23 +348,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let renderLayers: () => void = () => {};
   let renderMeasure: () => void = () => {};
   /** Split: the new pane inherits the creating pane's registry by value (docs/24 §13.5). */
-  const splitActive = () => {
+  const splitActive = (dir: "columns" | "rows" = "columns") => {
     const p = preview;
     if (!p) return;
     const from = p.activePane;
-    p.split("columns");
+    p.split(dir);
     if (p.activePane !== from) {
       store.set(inheritPane(from, p.activePane, seedFor(from)));
       savePaneLayers(layersFor(p.activePane));
     }
     syncLayerControls();
   };
-  const closeActive = () => {
+  /** T-1005: close pane `id` (the active one by default). The pane made active afterwards is the
+   * one under the pointer, else the live one — `SurfacePreview.closePane`'s rule, fed the last
+   * pointer position this page saw over the canvas. */
+  const closeActive = (id?: string) => {
     const p = preview;
     if (!p) return;
-    const gone = p.activePane;
-    p.closeActive();
-    if (p.activePane !== gone) store.set(dropPaneLayers(gone));
+    const gone = id ?? p.activePane;
+    if (p.closePane(gone, split.pointerGl())) store.set(dropPaneLayers(gone));
     syncLayerControls();
   };
   /** An open layers menu describes the ACTIVE pane's registry (and the view-wide trace and colour
@@ -1302,7 +1309,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
         hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
-        dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); },
+        dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); split.place(panes, hPx, dpr); },
       });
     } catch (e) {
       const why = `WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`;
@@ -1478,8 +1485,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // T-820 (MAP-20): the Annotate and Pin tool modes, beside Measure in the cluster.
       annotating: () => (tool === "annotate" || tool === "pin" ? tool : null),
       setAnnotating: (mode) => setTool(mode ?? "navigate"),
-      split: () => splitActive(),
+      split: (dir) => splitActive(dir),
       closePane: () => closeActive(),
+      splitDir: () => pv.view.panes.splitDirOf(pv.activePane),
+      flipSplit: () => {
+        const d = pv.view.panes.splitDirOf(pv.activePane);
+        if (d) pv.view.panes.setSplitDir(pv.activePane, d === "rows" ? "columns" : "rows");
+      },
       wholeSurface: () => { pv.fitToSurface(); lastMirror = ""; mirror(); renderLive(); },
       paneCount: () => pv.view.panes.list().length,
       paneMenuExtras: [recordBtn],
