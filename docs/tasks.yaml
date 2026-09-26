@@ -27986,6 +27986,8 @@ tasks:
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): more: the Selected panel for 101.3 said 'Ended 11:59:16 UTC (1 min ago) - provisional' and 'Extent 11:59:16 -> 11:59:16 - 500 ms on air' WHILE the explorer was listening to it; later 'Extent 12:13:35 -> 12:15:01 - 1 min on air' and the list said '35 % on-air' for a continuous broadcast. On-air fraction and extent are wrong too, not only the end flag.
 
       Review fix 1: reviewer found observed (watched/reported) silence compared against the 2x-revisit gap double-discounts under a sweep (stopped burst live ~2P^2/d). Fold now judges observed silence against IdleGap::continuous (two silent visits), elapsed silence against the gap; regression test a_swept_band_closes_after_two_silent_visits_not_2p_squared_over_d (red on old threshold). e2e test window now from capture clock (/api/timeline window.t1_s). Merged main 72f9d76c. Commit b7f287ef.
+
+      Recovery 2026-09-26: brought up to date with gated base 1090f468 (merges 749d8a43, db3d8cb0, f9cde926). Conflict: hk-pipeline/src/detect.rs - main (T-941) moved the inventory stage into the chunked Writer::file_inventory; T-940's live-extent follow_track report (after reviews, before closes, now chunked) and stop_following_track on Closed/Merged are carried into it. New main caller tests/e2e acceptance/captured_signals.rs presence_intervals gets &Watched::unrecorded(). Tests green: hk-model/hk-detect/hk-pipeline/hk-api libs, track, inventory_liveness, inventory_api, api_contract, hk-e2e acceptance_ism + acceptance_captured_signals; precheck clean.
     branch: task-t940
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 10:38).
