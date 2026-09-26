@@ -50,8 +50,9 @@ test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO
     // The page's own wiring: go-to is `requestGoto` in the store, which the surface turns into
     // `setFreq` on the active pane (surface.ts's `nav.gotoHz` subscriber) — reproduced here.
     ctx.store.select((s) => s.nav.gotoHz, (hz) => { if (hz !== null) m.setFreq(id, hz, m.get(id)!.freq.spanHz); });
-    const mapFollow: boolean[] = [];
-    const acts = paneActions(m, () => id, (on) => mapFollow.push(on));
+    // T-995: no map strip to keep in step — the minimap is retired, so `paneActions` has no
+    // follow hook and follow/freeze is the active pane's alone.
+    const acts = paneActions(m, () => id);
     const span0 = m.get(id)!.freq.spanHz;
 
     for (let i = 0; i < 4; i++) acts.zoom(ZOOM_STEP);
@@ -67,7 +68,6 @@ test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO
     assert.equal(acts.isFollowing(), false);
     acts.followLive();
     assert.equal(acts.isFollowing(), true, "the FAB did not re-pin the pane to the growing edge");
-    assert.deepEqual(mapFollow, [true], "the map strip was not told to follow with the pane");
 
     // A layer toggle is a closure over a display flag; nothing here can be reached through it.
     let shown = true;
@@ -239,8 +239,9 @@ test("T-882: the FAB is the retired Live button too — it freezes a following p
   try {
     const m = model();
     const id = m.list()[0].id;
-    const mapFollow: boolean[] = [];
-    const acts = paneActions(m, () => id, (on) => mapFollow.push(on));
+    // T-995: no map strip to keep in step — the minimap is retired, so `paneActions` has no
+    // follow hook and follow/freeze is the active pane's alone.
+    const acts = paneActions(m, () => id);
     assert.equal(acts.isFollowing(), true);
     const before = m.get(id)!.time;
     acts.pauseLive();
@@ -249,7 +250,6 @@ test("T-882: the FAB is the retired Live button too — it freezes a following p
     assert.equal(m.get(id)!.time.spanNs, before.spanNs);
     acts.followLive();
     assert.equal(acts.isFollowing(), true);
-    assert.deepEqual(mapFollow, [false, true], "the map strip was not told to freeze and follow with the pane");
     paneActions(m, () => null).pauseLive(); // no active pane: a no-op, not a throw
   } finally { if (real) g.fetch = real; else delete g.fetch; }
   assert.deepEqual(fetched, []);
@@ -335,6 +335,22 @@ test("T-996: no white centre/span panel and no `More` expansion — a scale bar 
   assert.doesNotMatch(css, /\.sf-status:not\(\[data-open="true"\]\)/, "the collapse rules survive the retired panel");
 });
 
+test("T-995: with no minimap, the Zoom-out press reaches the WHOLE device range — the lock holds until time is saturated", () => {
+  const m = model();
+  const id = m.list()[0].id;
+  const acts = paneActions(m, () => id);
+  const f0 = m.get(id)!.freq.spanHz, t0 = m.get(id)!.time.spanNs;
+  acts.zoom(1 / ZOOM_STEP);
+  // While time can still widen, the press is T-472's uniform zoom: both spans by the same factor.
+  const kF = m.get(id)!.freq.spanHz / f0, kT = m.get(id)!.time.spanNs / t0;
+  assert.ok(kF > 1 && Math.abs(kF - kT) < 1e-9, `the aspect lock broke before time saturated: ${kF} vs ${kT}`);
+  for (let i = 0; i < 60; i++) acts.zoom(1 / ZOOM_STEP);
+  const p = m.get(id)!;
+  assert.equal(p.freq.spanHz, BOUNDS.f1Hz - BOUNDS.f0Hz,
+    `zooming out stopped at ${p.freq.spanHz} Hz: the whole spectrum is unreachable without a minimap`);
+  assert.equal(acts.isFollowing(), true, "zooming out walked a live pane off the growing edge");
+});
+
 // ——— T-955: a painted Go-to offer is re-derived when the radio retunes (by anyone) ———
 
 type Handler = (e: unknown) => void;
@@ -350,6 +366,8 @@ class FakeEl {
   value = "";
   title = "";
   style = { setProperty() {}, removeProperty() {} };
+  /** T-1028: `data-*` state a control writes (the retune chip's held marker). */
+  dataset: Record<string, string> = {};
   classList = {
     add: (...c: string[]) => c.forEach((x) => this.classes.add(x)),
     remove: (...c: string[]) => c.forEach((x) => this.classes.delete(x)),
@@ -434,5 +452,145 @@ test("T-955: a painted Go-to offer is withdrawn when the radio retunes onto the 
     assert.match(why.textContent, /10\.000 MHz span/, "the offer was not re-derived against the new tuned window");
   } finally {
     g.document = saved.document; g.window = saved.window;
+  }
+});
+
+// ——— T-1028: retune mode's chip — the one control here whose STATE decides what a gesture does ———
+
+test("T-1028: the retune-mode chip states the mode, toggles it, and still reaches no route itself", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  const fetched: unknown[] = [];
+  const realFetch = g.fetch;
+  g.fetch = (...a: unknown[]) => { fetched.push(a); return Promise.reject(new Error("the chip reached the network")); };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    const acts = paneActions(m, () => id);
+    // The surface host's own state: a mode flag and a momentary key, exactly the two bits
+    // `RetuneModeController` exposes.
+    let on = false, held = false;
+    const host = {
+      ...acts,
+      measuring: () => false, setMeasuring() {},
+      retuneMode: () => ({ on: on || held, held }),
+      setRetuneMode: (next: boolean) => { on = next; },
+      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const chip = root.find("map-retune-btn")!;
+    const banner = root.find("map-retune-mode")!;
+
+    // OFF is the default, and it is SAID: an unlit chip and no banner.
+    assert.equal(chip.hidden, false, "a host that has the mode must show its chip");
+    assert.equal(chip.getAttribute("aria-pressed"), "false");
+    assert.equal(banner.hidden, true, "no banner while the mode is off");
+
+    // The press turns it on through the host — the chip holds no state of its own.
+    chip.fire("click");
+    assert.equal(on, true, "the chip did not reach the host");
+    assert.equal(chip.getAttribute("aria-pressed"), "true", "the mode is on and the chip does not say so");
+    assert.ok(chip.classes.has("is-on"));
+    assert.equal(banner.hidden, false, "the mode is on and nothing on screen says what a pan will now do");
+    assert.match(banner.textContent, /pan or zoom/, "the banner must say what the mode does to a gesture");
+
+    // The HELD form is marked apart from the latch: "ends when I let go" is a different promise.
+    on = false; held = true;
+    c.syncRetuneMode();
+    assert.equal(chip.getAttribute("aria-pressed"), "true", "a held key is the mode being ON");
+    assert.equal(chip.dataset.held, "true", "the momentary form is not distinguishable from the latch");
+    held = false;
+    c.syncRetuneMode();
+    assert.equal(chip.getAttribute("aria-pressed"), "false");
+    assert.equal(banner.hidden, true, "releasing the key left the banner claiming the mode is on");
+
+    // The press a second time turns it off again, through the same host call.
+    on = true;
+    chip.fire("click");
+    assert.equal(on, false);
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+    if (realFetch) g.fetch = realFetch; else delete g.fetch;
+  }
+  assert.deepEqual(fetched, [], "the chip itself must reach nothing: it changes what a GESTURE means");
+});
+
+test("T-1028 x T-996: retune mode's pane status is SAID on the capture block beside Retune", () => {
+  // T-1028 put this line on the per-viewport row; T-996 retired those rows from the app, so the
+  // line moved to the floating capture block. A retune the user's own pan asked for must never be
+  // silent: shown while the host says something, hidden (not emptied) when it says nothing, and
+  // shown even when the viewport offers no Retune of its own.
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    let said: string | null = null;
+    let offer: { label: string; why: string; enabled: boolean } | null = null;
+    const host = {
+      ...paneActions(m, () => id),
+      measuring: () => false, setMeasuring() {},
+      paneRetune: () => offer, pressPaneRetune() {},
+      paneStatus: () => said,
+      goTo() {}, centreHz: () => 100e6, gotoOffer: () => null, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 1,
+      layerMenu: () => ({ pane: "this pane", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const block = root.find("map-retune")!;
+    const line = root.find("map-retune-status")!;
+    const row = root.find("map-retune-row")!;
+    assert.equal(block.hidden, true, "nothing to offer and nothing to say: no block");
+    assert.equal(line.getAttribute("role"), "status", "a retune the pan asked for must reach a screen reader");
+
+    said = "Retuning to 433.92 MHz (settling…)";
+    c.syncRetune();
+    assert.equal(block.hidden, false, "retune mode is acting on the viewport and the map says nothing");
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent, said);
+    assert.equal(row.hidden, true, "a Retune button with no offer behind it was shown");
+
+    offer = { label: "Retune", why: "to 433.92 MHz", enabled: true };
+    c.syncRetune();
+    assert.equal(row.hidden, false, "the viewport's own Retune was hidden by the status line");
+    assert.equal(line.hidden, false);
+
+    said = null;
+    c.syncRetune();
+    assert.equal(line.hidden, true, "the line claims a retune after the mode stopped saying one");
+    assert.equal(block.hidden, false, "the persistent Retune went with the status line");
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+  }
+});
+
+test("T-1028: the cluster module still names no route, no client and no DeviceAction", () => {
+  const src = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  for (const bad of ["/api/control/", "applyDeviceAction", "retuneAction", "controls/client"]) {
+    assert.ok(!src.includes(bad), `map-controls.ts names ${bad}: the device stays behind the host`);
   }
 });

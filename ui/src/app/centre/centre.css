@@ -22,7 +22,7 @@
      - bottom-RIGHT, per pane: the scale bars and that pane's honesty tier (`.sf-scale`).
    Never faded: these are honesty statements (docs/23 §10.2). */
 .sf-status {
-  position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 110px) + 30px); /* clear of the HUD's frequency labels */
+  position: absolute; z-index: 15; left: 8px; bottom: calc(var(--map-strip, 0px) + 30px); /* clear of the HUD's frequency labels */
   /* Clear of the right-edge cluster at every width: at 420 px the zoom stack docks above the FAB
      (`chrome/phone.css`), and a line run to the window's edge put its own controls under it. */
   max-width: min(560px, calc(100% - 80px));
