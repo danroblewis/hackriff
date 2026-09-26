@@ -937,8 +937,10 @@ test("T-386/T-389: the sidebar list and the surface's marks come from ONE collec
   // over the rows would still be the regression this test exists to catch.
   assert.match(src, /paneMarkBoxes\(Object\.values\(paneRows\(s\.inventory, pane\.id\)\).*s\.selections\.list/,
     "the marks are composed from this pane's rows and the store's selections, straight through");
-  assert.match(src, /signalMarkBoxes\(rows, focusId\)/, "…into the same signalMarkBoxes…");
-  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox\)/, "…and the same selectionMarkBoxes");
+  // T-1004 added the linked-focus flag (a pane that does not own the selection draws its ghost); the
+  // rows and the focus still go straight through to the one `signalMarkBoxes`.
+  assert.match(src, /signalMarkBoxes\(rows, focusId, undefined, undefined, linkedFocus\)/, "…into the same signalMarkBoxes…");
+  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox, linkedFocus\)/, "…and the same selectionMarkBoxes");
   assert.match(src, /markQuads\(boxesFor\(pane\), edge, pane\.box, pane\.rect\)/,
     "placed in the pane's own box and rect — the renderer's mapping, not a second one");
   // And the sidebar's window is the pane's window: `mirror()` is the ONE writer of `live.view`

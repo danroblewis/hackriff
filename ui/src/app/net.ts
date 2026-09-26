@@ -12,9 +12,25 @@ export function takeToken(loc: Location = location): string | null {
   const t = new URLSearchParams(loc.hash.slice(1)).get("token") ?? new URLSearchParams(loc.search).get("token");
   if (t) {
     sessionStorage.setItem(TOKEN_KEY, t);
-    history.replaceState(null, "", loc.pathname);
+    history.replaceState(null, "", withoutToken(loc));
   }
   return t ?? sessionStorage.getItem(TOKEN_KEY);
+}
+
+/**
+ * The same address **without the token** — the credential goes, everything else stays (T-1042).
+ *
+ * It used to be `loc.pathname`, which also threw away the **query string**, so a client flag
+ * (`?live-ring=1`, `src/flags.ts`) was gone from `location.search` before anything could read it and
+ * silently did nothing. The token is the one thing that may not stay in the address bar; a flag is
+ * the opposite — it is *meant* to be visible and to survive a reload, which is why the flags are
+ * query parameters at all.
+ */
+export function withoutToken(loc: Pick<Location, "pathname" | "search">): string {
+  const q = new URLSearchParams(loc.search);
+  q.delete("token");
+  const rest = q.toString();
+  return rest ? `${loc.pathname}?${rest}` : loc.pathname;
 }
 
 /**

@@ -1,8 +1,8 @@
-//! **The "all captured signals decode" milestone gate** (T-936, `SIGNAL-062`).
+//! **The "all captured signals decode" milestone gate** (T-936, extended by T-969; `SIGNAL-062`).
 //!
 //! ```text
-//! just acceptance-captured-signals                    # the three green controls
-//! just acceptance-captured-signals --run-ignored all   # + the five red proofs
+//! just acceptance-captured-signals                    # the four green controls
+//! just acceptance-captured-signals --run-ignored all   # + the six red proofs
 //! ```
 //!
 //! One blind acceptance test per ticket assertion over **every signal the explorer agent has
@@ -15,8 +15,8 @@
 //! by `just acceptance-milestones` — deliberately not in CI's per-merge acceptance gate, for the
 //! same reason `acceptance_mauto` and `acceptance_m3` are not: most of it is red *by design* until
 //! the tickets it names (T-926, T-937, T-938, T-940) land, and a known-red exit target must not pin
-//! every merge red. Its three green controls, which prove the fixture, the explanation path and the
-//! decode path are sound, run by default.
+//! every merge red. Its four green controls, which prove the fixture, the explanation path, the
+//! decode path and the attachment of a decode to its station are sound, run by default.
 //!
 //! The whole argument — what each test proves, what each red measured today, and which ticket must
 //! delete each `#[ignore]` — is in [`captured_signals`]'s module documentation.

@@ -574,3 +574,60 @@ test("T-1028: the cluster module still names no route, no client and no DeviceAc
     assert.ok(!src.includes(bad), `map-controls.ts names ${bad}: the device stays behind the host`);
   }
 });
+
+test("T-1004: the offer's BUTTON says what the press does — 'Go live here' on a frozen pane, 'Retune' otherwise", () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, window: g.window };
+  g.document = {
+    createElement: (t: string) => new FakeEl(t),
+    createElementNS: (_ns: string, t: string) => new FakeEl(t),
+    createComment: () => new FakeEl("#comment"),
+    querySelector: () => null,
+    body: new FakeEl("body"),
+    activeElement: null,
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  try {
+    const m = model();
+    const id = m.list()[0].id;
+    const tuned = { centerHz: 100.9e6, spanHz: 2.4e6 };
+    // The host answers as `surface.ts` does: a frozen pane's offer is a go-live, and carries its own
+    // word for the button; a live pane's offer is the plain Retune, which names no label at all.
+    let pressed = 0, frozen = true;
+    const offerFor = () => frozen
+      ? { why: "This viewport is frozen behind the growing edge… Go live at 162.2000 MHz", enabled: true, label: "Go live here", press: () => { pressed++; } }
+      : { why: "Retune to 162.2000 MHz at 2.400 MHz span", enabled: true, press: () => { pressed++; } };
+    const acts = paneActions(m, () => id, undefined, () => tuned);
+    const host = {
+      ...acts,
+      measuring: () => false, setMeasuring() {}, goTo: (hz: number) => m.setFreq(id, hz, m.get(id)!.freq.spanHz),
+      centreHz: () => tuned.centerHz, gotoOffer: offerFor, viewChanged() {}, toast() {},
+      split() {}, closePane() {}, wholeSurface() {}, paneCount: () => 2,
+      layerMenu: () => ({ pane: "pane 1 of 2", bases: [], data: [], overlays: [], viewWide: [], scale: { rows: [], note: "" } }),
+      setBase() {}, toggleOverlay() {}, toggleViewWide() {}, setScale() {},
+    } as unknown as Parameters<typeof mountMapControls>[0];
+    const c = mountMapControls(host);
+    const root = c.el as unknown as FakeEl;
+    const form = root.find("map-goto")!, go = root.find("map-offer-go")!, why = root.find("map-offer-why")!;
+    const input = form.children.find((x) => x.tag === "input")!;
+
+    input.value = "162.2M";
+    form.fire("submit");
+    assert.equal(go.textContent, "Go live here", "the button still says Retune while the press also unfreezes the pane");
+    assert.equal(go.disabled, false, "a frozen pane's offer is takeable as a go-live");
+    assert.match(why.textContent, /frozen behind the growing edge/);
+    go.fire("click");
+    assert.equal(pressed, 1);
+
+    // The pane is at the live edge now: the same control is the plain retune again, by its word.
+    frozen = false;
+    form.fire("submit");
+    assert.equal(go.textContent, "Retune", "the button kept the go-live word after the pane went live");
+    // And a re-derivation on a tuning change re-states the word, not only the sentence.
+    frozen = true;
+    c.tuningChanged();
+    assert.equal(go.textContent, "Go live here");
+  } finally {
+    g.document = saved.document; g.window = saved.window;
+  }
+});

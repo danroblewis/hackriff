@@ -18,7 +18,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { activePaneName, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "../src/app/centre/active-pane";
+import { activePaneName, closeButtonSpot, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "../src/app/centre/active-pane";
 import { attachSurfaceInput } from "../src/surface/input";
 import { SurfacePreview } from "../src/surface/preview";
 
@@ -212,4 +212,25 @@ test("the surface places the outline per frame and on every change; the chrome n
   }
   // Global chrome (docs/23 §10.7): the colour scale and the outputs are never named per pane.
   assert.ok(!/scale|record/i.test(sync), "syncActive names a GLOBAL control (colour scale / Record) as per-pane");
+});
+
+test("T-1005: a pane's × sits in its top-right corner, and steps left along the top edge when floating chrome is there", () => {
+  const pane = { left: 0, top: 280, width: 1280, height: 270 };
+  assert.deepEqual(closeButtonSpot(pane, []), { left: 1250, top: 286 });
+  // The zoom stack over the bottom pane's corner (the stacked split's case, found in the e2e).
+  const zoom = { left: 1230, top: 270, width: 44, height: 100 };
+  const spot = closeButtonSpot(pane, [zoom]);
+  assert.equal(spot.top, 286);
+  assert.ok(spot.left + 24 <= zoom.left, `the × is still under the zoom stack: ${JSON.stringify(spot)}`);
+  assert.ok(spot.left > 1100, "the × moved further than it needed to");
+  // Chrome elsewhere does not move it.
+  assert.deepEqual(closeButtonSpot(pane, [{ left: 0, top: 0, width: 300, height: 60 }]), { left: 1250, top: 286 });
+  // The whole top edge covered (the status chips at a phone width): down the right edge instead.
+  const phone = { left: 202, top: 98, width: 196, height: 476 };
+  const chips = { left: 135, top: 96, width: 257, height: 36 };
+  const down = closeButtonSpot(phone, [chips]);
+  assert.equal(down.left, 202 + 196 - 30, "stepping down the right edge left the right edge");
+  assert.ok(down.top >= chips.top + chips.height, `the × is still under the chips: ${JSON.stringify(down)}`);
+  // Nowhere clear at all: the corner, never off the pane.
+  assert.deepEqual(closeButtonSpot({ left: 0, top: 0, width: 100, height: 100 }, [{ left: 0, top: 0, width: 100, height: 100 }]), { left: 70, top: 6 });
 });

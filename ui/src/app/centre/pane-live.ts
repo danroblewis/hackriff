@@ -198,9 +198,9 @@ export class PaneLiveLayer {
     for (const pane of panes) {
       const el = this.button(pane.id);
       const box = outlineBox(pane.rect, canvasHpx, dpr);
-      // Top-right INSIDE the pane: the trace strip is taken off the pane's rectangle (view.ts), so
-      // this corner is picture, not chrome. Pushed below whatever floating chrome is over that
-      // corner. Placed with `transform`, like every other DOM layer.
+      // Top-right INSIDE the pane, which since T-1041 is the pane's own first row (the trace
+      // reserves nothing). Pushed below whatever floating chrome is over that corner. Placed with
+      // `transform`, like every other DOM layer.
       const right = box.left + box.width - LIVE_INSET_PX;
       const clear = chromeClearance(chrome, right - BTN_MAX_W, right, canvasHpx / (dpr > 0 ? dpr : 1));
       const top = Math.max(box.top + LIVE_INSET_PX, clear + LIVE_INSET_PX);
