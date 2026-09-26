@@ -30795,6 +30795,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+
+      2026-09-26 coordinator: the UI-stack integrator also saw app-trace fail IDENTICALLY on main 1090f468 (fresh hk, alone): the T-475 afterglow test and 'the trace is the spectrum at the viewport's time position' - besides heldObservation. Note T-1041 made the trace a layer OFF by default: a spec that asserts the trace must switch the layer on through the product's own control first. Own all app-trace reds on main here (or say which are a different defect).
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
@@ -31208,6 +31210,39 @@ tasks:
     notes: |
       FOUND BY T-1055 worker 2026-09-26: P1: a coarse 'Scan everything (fast)' pass retains no spectrum history after its rate change - the swept range leaves nothing on the canvas
     high_effort_reason: real-time history path across a rate change (scheduler/scan re-plumb + view writer); hard debugging
+  - id: T-1072
+    milestone: MUI
+    title: "fog-of-war.e2e red ALONE on main: T-521's 'less than 200 px of the pane is uncovered by floating chrome' fails since full bleed/floating chrome - fix the chrome if it covers the map, else re-measure with the same intent"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI-FOG-SPEC
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-26 by the UI-stack integrator; ui/e2e/fog-of-war.e2e.mjs fails identically on 1090f468 and on the T-996/T-1026/T-1007 stack, fresh hk built from 1090f468's crates, spec alone on ports >= 9216): the T-521 check "less than 200 px of the pane is uncovered by floating chrome" fails - so the migrated reads after it (the pane's scale block and the Retune control in the floating cluster, done on the stack) never run. Since T-521 the map went full bleed with floating chrome (T-995, T-1025 top chrome, T-1041 trace layer off, T-1056 sheet floats over the canvas, T-1053 folded mode chips) - either the chrome now covers too much of the pane at the spec's viewport (a PRODUCT regression: fix the chrome) or the spec measures coverage with a stale list of what counts as chrome/pane. Decide with evidence (screenshot + the measured uncovered rect), fix the product if the map is covered, update the measurement only if its premise changed (same intent, never a looser number). The fog-of-war flake history (7 reds in 7 d, 'passes alone') is separate; this one FAILS ALONE.
+      ACCEPTANCE: fog-of-war green alone 3/3 on a FRESH hk, including its migrated scale-block/Retune reads.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY UI-stack integrator 2026-09-26: fog-of-war.e2e red ALONE on main: T-521's 'less than 200 px of the pane is uncovered by floating chrome' fails since full bleed/floating chrome - fix the chrome if it covers the map, else re-measure with the same intent
+  - id: T-1073
+    milestone: MUI
+    title: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
+    status: todo
+    priority: high
+    deps:
+    - T-1007
+    parallel_group: UI-TOPCHROME-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON task-t1007 ONLY (UI-stack integrator 2026-09-26, sha 28257a9d): ui/e2e/app-top-chrome.e2e.mjs failed 3 of 3 alone, each at a different width with a different message ('the canvas moved by itself', 'gap changed'); green on task-t996 and task-t1026 (the same stack below it). T-1007 adds the settings rows to the ⋯ menu beside T-1053's folded mode chips. Looks like T-1031's canvas-sample class (sample hits a box/guide/grey), but 3/3 alone on one branch and 0 on its parents is not proven a flake. Triage (deflake-triage): run it alone on t1026 vs t1007 10x each; if t1007 moves the canvas or the chip gap (the menu's size, a relayout on open/close, a settings poll re-rendering the cluster), fix the product; if it is the sample point, make the sample deterministic (T-1031's rule) and prove it red when the defect returns. Never loosen an assertion.
+      ACCEPTANCE: app-top-chrome green alone 10/10 on main with T-1007 landed, at 1280x800 and 400 px.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY UI-stack integrator 2026-09-26: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
