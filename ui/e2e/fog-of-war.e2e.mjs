@@ -992,10 +992,53 @@ async function paneGeometry(page) {
   assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
   const whole = paneRectOf(rect, dpr, await page.canvasInsets());
-  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
-  const pane = clipToUnoccluded(whole, rect, unocc);
-  assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
+  const band = await clearBand(page, whole);
+  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: band.y, y1: band.y + band.h });
+  const pane = clipToUnoccluded(band, rect, unocc);
+  assert.ok(pane.w > 200 && pane.h > 200,
+    `less than 200 x 200 px of the pane is uncovered by the app's floating chrome: ` +
+    `${JSON.stringify({ band: { y: band.y, h: band.h }, unocc })}`);
   return { rect, dpr, pane };
+}
+
+/**
+ * The pane, narrowed to the ROWS between the floating chrome at its top and bottom edges (T-1072),
+ * so the column clip after it measures the surface rather than excluding every column a chip sits
+ * over anywhere in the pane's height.
+ *
+ * Since T-993 retired the app-shell top bar, its controls are small `data-band="chrome"` boxes in a
+ * row along the pane's top edge (Go-to, nudge, inventory pills, status chips, top-right chips) and a
+ * status line along its bottom. Measured 2026-09-26 at 1440 x 900: those boxes lie at y 8–130 and
+ * 769–798 and between them cover columns 8–1432, so the column-only clip over the pane's whole height
+ * (T-801's rule, written when the chrome was side PANELS that covered whole columns) left 8 px of 1440
+ * — while the hit test found the canvas at 20 of 25 points across the pane. The map was not covered;
+ * the measure assumed a chrome geometry that no longer exists. Same intent, same 200 px floor: the
+ * claims are still measured only over pixels the surface drew, now as a rectangle. The band is the
+ * one of largest area among the pane's edges and the chrome boxes' edges nearest them.
+ */
+async function clearBand(page, whole) {
+  const boxes = await page.eval(`[...document.querySelectorAll('[data-band="chrome"] > *')]
+    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0)
+    .map((b) => ({ l: b.left, r: b.right, t: b.top, b: b.bottom }))`);
+  const top = whole.y, bot = whole.y + whole.h, mid = (top + bot) / 2;
+  const inPane = boxes.filter((b) => b.b > top && b.t < bot);
+  const y0s = [top, ...inPane.filter((b) => b.t < mid).map((b) => b.b)];
+  const y1s = [bot, ...inPane.filter((b) => b.b >= mid).map((b) => b.t)];
+  const x0 = Math.ceil(whole.x), x1 = Math.floor(whole.x + whole.w);
+  let best = { ...whole, area: -1 };
+  for (const y0 of y0s) {
+    for (const y1 of y1s) {
+      if (!(y1 > y0)) continue;
+      const over = inPane.filter((b) => b.b > y0 && b.t < y1);
+      let run = 0, widest = 0;
+      for (let x = x0; x < x1; x++) {
+        if (over.some((b) => x + 1 > b.l && x < b.r)) run = 0; else widest = Math.max(widest, ++run);
+      }
+      const area = widest * (y1 - y0);
+      if (area > best.area) best = { x: whole.x, w: whole.w, y: y0, h: y1 - y0, area };
+    }
+  }
+  return { x: best.x, w: best.w, y: best.y, h: best.h };
 }
 /** The pane's data rect, inset a few pixels clear of every edge (a boundary pixel is a rounding
  * question, not a colour question — `surface-colour.e2e.mjs`'s `INSET`). */
