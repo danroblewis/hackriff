@@ -30649,7 +30649,7 @@ tasks:
   - id: T-1047
     milestone: MLIVE
     title: "LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold"
-    status: in-progress
+    status: done
     branch: task-t1047
     priority: medium
     deps:
@@ -30678,6 +30678,7 @@ tasks:
       Observed, not chased: `just task note` leaves docs/tasks.yaml modified but uncommitted, which is exactly what tripped this gate finding — a worker (or the runner) that calls it as its last action before hand-back should commit immediately after, or the note-then-handback sequence will keep re-triggering this UNCOMMITTED check on every fix-and-return cycle that ends with a note.
       Use cases: SIGNAL-012
       Resources: 3 CPU-s, peak 0.3 GB
+    commit: a2ff4ceb
   - id: T-1048
     milestone: MLIVE
     title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
