@@ -231,7 +231,9 @@ export class SurfaceView {
       bounds: opts.bounds, lattice: opts.lattice, freq: opts.freq, spanNs: opts.spanNs, device: opts.device,
     });
     this.minimap = new Minimap({ bounds: opts.bounds, lattice: opts.lattice });
-    this.minimapPx = opts.minimapPx ?? 96;
+    // T-995: 0 by default — the minimap is retired from the app (user, 2026-09-25). The strip
+    // survives only for the `/surface.html` dev preview and the unit tests that pass a height.
+    this.minimapPx = opts.minimapPx ?? 0;
     this.overlays = opts.overlays ?? true;
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
@@ -305,6 +307,17 @@ export class SurfaceView {
     if (this.marks) {
       for (const v of paneViews) {
         const q = this.marks(v, edgeNs);
+        if (q.length) paneQuads.push({ rect: v.rect, quads: q });
+      }
+    }
+    // T-995: with no map strip (the app's shape since the user retired the minimap, 2026-09-25 —
+    // the whole spectrum is reached by zooming a pane out, Google-Maps style), the one thing only
+    // the map drew — a lit segment per reported active capture window, per SDR — is drawn in each
+    // pane instead, through the same function and the same pane mapping: at the live edge when the
+    // pane shows it, omitted (never clamped) where the window is off the pane. Nothing is lost.
+    if (!mapRect) {
+      for (const v of paneViews) {
+        const q = liveSegmentQuads(windows, edgeNs, v.box, v.rect, this.overlayStyle);
         if (q.length) paneQuads.push({ rect: v.rect, quads: q });
       }
     }

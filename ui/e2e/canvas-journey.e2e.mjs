@@ -111,8 +111,6 @@ async function holdPort(port, { graceMs = 5000 } = {}) {
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
-/** The minimap strip along the BOTTOM of the canvas (`MINIMAP_PX` in app/centre/surface.ts). */
-const MINIMAP_PX = 110;
 /** The spectrum-trace strip carved off the TOP of each pane (`TRACE_PX`, T-457). */
 const TRACE_PX = 96;
 
@@ -411,10 +409,11 @@ async function tunedWindow(backend) {
 // Reading the pixels
 // ---------------------------------------------------------------------------
 
-/** The rectangle a pane draws its MEASUREMENT into: the canvas, minus the map strip and the trace. */
+/** The rectangle a pane draws its MEASUREMENT into: the canvas, minus the trace strip. */
 function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes and map strip sit between the stated insets.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr - MINIMAP_PX;
+  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
+  // them since T-995 retired the minimap).
+  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
   return { x: rect.x, w: rect.w, y: rect.y + ins.top + traceH / dpr, h: (paneH - traceH) / dpr };
 }

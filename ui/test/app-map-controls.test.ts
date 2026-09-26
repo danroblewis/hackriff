@@ -50,8 +50,9 @@ test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO
     // The page's own wiring: go-to is `requestGoto` in the store, which the surface turns into
     // `setFreq` on the active pane (surface.ts's `nav.gotoHz` subscriber) — reproduced here.
     ctx.store.select((s) => s.nav.gotoHz, (hz) => { if (hz !== null) m.setFreq(id, hz, m.get(id)!.freq.spanHz); });
-    const mapFollow: boolean[] = [];
-    const acts = paneActions(m, () => id, (on) => mapFollow.push(on));
+    // T-995: no map strip to keep in step — the minimap is retired, so `paneActions` has no
+    // follow hook and follow/freeze is the active pane's alone.
+    const acts = paneActions(m, () => id);
     const span0 = m.get(id)!.freq.spanHz;
 
     for (let i = 0; i < 4; i++) acts.zoom(ZOOM_STEP);
@@ -67,7 +68,6 @@ test("MAP-02: zoom, follow, go-to and layer toggles change the view and reach NO
     assert.equal(acts.isFollowing(), false);
     acts.followLive();
     assert.equal(acts.isFollowing(), true, "the FAB did not re-pin the pane to the growing edge");
-    assert.deepEqual(mapFollow, [true], "the map strip was not told to follow with the pane");
 
     // A layer toggle is a closure over a display flag; nothing here can be reached through it.
     let shown = true;
@@ -239,8 +239,9 @@ test("T-882: the FAB is the retired Live button too — it freezes a following p
   try {
     const m = model();
     const id = m.list()[0].id;
-    const mapFollow: boolean[] = [];
-    const acts = paneActions(m, () => id, (on) => mapFollow.push(on));
+    // T-995: no map strip to keep in step — the minimap is retired, so `paneActions` has no
+    // follow hook and follow/freeze is the active pane's alone.
+    const acts = paneActions(m, () => id);
     assert.equal(acts.isFollowing(), true);
     const before = m.get(id)!.time;
     acts.pauseLive();
@@ -249,7 +250,6 @@ test("T-882: the FAB is the retired Live button too — it freezes a following p
     assert.equal(m.get(id)!.time.spanNs, before.spanNs);
     acts.followLive();
     assert.equal(acts.isFollowing(), true);
-    assert.deepEqual(mapFollow, [false, true], "the map strip was not told to freeze and follow with the pane");
     paneActions(m, () => null).pauseLive(); // no active pane: a no-op, not a throw
   } finally { if (real) g.fetch = real; else delete g.fetch; }
   assert.deepEqual(fetched, []);
@@ -309,6 +309,22 @@ test("T-919: the status box is a collapsed line by default, with a toggle and a 
     assert.doesNotMatch(css, new RegExp(`\\.sf-status:not\\(\\[data-open="true"\\]\\) \\.${keep} \\{[^}]*display: none`),
       `the collapsed line hides .${keep}`);
   }
+});
+
+test("T-995: with no minimap, the Zoom-out press reaches the WHOLE device range — the lock holds until time is saturated", () => {
+  const m = model();
+  const id = m.list()[0].id;
+  const acts = paneActions(m, () => id);
+  const f0 = m.get(id)!.freq.spanHz, t0 = m.get(id)!.time.spanNs;
+  acts.zoom(1 / ZOOM_STEP);
+  // While time can still widen, the press is T-472's uniform zoom: both spans by the same factor.
+  const kF = m.get(id)!.freq.spanHz / f0, kT = m.get(id)!.time.spanNs / t0;
+  assert.ok(kF > 1 && Math.abs(kF - kT) < 1e-9, `the aspect lock broke before time saturated: ${kF} vs ${kT}`);
+  for (let i = 0; i < 60; i++) acts.zoom(1 / ZOOM_STEP);
+  const p = m.get(id)!;
+  assert.equal(p.freq.spanHz, BOUNDS.f1Hz - BOUNDS.f0Hz,
+    `zooming out stopped at ${p.freq.spanHz} Hz: the whole spectrum is unreachable without a minimap`);
+  assert.equal(acts.isFollowing(), true, "zooming out walked a live pane off the growing edge");
 });
 
 // ——— T-955: a painted Go-to offer is re-derived when the radio retunes (by anyone) ———

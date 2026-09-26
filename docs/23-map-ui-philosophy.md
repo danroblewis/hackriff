@@ -48,7 +48,7 @@ other:
 
 "Why now" is that MCANVAS (`docs/16 §8`, landed 2026-09-17) already delivered the surface these ideas
 need: one WebGL2 context, N scissored panes each with its own `(center_f, span_f, center_t,
-span_t)`, the minimap-as-viewport, a shared tile-texture LRU keyed by `(level_f, level_t, f_block,
+span_t)`, the minimap-as-viewport (since retired by the user, 2026-09-25, T-995: the whole range is reached by zooming out, and its per-SDR capture segments are drawn in the panes), a shared tile-texture LRU keyed by `(level_f, level_t, f_block,
 t_block)`, the coverage state machine, and per-pane time-addressable spectrum traces (T-457/T-475).
 What is missing is not the engine — it is the **chrome reframe**, the explicit **layer model**,
 first-class **pins**, the **Explore drawer**, and the **research tooling**. This document is the
@@ -122,7 +122,7 @@ consistency demand from the direct-manipulation literature is that **the same ge
 same way across content** — pinch-to-zoom on a map must feel identical to pinch-to-zoom on a photo
 ([UX Tigers](https://www.uxtigers.com/post/direct-manipulation)). For hackriff that means the pan/zoom
 grammar is one vocabulary over the whole surface: over raw spectrum, over a detection box, over a
-cluster of pins, over the minimap. A gesture never means one thing here and another thing there.
+cluster of pins. (The minimap this sentence once listed is retired — T-995, 2026-09-25.) A gesture never means one thing here and another thing there.
 
 hackriff already has this vocabulary, specified in [`ui/CONTROLS.md`](../ui/CONTROLS.md) under
 "Navigating the surface" (T-456), and this design **adopts it unchanged**:

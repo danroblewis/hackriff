@@ -112,8 +112,11 @@ import {
 } from "../map/research-slice";
 
 const S_TO_NS = 1e9;
-/** The map strip along the bottom of the canvas, device px. */
-const MINIMAP_PX = 110;
+/** The map strip along the bottom of the canvas, device px. **0: the minimap is retired** (T-995,
+ * user 2026-09-25: "there is never a 'whole world' minimap" — the whole 1 MHz–6 GHz range is reached
+ * by zooming a pane out, Google-Maps style). Its per-SDR active-capture segments are drawn in the
+ * panes instead (`SurfaceView.frame`), and survey/sweep coverage is the panes' coverage fog. */
+const MINIMAP_PX = 0;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
  * control's `"past"` block (T-444/T-476). One frame at 60 Hz, generously. */
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
@@ -1553,7 +1556,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // fetch spy); the only press that can reach the radio is the Go-to's retune OFFER, which goes
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
-    const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
+    // T-995: no minimap toggle on the FAB any more (the minimap is retired), so `onFollow` is not
+    // passed: follow/freeze is the active pane's alone.
+    const acts = paneActions(pv.view.panes, () => pv.activePane, undefined,
       // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
       // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
       // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
@@ -1757,16 +1762,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const dr = dock?.getBoundingClientRect();
       const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
       // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
-      // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
-      // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
-      // clear the peek strip too, not just the dock.
+      // it is never hidden (T-803's rule) — and the panes' bottom edge spans the WHOLE canvas width,
+      // so it always shares an x-range with the sheet: the panes must clear the peek strip too, not
+      // just the dock. (This was the minimap strip's clearance until T-995 retired the minimap.)
       //
       // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
       // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
       // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
       // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
       // height transition). Reading the live top/height, as an earlier version of this fix did,
-      // made the minimap — and so every pane, which packs above it — follow the sheet up and down
+      // made the bottom edge — and so every pane — follow the sheet up and down
       // on every drag and close (review finding on this ticket). The peek clearance itself is a
       // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
       // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
@@ -1776,7 +1781,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
-      // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
+      // The FAB and the readouts dock above the panes' bottom inset, in CSS px (`--map-strip` keeps
+      // its name; with the minimap retired, T-995, it is the lift alone).
       stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + lift}px`);
       // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
       // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
@@ -1800,7 +1806,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
     // height, see above), so this observer is not about tracking drag/snap changes — it exists so
     // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
-    // is still picked up once it appears, rather than the minimap staying un-lifted until the next
+    // is still picked up once it appears, rather than the panes staying un-lifted until the next
     // stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
