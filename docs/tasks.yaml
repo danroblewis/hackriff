@@ -27636,7 +27636,7 @@ tasks:
   - id: T-926
     milestone: MAUTO
     title: "P1: RDS decodes across the whole FM band unprompted - measure the live 88-108 MHz ratio (present / pilot+RDS / PI-PS decoded), fix detection->WFM->RDS across ALL detections to >= 90 %, per-station capture set as the guard"
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-922
@@ -27680,6 +27680,7 @@ tasks:
     branch: task-t926
     result: |
       Code fix done (b3ecd930): chains/analog.rs collect() kept only part of each ring chunk at every stage boundary, so live WFM windows were 0.5/1.0 s, never the ~4 s RDS needs; the replay's 5 ms blocks divided every stage length and hid it. 8cc3ff5c keeps a WFM chain's window once the probe accepts and adds a per-station RDS guard set. Guard: tests/e2e/tests/acceptance/fm_stations.rs serves the explorer FM captures in HackRF-sized (65 536-sample) transfers blind through the mock SDR - 2/2 RDS stations decode their PI unprompted (101.3 PI 1694, 98.9 A4FF). Fixtures deduped onto T-935's fixtures/hackrf/explorer-2026-09-25 set (the branch's fixtures/hackrf/fm-stations copies and manifest rows removed). Branch merged with main at 72f9d76c. Tests: hk-pipeline lib 278/278; hk-e2e acceptance_m0 SIGNAL-062/fm_band/fm_stations 10/10 + fm_stations 2/2; precheck clean. The on-air 88-108 MHz ratio measurement moved to T-992 (blocked on the radio); this ticket no longer needs live air.
+    commit: 381e948d
   - id: T-927
     milestone: MMAP
     title: "Density layer follow-ups: a hung GET never clears (no timeout), joined-request edge stamp, stale late-batch addrs, NaN-edge guard, poll-period constant (T-810 re-review)"
