@@ -30121,7 +30121,7 @@ tasks:
   - id: T-1015
     milestone: M2-hardening
     title: Listen level_dbfs while squelch is closed reads the dropped demod audio (docs say 'delivered'); stereo halves its time constant; docs + WFM/AGC and squelch-closed tests
-    status: in-progress
+    status: done
     priority: low
     deps:
     - T-966
@@ -30146,6 +30146,7 @@ tasks:
       Commits: 34e1cbe6
       Use cases: SIGNAL-062
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: dfea07fc
   - id: T-1030
     milestone: MMAP
     title: "Selected-region drawer asks /api/coverage for a stale scope (0-9.8 GHz instead of the selected region) when the selection lands mid-flight: send the current scope, drop superseded responses"
