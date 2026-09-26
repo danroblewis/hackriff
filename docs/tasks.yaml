@@ -30810,7 +30810,8 @@ tasks:
   - id: T-1055
     milestone: MSCAN
     title: "After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation"
-    status: todo
+    status: in-progress
+    branch: task-t1055
     priority: high
     deps:
     - T-964
