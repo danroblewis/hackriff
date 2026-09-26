@@ -66,7 +66,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import path from "node:path";
-import { Browser, census, paneGeometry, until, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, clipToUnoccluded, paneGeometry, paneRectOf, until, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 /**
@@ -502,6 +502,39 @@ function bodyRect(pane, from = 0.06, to = 1.0) {
  * The fix (`harness.mjs`'s shared `paneGeometry`, moved from `fog-of-war.e2e.mjs`'s T-1072 copy) is
  * the row-band clip first, then the column clip inside it.
  */
+
+/**
+ * **The LIVE-EDGE ZONE's OWN geometry — never `paneGeometry`'s (T-1078 review fix).**
+ *
+ * `paneGeometry`'s row-band clip (above) starts BELOW the top-edge chrome, at y ~130 of 900 measured
+ * 2026-09-26, because that is the first row no chip sits over across the WHOLE pane width. But the
+ * T-532 fault this zone exists to catch (see [[LIVE_EDGE_ZONE]]) paints grey only in the pane's true
+ * newest rows — the top of the CANVAS, not the top of `paneGeometry`'s clipped band. Reading
+ * `bodyRect(g.pane, 0, LIVE_EDGE_ZONE)` puts every one of those rows above the sampled rectangle, so
+ * the check would read 0 % grey in every frame whether or not the fault is present — silently
+ * re-opening exactly the blind spot T-846 closed, while still reporting green.
+ *
+ * So this measures from the pane's own top edge (`paneRectOf`, no row-band clip), column-clipped to
+ * whatever the top-chip row itself leaves clear: narrower than `paneGeometry`'s band (89 of 1440 px
+ * measured 2026-09-26 — the gap between the chip clusters, not the widest run below them), but wide
+ * and tall enough to still carry the claim: with the T-532 fault re-injected (`ui/e2e/selftest.mjs`'s
+ * `t532-draw-past-the-coverage-horizon`) this zone reads 98.6 % THE grey in its worst of eight frames
+ * against 0.0 % without it, over 19x the `EDGE_GREY_MAX` bound. `minW` is far below `paneGeometry`'s
+ * 200 px floor for exactly that reason: this zone is inherently narrower by construction, not unhealthy.
+ */
+async function edgeZoneGeometry(page, toFrac, { minW = 60, minH = 40 } = {}) {
+  const rect = await page.$rect(".sf-canvas");
+  assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
+  const dpr = await page.eval("window.devicePixelRatio || 1");
+  const whole = paneRectOf(rect, dpr, await page.canvasInsets());
+  const zone = { x: whole.x, w: whole.w, y: whole.y, h: whole.h * toFrac };
+  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: zone.y, y1: zone.y + zone.h });
+  const pane = clipToUnoccluded(zone, rect, unocc);
+  assert.ok(pane.w > minW && pane.h > minH,
+    `less than ${minW} x ${minH} px of the live-edge zone (the pane's true top ${(toFrac * 100).toFixed(0)} %) ` +
+    `is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
+  return pane;
+}
 
 /** The frequency sub-range of `view` that the pane's uncovered columns draw. The pane maps
  * frequency linearly across the canvas's FULL width (the panels float over the drawing; they do
@@ -1038,8 +1071,10 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     if (movedBy > 0) t.diagnostic(`the canvas moved ${movedBy} px while the waits above ran — ` +
       "the rectangle sampled below is re-read for exactly this reason");
     const insideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE));
-    // **From the very top of the pane, and eight frames** (T-846) — see the note under [[EDGE_GREY_MAX]].
-    const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0, LIVE_EDGE_ZONE), { n: 8, gapMs: 700 });
+    // **From the very top of the PANE, not `paneGeometry`'s row-band-clipped `g.pane`, and eight
+    // frames** (T-846) — see the note under [[EDGE_GREY_MAX]] and [[edgeZoneGeometry]] for why this
+    // reads its own geometry rather than `g`'s.
+    const insideEdge = await sampleGrey(page, await edgeZoneGeometry(page, LIVE_EDGE_ZONE), { n: 8, gapMs: 700 });
     const insidePix = insideG.last;
     const { cov: insideCov, cellHz: insideCellHz, n: insideN } = await atPaneLevel(visibleView(zi.view, g.pane));
     t.diagnostic(`pane level: ${insideN} cells of ${(insideCellHz / 1e3).toFixed(1)} kHz across the viewport`);
