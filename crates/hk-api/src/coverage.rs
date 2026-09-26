@@ -1056,6 +1056,9 @@ fn grid_json(
     unknown_rows: std::ops::Range<usize>,
 ) -> Value {
     let mut unknown_cells = 0usize;
+    // T-964: the survey census, collapsed over time — see [`band_census`]. Accumulated in the same
+    // pass as the cells, from the same `beyond`, so the two censuses cannot disagree about a cell.
+    let mut bands = vec![BandState::Unobserved; g.nf];
     let cells: Vec<Value> = g
         .cells
         .iter()
@@ -1063,6 +1066,9 @@ fn grid_json(
         .map(|(i, c)| {
             let beyond = g.nf > 0 && unknown_rows.contains(&(i / g.nf));
             unknown_cells += usize::from(beyond && !c.is_observed());
+            if let Some(b) = bands.get_mut(i % g.nf.max(1)) {
+                *b = (*b).max(BandState::of(c, beyond));
+            }
             cell_json(c, shades.map(|s| s.get(i).copied().flatten()), beyond)
         })
         .collect();
@@ -1084,7 +1090,74 @@ fn grid_json(
         "unobserved_cells": g.unobserved_cells() - unknown_cells,
         "unknown_cells": unknown_cells,
         "observed_fraction": g.observed_fraction(),
+        // T-964: the same census with the **time axis collapsed** — the survey question. See
+        // [`band_census`] for why a grid census cannot answer it.
+        "bands": band_census(&bands),
         "cells": cells,
+    })
+}
+
+/// One frequency cell's state once its rows are collapsed, ordered so that `max` keeps the
+/// strongest claim: a band the radio sampled at any instant *was* sampled, whatever the rest of the
+/// column says, and forgetting (`Unknown`) outranks grey because grey is the positive claim.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BandState {
+    /// Nothing looked here at any instant in the window, and a surviving record says so.
+    Unobserved,
+    /// No row was sampled and at least one row is past the record horizon: we no longer know.
+    Unknown,
+    /// Sampled at some instant, and every sampled row was excluded from analysis (T-595).
+    Excluded,
+    /// Sampled, and analysed, at some instant in the window.
+    Observed,
+}
+
+impl BandState {
+    fn of(c: &Coverage, beyond_horizon: bool) -> Self {
+        match c.sampled() {
+            Some(s) if s.excluded() => Self::Excluded,
+            Some(_) => Self::Observed,
+            None if beyond_horizon => Self::Unknown,
+            None => Self::Unobserved,
+        }
+    }
+}
+
+/// **The survey census: the same coverage with the time axis collapsed** (T-964).
+///
+/// A grid census counts (time × frequency) cells, and that is the wrong denominator for the one
+/// question the fog-of-war view asks — *where has this radio ever looked?* A front end sees one
+/// window at a time, so a **complete** 1 MHz–6 GHz survey pass can never occupy more than a thin
+/// diagonal of a (time × frequency) grid: T-964 measured a finished full-range pass reported as
+/// *"4.3 % of this surface was ever sampled (176 of 4096 coverage cells)"* — arithmetically true of
+/// the 128 × 32 grid it counted, and read by the user as *the survey did not light the map*.
+///
+/// The collapse is the honest answer to the question actually being asked: a frequency cell counts
+/// as sampled if **any** row in the window sampled it. It is deliberately a *different* number from
+/// `observed_cells`, not a replacement for it — the grid census is what the canvas draws, because a
+/// cell is a claim about an instant, and this one is what a sentence about the survey may cite.
+/// Both are served, so a client never has to fold the grid itself to get either.
+fn band_census(bands: &[BandState]) -> Value {
+    let count = |want: BandState| bands.iter().filter(|b| **b == want).count();
+    let (observed, excluded) = (count(BandState::Observed), count(BandState::Excluded));
+    json!({
+        "cells": bands.len(),
+        // Strictly observed, with `excluded_cells` beside it — the same split as the grid census,
+        // so `observed + excluded` is the sampled total there and here.
+        "observed_cells": observed,
+        "excluded_cells": excluded,
+        "unobserved_cells": count(BandState::Unobserved),
+        "unknown_cells": count(BandState::Unknown),
+        "observed_fraction": if bands.is_empty() {
+            0.0
+        } else {
+            (observed + excluded) as f64 / bands.len() as f64
+        },
+        "rule": "collapsed over time: a frequency cell counts as sampled if ANY row in this window \
+            sampled it. This is the survey question - `did this radio ever look here in this \
+            window` - and never a claim about one instant: a front end sees one window at a time, \
+            so a COMPLETE full-range pass covers only a thin diagonal of the (time x frequency) \
+            grid. Cite this for a sentence about the survey; draw the per-cell grid.",
     })
 }
 

@@ -76,6 +76,13 @@ const MAGIC: [u8; 8] = *b"HKTILE\0\x01";
 /// Tile file format version written (T-116: 2; T-133: 3, per-tile origins; T-141: 4, per-shape
 /// value counts; T-332: 5, bias-tee state; T-377: 6, occupancy decided against the frame's own
 /// origin's floor — no new bytes, see the [module docs](self)). Versions 1–5 are still read.
+///
+/// **T-1024 measured a seventh and did not write it.** A per-column tag block that elided a
+/// constant or duplicated plane was implemented, round-tripped and priced: it halves the *raw*
+/// payload and buys **0.5 %** of the compressed level-0 tile, **−3.9 %** (i.e. worse) on a coarse
+/// one, and to guarantee it never grew a tile the writer had to encode and compress twice, which
+/// doubled the seal's cost on the capture thread. The planes it removes cost 0.04 B/cell of the
+/// 2.83 B/cell a cell costs; see [`plane_bytes`] and `history::tests::plane_bytes`.
 pub const FORMAT_VERSION: u16 = 6;
 const PREAMBLE_LEN: usize = 28;
 const UNKNOWN_DB: i16 = i16::MIN;
@@ -142,6 +149,21 @@ pub(crate) struct Header {
 fn q_db(v: f32) -> i16 {
     if v.is_finite() {
         (v * 100.0).round().clamp(-32767.0, 32767.0) as i16
+    } else if v == f32::INFINITY {
+        i16::MAX
+    } else if v == f32::NEG_INFINITY {
+        -32767
+    } else {
+        UNKNOWN_DB
+    }
+}
+
+#[cfg(test)]
+/// [`q_db`] on a coarser grid: `scale` counts steps per dB (100 = the stored 0.01 dB).
+/// Measurement only ([`quant_sweep`]).
+fn q_db_scale(v: f32, scale: f32) -> i16 {
+    if v.is_finite() {
+        (v * scale).round().clamp(-32767.0, 32767.0) as i16
     } else if v == f32::INFINITY {
         i16::MAX
     } else if v == f32::NEG_INFINITY {
@@ -685,8 +707,58 @@ fn encode_histograms(tile: &Tile, buf: &mut Vec<u8>) {
     }
 }
 
-/// The v2 raw payload: bitmap, columns, histograms.
-fn encode_payload(tile: &Tile, buf: &mut Vec<u8>) {
+/// The per-cell statistic columns, in stored order. `frames` is a varint column and is not one
+/// of these; the histogram section and the observed bitmap are not columns at all.
+pub(crate) const N_COLS: usize = 7;
+/// Plane names for the byte-cost table ([`plane_bytes`]), in stored order.
+#[cfg(test)]
+pub(crate) const PLANE_NAMES: [&str; N_COLS + 3] = [
+    "max_db",
+    "mean_db",
+    "p_low_db",
+    "p_high_db",
+    "occupancy",
+    "occupancy_max",
+    "coverage",
+    "frames",
+    "histogram",
+    "observed bitmap",
+];
+/// Plane index of the varint `frames` column, of the histogram section and of the bitmap.
+pub(crate) const PLANE_FRAMES: usize = N_COLS;
+pub(crate) const PLANE_HIST: usize = N_COLS + 1;
+#[cfg(test)]
+pub(crate) const PLANE_BITMAP: usize = N_COLS + 2;
+
+/// Appends column `c`'s u16 values, one per observed cell, in bitmap order.
+fn write_col(tile: &Tile, c: usize, buf: &mut Vec<u8>) {
+    let n = tile.nf * tile.nt;
+    let cells = (0..n).filter(|&i| tile.count[i] > 0);
+    match c {
+        0 => cells.for_each(|i| buf.extend_from_slice(&q_db(tile.max[i]).to_le_bytes())),
+        1 => cells.for_each(|i| buf.extend_from_slice(&q_db(tile.mean_db(i)).to_le_bytes())),
+        2 => cells.for_each(|i| buf.extend_from_slice(&q_db(tile.p_lo[i]).to_le_bytes())),
+        3 => cells.for_each(|i| buf.extend_from_slice(&q_db(tile.p_hi[i]).to_le_bytes())),
+        4 => cells.for_each(|i| {
+            let (obs, occ) = tile.cell_obs(i);
+            let ratio = if obs > 0.0 { occ / obs } else { 0.0 };
+            buf.extend_from_slice(&q_frac(ratio).to_le_bytes());
+        }),
+        5 => cells.for_each(|i| {
+            buf.extend_from_slice(&q_frac(f64::from(tile.occ_max[i])).to_le_bytes());
+        }),
+        _ => cells.for_each(|i| {
+            let (obs, _) = tile.cell_obs(i);
+            buf.extend_from_slice(&q_frac(obs / tile.t_cell_s).to_le_bytes());
+        }),
+    }
+}
+
+/// The raw payload: observed bitmap, statistic columns, `frames` varints, histograms.
+///
+/// `skip` is a plane bitmask used **only** by [`plane_bytes`] to price one plane by leaving it
+/// out; production always passes 0, and a payload written with a non-zero mask is not readable.
+fn encode_payload_masked(tile: &Tile, buf: &mut Vec<u8>, skip: u16) {
     buf.clear();
     let n = tile.nf * tile.nt;
     buf.resize(n.div_ceil(8), 0);
@@ -698,35 +770,23 @@ fn encode_payload(tile: &Tile, buf: &mut Vec<u8>) {
         }
     }
     buf.reserve(observed * 17 + tile.nf * 8);
-    let cells = || (0..n).filter(|&i| tile.count[i] > 0);
-    for i in cells() {
-        buf.extend_from_slice(&q_db(tile.max[i]).to_le_bytes());
+    for c in 0..N_COLS {
+        if skip & (1 << c) == 0 {
+            write_col(tile, c, buf);
+        }
     }
-    for i in cells() {
-        buf.extend_from_slice(&q_db(tile.mean_db(i)).to_le_bytes());
+    if skip & (1 << PLANE_FRAMES) == 0 {
+        for i in (0..n).filter(|&i| tile.count[i] > 0) {
+            put_varint(buf, u64::from(tile.count[i]));
+        }
     }
-    for i in cells() {
-        buf.extend_from_slice(&q_db(tile.p_lo[i]).to_le_bytes());
+    if skip & (1 << PLANE_HIST) == 0 {
+        encode_histograms(tile, buf);
     }
-    for i in cells() {
-        buf.extend_from_slice(&q_db(tile.p_hi[i]).to_le_bytes());
-    }
-    for i in cells() {
-        let (obs, occ) = tile.cell_obs(i);
-        let ratio = if obs > 0.0 { occ / obs } else { 0.0 };
-        buf.extend_from_slice(&q_frac(ratio).to_le_bytes());
-    }
-    for i in cells() {
-        buf.extend_from_slice(&q_frac(f64::from(tile.occ_max[i])).to_le_bytes());
-    }
-    for i in cells() {
-        let (obs, _) = tile.cell_obs(i);
-        buf.extend_from_slice(&q_frac(obs / tile.t_cell_s).to_le_bytes());
-    }
-    for i in cells() {
-        put_varint(buf, u64::from(tile.count[i]));
-    }
-    encode_histograms(tile, buf);
+}
+
+fn encode_payload(tile: &Tile, buf: &mut Vec<u8>) {
+    encode_payload_masked(tile, buf, 0);
 }
 
 /// **T-585: one committed row footprint in stored form.** Encodes cells `[lo, hi)` of `src` into
@@ -810,6 +870,168 @@ pub(crate) fn decode_row_cells(
         );
     }
     (c.p == bytes.len()).then_some(())
+}
+
+#[cfg(test)]
+/// Reads a tile file whose geometry is taken from its own header — the only way to read a store
+/// directory without the [`super::PyramidConfig`] that wrote it. Returns the header, the tile and
+/// the file length.
+pub(crate) fn read_tile_standalone(path: &Path) -> io::Result<Option<(Header, Tile, u64)>> {
+    let bytes = fs::read(path)?;
+    let Some(pre) = parse_preamble(&bytes) else {
+        return Ok(None);
+    };
+    let hb = bytes
+        .get(PREAMBLE_LEN..PREAMBLE_LEN + pre.header_len)
+        .unwrap_or_default();
+    let Some(h) = decode_header(&mut Cur { b: hb, p: 0 }, pre.format) else {
+        return Ok(None);
+    };
+    let g = LevelGeometry {
+        f_cell_hz: h.f_cell_hz,
+        t_cell_ns: h.t_cell_ns,
+        nt: h.nt as usize,
+        f_factor: 1,
+        t_factor: 1,
+        from: None,
+    };
+    let len = bytes.len() as u64;
+    Ok(decode_bytes(&bytes, &g, usize::from(h.hist.bins)).map(|t| (h, t, len)))
+}
+
+#[cfg(test)]
+/// The compressed and raw payload with the planes in `skip` left out — what a *group* of planes
+/// costs together, which is the only honest question when planes duplicate one another.
+/// Measurement only.
+pub(crate) fn group_bytes(tile: &Tile, skip: u16, compression: i32) -> (usize, usize) {
+    let mut b = Vec::new();
+    encode_payload_masked(tile, &mut b, skip);
+    let z = zstd::bulk::compress(&b, compression).map_or(b.len(), |c| c.len());
+    (b.len(), z)
+}
+
+#[cfg(test)]
+/// Compresses `tile`'s format-`format` payload at each of `levels`, returning
+/// `(level, compressed bytes, seconds to compress, seconds to decompress)`. Measurement only.
+pub(crate) fn payload_sweep(tile: &Tile, levels: &[i32]) -> Vec<(i32, usize, f64, f64)> {
+    let mut raw = Vec::new();
+    encode_payload_masked(tile, &mut raw, 0);
+    levels
+        .iter()
+        .map(|&l| {
+            let t = std::time::Instant::now();
+            let c = zstd::bulk::compress(&raw, l).unwrap_or_default();
+            let enc = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let _ = zstd::bulk::decompress(&c, raw.len());
+            (l, c.len(), enc, t.elapsed().as_secs_f64())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+/// **What the 0.01 dB grid costs.** Re-quantises the four dB planes to each `step_db` and
+/// returns `(step_db, compressed payload bytes)`. Measurement only, and deliberately *not* a
+/// knob: a coarser grid discards measured values, however far below the estimator's own standard
+/// error they are, and that is the user's call, not the codec's (T-1024).
+pub(crate) fn quant_sweep(tile: &Tile, steps: &[f32], compression: i32) -> Vec<(f32, usize)> {
+    let n = tile.nf * tile.nt;
+    let cells = || (0..n).filter(|&i| tile.count[i] > 0);
+    steps
+        .iter()
+        .map(|&step| {
+            let scale = 1.0 / step;
+            let mut b = vec![0u8; n.div_ceil(8)];
+            for i in 0..n {
+                if tile.count[i] > 0 {
+                    b[i / 8] |= 1 << (i % 8);
+                }
+            }
+            for get in [
+                &(|t: &Tile, i: usize| t.max[i]) as &dyn Fn(&Tile, usize) -> f32,
+                &|t: &Tile, i: usize| t.mean_db(i),
+                &|t: &Tile, i: usize| t.p_lo[i],
+                &|t: &Tile, i: usize| t.p_hi[i],
+            ] {
+                for i in cells() {
+                    b.extend_from_slice(&q_db_scale(get(tile, i), scale).to_le_bytes());
+                }
+            }
+            for c in 4..N_COLS {
+                write_col(tile, c, &mut b);
+            }
+            for i in cells() {
+                put_varint(&mut b, u64::from(tile.count[i]));
+            }
+            encode_histograms(tile, &mut b);
+            let z = zstd::bulk::compress(&b, compression).map_or(b.len(), |c| c.len());
+            (step, z)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+/// What one plane of a tile costs on disk (T-1024, the disk half of T-1019).
+#[derive(Clone, Debug)]
+pub(crate) struct PlaneCost {
+    pub name: &'static str,
+    /// Bytes this plane occupies in the uncompressed payload.
+    pub raw: usize,
+    /// Bytes this plane compresses to **on its own** — what it would cost if nothing else in the
+    /// tile helped it.
+    pub alone: usize,
+    /// Bytes the compressed tile **grows by** because this plane is in it: the whole payload
+    /// compressed, minus the same payload compressed without the plane. This is the number that
+    /// says what dropping the plane would buy, and it is not the same as `alone` — zstd prices a
+    /// column against its neighbours.
+    pub marginal: i64,
+}
+
+#[cfg(test)]
+/// Prices every plane of `tile` at `format`, compressed at `compression`. Returns the observed
+/// cell count, the raw and compressed payload sizes, and one [`PlaneCost`] per plane.
+///
+/// Measurement only: it encodes the payload ten times over and is never on the capture thread.
+pub(crate) fn plane_bytes(tile: &Tile, compression: i32) -> (usize, usize, usize, Vec<PlaneCost>) {
+    let z = |b: &[u8]| zstd::bulk::compress(b, compression).map_or(b.len(), |c| c.len());
+    let mut full = Vec::new();
+    encode_payload_masked(tile, &mut full, 0);
+    let z_full = z(&full);
+    let n = tile.nf * tile.nt;
+    let cells = (0..n).filter(|&i| tile.count[i] > 0).count();
+    let mut scratch = Vec::new();
+    let mut out = Vec::with_capacity(PLANE_NAMES.len());
+    for (p, name) in PLANE_NAMES.iter().enumerate() {
+        if p == PLANE_BITMAP {
+            let bytes = &full[..n.div_ceil(8)];
+            out.push(PlaneCost {
+                name,
+                raw: bytes.len(),
+                alone: z(bytes),
+                marginal: 0, // The bitmap is the coverage mask: nothing else says which cells exist.
+            });
+            continue;
+        }
+        let mut without = Vec::new();
+        encode_payload_masked(tile, &mut without, 1 << p);
+        scratch.clear();
+        match p {
+            PLANE_FRAMES => {
+                for i in (0..n).filter(|&i| tile.count[i] > 0) {
+                    put_varint(&mut scratch, u64::from(tile.count[i]));
+                }
+            }
+            PLANE_HIST => encode_histograms(tile, &mut scratch),
+            c => write_col(tile, c, &mut scratch),
+        }
+        out.push(PlaneCost {
+            name,
+            raw: full.len() - without.len(),
+            alone: z(&scratch),
+            marginal: z_full as i64 - z(&without) as i64,
+        });
+    }
+    (cells, full.len(), z_full, out)
 }
 
 /// Serialises `tile` into `buf` (cleared first) as format [`FORMAT_VERSION`], compressing the
@@ -1075,7 +1297,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], g: &LevelGeometry, bins: usize) -> Opti
         }
     } else {
         let m = (0..n).filter(|&i| observed(i)).count();
-        let cols: Vec<&[u8]> = (0..7)
+        let cols: Vec<&[u8]> = (0..N_COLS)
             .map(|_| c.take(m.checked_mul(2)?))
             .collect::<Option<_>>()?;
         let at = |col: usize, j: usize| [cols[col][2 * j], cols[col][2 * j + 1]];
@@ -1138,6 +1360,96 @@ mod tests {
             b.clear();
             put_varint(&mut b, v);
             assert_eq!(Cur { b: &b, p: 0 }.varint(), Some(v));
+        }
+    }
+
+    /// T-1024: a tile round-trips every plane it stores, and re-encoding the decoded tile is a
+    /// fixed point (quantisation happens once). The measurement harness rests on both.
+    #[test]
+    fn every_plane_round_trips_and_re_encodes_identically() {
+        let g = LevelGeometry {
+            f_cell_hz: 1000.0,
+            t_cell_ns: 1_000_000_000,
+            nt: 8,
+            f_factor: 1,
+            t_factor: 1,
+            from: None,
+        };
+        let hist = HistogramConfig {
+            lo_db: -200.0,
+            step_db: 5.0,
+            bins: 44,
+        };
+        let key = TileKey {
+            scheme: 9,
+            level: 0,
+            f_block: 0,
+            t_block: 0,
+        };
+        let bins = usize::from(hist.bins);
+        let mut tile = Tile::new(key, 16, &g, bins);
+        tile.t_cell_s = 1.0;
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 16_777_216.0 * 3.0
+        };
+        for i in 0..16 * 8 {
+            if i % 5 == 4 {
+                continue; // unobserved
+            }
+            let v = -100.0 + rnd();
+            // max == mean (one frame), p_lo a hair below, p_hi exactly max, coverage constant.
+            tile.set_decoded(i, 1, v, v, v - 0.01, v, 0.5, 0.5, 1.0);
+        }
+        for fmt in [2u16, FORMAT_VERSION] {
+            let (mut buf, mut scratch) = (Vec::new(), Vec::new());
+            encode_format(
+                fmt,
+                &tile,
+                true,
+                PowerUnit::Dbfs,
+                &g,
+                &hist,
+                (10.0, 90.0),
+                None,
+                &mut buf,
+                &mut scratch,
+            );
+            let back = decode_bytes(&buf, &g, bins).expect("decodes");
+            assert_eq!(back.count, tile.count, "format {fmt}: frames");
+            let close = |a: f32, b: f32, what: &str, i: usize| {
+                assert!(
+                    (a - b).abs() <= 0.006 || (a == b) || (a.is_nan() && b.is_nan()),
+                    "format {fmt}: {what} at {i}: {a} vs {b}"
+                );
+            };
+            for i in 0..16 * 8 {
+                close(back.max[i], tile.max[i], "max", i);
+                close(back.p_lo[i], tile.p_lo[i], "p_lo", i);
+                close(back.p_hi[i], tile.p_hi[i], "p_hi", i);
+                close(back.mean_db(i), tile.mean_db(i), "mean", i);
+                close(back.occ_max[i], tile.occ_max[i], "occupancy_max", i);
+                close(back.obs_s[i] as f32, tile.obs_s[i] as f32, "coverage", i);
+                close(back.occ_s[i] as f32, tile.occ_s[i] as f32, "occupancy", i);
+            }
+            // Re-encoding the decoded tile is a fixed point: quantisation happened once.
+            let mut again = Vec::new();
+            encode_format(
+                fmt,
+                &back,
+                true,
+                PowerUnit::Dbfs,
+                &g,
+                &hist,
+                (10.0, 90.0),
+                None,
+                &mut again,
+                &mut scratch,
+            );
+            assert_eq!(again, buf, "format {fmt}: re-encode is byte-identical");
         }
     }
 

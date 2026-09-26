@@ -838,7 +838,8 @@ T-434), which is now a prerequisite of the spike rather than an independent step
   under a budget. **A tile visible in two panes uploads once** — and that sharing is precisely why
   this must be *one* context rather than one per pane.
 - **A zoomable minimap** is simply another viewport at a coarse level, overlaying rectangles for where
-  each pane is looking and lit segments for where each SDR is currently live.
+  each pane is looking and lit segments for where each SDR is currently live. **Retired from the app
+  2026-09-25 by the user's decision (T-995)** — see §8.4b's note.
 - **The honesty tiers stay visually distinct** — `live-iq`, `spectrum-history`, `survey-overview` —
   so a wide or deep zoom never fakes resolution the hardware did not capture. §4's rule is unchanged
   and now has one place to be enforced instead of three.
@@ -902,6 +903,19 @@ pane's `device` selects **whose coverage plane decides its grey** (`any` = the u
 selector, not a second subject.
 
 ### 8.4b The minimap as a viewport, and what that cost (T-443, 2026-09-17)
+
+> **RETIRED from the app, 2026-09-25 (user decision, T-995).** *"If I want to see the whole width of
+> the waterfall map, I would zoom or scale to see it, which is how Google Maps works — there is never
+> a 'whole world' minimap. The minimap was an idea for the previous UI."* The app lays out no map strip
+> (`MINIMAP_PX = 0` in `ui/src/app/centre/surface.ts`; `SurfaceView`'s default is 0) and the
+> follow-live FAB no longer toggles one. **Where its information now lives:** the whole 1 MHz–6 GHz
+> range is reached by zooming a pane out — the cluster's Zoom-out keeps widening frequency to the
+> device range once the time axis holds the whole record, so a young record or a phone (no
+> shift-wheel) can still get there; each reported active capture window, per SDR, is lit at the
+> pane's own live edge by the same `liveSegmentQuads` the map used (`SurfaceView.frame`, drawn when
+> there is no map strip); survey/sweep coverage is the panes' coverage fog (T-807); where each pane
+> is looking is its own HUD rulers and scale bar. The `Minimap` class survives only for the
+> `/surface.html` dev preview and its unit tests. The text below is the record of what was built.
 
 Built in `ui/src/surface/{minimap,overlay,chrome,view}.ts`. **"Another viewport" survived contact**:
 the minimap is a one-pane `PaneModel` whose `PaneView` is appended to the panes' and handed to the

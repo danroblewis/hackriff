@@ -846,10 +846,14 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     ] {
         assert!(tc[field].is_u64(), "tile_cache.{field}: {tc}");
     }
-    assert_eq!(tc["max_entries"], json!(256), "{tc}");
-    assert_eq!(tc["max_bytes"], json!(32 * 1024 * 1024), "{tc}");
-    assert!(tc["entries"].as_u64().unwrap() <= 256, "{tc}");
-    assert!(tc["bytes"].as_u64().unwrap() <= 32 * 1024 * 1024, "{tc}");
+    // T-1020: sized in viewports (256 MiB / 600 entries), past the 135-290 tiles/screen the
+    // tile-latency review measured against the old 32 MiB / ~35-tile bound.
+    assert_eq!(tc["max_entries"], json!(600), "{tc}");
+    assert_eq!(tc["max_bytes"], json!(256 * 1024 * 1024), "{tc}");
+    assert!(tc["entries"].as_u64().unwrap() <= 600, "{tc}");
+    assert!(tc["bytes"].as_u64().unwrap() <= 256 * 1024 * 1024, "{tc}");
+    // T-1020: per-client hit/miss, so a pan-back over one pane's own viewport is measurable.
+    assert!(is_object(&tc["by_client"]), "tile_cache.by_client: {tc}");
 
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
@@ -2916,6 +2920,31 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
             row["source_session"].is_null() || row["source_session"].is_string(),
             "{row}"
         );
+        // T-962: every vote-gated identity row states its vote, the bar and its window, and
+        // `provisional` is exactly "the bar has not yet fallen within the window" — a rate, not
+        // a lifetime count (docs/api.md, "Provisional identity").
+        let f = &row["fields"];
+        if row["frame_model"] == json!("rds-pi") {
+            assert!(f["pi_provisional"].is_boolean(), "{row}");
+            assert_eq!(f["pi_provisional"], f["identity_provisional"], "{row}");
+        }
+        if let Some(provisional) = f.get("identity_provisional") {
+            let votes = f["identity_votes"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let needed = f["identity_votes_needed"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let in_window = f["identity_votes_in_window"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{row}"));
+            let window_s = f["identity_votes_window_s"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{row}"));
+            assert!(in_window <= votes.min(needed), "{row}");
+            assert!(window_s > 0.0, "{row}");
+            assert_eq!(provisional, &json!(in_window < needed), "{row}");
+        }
     }
     let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
     assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
@@ -9528,20 +9557,27 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!(2),
         "(level_f 0, level_t 2) is node 0*8+2 of the 8x8 view lattice: {coarse_t}"
     );
-    // The node existing does not mean the read uses it: the rule is **finest affordable first**
-    // (T-438), and node (0, 0) is affordable here and finer in time, so it answers and its cells
-    // fold onto the tile's. Folding a finer source invents nothing and greys nothing — it is the
-    // only direction that is free. `exact_node: false` alongside a non-null `store_node` is that
-    // preference showing, not a missing node.
-    assert_eq!(
-        coarse_t["resolution"]["answered"]["exact_node"],
-        json!(false),
-        "{coarse_t}"
+    // **T-1018: the node answers once it holds every row level 0 does.** The view lattice's
+    // coarse nodes are maintained live, so node (0, 2) is read (`exact_node: true`, cells² source
+    // cells) for any tile whose rows have all folded up. But a closed level-0 row folds up only
+    // `seal_lag` after the clock leaves it, and this tile was pinned at the DATA EDGE of a server
+    // that is still capturing — so whether it still reaches into those held-back rows depends on
+    // how far capture has moved on since, and while it does the read keeps finest-first (node
+    // (0, 0), `exact_node: false`) rather than drop the newest rows. Either is right; nothing else
+    // is, and neither replicates.
+    let answered = coarse_t["resolution"]["answered"]["level"].as_u64();
+    let exact = coarse_t["resolution"]["answered"]["exact_node"].as_bool();
+    assert!(
+        matches!(
+            (answered, exact),
+            (Some(2), Some(true)) | (Some(0), Some(false))
+        ),
+        "node (0, 2) once folded, else finest-first at the live edge: {coarse_t}"
     );
-    assert_eq!(
+    assert_ne!(
         coarse_t["resolution"]["fold"]["time"]["direction"],
-        json!("folded"),
-        "a finer source folded onto a coarser tile invents nothing: {coarse_t}"
+        json!("replicated"),
+        "{coarse_t}"
     );
     assert!(
         coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,
