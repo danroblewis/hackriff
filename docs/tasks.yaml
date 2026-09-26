@@ -29353,6 +29353,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
+
+      2026-09-25 20:20 AMENDMENT (user, full bleed): nothing reserves a band at the top or bottom of the canvas; full bleed at both edges (the trace strip goes in its own ticket).
   - id: T-997
     milestone: MMAP
     title: "Redesign the inventory chip ('1 cand, 1 conf' + hamburger): dock it top-left under Go-to as two pills that open the sheet on their list, never mid-height over the time ruler"
@@ -30000,6 +30002,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list
+
+      2026-09-25 20:20 AMENDMENT (user, full bleed): nothing reserves a band at the top or bottom of the canvas; full bleed at both edges - the closed card takes 0 px.
     high_effort_reason: the bottom sheet/accordion's open-state model is replaced by a selection-driven card that every map feature, the inventory pills (T-997) and the Selected strip retirement build on; hit-testing on boxes/pins/paths
   - id: T-1027
     milestone: MMAP
@@ -30019,6 +30023,10 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge
+
+      2026-09-25 20:20 supervisor (user): priority raised to P1 - 'The bottom bar looks like it should be gone.' Staging 336a12db lacks this ticket. Dispatch now.
+
+      2026-09-25 coordinator: FIRST STEP - screenshot staging (and main) at 1280x800 and 400 px with the harness and NAME the bottom band element (expected: this Selected strip; if it is something else - time ruler, sheet peek, a dock remnant - report it with the element's selector before changing anything). Dispatched manually by the coordinator stacked on task-t1026 (the card this ticket moves selection into) as soon as the T-996/T-1026/T-1007 re-integration hands back.
   - id: T-1028
     milestone: MMAP
     title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
@@ -30159,10 +30167,10 @@ tasks:
   - id: T-1032
     milestone: MMAP
     title: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
-    status: in-progress
+    status: todo
     branch: task-t1032
     priority: medium
-    deps: []
+    deps: [T-1026]
     parallel_group: UI-CARD-FLAKE
     needs: none
     model: opus
@@ -30173,6 +30181,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone and at 3 lanes on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been ~a day stale; build hk-cli once), then HAND BACK. Never `just gate`. Never loosen an assertion; make it deterministic and prove it goes red when the defect returns.
     notes: |
       FOUND BY coordinator triage 2026-09-25: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
+
+      2026-09-25 coordinator: filing error corrected - the app-card spec this ticket deflakes exists only on the unlanded T-996/T-1026/T-1007 stack, so the ticket now depends on T-1026 (status todo, not blocked). The runner's claim for T-1032 is 'blocked' and will not release on its own: when T-1026 lands, the coordinator re-dispatches this ticket (on task-t1032, which may hold the worker's first pass).
   - id: T-1033
     milestone: MAUTO
     title: "explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it"
@@ -30261,6 +30271,236 @@ tasks:
       Observed, not chased: Under load the split's own default half took 151 s while the bound half ran beside it (both at 20k debug-build inserts); alone the insert run is 0.9-3.8 s. Nothing to fix - the gating half has no bound - but it means the default tier still pays ~10 s for ADR-0006's dense-write exercise on a busy box.
       Resources: 0 CPU-s, peak 0.0 GB
     commit: 832a670c
+  - id: T-1037
+    milestone: MLIVE
+    title: "Tiles reveal coarse-first then ATOMICALLY per row/viewport - never black: the coarsest covering level in one batch as stand-in, the target level per row, one swap per row; PENDING only when no ancestor exists at any level"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: TILE-REVEAL
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~20:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-2010-tile-reveal-blockiness.md - read it: it records what the client does today, verified): "tiles come in at random times, they don't all show at once ... a lot of random black areas, which make it look very broken ... we don't prefetch the multiple levels of the pyramid ... so much UI jankiness, especially on an unstable network connection."
+      TICKET A (the visible fix). On any viewport change: (1) request the coarsest level covering the viewport in ONE batch and draw it at once as the stand-in; (2) request the target level as one batch (one per tile ROW when > 64 addresses); (3) swap the whole set in when every tile of that row/viewport is in hand, or after a bounded wait (~300 ms) reveal what arrived and keep stand-ins under the rest. The flat PENDING mark (surface.ts:743) is drawn ONLY when no ancestor exists at any level. Honesty tiers unchanged: a stand-in states the level it was drawn at.
+      ACCEPTANCE: e2e - after first paint no PENDING quad is visible at 1280x800 on a cold reload and after a 2-level zoom; spy client - requests per viewport change <= ceil(tiles/64) + 1; one render swap per row, not per tile. Live-edge rows are LSR-1's (ring) once it lands - do not fight it; exclude the ring-covered extent if LSR-1 is on main.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Tiles reveal coarse-first then ATOMICALLY per row/viewport - never black: the coarsest covering level in one batch as stand-in, the target level per row, one swap per row; PENDING only when no ancestor exists at any level
+    high_effort_reason: the canvas rendering contract for every viewport change (stand-in, batching, swap) - what the user sees as 'broken' today
+  - id: T-1038
+    milestone: MLIVE
+    title: "Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget"
+    status: todo
+    priority: high
+    deps:
+    - T-1037
+    parallel_group: TILE-PREFETCH
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~20:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-2010-tile-reveal-blockiness.md - read it: it records what the client does today, verified): "tiles come in at random times, they don't all show at once ... a lot of random black areas, which make it look very broken ... we don't prefetch the multiple levels of the pyramid ... so much UI jankiness, especially on an unstable network connection."
+      TICKET B. Keep resident for the visible (t,f) window: the overview tier over the whole retained window (tiny), the parent level (already pinned), and the child level for the centre third of the viewport; for a following pane, the next time row of the current level before the edge enters it (T-890 already asks). Bounded by the cache byte budget in viewports (T-1020). Presentation/scheduling only (thin client).
+      ACCEPTANCE: a 1-level zoom in or out on a warm view issues 0 requests for the centre third and draws no PENDING (spy client + e2e). Opus reviews (cheaper model on the rendering path).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Multi-level tile prefetch: keep the overview tier for the whole retained window, the parent level, the child level for the centre third, and a following pane's next time row resident, within T-1020's viewport-sized budget
+  - id: T-1039
+    milestone: MLIVE
+    title: "Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload"
+    status: todo
+    priority: high
+    deps:
+    - T-1037
+    parallel_group: TILE-RESILIENCE
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~20:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-2010-tile-reveal-blockiness.md - read it: it records what the client does today, verified): "tiles come in at random times, they don't all show at once ... a lot of random black areas, which make it look very broken ... we don't prefetch the multiple levels of the pyramid ... so much UI jankiness, especially on an unstable network connection."
+      TICKET D. Stale-while-revalidate: a failed or slow batch never clears what is drawn; the last good tile stays, marked stale in the honesty tier if older than N s (state N); batch retries with jittered backoff (share T-1035's backoff if it has landed); requests in flight coalesced per address; a reload restores the last viewport's tiles from a Service Worker cache of SEALED immutable tiles (immutable by contract, T-574 headers - never cache live/unsealed tiles), giving an instant first paint offline. No CDN in the product (on-device/LAN).
+      ACCEPTANCE: e2e with the harness dropping/stalling the tile route: nothing drawn is cleared, no PENDING appears over previously drawn tiles, retries back off; a reload with the server stopped paints the last viewport's sealed tiles from the SW cache; unit tests for coalescing and the stale marker. Opus reviews.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Tile loading survives an unstable network: stale-while-revalidate (a failed/slow batch never clears what is drawn), jittered batch retry, per-address in-flight coalescing, and a Service Worker cache of sealed immutable tiles for an instant reload
+  - id: T-1040
+    milestone: MLIVE
+    title: coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: TILE-EVENTS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER FEEDBACK (2026-09-25 ~20:05, via supervisor; ~/.hackriff-ops/handoffs/coordinator-2010-tile-reveal-blockiness.md - read it: it records what the client does today, verified): "tiles come in at random times, they don't all show at once ... a lot of random black areas, which make it look very broken ... we don't prefetch the multiple levels of the pyramid ... so much UI jankiness, especially on an unstable network connection."
+      TICKET C, REDUCED per the live-stream design (~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md §5): the live-edge `tile_committed` event is superseded by the LSR ring (LSR-1/2); keep only `coverage_changed {f_lo, f_hi, t}` on a retune (or derive it from the row epoch LSR-2 defines - coordinate), on /ws/tiles/rows or a sibling, so the client re-lays the fog immediately and fetches exactly the tiles that moved; the refresh lane's timer becomes a fallback until LSR-5 retires it.
+      ACCEPTANCE: docs/api.md + api_contract.rs; a spy-client test that one coverage_changed event causes exactly one batch for the named tiles; a retune in the mock SDR shows the departed band's fog within one event (no timer wait).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
+    core_interface: true
+  - id: T-1041
+    milestone: MMAP
+    title: "Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-TRACE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER (2026-09-25 ~20:15, via supervisor; ~/.hackriff-ops/handoffs/coordinator-2020-full-bleed.md): "the waterfall map is still currently not full bleed. There are still black bars on the bottom and top. The top bar looks like it's actually the phosphor display ... We can remove it entirely for now."
+      The top black band is each pane's TRACE STRIP - the viewport-wide FFT trace band reserved above the waterfall (ui/src/surface/view.ts:150 'One pane's trace strip this frame', drawn by ui/src/surface/tracepass.ts:133; preview.ts:361 clamps points in the strip to the pane's top edge).
+      DELIVER: no reserved band above the waterfall - the pane's first pixel row is a waterfall/coverage row (the pane's top edge at the page's first pixel when no chrome overlaps). Keep the trace as an optional overlay layer (layers.ts), OFF by default, that when on draws translucently OVER the waterfall's top rows rather than reserving space - the T-457 invariant (viewport-wide, time-addressable, per-pane trace) survives as that layer. Remove traceStrip geometry from view.ts and the preview clamp. Note it in docs/16 §8 and CLAUDE.md's trace sentence (the trace is a layer, not a strip). LSR-6 later feeds the trace from the ring - keep the layer's data path swappable.
+      ACCEPTANCE: e2e at 1280x800 and 400 px - canvas row 0 is a waterfall/coverage pixel, not black; no trace band exists with the layer off; with the layer on the trace draws over the top rows and the waterfall's row 0 is still at the pane's top.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): Remove the per-pane TRACE STRIP (the phosphor FFT band reserved above the waterfall): no reserved band; the trace survives as an OFF-by-default overlay layer drawn over the top rows
+  - id: T-1042
+    milestone: MLIVE
+    title: "LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: LSR-1
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-1 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-1: live ring renderer - draw spectrum/live rows into a per-pane ring texture; the tile lane excludes the ring-covered extent (behind HK_UI_LIVE_RING=1)
+    high_effort_reason: the live-edge rendering path (the user's live waterfall) is replaced by a ring; per-row cost on the render loop must stay honest
+  - id: T-1043
+    milestone: MLIVE
+    title: "LSR-2: GET /ws/spectrum/rows - per-pane folded, quantised binary row subscription with t_from (store walk -> live), epoch and coverage trailer"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: LSR-2
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-2 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-2: GET /ws/spectrum/rows - per-pane folded, quantised binary row subscription with t_from (store walk -> live), epoch and coverage trailer
+    core_interface: true
+    high_effort_reason: a new binary stream contract (docs/stream-contract.md) and a store-walk fold that must be bit-exact with the pyramid's level-0 cells
+  - id: T-1044
+    milestone: MLIVE
+    title: "LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles"
+    status: todo
+    priority: medium
+    deps:
+    - T-1042
+    - T-1043
+    parallel_group: LSR
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-3 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-3: row-stream resume and gaps - reconnect with t_from = last t1, the server walks the store for the gap, the client fills a DISCONTINUITY from tiles
+  - id: T-1045
+    milestone: MLIVE
+    title: "LSR-4: per-device live publishers spectrum/live/<device>; a pane's device selects its stream"
+    status: todo
+    priority: medium
+    deps:
+    - T-1043
+    parallel_group: LSR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-4 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-4: per-device live publishers spectrum/live/<device>; a pane's device selects its stream
+    core_interface: true
+  - id: T-1046
+    milestone: MLIVE
+    title: "LSR-5: retire the live-edge tile refresh lane and the JSON row feed's live role once LSR-2 carries following panes"
+    status: todo
+    priority: medium
+    deps:
+    - T-1042
+    - T-1043
+    parallel_group: LSR
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-5 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-5: retire the live-edge tile refresh lane and the JSON row feed's live role once LSR-2 carries following panes
+  - id: T-1047
+    milestone: MLIVE
+    title: "LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold"
+    status: todo
+    priority: medium
+    deps:
+    - T-1042
+    - T-1041
+    parallel_group: LSR
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-6 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-6: the spectrum trace reads the live ring for the slice and the ring-covered max-hold
+  - id: T-1048
+    milestone: MLIVE
+    title: "LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile"
+    status: todo
+    priority: medium
+    deps:
+    - T-1042
+    parallel_group: LSR
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      DESIGN (Fable fork of the supervisor, 2026-09-25 ~20:30; ~/.hackriff-ops/handoffs/live-stream-rendering-design-2026-09-25.md - read §1-§3 and §5-§7 and the ticket row for this id): live-stream-first waterfall - the live edge paints from spectrum/live rows into a per-pane ring; tiles serve history. Stays: T-1018/1019/1020/1034 and the tile-reveal tickets A/B/D. Retires (LSR-5): the live-edge refresh lane, the JSON row feed's live role, the live-edge tile_committed event.
+      THIS TICKET = LSR-7 in the design's §6 table (files, acceptance and model are stated there - they are this ticket's definition of done). First milestone: behind HK_UI_LIVE_RING=1, LSR-1 alone shows a following pane painting from spectrum/live end-to-end (rows at the edge, tiles below) on the mock SDR in the e2e harness. Capture-thread cost is measured, never assumed (T-453; LSR-7).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on ports >= 9216 against a FRESH hk - main's seeded target/debug/hk has been stale; cargo nextest -p <crate> -E 'binary(<name>)' for Rust; docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots where visible. Never `just gate`. Never loosen an assertion.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile jank / full bleed / live-stream design): LSR-7: measure sample->pixel latency (row t vs rAF) and per-subscription fold cost per row, timing tier + dashboard tile
+  - id: T-1049
+    milestone: MMAP
+    title: "app-outputs-map (T-994) reported red 3x at 400 px ('no pressable box in 60 s') - triage on main with a FRESH hk: close as stale-binary or fix"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: UI-OUTPUTS-MAP-TRIAGE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      REPORTED RED 3 TIMES (2026-09-25 evening): ui/e2e/app-outputs-map.e2e.mjs (T-994's spec, outputs on the map) - 'timed out after 60000 ms waiting for a pressable box at 400 px' - by the T-1002 worker (on its branch and on a main-only UI tree) and the T-1004 worker. Every run used a borrowed/stale hk binary (main's seeded target/debug/hk has been ~a day stale all day, the cause of most of the day's false browser reds), so it is NOT yet established whether this is red on main.
+      DELIVER (deflake-triage rules): build a FRESH hk (`cargo build -p hk-cli` once `just builders` says safe) and run app-outputs-map ALONE 3x on main (or the bulk base= if a bulk is gating) at 1280x800 and 400 px on ports >= 9216. If green 3/3: record the evidence and close as stale-binary (no code). If red: find why no box is pressable at 400 px on main (the left-column stack T-996, the chips T-1025, the card/pills, or the fixture's detections not yet present) and fix the product or make the spec wait on the served inventory state (never a longer timeout; never loosen) - with a red-on-regression proof.
+      TESTING PROTOCOL (CLAUDE.md): targeted only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1002 and T-1004 workers 2026-09-25: app-outputs-map (T-994) reported red 3x at 400 px ('no pressable box in 60 s') - triage on main with a FRESH hk: close as stale-binary or fix
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
