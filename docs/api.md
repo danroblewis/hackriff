@@ -1497,6 +1497,42 @@ Opaque, per-build JSON object of counters (source samples, chain stats, control-
 
 **What is pruned, and why the served routes do not change.** Only per-frame `Detection` rows (and their track links) older than the age are deleted, in batches of `batch` rows per write transaction with a pause between batches. Tracks, emitters, presence intervals, the observation ledger, links, relations and decodes are durable and never touched, so `/api/inventory`, `/api/events` and presence for a pruned window answer as they did. Three kinds of reader of detection rows are kept answerable. (1) The per-emitter "newest linked detections" reads — `/api/inventory`'s `snr_db`/`peak_dbfs`/`measured`, the overlap re-analysis's measured bands, the artefact and retune evidence — rank by start time and read at most 256 rows, so each emitter's newest `keep_per_emitter` (256) rows are never pruned and those answers are exact. (2) A row named by id — decode provenance (a demodulation's detection), a recording's trigger, a retune verdict, a direct emitter link, an annotation, an anomaly subject, a classification input, an observation-ledger source — is pinned for good. (3) The time-windowed reads (occupancy spans, the channel plan) read **rollups** past the age: before a row is deleted it is folded into its track's rollup, one row per contiguous run (same survey and provenance, no gap over `rollup_gap_s`, no longer than `rollup_span_s`) holding the time hull, the time on air inside it (the **union** of the members' intervals, T-913 — co-timed members are one span of air, and the figure never exceeds the hull), frequency envelope, mean/max OBW and SNR, peak level, count, clip count and the OR/AND of the flags. A rollup is a summary, never served as a detection, and it summarises only rows that were **deleted**: a row the pass kept (pinned, or in an emitter's protected tail) closes the run it falls in, so no window is counted both as a surviving row and inside a rollup (T-913). An explanation citing a detection pins it like any other reference (`explanation_detection`). Detections remain not a served record kind. Contract: `api_contract.rs::discovery_history_floor_status_and_control_state_have_the_documented_shape` (the shape and defaults by value) and `::a_pruned_window_still_answers_inventory_and_events_as_before` (the whole `/api/inventory` and `/api/events` answers equal before and after a prune); the policy itself: `hk-model` `repo::retention_tests`.
 
+**The front end's clip state (T-981)** is reported under `"frontend"`: measured **per spectrum row** — the rows `/ws/spectrum/live` publishes and the canvas's finest tier is folded from (T-484) — never inferred from the sticky tune-state `overload` flag, which says only that a gain state has clipped at some point. Each row's clipped samples (a component on the −128/127 rail) and ADC peak are counted over the row's own span, and the row is judged by one rule, shared with the detection reader (`hk_detect::frontend`): **clipped** when its clipped fraction exceeds `rule.clip_fraction`; a **front-end event** when it is clipped **and** its median PSD stepped up by at least `rule.step_db` over a reference kept from recent non-event rows under the same tuning and gains — or, with no reference yet (the start-up transient, the first rows after a retune), when it is saturated (`rule.saturation_fraction`). A narrow carrier that clips a little is `clipped` and not an event: it leaves the median where it was. Both marks also ride on each row's frame metadata (`docs/stream-contract.md` flags `CLIPPED`, `FRONTEND_EVENT`). Counted only while rows are produced (the view lattice is attached, or something is subscribed — T-489). Contract: `api_contract.rs::frontend_status_block_and_events_route_answer_as_documented`; end to end through the mock SDR: `hk-pipeline/tests/frontend_overload.rs`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `frontend.rows` / `samples` | number | Spectrum rows measured, and their samples |
+| `frontend.clipped_rows` / `clipped_samples` | number | Rows over the clip threshold, and the clipped samples in them |
+| `frontend.event_rows` / `events` | number | Rows judged front-end events, and the events they coalesced into (consecutive event rows under one tuning are one event) |
+| `frontend.suppressed_detections` | number | Detections **not stored** because they were a front-end event's energy: a record over an event frame that is impulsive or covers at least half the tuned window. A narrow emission over the same frames is kept, flagged `clipped` as before |
+| `frontend.evicted_events` | number | Events dropped from the front of the in-memory log (`log.capacity`) |
+| `frontend.adc_peak_max` | number | Largest per-row ADC peak this run, as a fraction of full scale (1.0 = the −128 rail) |
+| `frontend.last_row` | object \| null | The newest row: `t` (Unix s, capture clock), `clipped_samples`, `samples`, `clip_fraction`, `adc_peak`, `level_db` (its median PSD, dBFS/Hz), `step_db` (over the reference, `null` with none), `clipped`, `event` |
+| `frontend.last_event` | object \| null | The newest event, in the `GET /api/frontend/events` shape |
+| `frontend.log` | object | The event log: `capacity` (1024), `retained`, `oldest_s`. In memory, not persisted: a restart starts it empty |
+| `frontend.rule` | object | The thresholds in force: `clip_fraction` (1e-4, the detector's own rule-8 fraction), `step_db` (6), `saturation_fraction` (0.01) |
+
+### `GET /api/frontend/events` — front-end events over a window (T-981)
+
+Query: `t0`, `t1` (Unix s, capture clock; both required, `t1 > t0`), `device`? (a `device_id`), `limit`? (1–1024, default 256). Any other parameter is `400`.
+
+```jsonc
+{ "window": { "t0": …, "t1": … },
+  "events": [ { "kind": "clip", "t0": …, "t1": …, "t0_ns": …, "t1_ns": …,
+                "device_id": "hackrf:…", "center_hz": …, "sample_rate_hz": …,
+                "f_lo_hz": …, "f_hi_hz": …,            // the tuned window: centre ± rate/2
+                "rows": 2, "clipped_samples": 75295, "samples": 161792,
+                "clip_fraction_max": 0.59, "adc_peak_max": 1.0, "step_db_max": 28.4 } ],
+  "total": 1, "limit": 256, "truncated": false,
+  "log": { "capacity": 1024, "retained": 1, "oldest_s": …, "evicted": 0, "rule": { … } } }
+```
+
+- **An event is a time–frequency region**: `[t0, t1)` on the capture clock (the rows' own times) over the tuned window. It is the **front end's** energy — the one-row stripe across the whole span that a strong burst keying up with the amp on, or a start-up transient, puts on the canvas — and is never a signal: the canvas draws it as its own mark (`ui/src/surface/frontend.ts`, the `frontend` layer), distinct from every detection box, and the detection reader does not store it (`frontend.suppressed_detections` above).
+- **Selection is by overlap** with `[t0, t1)`, oldest first; with more than `limit`, the **newest** `limit` are returned and `truncated` is `true`.
+- **Bounded memory**: the log holds the newest 1024 events of this run; `log.oldest_s` says how far back it reaches and `log.evicted` how many it has dropped. An empty answer for a window before `oldest_s` (or before this run) means "not known here", not "no overload".
+- `step_db_max` is `null` when no row of the event had a reference (saturation at start-up or right after a retune).
+- Errors: `400 invalid` (a missing or bad `t0`/`t1`, `t1 ≤ t0`, a bad `limit`, an unknown parameter), `405` other methods, `503 unavailable` (no pipeline on this server).
+
 ## Control API (T-050)
 
 Device, display, recording and bookmark endpoints, all behind the bearer token, all audited once authenticated. **Six of them reach the radio and the rest do not** — see [Device actions](#device-actions-t-343) — and one more *commissions* retunes without performing any: [the in-app survey sweep](#the-in-app-survey-sweep-and-who-wins-when-it-and-the-user-both-want-the-radio-t-452). Every mutating body is a JSON object (`Content-Type: application/json`); an unknown field is `400 invalid`. Device endpoints (`center`, `rate`, `window`, `gains`, `bias_tee`) act on a *live* source ([`ApiState::live_controls`]); on a replayed recording they answer `409 not_live`, while display, recording and bookmarks keep working. Each of them also takes an optional **device selector**, `"device_id"` — see [Which radio](#which-radio-the-device-selector-t-511); omitting it is correct whenever the run holds exactly one front end, which is every run today.

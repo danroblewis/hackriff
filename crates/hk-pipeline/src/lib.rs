@@ -48,6 +48,7 @@ pub mod config;
 pub mod control;
 pub mod events;
 pub mod family;
+pub mod frontend; // T-981: per-row front-end clip state and events
 pub mod gate;
 pub mod gnss; // T-322 (ADR-0018): the C36 L1-dwell caller
 pub mod inventory;
