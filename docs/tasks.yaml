@@ -31948,7 +31948,8 @@ tasks:
   - id: T-1088
     milestone: MUI
     title: 1736 magenta 'error ink' pixels on the canvas in NORMAL operation (x~2, rgb 255,64,217) before any failure - canvas-journey test 4 cannot run (unmasked by T-1078)
-    status: todo
+    status: in-progress
+    branch: task-t1088
     priority: P1
     deps: []
     parallel_group: UI-MAGENTA
@@ -31965,7 +31966,8 @@ tasks:
   - id: T-1089
     milestone: M2-hardening
     title: hk-api shutdown_leaves_no_thread_writing_under_the_handlers_directory fails ALONE on main a9f82aa1 ('no handler ever ran'), green on d91603f4 - bisect (T-1063's accept-loop 503 is the prime suspect)
-    status: todo
+    status: in-progress
+    branch: task-t1089
     priority: P1
     deps: []
     parallel_group: API-HTTP
@@ -31987,7 +31989,8 @@ tasks:
   - id: T-1090
     milestone: M2-hardening
     title: The server prints NOTHING and never binds when its --data-dir volume is ~99 % full (node2) - fail loudly with need/free numbers or degrade to a stated smaller ring, never hang silently
-    status: todo
+    status: in-progress
+    branch: task-t1090
     priority: P1
     deps: []
     parallel_group: CLI-STARTUP-DISK
@@ -32022,7 +32025,8 @@ tasks:
   - id: T-1092
     milestone: MUI
     title: "app-trace colour check (T-1050 picture guard) marginal: 0.53 vs <0.50 over only 154 clear columns since full bleed - re-derive the sampled region/bound with a measurement"
-    status: todo
+    status: in-progress
+    branch: task-t1092
     priority: normal
     deps: []
     parallel_group: UI-TRACE-COLOUR
