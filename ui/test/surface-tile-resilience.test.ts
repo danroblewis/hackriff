@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { keyOf, type TileAddr } from "../src/surface/lattice";
 import { batchedTileSource } from "../src/surface/tilebatch";
 import { TileCache } from "../src/surface/tilecache";
+import { buildOfflineBatch } from "../src/sw/tile-cache-logic";
 
 const addr = (fIndex: number, over: Partial<TileAddr> = {}): TileAddr => ({
   device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex, tIndex: 7, cells: 256, ...over,
@@ -135,3 +136,72 @@ function keyIndexOf(a: TileAddr): string {
   const [, , levelF, levelT, fIndex, tIndex] = keyOf(a).split("|");
   return `${levelF}.${levelT}.${fIndex}.${tIndex}`;
 }
+
+// ——— T-1039 review fix 2/2: the SW's OFFLINE reconstruction must not create a tight retry loop ———
+//
+// The trigger the review named exactly: the network is down, a batch asks for two addresses, one
+// (A) is a sealed tile the Service Worker has cached and the other (B) is not. The worker (through
+// `buildOfflineBatch`, exercised directly here — the same function `../src/sw/tiles-sw.ts` calls,
+// which cannot itself run under `node:test`) must answer both, not put B in `remaining` (which
+// `tilebatch.ts` requeues on the very next microtask with no delay at all).
+
+test("an offline SW answer mixing a cached hit and an uncached miss backs the miss off — no tight retry loop", async () => {
+  // The trigger, exactly: address A is a sealed tile the worker has cached, address B is not, and
+  // the network is down. Under the bug the review found, B was carried in `remaining` — which
+  // `tilebatch.ts` requeues on the very next MICROTASK with no delay at all, so every one of B's
+  // "failures" bypassed `TileCache.failed()` entirely and the ladder this ticket adds never got a
+  // chance to arm. Fixed, B is answered as its own 502 entry, which the client REJECTS the caller
+  // with — reaching `failed()`'s real silent-failure backoff.
+  //
+  // (One nuance, not part of the bug: A's SUCCESS resolves in the same round trip as B's failure,
+  // and `TileCache.succeeded()` — pre-existing, general T-499 behaviour, unrelated to this fix —
+  // clears the WHOLE silence ladder on any completion at all, so B's very first backoff is
+  // immediately un-armed by A's co-occurring hit and gets one extra, undelayed retry. That is not
+  // the "for as long as the network is down" tight loop the review named: A is resident after round
+  // 1 and never re-enters a request again, so from round 2 on nothing is left to reset the ladder
+  // and it holds and escalates exactly as the equivalent all-miss case already does. Both facts are
+  // asserted below rather than only the friendlier one.)
+  const clock = { t: 0 };
+  const calls: string[][] = [];
+  const cachedSealed = new Map<string, unknown>([[keyIndexOf(addr(1)), tileBody()]]);
+  const fetchFn = async (url: string) => {
+    const spellings = new URLSearchParams(url.split("?")[1]).get("addresses")!.split(",");
+    calls.push(spellings);
+    const offline = buildOfflineBatch(spellings, cachedSealed);
+    return { ok: true, status: 200, statusText: "OK", json: async () => offline };
+  };
+  const source = batchedTileSource("tok", fetchFn as never, { schedule: (fn) => void Promise.resolve().then(fn) });
+  const cache = new TileCache<{ id: number }>(
+    { upload: () => ({ id: 0 }), destroy: () => {} },
+    source,
+    { now: () => clock.t, random: () => 0 },
+  );
+  cache.setViewports(LAT, [{ box: FULL_BOX, levelF: 0, levelT: 0 }]);
+  cache.beginFrame();
+  cache.acquire(addr(1)); // A: cached sealed tile
+  cache.acquire(addr(2)); // B: never cached
+  cache.endFrame();
+  await flush();
+  await flush();
+  assert.equal(calls.length, 1, "one batch request for both addresses");
+  assert.equal(cache.acquire(addr(1)).kind, "resident", "A resolves from the worker's cached sealed tile");
+  assert.equal(cache.stats.silentFailures, 1,
+    "B's per-entry miss reached TileCache.failed() and armed the silent-failure backoff — the fix this test proves");
+  // A is now resident and drops out of every further request, so from here B is the ONLY thing
+  // being asked — this is the steady state a real outage actually looks like.
+  cache.beginFrame(); cache.acquire(addr(2)); cache.endFrame();
+  await flush();
+  const afterFirstRetry = calls.length;
+  assert.ok(afterFirstRetry <= 2,
+    "at most one un-gated retry from A's co-occurring success (the noted nuance) — never an unbounded loop");
+  // THE ASSERTION THAT MATTERS: with nothing left to reset the ladder, it now holds and escalates
+  // exactly like the all-miss case (`"a batch failure backs off"`, above) — not another tight loop.
+  cache.beginFrame(); cache.acquire(addr(2)); cache.endFrame();
+  await flush();
+  assert.equal(calls.length, afterFirstRetry,
+    "the silence gate holds on the very next frame once nothing is left to reset it");
+  clock.t = 600;
+  cache.beginFrame(); cache.acquire(addr(2)); cache.endFrame();
+  await flush();
+  assert.equal(calls.length, afterFirstRetry + 1, "and it reopens once the backoff elapses — resilience, not a refusal");
+});

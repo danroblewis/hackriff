@@ -65,22 +65,33 @@ test("sealedEntries keeps ONLY status-200 answers whose own tile states sealed:t
     "the live tile, the refusal, the spelling-less entry and the body-less entry are all excluded");
 });
 
-test("buildOfflineBatch reconstructs exactly the {tiles, remaining} shape tilebatch.ts already reads", () => {
+test("buildOfflineBatch answers EVERY address, one way or the other — never `remaining` (T-1039 review fix 2/2)", () => {
+  // The first cut put an uncached address in `remaining`, which `tilebatch.ts` requeues on the next
+  // microtask with NO delay — a tight retry loop against a server that is still down. `remaining`
+  // must therefore always come back empty, and every address answered as its own tiles entry.
   const cached = new Map<string, unknown>([
     ["0.0.1.7", { sealed: true, max_db: -80 }],
     ["0.0.3.7", { sealed: true, max_db: -70 }],
   ]);
   const out = buildOfflineBatch(["0.0.1.7", "0.0.2.7", "0.0.3.7"], cached);
-  assert.deepEqual(out.remaining, ["0.0.2.7"], "an address never cached — live, or never fetched — is `remaining`, not refused");
-  assert.equal(out.tiles.length, 2);
+  assert.deepEqual(out.remaining, [], "remaining is always empty — nothing here is a truncation");
+  assert.equal(out.tiles.length, 3, "every requested address gets its own entry, cached or not");
   assert.deepEqual(out.tiles[0], { address: { spelling: "0.0.1.7" }, status: 200, tile: { sealed: true, max_db: -80 } });
-  assert.deepEqual(out.tiles[1], { address: { spelling: "0.0.3.7" }, status: 200, tile: { sealed: true, max_db: -70 } });
+  // The uncached address is a real per-entry FAILURE (502, "a proxy that could not reach the
+  // origin"), which `tilebatch.ts` rejects the caller with — reaching `TileCache.failed()`'s own
+  // silent-failure backoff, rather than skipping it entirely via `remaining`.
+  assert.equal(out.tiles[1].address?.spelling, "0.0.2.7");
+  assert.equal(out.tiles[1].status, 502);
+  assert.equal(out.tiles[1].tile, undefined, "a miss carries no tile body to be mistaken for one");
+  assert.deepEqual(out.tiles[2], { address: { spelling: "0.0.3.7" }, status: 200, tile: { sealed: true, max_db: -70 } });
 });
 
-test("buildOfflineBatch with nothing cached at all puts every address in `remaining`", () => {
+test("buildOfflineBatch with nothing cached at all still answers every address, each a miss — never `remaining`", () => {
   const out = buildOfflineBatch(["0.0.1.7", "0.0.2.7"], new Map());
-  assert.deepEqual(out.tiles, []);
-  assert.deepEqual(out.remaining, ["0.0.1.7", "0.0.2.7"]);
+  assert.deepEqual(out.remaining, []);
+  assert.equal(out.tiles.length, 2);
+  for (const t of out.tiles) { assert.equal(t.status, 502); assert.equal(t.tile, undefined); }
+  assert.deepEqual(out.tiles.map((t) => t.address?.spelling), ["0.0.1.7", "0.0.2.7"]);
 });
 
 test("end to end: a batch answer mixing sealed and live tiles caches only the sealed one, and offline reconstruction never resurrects the live one", () => {
@@ -96,8 +107,9 @@ test("end to end: a batch answer mixing sealed and live tiles caches only the se
     if (hit !== undefined) found.set(spelling, hit);
   }
   const offline = buildOfflineBatch(["0.0.1.7", "0.0.2.7"], found);
-  assert.deepEqual(offline.tiles.map((t) => t.address!.spelling), ["0.0.1.7"],
-    "only the sealed tile survives to an offline reload");
-  assert.deepEqual(offline.remaining, ["0.0.2.7"],
-    "the live tile is `remaining`, never served stale from a cache it was never allowed into");
+  assert.deepEqual(offline.tiles.map((t) => t.address!.spelling), ["0.0.1.7", "0.0.2.7"]);
+  assert.equal(offline.tiles[0].status, 200, "only the sealed tile is served as a hit");
+  assert.equal(offline.tiles[1].status, 502,
+    "the live tile is a per-entry MISS, never served stale from a cache it was never allowed into, and never `remaining` either");
+  assert.deepEqual(offline.remaining, []);
 });

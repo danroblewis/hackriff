@@ -16,8 +16,11 @@
 // `./tile-cache-logic.ts`'s header comment for why that is the whole correctness argument) under a
 // synthetic key nothing else can reach. On a failed one — the network is down, or the origin is
 // unreachable — it reconstructs the same `{tiles, remaining}` shape from whatever sealed tiles it has
-// cached for the requested addresses, so `../surface/tilebatch.ts` sees an ordinary partial answer
-// and the canvas paints what it can rather than nothing.
+// cached for the requested addresses, so `../surface/tilebatch.ts` sees an ordinary answer: every
+// requested address, one way or the other — a cache hit as a normal 200, and a cache miss as its own
+// non-200 entry (never `remaining`, which the client requeues at once with no delay — see
+// `./tile-cache-logic.ts`'s `buildOfflineBatch`, T-1039 review fix 2/2) — so the canvas paints what
+// it can, and what it cannot backs off exactly as a refused socket would.
 
 import {
   SEALED_CACHE_NAME, buildOfflineBatch, parseBatchUrl, sealedCacheUrl, sealedEntries,

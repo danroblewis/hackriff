@@ -17,10 +17,13 @@
 // cause. So [[sealedEntries]] is the one gate every stored byte passes through, and nothing else in
 // this file, or in `./tiles-sw.ts`, may store a tile that did not pass it.
 
-/** One entry of a `GET /api/tiles/batch` answer, structurally — only the fields this file reads. */
+/** One entry of a `GET /api/tiles/batch` answer, structurally — only the fields this file reads
+ * or writes. `error` is this worker's own words on a reconstructed (offline) miss entry — never
+ * read back by this file, only by the client (`../surface/tilebatch.ts`'s `BatchEntry.error`). */
 export interface BatchEntryLike {
   readonly address?: { readonly spelling?: string };
   readonly status?: number;
+  readonly error?: string;
   readonly tile?: { readonly sealed?: boolean; readonly [key: string]: unknown };
 }
 
@@ -92,24 +95,42 @@ export function sealedEntries(entries: readonly BatchEntryLike[]): BatchEntryLik
 }
 
 /**
+ * **The status this cache answers a genuinely uncached address with, while offline** (T-1039,
+ * review fix 2/2). Never `remaining` — see the header comment on why that reads as a truncation, not
+ * a refusal, everywhere else it is served — but a **502**, exactly what this worker actually is at
+ * that instant: a proxy standing in front of the real network that could not reach the origin for
+ * this address. The client already has a rule for that (`../surface/tilecache.ts`'s `fromTheRoute`,
+ * T-523's "a proxy answers in the same channel the origin does"), and it puts a `502` on the SAME
+ * silent-failure ladder a refused socket takes — the one path that backs off before asking again.
+ */
+const OFFLINE_MISS_STATUS = 502;
+
+/**
  * Reconstruct the exact shape `../surface/tilebatch.ts` already reads (`{tiles, remaining}`) from
  * whatever this cache has for the requested addresses — the offline answer (T-1039).
  *
- * Every address not found goes to `remaining`, which the client already treats as "the route did not
- * reach it, ask again" (T-573's `truncated`/`remaining` handling) rather than as a refusal — which is
- * exactly true here: this cache did not refuse it, it simply never had it (because it was live, or
- * was never fetched, or has since been evicted). That is also what keeps a live/unsealed address from
- * ever being answered offline: it can only ever be cached-then-served if [[sealedEntries]] let it in.
+ * **Every address is answered, one way or the other, and `remaining` is always empty.** The first
+ * cut put an uncached address in `remaining`, reasoning "this cache did not refuse it, it simply
+ * never had it" — true, but `remaining` means "the route did not reach it THIS TIME, ask again" (T-573's
+ * truncation handling), and `tilebatch.ts` requeues it on the very next microtask with **no delay at
+ * all**. Offline, that address fails again in milliseconds (the same connection refusal that put this
+ * cache on the offline path at all), and the result is a tight retry loop that never once reaches
+ * `TileCache`'s own failure handling — the jittered backoff this ticket exists to add never gets a
+ * chance to apply. So an uncached address is answered as its own [[BatchEntryLike]] with
+ * [[OFFLINE_MISS_STATUS]] instead: a real per-entry outcome `tilebatch.ts` rejects the caller with,
+ * which reaches `TileCache.failed()` and arms the silent-failure ladder exactly as a refused socket
+ * would. That is also what keeps a live/unsealed address from ever being served stale offline: it was
+ * never eligible to be cached in the first place ([[sealedEntries]]), so it always takes this branch.
  */
 export function buildOfflineBatch(
   addresses: readonly string[], cached: ReadonlyMap<string, unknown>,
 ): { readonly tiles: BatchEntryLike[]; readonly remaining: string[] } {
   const tiles: BatchEntryLike[] = [];
-  const remaining: string[] = [];
   for (const spelling of addresses) {
     const tile = cached.get(spelling);
-    if (tile !== undefined) tiles.push({ address: { spelling }, status: 200, tile: tile as BatchEntryLike["tile"] });
-    else remaining.push(spelling);
+    tiles.push(tile !== undefined
+      ? { address: { spelling }, status: 200, tile: tile as BatchEntryLike["tile"] }
+      : { address: { spelling }, status: OFFLINE_MISS_STATUS, error: "offline: no cached sealed tile for this address" });
   }
-  return { tiles, remaining };
+  return { tiles, remaining: [] };
 }
