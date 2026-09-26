@@ -73,7 +73,7 @@ import {
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
-  afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
+  afterglowAbsence, coreSamples, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import { ringMaxHoldColumns, ringRowAt, sampleRingRow } from "../../surface/livering";
 import type { OverlayQuad } from "../../surface/minimap";
@@ -938,6 +938,28 @@ function mount(el: HTMLElement, ctx: AppContext) {
     ringDiag = next;
     stage.dataset.liveRing = next;
   };
+  /**
+   * **The active pane's trace CORE, as the layer itself drew it** (T-1050): one sample per MEASURED
+   * column — `{x, y}` the pixel centre from the canvas element's top-left, and the 0–255 ink of that
+   * vertex — from the `trace-slice` paths submitted this frame. See [[coreSamples]] for why a pixel read cannot find
+   * the core on its own now that the layer is drawn over the waterfall, and what the e2e check does
+   * with this. Written only while the layer is on (it is off by default) and only for the pane whose
+   * readout describes the slice, and removed the moment it is not: a stale statement about a stroke
+   * that is no longer drawn would be worse than none.
+   */
+  let traceCoreDiag = "";
+  const stateTraceCore = (core: readonly TracePath[], strip: PaneRect) => {
+    const dpr = window.devicePixelRatio || 1;
+    // `onlyMeasured`: this runs in the frame it describes, so the cost is paid whether or not anyone
+    // reads it — 0.28 ms and 6.0 kB a frame at a 1440 px pane, against 0.86 ms and 36.8 kB for every
+    // column (measured; see [[coreSamples]]). The measured columns are also the only ones whose
+    // colour a cell can be asked about, so nothing the reader needs is dropped to buy that.
+    const next = JSON.stringify(coreSamples(core, strip, canvas.height, dpr, { onlyMeasured: true })
+      .map((c) => [Math.round(c.xPx * 10) / 10, Math.round(c.yPx * 10) / 10, c.rgb[0], c.rgb[1], c.rgb[2]]));
+    if (next === traceCoreDiag) return;
+    traceCoreDiag = next;
+    stage.dataset.traceCore = next;
+  };
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
@@ -1035,8 +1057,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // the strip (see `TraceStyle.shade`).
     out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-bloom", pane.id,
       { alpha: 0.18, widthPx: GLOW_PX, shade: "mono" }));
-    out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-slice", pane.id,
-      phosphor ? { alpha: 1, widthPx: SLICE_PX, ink: PHOSPHOR_INK } : { alpha: 1, widthPx: SLICE_PX }));
+    const core = tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-slice", pane.id,
+      phosphor ? { alpha: 1, widthPx: SLICE_PX, ink: PHOSPHOR_INK } : { alpha: 1, widthPx: SLICE_PX });
+    out.push(...core);
+    // **Where the core is on the screen and what ink it carries** (T-1050) — the layer's own
+    // statement of what it just handed the GPU, for the active pane only, off the very paths above.
+    // T-475's equality is checked against a real framebuffer, and since T-1041 the layer draws over
+    // the cells it is a spectrum of: a pixel read cannot tell the core from its own achromatic bloom
+    // blended over a coloured cell, and where the equality HOLDS the core pixel is identical to the
+    // cell, so a difference against a trace-off baseline keeps only the failures. So the page says
+    // where it stroked and in what colour, and `ui/e2e/app-trace.e2e.mjs` reads the COLOUR out of
+    // the framebuffer there — a wrong position fails "the pixel carries the stated ink", a diverged
+    // ramp fails "the cells carry it too". Presentation metadata read off the drawn vertices:
+    // commands nothing, recomputes no ramp, and absent entirely while the layer is off.
+    if (pane.id === p.activePane) stateTraceCore(core, strip);
 
     // The readout, for the pane gestures apply to. Written here rather than on the poll for the same
     // reason the quads are: it describes the frame that was just drawn. It names the SOURCE, because
@@ -1104,6 +1138,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (preview) preview.view.tracePx = traceOn ? TRACE_PX : 0;
     traceEl.hidden = !traceOn;
     if (!traceOn) traceEl.textContent = "";
+    // T-1050: the core statement describes a stroke that is drawn. With the layer off nothing is
+    // stroked and `traceFor` is not called at all, so the statement is withdrawn here rather than
+    // left to go stale — the same rule the readout above follows.
+    if (!traceOn) { delete stage.dataset.traceCore; traceCoreDiag = ""; }
     syncLayerControls();
   };
   // T-522: the found-signal boxes' switch is the ACTIVE pane's `detections` layer (T-806) — the
