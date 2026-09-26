@@ -28833,7 +28833,8 @@ tasks:
   - id: T-971
     milestone: MAUTO
     title: "FM/RDS sub-2: continuous RDS accumulation on the detection row (PS/RT/PTY), not a 4-group PI snapshot"
-    status: todo
+    status: in-progress
+    branch: task-t971
     priority: P1
     deps:
     - T-926
@@ -29894,7 +29895,8 @@ tasks:
   - id: T-1011
     milestone: M3
     title: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
-    status: todo
+    status: in-progress
+    branch: task-t1011
     priority: normal
     deps:
     - T-953
@@ -29964,7 +29966,8 @@ tasks:
   - id: T-1017
     milestone: MAUTO
     title: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
-    status: todo
+    status: in-progress
+    branch: task-t1017
     priority: medium
     deps:
     - T-967
