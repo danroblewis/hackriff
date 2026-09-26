@@ -30888,7 +30888,8 @@ tasks:
   - id: T-1046
     milestone: MLIVE
     title: "LSR-5: retire the live-edge tile refresh lane and the JSON row feed's live role once LSR-2 carries following panes"
-    status: todo
+    status: in-progress
+    branch: task-t1046
     priority: medium
     deps:
     - T-1042
@@ -31406,7 +31407,8 @@ tasks:
   - id: T-1066
     milestone: MUI
     title: "Client pollers become watchers: net.ts startWatch(route, fetch, fallbackMs = 30_000) fetches on a `changed` version bump and on the slow fallback only; steady state following live <= 1 req/s besides WS"
-    status: todo
+    status: in-progress
+    branch: task-t1066
     priority: high
     deps:
     - T-1065
