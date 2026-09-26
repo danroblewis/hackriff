@@ -30797,6 +30797,8 @@ tasks:
       FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
 
       2026-09-26 coordinator: the UI-stack integrator also saw app-trace fail IDENTICALLY on main 1090f468 (fresh hk, alone): the T-475 afterglow test and 'the trace is the spectrum at the viewport's time position' - besides heldObservation. Note T-1041 made the trace a layer OFF by default: a spec that asserts the trace must switch the layer on through the product's own control first. Own all app-trace reds on main here (or say which are a different defect).
+
+      2026-09-26 coordinator: the handback (c635e59c) fixes the product defect (a following pane's trace = the newest row, liveFrameFits) and every app-trace test but the afterglow-while-scrubbed park, which is split to T-1074. T-1051 closes on c635e59c once merged onto the UI stack (conflicts with T-996's app-trace.e2e.mjs/surface.ts).
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
@@ -31243,6 +31245,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY UI-stack integrator 2026-09-26: app-top-chrome.e2e red 3/3 alone on task-t1007 only ('the canvas moved by itself', 'gap changed'; green on t996/t1026) - does T-1007's settings menu move the canvas or the chip gap?
+  - id: T-1074
+    milestone: MUI
+    title: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
+    status: todo
+    priority: high
+    deps:
+    - T-1051
+    parallel_group: UI-TRACE-HOLD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      SPLIT FROM T-1051 (its handback 2026-09-26 01:44, branch task-t1051 c635e59c): every app-trace test is green 3/3 at 2 lanes EXCEPT 'T-475: the AFTERGLOW ... while SCRUBBED', which ran past the spec's 600 s deadline 3/3 at 2 lanes and alone needed 1-7 attempts (~45 s per failed attempt; one run 307 s). Cause located: scrubOntoCell (ui/e2e/app-trace.e2e.mjs) parks by FREEZING AT THE LIVE EDGE and waiting for a cell - the still-being-written edge cell - with failed attempts bounded only by the 180 s waitWhileWorking cap.
+      DELIVER: first log why each park attempt fails (one console.error of `last` in scrubOntoCell's catch) under HK_E2E_CONCURRENCY=2; then park deterministically - freeze and drag back into SEALED history as the 'scrubbed into the past' test already does (passes in 10-25 s at 2 lanes) - and bound failed attempts by the pane's report stalling, not a wall-clock cap. Same assertion (the afterglow while scrubbed), never looser. If a park attempt fails because of a product defect (the frozen pane never reports a cell), fix the product.
+      OBSERVED (T-1051, not chased): /api/tiles/batch took 10-40 s per 2-4 addresses on a debug hk at load ~35 - if the log shows the park waits on that, say so with numbers (T-1021 owns tile-lock hold).
+      ACCEPTANCE: app-trace whole spec green 3/3 alone AND 3/3 at 2 lanes (with live-edge) on a FRESH hk, the afterglow test under 60 s each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone/at 2 lanes on ports >= 9216 against a FRESH hk; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1051 worker 2026-09-26: app-trace 'T-475 AFTERGLOW while SCRUBBED' parks on the still-being-written live-edge cell and runs past 600 s at 2 lanes - park in sealed history deterministically (split from T-1051)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
