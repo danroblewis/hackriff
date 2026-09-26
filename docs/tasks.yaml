@@ -28554,7 +28554,7 @@ tasks:
   - id: T-963
     milestone: MAUTO
     title: AIS recipe (GMSK 9600, NRZI, HDLC, CRC-16/X.25) + a validated AIS reference oracle
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: RECIPE-AIS
@@ -28584,6 +28584,7 @@ tasks:
       2026-09-25 recovery: merged gated main d8bc9fa2 (board: took main's, re-applied the fix-round note). The textual merge compiled-broke hk-blocks framing tests: T-952 (APRS, on main) and T-963 each added an identical lsb_first_bits helper in crates/hk-blocks/src/blocks/framing/tests.rs (E0428); kept one, doc comment names both uses. hk-blocks ais_recipe + aprs_recipe + framing/bitstuff lib tests 25/25, python fixture/synth tests 110 passed, precheck hk-blocks clean.
     model_reason: "sonnet/high: a well-specified recipe over existing blocks, plus a new validated oracle"
     branch: task-t963
+    commit: 1f7120f8
   - id: T-964
     milestone: MSCAN
     title: "Scan everything (fast) does not light the coverage map: 4.3 % sampled after a full 1 MHz-6 GHz pass; /api/coverage observed only for the current step"
