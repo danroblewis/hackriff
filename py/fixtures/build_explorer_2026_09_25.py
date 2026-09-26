@@ -596,6 +596,46 @@ def build_p25() -> dict[str, Any]:
 _CTCSS_RELEVANT_KINDS = ("nbfm-voice-ctcss", "nbfm-burst")
 
 
+#: DMR's TDMA frame (two 30 ms bursts, ETSI TS 102 361-1 §4.2). The FM discriminator of a DMR
+#: emission carries a comb of lines on a 1/60 ms = 16.67 Hz grid, inside the CTCSS band (T-986).
+DMR_FRAME_S = 0.060
+
+
+def dmr_screen(data_path: Path, fs: float, offset_hz: float, start_s: float, duration_s: float
+               ) -> dict[str, Any]:
+    """The independent DMR oracle run over one emission's window, as a truth block (T-986): run on
+    *every* window-3 emission, not only the one the explorer called DMR, because the explorer's
+    "NBFM + CTCSS" burst at 461.125 MHz turned out to carry DMR base-station syncs on the 30 ms
+    burst grid. ``identified_dmr`` is ``dmr_ref.identify`` (sync count and slot-grid structure)."""
+    oracle = dmr_ref.decode_ci8(str(data_path), fs, offset_hz, start_s=start_s,
+                                duration_s=duration_s)
+    dec_fs = fs / max(1, int(fs // 48_000.0))
+    times = [round(start_s + s["sample"] / dec_fs, 4) for s in oracle["syncs"]]
+    return {
+        "n_syncs": oracle["n_syncs"],
+        "syncs_by_pattern": oracle["syncs_by_pattern"],
+        "sync_rate_bd": oracle["sync_rate_bd"],
+        "slot_grid_fraction": oracle["slot_grid_fraction"],
+        "identified_dmr": oracle["identified_dmr"],
+        "identify_rule": (f">= {dmr_ref.MIN_IDENT_SYNCS} syncs and >= "
+                          f"{dmr_ref.MIN_SLOT_GRID_FRACTION:g} of their spacings within "
+                          f"{dmr_ref.SLOT_GRID_TOL_S * 1e3:g} ms of a whole number of "
+                          f"{dmr_ref.BURST_S * 1e3:g} ms bursts"),
+        "first_sync_s": times[0] if times else None,
+        "last_sync_s": times[-1] if times else None,
+        "window": {"t_start_s": start_s, "duration_s": duration_s},
+        "decoder": oracle["decoder"],
+    }
+
+
+def frame_harmonic(tone_hz: float) -> dict[str, Any]:
+    """Where a measured sub-audible line sits on DMR's 60 ms frame comb."""
+    n = round(tone_hz * DMR_FRAME_S)
+    return {"measured_hz": round(tone_hz, 2), "harmonic": n,
+            "frame_line_hz": round(n / DMR_FRAME_S, 2),
+            "residual_hz": round(tone_hz - n / DMR_FRAME_S, 2)}
+
+
 def build_ctcss() -> dict[str, Any]:
     """Builds the LMR/GMRS NBFM+CTCSS fixture (T-985) into the **external store** (gitignored):
     at 72 MB the raw 15 s/2.4 Msps capture is over fixtures/README.md's 25 MB committed cap, and
@@ -674,6 +714,35 @@ def build_ctcss() -> dict[str, Any]:
                 f"{oracle['tone_snr_db']:.1f} dB) vs explorer claim {claimed_hz!r} Hz"
             )
 
+        dmr_truth = dmr_screen(src_data, fs, offset_hz, t0, dur)
+        tone_claimed = ctcss_truth is not None and (
+            claimed_hz is not None or ctcss_truth["table_match"] is not None)
+        if tone_claimed and dmr_truth["identified_dmr"]:
+            # T-986: the two tone claims are both lines of the DMR frame comb, not a CTCSS tone.
+            # The explorer's value is its own measured 233.0 Hz (its 233.6 Hz is the table snap).
+            ctcss_truth["settled"] = {
+                "ctcss_hz": None,
+                "subaudible_kind": "none",
+                "verdict": "no CTCSS tone: the emission is DMR (TDMA 4FSK), which carries no "
+                           "analogue sub-audible tone",
+                "reason": (f"dmr_ref.py finds {dmr_truth['n_syncs']} DMR syncs "
+                           f"{dmr_truth['syncs_by_pattern']} in this window, "
+                           f"{dmr_truth['slot_grid_fraction']:.2f} of their spacings on the "
+                           f"30 ms burst grid; the discriminator's sub-audible lines are the "
+                           f"harmonics of the {DMR_FRAME_S * 1e3:g} ms TDMA frame, and the two "
+                           f"disputed tones are two of them"),
+                "frame_harmonics": {
+                    "ctcss_ref": frame_harmonic(oracle["tone_hz_measured"]),
+                    "explorer_nbfm3": frame_harmonic(233.0),
+                },
+                "settled_by": "T-986",
+            }
+            summary_bits.append(
+                f"{label}: SETTLED (T-986) no CTCSS tone - DMR, {dmr_truth['n_syncs']} syncs "
+                f"on the 30 ms grid; both tones are 60 ms frame-comb lines")
+        elif dmr_truth["identified_dmr"]:
+            summary_bits.append(f"{label}: DMR, {dmr_truth['n_syncs']} syncs (T-986)")
+
         items.append(dict(
             **whole(n),
             freq_lower_edge=f_center - float(em["bandwidth_hz"]) / 2,
@@ -686,7 +755,7 @@ def build_ctcss() -> dict[str, Any]:
                 channel_hz=f_center, decoded=False,
                 decode_note="Not decoded: blind detection + burst timing/CTCSS identification "
                             "only; no voice/audio content is stored (CLAUDE.md legal guardrails).",
-                ctcss=ctcss_truth,
+                ctcss=ctcss_truth, dmr=dmr_truth,
             ),
         ))
 
@@ -814,6 +883,7 @@ def build_dmr() -> dict[str, Any]:
 
         if em["kind"] == "dmr-4fsk-bursts":
             oracle = dmr_ref.decode_ci8(str(data_path), fs, offset_hz, duration_s=n / fs)
+            dec_fs = fs / max(1, int(fs // 48_000.0))
             claim_match = re.search(r"found (\d+)x", em["decoded"])
             claimed_syncs = int(claim_match.group(1)) if claim_match else None
             agrees = claimed_syncs is not None and claimed_syncs == oracle["n_syncs"]
@@ -834,6 +904,12 @@ def build_dmr() -> dict[str, Any]:
                           "hamming": s["hamming"], "order": s["order"], "n_phases": s["n_phases"]}
                          for s in oracle["syncs"]],
                 "levels": oracle["levels"],
+                "slot_grid_fraction": oracle["slot_grid_fraction"],
+                "identified_dmr": oracle["identified_dmr"],
+                "first_sync_s": round(min(s["sample"] for s in oracle["syncs"]) / dec_fs, 4)
+                if oracle["syncs"] else None,
+                "last_sync_s": round(max(s["sample"] for s in oracle["syncs"]) / dec_fs, 4)
+                if oracle["syncs"] else None,
                 "decoder": oracle["decoder"],
                 "oracle_agrees_with_explorer_sync_count": agrees,
                 "explorer_claim": {
@@ -850,7 +926,12 @@ def build_dmr() -> dict[str, Any]:
                 f"this {DMR_TRIM_DURATION_S:g} s clip vs explorer's {claimed_syncs} in the full "
                 f"10 s file"
             )
-        elif em["kind"] == "nbfm-burst":
+        if dmr_truth is None:
+            # T-986: every emission is screened, not only the one the explorer called DMR.
+            dmr_truth = dmr_screen(data_path, fs, offset_hz, 0.0, n / fs)
+            if dmr_truth["identified_dmr"]:
+                summary_bits.append(f"{label}: DMR, {dmr_truth['n_syncs']} syncs (T-986)")
+        if em["kind"] == "nbfm-burst":
             oracle = ctcss_ref.decode_ci8(str(data_path), fs, offset_hz, duration_s=n / fs)
             claimed_hz = em.get("ctcss_hz")
             oracle_hz = oracle["ctcss"]["table_hz"] if oracle["ctcss"] else None
