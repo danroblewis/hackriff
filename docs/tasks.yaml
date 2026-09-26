@@ -28808,7 +28808,6 @@ tasks:
     milestone: M2-hardening
     title: "replumb_never_pays_for_the_ring fails alone on main: a re-plumb stalls the always-on readers 1.8 s (bound 1 s)"
     status: in-progress
-    branch: task-t973
     priority: P1
     deps:
     - T-941
@@ -28821,6 +28820,15 @@ tasks:
       DELIVER (deflake-triage): run it alone x5 on the quietest box available and on the tree before tonight's re-plumb-path landings (T-917 survey thread, T-868 listen parity, T-891 accessory source) - bisect if it was green before; fails alone on a quiet box => a real stall: root-cause what the always-on readers wait on during a re-plumb (a lock held across segment teardown? the survey/detect straggler joining?) and fix it; if the assertion is genuinely a latency bound that only a quiet box meets, move that bound to the `timing` tier (just timing, docs/10 §3.6) and keep a DETERMINISTIC correctness assertion in the gate (the readers are never blocked on ring allocation - e.g. the ring is allocated off the readers' path, asserted structurally). No threshold change, no retry. Coordinate with T-941 (running; same re-plumb path) - this ticket waits for it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-pipeline -E 'binary(replumb_never_pays_for_the_ring)'), then HAND BACK. Never `just gate`.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 21:29).
+      Merged main 6f38fbb8 into task-t973 (merge commit d1258361). The one conflict was .config/nextest.toml, where main's T-1036 (the_detection_write_rate_clears_its_floor) and this ticket's a_re_plumb_with_the_ring_open_stalls_the_readers_under_a_second each appended to the same timing-tier comment and to both default-filter lists. Resolved by keeping both: main's comment then T-973's, and both test names in the default profile's exclusion list and the timing profile's inclusion list. docs/tasks.yaml auto-merged as main's copy plus only T-973's own result/branch fields; the hook refuses `git checkout -- docs/tasks.yaml`, so that auto-merge was kept and checked with `just task validate` (882 tickets OK). The ticket's own change is unchanged from 36c6dbe0: the re-plumb stall bound moved to the timing tier, and T-536 is asserted from state in the gate (see the prior result).
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(replumb_never_pays_for_the_ring)' -> exit 0 (1 passed (gate half), 1 skipped (timing half, by default-filter) after the merge); cargo nextest run -p hk-pipeline -P timing -E 'binary(replumb_never_pays_for_the_ring)' -> exit 0 (timing half passes under the timing profile); just nextest-config-check -> exit 0 (both tier lists name real tests, including main's T-1036 entry); just task validate -> exit 0 (882 tickets OK)
+      precheck exit 0
+      Commits: 36c6dbe0, d1258361
+      Observed, not chased: A re-plumb's capture-off window is dominated by hk-history's segment-end persistence on the join path (history.rs run() end: scheme-1 checkpoint 30-200 ms, ViewWriter::finish waiting on its producer ~130 ms and joining hk-view-io's tile writes/fsyncs 100-300 ms); candidate fix is a run-level view-io FIFO that segment ends enqueue to rather than join. Core real-time path, not chased.
+      Resources: 273 CPU-s, peak 3.8 GB
+    branch: task-t973
   - id: T-974
     milestone: M2-hardening
     title: hk-cli api_contract tests fail alone in worker worktrees but pass in the merge gate (retune stream, recipe routes, ws header, band-collapsed activity)
