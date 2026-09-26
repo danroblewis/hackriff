@@ -71,6 +71,17 @@ fn start_server_in(
     dir: PathBuf,
     retention_s: Option<f64>,
 ) -> (TempDataDirGuard, Serving, SocketAddr) {
+    start_server_fft(dir, retention_s, 1024)
+}
+
+/// [`start_server_in`] at an explicit display FFT length — which sets the view lattice's finest
+/// frequency cell, and with it how much spectrum one store block spans (T-1034: `hk serve`'s own
+/// default is 4096).
+fn start_server_fft(
+    dir: PathBuf,
+    retention_s: Option<f64>,
+    fft_len: usize,
+) -> (TempDataDirGuard, Serving, SocketAddr) {
     let guard = TempDataDirGuard::new(dir.clone());
     let serving = start(&ServeOptions {
         source: ServeSource::HackRf {
@@ -81,7 +92,7 @@ fn start_server_in(
         data_dir: Some(dir),
         bind: "127.0.0.1:0".parse().unwrap(),
         ui_dist: None,
-        fft_len: 1024,
+        fft_len,
         rows_per_s: 25.0,
         calibration: None,
         token: Some(TOKEN.into()),
@@ -10248,6 +10259,11 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         assert!(own["store"].is_string(), "{own}");
         assert!(own["level"].is_u64(), "{own}");
         assert!(own["stages"].is_array(), "{own}");
+        // T-1034: the tune record's bound on the search, or null when the record made no claim.
+        assert!(
+            own["record_bound_s"].is_null() || own["record_bound_s"].is_f64(),
+            "{own}"
+        );
         let (found, used) = (
             own["columns_found"].as_u64().unwrap(),
             own["columns_used"].as_u64().unwrap(),
@@ -10270,6 +10286,226 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         sh["rule"]
             .as_str()
             .is_some_and(|s| s.contains("GREY IS UNCHANGED"))
+    );
+    stop_server(serving);
+}
+
+/// T-1034, **the user's bug, through the mock SDR: after a nudge of half a span, the departed
+/// band's newest half is fog — never blank — at the finest level, and at every level above it.**
+///
+/// The user: "If I have the waterfall going for a while, then I nudge it +1/2 to the right, the
+/// fog-of-war applies correctly for the 99.5 to 100.2 tiles, but the 100.2 to 100.8 tiles do not
+/// load. [...] The issue goes away if I zoom out." Staging answered those finest tiles
+/// `shadow.runs = 0` with one store time block `unsearched`: the tile's own-level search skips a
+/// time block that holds no tile over its frequency, but a store block spans 600 kHz, the new
+/// window's edge bin lands in the departed half's block in every block after the retune, and each
+/// was read in full until the budget ran out ~20 s short of the band's last live row.
+///
+/// Driven through the generic device route (`POST /api/control/center`), with every instant read
+/// off the wire in capture time: the band is measured at the data edge (`armed`), the radio moves
+/// half a span up, and the data edge is let run more than ten store blocks past it. Then every
+/// live-edge tile over the departed band, at (0, 0), (1, 0) and (2, 1): no window unsearched,
+/// every column of every row before the data edge either measured or carried by a shadow run, and
+/// every carried value last seen at the band's last live row — at or after `armed`, and no later
+/// than one row past the new band's first measured row.
+#[test]
+fn a_nudged_away_band_is_fog_at_the_finest_level_up_to_its_last_live_row() {
+    // `hk serve`'s default display FFT, as staging ran: 586 Hz cells, so one store block spans
+    // 600 kHz and the new window's edge bin lands in the departed half's block in every time
+    // block after the nudge. At this file's usual 1024 a block spans the whole 2.4 MHz window and
+    // the edge bin lands in the NEXT block — the case never arises there.
+    let (_dir_guard, serving, addr) = start_server_fft(temp_data_dir(), None, 4096);
+    const N: u64 = 32;
+    let n = N as usize;
+    let tile = |lf: u32, lt: u32, fi: u64, ti: u64| {
+        format!("/api/tiles?level_f={lf}&level_t={lt}&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let (st, probe) = get(addr, &tile(0, 0, 0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let geom = |lf: u32, lt: u32| {
+        (
+            f_cell * f64::from(1u32 << lf) * N as f64,
+            t_cell * f64::from(1u32 << lt) * N as f64,
+        )
+    };
+    let (w0, h0) = geom(0, 0);
+    // The departed band: the fixture window's lower half, which the nudge leaves. The half nearest
+    // the new window is where staging went blank.
+    let (band_lo, band_hi) = (FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0, FIXTURE_CENTER_HZ);
+    let probe_fi = ((band_lo + band_hi) / 2.0 / w0) as u64;
+    // The store's newest frame, or `None` before the first one is folded.
+    let edge_now = || {
+        get(addr, &tile(0, 0, probe_fi, (unix_now() / h0) as u64)).1["shadow"]["edge_s"].as_f64()
+    };
+    let grid_of = |fi: u64, ti: u64| {
+        let v = get(addr, &tile(0, 0, fi, ti)).1;
+        let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+        v["grid"]["max_db"].as_array().cloned().map(|g| (t0, g))
+    };
+    // Armed: the departed band measured at the data edge, read off the wire.
+    let mut armed = 0.0f64;
+    wait_for(
+        "the band to be measured at the data edge",
+        Duration::from_secs(60),
+        || {
+            let Some(e) = edge_now() else {
+                return false;
+            };
+            let Some((t0, g)) = grid_of(probe_fi, (e / h0) as u64) else {
+                return false;
+            };
+            match (0..n).rev().find(|&r| !g[r * n + n / 2].is_null()) {
+                Some(r) => {
+                    armed = t0 + r as f64 * t_cell;
+                    true
+                }
+                None => false,
+            }
+        },
+    );
+    // The nudge: half a span up, through the device route.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * ((FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0) / step).round();
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // Let capture run well past ten blocks of the view lattice's finest node (64 rows each), so
+    // the live edge sits past what the budget could read block by block. Waited on the DATA edge,
+    // never the wall clock.
+    let blocks_s = 10.5 * 64.0 * t_cell;
+    wait_for(
+        "the data edge to run ten store blocks past the nudge",
+        Duration::from_secs(180),
+        || edge_now().is_some_and(|e| e > armed + blocks_s),
+    );
+    // The new band's first measured row after `armed`: the departure is before it.
+    let new_fi = ((moved + FIXTURE_RATE_HZ / 4.0) / w0) as u64;
+    let edge = edge_now().expect("the edge ran past the nudge");
+    let arrived = ((armed / h0) as u64..=(edge / h0) as u64)
+        .find_map(|ti| {
+            let (t0, g) = grid_of(new_fi, ti)?;
+            (0..n)
+                .map(|r| (r, t0 + r as f64 * t_cell))
+                .find(|&(r, t)| t > armed && (0..n).any(|c| !g[r * n + c].is_null()))
+                .map(|(_, t)| t)
+        })
+        .expect("the band moved to is measured after the nudge");
+
+    let new_lo = moved - FIXTURE_RATE_HZ / 2.0;
+    let mut checked = 0usize;
+    for (lf, lt) in [(0u32, 0u32), (1, 0), (2, 1)] {
+        let (w, h) = geom(lf, lt);
+        let dt = h / N as f64;
+        // The live-edge tile, whole tiles over the departed band only.
+        let ti = ((edge - dt) / h) as u64;
+        let fis = (band_lo / w).ceil() as u64..(band_hi / w).floor() as u64;
+        assert!(!fis.is_empty(), "({lf}, {lt}): {band_lo}..{band_hi} / {w}");
+        for fi in fis {
+            let (st, v) = get(addr, &tile(lf, lt, fi, ti));
+            assert_eq!(st, 200, "{v}");
+            let sh = &v["shadow"];
+            let at = format!(
+                "({lf}, {lt}) tile {fi} ({:.3}-{:.3} MHz)",
+                fi as f64 * w / 1e6,
+                (fi + 1) as f64 * w / 1e6
+            );
+            assert_eq!(
+                sh["search"]["unsearched"],
+                json!([]),
+                "{at}: the departed band's past is searched, never left: {}",
+                sh["search"]
+            );
+            let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+            let tile_edge = sh["edge_s"].as_f64().unwrap();
+            let reach = sh["reach_s"].as_f64().unwrap_or(tile_edge).max(tile_edge);
+            let grid = v["grid"]["max_db"].as_array();
+            let mut covered = vec![false; n * n];
+            let arr = |k: &str| sh[k].as_array().unwrap().clone();
+            let (f, row, rows, t) = (arr("f"), arr("row"), arr("rows"), arr("last_t_s"));
+            for i in 0..f.len() {
+                let c = f[i].as_u64().unwrap() as usize;
+                let r0 = row[i].as_u64().unwrap() as usize;
+                let last_t = t[i].as_f64().unwrap();
+                let measured_now = grid.is_some_and(|g| (0..n).any(|r| g[r * n + c].is_number()));
+                // The column right below the new window's tuned edge takes its edge bin, which
+                // reaches half a bin past the edge: live data from the new window, not the
+                // departed band's (staging's tile 671 showed the same one column).
+                let cell = w / N as f64;
+                let edge_bin = fi as f64 * w + (c + 1) as f64 * cell > new_lo - cell / 2.0;
+                if !measured_now && !edge_bin {
+                    // A column the new window never reaches: its value is the band's last live
+                    // row, which is after `armed` and before the new band's first row.
+                    assert!(
+                        last_t >= armed - dt && last_t <= arrived + dt,
+                        "{at} column {c}: last seen {last_t}, not the band's last live row \
+                         (armed {armed}, new band from {arrived}): {sh}"
+                    );
+                }
+                for r in r0..r0 + rows[i].as_u64().unwrap() as usize {
+                    covered[r * n + c] = true;
+                }
+            }
+            // What a client following docs/api.md draws as THE grey: a row the answer's record
+            // reaches (`coverage.horizon.as_of_s`), a cell the selected plane calls `unobserved`,
+            // and no shadow run over it. Over a departed band there must be none: the radio
+            // looked here, then left, and that is fog. (A cell the plane calls `observed` past the
+            // fold edge is the pending mark, never grey.)
+            let cov = &v["coverage"];
+            let states: Vec<&str> = cov["states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap())
+                .collect();
+            let sel = cov["selected"]["plane"].as_u64().unwrap() as usize;
+            let plane: Vec<&str> = cov["planes"][sel]["runs"]
+                .as_array()
+                .unwrap()
+                .chunks(2)
+                .flat_map(|p| {
+                    std::iter::repeat_n(
+                        states[p[0].as_u64().unwrap() as usize],
+                        p[1].as_u64().unwrap() as usize,
+                    )
+                })
+                .collect();
+            assert_eq!(plane.len(), n * n, "{cov}");
+            let as_of = cov["horizon"]["as_of_s"].as_f64();
+            for c in 0..n {
+                for r in 0..n {
+                    let start = t0 + r as f64 * dt;
+                    if as_of.is_some_and(|a| start >= a) || start >= reach {
+                        continue;
+                    }
+                    let measured = grid.is_some_and(|g| g[r * n + c].is_number());
+                    assert!(
+                        measured || covered[r * n + c] || plane[r * n + c] != "unobserved",
+                        "{at} column {c} row {r} is BLANK: unobserved, not measured, no fog \
+                         (armed {armed}, edge {tile_edge}): {}",
+                        sh["search"]
+                    );
+                    // Before the fold edge nothing is pending: every departed cell is fog.
+                    if start < tile_edge {
+                        assert!(
+                            measured || covered[r * n + c],
+                            "{at} column {c} row {r}, before the fold edge {tile_edge}, carries \
+                             no fog: {}",
+                            sh["search"]
+                        );
+                    }
+                }
+            }
+            checked += 1;
+        }
+    }
+    eprintln!(
+        "T-1034: {checked} departed tiles fogged edge to edge; armed {armed:.2}, new band from \
+         {arrived:.2}, edge {edge:.2}"
     );
     stop_server(serving);
 }
@@ -11964,6 +12200,81 @@ fn trunking_load_index_answers_documented_shape_and_carries_no_content() {
         addr,
         "POST",
         "/api/trunking/load?t0=0&t1=3600",
+        Some(&auth),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
+// ---------------------------------------------------------------------------
+// T-977 control-channel candidates and their verdicts
+
+/// T-977, SIGNAL-085: `/api/trunking/cc-candidates` answers the documented shape on a fresh run.
+///
+/// The interesting assertion is the **empty state**: a run whose hunt has not completed a pass
+/// answers `pass: null`, not `{"channels": []}`. Un-looked-at and looked-at-and-chose-nothing are
+/// different facts (ADR-0021 §7A.4), and this route exists precisely to keep them apart — the same
+/// rule the canvas's grey obeys. A shape-only assertion would pass either way, so this one asserts
+/// the value.
+#[test]
+fn cc_candidates_answers_pass_null_before_a_hunt_has_completed_one() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/trunking/cc-candidates");
+    assert_eq!(st, 200, "{v}");
+    assert!(v.get("pass").is_some(), "missing pass: {v}");
+    assert!(
+        v["pass"].is_null() || v["pass"].is_object(),
+        "pass is either null (no pass completed) or the pass object: {v}"
+    );
+    if let Some(pass) = v["pass"].as_object() {
+        for field in [
+            "pass",
+            "t_start",
+            "t_end",
+            "device_id",
+            "tune_center_hz",
+            "raster_hz",
+            "grid_offset_hz",
+            "channels_swept",
+            "channels",
+        ] {
+            assert!(pass.contains_key(field), "missing {field}: {v}");
+        }
+        assert!(is_array(&v["pass"]["channels"]), "{v}");
+        for ch in v["pass"]["channels"].as_array().unwrap() {
+            for field in ["k", "center_hz", "fco", "candidacy", "outcome", "reason"] {
+                assert!(ch.get(field).is_some(), "channel missing {field}: {ch}");
+            }
+            let outcome = ch["outcome"].as_str().unwrap_or_default();
+            assert!(
+                [
+                    "confirmed",
+                    "sync-without-check",
+                    "no-sync",
+                    "not-demodulated",
+                    "admission-refused",
+                ]
+                .contains(&outcome),
+                "outcome outside the documented enum: {ch}"
+            );
+        }
+    }
+
+    // Metadata only, exactly like `/api/trunking/load`: a verdict about a channel is not its
+    // traffic.
+    let body = v.to_string().to_lowercase();
+    for banned in ["audio", "vocoder", "pcm"] {
+        assert!(!body.contains(banned), "must never carry {banned:?}: {v}");
+    }
+
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/trunking/cc-candidates",
         Some(&auth),
         Some("{}"),
     );

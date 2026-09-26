@@ -39,6 +39,7 @@
 
 pub mod atsc; // T-979: the 8VSB television survey
 pub mod audio; // T-869 (ADR-0015 §12.2): the Listen chooser
+pub mod ccverdict; // T-977: the control-channel hunt's per-channel verdicts
 pub mod chains;
 pub mod characterise; // T-242
 pub mod class;
@@ -69,6 +70,7 @@ pub mod attention; // T-119
 pub mod candidates; // T-128
 pub mod observe; // T-115
 pub mod occupancy; // T-118
+pub mod overlap; // T-978: the spectrum hand-off behind the overlap re-analysis
 pub mod presence; // T-388
 pub mod reports; // T-121
 pub mod retention; // T-904
