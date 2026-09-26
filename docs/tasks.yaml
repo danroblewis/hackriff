@@ -31945,7 +31945,7 @@ tasks:
   - id: T-1084
     milestone: MUI
     title: "RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands"
-    status: in-progress
+    status: done
     branch: task-t1084
     priority: P1
     deps:
@@ -31961,6 +31961,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands
+    result: |
+      DONE (coordinator, 2026-09-26 08:4x - the worker proposed CANCEL because nothing was left to fix; the ticket's deliverable WAS the verification, so recorded as done with its evidence). Both RC reds are fixed on main by the landed UI stack: T-1051 (c88c5de9: a following pane's trace is the newest row) and T-1007/T-996/T-1026 (49a5253a: the sheet floats over the full-bleed canvas; app-dismiss reworked). Evidence on main with a fresh hk, alone on port 9216: app-dismiss 3/3 green; app-trace 4/5 green with the last 3 consecutive green - the one red is the colour check's marginal bound, owned by T-1092 (AFTERGLOW is T-1074, landed be9ee280).
   - id: T-1085
     milestone: M2-hardening
     title: "listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag"
