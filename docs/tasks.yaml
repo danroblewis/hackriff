@@ -30838,7 +30838,7 @@ tasks:
   - id: T-1056
     milestone: MMAP
     title: "Black bar at the bottom of the map: fit() reserved the sheet peek strip under the panes (T-933); the sheet floats over the full-bleed canvas"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-SHEET-INSET
@@ -30853,6 +30853,9 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor: Black bar at the bottom of the map: fit() reserved the sheet peek strip under the panes (T-933); the sheet floats over the full-bleed canvas
     branch: task-sup-sheet-inset
     dispatch: manual
+    commit: 72ef7434
+    result: |
+      LANDED 2026-09-26 00:04 in the bulk with T-1047/T-1052/T-1050/T-1053 (merge 72ef7434). Supervisor-authored at the user's request: surface.ts fit() no longer lifts the panes above the sheet's PEEK_PX strip (T-933's clearance, the black bottom bar); only the out-strip clearance remains, so the sheet/card floats over the full-bleed canvas. Branch task-sup-sheet-inset, commit cbe32c84; ui unit 106/106; app-dismiss + app-sheet e2e green.
   - id: T-1057
     milestone: MLIVE
     title: "Visible tiles are ABANDONED and stay black forever: every pending visible address must be re-requested with jittered backoff until served or stated nonexistent (tilecache failed(), abandonedUntil, a stale T-905 survey veto after a retune, batch 503/remaining entries)"
