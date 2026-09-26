@@ -55,6 +55,7 @@
 
 import { fitToLiveWindow, retunePlan, type FrequencyGrid, type RetunePlan, type RetuneRefusal } from "../navigation";
 import { applyDeviceAction, retuneAction, type DeviceAction } from "../app/centre/view";
+import { retuneDevice, type AttachedDevice } from "./panedevice";
 import type { AppContext } from "../app/context";
 import { boxOf, timeExtentOf, type PaneState } from "./panes";
 
@@ -83,6 +84,18 @@ export interface RetuneModeTarget {
   readonly paneId: string;
   /** The pane's coverage selector — whose window this is about (`"any"` = the union). */
   readonly device: string;
+  /**
+   * **The `device_id` a sent target must name** (T-1006), or null for none.
+   *
+   * The mode is the one path to the front end that a *gesture* opens, so it is also the one that
+   * would post a selector-less request on a run holding several radios — `400 device_required`,
+   * which the server answers rather than moving whichever radio was composed first. [[deviceBlock]]
+   * carries which way the pane's device failed to resolve, and [[retuneModeAcceptable]] refuses
+   * on it, so the mode never asks for a retune the route must refuse.
+   */
+  readonly retuneDeviceId: string | null;
+  /** Why the pane's front end could not be resolved (T-1006), or null when it was. */
+  readonly deviceBlock: "device_required" | "device_gone" | null;
   /** The region planned for: the view, or the largest achievable window centred on it. */
   readonly loHz: number;
   readonly hiHz: number;
@@ -106,6 +119,10 @@ export interface RetuneModeTarget {
  */
 export function retuneModeTarget(
   pane: PaneState, grid: FrequencyGrid | null, edgeNs: number, edgeGraceNs = 0,
+  /** Every live front end this run holds (T-1006), `/api/control/state`'s `devices[]`. `[]` — the
+   * default — is a replay or a run with none, and then no selector is named and the route's own
+   * `not_live` answers. */
+  attached: readonly AttachedDevice[] = [],
 ): RetuneModeTarget {
   const box = boxOf(pane, edgeNs);
   const t = timeExtentOf(pane.time, edgeNs);
@@ -114,9 +131,12 @@ export function retuneModeTarget(
   // back unchanged, which is why the ordinary case has no special path here.
   const fit = fitToLiveWindow(grid, box.f0Hz, box.f1Hz);
   const loHz = fit?.loHz ?? box.f0Hz, hiHz = fit?.hiHz ?? box.f1Hz;
+  const dev = retuneDevice(attached, pane.device);
   return {
     paneId: pane.id,
     device: pane.device,
+    retuneDeviceId: dev.kind === "named" ? dev.deviceId : null,
+    deviceBlock: dev.kind === "ambiguous" ? "device_required" : dev.kind === "gone" ? "device_gone" : null,
     loHz,
     hiHz,
     viewLoHz: box.f0Hz,
@@ -128,7 +148,15 @@ export function retuneModeTarget(
 }
 
 /** Whether a target can be sent. A refusal is stated, never clamped into something takeable. */
-export const retuneModeAcceptable = (t: RetuneModeTarget | null): boolean => !!t && t.plan.ok;
+export const retuneModeAcceptable = (t: RetuneModeTarget | null): boolean =>
+  !!t && t.plan.ok && t.deviceBlock === null;
+
+/** The reason this pane's front end could not be named (T-1006) — the server's own rule, said here
+ * rather than posted and refused. */
+const DEVICE_BLOCK_TEXT = {
+  device_required: "Retune mode: this viewport draws the union of every front end, so there is no one radio to tune — pick a front end for it in the viewport menu.",
+  device_gone: "Retune mode: this viewport is pinned to a front end this run does not hold, so nothing here can tune it — pick a front end for it in the viewport menu.",
+} as const;
 
 /** The reason no capture configuration reaches this view at all — the refusals the mode keeps. */
 function refusalText(reason: RetuneRefusal): string {
@@ -150,6 +178,9 @@ function refusalText(reason: RetuneRefusal): string {
  * a 20 MHz capture must be able to read that off the screen rather than deduce it from the fog.
  */
 export function retuneModeLabel(t: RetuneModeTarget): string {
+  // The device first: a viewport whose radio is not named cannot be tuned however good the plan is,
+  // and telling the user about a capture configuration that will not be sent states the wrong thing.
+  if (t.deviceBlock) return DEVICE_BLOCK_TEXT[t.deviceBlock];
   if (!t.plan.ok) return refusalText(t.plan.reason);
   const mhz = (t.plan.centerHz / 1e6).toFixed(4);
   const msps = (t.plan.spanHz / 1e6).toFixed(3);
@@ -176,7 +207,9 @@ export function retuneModeLabel(t: RetuneModeTarget): string {
  */
 export function retuneModeAction(t: RetuneModeTarget | null): DeviceAction | null {
   if (!t || !retuneModeAcceptable(t) || !t.plan.ok) return null;
-  return retuneAction(t.plan.centerHz, "retune-mode", null, t.plan.spanHz);
+  // T-1006: and WHICH radio. `retuneModeAcceptable` has already refused every unresolvable pane, so
+  // a null here is "this run holds no live front end" — send no selector and let the route say so.
+  return retuneAction(t.plan.centerHz, "retune-mode", null, t.plan.spanHz, t.retuneDeviceId);
 }
 
 /** What [[commitRetuneMode]] needs from the surface around it. */
