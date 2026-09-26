@@ -237,6 +237,68 @@ export function tilesFor(lat: Lattice, box: Box, levelF: number, levelT: number,
 }
 
 /**
+ * How many tiles the coarse stand-in enumeration may take (T-1037).
+ *
+ * It is a handful and not a viewport's worth for two reasons, both of them properties of what the
+ * stand-in is *for*: it has to be **one** `/api/tiles/batch` request (so the whole picture arrives
+ * in one answer rather than trickling in, which is the jank this exists to remove), and it has to
+ * be cheap enough that asking for it on every viewport change is not a second viewport's worth of
+ * work. Four is the smallest number that still covers a box straddling a tile boundary on both
+ * axes, which is the ordinary case rather than the exception.
+ */
+export const COARSE_COVER_TILES = 4;
+
+/** The tile counts per axis `box` spans at `(levelF, levelT)` — [[tilesFor]]'s extent arithmetic
+ * without building the list, so a search over levels costs no allocation. */
+function spanTiles(lat: Lattice, box: Box, levelF: number, levelT: number): { nf: number; nt: number } {
+  const fw = fTileHz(lat, levelF), tw = tTileNs(lat, levelT);
+  if (!(fw > 0) || !(tw > 0) || !(box.f1Hz > box.f0Hz) || !(box.t1Ns > box.t0Ns)) return { nf: 0, nt: 0 };
+  const f0 = Math.max(0, Math.floor(box.f0Hz / fw));
+  const f1 = Math.min(maxFIndex(lat, levelF), Math.floor((box.f1Hz - 1e-9) / fw));
+  const t0 = Math.max(0, Math.floor(box.t0Ns / tw));
+  const t1 = Math.min(maxTIndex(lat, levelT), Math.floor((box.t1Ns - 1) / tw));
+  return { nf: Math.max(0, f1 - f0 + 1), nt: Math.max(0, t1 - t0 + 1) };
+}
+
+/**
+ * **The coarsest level that still covers `box` in one batch** — the stand-in enumeration (T-1037,
+ * user 2026-09-25: *"a lot of random black areas, which make it look very broken"*).
+ *
+ * A viewport's own level is tens of addresses, which arrive over tens of answers; until they do,
+ * a place with no resident ancestor is drawn PENDING, and a screen of PENDING quads is the black.
+ * So a viewport change asks for **two** things: its own level, and this — the coarsest level whose
+ * enumeration is at most `maxTiles` addresses, which is one request and therefore one reveal. It
+ * is drawn through the ordinary stand-in path, marked and stating its own level, so the honesty
+ * tiers are untouched: it says *coarse*, and coarse-and-true beats black.
+ *
+ * Coarsened **one axis at a time**, the axis currently costing more tiles first, so the answer is
+ * the coarsest covering level *of this box* rather than a fixed number of steps up a ladder — a
+ * pane 1 tile tall and 40 wide must coarsen frequency 5 times and time not at all.
+ *
+ * `null` when the viewport's own level already fits in `maxTiles`: then its own tiles *are* the one
+ * batch, and a second, coarser request would buy nothing and cost a tile read.
+ */
+export function coarsestCovering(
+  lat: Lattice, box: Box, levelF: number, levelT: number, device = "any",
+  maxTiles = COARSE_COVER_TILES,
+): { levelF: number; levelT: number; addrs: TileAddr[] } | null {
+  const capF = levelCapF(lat), capT = levelCapT(lat);
+  let lf = clampLevel(levelF, capF), lt = clampLevel(levelT, capT);
+  let { nf, nt } = spanTiles(lat, box, lf, lt);
+  if (nf * nt === 0) return null;
+  if (nf * nt <= maxTiles) return null;
+  while (nf * nt > maxTiles && (lf < capF || lt < capT)) {
+    // Coarsen the dearer axis. When only one axis can still be coarsened the choice is made for us,
+    // which is why the reach is per axis and not one step count for both.
+    const takeF = lf < capF && (nf >= nt || lt >= capT);
+    if (takeF) lf++; else lt++;
+    ({ nf, nt } = spanTiles(lat, box, lf, lt));
+  }
+  if (lf === clampLevel(levelF, capF) && lt === clampLevel(levelT, capT)) return null;
+  return { levelF: lf, levelT: lt, addrs: tilesFor(lat, box, lf, lt, device) };
+}
+
+/**
  * The tile `df`/`dt` levels coarser that contains `a`. A coarser cell covers twice the span per
  * level on that axis, so the index halves — **per axis, independently**.
  *
