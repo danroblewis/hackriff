@@ -790,6 +790,7 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST /api/annotations`, `PUT`/`DELETE /api/annotations/{id}`** |
 | Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST /api/views`, `PUT`/`DELETE /api/views/{id}`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
 | Scan plan overlay (small Scan button in the Go-to cluster; plan panel; the `scan` layer) | T-1008 | `map.scan` (the controller's plan/draft; progress from the shell's existing control-state poll, `device.scan`) | `GET /api/control/scan?windows=1` (the price of the plan as drawn **and the steps the engine will take** — the client draws them, never tiles a range itself) | `POST /api/control/scan` **only on the panel's explicit Start/Resume press** (commissions retunes, T-452), `POST /api/control/scan/stop` (surrenders the radio; never refused) |
+| Measurement box menu (right-click / long-press a Measure box) | T-1009 | `map.scan` (the plan it opens) + `research` (the marker it writes) | `GET /api/collections` (which collection a marker is filed in), `GET /api/control/scan?windows=1&device_id=…` (the plan it opens, priced on the chosen radio) | `POST /api/iqbuffer/clip` (the box's time window, band-filtered, off the chosen radio's ring — a read of the ring, not a device route), `POST /api/collections` + `POST /api/collections/{id}/markers` (Save as marker). **Scan** only *opens* the plan overlay above — Start stays that panel's own explicit press |
 | Export menu | MAP-23 | `research` | **`GET /api/research/export`** (T-823: one read-only GET, optionally narrowed to a collection - the bundle is the server's) | - (the client only names and saves the file; a share link is a later addition) |
 
 **Three rules this table encodes.**
@@ -797,7 +798,9 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 1. **Only three rows in the whole table reach a device route**, and each needs an explicit press on a
    **small** control: Go-to, the Selected tab's compact action cluster (§10.6 rule 4), and the scan
    plan's Start (T-1008 — a *commission* of retunes, T-452, taken on its own press; opening, dragging
-   and pricing the plan are reads). A per-row
+   and pricing the plan are reads). The measurement-box menu (T-1009) is **not** a fourth: choosing
+   "Scan this region with <device>" opens that same plan overlay, bounded by the box and bound to the
+   radio the user named, and the commissioning press is still the panel's own Start. A per-row
    **Go** button in the Explore drawer or Research may *raise* the gated retune offer, which is itself
    the band-4 transient that needs its own press. Everything else is a view change or a durable-state write.
 2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client
