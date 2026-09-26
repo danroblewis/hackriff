@@ -30303,7 +30303,7 @@ tasks:
   - id: T-1027
     milestone: MMAP
     title: "Retire the opaque bottom 'Selected - nothing yet' strip: selection lives in the click-opened detail card; the empty-state hint is a one-time translucent toast or the Go-to tooltip; nothing spans the bottom edge"
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-1026
@@ -30331,6 +30331,7 @@ tasks:
       Commits: 359378bc
       Observed, not chased: Screenshots are in ~/.hackriff-ops/work/T-1027/ (bottom-edge-1280.png, bottom-edge-400.png, red-injected-sheet-400.png). | No crates were touched, so precheck was cargo fmt --all --check (clean) plus tsc; clippy was not run.
       Resources: 139 CPU-s, peak 2.6 GB
+    commit: "49809503"
   - id: T-1028
     milestone: MMAP
     title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
