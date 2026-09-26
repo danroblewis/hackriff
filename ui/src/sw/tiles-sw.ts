@@ -1,6 +1,7 @@
 // The Service Worker that gives a reload an instant first paint offline (T-1039).
 //
-// Built to `dist/sw-tiles.js` (`ui/package.json`'s `build:sw`) and registered from `../app/main.ts`
+// Built to `dist/sw-tiles.js` (inlined into `ui/package.json`'s `build` script) and registered from
+// `../app/main.ts`
 // at the page's own origin, so its scope covers every request the app makes. All the logic that can
 // be tested without a real worker environment lives in `./tile-cache-logic.ts`, which
 // `ui/test/sw-tile-cache.test.ts` exercises directly; this file is the thin `fetch`-event wiring

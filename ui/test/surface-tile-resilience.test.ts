@@ -60,7 +60,10 @@ function harness(clock: { t: number }) {
   const cache = new TileCache<{ id: number }>(
     { upload: () => ({ id: 0 }), destroy: () => {} },
     source,
-    { now: () => clock.t, random: () => 0, staleAfterMs: 1000 },
+    // staleAfterMs well above LAT's own level-0 cadence margin (STALE_CADENCE_MARGIN x 1 s = 2 s),
+    // so it is the flat default doing the work in these tests, not the per-tile cadence floor
+    // (which `surface-cache.test.ts`'s own "COARSE level" test covers directly).
+    { now: () => clock.t, random: () => 0, staleAfterMs: 5000 },
   );
   return { cache, calls, setDown: (v: boolean) => { downUntilNextCall = v; } };
 }
@@ -74,7 +77,7 @@ test("a dropped batch never clears the resident tile it was trying to revalidate
   assert.equal(h.cache.acquire(addr(1)).kind, "resident");
   // The network drops, and a revalidation goes out and fails through the real batching layer.
   h.setDown(true);
-  clock.t = 1000; // staleAfterMs: the copy is now reportable as stale, but must still be ON SCREEN
+  clock.t = 5000; // staleAfterMs: the copy is now reportable as stale, but must still be ON SCREEN
   h.cache.refreshEdge(LAT, 0, [{ box: FULL_BOX, levelF: 0, levelT: 0 }]);
   await flush();
   const during = h.cache.acquire(addr(1));

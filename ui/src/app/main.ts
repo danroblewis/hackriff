@@ -27,7 +27,7 @@ const EAGER_AREAS: readonly AreaMounts[] = [explore.mounts, centre.mounts, dock.
  *
  * Best-effort and silent: a browser with no Service Worker support, or one that refuses the
  * registration, still runs exactly as before — this is resilience on top of the ordinary network
- * path (`../surface/tilebatch.ts`'s own stale-while-revalidate and jittered backoff), never a
+ * path (`../surface/tilecache.ts`'s own stale-while-revalidate and jittered backoff), never a
  * dependency of it.
  */
 function registerTileServiceWorker(): void {
