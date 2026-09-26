@@ -180,6 +180,13 @@
 .map-more-body #theme-btn { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
 .map-more-body #theme-btn:hover { background: var(--raise); }
 .map-more-body { display: flex; flex-direction: column; gap: 4px; }
+/* T-1053: the mode chips folded into ⋯ on a phone — the same buttons, as labelled menu rows. The
+   word is shown only here; in the chip row the icon is the face and the aria-label the name. */
+.map-ibtn-word { display: none; }
+.map-more-tools { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.map-more-tools .map-ibtn { width: auto; height: auto; min-height: 30px; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font: 12px var(--ui); text-align: left; }
+.map-more-tools .map-ibtn svg { width: 16px; height: 16px; flex: none; }
+.map-more-tools .map-ibtn-word { display: inline; }
 
 /* T-1008: the Scan button, inside the Go-to glass (small: it commands the radio), and its plan
    panel bottom-left above the map strip — beside the frequency axis the plan is drawn along, and
@@ -255,7 +262,13 @@
    eight of them, the nudges drop their label, and the pill states the device by its dot and label
    on the row under the nudges. */
 @media (max-width: 600px) {
-  .map-ctl { --topright-w: 328px; } /* T-1025, +T-1028's chip: 9 × 32 + 8 × 4 + 8 */
+  /* T-1053: five chips here — Measure, Annotate, Pin and Retune mode fold into ⋯ (`FOLD_QUERY`),
+     because nine reached 80 % of a 400 px pane (a bar by another name) and left Go-to 4 px of
+     input. 5 × 32 + 4 × 4 + 8. */
+  .map-ctl { --topright-w: 184px; }
+  /* T-1025: no painted chip wider than a third of the pane on the top edge — Go-to included; the
+     canvas shows between it and the cluster. */
+  .map-goto { width: min(calc(100% / 3), calc(100% - var(--topright-w))); }
   .map-topright { gap: 4px; }
   .map-status { gap: 4px; }
   .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }
