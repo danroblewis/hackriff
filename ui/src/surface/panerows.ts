@@ -245,13 +245,16 @@ export interface PaneGapBlock extends BlockCommon {
 /** Either kind of block. */
 export type PaneMessage = PaneBlock | PaneGapBlock;
 
-/** Reads an `i64` field as a JS number, refusing one that would lose precision. */
-function i64(view: DataView, at: number, what: string): number {
-  const v = view.getBigInt64(at, true);
-  if (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(-Number.MAX_SAFE_INTEGER)) {
-    throw new TileDecodeError(`pane block: ${what} ${v} is outside the safe integer range`);
-  }
-  return Number(v);
+/**
+ * Reads an `i64` field as a JS number.
+ *
+ * **Lossy above 2^53 on purpose**: an absolute capture time in ns is ~1.8e18, past `MAX_SAFE_INTEGER`,
+ * so a double lands on a multiple of 256 ns there — the resolution the whole canvas already lays rows
+ * out at (`edgeNs` is `tS * 1e9` everywhere in this client), nine orders below one row. Refusing such
+ * a value, as this once did, refused **every real block** (found by T-1044's e2e: 22 of 22 unreadable).
+ */
+function i64(view: DataView, at: number): number {
+  return Number(view.getBigInt64(at, true));
 }
 
 /**
@@ -271,9 +274,9 @@ export function decodePaneBlock(header: PaneHeader, buf: ArrayBuffer): PaneMessa
   const nf = view.getUint16(6, true);
   const rows = view.getUint32(8, true);
   const epoch = view.getUint32(12, true);
-  const t0Ns = i64(view, 16, "t0_ns");
-  const tCellNs = i64(view, 24, "t_cell_ns");
-  const row0 = i64(view, 32, "row0");
+  const t0Ns = i64(view, 16);
+  const tCellNs = i64(view, 24);
+  const row0 = i64(view, 32);
   const trailerBytes = view.getUint32(40, true);
   const observedCells = view.getUint32(44, true);
   if (flags & ~(FLAG_FINAL | FLAG_DISCONTINUITY)) {

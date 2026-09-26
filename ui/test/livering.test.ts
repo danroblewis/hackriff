@@ -356,3 +356,18 @@ test("LSR-3: a contiguous resume (no rows missed) or an empty ring requests noth
   g.noteClose(null);
   assert.equal(g.onRow(last + 100 * PERIOD, f.rowPeriodNs), null);
 });
+
+test("LSR-3 (review): a long outage is bounded to the ring's own window, and `pending` is only true after a drop", () => {
+  const ring = new LiveRing({ rows: 100 });
+  const last = fill(ring, 10);
+  const f = ring.frame()!;
+  const g = new GapResume();
+  assert.equal(g.pending, false);
+  g.noteClose(f);
+  assert.equal(g.pending, true);
+  const hour = last + 90_000 * PERIOD;
+  const r = g.onRow(hour, f.rowPeriodNs, ring.capacity)!;
+  assert.equal(r.tToNs, hour);
+  sameNs(r.tToNs - r.tFromNs, 100 * f.rowPeriodNs, "the walk reaches back one ring's worth, not the hour");
+  assert.equal(g.pending, false);
+});

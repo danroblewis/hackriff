@@ -971,6 +971,15 @@ export class SurfacePreview {
   }
 
   /**
+   * **A stretch of the live edge was missed and has been walked** (T-1044 / LSR-3): re-ask the
+   * resident tiles meeting `[f_lo, f_hi] × [t, ∞)`. Not a front-end move, so the survey is left alone.
+   */
+  regionChanged(c: { readonly fLoHz: number; readonly fHiHz: number; readonly tNs: number }): number {
+    const { detail, overview } = this.view.surface.tiers;
+    return this.view.surface.cache.coverageChanged([detail, overview], c);
+  }
+
+  /**
    * **Re-ask the coverage survey when it is due** (T-580). Once at open; again every
    * [[SURVEY_EVERY_MS]] while anything follows the live edge (the edge is where "never sampled"
    * stops being true, the moment the radio tunes there); again when the surface's floor moves. A

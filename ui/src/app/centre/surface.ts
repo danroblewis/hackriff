@@ -96,7 +96,7 @@ import {
 } from "../../surface/frontend";
 import { flags } from "../../flags";
 import { fmtLiveMetrics, liveMetrics } from "../../surface/livemetrics";
-import { liveRing, liveRow } from "./live-edge";
+import { liveRing, liveRow, resumeState, setResumeSink } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
 import { captureBanner } from "./capture-state";
@@ -1026,7 +1026,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * numbers change.
    */
   let metricsDiag = "";
+  let resumeDiag = "";
   const stateMetrics = () => {
+    // T-1044 (LSR-3): what the last socket-resume asked for and walked, for a spec to read.
+    const rs = JSON.stringify(resumeState);
+    if (rs !== resumeDiag) { resumeDiag = rs; stage.dataset.liveResume = rs; }
     const snap = liveMetrics.snapshot();
     const next = JSON.stringify(snap);
     if (next === metricsDiag) return;
@@ -2486,6 +2490,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (outStrip) ro?.observe(outStrip);
     window.addEventListener("resize", fit);
     preview.start();
+    // T-1044 (LSR-3): a finished socket-resume re-asks the resident tiles over the gap it walked.
+    if (flags().liveRing) { const pv = preview; setResumeSink((c) => { pv.regionChanged(c); }); }
 
     // Once a second: the app's one (time, frequency) window has to track the active viewport so the
     // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is

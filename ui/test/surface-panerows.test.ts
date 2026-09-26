@@ -238,3 +238,17 @@ test("a block this client cannot read is refused, never rendered with a guessed 
     TileDecodeError,
   );
 });
+
+test("T-1044: a block at a REAL absolute capture time (~1.8e18 ns, past 2^53) decodes — it was refused before", () => {
+  const h = header();
+  // 1.79e18 ns / T_CELL_NS: the row a live server actually addresses.
+  const row0 = Math.floor(1_789_297_852_997_238_894 / T_CELL_NS);
+  const m = decodePaneBlock(h, blockBytes({
+    rows: 2, nf: NF, row0, values: twoRows(row0), runs: [[2 * NF, COVERAGE_STATES.indexOf("observed")]],
+  })) as PaneBlock;
+  assert.equal(m.kind, "rows");
+  // Within the axis's own resolution (a double's step at this magnitude is 256 ns).
+  assert.ok(Math.abs(m.t0Ns - row0 * T_CELL_NS) <= 512, `t0 ${m.t0Ns} is not ${row0 * T_CELL_NS}`);
+  // …and a request can be built from it.
+  assert.match(panePath(pane, { tFromNs: m.t0Ns, tToNs: null }), /t_from=17\d{17}/);
+});

@@ -289,6 +289,9 @@ function spansOf(order: readonly number[], times: Float64Array, periodNs: number
 export class GapResume {
   private t1Ns: number | null = null;
 
+  /** A drop is waiting for its first resumed row: the only time [[onRow]] has anything to say. */
+  get pending(): boolean { return this.t1Ns !== null; }
+
   /** The socket dropped: remember where the ring's newest run ends (`null` if it holds nothing). */
   noteClose(fr: RingFrame | null): void {
     this.t1Ns = fr?.live ? Math.floor(fr.live.t1Ns) : null;
@@ -297,15 +300,17 @@ export class GapResume {
   /**
    * The first row of the resumed stream arrived at `tNs`. Returns the range to fetch, or `null` when
    * the stream simply continues (within [[GAP_FACTOR]] periods) or there is nothing to resume from.
-   * One-shot: the note is consumed either way.
+   * **Bounded**: the range never reaches back further than `maxRows` periods before the new row —
+   * what the ring could hold; older than that is the pyramid's, and an hour-long sleep must not be
+   * walked row by row. One-shot: the note is consumed either way.
    */
-  onRow(tNs: number, rowPeriodNs: number): { readonly tFromNs: number; readonly tToNs: number } | null {
+  onRow(tNs: number, rowPeriodNs: number, maxRows = Infinity): { readonly tFromNs: number; readonly tToNs: number } | null {
     const from = this.t1Ns;
     this.t1Ns = null;
     if (from === null || !Number.isFinite(tNs) || !(rowPeriodNs > 0)) return null;
     const to = Math.floor(tNs);
     if (to - from <= (GAP_FACTOR - 1) * rowPeriodNs) return null;
-    return { tFromNs: from, tToNs: to };
+    return { tFromNs: Math.max(from, to - Math.floor(maxRows * rowPeriodNs)), tToNs: to };
   }
 }
 

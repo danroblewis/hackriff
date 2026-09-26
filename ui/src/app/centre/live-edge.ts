@@ -78,14 +78,30 @@ export const liveRow = new LiveRow();
 export const liveRing = new LiveRing();
 
 /**
- * What the last resume fetched (T-1044 / LSR-3): the gap's range, how many blocks the server walked,
- * and how many carried `DISCONTINUITY` (parts the store had no frame for — tiles fill those, never
- * this ring). Read by the e2e spec and the dashboard; the rows themselves are not stitched into the
- * ring, because a gap is a gap and the tile lane already answers it.
+ * What the last resume did (T-1044 / LSR-3): the gap's range, the blocks the server walked for it, and
+ * how many carried `DISCONTINUITY` (parts the store had no frame for).
+ *
+ * The walked rows are **not** painted into the ring, and that is deliberate: a store row is a tile
+ * lattice cell (level 0 is ~1 s), coarser than the ring's ~40 ms display rows, so mixing them would
+ * put two cadences in one texture. The gap is the tile lane's. What the walk is *for* is the
+ * moment it ends: the store has answered for the gap, so the tiles resident over it are re-asked
+ * ([[setResumeSink]] → `TileCache.coverageChanged`), instead of waiting for the refresh lane to come
+ * round to a tile the ring had been standing in front of.
  */
 export const resumeState = {
   path: null as string | null, tFromNs: 0, tToNs: 0, blocks: 0, discontinuities: 0, done: false,
+  /** The subscription's answer: `"ok"`, a refusal's `<status> <code>`, or `null` before any. */
+  answer: null as string | null,
+  /** Blocks this build refused to read (an unknown code, a length that does not add up), and the last reason. */
+  unreadable: 0, lastError: null as string | null,
 };
+
+/** What a finished resume asks of the surface: re-ask the tiles meeting this region from `tNs`. */
+export interface ResumeChange { readonly fLoHz: number; readonly fHiHz: number; readonly tNs: number }
+let resumeSink: ((c: ResumeChange) => void) | null = null;
+
+/** The surface's hook (`app/centre/surface.ts`): where a finished resume's re-ask goes. */
+export function setResumeSink(fn: ((c: ResumeChange) => void) | null): void { resumeSink = fn; }
 
 /** The `/api/streams` fields this needs (docs/api.md discovery). */
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
@@ -150,28 +166,33 @@ export function mountLiveEdge(ctx: AppContext): () => void {
   // T-1044 (LSR-3): the socket dropped and came back with rows missing between. Ask the row route for
   // exactly that gap — `t_from` the ring's last `t1`, `t_to` this first row — so the server walks the
   // store; the ring keeps the gap a gap and the tile lane fills it (its `DISCONTINUITY` parts too).
-  const resumeGap = (g: { centerHz: number; bandwidthHz: number; bins: number }, tNs: number) => {
+  const resumeGap = (tNs: number) => {
     const fr = liveRing.frame();
-    const range = gap.onRow(tNs, fr?.rowPeriodNs ?? 0);
-    if (!range) return;
+    const range = gap.onRow(tNs, fr?.rowPeriodNs ?? 0, fr?.capacity);
+    if (!range || !fr) return;
+    // The RING's band, not the header's: the rows the gap continues are of the band the ring holds.
+    const win = { fLoHz: fr.f0Hz, fHiHz: fr.f1Hz };
+    const path = panePath({ ...win, nf: Math.min(4096, Math.max(8, fr.nf)) }, range);
     resumeSock?.close();
-    const path = panePath(
-      { fLoHz: g.centerHz - g.bandwidthHz / 2, fHiHz: g.centerHz + g.bandwidthHz / 2, nf: Math.min(4096, Math.max(8, g.bins)) },
-      range,
-    );
-    Object.assign(resumeState, { path, ...range, blocks: 0, discontinuities: 0, done: false });
+    Object.assign(resumeState, { path, tFromNs: range.tFromNs, tToNs: range.tToNs, blocks: 0, discontinuities: 0, done: false, answer: null, unreadable: 0, lastError: null });
     let hd: PaneHeader | null = null;
     resumeSock = openStream(path, ctx.token, {
-      onHeader: (h) => { try { hd = parsePaneHeader(JSON.stringify(h)); } catch { hd = null; } },
+      onHeader: (h) => {
+        try { hd = parsePaneHeader(JSON.stringify(h)); resumeState.answer = "ok"; } catch (e) { hd = null; resumeState.answer = `unreadable: ${String(e)}`; }
+      },
+      onRefused: (r) => { resumeState.answer = `${r.status} ${r.code}`; },
       onBinary: (b) => {
         if (!hd) return;
         try {
           const m = decodePaneBlock(hd, b);
           resumeState.blocks++;
           if (m.discontinuity) resumeState.discontinuities++;
-        } catch { /* a block this build cannot read is not rendered with a guessed meaning */ }
+        } catch (e) { resumeState.unreadable++; resumeState.lastError = String(e); /* never rendered with a guessed meaning */ }
       },
-      onClose: () => { resumeState.done = true; },
+      onClose: () => {
+        resumeState.done = true;
+        resumeSink?.({ ...win, tNs: range.tFromNs });
+      },
     });
   };
 
@@ -183,7 +204,7 @@ export function mountLiveEdge(ctx: AppContext): () => void {
     // spectrum, so the last real frame stands rather than being replaced by nothing.
     const g = geom();
     if (r.row && g && r.row.length > 0) {
-      if (flags().liveRing) resumeGap(g, r.tS * 1e9);
+      if (flags().liveRing && gap.pending) resumeGap(r.tS * 1e9);
       const frame = {
         f0Hz: g.centerHz - g.bandwidthHz / 2,
         f1Hz: g.centerHz + g.bandwidthHz / 2,
