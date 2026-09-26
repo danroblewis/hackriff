@@ -158,6 +158,7 @@ pub fn audio_header(
         recipe: Some(recipe_ref),
         output_id: Some(spec.id.clone()),
         edit_rev: Some(edit_rev),
+        wait: None,
     });
     h
 }

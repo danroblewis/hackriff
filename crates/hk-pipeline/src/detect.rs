@@ -53,8 +53,8 @@ use hk_detect::clip::is_clipped_ci8;
 use hk_detect::track::TrackSummary;
 use hk_detect::{
     BandProfile, BurstConfig, BurstDetector, ClipCount, Confirmation, DetectionProfile,
-    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, LiveExtent,
-    TrackBatch, TrackEvent, Tracker, TrackerConfig,
+    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, FrontEndMonitor,
+    LiveExtent, TrackBatch, TrackEvent, Tracker, TrackerConfig,
 };
 use hk_dsp::floor::{FloorConfig, FloorEvent, NoiseFloorTracker};
 use hk_dsp::window::WindowKind;
@@ -113,6 +113,14 @@ pub(crate) const CAPTURE_NAME_SAMPLES: usize = 16_384;
 /// Dense-frame indices kept for flagging records (records never span more frames).
 const DENSE_MEMORY_FRAMES: u64 = 1 << 20;
 /// Longest end-of-stream wait for the writer.
+/// T-981: how long the detection reader remembers a front-end event's frames, s — longer than the
+/// detector's longest box (1 s) plus its impulsive aggregation, so a record emitted late still
+/// finds the event it spans.
+const FRONTEND_MEMORY_S: f64 = 10.0;
+
+/// T-981: the share of the tuned window a record must cover to be "whole-span".
+const FRONTEND_WIDE_FRACTION: f64 = 0.5;
+
 const SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 /// Ring chunks between samples of this reader's CPU clock (T-939; ~0.2 s at 20 Msps).
 const CPU_SAMPLE_CHUNKS: u64 = 64;
@@ -360,6 +368,11 @@ struct DetectNode {
     batch: TrackBatch,
     carry: WriteBatch,
     clips: VecDeque<u64>,
+    /// T-981: the front-end judgement of this reader's own frames ([`crate::frontend`]).
+    frontend: FrontEndMonitor,
+    /// T-981: sample ranges of the frames judged front-end events, merged, oldest first; kept for
+    /// [`FRONTEND_MEMORY_S`] so a record closed late still finds the event it spans.
+    frontend_spans: VecDeque<Range<u64>>,
     pending: Vec<DetectionRecord>,
     pending_floor: Vec<FloorEvent>,
     closed: Vec<TrackEvent>,
@@ -435,6 +448,8 @@ impl DetectNode {
             batch: TrackBatch::new(),
             carry: WriteBatch::default(),
             clips: VecDeque::new(),
+            frontend: FrontEndMonitor::default(),
+            frontend_spans: VecDeque::new(),
             pending: Vec::new(),
             pending_floor: Vec::new(),
             closed: Vec::new(),
@@ -491,6 +506,7 @@ impl DetectNode {
             self.clips.pop_front();
         }
         let clipped = self.clips.partition_point(|&i| i < b) as u64;
+        self.judge_front_end(frame, clipped);
         let mut floor_events = std::mem::take(&mut self.pending_floor);
         let t_frame = Instant::now();
         let floor = self.floor.update(frame, |e| floor_events.push(e.clone()));
@@ -564,6 +580,46 @@ impl DetectNode {
         );
     }
 
+    /// T-981: judges `frame` by the spectrum reader's own rule and remembers the event frames.
+    fn judge_front_end(&mut self, frame: &SpectrumFrame, clipped: u64) {
+        let (a, b) = (
+            frame.t.sample_index,
+            frame.t.sample_index + frame.sample_count,
+        );
+        let verdict = self.frontend.observe(
+            &frame.spectrum.psd,
+            ClipCount::new(clipped, frame.sample_count),
+            &frame.provenance.get().tune,
+        );
+        if verdict.event {
+            match self.frontend_spans.back_mut() {
+                Some(last) if last.end >= a => last.end = last.end.max(b),
+                _ => self.frontend_spans.push_back(a..b),
+            }
+        }
+        let keep = a.saturating_sub((FRONTEND_MEMORY_S * self.shared.fs) as u64);
+        while self.frontend_spans.front().is_some_and(|s| s.end < keep) {
+            self.frontend_spans.pop_front();
+        }
+    }
+
+    /// T-981: `r` is a front-end event's energy, not a signal's: it spans a frame judged a
+    /// front-end event **and** it is whole-span — impulsive (the detector's broadband class) or at
+    /// least [`FRONTEND_WIDE_FRACTION`] of the tuned window. A narrow emission over the same frames
+    /// (often the very burst that overloaded the front end) is kept, flagged `clipped` as before.
+    fn is_front_end_event(&self, r: &DetectionRecord) -> bool {
+        let overlaps = self
+            .frontend_spans
+            .iter()
+            .any(|s| s.start < r.samples.end && r.samples.start < s.end);
+        if !overlaps {
+            return false;
+        }
+        let rate = r.provenance.get().tune.sample_rate_hz;
+        r.detection.flags.impulsive
+            || (rate > 0.0 && (r.f_hi_hz - r.f_lo_hz).abs() >= FRONTEND_WIDE_FRACTION * rate)
+    }
+
     /// A short-burst detection (T-075): stored untracked (never offered to the tracker).
     fn push_burst(&mut self, r: DetectionRecord) {
         inc(&self.shared.counters.detect.detections);
@@ -580,6 +636,12 @@ impl DetectNode {
         for ev in evs {
             match ev {
                 Owned::Det(mut r) => {
+                    if self.is_front_end_event(&r) {
+                        // T-981: never stored as a detection; the event itself is on the canvas
+                        // (`GET /api/frontend/events`) and in `/api/status`.
+                        inc(&shared.counters.frontend.suppressed_detections);
+                        continue;
+                    }
                     inc(&dc.detections);
                     if self.spans_dense(&r.frames) {
                         r.detection.flags.dense_skipped = true;
