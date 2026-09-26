@@ -925,9 +925,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
    *
    * Read by `ui/e2e/live-ring.e2e.mjs`, which can see from the pixels that the newest rows are on
    * screen but cannot see *which lane* put them there — and "the edge kept up" is a claim about the
-   * lane. Written from the `PaneReport` the data pass just produced, in the pass that produced it,
-   * and only when the numbers change. Presentation metadata: commands nothing, and absent entirely
-   * with the flag off.
+   * lane. Written from `preview.lastFrame`'s `PaneReport`s in the `dom:` callback below — the one
+   * render-frame extension point that runs every frame regardless of the trace layer's on/off state
+   * (T-1041 made the trace opt-in, so this can no longer live inside `traceFor`, which now runs only
+   * while that layer is on) — and only when the numbers change. One render pass behind `dom:`'s own
+   * call (`lastFrame` is assigned after `frame()` returns), imperceptible for a diagnostic tile.
+   * Presentation metadata: commands nothing, and absent entirely with the flag off.
    */
   let ringDiag = "";
   const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number; latencyMs: number | null }>();
@@ -963,7 +966,6 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
-    if (flags().liveRing) { stateRing(report); stateMetrics(); }
     const s = p.view.surface;
     const dev = pane.device ?? "any";
     // **The pane's OWN lattice, off the report the data pass just produced** (T-505). Since the
@@ -1658,6 +1660,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
           liveButtons?.update(panes, hPx, dpr, chromeBoxes);
           // T-1005: the split's dividers and each pane's ×, from the same frame.
           split.place(panes, hPx, dpr);
+          // T-1048 (LSR-7): the ring/metrics dashboard tiles, unconditional on the trace layer
+          // (T-1041 made that opt-in) — this is the one hook that runs every frame regardless.
+          if (flags().liveRing) {
+            for (const report of preview?.lastFrame?.reports ?? []) stateRing(report);
+            stateMetrics();
+          }
         },
       });
     } catch (e) {
