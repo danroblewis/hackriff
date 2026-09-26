@@ -105,6 +105,11 @@ honesty rule (a mark's claim is not a flag).
   the query parameter, so `HK_UI_LIVE_RING=1 node e2e/run.mjs live-ring` and a page opened by hand
   agree. The page states what the lane did per pane in `.sf-stage[data-live-ring]` (rows painted,
   tile addresses excluded, one row's height in px) while the flag is on.
+  **LSR-7 (T-1048)** adds a dashboard tile beside it, measured rather than assumed: `.sf-stage[data-live-metrics]`
+  (`src/surface/livemetrics.ts`) states sample→pixel latency (row arrival → paint, one client clock
+  read twice — never the row's own backend capture time, which is not wall-clock-comparable on a
+  replay) and per-row fold cost, each as mean/p95/max over a bounded rolling window. In words, it is
+  the `.sf-ring-metrics` line in the status panel's "More" body.
 
 Replay notes:
 - Each `--loop` pass is a new stream, and the page reconnects on its own.

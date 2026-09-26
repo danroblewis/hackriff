@@ -89,6 +89,7 @@ import {
   frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
 } from "../../surface/frontend";
 import { flags } from "../../flags";
+import { fmtLiveMetrics, liveMetrics } from "../../surface/livemetrics";
 import { liveRing, liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -275,6 +276,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
+  // T-1048 (LSR-7): the live ring's own cost and freshness — fold cost per row, sample→pixel
+  // latency — shown only behind the same `?live-ring=1` flag as the lane it measures. Empty (no
+  // text node) with the flag off: `setText` is never called, so there is nothing to hide.
+  const metricsEl = h("div", { class: "sf-ring sf-ring-metrics", role: "status" });
   // T-807 (MAP-07): says so, in words, when the active pane's coverage fog is hidden — the bare
   // ground it then draws is a viewer's choice, and a choice about grey must never pass for a fact.
   const fogEl = h("div", { class: "sf-ring sf-fog", role: "status", hidden: true });
@@ -337,7 +342,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // The dismiss (×, and Escape through the one overlay stack, T-900) returns it to the collapsed
   // line, never to nothing — a viewer can put a paragraph away, not switch an honesty statement off.
   const statusBody = h("div", { class: "sf-status-body", id: "sf-status-body", hidden: true },
-    traceEl, ringEl, fogEl, priorsEl, note);
+    traceEl, ringEl, metricsEl, fogEl, priorsEl, note);
   const statusToggle = h("button", {
     class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded": "false",
     title: "The full status: spectrum trace, capture rules, coverage, priors and orientation",
@@ -886,18 +891,37 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * with the flag off.
    */
   let ringDiag = "";
-  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number }>();
+  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number; latencyMs: number | null }>();
   const stateRing = (report: PaneReport) => {
-    ringReports.set(report.id, { rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10 });
+    ringReports.set(report.id, {
+      rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10,
+      latencyMs: report.ringLatencyMs === null ? null : Math.round(report.ringLatencyMs * 100) / 100,
+    });
     const next = JSON.stringify([...ringReports].map(([id, r]) => ({ id, ...r })));
     if (next === ringDiag) return;
     ringDiag = next;
     stage.dataset.liveRing = next;
   };
+  /**
+   * **The LSR-7 dashboard tile** (T-1048): sample→pixel latency and per-row fold cost, in words and
+   * as machine-readable numbers, behind the same flag as the lane it measures. Read by the person
+   * (`metricsEl`, in the status panel's "More" body beside the other capture-rule paragraphs) and by
+   * a spec (`.sf-stage[data-live-metrics]`, the same pattern `stateRing` above already keeps).
+   * Written once per frame the ring lane runs, and only when the numbers change.
+   */
+  let metricsDiag = "";
+  const stateMetrics = () => {
+    const snap = liveMetrics.snapshot();
+    const next = JSON.stringify(snap);
+    if (next === metricsDiag) return;
+    metricsDiag = next;
+    stage.dataset.liveMetrics = next;
+    setText(metricsEl, fmtLiveMetrics(snap));
+  };
   const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
-    if (flags().liveRing) stateRing(report);
+    if (flags().liveRing) { stateRing(report); stateMetrics(); }
     const s = p.view.surface;
     const dev = pane.device ?? "any";
     // **The pane's OWN lattice, off the report the data pass just produced** (T-505). Since the

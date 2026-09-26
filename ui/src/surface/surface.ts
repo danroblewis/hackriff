@@ -55,6 +55,7 @@ import {
   type Box, type Lattice, type LatticeSet, type TileAddr, type ViewTier,
 } from "./lattice";
 import { ringCovers, ringPlan, type LiveRingSource, type RingDraw, type RingFrame } from "./livering";
+import { lastRowArrival, liveMetrics, paintLatencyMs } from "./livemetrics";
 import { TileCache, type TileEntry, type TileTextures, type Viewport } from "./tilecache";
 import type { TileData } from "./tile";
 import type { Survey } from "./survey";
@@ -194,6 +195,15 @@ export interface PaneReport {
   /** One ring row's height in this pane, device px — the eligibility measurement, reported rather
    * than hidden so a pane that stood the ring aside can say why. `0` with no ring. */
   readonly ringRowPx: number;
+  /**
+   * **Row t vs rAF** (T-1048 / LSR-7): this draw call's wall clock minus the newest ring row's own
+   * ARRIVAL wall clock (`./livemetrics.ts`'s `lastRowArrival` — never the row's capture time, which
+   * is not wall-clock-comparable on a replay), ms — the sample→pixel latency the live-rendering
+   * invariant is checked against. `null` when this pane drew no NEW live row this frame (no ring, the
+   * ring stood aside below `MIN_ROW_PX`, or the newest row was already accounted for by an earlier
+   * frame), never a stale number left over from one.
+   */
+  readonly ringLatencyMs: number | null;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -514,6 +524,10 @@ export class Surface {
    * a pane that stops following (or closes) leaves one entry, dropped on the first frame it asks for
    * no ring. */
   private ringTex = new Map<string, RingTex>();
+  /** The `t1Ns` of the newest ring row this pane last recorded a latency sample for (T-1048 /
+   * LSR-7) — so a pane holding the same newest row across several frames (no new row has arrived)
+   * records one sample per row, not one per frame. Cleared with the pane's ring texture. */
+  private ringLatencySeen = new Map<string, number>();
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -846,6 +860,7 @@ export class Surface {
       // describe the same instant the ROW is what is seen. That is the ordering the live-rendering
       // invariant asks for — the row exists, so it is on screen — and it is why a tile only partly
       // under the ring is still drawn: the part the rows do not reach keeps its measurement.
+      let ringLatencyMs: number | null = null;
       if (ring && plan) {
         const planes = plan.draws.length ? this.ringPlanes(pane.id, ring) : null;
         if (planes) {
@@ -855,13 +870,30 @@ export class Surface {
             drawnToNs = Math.max(drawnToNs, d.region.t1Ns);
           }
         }
+        // T-1048 (LSR-7): **row t vs rAF**, one sample per NEW row rather than one per frame — the
+        // pane's `cover` is the newest run clipped to its box, and its `t1Ns` only advances when a
+        // fresh row actually arrived (`ringPlan`'s rule 2 in `./livering.ts`'s header). The latency
+        // itself is this draw call's wall clock minus that row's own ARRIVAL wall clock
+        // (`lastRowArrival`, set where the row reached the socket) — never the row's capture time,
+        // which is not wall-clock-comparable on a replay (`./livemetrics.ts`'s header).
+        if (plan.cover) {
+          const seen = this.ringLatencySeen.get(pane.id);
+          if (seen !== plan.cover.t1Ns) {
+            this.ringLatencySeen.set(pane.id, plan.cover.t1Ns);
+            const arrival = lastRowArrival.get();
+            if (arrival !== null) {
+              ringLatencyMs = paintLatencyMs(performance.now(), arrival);
+              liveMetrics.latency.push(ringLatencyMs);
+            }
+          }
+        }
       } else if (this.ringTex.has(pane.id)) {
         // The pane asked for no ring this frame (it froze, or the host withdrew the source): its
         // texture is memory held for a claim nobody is making any more.
         this.dropRing(pane.id);
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0 });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS, ringRows, ringTiles, ringRowPx: plan?.rowPx ?? 0, ringLatencyMs });
     }
     gl.disable(gl.SCISSOR_TEST);
     for (const id of this.ringTex.keys()) if (!drawn.has(id)) this.dropRing(id);
@@ -1103,9 +1135,9 @@ export class Surface {
   /** Release one pane's ring texture. */
   private dropRing(paneId: string): void {
     const held = this.ringTex.get(paneId);
-    if (!held) return;
-    new GlTileTextures(this.gl).destroy(held.planes);
+    if (held) new GlTileTextures(this.gl).destroy(held.planes);
     this.ringTex.delete(paneId);
+    this.ringLatencySeen.delete(paneId);
   }
 
   /** Release every ring texture: the source was withdrawn, or the renderer is being disposed. */
