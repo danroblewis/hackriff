@@ -29588,6 +29588,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost
+
+      2026-09-25 coordinator, from T-1004's conflict merge: app-split-frozen's per-pane badge check only exercises ONE pane ('drawn on [pane1], badged on [pane1]') since T-1002 draws only each pane's own rows and the live pane 2 lacks that signal. It passes, but it does not prove both panes; a follow-up should set the spec so both panes contain the row (e.g. pane 2 frozen over the same window).
   - id: T-1005
     milestone: MMAP
     title: "Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close"
@@ -30565,6 +30567,42 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1002 and T-1004 workers 2026-09-25: app-outputs-map (T-994) reported red 3x at 400 px ('no pressable box in 60 s') - triage on main with a FRESH hk: close as stale-binary or fix
+  - id: T-1050
+    milestone: MMAP
+    title: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+    status: todo
+    priority: high
+    deps:
+    - T-1041
+    parallel_group: UI-TRACE-COLOUR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOLLOW-UP OF T-1041 (trace strip removed; the trace is now an OFF-by-default layer drawn translucently OVER the pane's top rows). The product and T-1041's acceptance pass; ONE e2e instrument no longer measures what it claims: ui/e2e/app-trace.e2e.mjs T-475 'the SAME dB is the SAME COLOUR' reads 89/154 columns = 57.8 % against the file's 80 % threshold (the threshold was NOT lowered; it read 9.1 % before T-1041's worker rebuilt the core read).
+      MEASURED BY T-1041's worker (handback ~/.hackriff-ops/work/T-1041/handback.json): (a) where the property HOLDS, the core pixel is identical to the trace-off baseline, so a difference mask cannot find the core - use it only to locate the stroke; (b) the bloom is achromatic by construction, so over a cell it is a lightened, desaturated copy of that cell - which is why 'the brightest pixel in the stroke' now returns the bloom, not the core. Its last, unverified variant takes the most saturated ramp pixel in the core's own rows (bloom excluded).
+      DELIVER: make the instrument read the trace CORE colour deterministically over ramp-coloured cells (e.g. the page exposes the core's per-column colour it drew - as T-475's own honesty instrument - or the spec renders the trace over a flat known cell, or reads the core from the layer's own framebuffer pass), then re-run the SAME-COLOUR property at the unchanged 80 % (or better). If the property genuinely fails over cells, fix the product (the trace's colour must be the same dB->colour as the cells). Never lower the threshold.
+      ACCEPTANCE: app-trace T-475 green 3/3 alone on a quiet-ish box against a FRESH hk; red-proof: a deliberately mismatched trace colour ramp turns it red.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the spec alone on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1041 worker 2026-09-25: app-trace T-475 'same dB is the same colour' instrument cannot find the trace core now that the trace draws over the cells (57.8 % vs 80 %, threshold not lowered) - read the core deterministically; fix the product only if the property truly fails
+  - id: T-1051
+    milestone: MMAP
+    title: app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI-TRACE-HOLD
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN (found 2026-09-25 by T-1041's worker, who built main's ui and ran main's own ui/e2e/app-trace.e2e.mjs against the same hk binary: 3 of 6 red on main): the heldObservation() tests fail with 'the page would not hold still in the state under test' - including the trace extent test - under load 30-55. The browser-e2e tier runs only in the daily RC, so this red sits on main unseen by the merge gate.
+      DELIVER (deflake-triage rules): run app-trace alone 5x on main with a FRESH hk (main's seeded target/debug/hk has been stale all day - that caused most of the day's false browser reds; rule it out first). If it is green alone and red only under load, make heldObservation deterministic - hold on a state the PAGE reports (a frame counter / render-settled flag the surface exposes for tests, or the server's capture clock) instead of comparing screenshots over a wall-clock window; never a longer timeout or fewer attempts. If it fails alone, it is a product defect (the page never settles - e.g. a re-render loop on the trace/layer path, or T-1035's backoff/refresh interplay): find and fix it with a red-on-regression proof.
+      ACCEPTANCE: app-trace (all tests except T-475's colour check, which is its own follow-up) green 5/5 alone and 3/3 at 2 lanes on a fresh hk.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1041 worker 2026-09-25 (red on main): app-trace heldObservation tests red on MAIN ('the page would not hold still', 3 of 6 on main) - triage with a fresh hk; hold on page-reported state, or fix the settle defect
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
