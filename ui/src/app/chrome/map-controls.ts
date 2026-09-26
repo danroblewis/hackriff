@@ -357,6 +357,9 @@ function layerKey(entries: readonly LegendEntry[]): HTMLElement {
  * host calls: `viewMoved()` when a gesture moved the view (a Go-to offer describes a window the pane
  * has now left, so it is withdrawn), and `tuningChanged()` when the radio's window changed.
  */
+/** T-1027: the Go-to glass's tooltip — how to go somewhere, and how to select something. */
+export const GOTO_HINT = "Go to a frequency — or click a signal's box for its details, or shift+drag to select a region";
+
 export function mountMapControls(host: MapControlHost): {
   el: HTMLElement; viewMoved(): void; syncLayers(): void; syncMeasure(): void; syncResearch(): void;
   /** T-996: re-read the active viewport's Retune / width offers. Called per RENDER FRAME. */
@@ -373,7 +376,9 @@ export function mountMapControls(host: MapControlHost): {
   }) as HTMLInputElement;
   // T-1000: which pane a Go-to moves, stated beside the entry while there is more than one.
   const gotoPane = h("span", { class: "map-goto-pane", hidden: true });
-  const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off" },
+  // T-1027: the empty-state hint the retired bottom strip used to print ("Selected — nothing yet:
+  // click a signal or drag a region") lives here, as the Go-to glass's tooltip, never as a bar.
+  const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off", title: GOTO_HINT },
     svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input, gotoPane,
     h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"),
     // T-1008: the Scan button sits in the Go-to glass — small, because it commands the radio.
