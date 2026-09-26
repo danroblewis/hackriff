@@ -178,7 +178,7 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   // stage float over it in one bottom-left stack, as screen-space chrome, with the readout.
   assert.match(host, /el\.replaceChildren\(stage\);/, "the stage is the surface's only row: full-bleed, nothing above or below it");
   // T-996: the statuses float over the stage as ONE LINE — no white per-viewport panel, no `More`.
-  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome" \}, fogEl, priorsEl, statusLine, said\)/,
+  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome" \}, fogEl, priorsEl, metricsEl, statusLine, said\)/,
     "the statuses do not float over the stage as one line with its conditional statements");
   assert.match(host, /paneMenuExtras: \[recordBtn\]/, "Record IQ has a home in the viewport menu");
 });
