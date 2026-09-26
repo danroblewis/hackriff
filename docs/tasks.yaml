@@ -30764,7 +30764,7 @@ tasks:
   - id: T-1052
     milestone: MLIVE
     title: "live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom"
-    status: in-progress
+    status: done
     branch: task-t1052
     priority: medium
     deps: []
@@ -30779,6 +30779,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the specs alone and in the stated order on ports >= 9216; just test-ui), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1037 worker 2026-09-25 (proven on main 8ac9cfb9): live-ring spec (LSR-1) is order-dependent: passes alone, fails after another spec on the same backend (the pane's window is the growing capture clock, so the ring correctly stands aside) - establish its own time zoom
+    commit: 6b8452db
   - id: T-1053
     milestone: MMAP
     title: "Red on main after T-1028 (retune mode): app-surface's cluster list lacks the Retune-mode chip + T-807 key rows; at 400 px the top-right cluster spans the full width; app-phone 'mono' covered - update the spec list, fix the 400 px layout"
