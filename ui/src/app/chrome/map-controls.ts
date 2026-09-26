@@ -180,6 +180,10 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   toast(text: string): void;
   /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
   research?: { isOpen(): boolean; toggle(): void };
+  /** T-1008: the scan plan's small button (in the Go-to cluster — it commands the radio, like the
+   * retune offer beside it) and its panel. Built by `app/map/scan-overlay.ts`, whose own code states
+   * its routes; absent, the cluster offers no scan. */
+  scan?: { button: HTMLElement; panel: HTMLElement };
   /**
    * T-1000 (docs/23 §10.7): which pane the per-pane chrome acts on, as the user names it — its
    * position in layout order ("pane 2 of 3") — or `null` when there is one pane and so nothing to
@@ -349,7 +353,9 @@ export function mountMapControls(host: MapControlHost): {
   const gotoPane = h("span", { class: "map-goto-pane", hidden: true });
   const goto = h("form", { class: "map-glass map-goto map-fade", role: "search", autocomplete: "off" },
     svg(["circle", 11, 11, 7], ["path", "M20 20l-3.5-3.5"]), input, gotoPane,
-    h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"));
+    h("span", { class: "map-hint", "aria-hidden": "true" }, "↵"),
+    // T-1008: the Scan button sits in the Go-to glass — small, because it commands the radio.
+    host.scan?.button ?? null);
 
   // The retune offer never fades (docs/23 §10.2), so it carries no `map-fade`.
   const offerWhy = h("span", { class: "map-offer-why" });
@@ -511,7 +517,7 @@ export function mountMapControls(host: MapControlHost): {
   const layersPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
   layersBtn.append(layersPane);
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, retuneBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, retuneBanner, statusHome, topright, layers, paneMenu, moreMenu, host.scan?.panel ?? null, zoom);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the

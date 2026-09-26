@@ -119,6 +119,8 @@ import { densityQuads } from "../../surface/density";
 import { DENSITY_POLL_MS, DensityPoll } from "./density-poll";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
+import { scanPlanQuads } from "../../surface/scanplan";
+import { ScanController } from "../map/scan-overlay";
 import {
   addResearchAnnotation, collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, rowKey, selectResearch, setResearchOpen,
   type Collection, type ResearchRow, type ResearchSlice,
@@ -693,9 +695,36 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // HERE, per frame, through the pane's own box. The poll below only refreshes the records.
   let frontEndEvents: FrontEndEvent[] = [];
   const frontEndQuadsFn: OverlayLayerFn = (pane) => frontEndQuads(frontEndEvents, pane.box, pane.rect);
+  // T-1008: the scan plan — a survey sweep's region and the steps the engine will take (as served,
+  // `plan.windows`; the controller never tiles a range itself), hatched over the canvas, grey cells
+  // included, and its progress while it runs. Laid out HERE, per frame, through the pane's own box;
+  // the controller only holds the served state. Its button sits in the Go-to cluster (below).
+  const scanCtl = new ScanController({
+    client,
+    paneWindow: () => {
+      const v = preview ? paneById(preview.activePane) : null;
+      return v ? { f0Hz: v.box.f0Hz, f1Hz: v.box.f1Hz } : null;
+    },
+    toast: (text) => store.set(toast(text)),
+  });
+  store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded), { immediate: true });
+  const scanQuadsFn: OverlayLayerFn = (pane) => {
+    // Where the active pane is, stated beside the plan it draws (CSS px from the canvas's top-left,
+    // and its frequency window), so a check can find a plan edge on screen without re-deriving the
+    // pane layout. Set-if-changed; presentation only.
+    if (preview && pane.id === preview.activePane && scanCtl.model()) {
+      const k = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+      const d = scanCtl.panel.dataset;
+      const put = (key: string, v: number) => { const t = String(v); if (d[key] !== t) d[key] = t; };
+      put("paneF0Hz", pane.box.f0Hz); put("paneF1Hz", pane.box.f1Hz);
+      put("paneLeftPx", pane.rect.x * k); put("paneWPx", pane.rect.w * k);
+      put("paneTopPx", (canvas.height - pane.rect.y - pane.rect.h) * k); put("paneHPx", pane.rect.h * k);
+    }
+    return scanPlanQuads(scanCtl.model(), pane.box, pane.rect);
+  };
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
     rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads,
-    paths: pathQuadsFn, tune: tuneQuadsFn, frontend: frontEndQuadsFn, priors: priorsQuads,
+    paths: pathQuadsFn, tune: tuneQuadsFn, frontend: frontEndQuadsFn, scan: scanQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -1618,9 +1647,35 @@ function mount(el: HTMLElement, ctx: AppContext) {
       if (ext && preview) preview.extendTimeFloor(ext.lo * S_TO_NS);
     }, { immediate: true });
 
+    // T-1008: the scan plan's region edges are dragged on the map, through the ONE input handler's
+    // `grabHandle` — offered only where an edge of an editable (idle) plan is under the press in a
+    // pane that shows the `scan` layer, so every other press keeps its meaning. The drag only moves
+    // the region; the server re-prices it on release, and nothing reaches a device route (Start
+    // does, on its own press).
+    const scanEdgeUnder = (x: number, y: number) => {
+      const hit = paneUnder(x, y);
+      if (!hit || !isLayerVisible(layersFor(hit.view.id), "scan")) return null;
+      const edge = scanCtl.edgeAt(hit.view.box, hit.view.rect, x, window.devicePixelRatio || 1);
+      return edge ? { edge, pane: hit.view.id } : null;
+    };
+    const grabScanEdge = (p: GlPoint, paneId: string) => {
+      const grab = scanEdgeUnder(p.x, p.y);
+      if (!grab || grab.pane !== paneId) return null;
+      return {
+        move: (q: GlPoint) => {
+          const v = paneById(grab.pane);
+          if (!v) return;
+          const x = Math.min(Math.max(q.x, v.rect.x), v.rect.x + v.rect.w);
+          scanCtl.dragTo(grab.edge, pointOn(v.box, v.rect, x, v.rect.y).fHz);
+        },
+        end: () => scanCtl.endDrag(),
+      };
+    };
+
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); viewMoved(); },
+      grabHandle: grabScanEdge,
       // T-1028: the only wire from a gesture to the front end, and it is inert while the mode is
       // off — `moved`/`settled` return immediately then, so with the mode off this handler is the
       // old rule byte for byte. A pinch and a drag report `ended` at their release (T-486's commit
@@ -1629,7 +1684,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       onHover: (p, e) => {
         // A pin under the pointer wins the MapTip; the quadtree is the hit test (docs/24 §14.4).
         hoveredPin = p ? pinLayer.pick(cssPoint(e).x, cssPoint(e).y) : null;
-        canvas.style.cursor = hoveredPin ? "pointer" : "";
+        canvas.style.cursor = hoveredPin ? "pointer" : p && scanEdgeUnder(p.x, p.y) ? "ew-resize" : "";
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
         const markLabel = hit?.mark
@@ -1966,6 +2021,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         isOpen: () => store.get().research.open,
         toggle: () => store.set(setResearchOpen(!store.get().research.open)),
       },
+      scan: { button: scanCtl.button, panel: scanCtl.panel },
       // T-1000: the per-pane chrome's name for the pane it acts on — the outline's own words.
       activeName: () => activePaneName(pv.view.panes.list().map((x) => x.id), pv.activePane),
     };
