@@ -66,7 +66,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import path from "node:path";
-import { Browser, census, clipToUnoccluded, until, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, paneGeometry, until, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 /**
@@ -415,16 +415,6 @@ async function tunedWindow(backend) {
 // Reading the pixels
 // ---------------------------------------------------------------------------
 
-/** The rectangle a pane draws its MEASUREMENT into: the canvas, minus the chrome's insets. */
-function paneRectOf(rect, dpr, ins = { top: 0, bottom: 0 }) {
-  // T-918: the canvas is full-bleed; the panes sit between the stated insets (no map strip below
-  // them since T-995 retired the minimap).
-  // T-1041: the trace reserves nothing any more (it is a layer over the pane's top rows, off by
-  // default), so the pane's measurement starts at the inset — its own first row.
-  const paneH = (rect.h - ins.top - ins.bottom) * dpr;
-  return { x: rect.x, w: rect.w, y: rect.y + ins.top, h: paneH / dpr };
-}
-
 /**
  * **The newest 40 % of a pane: the LIVE-EDGE ZONE, and since T-532 it carries a claim of its own.**
  *
@@ -487,26 +477,17 @@ function bodyRect(pane, from = 0.06, to = 1.0) {
 }
 
 /**
- * The pane, narrowed to the columns nothing foreign covers (T-801). Since MAP-01 the app's canvas
- * is full-bleed and the inventory/focus panels float over it by design, so the pane's whole box is
- * no longer all surface — and the panels sit exactly over the viewport's two ends, which in the
- * zoomed-out state below are the most-unobserved spectrum on screen. Measured on the first red run:
- * the whole box read 67.3 % THE grey against a server answer of 88.9 % unobserved for the whole
- * viewport; the difference was panel background. The pixels are therefore measured only where the
- * browser's own hit test says the surface is on top (`Page.unoccludedColumns`, never a hard-coded
- * panel width), and `pane.fracLo/fracHi` say which share of the canvas's width that is, so the
- * server is asked about exactly the frequency sub-range those pixels draw ([[visibleView]]).
+ * The pane, narrowed to the columns nothing foreign covers (T-801), inside the ROW band between the
+ * top/bottom chrome (T-1072). `pane.fracLo/fracHi` say which share of the canvas's width that is, so
+ * the server is asked about exactly the frequency sub-range those pixels draw ([[visibleView]]).
+ *
+ * T-1078: this used to clip columns over the pane's WHOLE height, which the top/bottom chrome this
+ * app now has (small chips along the top edge, a status line along the bottom) covers almost every
+ * column of, even though 20 of 25 hit-test points across the pane reach the canvas — so every test
+ * below read "less than 200 px of the pane is uncovered" however healthy the surface actually was.
+ * The fix (`harness.mjs`'s shared `paneGeometry`, moved from `fog-of-war.e2e.mjs`'s T-1072 copy) is
+ * the row-band clip first, then the column clip inside it.
  */
-async function paneGeometry(page) {
-  const rect = await page.$rect(".sf-canvas");
-  assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
-  const dpr = await page.eval("window.devicePixelRatio || 1");
-  const whole = paneRectOf(rect, dpr, await page.canvasInsets());
-  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
-  const pane = clipToUnoccluded(whole, rect, unocc);
-  assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
-  return { rect, dpr, pane };
-}
 
 /** The frequency sub-range of `view` that the pane's uncovered columns draw. The pane maps
  * frequency linearly across the canvas's FULL width (the panels float over the drawing; they do
