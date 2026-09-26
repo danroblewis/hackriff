@@ -64,10 +64,21 @@
 //! 1.7 CPU-s, which its own note says varied ±9% with other agents on the box; the direction and
 //! the order of magnitude hold, the exact 13% does not. Same run, the reader's own counters:
 //! `reader spectrum 179 388 000 samples, 0 frames, lost 0` — the ring drained in full, no FFT.
+//!
+//! **T-1048 (LSR-7): the row's own fold — dB conversion plus wire serialize — is timed, never
+//! assumed** ([`SpectrumCounters::fold_ns_last`]/`fold_ns_max`/`fold_ns_total`, `/api/status`
+//! `spectrum`). It is the one step every subscriber's row pays before publish, so it is the
+//! server-side half of T-453's "capture-thread cost is measured, never assumed" for this reader —
+//! but it is **not yet the per-pane fold** the design's live-ring ticket set (LSR-1..7) means by
+//! "per-subscription fold cost": today's `/ws/spectrum/live` folds a row exactly **once** and every
+//! watcher gets the same bytes, because there is one canonical geometry for the whole stream. A
+//! genuinely per-subscription fold needs a per-pane geometry to fold *to*, which is what LSR-2's
+//! `/ws/spectrum/rows` adds; once it lands, its own per-pane fold should be timed at this same
+//! point, extending these counters rather than duplicating them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_core::{Discontinuity, ReadOutcome};
 use hk_detect::{ClipLedger, FrontEndMonitor};
@@ -299,12 +310,24 @@ impl<'a> Output<'a> {
                 return;
             }
         }
+        // T-1048 (LSR-7): the fold itself, timed — dB conversion plus the wire's little-endian
+        // serialize, exactly the work skipped in the T-348/T-489 measurement above. One timer
+        // around the same lines that measurement already names, so "the cost" is never two
+        // different things in this file.
+        let fold_t0 = Instant::now();
         self.db.resize(bins, 0.0);
         self.bytes.resize(4 * bins, 0);
         let trace: &[f32] = if averaging > 1 { &self.avg } else { &spec.psd };
         spec.write_db(trace, PowerUnit::DbfsPerHz, &mut self.db);
         for (c, v) in self.bytes.chunks_exact_mut(4).zip(&self.db) {
             c.copy_from_slice(&v.to_le_bytes());
+        }
+        let fold_ns = fold_t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        {
+            let sc = &self.shared.counters.spectrum;
+            sc.fold_ns_last.store(fold_ns, Ordering::Relaxed);
+            sc.fold_ns_max.fetch_max(fold_ns, Ordering::Relaxed);
+            sc.fold_ns_total.fetch_add(fold_ns, Ordering::Relaxed);
         }
         let mut flags = RecordFlags::empty();
         let provenance = frame.provenance.get();

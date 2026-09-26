@@ -106,10 +106,14 @@ honesty rule (a mark's claim is not a flag).
   agree. The page states what the lane did per pane in `.sf-stage[data-live-ring]` (rows painted,
   tile addresses excluded, one row's height in px) while the flag is on.
   **LSR-7 (T-1048)** adds a dashboard tile beside it, measured rather than assumed: `.sf-stage[data-live-metrics]`
-  (`src/surface/livemetrics.ts`) states sample→pixel latency (row arrival → paint, one client clock
-  read twice — never the row's own backend capture time, which is not wall-clock-comparable on a
-  replay) and per-row fold cost, each as mean/p95/max over a bounded rolling window. In words, it is
-  the `.sf-ring-metrics` line in the status panel's "More" body.
+  (`src/surface/livemetrics.ts`) states the CLIENT's own arrival→paint latency (a row's socket
+  arrival to its render, one client clock read twice — never the row's own backend capture time,
+  which is not wall-clock-comparable on a replay) and the ring's own per-row fold cost, each as
+  mean/p95/max over a bounded rolling window. In words, it is the `.sf-ring-metrics` line in the
+  status panel's "More" body. This is **not** the design's full sample-to-pixel budget and **not**
+  the server's per-subscription fold — those are `hk-pipeline::spectrum`'s row-fold cost, reported
+  at `/api/status` `spectrum.fold_ns_*` (`docs/api.md`); a genuinely per-pane server fold awaits
+  LSR-2's `/ws/spectrum/rows`.
 
 Replay notes:
 - Each `--loop` pass is a new stream, and the page reconnects on its own.

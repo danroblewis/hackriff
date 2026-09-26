@@ -196,12 +196,14 @@ export interface PaneReport {
    * than hidden so a pane that stood the ring aside can say why. `0` with no ring. */
   readonly ringRowPx: number;
   /**
-   * **Row t vs rAF** (T-1048 / LSR-7): this draw call's wall clock minus the newest ring row's own
-   * ARRIVAL wall clock (`./livemetrics.ts`'s `lastRowArrival` — never the row's capture time, which
-   * is not wall-clock-comparable on a replay), ms — the sample→pixel latency the live-rendering
-   * invariant is checked against. `null` when this pane drew no NEW live row this frame (no ring, the
-   * ring stood aside below `MIN_ROW_PX`, or the newest row was already accounted for by an earlier
-   * frame), never a stale number left over from one.
+   * **Row t vs rAF, arrival→paint** (T-1048 / LSR-7): this draw call's wall clock minus the newest
+   * ring row's own ARRIVAL wall clock (`./livemetrics.ts`'s `lastRowArrival` — never the row's
+   * capture time, which is not wall-clock-comparable on a replay), ms. This is the CLIENT's own
+   * socket-to-screen wait, not the design's full sample-to-pixel budget (it excludes the row
+   * period, the backend fold and the network) — named for exactly what it covers. `null` when this
+   * pane drew no NEW live row this frame (no ring, the ring stood aside below `MIN_ROW_PX`, or the
+   * newest row was already accounted for by an earlier frame), never a stale number left over from
+   * one.
    */
   readonly ringLatencyMs: number | null;
 }

@@ -272,7 +272,7 @@ test("LSR-1: a retune rebuilds the ring's texture and releases the old one; a wi
 
 // ——— T-1048 / LSR-7: row t vs rAF, measured at the same draw call ———
 
-test("LSR-7: a following pane painted from the ring states its sample→pixel latency; the no-ring control states null", async () => {
+test("LSR-7: a following pane painted from the ring states its arrival→paint latency; the no-ring control states null", async () => {
   liveMetrics.reset();
   lastRowArrival.set(performance.now() - 7); // the newest row "arrived" 7 ms ago
   const h = harness();

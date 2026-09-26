@@ -1,4 +1,6 @@
-// T-1048 / LSR-7: sample→pixel latency and per-row fold cost, measured — never assumed.
+// T-1048 / LSR-7: the client's own arrival→paint latency and ring-fold cost, measured — never
+// assumed. (Not the design's full sample-to-pixel budget, and not the server's per-subscription
+// fold — see ../src/surface/livemetrics.ts's header for why each is named for what it covers.)
 //
 // The claims, each against the implementation that would otherwise pass:
 //
@@ -130,17 +132,18 @@ test("LiveMetrics: latency and fold are independent windows, both reset together
 test("fmtLiveMetrics: states 'no samples yet' rather than a guessed number when a window is empty", () => {
   const m = new LiveMetrics();
   const text = fmtLiveMetrics(m.snapshot());
-  assert.match(text, /fold no samples yet/);
-  assert.match(text, /latency no samples yet/);
+  assert.match(text, /ring fold no samples yet/);
+  assert.match(text, /arrival→paint no samples yet/);
 });
 
-test("fmtLiveMetrics: with samples, states mean/p95/max and the sample count for each window", () => {
+test("fmtLiveMetrics: with samples, states mean/p95/max and the sample count for each window, labelled for exactly what each measures", () => {
   const m = new LiveMetrics();
   m.fold.push(0.02);
   m.fold.push(0.04);
   m.latency.push(30);
   m.latency.push(50);
   const text = fmtLiveMetrics(m.snapshot());
-  assert.match(text, /fold 0\.03 ms mean, 0\.04 ms p95, 0\.04 ms max \(n=2\)/);
-  assert.match(text, /latency 40\.00 ms mean, 50\.00 ms p95, 50\.00 ms max \(n=2\)/);
+  assert.match(text, /ring fold 0\.03 ms mean, 0\.04 ms p95, 0\.04 ms max \(n=2\)/);
+  assert.match(text, /arrival→paint 40\.00 ms mean, 50\.00 ms p95, 50\.00 ms max \(n=2\)/);
+  assert.doesNotMatch(text, /sample.{0,3}pixel/i, "the label must not claim the design's full sample-to-pixel budget");
 });

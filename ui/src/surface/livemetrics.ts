@@ -1,17 +1,25 @@
-// **LSR-7: sample→pixel latency and per-row fold cost, MEASURED, never assumed** (T-1048).
+// **LSR-7 (client half): arrival→paint latency and per-row ring-fold cost, MEASURED, never
+// assumed** (T-1048). Review fix (2026-09-25): the first version of this comment, the dashboard
+// tile and the PaneReport doc it fed all called the latency metric below "sample→pixel latency" —
+// which overclaims it. It is **not** the design's full sample-to-pixel budget (capture → STFT →
+// wire → arrival → ring → paint): it excludes the row period, the backend fold, and the network,
+// and it is named for exactly what it covers, no more.
 //
 // The live-rendering invariants this ticket exists to hold the ring to (docs/16, "Live rendering",
 // and `./livering.ts`'s own header) are claims about *cost* and *freshness*: "capture-thread cost is
 // measured, never assumed" (T-453) and "the live view renders like a classic SDR waterfall". Neither
 // claim is checkable from the ring's arithmetic alone — it says where a row lands, not how long it
-// took to get there or how stale it is by the time a frame draws it. This module is the two numbers
-// that make both checkable, and nothing else: it holds no ring, opens no socket and commands nothing.
+// took to get there or how stale it is by the time a frame draws it. This module is two client-side
+// numbers that make the CLIENT's own share of both checkable — the server-side half (the actual
+// per-subscription fold cost the design means, `hk-pipeline::spectrum`'s row fold, `/api/status`
+// `spectrum.fold_ns_*`, T-1048's Rust half) is not this file's, and this file no longer calls its
+// own, narrower ring-fold cost by that name either.
 //
-//  - **fold**: the wall-clock cost of filing one published row into the ring
-//    (`LiveRing.push`, timed at its one call site in `app/centre/live-edge.ts`'s `onBinary`) — the
-//    client-side half of "per-subscription fold cost per row" (there is one subscription: the
-//    spectrum socket `live-edge.ts` already holds, and every row on it is folded into the ring once).
-//  - **latency**: **row t vs rAF** — the wall clock at the instant a pane's render pass actually
+//  - **fold**: the wall-clock cost of filing one published row into the client's ring
+//    (`LiveRing.push`, timed at its one call site in `app/centre/live-edge.ts`'s `onBinary`). This
+//    is the RING's fold, not the design's per-subscription one — there is one client-side ring per
+//    page, so "per-subscription" does not apply to it either; see the header note above.
+//  - **paint latency ("row t vs rAF")**: the wall clock at the instant a pane's render pass actually
 //    paints a row, minus the wall clock at the instant that row **arrived** over the socket
 //    (`live-edge.ts`'s `onBinary`, before this ticket its only reader of "now"). Measured at the draw
 //    call (`./surface.ts`'s render loop, the same place every other per-frame quantity on this
@@ -28,7 +36,8 @@
 //    the first version of this module did exactly that and reported a billion-millisecond latency.
 //    Two wall-clock reads of the same client clock, one at arrival and one at paint, are immune to
 //    that: whatever clock the row's own timeline runs on, the CLIENT's wait between "the socket
-//    delivered it" and "the screen showed it" is a real, small, comparable duration on any source.
+//    delivered it" and "the screen showed it" is a real, small, comparable duration on any source —
+//    but it is only that wait, never the row's full trip from the antenna.
 
 /** One rolling window's stats, ms. `n === 0` is the honest "nothing measured yet" — never a guessed 0. */
 export interface StatSnapshot {
@@ -152,10 +161,17 @@ export class LastArrival {
  * reason `liveMetrics` is — the mount that feeds it is mounted exactly once. */
 export const lastRowArrival = new LastArrival();
 
-/** The dashboard tile's text: what a person reads, not what a test greps. `"no samples yet"` per
- * window is the honest empty state — never a guessed 0 ms presented as a measurement. */
+/**
+ * The dashboard tile's text: what a person reads, not what a test greps. `"no samples yet"` per
+ * window is the honest empty state — never a guessed 0 ms presented as a measurement.
+ *
+ * Labelled "ring fold" and "arrival→paint", not "sample→pixel" or "per-subscription fold": each
+ * label names exactly the client-side quantity this file measures, no more (see this module's
+ * header). The server's per-subscription fold cost is a different number, reported separately at
+ * `/api/status` `spectrum.fold_ns_*`.
+ */
 export function fmtLiveMetrics(s: LiveMetricsSnapshot): string {
   const one = (label: string, w: StatSnapshot) =>
     w.n === 0 ? `${label} no samples yet` : `${label} ${w.meanMs.toFixed(2)} ms mean, ${w.p95Ms.toFixed(2)} ms p95, ${w.maxMs.toFixed(2)} ms max (n=${w.n})`;
-  return `${one("fold", s.fold)} · ${one("latency", s.latency)}`;
+  return `${one("ring fold", s.fold)} · ${one("arrival→paint", s.latency)}`;
 }

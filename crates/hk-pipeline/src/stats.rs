@@ -253,6 +253,16 @@ counter_group!(
         rows_gated,
         /// Publisher errors.
         errors,
+        /// T-1048 (LSR-7): the newest row's fold cost, ns — dB conversion plus the wire's
+        /// little-endian serialize (`crate::spectrum::Output::row`'s own timer, T-453's
+        /// "capture-thread cost is measured, never assumed"). Not per-subscription: one fold
+        /// serves every watcher of today's single-geometry `/ws/spectrum/live` alike; a per-pane
+        /// fold is LSR-2's (`/ws/spectrum/rows`) to add at this same point once it lands.
+        fold_ns_last,
+        /// The largest fold cost seen this run, ns.
+        fold_ns_max,
+        /// Every fold cost seen this run, summed, ns — `fold_ns_total / rows` is the mean.
+        fold_ns_total,
     }
 );
 

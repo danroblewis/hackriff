@@ -276,9 +276,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
-  // T-1048 (LSR-7): the live ring's own cost and freshness — fold cost per row, sample→pixel
-  // latency — shown only behind the same `?live-ring=1` flag as the lane it measures. Empty (no
-  // text node) with the flag off: `setText` is never called, so there is nothing to hide.
+  // T-1048 (LSR-7): the CLIENT ring's own cost and freshness — ring-fold cost per row,
+  // arrival→paint latency (never the design's full sample-to-pixel budget, and never the
+  // server's per-subscription fold, which is `/api/status` `spectrum.fold_ns_*`) — shown only
+  // behind the same `?live-ring=1` flag as the lane it measures. Empty (no text node) with the
+  // flag off: `setText` is never called, so there is nothing to hide.
   const metricsEl = h("div", { class: "sf-ring sf-ring-metrics", role: "status" });
   // T-807 (MAP-07): says so, in words, when the active pane's coverage fog is hidden — the bare
   // ground it then draws is a viewer's choice, and a choice about grey must never pass for a fact.
@@ -903,11 +905,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     stage.dataset.liveRing = next;
   };
   /**
-   * **The LSR-7 dashboard tile** (T-1048): sample→pixel latency and per-row fold cost, in words and
-   * as machine-readable numbers, behind the same flag as the lane it measures. Read by the person
-   * (`metricsEl`, in the status panel's "More" body beside the other capture-rule paragraphs) and by
-   * a spec (`.sf-stage[data-live-metrics]`, the same pattern `stateRing` above already keeps).
-   * Written once per frame the ring lane runs, and only when the numbers change.
+   * **The LSR-7 dashboard tile** (T-1048): the client's own arrival→paint latency and ring-fold
+   * cost per row — named for exactly what each measures, never the design's full sample-to-pixel
+   * budget and never the server's per-subscription fold (`/api/status` `spectrum.fold_ns_*`,
+   * `docs/api.md`) — in words and as machine-readable numbers, behind the same flag as the lane it
+   * measures. Read by the person (`metricsEl`, in the status panel's "More" body beside the other
+   * capture-rule paragraphs) and by a spec (`.sf-stage[data-live-metrics]`, the same pattern
+   * `stateRing` above already keeps). Written once per frame the ring lane runs, and only when the
+   * numbers change.
    */
   let metricsDiag = "";
   const stateMetrics = () => {
