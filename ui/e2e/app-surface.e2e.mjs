@@ -61,8 +61,8 @@ async function rehomedCounts(page) {
   const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
   assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
   // The viewport menu: its ×, Split ⇔, Split ⇕ and the rows ⇄ columns flip (T-1005), Close,
-  // Whole surface, Record IQ.
-  return { closed: CLOSED_NAMES.length, pane: 7, layers: registry.length + 1 + 1 + 3 };
+  // Whole surface, Record IQ, and T-1006's per-device capture offer.
+  return { closed: CLOSED_NAMES.length, pane: 8, layers: registry.length + 1 + 1 + 3 };
 }
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {

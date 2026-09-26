@@ -21,7 +21,7 @@ export const FOLLOWING = `${liveBtn(1)}.classList.contains('following')`;
 /** Every control T-882 rehomed from the toolbar row, plus the cluster it joined, closed state.
  * (T-1001: the FAB left this list with the FAB; each pane's Live button is on the canvas.) */
 export const CLOSED = ".map-goto input, .map-topright button, .map-zoom-in, .map-zoom-out";
-/** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ. */
+/** Inside the viewport menu: Split ⇔, Split ⇕, rows ⇄ columns (T-1005), Close, Whole surface, Record IQ, per-device (T-1006). */
 export const PANE_ITEMS = "#map-pane-menu button";
 /** Inside the layers menu: Signals (the detections overlay), Trace (view-wide) and the colour scale. */
 export const LAYER_ITEMS = "#map-layers input[data-layer], #map-layers input[data-view-layer], #map-layers input[data-scale]";
