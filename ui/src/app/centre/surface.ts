@@ -2124,29 +2124,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const dock = document.querySelector<HTMLElement>(".app > .out-strip");
       const dr = dock?.getBoundingClientRect();
       const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
-      // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
-      // it is never hidden (T-803's rule) — and the panes' bottom edge spans the WHOLE canvas width,
-      // so it always shares an x-range with the sheet: the panes must clear the peek strip too, not
-      // just the dock. (This was the minimap strip's clearance until T-995 retired the minimap.)
-      //
-      // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
-      // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
-      // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
-      // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
-      // height transition). Reading the live top/height, as an earlier version of this fix did,
-      // made the bottom edge — and so every pane — follow the sheet up and down
-      // on every drag and close (review finding on this ticket). The peek clearance itself is a
-      // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
-      // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
+      // The sheet (T-803) is a CLOSEABLE OVERLAY in the map model (docs/23 §10.1 P1; T-1026 hides it
+      // until a feature is clicked), so it never insets the panes: the canvas stays full-bleed under
+      // it. T-933 used to lift the panes clear of its peek strip, and that reserved strip read as a
+      // black bar along the bottom of the map (user, 2026-09-25) — an unpainted band that no CSS on
+      // the sheet could move, since it was this arithmetic and not the sheet's box. What the peek
+      // strip still arranges is the floating DOM chrome (`--chrome-bottom` / `--map-strip`: the
+      // status stack, layers, scan and zoom), anchored off the sheet's fixed BOTTOM edge and the
+      // constant `PEEK_PX` — never its live top/height, which made every pane follow a drag
+      // (T-933 review finding). The panes themselves clear only a full-width bar (the out-strip).
       const sheet = document.querySelector<HTMLElement>(".sheet");
       const sr = sheet?.getBoundingClientRect();
       const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - (sr.bottom - PEEK_PX))) : 0;
-      const under = Math.max(dockUnder, sheetUnder);
-      const lift = under > 0 ? under + 8 : 0;
-      stage.style.setProperty("--chrome-bottom", `${under}px`);
-      // The FAB and the readouts dock above the panes' bottom inset, in CSS px (`--map-strip` keeps
-      // its name; with the minimap retired, T-995, it is the lift alone).
-      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + lift}px`);
+      const chromeUnder = Math.max(dockUnder, sheetUnder);
+      const lift = dockUnder > 0 ? dockUnder + 8 : 0;
+      const chromeLift = chromeUnder > 0 ? chromeUnder + 8 : 0;
+      stage.style.setProperty("--chrome-bottom", `${chromeUnder}px`);
+      // The FAB and the readouts dock above the floating chrome's bottom clearance, in CSS px
+      // (`--map-strip` keeps its name; with the minimap retired, T-995, it is that clearance alone).
+      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr + chromeLift}px`);
       // T-882: how far the app's floating top bar reaches down over the stage (it wraps to several
       // rows on a narrow window — ~120 px at 420 px), so the cluster's top row starts below it
       // rather than under it. Layout arithmetic over two measured boxes; 0 where they do not meet.
@@ -2166,11 +2162,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
-    // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
-    // height, see above), so this observer is not about tracking drag/snap changes — it exists so
-    // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
-    // is still picked up once it appears, rather than the panes staying un-lifted until the next
-    // stage resize.
+    // The sheet's clearance (floating chrome only, see `fit`) is anchored to its fixed bottom edge,
+    // never its live height, so this observer is not about drag/snap changes — it exists so that a
+    // sheet mounted AFTER this first `fit()` call (a separate area mount, T-803) is still picked up
+    // once it appears, rather than the chrome staying un-lifted until the next stage resize.
     const sheetEl = document.querySelector<HTMLElement>(".sheet");
     if (sheetEl) ro?.observe(sheetEl);
     // T-994: the Active-outputs strip appears and disappears with the outputs; its box changing size
