@@ -10151,6 +10151,11 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         assert!(own["store"].is_string(), "{own}");
         assert!(own["level"].is_u64(), "{own}");
         assert!(own["stages"].is_array(), "{own}");
+        // T-1034: the tune record's bound on the search, or null when the record made no claim.
+        assert!(
+            own["record_bound_s"].is_null() || own["record_bound_s"].is_f64(),
+            "{own}"
+        );
         let (found, used) = (
             own["columns_found"].as_u64().unwrap(),
             own["columns_used"].as_u64().unwrap(),
