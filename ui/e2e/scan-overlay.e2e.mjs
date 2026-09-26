@@ -205,6 +205,14 @@ test("Start: the steps the engine executes (the scheduler's log) are the steps t
   const { page, backend } = await opened();
   assert.ok(planned, "a plan was dragged into shape");
   const startS = Date.now() / 1000;
+  // The capture clock's live edge just before Start, read off the wire (`GET /api/timeline`), in the
+  // same capture time the scheduler's records carry. It is what separates the tune the radio held
+  // before Start (began at or before it) from the sweep's steps (retuned after it) — a wall-clock
+  // cut cannot, because how long before Start that held tune began depends on how fast the page
+  // mounted (a quick mount put it 3 s before Start, inside any "few seconds" margin).
+  const tl = (await api(backend, "/api/timeline")).window;
+  const edgeS = tl?.buffered?.t1_s ?? tl?.t1_s;
+  assert.equal(typeof edgeS, "number", `the capture clock states no live edge: ${JSON.stringify(tl)}`);
   await page.click("document.querySelector('.map-scan-go')");
   await page.waitFor("the button to become Stop",
     `document.querySelector('.map-scan-btn .map-scan-label')?.textContent === 'Stop'`, { timeoutMs: 15000 });
@@ -240,10 +248,10 @@ test("Start: the steps the engine executes (the scheduler's log) are the steps t
       c: r.window?.center_hz, tier: r.tier, reason: r.reason?.code, start: (r.observed?.start_ns ?? 0) / 1e9 - startS,
       end: (r.observed?.end_ns ?? 0) / 1e9 - startS }));
     executed = (obs.records ?? [])
-      // Records are in CAPTURE time, which on the mock runs ~1 s behind the wall clock `startS` was
-      // read from — so the cut is "began within a few seconds of Start", which excludes only the
-      // tune the radio held before Start (it began when the page opened, tens of seconds earlier).
-      .filter((r) => r.record === "dwell" && r.window && (r.observed?.start_ns ?? 0) / 1e9 >= startS - CAPTURE_LAG_S)
+      // Records are in CAPTURE time, so the cut is the capture clock's own live edge read just
+      // before Start (`edgeS`): a step's record begins at its retune, after Start; the tune the
+      // radio held before Start began at or before that edge and is the only record excluded.
+      .filter((r) => r.record === "dwell" && r.window && (r.observed?.start_ns ?? 0) / 1e9 > edgeS)
       .sort((a, b) => a.observed.start_ns - b.observed.start_ns)
       .map((r) => r.window.center_hz);
     if (executed.length >= n) break;
