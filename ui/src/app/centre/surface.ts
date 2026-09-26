@@ -68,7 +68,7 @@ import {
   commitRetuneMode, isRetuneKey, retuneModeLabel, retuneModeTarget, RetuneModeController, type RetuneModeTarget,
 } from "../../surface/retune-mode";
 import {
-  ANY_DEVICE, devicePill, deviceRows, splitPerDeviceOffer, type AttachedDevice,
+  ANY_DEVICE, devicePill, deviceLabels, deviceRows, splitPerDeviceOffer, type AttachedDevice,
 } from "../../surface/panedevice";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
@@ -95,7 +95,7 @@ import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./c
 import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
-import { openSelectionMenu, openSignalMenu } from "../menu";
+import { menuDevices, openMeasurementMenu, openSelectionMenu, openSignalMenu } from "../menu";
 import { boxActivity, type BoxActivity } from "../dock/activity";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
@@ -709,7 +709,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     },
     toast: (text) => store.set(toast(text)),
   });
-  store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded), { immediate: true });
+  store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded, d.scans ?? []), { immediate: true });
   const scanQuadsFn: OverlayLayerFn = (pane) => {
     // Where the active pane is, stated beside the plan it draws (CSS px from the canvas's top-left,
     // and its frequency window), so a check can find a plan edge on screen without re-deriving the
@@ -1802,6 +1802,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
           // T-1002: the row as THIS pane knows it — the box was drawn from that pane's answer.
           const row = paneRows(s.inventory, hit.pane.id)[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
+        } else if (hit.mark.kind === "measurement-box") {
+          // T-1009: a box the user DREW with the Measure tool carries its own acts — scan it with a
+          // chosen radio, record its IQ from that radio's ring, keep it as a marker. Same component
+          // and same trigger as a detection box's menu (T-994).
+          const m = measurements.find((x) => x.id === hit.mark!.id);
+          if (m) {
+            openMeasurementMenu(ctx, m, {
+              // The same words the pane's device menu uses, disambiguated the same way.
+              devices: menuDevices(s.device.devices, deviceLabels(s.device.devices)),
+              view: measureViewOf(hit.pane.id),
+              openScan: (region, deviceId) => scanCtl.openPlanOver(region, deviceId),
+              prompt: (message, initial) => window.prompt(message, initial),
+            }, e.clientX, e.clientY);
+          }
         } else if (hit.mark.kind === "selection-box") {
           const sel = s.selections.list.find((x) => x.id === hit.mark!.id);
           if (sel) openSelectionMenu(ctx, sel, e.clientX, e.clientY);
