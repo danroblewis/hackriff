@@ -20,16 +20,17 @@ import { h } from "../dom";
 import { getAudioSession } from "../dock/api";
 import { mountInspectorPanel } from "../decode/inspector";
 import { startPoll } from "../net";
-import type { OutputEntry } from "../state";
+import type { AppState, OutputEntry } from "../state";
+import { audioOutputEmitter, runningEmitters, type ServedPipeline } from "../dock/activity";
 import { apiErrorText, fmtMHz } from "./format";
 import { viewWindow, windowCoverage, windowEmptyText, windowKey, type Row, type ViewWindow, type WindowState } from "./inventory";
 import type { WindowCoverage } from "./slice";
 
-// ---- pipelines (a minimal local shape: T-195 only needs emitter_id/state/outputs, so this module
-// doesn't statically import decode/pipelines.ts and pull its (much larger) recipe/palette UI into
-// this chunk). ----
+// ---- pipelines: the served `GET /api/pipelines` records (`servedOutputs.pipelines`, polled by
+// `dock/index.ts`) — the SAME records the map's box badges read (LP-7, ADR-0015 §12.7). ----
 
-export interface PipelineLite {
+/** A served pipeline as a test writes one out in full. */
+export interface PipelineLite extends ServedPipeline {
   id: string;
   emitter_id: string | null;
   state: "running" | "ended";
@@ -56,18 +57,20 @@ const RDS_MESSAGE_OUTPUT_IDS = new Set(["group-info", "station", "radiotext"]);
  * by its `messages` output ids) gets the dedicated accumulated RDS view ahead of the raw packet
  * inspector — the per-frame group stream is plumbing, the assembled PS/RadioText/PI/PTY readout is
  * the product (T-252, found live: the inspector was winning and hiding it). Otherwise a running
- * pipeline with a frame ("inspector") output wins over a live/opening Listen stream. Pure and
- * stable-ordered (pipelines first, then dock order) so a panel's identity/position doesn't jump
+ * pipeline with a frame ("inspector") output wins over a live Listen stream (server header
+ * arrived — the map badge's rule, LP-7). Pure and stable-ordered (pipelines first, then dock order) so a panel's identity/position doesn't jump
  * around as unrelated state changes elsewhere.
  */
-export function collectPanelSources(outputs: readonly OutputEntry[], pipelines: readonly PipelineLite[]): PanelSource[] {
+export function collectPanelSources(outputs: readonly OutputEntry[], pipelines: readonly ServedPipeline[]): PanelSource[] {
   // One output model (ADR-0015 §12.7 / LP-7): every output, whichever API produced it, is
   // `{emitter, pipeline_id, output_id, kind}`; the widget is chosen from the kinds an emitter has.
+  // Whether an audio entry is an open output, and of which emitter, is `dock/activity.ts`'s
+  // `audioOutputEmitter` — the rule the map badge uses — so the two can never disagree.
   const liveAudio = new Map<string, OutputEntry>();
   const running = pipelines.filter((p) => p.state === "running");
+  const emitterOf = runningEmitters(pipelines);
   for (const o of outputs) {
-    if (o.kind !== "audio" || (o.state !== "live" && o.state !== "opening")) continue;
-    const em = o.emitterId ?? running.find((p) => p.id === o.pipelineId)?.emitter_id ?? null;
+    const em = audioOutputEmitter(o, emitterOf);
     if (em && !liveAudio.has(em)) liveAudio.set(em, o);
   }
   const seen = new Set<string>();
@@ -78,8 +81,9 @@ export function collectPanelSources(outputs: readonly OutputEntry[], pipelines: 
   };
   for (const p of running) {
     if (!p.emitter_id || seen.has(p.emitter_id)) continue;
-    const isRds = p.outputs.some((o) => o.kind === "messages" && RDS_MESSAGE_OUTPUT_IDS.has(o.id));
-    const hasInspector = p.outputs.some((o) => o.kind === "inspector");
+    const outs = p.outputs ?? [];
+    const isRds = outs.some((o) => o.kind === "messages" && RDS_MESSAGE_OUTPUT_IDS.has(o.id));
+    const hasInspector = outs.some((o) => o.kind === "inspector");
     if (isRds) {
       seen.add(p.emitter_id);
       // Audio + RDS are two outputs of one signal: one panel, the scope with the RDS box under it.
@@ -96,6 +100,19 @@ export function collectPanelSources(outputs: readonly OutputEntry[], pipelines: 
     if (a) sources.push(a);
   }
   return sources;
+}
+
+/** The panel sources for a store state: `outputs` (the streams this page opened) + the served
+ * `GET /api/pipelines` records, exactly what `boxActivity` draws the map badges from. */
+export const panelSourcesOf = (s: Pick<AppState, "outputs" | "servedOutputs">): PanelSource[] =>
+  collectPanelSources(s.outputs, s.servedOutputs.pipelines);
+
+/** The mounted panel's identity: the output it shows, not just the signal. A Listen restart (new
+ * `outputId`) or RDS → audio on the same signal is a different panel and remounts; an RDS sibling
+ * appearing or leaving is not (the audio panel updates in place, [[AudioPanel.update]]). */
+export function panelKey(s: PanelSource | null): string | null {
+  if (!s) return null;
+  return `${s.emitterId}|${s.kind}|${s.kind === "audio" ? s.outputId : s.pipelineId}`;
 }
 
 /** Which signal's panel a tab strip should show: keeps the current one while it's still available,
@@ -356,6 +373,10 @@ export const DIGITAL_PANEL_CLASS = "out-panel out-digital inspector";
 export const AUDIO_PANEL_CLASS = "out-panel out-audio";
 export const RDS_PANEL_CLASS = "out-panel out-rds";
 
+/** The widget class a panel source mounts (chosen by output kind, ADR-0015 §12.7). */
+export const panelClass = (s: PanelSource): string =>
+  (s.kind === "rds" ? RDS_PANEL_CLASS : s.kind === "digital" ? DIGITAL_PANEL_CLASS : AUDIO_PANEL_CLASS);
+
 /** A field that arrives 2 (PS) or 4 (RadioText) characters at a time but only ever reaches
  * `/decode` once fully assembled (see [[rdsViewModel]]): `raw === null` is the true "not yet
  * received" state (T-207/T-164 — never rendered as blank or a placeholder value); a non-null raw
@@ -442,8 +463,9 @@ class AudioPanel {
   private poly: SVGPolylineElement;
   private rdsEl: HTMLElement;
   private unsubSamples: () => void;
-  private stopPoll: () => void;
+  private stopPoll: () => void = () => {};
   private unsubWindow: () => void = () => {};
+  private hasRds = false;
   private raf = 0;
   private dirty = false;
 
@@ -455,14 +477,29 @@ class AudioPanel {
     this.poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline") as SVGPolylineElement;
     this.poly.setAttribute("class", "scope-line");
     this.svg.append(this.poly);
-    this.rdsEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "Loading…"));
+    this.rdsEl = h("div", { class: "rds-box", hidden: true }, h("p", { class: "hint" }, "Loading…"));
     el.replaceChildren(
       h("div", { class: "out-scope" }, this.svg),
       this.rdsEl,
     );
     this.unsubSamples = getAudioSession(ctx).onSamples(outputId, (pcm) => { this.scope.push(pcm); this.scheduleDraw(); });
-    this.stopPoll = startPoll(() => this.loadDecode(), 3000);
-    this.unsubWindow = ctx.store.select(windowKey, () => { void this.loadDecode(); });
+  }
+
+  /** Re-derives the panel's capabilities from the served output state on EVERY update, never once at
+   * build time: the RDS box shows (and polls) exactly while a running RDS sibling output exists. */
+  update(source: Extract<PanelSource, { kind: "audio" }>) {
+    const hasRds = source.rdsSibling !== null;
+    if (hasRds === this.hasRds) return;
+    this.hasRds = hasRds;
+    this.rdsEl.hidden = !hasRds;
+    this.stopPoll();
+    this.unsubWindow();
+    this.stopPoll = () => {};
+    this.unsubWindow = () => {};
+    if (hasRds) {
+      this.stopPoll = startPoll(() => this.loadDecode(), 3000);
+      this.unsubWindow = this.ctx.store.select(windowKey, () => { void this.loadDecode(); });
+    }
   }
 
   private scheduleDraw() {
@@ -492,10 +529,9 @@ type MountedPanel = { destroy(): void };
 
 class OutputPanels {
   private sources: PanelSource[] = [];
-  private pipelines: PipelineLite[] = [];
   private active: string | null = null;
   private mounted: MountedPanel | null = null;
-  private mountedFor: string | null = null;
+  private mountedKey: string | null = null;
 
   private tabsEl: HTMLElement;
   private bodyEl: HTMLElement;
@@ -508,19 +544,13 @@ class OutputPanels {
     el.replaceChildren(h("div", { class: "out-panels" }, analyzeEl, traceEl, h("div", { class: "section-h" }, "Outputs"), this.tabsEl, this.bodyEl));
     const trace = mountTracePanel(traceEl, ctx);
     mountAnalyzeSection(analyzeEl, ctx, (j) => trace.setJob(j));
-    ctx.store.select((s) => s.outputs, (outputs) => this.recompute(outputs), { immediate: true });
-    // A running pipeline's `emitter_id`/`outputs` isn't in any store slice today (only Decode mode
-    // polls `/api/pipelines`), so this panel keeps its own light poll rather than pulling in
-    // `decode/pipelines.ts`'s much larger recipe/palette module.
-    startPoll(async () => {
-      const r = await ctx.client.get<{ pipelines: PipelineLite[] }>("/api/pipelines");
-      this.pipelines = r.pipelines;
-      this.recompute(ctx.store.get().outputs);
-    }, 2000);
+    // LP-7: the same two slices the map's box badges read (`centre/surface.ts` `boxActivity`), so
+    // the panel and the badge are two views of one output model and cannot disagree.
+    ctx.store.select((s) => [s.outputs, s.servedOutputs] as const, () => this.recompute(), { immediate: true });
   }
 
-  private recompute(outputs: readonly OutputEntry[]) {
-    this.sources = collectPanelSources(outputs, this.pipelines);
+  private recompute() {
+    this.sources = panelSourcesOf(this.ctx.store.get());
     this.active = nextPanelTab(this.active, this.sources);
     this.render();
   }
@@ -540,22 +570,27 @@ class OutputPanels {
     }, tabLabel(rows, s))));
 
     const current = this.sources.find((s) => s.emitterId === this.active) ?? null;
-    const currentId = current?.emitterId ?? null;
-    if (currentId !== this.mountedFor) {
+    const key = panelKey(current);
+    if (key !== this.mountedKey) {
       this.mounted?.destroy();
       this.mounted = null;
-      this.mountedFor = currentId;
+      this.mountedKey = key;
       this.bodyEl.replaceChildren();
       if (current) {
-        const cls = current.kind === "rds" ? RDS_PANEL_CLASS : current.kind === "digital" ? DIGITAL_PANEL_CLASS : AUDIO_PANEL_CLASS;
-        const panelEl = h("div", { class: cls });
+        const panelEl = h("div", { class: panelClass(current) });
         this.bodyEl.append(panelEl);
-        this.mounted = current.kind === "rds"
-          ? new RdsPanel(panelEl, this.ctx, current.emitterId)
-          : current.kind === "digital"
-            ? new DigitalPanel(panelEl, this.ctx, current.pipelineId)
-            : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId);
+        if (current.kind === "audio") {
+          const audio = new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId);
+          audio.update(current);
+          this.mounted = audio;
+        } else {
+          this.mounted = current.kind === "rds"
+            ? new RdsPanel(panelEl, this.ctx, current.emitterId)
+            : new DigitalPanel(panelEl, this.ctx, current.pipelineId);
+        }
       }
+    } else if (current?.kind === "audio" && this.mounted instanceof AudioPanel) {
+      this.mounted.update(current);
     }
     const empty = panelsEmptyText(this.sources);
     if (empty && !this.bodyEl.hasChildNodes()) this.bodyEl.replaceChildren(h("div", { class: "empty" }, empty));

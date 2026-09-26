@@ -11,6 +11,8 @@ import {
   type DecodeRow, type PanelSource, type PipelineLite,
 } from "../src/app/explore/output-panel";
 import { FALLBACK_ROWS, viewWindow, windowKey } from "../src/app/explore/inventory";
+import { panelKey, panelClass, panelSourcesOf, AUDIO_PANEL_CLASS, RDS_PANEL_CLASS } from "../src/app/explore/output-panel";
+import { boxActivity } from "../src/app/dock/activity";
 
 
 function audioOutput(over: Partial<OutputEntry> = {}): OutputEntry {
@@ -38,9 +40,11 @@ test("collectPanelSources: an ended pipeline, or one with no inspector output, c
   assert.deepEqual(collectPanelSources([], [pipeline({ emitter_id: null })]), []);
 });
 
-test("collectPanelSources: a live or opening Listen entry makes an audio panel; other states don't", () => {
+test("collectPanelSources: a live Listen entry (server header arrived) makes an audio panel; other states don't", () => {
   assert.deepEqual(collectPanelSources([audioOutput()], []), [{ emitterId: "em-fm", kind: "audio", outputId: "listen1", pipelineId: null, rdsSibling: null }]);
-  assert.deepEqual(collectPanelSources([audioOutput({ state: "opening" })], []), [{ emitterId: "em-fm", kind: "audio", outputId: "listen1", pipelineId: null, rdsSibling: null }]);
+  // `opening` = the socket is open but the server has not answered: not an output yet, for the map
+  // badge (T-994) and so for the panel too — one rule, one model (LP-7).
+  assert.deepEqual(collectPanelSources([audioOutput({ state: "opening" })], []), []);
   assert.deepEqual(collectPanelSources([audioOutput({ state: "refused" })], []), []);
   assert.deepEqual(collectPanelSources([audioOutput({ state: "ended" })], []), []);
   assert.deepEqual(collectPanelSources([{ ...audioOutput(), kind: "records" }], []), []);
@@ -350,4 +354,56 @@ test("windowKey changes exactly when the window does, so a mounted panel re-read
     "a dragged span is a different window at the same instant",
   );
   assert.notEqual(windowKey(base), windowKey(winState({ rowRateHz: 64 })), "the span is derived from the row rate");
+});
+
+// ---- LP-7 (ADR-0015 §12.7): one output model, and the mounted panel follows the output's identity ----
+
+test("panelKey: a Listen restart (same signal, new outputId) is a different panel — the scope re-subscribes", () => {
+  const before = collectPanelSources([audioOutput({ id: "listen1" })], []);
+  const after = collectPanelSources([audioOutput({ id: "listen2" })], []);
+  assert.equal(before[0].emitterId, after[0].emitterId);
+  assert.notEqual(panelKey(before[0]), panelKey(after[0]));
+  assert.match(panelKey(after[0]) ?? "", /listen2/);
+});
+
+test("panelKey: RDS running, then Listen starts on the same signal — the rds panel is swapped for the audio panel", () => {
+  const rdsOnly = collectPanelSources([], [rdsPipeline()]);
+  const merged = collectPanelSources([audioOutput({ emitterId: "em-fm" })], [rdsPipeline()]);
+  assert.equal(panelClass(rdsOnly[0]), RDS_PANEL_CLASS);
+  assert.notEqual(panelKey(rdsOnly[0]), panelKey(merged[0]));
+  assert.equal(panelClass(merged[0]), AUDIO_PANEL_CLASS);
+  // …and when Listen stops, back to the rds panel.
+  assert.notEqual(panelKey(merged[0]), panelKey(collectPanelSources([audioOutput({ state: "ended" })], [rdsPipeline()])[0]));
+});
+
+test("panelKey: the RDS sibling appearing/leaving is an in-place update of the same audio panel, not a remount", () => {
+  const plain = collectPanelSources([audioOutput()], [])[0];
+  const withRds = collectPanelSources([audioOutput()], [rdsPipeline()])[0];
+  assert.equal(panelKey(plain), panelKey(withRds));
+  assert.equal(plain.kind === "audio" && plain.rdsSibling, null);
+  assert.equal(withRds.kind === "audio" && withRds.rdsSibling, "p2");
+  assert.equal(panelKey(null), null);
+});
+
+test("one output model: the map badge and the panel read the same served records and never disagree on audio", () => {
+  const cases: { outputs: OutputEntry[]; pipelines: PipelineLite[] }[] = [
+    { outputs: [audioOutput()], pipelines: [] },
+    { outputs: [audioOutput({ state: "opening" })], pipelines: [] },
+    { outputs: [audioOutput({ state: "refused" })], pipelines: [] },
+    { outputs: [audioOutput({ state: "ended" })], pipelines: [rdsPipeline()] },
+    { outputs: [audioOutput({ emitterId: "em-fm" })], pipelines: [rdsPipeline()] },
+    // A recipe-pipeline audio stream names its pipeline, not its emitter (header pipeline_id).
+    { outputs: [audioOutput({ emitterId: null, pipelineId: "p2", outputId: "audio" })], pipelines: [rdsPipeline()] },
+    { outputs: [audioOutput({ emitterId: null, pipelineId: "p2", outputId: "audio" })], pipelines: [rdsPipeline({ state: "ended" })] },
+  ];
+  for (const c of cases) {
+    const state = { outputs: c.outputs, servedOutputs: { pipelines: c.pipelines, recordings: [] } };
+    const panels = panelSourcesOf(state);
+    const badges = boxActivity(state.outputs, state.servedOutputs.pipelines, state.servedOutputs.recordings);
+    const panelAudio = panels.filter((p) => p.kind === "audio").map((p) => p.emitterId).sort();
+    const badgeAudio = [...badges].filter(([, a]) => a.kinds.includes("audio")).map(([id]) => id).sort();
+    assert.deepEqual(panelAudio, badgeAudio, JSON.stringify(c));
+    // Every panel is for a box the map marks active.
+    for (const p of panels) assert.ok(badges.has(p.emitterId), `panel ${p.emitterId} has no badge: ${JSON.stringify(c)}`);
+  }
 });
