@@ -31540,6 +31540,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/accept_encoding/)'`), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-1021 + T-1058 workers 2026-09-26: api_contract tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding compares separate reads of a LIVE tile - compare the encodings of the same (sealed) content
+
+      2026-09-26 coordinator: queued UNPROVEN - the worker never saw its own target test green: every run timed out earlier at api_contract.rs:221 ('timed out waiting for the station's tile to be observed', a 60 s wait) at Mac load 60-100. The gate arbitrates; if the sealed+observed wait cannot be met on this fixture, the gate will show it - then re-open here.
   - id: T-1077
     milestone: MLIVE
     title: fog-of-war.e2e band-A live baseline (9.9 %/3.4 %/9.6 % of the pane measured, want >= 25 %) and re-sweep brightness reds, unmasked by T-1072 - triage alone on a quiet box against T-1057/T-1037/T-1042
@@ -31687,6 +31689,25 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the named spec/test ALONE on ports >= 9216 against a FRESH hk; just test-ui / the one binary), then HAND BACK. Never `just gate`. Never loosen an assertion; a stale premise is re-measured with the same intent and evidence.
     notes: |
       FOUND BY rc-20260926: RC P1: app-trace (peak drawn at nothing) and app-dismiss (sheet gives no columns back) red on main - fixed on the unlanded UI stack; verify on main after T-1051 lands
+  - id: T-1085
+    milestone: M2-hardening
+    title: "listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE-LISTEN-STEREO
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      SEEN BY T-1071's worker (2026-09-26 ~06:00, `just test-crate hk-pipeline`, load avg 26): hk-pipeline::listen_conformance `listen_stereo_is_opt_in_interleaved_and_reports_the_pilot` failed with 'sample_index jumped 0 -> 1920 with no DISCONTINUITY flag' (30 s); it passed alone twice (11.8 s, 10.1 s). Never seen red in a merge gate (0 FAIL lines in the merge-runner log).
+      WHY IT IS NOT JUST A LOAD FLAKE: under load the listen path may legitimately lose audio, but the stream contract (hk-stream; docs/api.md stream records) says a gap in sample_index is ALWAYS flagged DISCONTINUITY - an unflagged jump is a consumer-visible contract violation (a decoder downstream would splice across it silently). So either the stereo interleaved path advances sample_index without setting the flag when it drops/skips a block under backpressure (a PRODUCT defect that load exposes), or the test reads the index across a legitimate restart the product flags elsewhere (then say where, with evidence).
+      DELIVER (deflake-triage): reproduce under load deterministically - e.g. a slow consumer / delayed reader in the test harness (not a CPU-spinner) - and find where sample_index advances by 1920 (one block?) without DISCONTINUITY; fix the product so every gap is flagged; pin it with a test that is red without the fix. Never loosen the 'no unflagged jump' assertion.
+      ACCEPTANCE: the test green 10/10 alone and 5/5 inside `just test-crate hk-pipeline`; a new deterministic test (slow consumer) red on the pre-fix code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-1071 worker 2026-09-26: listen stereo: sample_index jumps 0 -> 1920 with NO DISCONTINUITY flag under load (listen_conformance listen_stereo_is_opt_in...) - an unflagged gap breaks the stream contract; find where a dropped block skips the flag
+    high_effort_reason: stream-contract defect on the real-time listen path, only under load; hard debugging
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
