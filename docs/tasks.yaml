@@ -30378,7 +30378,8 @@ tasks:
   - id: T-1040
     milestone: MLIVE
     title: coverage_changed event on the tile/row socket so a retune re-lays the fog and fetches exactly the moved tiles (the live-edge tile_committed half is superseded by the LSR live ring)
-    status: todo
+    status: in-progress
+    branch: task-t1040
     priority: medium
     deps: []
     parallel_group: TILE-EVENTS
@@ -30433,7 +30434,8 @@ tasks:
   - id: T-1043
     milestone: MLIVE
     title: "LSR-2: GET /ws/spectrum/rows - per-pane folded, quantised binary row subscription with t_from (store walk -> live), epoch and coverage trailer"
-    status: todo
+    status: in-progress
+    branch: task-t1043
     priority: high
     deps: []
     parallel_group: LSR-2
@@ -30540,7 +30542,8 @@ tasks:
   - id: T-1049
     milestone: MMAP
     title: "app-outputs-map (T-994) reported red 3x at 400 px ('no pressable box in 60 s') - triage on main with a FRESH hk: close as stale-binary or fix"
-    status: todo
+    status: in-progress
+    branch: task-t1049
     priority: medium
     deps: []
     parallel_group: UI-OUTPUTS-MAP-TRIAGE
