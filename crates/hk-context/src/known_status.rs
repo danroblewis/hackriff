@@ -50,6 +50,11 @@ fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
         "cellular" | "lte" => Some(&["cellular"]),
         "public-safety" | "p25" | "dmr" => Some(&["public-safety"]),
         "paging" | "pager" => Some(&["paging"]),
+        // T-979: UHF television and the Part 74 low power auxiliary (wireless microphone) use
+        // that shares its channels. `atsc` and `dtv` are the emission families the pipeline maps
+        // an 8VSB pilot to; `tv-broadcast` is the service.
+        "tv-broadcast" | "atsc" | "dtv" => Some(&["tv-broadcast"]),
+        "wireless-mic" | "low-power-auxiliary" => Some(&["wireless-mic"]),
         _ => None,
     }
 }

@@ -28,6 +28,12 @@ pub enum CalibrationMethod {
     /// alias finds energy on granted channels (T-628), measures the receiver. No known-frequency
     /// reference and no band-plan lookup: the raster is an a-priori standard, not a truth table.
     LmrRaster,
+    /// An ATSC 1.0 (8VSB) pilot (T-979). The pilot is a CW line the standard places
+    /// 309.440 559 kHz above a 6 MHz television channel's lower edge (A/53 Part 2 §5.1.2), so
+    /// reading it against the channel raster measures this receiver's own clock — the same kind
+    /// of measurement as [`Self::FmPilot`] and [`Self::LmrRaster`]: an a-priori standard, never a
+    /// band-plan truth table, and free with a detection that had to measure the pilot anyway.
+    AtscPilot,
     /// Entered by hand or a factory value.
     Manual,
 }

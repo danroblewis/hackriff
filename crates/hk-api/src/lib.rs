@@ -40,12 +40,15 @@ pub mod coverage; // T-368: the coverage map - grey means genuinely unobserved
 pub mod datasets; // T-205
 pub mod decode; // T-159
 pub mod events; // T-264 (ADR-0017 TM-8): the durable catalogue behind the History surface
+pub mod frontend; // T-981: front-end events (clipped whole-span steps) over a window
+pub mod gain; // T-945: the actuator for automatic front-end gain management (docs/28)
 pub mod http;
 pub mod inspector;
 pub mod inventory;
 pub mod iqbuffer; // T-157
 pub mod live_control;
 pub mod measurements; // T-818 MAP-18
+pub mod ml; // T-844: C38 models, modes and the durable shadow log
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
@@ -65,6 +68,7 @@ pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)
 pub mod timeline; // T-338: the capture window, and the compressed overview drawn on it
+pub mod trunk_cc; // T-977: the control-channel hunt's last pass, with per-channel verdicts
 pub mod tune_history; // T-898: the device's own retune route, from the recorded tune intervals
 pub mod views; // T-819 MAP-19
 pub mod vlf; // T-891: VLF/LF science on the accessory-fed source
@@ -87,10 +91,11 @@ pub use analyze::{
 pub use auth::{Token, default_token_path};
 pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
 pub use control::{
-    AuditLog, CaptureStatus, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
+    AuditLog, CaptureStatus, ClassBand, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
     RunControl, RunState,
 };
 pub use datasets::{DatasetControl, DatasetFailure};
+pub use gain::{GainManager, GainRunError};
 pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
@@ -98,6 +103,7 @@ pub use live_control::{
     LiveControls, LiveControlsError, LiveTuning, SelectError, SourceLiveControl, WindowPolicy,
     WindowRetuner, validate_gains,
 };
+pub use ml::{MlControl, MlFailure, MlModeChange, MlModeWanted};
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 pub use playback::{PlaybackChange, PlaybackControl, PlaybackFailure};
 pub use recordings::{RecordingCatalog, RecordingsFailure};

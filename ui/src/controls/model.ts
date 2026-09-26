@@ -110,9 +110,26 @@ export interface ScanState {
   yielded: ScanYielded | null;
 }
 
+/**
+ * One front end on `/api/control/state`'s `devices[]` (T-511): the list a client picks a `device_id`
+ * selector from. `[]` on a replay, one entry on a single-SDR run — the same device the singular
+ * `device`/`tuning` describe — and N when N are composed, where those two are `null` because then
+ * there is no "the" device to describe.
+ *
+ * Optional on [[ControlState]] only because a server older than T-511 does not send it; a missing
+ * list reads as "this server names no front ends", never as "there are none".
+ */
+export interface DeviceEntry {
+  device_id: string | null;
+  device: DeviceCaps;
+  tuning: Tuning;
+}
+
 export interface ControlState {
   live: boolean;
   device: DeviceCaps | null;
+  /** Every live front end, in composition order (T-511). See [[DeviceEntry]]. */
+  devices?: DeviceEntry[];
   tuning: Tuning | null;
   run: Run | null;
   /** T-452: the survey sweep, beside the tuning it moves. `null` when nothing can sweep this

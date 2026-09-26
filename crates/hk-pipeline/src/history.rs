@@ -3,8 +3,11 @@
 //! Its own STFT (the detection bin width, Hann 50 % overlap, `K` for ~`history_rows_per_s`
 //! frames/s, no SK) and its own `NoiseFloorTracker` feed `FloorProduct::ingest`, which folds
 //! each frame into the dBFS/Hz pyramid (or the dBm/Hz one when a calibration applies). The
-//! product's uncalibrated pyramid is the history `/api/history` answers from. At the end of the run
-//! tiles are sealed through the last frame plus an hour.
+//! product's uncalibrated pyramid is the history `/api/history` answers from. At the end of the
+//! run every open tile is forced shut ([`hk_store::Pyramid::seal_all`]) with the watermark left at
+//! the last frame — never past it, which is T-942: a watermark in a time block that has not
+//! happened yet is one the next run on the same data dir recovers, and then refuses every frame
+//! it folds.
 //!
 //! **Readers never stall this reader (T-037b).** `/api/history` and `/api/floor` hold the
 //! product's lock for a whole query. Frames go through a [`FloorIngestQueue`], which only tries
@@ -43,10 +46,15 @@
 //! the stream has retuned (or changed rate), a reset emits the averaging in progress as a row when
 //! it holds at least `K / 10` segments ([`hk_dsp::PartialFrames`]): its resolution's `n_avg` and
 //! `sample_count` are what was actually averaged, so the pyramid's per-cell noise shape and
-//! observed duration stay honest. A stream that never retunes (fixed tuning; gaps and gain steps
-//! only) folds exactly the frames it did before, and a full row disarms partial rows until the
-//! next retune, so a tune held after the scheduler left it discards at overrun gaps as before. Rows are one per step at most beyond the full
-//! rows, so the reader's per-block cost is unchanged.
+//! observed duration stay honest. A stream that never retunes and never loses a sample (fixed
+//! tuning, gain steps only) folds exactly the frames it did before, and a full row disarms partial
+//! rows until the next such input. Rows are one per step at most beyond the full rows, so the
+//! reader's per-block cost is unchanged.
+//!
+//! **T-939 arms them on a `GAP` too, and that is what keeps the waterfall from going empty.** A
+//! stream whose source drops transfers more often than one row period used to fold **no row at
+//! all** — the reset arrived before `K` segments ever completed — while this reader lost not one
+//! ring sample of its own. See [`history_stft_config`] for the measurement and the argument.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -78,7 +86,7 @@ pub(crate) const PARTIAL_MIN_DIVISOR: usize = 10;
 
 /// T-139's minimum for a partial row of a `k`-segment STFT; also the minimum a stream's last
 /// averaging needs to be emitted at the stream's end ([`hk_dsp::StftProcessor::finish`], T-915).
-pub(crate) fn partial_min_segments(k: usize) -> usize {
+pub fn partial_min_segments(k: usize) -> usize {
     k.div_ceil(PARTIAL_MIN_DIVISOR)
 }
 
@@ -107,6 +115,9 @@ pub(crate) fn update_view_tile_counters(counters: &Counters, view: &Pyramid) {
     set(&counters.history.view_bytes_written, s.bytes_written);
 }
 
+/// Late frames a run may count before it says so in the log: ~10 s at the default 10 rows/s.
+const LATE_ALARM: u64 = 100;
+
 fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
     for r in folded {
         match r {
@@ -114,6 +125,21 @@ fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
             Ok(_) => inc(&h.frames_ingested),
             Err(_) => inc(&h.frames_rejected),
         }
+    }
+    // **T-942: a total loss must not be silent.** `frames_late` was counted and served all along
+    // — the explorer read `frames_ingested 0, frames_late 2024` off `/api/status` — but nothing
+    // said it out loud, so a run recorded no spectrum history at all for half an hour while
+    // looking healthy everywhere else. A run that has folded NOTHING and refused a hundred frames
+    // is not a run with a little jitter; it says so, once (the count crosses the threshold at one
+    // frame, and never again in the run's life).
+    if h.frames_ingested.load(Ordering::Relaxed) == 0
+        && h.frames_late.load(Ordering::Relaxed) == LATE_ALARM
+    {
+        eprintln!(
+            "hk-pipeline: spectrum history is recording NOTHING: all {LATE_ALARM} frames so far \
+             were folded behind the pyramid's watermark, which sits ahead of this run's capture \
+             time (see /api/status `history`, T-942)"
+        );
     }
 }
 
@@ -907,7 +933,7 @@ pub(crate) fn frame_site(attention: Option<&AttentionService>, t: Timestamp) -> 
 
 /// Reader 2's STFT: the history bin width, `K` for ~`rows_per_s` frames/s, T-139 partial rows
 /// and the T-524 DC notch-and-interpolate.
-pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> StftConfig {
+pub fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> StftConfig {
     let welch = history_welch(fft_len);
     let rows = rows_per_s.max(0.01);
     let k = ((fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
@@ -917,9 +943,21 @@ pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> S
     // hop's centre. Detection runs its own STFT without this and keeps its DC rule.
     stft_cfg.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
     // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
+    //
+    // **T-939 adds `GAP`, and it is what keeps the waterfall from going empty.** A row needs `K`
+    // segments of unbroken samples — 0.1 s at 10 rows/s — and every gap resets the averaging. At
+    // 20 Msps a loaded box drops USB transfers more often than that (measured: 54 M samples in
+    // 4 minutes, in bursts), so the reset arrived before any row completed and this reader folded
+    // **nothing at all** while losing not one ring sample of its own: `frames` flat, the pyramid
+    // empty, the live surface grey over spectrum the radio really did sample. The averaging
+    // interrupted by a gap is honest data with its own `n_avg` and `sample_count` — the argument
+    // T-915 already makes for the stream's last segments — so it is emitted rather than discarded,
+    // and "show all the data that exists" holds through a lossy stream instead of only a clean
+    // one. A full row still disarms until the next gap, so a stream that neither retunes nor drops
+    // folds exactly the frames it did before.
     stft_cfg.partial = Some(PartialFrames {
         min_segments: partial_min_segments(k),
-        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE | Discontinuity::GAP,
     });
     stft_cfg
 }
@@ -1068,7 +1106,27 @@ pub(crate) fn run(
     // `seal_at_end` is true for a single-device run, which keeps this reader's seal as it was.
     let seal = !continues && folded_anything && shared.seal_at_end;
     if seal {
-        p.seal_through(last_end.saturating_add_nanos(3_600_000_000_000))
+        // **The watermark stops at the last frame, whatever the seal reaches (T-942).**
+        //
+        // This was `seal_through(last_end + 1 h)`. The hour of slack forced every partially-filled tile shut so a finished replay's
+        // history was complete on disk at every level. It also **sealed tiles whose time block
+        // had not happened yet**, and scheme 1's ladder makes that an hour wide: level 2's tile
+        // is one hour, so the run-end seal wrote the tile of the hour the run died in and left
+        // its `block_end` — the next hour boundary — on disk as the newest sealed time. The next
+        // run on the same `--data-dir` recovered its watermark from that (`Pyramid::recover`),
+        // and `Pyramid::ingest` answers `Late` for every frame whose level-0 block ends at or
+        // before the watermark: **every** frame of the new run, until wall clock passed the hour
+        // boundary. Measured by the explorer on staging, 2026-09-25: `frames_ingested 0`,
+        // `frames_late 2024`, `/api/history` `observed_cells 0`, and `/api/navigation`
+        // `time.latest_s` an exact hour boundary 34 minutes in the future.
+        //
+        // `seal_all` still forces every partially-filled tile shut, so a finished replay's
+        // history is complete on disk at every level — what changes is that the *clock* stays at
+        // the data. `Pyramid::open` then reopens a level-0 tile that was sealed past the last
+        // frame and rebuilds its coarse summaries, so a restart **continues filling** the tile it
+        // was in the middle of. The monotonic watermark still applies (T-446); it just never runs
+        // ahead of what was recorded.
+        p.seal_all(last_end)
             .map_err(|e| anyhow::anyhow!("sealing history: {e}"))?;
     }
     p.checkpoint()

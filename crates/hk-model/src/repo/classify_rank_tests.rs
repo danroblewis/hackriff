@@ -222,14 +222,26 @@ fn t211_every_rank_pair_wins_in_both_merge_directions() {
         for b in WRITERS.into_iter().filter(|b| *b != a) {
             for track_survives in [true, false] {
                 let mut r = Repository::open_in_memory().unwrap();
+                // Two entries of one emission (the same-emission tests' `tracked_and_decoded`):
+                // since T-961 a decode attaches to the entry whose (t, f) region it came from, so
+                // the second entry is the decode that arrived before the tracker had measured
+                // that instant, with the tracker's window covering it afterwards.
+                let tracked = track(101.3e6, tr(0.0, 5.0));
                 let e = r
-                    .record_sighting(&track(101.3e6, tr(0.0, 5.0)), None)
+                    .record_sighting(
+                        &Sighting {
+                            seen: tr(0.0, 0.0),
+                            ..tracked.clone()
+                        },
+                        None,
+                    )
                     .unwrap()
                     .emitter_id;
                 let d = r
                     .record_sighting(&rds(101.3022e6, tr(1.0, 4.0)), None)
                     .unwrap()
                     .emitter_id;
+                r.record_sighting(&tracked, None).unwrap();
                 assert_ne!(e, d);
                 let (from, into) = if track_survives { (d, e) } else { (e, d) };
                 a.write(&mut r, into, 1.0);

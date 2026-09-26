@@ -21,8 +21,10 @@
 //!   [`write_declined`] writes the Demodulation alone for a probe that measured a window and
 //!   declined it, so a refusal is distinguishable from never having looked (T-416).
 //!
-//! Not yet: NBFM/AM/SSB/CW audio, squelch, AGC, CTCSS/DCS, stereo L−R audio, RDS without a
-//! pilot, RadioText.
+//! - [`subaudible`]: blind CTCSS tone / DCS code identification from the NBFM discriminator
+//!   (T-988, SIGNAL-090), reported on Listen's status and the emitter's `estimated_params`.
+//!
+//! Not yet: RDS without a pilot, RadioText.
 //!
 //! # C20 digital demodulation: 2-FSK / GFSK (T-013, AWARE-036)
 //!
@@ -47,6 +49,8 @@ pub mod receiver;
 pub mod record;
 /// Output-driven parameter refinement: the generic loop and the WFM objective (T-070).
 pub mod refine;
+/// Blind CTCSS/DCS identification on FM channels (T-988).
+pub mod subaudible;
 pub mod wfm;
 
 pub use mode::{

@@ -15,7 +15,7 @@ import type { AppContext, AreaMounts } from "./context";
 import * as dock from "./dock";
 import { slot } from "./dom";
 import * as explore from "./explore";
-import { forgetToken, takeToken } from "./net";
+import { forgetToken, reloadOnTokenHash, takeToken } from "./net";
 import { PREFS_KEY, mountShell } from "./shell";
 import { createStore } from "./store";
 import { initialState, parsePrefs } from "./state";
@@ -31,6 +31,7 @@ function readPrefs(): string | null {
 }
 
 function main() {
+  reloadOnTokenHash(window, sessionStorage);
   const token = takeToken();
   const store = createStore(initialState(parsePrefs(readPrefs())));
   const ctx: AppContext = { store, client: new ControlClient(token ?? ""), token: token ?? "" };

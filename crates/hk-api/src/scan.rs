@@ -305,6 +305,12 @@ impl Prepared {
                 "span_hz": b.span_hz,
                 "step_span_hz": b.step_span_hz,
                 "duty": b.duty(),
+                // T-965: what the pass spends listening, what each step spends retuning before it
+                // can, and whether anything measured the latter. `step_overhead_s` is `null` when
+                // nothing has — which is not zero: `pass_s` is then a floor, and `statement` says so.
+                "dwell_total_s": b.dwell_total_ns as f64 / NS_PER_S,
+                "step_overhead_s": b.step_overhead_ns.map(|o| o as f64 / NS_PER_S),
+                "overhead_measured": b.overhead_measured(),
                 // T-406's own sentence: what the pass catches and what it does not, in one line.
                 "statement": b.statement(),
             },
@@ -363,6 +369,33 @@ struct State {
     /// discarded rather than written over the new state.
     generation: u64,
     shutdown: bool,
+    /// T-965: wall time this front end's scan retunes have taken in total, ns, and how many were
+    /// measured. Their mean is **the per-step cost a pass pays beyond its dwell** — the retune and,
+    /// at a class or rate boundary, the run's re-plumb — which [`ScanBudget`] priced at zero and the
+    /// user paid anyway (`Scan everything (fast)`: 125.4 s stated, 237 s taken).
+    ///
+    /// Measured here because here is the only place that sees the whole cost: the worker brackets
+    /// the one `set_center`/`set_rate` pair a step makes, so what is timed is exactly what the step
+    /// waits for, not an estimate divided out of a pass length. Only a **successful** retune is
+    /// counted — a refused step is retried and has not happened yet, so its wait is not the price of
+    /// a step that did.
+    ///
+    /// It outlives one scan, because it is a property of the front end and not of a pass, and it is
+    /// a sum and a count rather than a smoothed figure so the served number is a plain mean with
+    /// nothing tuned in it.
+    retune_ns_total: i64,
+    retunes_measured: u64,
+}
+
+impl State {
+    /// T-965: the measured per-step cost beyond the dwell, ns — `None` until a retune has been
+    /// timed. **`None` is not zero**: a pass priced without it states a floor (see
+    /// [`ScanBudget::statement`]).
+    fn measured_step_overhead_ns(&self) -> Option<i64> {
+        (self.retunes_measured > 0).then(|| {
+            self.retune_ns_total / i64::try_from(self.retunes_measured).unwrap_or(i64::MAX)
+        })
+    }
 }
 
 /// The detection/history bin width, Hz, at a sample rate (T-517).
@@ -412,6 +445,8 @@ impl ScanRunner {
                     yielded: None,
                     generation: 0,
                     shutdown: false,
+                    retune_ns_total: 0,
+                    retunes_measured: 0,
                 }),
                 wake: Condvar::new(),
             }),
@@ -526,7 +561,13 @@ impl ScanRunner {
             rate_in_force_hz: rate_in_force,
             step,
             bin_hz,
-            budget: scan.budget(&compiled),
+            // T-965: priced with what this front end's retunes have actually been measured at, so
+            // the commitment line states the pass the user will wait for. Unmeasured, the budget
+            // says its own figure is a floor rather than implying the dwells are the whole cost.
+            budget: priced(
+                scan.budget(&compiled),
+                self.shared.lock().measured_step_overhead_ns(),
+            ),
             warnings: compiled.warnings.iter().map(warning_text).collect(),
             hops,
         })
@@ -678,10 +719,23 @@ impl ScanRunner {
         let o = out.as_object_mut().expect("object");
         match (&st.prepared, &st.active) {
             (Some(p), Some(a)) => {
+                // T-965: repriced from what THIS scan's own retunes have measured, so the pass
+                // length converges on the truth while the user watches rather than staying at the
+                // figure the preview guessed before anything had been timed.
+                let overhead = st.measured_step_overhead_ns();
+                let mut p = p.clone();
+                p.budget = priced(p.budget, overhead);
                 let j = p.json();
                 o.insert("plan".into(), j["plan"].clone());
                 o.insert("budget".into(), j["budget"].clone());
                 let now = Instant::now();
+                // The pass length the steps taken so far imply, end to end on the wall clock: the
+                // number to compare the stated budget against (T-965's "stated must match
+                // measured"). `null` until a step has been timed.
+                let measured_pass_s = overhead.map(|o| {
+                    (p.steps() as i64).saturating_mul(o.saturating_add(p.dwell_ns)) as f64
+                        / NS_PER_S
+                });
                 o.insert(
                     "progress".into(),
                     json!({
@@ -693,6 +747,9 @@ impl ScanRunner {
                         "started_s": a.started_ns as f64 / NS_PER_S,
                         "step_started_s": a.step_started_ns.map(|n| n as f64 / NS_PER_S),
                         "next_step_in_s": a.due.saturating_duration_since(now).as_secs_f64(),
+                        "elapsed_s": (now_ns() - a.started_ns).max(0) as f64 / NS_PER_S,
+                        "measured_step_overhead_s": overhead.map(|o| o as f64 / NS_PER_S),
+                        "measured_pass_s": measured_pass_s,
                     }),
                 );
             }
@@ -801,6 +858,10 @@ fn worker(shared: &Arc<Shared>) {
                 };
             }
         };
+        // T-965: the step's whole cost beyond its dwell, timed where it is paid. A step is a
+        // retune, and on a class or rate boundary the run re-plumbs behind it; none of that
+        // advances capture time, so a pass priced from its dwells prices it at zero.
+        let retune_began = Instant::now();
         let result = if shared.live.tuning().sample_rate_hz == step.rate_hz {
             shared.live.set_center(step.center_hz)
         } else {
@@ -809,12 +870,16 @@ fn worker(shared: &Arc<Shared>) {
                 .set_rate(step.rate_hz)
                 .and_then(|_| shared.live.set_center(step.center_hz))
         };
+        let retune_took = retune_began.elapsed();
         let mut st = shared.lock();
         if st.generation != step.generation || st.phase != Phase::Running {
             // A stop, a resume or a user action landed while this retune was in flight: its
             // outcome belongs to a scan that no longer exists.
             continue;
         }
+        // Set inside the `Ok` arm and folded into the front end's measured cost after it, so the
+        // borrow of `st.active` does not have to span the update.
+        let mut took: Option<Duration> = None;
         match result {
             Ok(t) => {
                 let steps = st.prepared.as_ref().map_or(1, Prepared::steps).max(1);
@@ -822,6 +887,7 @@ fn worker(shared: &Arc<Shared>) {
                     a.center_hz = Some(t.center_hz);
                     a.step_started_ns = Some(now_ns());
                     a.steps_done += 1;
+                    took = Some(retune_took);
                     a.retries = 0;
                     a.retry_since = None;
                     a.step += 1;
@@ -889,6 +955,26 @@ fn worker(shared: &Arc<Shared>) {
                 st.generation += 1;
             }
         }
+        // T-965: fold the step's measured cost into the front end's running mean. Outside the
+        // `Ok` arm so `st.active`'s borrow does not span it, and only for a step that happened.
+        if let Some(d) = took {
+            st.retune_ns_total = st
+                .retune_ns_total
+                .saturating_add(i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
+            st.retunes_measured += 1;
+        }
+    }
+}
+
+/// T-965: `budget` with a measured per-step cost priced in, or left stating that it has none.
+///
+/// One function so the price is the same on the preview, on the running scan's status and in the
+/// commitment line — the three places a user reads it — and so `None` can never quietly become a
+/// zero on one of the three.
+fn priced(budget: ScanBudget, overhead_ns: Option<i64>) -> ScanBudget {
+    match overhead_ns {
+        Some(o) => budget.with_step_overhead(o),
+        None => budget,
     }
 }
 
@@ -916,6 +1002,10 @@ mod tests {
         replumbing: Mutex<bool>,
         calls: AtomicU64,
         rates: Mutex<Vec<f64>>,
+        /// T-965: how long this front end takes to retune. A real one is not instant — it
+        /// reprograms the synthesiser, restarts the stream, and on a class or rate boundary the run
+        /// re-plumbs behind it — and that cost is what the scan's price used to omit.
+        retune_delay: Mutex<Duration>,
     }
 
     impl Fake {
@@ -943,6 +1033,7 @@ mod tests {
                 replumbing: Mutex::new(false),
                 calls: AtomicU64::new(0),
                 rates: Mutex::new(Vec::new()),
+                retune_delay: Mutex::new(Duration::ZERO),
             })
         }
         /// The same front end left at a narrow window, as a live run at 2.4 Msps is.
@@ -983,6 +1074,13 @@ mod tests {
         }
         fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let delay = *self
+                .retune_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
             if *self
                 .replumbing
                 .lock()
@@ -1068,6 +1166,106 @@ mod tests {
         // Preparing is not starting: the radio has not moved.
         assert!(live.centers().is_empty());
         assert_eq!(r.json()["state"], "idle");
+    }
+
+    /// T-965: **the stated pass length has to match the pass the user waits for.**
+    ///
+    /// The live failure: `Scan everything (fast)` priced 418 steps × 0.3 s as a 125.4 s pass and
+    /// took **237 s**, because the price counted the listening and nothing else. A step is a
+    /// retune — the synthesiser, the stream restart and, at a class or rate boundary, the run's
+    /// re-plumb — and none of that advances the sample clock the dwells are measured on, so a
+    /// price computed from the dwells alone prices it at exactly zero.
+    ///
+    /// Here the front end takes [`RETUNE_DELAY`] to retune, which the worker times where it is
+    /// paid. What this asserts:
+    ///
+    /// 1. Before anything has been timed, the price is the dwells and **says it is a floor** — the
+    ///    `None`-is-not-zero rule, the same one `Coverage::Unobserved` and `BiasTee::Unknown` obey.
+    /// 2. Once steps have run, `step_overhead_s` is the measured retune cost and `pass_s` is
+    ///    `steps × (dwell + it)` — so the served number is the wall-clock pass.
+    /// 3. And the dwell-only figure **understates** it by the whole per-step cost. That is the
+    ///    defect's own shape as an assertion: drop the overhead back out of `pass_s` and this fails.
+    #[test]
+    fn the_priced_pass_matches_the_pass_the_retunes_actually_cost() {
+        /// Long enough to dominate the dwell below (a real HackRF step cost ~268 ms), short enough
+        /// that four steps are a fraction of a second.
+        const RETUNE_DELAY: Duration = Duration::from_millis(30);
+        const DWELL_S: f64 = 0.02;
+
+        let live = Fake::new();
+        *live
+            .retune_delay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = RETUNE_DELAY;
+        let r = ScanRunner::new(live.clone() as Arc<dyn LiveControl>);
+
+        // 1. Nothing measured yet: the dwells, and an admission that they are not the whole cost.
+        let p = r
+            .prepare(&ScanRequest {
+                freq: None,
+                dwell_s: Some(DWELL_S),
+                step: None,
+            })
+            .expect("prepared");
+        assert_eq!(p.budget.step_overhead_ns, None);
+        assert!(!p.budget.overhead_measured());
+        assert_eq!(p.budget.pass_ns, p.budget.dwell_total_ns);
+        assert!(
+            p.budget.statement().contains("a floor, not the answer"),
+            "{}",
+            p.budget.statement()
+        );
+
+        r.start(&ScanRequest {
+            freq: None,
+            dwell_s: Some(DWELL_S),
+            step: None,
+        })
+        .expect("started");
+        assert!(wait_for(|| live.centers().len() >= 4));
+
+        // 2. The served budget prices the measured retune, once per step.
+        let j = r.json();
+        let b = &j["budget"];
+        assert_eq!(b["overhead_measured"], json!(true), "{b}");
+        let overhead_s = b["step_overhead_s"].as_f64().expect("measured");
+        let want = RETUNE_DELAY.as_secs_f64();
+        assert!(
+            (want..want + 0.5).contains(&overhead_s),
+            "measured {overhead_s} s per step against a {want} s retune"
+        );
+        let steps = b["steps"].as_f64().expect("steps");
+        let dwell_total_s = b["dwell_total_s"].as_f64().expect("dwell total");
+        let pass_s = b["pass_s"].as_f64().expect("pass");
+        assert!(
+            (pass_s - (dwell_total_s + steps * overhead_s)).abs() < 1e-6,
+            "pass {pass_s} s against {dwell_total_s} s of dwell + {steps} x {overhead_s} s"
+        );
+        // The progress block states the same measurement, so a watching client can compare the
+        // stated pass with the measured one without recomputing either.
+        let pr = &j["progress"];
+        assert_eq!(
+            pr["measured_step_overhead_s"].as_f64(),
+            Some(overhead_s),
+            "{pr}"
+        );
+        assert!((pr["measured_pass_s"].as_f64().expect("measured pass") - pass_s).abs() < 1e-6);
+
+        // 3. And the old, dwell-only figure understates the pass by the whole per-step cost.
+        assert!(
+            pass_s > dwell_total_s * 1.5,
+            "a {want} s retune against a {DWELL_S} s dwell must dominate the pass: {pass_s} s \
+             priced, {dwell_total_s} s of listening"
+        );
+        assert!(
+            !j["budget"]["statement"]
+                .as_str()
+                .expect("statement")
+                .contains("a floor, not the answer"),
+            "{}",
+            j["budget"]["statement"]
+        );
+        r.stop();
     }
 
     /// A dwell outside 10-30 s runs and is reported as unusual, never clamped (T-406).
