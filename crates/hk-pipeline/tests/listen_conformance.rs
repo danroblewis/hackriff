@@ -44,6 +44,10 @@
 //!    `sample_index`/`t` clock, and status records saying `stereo` (pilot locked) and
 //!    `stereo_lock_losses`; the left and right programmes arrive on their own channels; anything
 //!    but `1`/`2` is `4400`.
+//! 10. **Nothing is published unheard (T-1085)** — the transport subscribes after the opener
+//!     returns, so the chain reads nothing until its listener has attached: the first listener's
+//!     first record is `sample_index` 0. Audio that did go out to nobody (a listener left and
+//!     another attached) is a jump flagged `DISCONTINUITY` on the next listener's first record.
 //!
 //! **Not frozen here:** the audio's *content* (level, SNR) and CPU cost, which stage 3's parity
 //! harness compares sample-wise; refinement convergence tolerances (T-070's own tests); emitter
@@ -73,6 +77,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use common::TempDir;
@@ -87,7 +92,10 @@ use hk_pipeline::{
     replay_plan,
 };
 use hk_stream::record::parse_status_record;
-use hk_stream::{BinaryRecordHeader, OpenerRegistry, RecordFlags};
+use hk_stream::{
+    BinaryRecordHeader, ConsumerId, Declared, OpenRequest, OpenedStream, OpenerRegistry, Record,
+    RecordFlags, StreamOpener, StreamReader,
+};
 use serde_json::Value;
 use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
@@ -1097,6 +1105,175 @@ fn listen_stereo_is_opt_in_interleaved_and_reports_the_pilot() {
     );
     close(ws);
     run.finish();
+}
+
+/// §10 (T-1085): **no audio is published unheard, and audio that was is a flagged gap.**
+///
+/// A transport subscribes its consumer only after the opener has returned — which is after the
+/// chain has started. On a loaded box that interval ran long enough for the chain to publish two
+/// frames to nobody, and the listener's first record arrived at `sample_index` 1920 with no
+/// `DISCONTINUITY` flag (T-1071's red of the stereo test above, load average 26). Here the late
+/// subscriber is made deterministic instead of hoped for: the stream is opened in-process and its
+/// consumer is held back until the chain has either published frames to nobody (the defect) or
+/// had ample time to (this bounds an event; nothing asserts on it).
+///
+/// 1. The first listener hears the stream from its start: the checker's frozen rules (no
+///    unflagged jump, `frames` counting the records it saw) hold from `sample_index` 0.
+/// 2. A listener that attaches after audio went out to nobody (the first one left, the chain ran
+///    on) gets that as a gap: its first data record jumps **and** is flagged.
+#[test]
+fn listen_publishes_no_audio_unheard_and_flags_what_was() {
+    let run = Run::start("t1085-late-subscriber", 8);
+    let counters = run.listen();
+    let listen = run.handle.listen_service();
+    let f = CENTER + STATION_OFFSET_HZ;
+    let request = OpenRequest {
+        params: vec![
+            ("f_lo".into(), format!("{}", f - 75e3)),
+            ("f_hi".into(), format!("{}", f + 75e3)),
+        ],
+        peer: "t1085".into(),
+    };
+    let opened = listen
+        .open(&request)
+        .unwrap_or_else(|r| panic!("the station was refused: {}", r.to_json()));
+
+    // The late subscriber: until the chain has produced frames, or for a second at most.
+    let frames = |c: &hk_pipeline::stats::Counters| get(&c.listen.frames);
+    let held = Instant::now();
+    while frames(&counters) < 10 && held.elapsed() < Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let unheard = frames(&counters);
+
+    // 1. The first listener.
+    let (id, mut first) = local_consumer(&opened, "t1085-first");
+    let mut c = Checker::default();
+    while c.data < 50 || c.statuses < 2 {
+        c.check(&next_local(&mut first).expect("the stream ended"));
+    }
+    let (i0, _) = c.first_data.unwrap();
+    assert_eq!(
+        (i0, c.jumps),
+        (0, 0),
+        "the first listener hears the stream from its start ({unheard} frames were published \
+         before it subscribed)"
+    );
+
+    // 2. The first listener leaves; the chain runs on unheard; a second one attaches.
+    opened.handle.close(id);
+    drop(first);
+    let left = frames(&counters);
+    wait("audio published to nobody", || {
+        frames(&counters) >= left + 10
+    });
+    let (_, mut second) = local_consumer(&opened, "t1085-second");
+    let r = loop {
+        match next_local(&mut second).expect("the stream ended") {
+            r @ Rec::Data { .. } => break r,
+            _ => continue,
+        }
+    };
+    let Rec::Data {
+        index,
+        discontinuity,
+        ..
+    } = r
+    else {
+        unreachable!()
+    };
+    assert!(
+        index > c.next_index,
+        "the second listener's audio starts after what went out unheard: {index} ≤ {}",
+        c.next_index
+    );
+    assert!(
+        discontinuity,
+        "sample_index jumped {} → {index} across audio nobody heard, with no DISCONTINUITY flag",
+        c.next_index
+    );
+    drop(second);
+    drop(opened);
+    drop(listen);
+    run.finish();
+}
+
+/// `Write` end of an in-process consumer: each write is sent on.
+struct Tx(Sender<Vec<u8>>);
+
+impl Write for Tx {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .send(b.to_vec())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The `Read` end: blocks (bounded) for the next bytes; the writer's close is end of stream.
+struct Pipe {
+    rx: Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for Pipe {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.buf.len() {
+            match self.rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(b) => {
+                    self.buf = b;
+                    self.pos = 0;
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(0),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                }
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// Subscribes an in-process consumer to `o`, as a transport does once the opener has returned.
+fn local_consumer(o: &OpenedStream, label: &str) -> (ConsumerId, StreamReader<Pipe>) {
+    let (tx, rx) = mpsc::channel();
+    let id = o
+        .handle
+        .subscribe(label, Declared::local(Tx(tx)), Box::new(|_| {}))
+        .unwrap();
+    let reader = StreamReader::new(Pipe {
+        rx,
+        buf: Vec::new(),
+        pos: 0,
+    });
+    (id, reader)
+}
+
+/// The next record an in-process consumer reads, as the WebSocket client decodes it.
+fn next_local(r: &mut StreamReader<Pipe>) -> Option<Rec> {
+    Some(match r.next_record().ok()?? {
+        Record::Binary(b) => {
+            let h = b.header;
+            assert_eq!(h.record_type, 1, "a data record on an audio stream");
+            Rec::Data {
+                seq: h.seq,
+                index: h.sample_index,
+                t: h.t.as_unix_nanos(),
+                discontinuity: h.flags.contains(RecordFlags::DISCONTINUITY),
+                payload_len: b.payload.len(),
+            }
+        }
+        Record::Dropped(m) => Rec::Dropped { seq: m.first_seq },
+        Record::Unknown(f) => rec_of(&f),
+        Record::Message(_) => panic!("a message record on an audio stream"),
+    })
 }
 
 /// Tone power at `f` relative to the total power of 48 kS/s `x`, dB (single-bin DFT).
