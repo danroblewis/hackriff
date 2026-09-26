@@ -44,6 +44,7 @@ import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
+import type { RingFrame } from "./livering";
 import { LiveRowFeeds, type RowOpener } from "./rowfeed";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
@@ -654,6 +655,19 @@ export interface PreviewOptions {
    * lane next comes round. Omitted, the live edge advances by polling alone (T-460), as before.
    */
   rows?: RowOpener | null;
+  /**
+   * **The live ring** (T-1042 / LSR-1, `./livering.ts`): the rows `/ws/spectrum/live` has published,
+   * read once per frame, which every **following** pane paints its live edge from.
+   *
+   * Omitted or `null` — the default, and what an unflagged page passes — the surface is drawn from
+   * tiles exactly as before: nothing is asked of the ring, nothing is excluded from the tile lane,
+   * and no ring texture exists.
+   *
+   * A getter rather than a pushed frame for the reason every overlay here is a callback: the ring is
+   * read in the **render pass**, so what is painted is the rows that had arrived when the frame was
+   * drawn, and never a snapshot taken on a poll and laid out against a scroll (T-388).
+   */
+  liveRing?: (() => RingFrame | null) | null;
 }
 
 /**
@@ -751,6 +765,19 @@ export class SurfacePreview {
       hudReserve: opts.hudReserve ?? null,
       dom: opts.dom ?? null,
     });
+    // **The live rows, per following pane** (T-1042). The follow question is answered here, beside
+    // the row feed's own reading of it (`refreshLiveEdge`), because this object is the one that knows
+    // which viewports follow — a frozen pane is a view over recorded data, which the pyramid answers,
+    // and painting live rows into it would be a live claim about a window that is not live. The
+    // minimap is excluded for the same reason it is excluded from the refresh lane: it is a viewport
+    // over the whole surface, where a 40 ms row is a small fraction of a pixel.
+    if (opts.liveRing) {
+      const ring = opts.liveRing;
+      this.view.surface.setLiveRings({
+        ringFor: (paneId) =>
+          paneId !== this.view.minimap.id && this.view.panes.isFollowing(paneId) ? ring() : null,
+      });
+    }
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
     // probe, never from a viewport. Nothing below this line, and nothing in `frame()`, moves it.
