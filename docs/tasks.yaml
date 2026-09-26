@@ -30439,6 +30439,8 @@ tasks:
 
       2026-09-26 coordinator: the stack landed 04:57, so the BLOCKED claim's blocker is gone; the work runner never releases a blocked claim (reported to the PM), so this is hand-dispatched (dispatch=manual): a worker merges main 36662722 into task-t1032 (clean), adapts 1707b3eb's determinism to the landed spec, runs app-card alone 3x on a fresh hk.
     dispatch: manual
+    result: |
+      Merged main (36662722, the landed T-996/T-1026/T-1007/T-1051 UI stack) into task-t1032 as baafc338 — the merge auto-resolved app-card.e2e.mjs's determinism fix (1707b3eb) against the landed panes'-bottom-inset model cleanly: MINIMAP_PX/dpr replaced by a PANE_BOTTOM expression reading canvas.dataset.insetBottom (matches surface.ts:2458's landed dataset write), no manual adaptation needed, no active MINIMAP_PX references remain (only historical comments). Verified: npx tsc --noEmit exit 0 (clean); just test-ui exit 0 (115/115 test files, 74 tests passed, 0 failed); app-card e2e run alone 3x via HK_E2E_PORT=9316 HK_E2E_JOURNEY_PORT=9317 node e2e/run.mjs app-card — each run 2/2 tests passed, exit 0 (10.6-11.1s); app-card + app-dismiss at HK_E2E_CONCURRENCY=2 — 2/2 files passed (app-card 2/2 tests, app-dismiss 3/3 tests), exit 0. No further code changes were needed beyond the merge commit.
   - id: T-1033
     milestone: MAUTO
     title: "explorer-window.sh: after a process has exited, the watcher and cleanup still send an unconditional kill -KILL to its old pid (pid reuse could hit an unrelated process); cleanup can stop the watcher between spotting a rogue server and killing it"
