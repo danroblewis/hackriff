@@ -30047,7 +30047,7 @@ tasks:
   - id: T-1031
     milestone: MMAP
     title: "app-top-chrome spec (T-1025) samples the canvas 60 px below the chip gap and sometimes hits a detection box / guide line / grey: red 1 in 4 on main - sample a known-empty canvas point deterministically"
-    status: todo
+    status: done
     priority: medium
     deps: []
     parallel_group: UI-TOPCHROME-FLAKE
@@ -30068,6 +30068,7 @@ tasks:
       Commits: 8d4da9e4
       Observed, not chased: PRE-EXISTING, reproduces on main's own copy of the spec at base 364e37a3: app-top-chrome.e2e.mjs's 400 px test fails before it ever reaches the chip-pixel guard, on (1) 'a chrome element spans the width across the top — a bar by another name', actual ['DIV.map-chips map-topright map-fade'], and then (after bypassing that) on (2) 'a former top-bar control is off screen, too small or covered' (covered: 'mono'). Verified by running `git show HEAD:ui/e2e/app-top-chrome.e2e.mjs` unchanged as a separate spec file: identical failure, identical message. So at 400 px the top-right chip cluster is >= 80 % of the window and at least one control is covered — a product/layout regression in the MMAP chrome at phone width, not a flake and not in this ticket's scope. | Machine/pipeline observation, not a code defect: with the box at load 30-60, `hk serve` needs longer than backend.mjs's fixed 20 s readiness window and several e2e runs died with 'hk serve did not come up ... in 20 s' before a single test ran (an 85-108 s backend bring-up even when it succeeded). Manually started, the same binary served /surface.html 200. Cost me ~6 wasted runs; it makes every ui-class gate under load look red for a reason that is not the diff. | cargo fmt --all --check is clean; no crates were touched, so `just precheck` was run only as its whole-tree fmt half (clippy over the whole workspace would have been unrelated to a ui/e2e-only diff).
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 007cf890
   - id: T-1032
     milestone: MMAP
     title: app-card spec (T-1026) goes red under load with varying causes (99.7754 vs 99.7755 label rounding, 5 s wait for the card's x to close it, boxes disappearing) - make it deterministic
