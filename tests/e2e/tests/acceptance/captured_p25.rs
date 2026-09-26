@@ -566,7 +566,13 @@ fn p25_b_it_is_one_time_frequency_region_not_two_overlapping() {
             MAX_REGION_BW_HZ / 1e3
         );
         let intervals = repo(&ch.run.dir.0)
-            .presence_intervals(e.emitter.id, IdleGap::continuous(), ever().end)
+            .presence_intervals(
+                e.emitter.id,
+                IdleGap::continuous(),
+                ever().end,
+                // T-940: unrecorded = the original elapsed-silence reading (as captured_signals.rs).
+                &hk_model::Watched::unrecorded(),
+            )
             .unwrap();
         for s in ch.oracle_syncs_s() {
             let t = ch.at(s);

@@ -34,8 +34,9 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
  * surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
  * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
- * rows outside it: the coverage-fog row (T-807), the spectrum-trace row and the three colour-scale rows
- * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
+ * rows outside it: the coverage-fog row (T-807) and the spectrum-trace row. The three colour-scale
+ * rows are not among them since T-1007 moved them to the ⋯ settings menu (`app-settings.e2e.mjs`
+ * presses those). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
 // T-1028 added the Retune-mode chip to the cluster; T-1001 took the follow-live FAB out of it. Both
@@ -62,8 +63,10 @@ async function rehomedCounts(page) {
   const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
   assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
   // The viewport menu: its ×, Split ⇔, Split ⇕ and the rows ⇄ columns flip (T-1005), Close,
-  // Whole surface, Record IQ, and T-1006's per-device capture offer.
-  return { closed: CLOSED_NAMES.length, pane: 8, layers: registry.length + 1 + 1 + 3 };
+  // Whole surface, Record IQ, and T-1006's per-device capture offer. T-1007 moved the three
+  // colour-scale rows out of the layers menu into the ⋯ settings menu, so they are no longer among
+  // the layers; `app-settings.e2e.mjs` presses them where they now live.
+  return { closed: CLOSED_NAMES.length, pane: 8, layers: registry.length + 1 + 1 };
 }
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {
@@ -205,12 +208,14 @@ test("a drag on the app's surface moves the view and still reaches no device rou
     { timeoutMs: 60000 });
   const rect = await page.$rect(".sf-canvas");
 
-  const before = (await page.$text(".sf-chrome")) ?? "";
+  // T-996: the kept one-line readout (`.sf-where`, centre ± span · LIVE) is the viewport statement
+  // now — the per-viewport panel it used to sit in is retired.
+  const before = (await page.$text(".sf-where")) ?? "";
   await page.drag(
     { x: rect.x + rect.w * 0.6, y: rect.y + rect.h * 0.4 },
     { x: rect.x + rect.w * 0.3, y: rect.y + rect.h * 0.4 });
-  await page.waitFor("the per-viewport readout to change after a drag",
-    `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`,
+  await page.waitFor("the viewport readout to change after a drag",
+    `(document.querySelector('.sf-where')?.textContent ?? "") !== ${JSON.stringify(before)}`,
     { timeoutMs: 15000 });
 
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
@@ -234,7 +239,7 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   await page.waitFor("the surface to draw and the floating controls to mount",
     `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
      !!document.querySelector('.map-ctl .map-zoom-in') && !!document.querySelector('${LIVE_BTN}') &&
-     / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+     / MHz ± /.test(document.querySelector('.sf-scale')?.dataset.where ?? "")`,
     { timeoutMs: 60000 });
 
   const covered = JSON.parse(await page.eval(`JSON.stringify(
@@ -246,7 +251,8 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
     }).filter((b) => !b.ok))`));
   assert.deepEqual(covered, [], "a floating control is not pressable at its own centre, or is under 24 px");
 
-  const headline = `document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? ""`;
+  // T-996: the pane's window, off its own scale block (the per-viewport panel is retired).
+  const headline = `document.querySelector('.sf-scale')?.dataset.where ?? ""`;
   // Zoom in: the pane's stated window changes.
   let before = await page.eval(headline);
   await page.click("document.querySelector('.map-zoom-in')");

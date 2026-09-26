@@ -408,6 +408,9 @@ proposal that fails any line is wrong, not a trade-off.
   the guard is a `ui/test` assertion of the *request the client builds* (the T-367 lesson).
 - [ ] **The view opens on the observed extent from the coverage map** (`surface/bootstrap.ts`), never
   on the whole 1 MHz–6 GHz midpoint and never derived from `frequency.current` (`docs/16 §8`, T-376).
+- [ ] **A visible tile is never abandoned** (§10.9, T-1057). Every pending visible address is re-requested
+  with jittered backoff until it is served or the route states it does not exist; the coverage survey may
+  turn a place grey and may never leave it pending; a retune refreshes the survey before it may veto.
 
 ---
 
@@ -503,7 +506,9 @@ at 1440 px and 340 × 51 at 420 px, after (`ui/e2e/app-status.e2e.mjs`).
 Settled 2026-09-22 (ADR-0023 §7); these were the mockup's two open choices.
 
 - **Bottom sheet, every width.** Three snap states - `peek` (a title strip, ~56 px), `half` (~45 vh),
-  `full` (~90 vh) - draggable by its grab handle and by flick, with keyboard equivalents. It is
+  `full` (~90 vh) - draggable by its grab handle and by flick, with keyboard equivalents. **T-1026: those
+  three are its SIZE; whether it is on screen at all is a fourth thing, and its default is off** (§10.6
+  P1 - the place card opens on a clicked feature or an inventory pill and closes on bare map / × / Esc). It is
   **never modal**: the canvas beneath stays live, pannable and zoomable, and a pointer event that
   starts outside the sheet reaches the canvas. On viewports wider than ~900 px the sheet is
   width-capped (~520 px) and docked bottom-left, so the centre of the surface is never covered. It
@@ -569,7 +574,28 @@ this document, ADR-0023 or the mockup disagrees, these win. An audit on the same
 partly planned; the tickets that close the gaps are named per principle.*
 
 1. **Minimize overlay; expose as much map as possible.** An overlay is temporary: it exists to be
-   **closed**, returning its pixels to the map. Every band-2/3 overlay therefore has a visible
+   **closed**, returning its pixels to the map.
+   **The detail card is HIDDEN until a feature is clicked (T-1026, user 2026-09-25: "the bottom right
+   accordion panel is kind of dumb to show all the time … like on Google Maps how someone clicks
+   something and it opens the detailed view, and if they click on the back of the map it goes away, or
+   if they click on another interest point it changes").** So the bottom sheet's default is not its
+   smallest state — it is *no state*: the first paint of the map has no card on it, nothing opaque
+   spans the bottom edge, and the instruction the peek strip used to print there ("Selected — nothing
+   yet: click a signal or drag a region") is gone with the strip. Openness and size are **separate**:
+   *open* is "on screen at all" and belongs to the current selection (`card.open` in the store, never
+   persisted, `hidden` on the host so it takes no pixels and no hit test); *peek / half / full* is the
+   size, still the per-viewer `localStorage` preference of §10.3. The card opens when a feature is
+   selected — a box, a pin, a generalized symbol, a list row, a marked region — at `half`; **another
+   feature swaps its content** rather than closing and re-opening it; and it closes on a click on
+   **bare map**, on its ×, on `Esc` (the one overlay stack, T-900) and on a downward flick or keyboard
+   shrink past the strip. Closing **clears the selection**, so clicking the same feature re-opens the
+   card; a click on a feature that has no card of its own yet (a measurement box, an annotation) leaves
+   the card exactly as it was rather than dismissing it, and a curated/collection mark still selects its
+   row in the Research slide-in (T-821), which is that mark's own detail surface. The inventory pills
+   (T-997) are the other way in: a pill opens the card **on its list**, inventing no selection. The
+   consequence to keep measured: the closed card releases the strip's worth of lift the map kept clear
+   of it, so the minimap and the surface's bottom-docked rows move back down (`centre/surface.ts`'s
+   `fit` re-runs on `card.open`). Every band-2/3 overlay therefore has a visible
    **dismiss**; §10.2's fade-to-35 % is an idle courtesy for band-2 chrome, **never a substitute for
    closing**. A panel's default state is its smallest: no list keeps a column of the map, and
    expanded it is an overlay with a dismiss — a column that keeps the height it had before the
@@ -737,6 +763,50 @@ Still no device route, and no new route at all: the same `/api/inventory` read, 
 Guarded by `ui/test/app-pane-inventory.test.ts` (the requests the client builds, per pane) and
 `ui/e2e/app-pane-inventory.e2e.mjs` (two windows asked about from one page, pane 2 advancing while
 pane 1 sits in the past, the lists named, at 1280 and 400 px).
+
+---
+
+### 10.9 A visible tile is never abandoned (normative, T-1057, 2026-09-25)
+
+*The user, via the supervisor: "Sometimes there are black bars in the waterfall, representing tiles that
+haven't been loaded yet; sometimes those never load. If a tile fails to load at all it should be
+re-requested. It seems like they are getting abandoned. Left alone long enough, all tiles on the screen
+should load. I don't think we should ever see the black tiles."*
+
+**The invariant.** Every pending **visible** address is re-requested, with jittered backoff, **until it
+is served or the route states the place does not exist**. Nothing else ends the asking. Three corollaries,
+each of which was a live defect:
+
+1. **Only "there is no such node" is permanent.** `hk-api` says that with a **404** (`tiles.rs`: *"scheme
+   … has no node at (level_f …, level_t …)"*). Every other refusal — a `400`, a `500`, a `501`, an
+   unreadable body, a batch answer that named no entry for the address — is about **this place at this
+   moment**, and goes on a **per-address** jittered ladder (`ui/src/surface/retry.ts`: 500 ms doubling to
+   30 s, the same ladder shape as `controls/backoff.ts`, additive jitter so a herd cannot re-arrive on one
+   tick). T-479's rule that every status the route could emit is terminal was too wide by exactly one
+   notch: the route uses `400` both for an address that can never exist *and* for a tile whose level
+   cannot be folded **yet**, so one frame of the second meaning cost that place for the rest of the session.
+2. **The coverage survey may turn a place GREY; it may never leave it PENDING.** T-580/T-905's
+   short-circuit (never-swept spectrum costs no round trip) is granted only where the survey will
+   actually draw grey for the place. A survey that settles a place while having no evidence *inside* it
+   draws nothing and also stops every lane requesting it — neither grey nor a tile, which is the black bar
+   arrived at from the coverage side.
+3. **A retune refreshes the survey before it may veto a request.** A survey taken before the radio moved
+   cannot speak for any instant after it, so a place that **reaches past** the retune is owed a request
+   until a survey whose evidence reaches past it lands — and the retune asks for that survey at once,
+   because a surface with nothing following the live edge never asks for another one on its own
+   (`preview.ts`'s cadence is `POSITIVE_INFINITY` there). Places that end **before** the retune keep the
+   veto and the saving: the radio cannot retroactively have sampled a band it was not tuned to.
+
+**Never at frame rate, either.** The flood T-479 fixed (157 requests in 700 ms for one place) is
+prevented by the **wait**, not by permanence: a place is asked at most once per interval, and only while
+something draws it — the ladder issues nothing, so a place nobody is looking at is never re-asked. The
+cost of a permanently-refused visible place is therefore two requests a minute; the cost of the other
+mistake is a bar of the waterfall that stays black until the page is reloaded. Those are not symmetric.
+
+Guarded by `ui/test/surface-tile-never-abandoned.test.ts` (30 % of answers dropped/refused/unreadable at
+random on a seeded schedule, every visible address served in the end, no PENDING or REFUSED quad left in
+the final frame's draw list; the pacing bound; the ladder's arithmetic; the survey and retune rules; the
+batch layer's own entries) and `ui/test/surface-cache.test.ts` (the status enumeration, place by place).
 
 ---
 

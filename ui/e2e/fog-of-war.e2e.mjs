@@ -82,8 +82,12 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 // 8959 / 8991 in lanes 1 and 2 - none of them in backend.mjs's FORBIDDEN set at any lane base.
 const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 8;
 
-const PANE_ROW = '.hk-surface-viewport[data-viewport="pane"]';
-const PANE_ACTION = `${PANE_ROW} .hk-surface-action:not([hidden])`;
+// T-996 retired the app's per-viewport rows: a pane states itself on its own scale block
+// (`.sf-scale`, the frame's own report in its dataset — `canvas-journey.e2e.mjs`'s reading), and its
+// persistent Retune is the floating cluster's, for the active pane (`.map-retune-go`). Same facts,
+// same frame; a different set of elements to read them off.
+const PANE_ROW = '.sf-scale:not([hidden])';
+const PANE_ACTION = '.map-retune:not([hidden]) .map-retune-go';
 // T-529 added `window`: a retune to a region is now ONE device action carrying centre and span
 // together (`POST /api/control/window`) instead of a `rate` post followed by a `center` one. It
 // belongs here for both of this file's uses. In `assertNoDeviceCalls` its absence silently WEAKENED
@@ -105,18 +109,19 @@ const C_HZ = 200.0e6, C_VIEW_SPAN_HZ = 250e3;
 // Reading the page
 // ---------------------------------------------------------------------------
 
-const ROWS = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => {
-  const b = v.querySelector('.hk-surface-action');
-  const ruler = v.querySelector('.hk-surface-ruler');
+const ROWS = `JSON.stringify([...document.querySelectorAll('${PANE_ROW}')].map((v) => {
+  const b = document.querySelector('${PANE_ACTION}');
   return {
-    id: v.querySelector('.hk-surface-id')?.textContent ?? '',
-    viewport: v.getAttribute('data-viewport'),
-    where: v.querySelector('.hk-surface-where')?.textContent ?? '',
-    counts: v.querySelector('.hk-surface-counts')?.textContent ?? '',
-    hasButton: !!b && !b.hidden,
+    id: v.dataset.pane ?? '',
+    viewport: 'pane',
+    where: v.dataset.where ?? '',
+    counts: v.dataset.counts ?? '',
+    hasButton: !!b,
     disabled: b ? b.disabled : null,
-    why: v.querySelector('.hk-surface-why')?.textContent ?? '',
-    ruler: (ruler && !ruler.hidden) ? (ruler.textContent ?? '') : '',
+    why: document.querySelector('.map-retune-why')?.textContent ?? '',
+    // The pane's own time span in seconds (T-996: the scale block's \`data-span-s\`, the exact number
+    // the frame laid the pane out with — it was inferred from the retired row's ruler sentence).
+    ruler: v.dataset.spanS ?? '',
   };
 }))`;
 const rows = async (page) => JSON.parse(await page.eval(ROWS));
@@ -126,7 +131,7 @@ const pane0 = async (page) => {
   return r;
 };
 
-/** The pane's frequency window, parsed from `.hk-surface-where` (T-478: numbers, never the string). */
+/** The pane's frequency window, parsed from the scale block's `data-where` (T-996; it was `.hk-surface-where`) (T-478: numbers, never the string). */
 function windowOf(where) {
   const m = /^([\d.]+) MHz ± ([\d.]+) (Hz|kHz|MHz|GHz)/.exec(where);
   assert.ok(m, `the pane readout is not a frequency window: ${JSON.stringify(where)}`);
@@ -284,20 +289,12 @@ async function waitForResident(page, {
  * `canvas-journey.e2e.mjs` uses): the oldest time tick's age plus the widest gap between ticks.
  * `null` when the ruler states fewer than two time ticks.
  */
-function paneSpanBoundS(ruler) {
-  const m = /time (.*)$/.exec(ruler ?? "");
-  if (!m) return null;
-  const unit = { ms: 1e-3, s: 1, m: 60, h: 3600 };
-  const ages = m[1].split(",").map((x) => {
-    const mm = /([\d.]+) m ([\d.]+) s/.exec(x);
-    if (mm) return Number(mm[1]) * 60 + Number(mm[2]);
-    const t = /([\d.]+) (ms|s|h)/.exec(x);
-    return t ? Number(t[1]) * unit[t[2]] : NaN;
-  }).filter(Number.isFinite).sort((a, b) => a - b);
-  if (ages.length < 2) return null;
-  let gap = 0;
-  for (let i = 1; i < ages.length; i++) gap = Math.max(gap, ages[i] - ages[i - 1]);
-  return ages[ages.length - 1] + gap;
+function paneSpanBoundS(stated) {
+  // T-996: the pane's OWN time span, off the scale block's dataset (as canvas-journey reads it) —
+  // the exact seconds the frame laid the pane out with, where the retired row's ruler sentence only
+  // gave a bound (the largest stated age plus the widest gap between marks).
+  const v = Number(stated);
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 /**
@@ -992,10 +989,53 @@ async function paneGeometry(page) {
   assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
   const whole = paneRectOf(rect, dpr, await page.canvasInsets());
-  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
-  const pane = clipToUnoccluded(whole, rect, unocc);
-  assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
+  const band = await clearBand(page, whole);
+  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: band.y, y1: band.y + band.h });
+  const pane = clipToUnoccluded(band, rect, unocc);
+  assert.ok(pane.w > 200 && pane.h > 200,
+    `less than 200 x 200 px of the pane is uncovered by the app's floating chrome: ` +
+    `${JSON.stringify({ band: { y: band.y, h: band.h }, unocc })}`);
   return { rect, dpr, pane };
+}
+
+/**
+ * The pane, narrowed to the ROWS between the floating chrome at its top and bottom edges (T-1072),
+ * so the column clip after it measures the surface rather than excluding every column a chip sits
+ * over anywhere in the pane's height.
+ *
+ * Since T-993 retired the app-shell top bar, its controls are small `data-band="chrome"` boxes in a
+ * row along the pane's top edge (Go-to, nudge, inventory pills, status chips, top-right chips) and a
+ * status line along its bottom. Measured 2026-09-26 at 1440 x 900: those boxes lie at y 8–130 and
+ * 769–798 and between them cover columns 8–1432, so the column-only clip over the pane's whole height
+ * (T-801's rule, written when the chrome was side PANELS that covered whole columns) left 8 px of 1440
+ * — while the hit test found the canvas at 20 of 25 points across the pane. The map was not covered;
+ * the measure assumed a chrome geometry that no longer exists. Same intent, same 200 px floor: the
+ * claims are still measured only over pixels the surface drew, now as a rectangle. The band is the
+ * one of largest area among the pane's edges and the chrome boxes' edges nearest them.
+ */
+async function clearBand(page, whole) {
+  const boxes = await page.eval(`[...document.querySelectorAll('[data-band="chrome"] > *')]
+    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0)
+    .map((b) => ({ l: b.left, r: b.right, t: b.top, b: b.bottom }))`);
+  const top = whole.y, bot = whole.y + whole.h, mid = (top + bot) / 2;
+  const inPane = boxes.filter((b) => b.b > top && b.t < bot);
+  const y0s = [top, ...inPane.filter((b) => b.t < mid).map((b) => b.b)];
+  const y1s = [bot, ...inPane.filter((b) => b.b >= mid).map((b) => b.t)];
+  const x0 = Math.ceil(whole.x), x1 = Math.floor(whole.x + whole.w);
+  let best = { ...whole, area: -1 };
+  for (const y0 of y0s) {
+    for (const y1 of y1s) {
+      if (!(y1 > y0)) continue;
+      const over = inPane.filter((b) => b.b > y0 && b.t < y1);
+      let run = 0, widest = 0;
+      for (let x = x0; x < x1; x++) {
+        if (over.some((b) => x + 1 > b.l && x < b.r)) run = 0; else widest = Math.max(widest, ++run);
+      }
+      const area = widest * (y1 - y0);
+      if (area > best.area) best = { x: whole.x, w: whole.w, y: y0, h: y1 - y0, area };
+    }
+  }
+  return { x: best.x, w: best.w, y: best.y, h: best.h };
 }
 /** The pane's data rect, inset a few pixels clear of every edge (a boundary pixel is a rounding
  * question, not a colour question — `surface-colour.e2e.mjs`'s `INSET`). */
@@ -1244,7 +1284,7 @@ async function draw(page, {
   acceptTimeoutMs = 180000,
 } = {}) {
   await page.frames(4);
-  const counts = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
+  const counts = `(document.querySelector('${PANE_ROW}')?.dataset.counts ?? '')`;
   // **A pane over never-swept spectrum holds no tiles and never will** (T-580). The original
   // predicate here was `0 pending` AND at least one tile, because until T-580 every place on
   // screen was a tile and `0 tiles` could only mean the pane had not started. Since T-580 the
@@ -1330,7 +1370,7 @@ async function draw(page, {
  * The box is read either side of the shot and the pair retaken if it moved, so the pixels and the
  * coordinates they are indexed by come from the same layout. See [[draw]] for what a stale one costs.
  */
-const PANE_COUNTS = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
+const PANE_COUNTS = `(document.querySelector('${PANE_ROW}')?.dataset.counts ?? '')`;
 async function snapPane(page, { tries = 4 } = {}) {
   let before = await paneGeometry(page), img = null, after = before;
   for (let i = 0; i <= tries; i++) {

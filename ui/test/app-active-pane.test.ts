@@ -187,10 +187,11 @@ test("the outline is the pane's own rectangle, GL device px to CSS px from the t
 
 test("the surface places the outline per frame and on every change; the chrome names the pane", () => {
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  // T-1001 added the panes' own Live buttons to the same hook; the outline's claim is unchanged.
-  const domAt = host.indexOf("dom: (panes, edge, hPx, dpr)");
+  // T-1001 added the panes' own Live buttons to the same hook; T-996 hands it the frame's own
+  // statuses (the scale bars). The outline's claim is unchanged.
+  const domAt = host.indexOf("dom: (panes, edge, hPx, dpr, statuses)");
   const domHook = host.slice(domAt, host.indexOf("});", domAt));
-  assert.ok(/pinsFrame\(panes, edge, hPx, dpr\);/.test(domHook) && /placeActive\(panes, hPx, dpr\);/.test(domHook),
+  assert.ok(domAt >= 0 && /pinsFrame\(panes, edge, hPx, dpr, statuses\);/.test(domHook) && /placeActive\(panes, hPx, dpr\);/.test(domHook),
     "the outline must be placed in the render frame's dom hook, from the frame's own pane rectangles");
   assert.match(host, /pv\.onActiveChange\(activeChanged\)/, "the chrome must hear every active-pane change");
   const changed = host.slice(host.indexOf("const activeChanged"), host.indexOf("pv.onActiveChange(activeChanged)"));

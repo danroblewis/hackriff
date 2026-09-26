@@ -52,13 +52,18 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
-import { TIME_LABEL_BOX_CSS, type HudReserve } from "../../surface/hud";
-import type { RowAction, WidthAction } from "../../surface/chrome";
+import { TIME_LABEL_BOX_CSS, getTimeLabelMode, setTimeLabelMode, type HudReserve } from "../../surface/hud";
+import { paneCountsText, type RowAction, type WidthAction } from "../../surface/chrome";
+// T-996: the per-pane scale bars — pure arithmetic plus a pooled band-2 layer, like the HUD's.
+import { ScaleBars, scaleMarkOf, type ScaleMark } from "../../surface/scale";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
+import { fmtBandwidth } from "../../axis";
+import { formatFrequency } from "../../controls/freq";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
+import { wsChangeOpener } from "../../surface/changefeed";
 import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, acceptGoLive, goLiveOfferLabel, isGoLiveOffer, GO_LIVE_LABEL,
@@ -77,7 +82,7 @@ import {
 } from "../../surface/trace";
 import { ringMaxHoldColumns, ringRowAt, sampleRingRow } from "../../surface/livering";
 import type { OverlayQuad } from "../../surface/minimap";
-import { boxOf, type PaneState } from "../../surface/panes";
+import { boxOf, type PaneState, type PaneStatus } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
 // T-898: the device's OWN route through frequency (`GET /api/tune-history`), drawn like a
 // directions line — one per front end, in the same render pass as the tiles.
@@ -90,6 +95,7 @@ import {
   frontEndKeyEntries, frontEndQuads, frontEndRequest, parseFrontEndEvents, type FrontEndEvent,
 } from "../../surface/frontend";
 import { flags } from "../../flags";
+import { fmtLiveMetrics, liveMetrics } from "../../surface/livemetrics";
 import { liveRing, liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -102,10 +108,11 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
-import { focusSelection, focusSignal, paneRows, setInventoryPanes } from "../explore/slice";
+import { closeCard, focusSelection, focusSignal, paneRows, setInventoryPanes } from "../explore/slice";
 import type { PaneWindowSpec } from "../explore/pane-window";
-import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { gotoTimeWindow, gotoWindow, openReview, requestGoto, reviewAt, setNavigation, toast, type AppState, type ReviewTab } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import { rulerRows, type SettingsModel } from "../chrome/settings";
 import { activePaneName, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
 import { PaneLiveLayer, paneLiveActions, type ChromeRect } from "./pane-live";
 import { mountSplitChrome } from "./split-chrome";
@@ -199,9 +206,10 @@ const HUD_IDLE_ALPHA = 0.45;
 /**
  * T-997: the floating chrome's TOP-LEFT column, measured against the canvas, so the time ruler's
  * labels are dropped rather than printed underneath it (`surface/hud.ts`'s `HudReserve`). The
- * cluster's children are absolutely placed by `map-controls.css`, and the ones that matter are the
- * ones that reach into the ruler's own band down the left edge — Go-to, the nudge row, the
- * inventory pills, the retune offer, and at phone width the status pill. Whichever they are, this
+ * cluster's children are placed by `map-controls.css`, and the ones that matter are the ones that
+ * reach into the ruler's own band down the left edge — Go-to, the nudge row, the left column's
+ * stack (T-996: the inventory pills, the persistent Retune, the Go-to offer and the narrow-width
+ * mode banner, in flow, measured as one rect), and at phone width the status pill. Whichever they are, this
  * asks the layout rather than repeating the CSS's numbers: one rect read per child, once per frame,
  * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
  * most one layout and never a read-write thrash.
@@ -257,6 +265,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // pans and zooms — one gesture everywhere (docs/23 §3). The MapTip is placed in the same pass.
   const pinsEl = h("div", { class: "sf-pins", role: "group", "aria-label": "Signal markers: Tab to a marker for its summary, Enter to select it, arrow keys for its neighbours" });
   const tipEl = h("div", { class: "sf-maptip", role: "tooltip", id: "sf-maptip", hidden: true });
+  // T-996 (MMAP): the per-pane SCALE BARS — band 2 DOM over the canvas, placed every render frame
+  // from each pane's own box and rect (`surface/scale.ts`). This is what replaced the white panel
+  // that stated a pane's centre and span as a sentence: a map answers "how big is this?" with a bar
+  // you can lay against the picture, and the pane's honesty tier is stated in the same block.
+  const scaleEl = h("div", { class: "sf-scales", "aria-hidden": "true" });
   // T-1000 (docs/23 §10.7): the ACTIVE pane's outline — the pane Go-to, zoom, the layers menu, the
   // follow-live FAB and the viewport menu act on. Placed every render frame from the pane rectangles
   // the frame was drawn with (and at once when the active pane changes), shown only while there are
@@ -270,9 +283,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // the retired follow-live FAB acted on the hidden active pane, so with two panes open it could
   // not say which one it froze. One button per pane, placed every render frame from that frame's
   // pane rectangles (`centre/pane-live.ts`). The container never takes the pointer; the buttons do.
+  // (T-996 retired the `.sf-chrome` per-viewport panel, so no `chrome` element is minted here.)
   const liveEl = h("div", { class: "sf-pane-live", role: "group", "aria-label": "Per-viewport Live / Freeze" });
-  const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
+  // T-996: the KEPT one-line readout — where this pane is looking (centre ± span) and whether it is
+  // on the live edge or a past instant. Written per FRAME from the status the renderer just
+  // reported, never on the poll, for the same reason every other overlay is (docs/16 §8: one
+  // mapping, one frame).
+  const whereEl = h("span", { class: "sf-where", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
   // T-1041: hidden until the trace layer is switched on (it is off by default).
   const traceEl = h("div", { class: "sf-trace", role: "status", hidden: true });
@@ -280,9 +298,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
+  // T-1048 (LSR-7): the CLIENT ring's own cost and freshness — ring-fold cost per row,
+  // arrival→paint latency (never the design's full sample-to-pixel budget, and never the
+  // server's per-subscription fold, which is `/api/status` `spectrum.fold_ns_*`) — shown only
+  // behind the same `?live-ring=1` flag as the lane it measures. Empty (no text node) with the
+  // flag off: `setText` is never called, and it stays `hidden`.
+  // T-996 merge: its own class only, never `.sf-ring` — that selector answers with the IQ-ring
+  // sentence (`ringEl`), and this element now sits before it in the DOM.
+  const metricsEl = h("div", { class: "sf-ring-metrics", role: "status", hidden: true });
   // T-807 (MAP-07): says so, in words, when the active pane's coverage fog is hidden — the bare
   // ground it then draws is a viewer's choice, and a choice about grey must never pass for a fact.
-  const fogEl = h("div", { class: "sf-ring sf-fog", role: "status", hidden: true });
+  // T-996: its own class now — the ring sentence moved into `said` (off the picture) and a shared
+  // `.sf-ring` class would make `querySelector('.sf-ring')` answer with THIS element instead.
+  const fogEl = h("div", { class: "sf-fog", role: "status", hidden: true });
   // T-812 (MAP-12): the active pane's band-plan priors, ranked, each with the backend's own reason —
   // shown only while that pane's priors layer is on. Suggestions, never truth.
   const priorsEl = h("div", { class: "sf-priors", role: "status", hidden: true });
@@ -291,8 +319,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const rangeEl = h("span", { class: "sf-range", role: "status" });
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
-  const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, splitEl, liveEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
+  const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, whereEl, rangeEl, hoverEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, splitEl, liveEl, pinsEl, hudEl, priorsLabelEl, annoEl, scaleEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -322,48 +350,35 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: there is no toolbar row. Live is the follow-live FAB, Trace/Signals/Contrast are the
   // layers menu, Measure and pane management are the floating cluster's top-right (`map-controls`).
   // T-918: the canvas is full-bleed (docs/23 §10.1) — no row below the stage subtracts from it.
-  // The statements that used to be those rows (trace, IQ ring, fog, priors, per-viewport level,
-  // orientation) float bottom-left with the readout, above the map strip: screen-space chrome over
-  // the canvas, never faded (docs/23 §10.2: honesty statements).
   //
-  // T-919 (user P1, docs/23 §10.6 rule 1): T-918's stack could grow to ~560 × 184 px — a large
-  // PERMANENT overlay over the waterfall, which is exactly what P1 forbids ("an overlay exists to
-  // be closed"; a panel's default state is its smallest). It is a compact STATUS LINE now:
+  // T-996 (user, 2026-09-25, via the supervisor): what is left of that stack is ONE LINE. The
+  // `More` expansion and the white per-viewport panel it sat beside are retired: the user read the
+  // panel's contents back ("slice, peak dB, a signal selection stuck at 101.3, phosphor style
+  // *totally unnecessary*, capture rules *also unnecessary*, `0.4 % of this surface was ever
+  // sampled…` can probably go") and asked for a map's answer instead — "Google Maps has a very
+  // small short section bottom-right that shows the distance measure … A sense of scale is what the
+  // current centre freq and width is." So:
   //
-  //  - **Collapsed (the default)** — one line: the per-viewport row (`.sf-chrome`, trimmed by CSS
-  //    to where · level/tier and T-476's persistent Retune) beside the colour-scale sentence and
-  //    the hover readout. The tier/level and the scale are honesty statements, so they are on the
-  //    picture in every state: §10.2 says a statement about what the data *is* may not be made less
-  //    legible, and that applies to hiding it behind a press as much as to fading it.
-  //  - **Expanded** — adds the sentences that are a paragraph each: the spectrum trace, the IQ-ring
-  //    rules in words (retention bound, oldest IQ, whether this viewport has IQ), the fog note, the
-  //    ranked band-plan priors and T-450's orientation note.
+  //  - **bottom-right, per pane**: the scale bars (`scaleEl`, `surface/scale.ts`) with that pane's
+  //    honesty tier and cell size beside them — the three-tier rule, stated where it is read;
+  //  - **bottom-left, one line**: where the active pane is looking (`whereEl`), the colour scale
+  //    (`rangeEl`, T-470 — a fixed range that clips is honest only if it is quoted), and the hover
+  //    readout, which is where PEAK dB now lives: on demand, under the pointer, not permanently;
+  //  - **conditional, above it**: the fog note and the ranked band-plan priors, each shown only
+  //    while the viewer has asked for that state (fog hidden; the priors layer on).
   //
-  // The dismiss (×, and Escape through the one overlay stack, T-900) returns it to the collapsed
-  // line, never to nothing — a viewer can put a paragraph away, not switch an honesty statement off.
-  const statusBody = h("div", { class: "sf-status-body", id: "sf-status-body", hidden: true },
-    traceEl, ringEl, fogEl, priorsEl, note);
-  const statusToggle = h("button", {
-    class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded": "false",
-    title: "The full status: spectrum trace, capture rules, coverage, priors and orientation",
-  }, "More") as HTMLButtonElement;
-  const statusClose = h("button", {
-    class: "sf-status-close", type: "button", "aria-label": "Close the status detail", title: "Close", hidden: true,
-  }, "×") as HTMLButtonElement;
-  const statusLine = h("div", { class: "sf-status-line" },
-    chrome, readout, h("div", { class: "sf-status-btns" }, statusToggle, statusClose));
-  const statusEl = h("div", { class: "sf-status", "data-band": "chrome", "data-open": "false" }, statusBody, statusLine);
-  const statusOverlay = trackOverlay("surface-status", () => setStatusOpen(false));
-  function setStatusOpen(on: boolean): void {
-    statusEl.dataset.open = on ? "true" : "false";
-    statusBody.hidden = !on;
-    statusClose.hidden = !on;
-    statusToggle.setAttribute("aria-expanded", on ? "true" : "false");
-    statusToggle.textContent = on ? "Less" : "More";
-    statusOverlay.open(on);
-  }
-  statusToggle.addEventListener("click", () => setStatusOpen(statusEl.dataset.open !== "true"));
-  statusClose.addEventListener("click", () => setStatusOpen(false));
+  // The three sentences the frame writes about ITSELF — the trace's slice/max-hold, the IQ-ring
+  // rules, and T-450's orientation census — are no longer painted over the waterfall. They stay in
+  // the DOM (`said`), because they are the frame's own report of what it drew and `ui/e2e` checks
+  // the PIXELS against them (`ringEl.dataset` has always been exactly that); the facts themselves
+  // are still on the picture, drawn rather than written — the two capture rules as their two lines,
+  // the spectrum as its trace, unobserved spectrum as the grey.
+  const said = h("div", { class: "sf-said", "aria-hidden": "true" }, traceEl, ringEl, note);
+  const statusLine = h("div", { class: "sf-status-line" }, readout);
+  // T-1048 (LSR-7) keeps its dashboard tile ON the picture: with the `More` body retired it is the
+  // third conditional statement above the line, shown only while `?live-ring=1` is on (it is
+  // `hidden` until the ring lane first measures), beside the fog note and the priors.
+  const statusEl = h("div", { class: "sf-status", "data-band": "chrome" }, fogEl, priorsEl, metricsEl, statusLine, said);
   stage.append(statusEl);
   el.replaceChildren(stage);
 
@@ -381,6 +396,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let renderLive: () => void = () => {};
   let renderLayers: () => void = () => {};
   let renderMeasure: () => void = () => {};
+  /** T-996: the cluster's Retune/width labels, re-read every render frame (see `scaleFrame`). */
+  let renderRetune: () => void = () => {};
 
   // Record IQ over this viewport's span (GAP-1 interim). Its home is the viewport menu (T-882); a
   // found signal's own clip is the detail sheet's "Record clip" (T-804).
@@ -790,8 +807,63 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const x = xr + 14 + w > canvas.clientWidth ? xl - 14 - w : xr + 14;
     tipEl.style.transform = `translate(${x.toFixed(1)}px, ${(now.y + 10).toFixed(1)}px)`;
   };
-  const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
+  // ---- T-996: the scale bars, and the one-line "where" readout ----
+  //
+  // Both are written HERE, in the render frame, from the pane views and the statuses the frame just
+  // produced. A scale bar computed on the 1 s chrome poll would state last second's zoom beside this
+  // second's pixels, which is the T-388 family exactly; and the readout beside it must not be a
+  // second opinion about the same pane.
+  const scaleLayer = new ScaleBars(scaleEl);
+  /** CSS px the floating chrome at the canvas's bottom reaches up (the card's peek strip, an open
+   * output strip) — what bottom-anchored overlays clear. NOT a pane inset (see `fit`). */
+  let floatLiftCss = 0;
+  const scaleFrame = (
+    panes: readonly PaneView[], hPx: number, dpr: number, statuses: readonly PaneStatus[],
+  ) => {
+    const byId = new Map(statuses.map((x) => [x.id, x]));
+    const marks: ScaleMark[] = [];
+    for (const v of panes) {
+      const st = byId.get(v.id);
+      if (!st) continue;
+      const m = scaleMarkOf(
+        { id: v.id, f0Hz: v.box.f0Hz, f1Hz: v.box.f1Hz, t0Ns: v.box.t0Ns, t1Ns: v.box.t1Ns, rect: v.rect },
+        { tier: st.tier, tierLabel: st.tierLabel, levelLabel: st.levelLabel, freqLabel: st.freqLabel,
+          timeLabel: st.timeLabel, counts: paneCountsText(st), following: st.following,
+          device: paneDevicePill(v.id) },
+        hPx, dpr,
+      );
+      // T-996 (user 2026-09-25 20:20, full bleed): the panes run under the card's peek strip, so a
+      // pane's bottom-right corner may be under it; the block is lifted clear of the floating chrome
+      // at the bottom (`floatLiftCss`, measured in `fit`) rather than drawn under it.
+      if (m) marks.push(m.bottom > hPx / dpr - floatLiftCss ? { ...m, bottom: hPx / dpr - floatLiftCss } : m);
+      // The KEPT one-liner, for the pane gestures apply to: centre ± span, and LIVE or how far
+      // behind the edge this viewport is parked. The same two strings the retired panel showed —
+      // what changed is that they are one line on the picture instead of a panel over it.
+      if (v.id === preview?.activePane) {
+        // T-1006: whose coverage is the pane's own device pill (on its scale block), so the bare
+        // `device_id` the line used to append is not repeated here.
+        setText(whereEl, [st.freqLabel, st.timeLabel].filter(Boolean).join(" · "));
+      }
+    }
+    scaleLayer.update(marks);
+    // The capture controls name the ACTIVE viewport's current window, so they are re-derived in the
+    // frame beside the bars — never on the 1 s poll (T-476: a label from a poll names somewhere the
+    // pane is not, and the painted offer is what a press is allowed to commit).
+    renderRetune();
+  };
+
+  /**
+   * The band-1/2 DOM layers, laid out INSIDE the render frame (T-809's pins, T-996's scale bars).
+   *
+   * `statuses` is what the very same frame reported for each viewport — the tier and cell size the
+   * pixels are made of. The scale bar reads it rather than `lastFrame` (a frame behind) or a second
+   * derivation beside it, which is the one-mapping-one-frame rule the whole surface is built on.
+   */
+  const pinsFrame = (
+    panes: readonly PaneView[], edge: number, hPx: number, dpr: number, statuses: readonly PaneStatus[],
+  ) => {
     const s = store.get();
+    scaleFrame(panes, hPx, dpr, statuses);
     // T-910: the feature layer (hit areas, focus, labels) is over the DETECTIONS it identifies, so a
     // pane that hides its detections has none of it either — no invisible target for an undrawn box.
     // T-1002: and over the detections THIS pane has, which are its own window's.
@@ -911,6 +983,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // top rows when it is on, and nothing at all when it is off. T-457's invariant — viewport-wide,
   // time-addressable, per pane — is a property of that layer, not of a band.
   let traceOn = false;
+  /** T-996: the active pane's slice peak this frame, shown only under the pointer (see `onHover`). */
+  let hoverPeak: string | null = null;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
   /**
@@ -930,13 +1004,36 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * fires every frame regardless of the trace layer.
    */
   let ringDiag = "";
-  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number }>();
+  const ringReports = new Map<string, { rows: number; tiles: number; rowPx: number; latencyMs: number | null }>();
   const stateRing = (report: PaneReport) => {
-    ringReports.set(report.id, { rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10 });
+    ringReports.set(report.id, {
+      rows: report.ringRows, tiles: report.ringTiles, rowPx: Math.round(report.ringRowPx * 10) / 10,
+      latencyMs: report.ringLatencyMs === null ? null : Math.round(report.ringLatencyMs * 100) / 100,
+    });
     const next = JSON.stringify([...ringReports].map(([id, r]) => ({ id, ...r })));
     if (next === ringDiag) return;
     ringDiag = next;
     stage.dataset.liveRing = next;
+  };
+  /**
+   * **The LSR-7 dashboard tile** (T-1048): the client's own arrival→paint latency and ring-fold
+   * cost per row — named for exactly what each measures, never the design's full sample-to-pixel
+   * budget and never the server's per-subscription fold (`/api/status` `spectrum.fold_ns_*`,
+   * `docs/api.md`) — in words and as machine-readable numbers, behind the same flag as the lane it
+   * measures. Read by the person (`metricsEl`, a conditional statement above the
+   * status line, beside the fog note and the priors) and by a spec (`.sf-stage[data-live-metrics]`, the same pattern
+   * `stateRing` above already keeps). Written once per frame the ring lane runs, and only when the
+   * numbers change.
+   */
+  let metricsDiag = "";
+  const stateMetrics = () => {
+    const snap = liveMetrics.snapshot();
+    const next = JSON.stringify(snap);
+    if (next === metricsDiag) return;
+    metricsDiag = next;
+    stage.dataset.liveMetrics = next;
+    setText(metricsEl, fmtLiveMetrics(snap));
+    metricsEl.hidden = false;
   };
   /**
    * **The active pane's trace CORE, as the layer itself drew it** (T-1050): one sample per MEASURED
@@ -1016,7 +1113,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const win = sliceWindow(lat, report.levelT, tAtNs);
     const ringAt = report.ringFrame ? ringRowAt(report.ringFrame, tAtNs) : null;
     const fr = liveRow.get();
-    const live = !ringAt && liveFrameFits(fr, win);
+    const live = !ringAt && liveFrameFits(fr, win, p.view.panes.isFollowing(pane.id));
     let slice: Float32Array;
     let sliceSrc: string;
     let sliceAtNs: number;
@@ -1086,6 +1183,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // sentence beside it must not turn a memory-and-latency fact into a statement about the radio,
       // which is exactly the distinction `cellrule.ts` keeps between PENDING and the one grey. The
       // `PaneReport` the renderer just produced is what knows which it is.
+      // T-996: the PEAK, kept for the hover readout — the user's "peak dB only while hovering". It
+      // is this frame's own slice peak for the active pane, so the number the pointer asks for is
+      // the one the trace beside it was drawn from, never a second reduction.
+      hoverPeak = slicePk ? `peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}` : null;
       const empty = report.tiles === 0
         ? `no tile in hand for this span yet (${report.pending} pending, ${report.fallbacks} coarse stand-in${report.fallbacks === 1 ? "" : "s"}) — not loaded is not unobserved`
         : "nothing observed across this span";
@@ -1223,6 +1324,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // host only reads the list off the store and hands the strings on.
   /** Every live front end this run holds, off the `/api/control/state` poll. `[]` on a replay. */
   const attached = (): readonly AttachedDevice[] => store.get().device.devices;
+  /** T-1006: a pane's device pill — whose coverage decides its grey — for its scale block (T-996). */
+  const paneDevicePill = (paneId: string) => {
+    const pane = preview?.view.panes.get(paneId);
+    return pane ? devicePill(attached(), pane.device) : null;
+  };
   /** How the chrome names the pane a per-pane control acts on — `activePaneName`'s words, reused so
    * the viewport menu's device section names the pane exactly as its layers section does. */
   const paneMenuName = (): string => {
@@ -1289,7 +1395,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow,
       // T-437 §5.2: the growing edge's tiles were computed from the tuning that has just ended, so
       // a cached one is an observation claim about a tuning that no longer exists.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1341,7 +1447,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       offerNow: widthOfferNow,
       // T-437 §5.2, same as the retune control: the growing edge's tiles described the tuning that
       // has just ended.
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1371,7 +1477,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (isGoLiveOffer(lastPaintedGoto)) {
       void acceptGoLive(ctx, {
         offerNow: widthOfferNow,
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, lastPaintedGoto, (paneId) => {
         p.view.panes.follow(paneId);
         lastMirror = ""; mirror(); renderLive(); viewMoved();
@@ -1386,7 +1492,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // nothing); if the current/default span has since changed that is `sameWidthTarget`'s job to
       // catch, not this function's.
       offerNow: widthOfferNow,
-      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      invalidateEdge: () => p.retuned(),
     }, lastPaintedGoto).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
@@ -1420,7 +1526,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const r = await commitRetuneMode(ctx, {
         targetNow: retuneTargetNow,
         // T-437 §5.2, as everywhere else: the growing edge's tiles describe the tuning that ended.
-        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+        invalidateEdge: () => p.retuned(),
       }, paneId);
       // What the pane says afterwards. A refusal is said too: in this mode the user did not press a
       // button, so silence would read as "my pan did nothing" rather than "the front end said no" —
@@ -1620,32 +1726,31 @@ function mount(el: HTMLElement, ctx: AppContext) {
     try {
       preview = new SurfacePreview({
         canvas, probe, token: ctx.token, fetchFn: (u, i) => fetch(u, i),
-        chrome, minimapPx: MINIMAP_PX,
-        // The persistent per-pane retune control (T-476). Strings and a press: `preview.ts` and
-        // `view.ts` carry them through without ever naming a tuning, which is what keeps
-        // `retune.ts` out of the `/surface.html` preview's import graph.
-        chromeAction, onChromeAction: pressRetune,
-        widthActions, onWidthAction: pressWidth,
-        // T-1028: one line per pane about a retune the mode has pending/in flight, per frame for the
-        // same reason `chromeAction` is — it names the window the pane is showing NOW.
-        chromeStatus: retuneStatusFor,
-        // T-1006: the device pill on each pane's status row — whose coverage decides that pane's
-        // grey. Strings and a bit, like the controls above, so `chrome.ts` still learns nothing about
-        // `device_id`s and `panedevice.ts` stays out of the `/surface.html` preview's import graph.
-        rowDevice: (paneId) => {
-          const pane = preview?.view.panes.get(paneId);
-          return pane ? devicePill(attached(), pane.device) : null;
-        },
+        minimapPx: MINIMAP_PX,
+        // T-996: no `chrome` element. The per-viewport rows (`SurfaceChrome`) were the white panel
+        // the user asked to be rid of; the app states a pane's window on the one status line and its
+        // level/tier beside the scale bar, both per frame from the same statuses those rows read.
+        // `/surface.html`, the developer preview, still mounts them — it is a diagnostic page.
+        // T-476's persistent Retune and T-496's width presets are unchanged as ACTIONS: they moved
+        // to the floating cluster (`host.paneRetune` / `host.paneWidths`), where Go-to lives and
+        // where every other device command on this map already is.
+        // T-1028's `chromeStatus` line is not passed either: with no rows it would render nowhere, so
+        // the host says it on that same floating block (`paneStatus`, beside Retune).
+        // T-1006's `rowDevice` pill is not passed either, for the same reason: it is stated on each
+        // pane's own scale block instead (`paneDevicePill`, in `scaleFrame`), which is per pane.
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
+        // T-1040: a front-end move re-lays the fog and re-fetches exactly the tiles it rewrote.
+        changes: wsChangeOpener(ctx.token),
         // T-1042 / LSR-1, behind `?live-ring=1` (`src/flags.ts`): the published spectrum rows every
         // FOLLOWING pane paints its live edge from, read in the render pass. Off, this is `null` and
         // the surface is drawn from tiles exactly as before — one flag, one lane, no second picture.
         liveRing: flags().liveRing ? () => liveRing.frame() : null,
         // T-1052: the ring diagnostic above, off every frame's reports regardless of the trace
         // layer's on/off state (see `stateRing`'s doc comment for why it moved here from `trace`).
-        onReports: flags().liveRing ? (reports) => { for (const r of reports) stateRing(r); } : null,
+        // T-1048 (LSR-7): the metrics dashboard tile rides the same every-frame hook.
+        onReports: flags().liveRing ? (reports) => { for (const r of reports) stateRing(r); stateMetrics(); } : null,
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,
@@ -1706,8 +1811,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
         hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
-        dom: (panes, edge, hPx, dpr) => {
-          pinsFrame(panes, edge, hPx, dpr);
+        dom: (panes, edge, hPx, dpr, statuses) => {
+          pinsFrame(panes, edge, hPx, dpr, statuses);
           placeActive(panes, hPx, dpr);
           // T-1001: each pane's Live button, from THIS frame's rectangles — the same pass as the
           // data and the outline, never a poll (docs/16 §8's one shared mapping).
@@ -1789,17 +1894,32 @@ function mount(el: HTMLElement, ctx: AppContext) {
           : null;
         const anno = hit ? annotationAt(annotations, hit.pane.box, hit.pane.rect, p) : null;
         const annoLabel = anno ? ` · annotation (${anno.kind}): ${anno.label}` : "";
-        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}${annoLabel}` : "";
+        // T-996: peak dB rides the hover, where the user asked for it — the retired status panel
+        // stated it permanently. `hoverPeak` is this frame's slice peak for the ACTIVE pane, so it
+        // is offered only while the pointer is on that pane; hovering another viewport says less
+        // rather than quoting a peak measured somewhere else.
+        const peak = hoverPeak && hit && hit.pane.id === preview?.activePane ? ` · ${hoverPeak}` : "";
+        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}${annoLabel}${peak}` : "";
       },
       onClick: (p, e) => {
         const c = cssPoint(e);
         const pin = pinLayer.pick(c.x, c.y);
         if (pin) { selectPin(pin); return; }
         const hit = hitAt(p.x, p.y);
-        if (!hit) return;
-        if (hit.mark?.kind === "signal-box") { store.set(focusSignal(hit.mark.id)); return; }
-        if (hit.mark?.kind === "selection-box") { store.set(focusSelection(hit.mark.id)); return; }
-        if (hit.mark?.kind === "research-box") {
+        // T-1026 (the Google-Maps place card): a click on BARE MAP closes the detail card and clears
+        // the selection - "if they click on the back of the map it goes away". Bare = nothing under the
+        // pointer: no pin (above), no mark box, no annotation (an annotation is a feature with a place,
+        // T-984 selects its Research row below).
+        if (!hit?.mark) {
+          // T-984: an annotation is a feature with a place - its hit test selects its Research row.
+          const anno = hit ? annotationAt(annotations, hit.pane.box, hit.pane.rect, p) : null;
+          if (anno) { store.set(selectResearch(rowKey("annotation", anno.id))); store.set(setResearchOpen(true)); return; }
+          store.set(closeCard());
+          return;
+        }
+        if (hit.mark.kind === "signal-box") { store.set(focusSignal(hit.mark.id)); return; }
+        if (hit.mark.kind === "selection-box") { store.set(focusSelection(hit.mark.id)); return; }
+        if (hit.mark.kind === "research-box") {
           // T-821: a collection mark selects its row in the Research panel (opened to show it).
           store.set(selectResearch(hit.mark.id));
           store.set(setResearchOpen(true));
@@ -1957,8 +2077,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const measureChrome = () => {
       const ctl = stage.querySelector<HTMLElement>(".map-ctl");
       const base = canvas.getBoundingClientRect();
+      // T-996's left column is one in-flow container (`.map-stack`) as wide as its widest possible
+      // block; what is ON the picture is its blocks, so they are measured, not the container — at
+      // phone width the container spans the canvas and would push every Live button under it.
       chromeBoxes = ctl
-        ? Array.from(ctl.children).map((c) => {
+        ? Array.from(ctl.children).flatMap((c) => c.classList.contains("map-stack") ? Array.from(c.children) : [c]).map((c) => {
           const r = c.getBoundingClientRect();
           return {
             left: r.left - base.left, right: r.right - base.left,
@@ -2005,6 +2128,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
       wholeSurface: () => { pv.fitToSurface(); lastMirror = ""; mirror(); renderLive(); },
       paneCount: () => pv.view.panes.list().length,
       paneMenuExtras: [recordBtn],
+      // T-996: T-476's persistent per-pane Retune and T-496's width presets, rehomed from the
+      // retired viewport panel to where Go-to and the nudges are. The ARITHMETIC is untouched — the
+      // same `chromeAction`/`widthActions` painted per frame, the same `lastPainted` consent record,
+      // the same `acceptPaneRetune`/`acceptPaneWidth` gate on the press — only the place changed.
+      paneRetune: () => chromeAction(pv.activePane),
+      pressPaneRetune: () => pressRetune(pv.activePane),
+      paneWidths: () => widthActions(pv.activePane),
+      pressPaneWidth: (key) => pressWidth(pv.activePane, key),
+      // T-1028's per-pane status line (it was the retired rows' `chromeStatus`), said on
+      // the same capture block. The active pane's own line first; else the pane the mode is acting on,
+      // because a retune in flight moves the ONE radio whichever pane asked, and must never be silent.
+      paneStatus: () => retuneStatusFor(pv.activePane)
+        ?? (retuneMode.pendingPane ? retuneStatusFor(retuneMode.pendingPane) : null),
       // T-1006: the front-end picker for the active pane, and the "one viewport per front end"
       // split. Every word comes from `surface/panedevice.ts`; every press is a view change.
       deviceMenu: () => {
@@ -2105,8 +2241,72 @@ function mount(el: HTMLElement, ctx: AppContext) {
             key: undefined,
           } }))).sort((a, b) => PLANE_ORDER.indexOf(a.plane) - PLANE_ORDER.indexOf(b.plane) || a.z - b.z).map((x) => x.row),
           viewWide: [{ id: "trace", label: "Spectrum trace", hint: "over every pane's top rows", on: traceOn }],
-          scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
         };
+      },
+      // ---- T-1007: the ⋯ settings menu's model. Every field is presentation state or the
+      // backend's own words; nothing here reaches a device route (`app-map-controls.test.ts` drives
+      // each press against a fetch spy and an empty call list).
+      settings: (): SettingsModel => {
+        const ids = pv.view.panes.list();
+        const devices = store.get().device.frontEnds;
+        // Short labels: the select sits in a 300 px menu, and the full `device_id` is stated once
+        // in the list above it rather than clipped in every option.
+        const choices = [
+          { id: "any", label: "Any front end" },
+          ...devices.filter((d) => d.deviceId).map((d) => ({ id: d.deviceId!, label: d.driver })),
+        ];
+        const w = store.get().captureWindow;
+        return {
+          scale: { rows: scaleRows(pv.range.mode), note: rangeLabel(pv.range) },
+          ruler: { rows: rulerRows(getTimeLabelMode()) },
+          devices: {
+            list: devices.map((d) => ({
+              id: d.deviceId, driver: d.driver, kind: d.kind,
+              tuned: d.centerHz !== null
+                ? `${formatFrequency(d.centerHz)}${d.sampleRateHz !== null ? ` · ${fmtBandwidth(d.sampleRateHz)}` : ""}`
+                : null,
+            })),
+            // A replay has no live front end, and that is a fact about the run, not an empty list to
+            // pad: the coverage on screen is still whichever device recorded it.
+            empty: devices.length === 0
+              ? "No live front end: this run is a replay, so coverage is whichever radio recorded it."
+              : null,
+            panes: ids.map((p, i) => ({
+              id: p.id, label: ids.length > 1 ? `Viewport ${i + 1}` : "This viewport", device: p.device,
+            })),
+            choices,
+          },
+          // The bigger panels keep their DOM (the drawer), but they are reached from here now: they
+          // are settings, and Review is only what needs a person (T-1007).
+          panels: [
+            { id: "device", label: "Device & display", hint: "gains, span, bias tee, FFT/speed, recording, survey sweep" },
+            { id: "scheduler", label: "Scheduler", hint: "scheduled survey passes" },
+            { id: "bookmarks", label: "Bookmarks", hint: "saved places on the surface" },
+          ],
+          capture: {
+            // The CONFIGURED retention and what the ring holds inside it — `GET /api/timeline`'s
+            // `window`, through the capture clock. Never a default span (T-379's rule).
+            retention: w ? durationText(w.spanS) : null,
+            buffered: w?.buffered ? durationText(Math.max(0, w.buffered.t1S - w.buffered.t0S)) : null,
+            note: w
+              ? "The retained capture window, as this server is configured. Resizing it is a server "
+                + "setting (`hk serve --iq-retention`), so it is stated here, not changed here."
+              : "This server has not stated a capture window, so none is drawn — never a default span.",
+          },
+        };
+      },
+      setRulerMode: (mode) => {
+        // Labelling only: the HUD re-derives its labels from the same marks on the next frame.
+        // T-998's per-viewer preference (stored and read by `surface/hud.ts`) — one mode, one home.
+        setTimeLabelMode(mode);
+        lastMirror = ""; mirror(); renderLive();
+      },
+      openPanel: (id) => store.set(openReview(id as ReviewTab)),
+      setDeviceOfPane: (paneId, device) => {
+        // Whose coverage decides this pane's grey (T-259/T-305: coverage is a fact about ONE front
+        // end). A pane is where you look from, so this never adds a view window and never tunes.
+        pv.view.panes.setDevice(paneId, device);
+        lastMirror = ""; mirror(); renderLive();
       },
       setBase: (id) => {
         const b = BASE_STYLES.find((x) => x.id === id);
@@ -2148,6 +2348,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     measureChrome();
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
+    renderRetune = controls.syncRetune;
     viewMoved = controls.viewMoved;
     // T-1028: the chip and its banner, re-stated whenever the mode changes or a retune becomes
     // pending. Wired here rather than passed in, because the controller exists before the cluster.
@@ -2238,6 +2439,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const chromeUnder = Math.max(dockUnder, sheetUnder);
       const lift = dockUnder > 0 ? dockUnder + 8 : 0;
       const chromeLift = chromeUnder > 0 ? chromeUnder + 8 : 0;
+      // T-996: the scale blocks sit at their pane's bottom-right corner, which now runs under the
+      // card's strip; they are lifted clear of the floating chrome by the same clearance.
+      floatLiftCss = chromeLift;
       stage.style.setProperty("--chrome-bottom", `${chromeUnder}px`);
       // The FAB and the readouts dock above the floating chrome's bottom clearance, in CSS px
       // (`--map-strip` keeps its name; with the minimap retired, T-995, it is that clearance alone).
@@ -2258,6 +2462,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
       }
     };
     fit();
+    // T-1026: the card is hidden until a feature is clicked, so the strip's clearance of it is no
+    // longer a one-off measurement — it changes when the card opens and closes, and a closed card
+    // gives the minimap its rows back (a hidden `.sheet` measures a zero box, so `sheetUnder` is 0).
+    // Measured twice: once now, in case the sheet was shown/hidden before this subscriber ran, and
+    // once on the next frame, because subscriber order does not guarantee the DOM has caught up.
+    store.select((s) => s.card.open, () => {
+      fit();
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => fit());
+    });
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
