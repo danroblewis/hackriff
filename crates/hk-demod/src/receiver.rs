@@ -278,6 +278,29 @@ impl AnalogReceiver {
         iq: &[T],
         request: &SnippetRequest,
     ) -> Result<AnalogSession, DemodError> {
+        self.run_inner(info, iq, request, false).map(|(s, _)| s)
+    }
+
+    /// T-971: [`Self::run`], and — when WFM was demodulated — the WFM chain itself, left running
+    /// at the request's end so the caller can keep demodulating the samples that follow it
+    /// ([`WfmFollower`]) without re-demodulating any it has already done. The follower produces no
+    /// audio.
+    pub fn run_following<T: IqSample>(
+        &mut self,
+        info: InputInfo<'_>,
+        iq: &[T],
+        request: &SnippetRequest,
+    ) -> Result<(AnalogSession, Option<WfmFollower>), DemodError> {
+        self.run_inner(info, iq, request, true)
+    }
+
+    fn run_inner<T: IqSample>(
+        &mut self,
+        info: InputInfo<'_>,
+        iq: &[T],
+        request: &SnippetRequest,
+        follow: bool,
+    ) -> Result<(AnalogSession, Option<WfmFollower>), DemodError> {
         let fs = info.provenance.tune.sample_rate_hz;
         let base = info.time.sample_index;
         let end = base + iq.len() as u64;
@@ -323,10 +346,22 @@ impl AnalogReceiver {
             audio: None,
             mpx_time: None,
         };
+        let mut follower = None;
         if session.mode.mode == AnalogMode::Wfm {
-            self.run_wfm(info, iq, &mut session)?;
+            let (ddc, mut wfm) = self.run_wfm(info, iq, &mut session)?;
+            if follow {
+                wfm.disable_audio();
+                follower = Some(WfmFollower {
+                    ddc,
+                    wfm,
+                    next_index: session.request.end_index,
+                    anchor: session.anchor,
+                    source_rate_hz: session.source_rate_hz,
+                    mpx_time: session.mpx_time,
+                });
+            }
         }
-        Ok(session)
+        Ok((session, follower))
     }
 
     fn run_wfm<T: IqSample>(
@@ -334,7 +369,7 @@ impl AnalogReceiver {
         info: InputInfo<'_>,
         iq: &[T],
         session: &mut AnalogSession,
-    ) -> Result<(), DemodError> {
+    ) -> Result<(Ddc, WfmDemod), DemodError> {
         let fs = session.source_rate_hz;
         let base = info.time.sample_index;
         let mut ddc = Ddc::new(
@@ -391,6 +426,75 @@ impl AnalogReceiver {
         }
         session.mpx_time = time_map;
         session.wfm = Some(wfm.report());
+        Ok((ddc, wfm))
+    }
+}
+
+/// T-971: a session's WFM + RDS chain kept running on the samples that follow its window
+/// ([`AnalogReceiver::run_following`]).
+///
+/// **Incremental, never re-decoded.** The DDC, the pilot PLL, the RDS demodulator and the group
+/// decoder carry their state from the window straight on, so every source sample is demodulated
+/// exactly once and the RDS report keeps accumulating — PS frames, RadioText, AF, CT and the PI
+/// vote — over the window and everything pushed after it (CLAUDE.md: decode extends with the
+/// region). No audio is produced.
+pub struct WfmFollower {
+    ddc: Ddc,
+    wfm: WfmDemod,
+    next_index: u64,
+    anchor: SampleTime,
+    source_rate_hz: f64,
+    mpx_time: Option<MpxTimeMap>,
+}
+
+impl WfmFollower {
+    /// Source index of the next sample it expects.
+    pub fn next_index(&self) -> u64 {
+        self.next_index
+    }
+
+    /// Demodulates `iq`, the source samples from [`Self::next_index`] on (`info` their first
+    /// sample's time, provenance and discontinuity flags). Refuses — consuming nothing — samples
+    /// that do not continue the stream: a gap is a different window, not a continuation.
+    pub fn push<T: IqSample>(&mut self, info: InputInfo<'_>, iq: &[T]) -> Result<(), DemodError> {
+        if info.time.sample_index != self.next_index {
+            return Err(DemodError::InvalidRequest(format!(
+                "follow expects sample {}, got {}",
+                self.next_index, info.time.sample_index
+            )));
+        }
+        let block = self.ddc.process(info, iq)?;
+        self.wfm.process(block.samples);
+        self.next_index += iq.len() as u64;
         Ok(())
+    }
+
+    /// The RDS results so far (window and follow together).
+    pub fn rds(&self) -> Option<RdsReport> {
+        self.wfm.rds_report()
+    }
+
+    /// CRC-valid groups decoded so far: a cheap progress count (no report is built).
+    pub fn rds_groups_ok(&self) -> u64 {
+        self.wfm.rds_groups_ok()
+    }
+
+    /// Whether the pilot PLL is locked at the last sample.
+    pub fn pilot_locked(&self) -> bool {
+        self.wfm.pilot_locked()
+    }
+
+    /// Host time of a (fractional) source index.
+    pub fn timestamp_of_source(&self, index: f64) -> Timestamp {
+        let dt = (index - self.anchor.sample_index as f64) / self.source_rate_hz;
+        self.anchor
+            .host_time
+            .saturating_add_nanos((dt * 1e9).round() as i64)
+    }
+
+    /// Host time of an MPX position (e.g. an RDS frame's `position`).
+    pub fn timestamp_of_mpx(&self, position: f64) -> Option<Timestamp> {
+        self.mpx_time
+            .map(|m| self.timestamp_of_source(m.source_index0 + position * m.source_per_output))
     }
 }

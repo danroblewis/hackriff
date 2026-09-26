@@ -60,10 +60,11 @@ pub use mode::{
 pub use pilot::{PilotConfig, PilotPll, PilotReport};
 pub use rds::{RdsConfig, RdsDecoder, RdsDemod, RdsReport};
 pub use receiver::{
-    AnalogReceiver, AnalogSession, AudioBuffer, DemodError, MpxTimeMap, ReceiverConfig,
+    AnalogReceiver, AnalogSession, AudioBuffer, DemodError, MpxTimeMap, ReceiverConfig, WfmFollower,
 };
 pub use record::{
-    RecordContext, WrittenSession, rds_decodes, rds_label, write_declined, write_session,
+    FollowRecord, FollowWrite, RecordContext, WrittenSession, rds_decodes, rds_label,
+    write_declined, write_follow, write_session,
 };
 pub use wfm::{MPX_RATE_HZ, WfmConfig, WfmDemod, WfmReport};
 

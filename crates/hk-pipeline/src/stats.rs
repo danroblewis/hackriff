@@ -368,6 +368,28 @@ counter_group!(
         /// (an overrun while it computed its probe or early identification) — instead of writing
         /// the fragment it had, too short for RDS.
         window_restarts,
+        /// T-971: analog chains that went on decoding their station's RDS after the window
+        /// ([`crate::chains::analog`]'s follow), accumulating PS/RT/PTY/AF/CT on its row.
+        rds_follows,
+        /// T-971: follows running now (a gauge, at most `chains::analog::MAX_RDS_FOLLOWS`).
+        rds_follows_active,
+        /// T-971: stations with RDS whose follow the concurrency cap refused (their window was
+        /// written as before; the channel is followed on a later attach once a slot frees).
+        rds_follow_refused,
+        /// T-971: accumulated-field `rds-pi` rows the follows wrote.
+        rds_follow_rows,
+        /// T-971: samples the follows demodulated (after their windows).
+        rds_follow_samples,
+        /// T-971: time the follows spent demodulating those samples, ns — with
+        /// `rds_follow_samples` the measured per-station cost (T-453: measured, never assumed).
+        rds_follow_ns,
+        /// T-971: follows that ended because the station's RDS went silent (the emitter ended).
+        rds_follow_ended_silent,
+        /// T-971: follows that ended at their spec's `follow_s` budget.
+        rds_follow_ended_budget,
+        /// T-971: follows that ended with the stream: a retune, a gap, an overrun (the chain fell
+        /// behind the ring) or the segment stopping.
+        rds_follow_ended_stream,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,

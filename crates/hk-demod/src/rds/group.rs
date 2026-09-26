@@ -18,8 +18,25 @@
 //!   complete frames, never one static string; the label is the most frequent frame.
 //! - **Error rates:** blocks evaluated at their lattice position while synchronised; a group is
 //!   in error when any of its 4 blocks is.
+//!
+//! **The accumulated field view (T-971).** A followed station is decoded for minutes, not for one
+//! window, so the report is the station's fields as they stand, not a packet list:
+//!
+//! - **PS** is stable until changed: [`RdsReport::ps_current`] is the latest complete frame, and a
+//!   dynamic (scrolling) PS is kept as [`RdsReport::ps_sequence`], the order its distinct frames
+//!   were sent in.
+//! - **RadioText** (groups 2A/2B, EN 50067 §3.1.5.3) is assembled per character address under one
+//!   PI and one A/B flag: a toggled flag, or a character that differs from the one held at its
+//!   address, starts a new message. A message is complete when every address before its carriage
+//!   return (0x0D), or all 64 (2A) / 32 (2B), has arrived CRC-valid.
+//! - **AF** (group 0A block C, method A codes 1–204) is the set of alternative frequencies heard.
+//! - **CT** (group 4A) is the latest clock time and date, with the local offset.
+//!
+//! Everything a follow can grow is bounded ([`FRAME_LOG_CAP`], [`PS_DISTINCT_CAP`],
+//! [`PS_SEQUENCE_CAP`], [`RT_LOG_CAP`], [`AF_CAP`]), so hours of one station cost the same memory
+//! as a minute.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use hk_model::{RDS_PI_COMMIT_WINDOW_NS, VoteWindow};
 use serde::{Deserialize, Serialize};
@@ -28,6 +45,19 @@ use super::block::{BlockEvent, BlockSync, Offset, SyncConfig};
 
 /// RDS bit rate, Bd (57 kHz / 48 = pilot / 16).
 pub const RDS_BITRATE_BD: f64 = 1187.5;
+
+/// T-971: most complete PS frames kept in [`RdsReport::frame_log`] (the newest). A 4 s window
+/// holds a handful; a followed station sends one every ~0.35 s for as long as it is followed.
+pub const FRAME_LOG_CAP: usize = 256;
+/// T-971: most distinct PS texts counted in [`RdsReport::ps_frames`]. A scrolling PS sends many;
+/// past the cap the least-sent (oldest among ties) is forgotten.
+pub const PS_DISTINCT_CAP: usize = 64;
+/// T-971: most entries kept in [`RdsReport::ps_sequence`] (the newest).
+pub const PS_SEQUENCE_CAP: usize = 32;
+/// T-971: most complete RadioText messages kept in [`RdsReport::rt_messages`] (the newest).
+pub const RT_LOG_CAP: usize = 32;
+/// T-971: most alternative frequencies kept (EN 50067 method A lists at most 25).
+pub const AF_CAP: usize = 25;
 
 /// Group-level decoder settings.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -139,6 +169,36 @@ pub struct PsFrame {
     pub text: String,
 }
 
+/// One complete RadioText message (T-971).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RtMessage {
+    /// Stream position of the group that completed it.
+    pub position: f64,
+    /// PI it was sent under.
+    pub pi: u16,
+    /// The text A/B flag it was sent with.
+    pub ab: bool,
+    /// The text, up to its carriage return, trailing spaces removed.
+    pub text: String,
+}
+
+/// Clock time and date from a 4A group (T-971).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RdsClockTime {
+    /// Stream position of the group.
+    pub position: f64,
+    /// Modified Julian Day (UTC).
+    pub mjd: u32,
+    /// UTC hour.
+    pub hour: u8,
+    /// UTC minute.
+    pub minute: u8,
+    /// Local time offset from UTC, in half hours.
+    pub offset_half_hours: i8,
+    /// The UTC instant as Unix seconds.
+    pub utc_unix_s: i64,
+}
+
 /// The reported station PI, its vote, and whether that vote has cleared the commit bound.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PiDecision {
@@ -200,10 +260,38 @@ pub struct RdsReport {
     pub pi_abstain: Option<PiAbstain>,
     /// All PI votes, hex → count.
     pub pi_votes: BTreeMap<String, u32>,
-    /// Complete PS frames, most frequent first (ties: first seen first).
+    /// Complete PS frames, most frequent first (ties: first seen first); at most
+    /// [`PS_DISTINCT_CAP`] texts.
     pub ps_frames: Vec<(String, u32)>,
-    /// Every complete PS frame in order.
+    /// Complete PS frames in order: every one of a window, the newest [`FRAME_LOG_CAP`] of a
+    /// follow.
     pub frame_log: Vec<PsFrame>,
+    /// T-971: the latest complete PS frame — the station's PS as it stands, stable until a
+    /// different complete frame arrives.
+    #[serde(default)]
+    pub ps_current: Option<String>,
+    /// T-971: distinct consecutive PS frames in the order sent (a dynamic PS's sequence), the
+    /// newest [`PS_SEQUENCE_CAP`].
+    #[serde(default)]
+    pub ps_sequence: Vec<String>,
+    /// T-971: more than one distinct PS text has been sent (a scrolling / dynamic PS).
+    #[serde(default)]
+    pub ps_dynamic: bool,
+    /// T-971: the latest complete RadioText message.
+    #[serde(default)]
+    pub rt: Option<String>,
+    /// T-971: the A/B flag of [`Self::rt`].
+    #[serde(default)]
+    pub rt_ab: Option<bool>,
+    /// T-971: distinct consecutive complete RadioText messages, the newest [`RT_LOG_CAP`].
+    #[serde(default)]
+    pub rt_messages: Vec<RtMessage>,
+    /// T-971: alternative frequencies heard (0A, method A), MHz, ascending.
+    #[serde(default)]
+    pub af_mhz: Vec<f64>,
+    /// T-971: the latest clock time (4A).
+    #[serde(default)]
+    pub ct: Option<RdsClockTime>,
     /// Most frequent PTY among valid B blocks.
     pub pty: Option<u8>,
     /// Most frequent TP flag.
@@ -252,6 +340,87 @@ struct PsAssembler {
     last_pos: f64,
 }
 
+/// RadioText characters by address under one PI, one A/B flag and one group version (T-971).
+#[derive(Clone, Debug)]
+struct RtAssembler {
+    pi: u16,
+    ab: bool,
+    version_b: bool,
+    chars: [Option<u8>; 64],
+}
+
+impl RtAssembler {
+    fn new(pi: u16, ab: bool, version_b: bool) -> Self {
+        Self {
+            pi,
+            ab,
+            version_b,
+            chars: [None; 64],
+        }
+    }
+
+    /// Addresses a message of this version can hold.
+    fn capacity(&self) -> usize {
+        if self.version_b { 32 } else { 64 }
+    }
+
+    /// The complete message: every address before the first carriage return (or all of them)
+    /// has arrived. `None` while one is missing.
+    fn complete(&self) -> Option<String> {
+        let mut text = String::new();
+        for c in &self.chars[..self.capacity()] {
+            match *c {
+                None => return None,
+                Some(0x0D) => break,
+                Some(c) => text.push(rds_char(c)),
+            }
+        }
+        Some(text.trim_end().to_owned())
+    }
+}
+
+/// An RDS character as text: EN 50067 Annex E codes 0x20–0x7E are ASCII, others are read as
+/// Latin-1 (as PS frames always were).
+fn rds_char(c: u8) -> char {
+    char::from(c)
+}
+
+/// Distinct PS texts and how often each was sent, bounded (T-971).
+#[derive(Clone, Debug, Default)]
+struct PsCounts {
+    /// `(text, count, first-seen sequence number)`.
+    entries: Vec<(String, u32, u64)>,
+    seq: u64,
+}
+
+impl PsCounts {
+    fn add(&mut self, text: &str) {
+        self.seq += 1;
+        if let Some(e) = self.entries.iter_mut().find(|e| e.0 == text) {
+            e.1 += 1;
+            return;
+        }
+        if self.entries.len() >= PS_DISTINCT_CAP
+            && let Some(i) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, e)| (e.1, e.2))
+                .map(|(i, _)| i)
+        {
+            self.entries.swap_remove(i);
+        }
+        self.entries.push((text.to_owned(), 1, self.seq));
+    }
+
+    /// Most frequent first, ties first seen first.
+    fn ranked(&self) -> Vec<(String, u32)> {
+        let mut v = self.entries.clone();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+        v.into_iter().map(|(t, n, _)| (t, n)).collect()
+    }
+}
+
 /// Streaming RDS group decoder.
 #[derive(Clone, Debug)]
 pub struct RdsDecoder {
@@ -263,7 +432,14 @@ pub struct RdsDecoder {
     group_start: Option<f64>,
     groups: Vec<RdsGroup>,
     ps: PsAssembler,
-    frames: Vec<PsFrame>,
+    /// Complete PS frames, the newest [`FRAME_LOG_CAP`].
+    frames: VecDeque<PsFrame>,
+    ps_counts: PsCounts,
+    ps_sequence: VecDeque<String>,
+    rt: Option<RtAssembler>,
+    rt_log: VecDeque<RtMessage>,
+    af: BTreeSet<u8>,
+    ct: Option<RdsClockTime>,
     pi_votes: BTreeMap<u16, u32>,
     /// T-962: each PI's votes over stream time, the windowed commit rule.
     pi_windows: BTreeMap<u16, VoteWindow>,
@@ -294,7 +470,13 @@ impl RdsDecoder {
             group_start: None,
             groups: Vec::new(),
             ps: PsAssembler::default(),
-            frames: Vec::new(),
+            frames: VecDeque::new(),
+            ps_counts: PsCounts::default(),
+            ps_sequence: VecDeque::new(),
+            rt: None,
+            rt_log: VecDeque::new(),
+            af: BTreeSet::new(),
+            ct: None,
             pi_votes: BTreeMap::new(),
             pi_windows: BTreeMap::new(),
             pty: BTreeMap::new(),
@@ -346,6 +528,11 @@ impl RdsDecoder {
             self.slots = [None; 4];
             self.group_start = None;
         }
+    }
+
+    /// T-971: groups with all four blocks CRC-valid so far.
+    pub fn groups_ok(&self) -> u64 {
+        self.groups_ok
     }
 
     /// Groups parsed so far (drains the buffer).
@@ -443,9 +630,121 @@ impl RdsDecoder {
                     group.ps_segment = Some((seg, chars));
                     self.push_ps(seg, chars, pi, position);
                 }
+                // T-971: 0A block C carries two alternative-frequency codes (method A).
+                if let (false, Some(c)) = (vb, valid(2)) {
+                    self.push_af(c);
+                }
+            }
+            if let (2, Some(pi)) = (gtype, pi) {
+                // T-971: RadioText. 2A: four characters at 4·addr (blocks C and D); 2B: two at
+                // 2·addr (block D; block C' is the PI).
+                let addr = usize::from(b & 0xF);
+                let ab = (b >> 4) & 1 == 1;
+                let mut chars: Vec<(usize, u8)> = Vec::with_capacity(4);
+                if !vb && let Some(c) = valid(2) {
+                    chars.extend([(4 * addr, (c >> 8) as u8), (4 * addr + 1, c as u8)]);
+                }
+                if let Some(d) = valid(3) {
+                    let at = if vb { 2 * addr } else { 4 * addr + 2 };
+                    chars.extend([(at, (d >> 8) as u8), (at + 1, d as u8)]);
+                }
+                self.push_rt(pi, ab, vb, &chars, position);
+            }
+            if let (4, false, Some(c), Some(d)) = (gtype, vb, valid(2), valid(3)) {
+                self.push_ct(b, c, d, position);
             }
         }
         self.groups.push(group);
+    }
+
+    /// T-971: an AF code pair from 0A block C. Codes 1–204 are 87.6–107.9 MHz; the count
+    /// indicators (224–249), the filler (205) and the LF/MF follower (250) are not frequencies.
+    fn push_af(&mut self, c: u16) {
+        for code in [(c >> 8) as u8, c as u8] {
+            if (1..=204).contains(&code) && (self.af.len() < AF_CAP || self.af.contains(&code)) {
+                self.af.insert(code);
+            }
+        }
+    }
+
+    /// T-971: RadioText characters (address, code) from one group. See the module docs.
+    fn push_rt(&mut self, pi: u16, ab: bool, version_b: bool, chars: &[(usize, u8)], pos: f64) {
+        let rt = self
+            .rt
+            .get_or_insert_with(|| RtAssembler::new(pi, ab, version_b));
+        if rt.pi != pi || rt.ab != ab || rt.version_b != version_b {
+            *rt = RtAssembler::new(pi, ab, version_b);
+        }
+        let cap = rt.capacity();
+        for &(at, ch) in chars.iter().filter(|(at, _)| *at < cap) {
+            // A character that differs from the one held at its address is a new message the
+            // station sent without toggling A/B.
+            if rt.chars[at].is_some_and(|held| held != ch) {
+                rt.chars = [None; 64];
+            }
+            rt.chars[at] = Some(ch);
+        }
+        let Some(text) = rt.complete() else {
+            return;
+        };
+        let repeat = self
+            .rt_log
+            .back()
+            .is_some_and(|m| m.pi == pi && m.ab == ab && m.text == text);
+        if !repeat {
+            if self.rt_log.len() == RT_LOG_CAP {
+                self.rt_log.pop_front();
+            }
+            self.rt_log.push_back(RtMessage {
+                position: pos,
+                pi,
+                ab,
+                text,
+            });
+        }
+    }
+
+    /// T-971: a 4A clock-time group (EN 50067 §3.1.5.6). An out-of-range field is a bad group
+    /// that passed its checks, and is dropped.
+    fn push_ct(&mut self, b: u16, c: u16, d: u16, position: f64) {
+        let mjd = (u32::from(b & 3) << 15) | u32::from(c >> 1);
+        let hour = (((c & 1) << 4) | (d >> 12)) as u8;
+        let minute = ((d >> 6) & 0x3F) as u8;
+        let half_hours = (d & 0x1F) as i8;
+        // MJD 40587 is 1970-01-01.
+        if hour > 23 || minute > 59 || half_hours > 28 || mjd < 40_587 {
+            return;
+        }
+        let offset_half_hours = if (d >> 5) & 1 == 1 {
+            -half_hours
+        } else {
+            half_hours
+        };
+        self.ct = Some(RdsClockTime {
+            position,
+            mjd,
+            hour,
+            minute,
+            offset_half_hours,
+            utc_unix_s: (i64::from(mjd) - 40_587) * 86_400
+                + i64::from(hour) * 3600
+                + i64::from(minute) * 60,
+        });
+    }
+
+    /// A complete PS frame: logged (bounded), counted, and sequenced (T-971).
+    fn push_frame(&mut self, frame: PsFrame) {
+        self.ps_counts.add(&frame.text);
+        if self.ps_sequence.back() != Some(&frame.text) {
+            if self.ps_sequence.len() == PS_SEQUENCE_CAP {
+                self.ps_sequence.pop_front();
+            }
+            self.ps_sequence.push_back(frame.text.clone());
+        }
+        if self.frames.len() == FRAME_LOG_CAP {
+            self.frames.pop_front();
+        }
+        self.frames.push_back(frame);
     }
 
     fn push_ps(&mut self, seg: u8, chars: [u8; 2], pi: u16, position: f64) {
@@ -471,13 +770,14 @@ impl RdsDecoder {
             ps.last_seg = seg;
             ps.last_pos = position;
             if seg == 3 {
-                let text: String = ps.buf.iter().flatten().map(|&c| char::from(c)).collect();
-                self.frames.push(PsFrame {
-                    position: ps.start,
+                let text: String = ps.buf.iter().flatten().map(|&c| rds_char(c)).collect();
+                let start = ps.start;
+                *ps = PsAssembler::default();
+                self.push_frame(PsFrame {
+                    position: start,
                     pi,
                     text,
                 });
-                *ps = PsAssembler::default();
             }
             return;
         }
@@ -518,14 +818,6 @@ impl RdsDecoder {
                 )
             }
         };
-        let mut counts: Vec<(String, u32, usize)> = Vec::new();
-        for (i, f) in self.frames.iter().enumerate() {
-            match counts.iter_mut().find(|(t, _, _)| *t == f.text) {
-                Some(c) => c.1 += 1,
-                None => counts.push((f.text.clone(), 1, i)),
-            }
-        }
-        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
         let flag = |c: [u32; 2]| (c[0] + c[1] > 0).then_some(c[1] > c[0]);
         let rate = |ok: u64, total: u64| (total > 0).then(|| 1.0 - ok as f64 / total as f64);
         RdsReport {
@@ -536,8 +828,20 @@ impl RdsDecoder {
                 .iter()
                 .map(|(p, v)| (format!("{p:04X}"), *v))
                 .collect(),
-            ps_frames: counts.into_iter().map(|(t, n, _)| (t, n)).collect(),
-            frame_log: self.frames.clone(),
+            ps_frames: self.ps_counts.ranked(),
+            frame_log: self.frames.iter().cloned().collect(),
+            ps_current: self.frames.back().map(|f| f.text.clone()),
+            ps_sequence: self.ps_sequence.iter().cloned().collect(),
+            ps_dynamic: self.ps_counts.entries.len() > 1,
+            rt: self.rt_log.back().map(|m| m.text.clone()),
+            rt_ab: self.rt_log.back().map(|m| m.ab),
+            rt_messages: self.rt_log.iter().cloned().collect(),
+            af_mhz: self
+                .af
+                .iter()
+                .map(|&code| (875.0 + f64::from(code)) / 10.0)
+                .collect(),
+            ct: self.ct,
             pty: self.pty.iter().max_by_key(|(_, v)| **v).map(|(p, _)| *p),
             tp: flag(self.tp),
             ta: flag(self.ta),
@@ -746,6 +1050,243 @@ pub(crate) mod tests {
             dense.committed() && dense.window_votes == n,
             "[T-962] {dense:?}"
         );
+    }
+
+    fn block_bits(blocks: [u32; 4]) -> Vec<u8> {
+        blocks
+            .iter()
+            .flat_map(|b| (0..26).map(move |i| ((b >> (25 - i)) & 1) as u8))
+            .collect()
+    }
+
+    /// A 2A group: RadioText characters `4·addr..4·addr+4` of `text` (0x0D-terminated, space
+    /// padded to 64).
+    fn group_2a_bits(pi: u16, ab: bool, addr: usize, text: &[u8]) -> Vec<u8> {
+        let at = |i: usize| u16::from(*text.get(i).unwrap_or(&b' '));
+        let b2 = (2u16 << 12) | (10u16 << 5) | (u16::from(ab) << 4) | addr as u16;
+        block_bits([
+            encode_block(pi, Offset::A),
+            encode_block(b2, Offset::B),
+            encode_block((at(4 * addr) << 8) | at(4 * addr + 1), Offset::C),
+            encode_block((at(4 * addr + 2) << 8) | at(4 * addr + 3), Offset::D),
+        ])
+    }
+
+    /// A 2B group: RadioText characters `2·addr..2·addr+2`.
+    fn group_2b_bits(pi: u16, ab: bool, addr: usize, text: &[u8]) -> Vec<u8> {
+        let at = |i: usize| u16::from(*text.get(i).unwrap_or(&b' '));
+        let b2 = (2u16 << 12) | (1 << 11) | (10u16 << 5) | (u16::from(ab) << 4) | addr as u16;
+        block_bits([
+            encode_block(pi, Offset::A),
+            encode_block(b2, Offset::B),
+            encode_block(pi, Offset::CPrime),
+            encode_block((at(2 * addr) << 8) | at(2 * addr + 1), Offset::D),
+        ])
+    }
+
+    /// A whole 2A message (every address the text reaches, terminator included).
+    fn rt_2a(pi: u16, ab: bool, text: &str) -> Vec<u8> {
+        let mut t = text.as_bytes().to_vec();
+        if t.len() < 64 {
+            t.push(0x0D);
+        }
+        (0..t.len().div_ceil(4))
+            .flat_map(|a| group_2a_bits(pi, ab, a, &t))
+            .collect()
+    }
+
+    /// A 0A group whose block C carries AF codes `a`, `b`.
+    fn group_0a_af_bits(pi: u16, seg: usize, af: (u8, u8)) -> Vec<u8> {
+        let ps = b"HACKRIFF";
+        let b2 = (10u16 << 5) | seg as u16;
+        block_bits([
+            encode_block(pi, Offset::A),
+            encode_block(b2, Offset::B),
+            encode_block((u16::from(af.0) << 8) | u16::from(af.1), Offset::C),
+            encode_block(
+                (u16::from(ps[2 * seg]) << 8) | u16::from(ps[2 * seg + 1]),
+                Offset::D,
+            ),
+        ])
+    }
+
+    /// A 4A clock-time group.
+    fn group_4a_bits(pi: u16, mjd: u32, hour: u16, minute: u16, offset: i8) -> Vec<u8> {
+        let b2 = (4u16 << 12) | (10u16 << 5) | ((mjd >> 15) & 3) as u16;
+        let c = (((mjd & 0x7FFF) as u16) << 1) | (hour >> 4);
+        let d = ((hour & 0xF) << 12)
+            | (minute << 6)
+            | (u16::from(offset < 0) << 5)
+            | u16::from(offset.unsigned_abs());
+        block_bits([
+            encode_block(pi, Offset::A),
+            encode_block(b2, Offset::B),
+            encode_block(c, Offset::C),
+            encode_block(d, Offset::D),
+        ])
+    }
+
+    /// Two groups of lead-in so block sync holds from the first group that matters.
+    fn lead_in() -> Vec<u8> {
+        stream(&[b"HACKRIFF"], 1)
+    }
+
+    /// T-971: a 2A RadioText message assembles to its carriage return, and a toggled A/B flag
+    /// starts the next one.
+    #[test]
+    fn t971_radiotext_2a_assembles_and_ab_toggles() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        let mut bits = lead_in();
+        bits.extend(rt_2a(
+            0xC0DE,
+            false,
+            "Star 101.3 - Olivia Dean - Man I Need",
+        ));
+        bits.extend(rt_2a(
+            0xC0DE,
+            false,
+            "Star 101.3 - Olivia Dean - Man I Need",
+        ));
+        bits.extend(rt_2a(
+            0xC0DE,
+            true,
+            "Star 101.3 - Glass Animals - Heat Waves",
+        ));
+        bits.push(0);
+        feed(&mut dec, &bits);
+        let r = dec.report();
+        let texts: Vec<(&str, bool)> = r
+            .rt_messages
+            .iter()
+            .map(|m| (m.text.as_str(), m.ab))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                ("Star 101.3 - Olivia Dean - Man I Need", false),
+                ("Star 101.3 - Glass Animals - Heat Waves", true),
+            ],
+            "[T-971] a repeat is one message; a toggle is the next: {:?}",
+            r.rt_messages
+        );
+        assert_eq!(
+            r.rt.as_deref(),
+            Some("Star 101.3 - Glass Animals - Heat Waves")
+        );
+        assert_eq!(r.rt_ab, Some(true));
+    }
+
+    /// T-971: a station that changes RadioText without toggling A/B starts a new message at the
+    /// first character that differs, rather than splicing two texts.
+    #[test]
+    fn t971_radiotext_changed_without_toggle_is_a_new_message() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        let mut bits = lead_in();
+        bits.extend(rt_2a(0xC0DE, false, "FIRST SONG"));
+        bits.extend(rt_2a(0xC0DE, false, "OTHER TUNE"));
+        bits.push(0);
+        feed(&mut dec, &bits);
+        let r = dec.report();
+        let texts: Vec<&str> = r.rt_messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["FIRST SONG", "OTHER TUNE"], "{:?}", r.rt_messages);
+    }
+
+    /// T-971: an incomplete message is never reported (a missing address is not a space).
+    #[test]
+    fn t971_radiotext_incomplete_is_not_reported() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        let text = b"Star 101.3 - Olivia Dean\r";
+        let mut bits = lead_in();
+        for a in [0usize, 1, 3, 4, 5, 6] {
+            bits.extend(group_2a_bits(0xC0DE, false, a, text));
+        }
+        bits.push(0);
+        feed(&mut dec, &bits);
+        let r = dec.report();
+        assert_eq!(r.rt, None, "address 2 never arrived: {:?}", r.rt_messages);
+    }
+
+    /// T-971: 2B carries two characters per address, a 32-character message.
+    #[test]
+    fn t971_radiotext_2b() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        let mut t = b"KQED News".to_vec();
+        t.push(0x0D);
+        let mut bits = lead_in();
+        for a in 0..t.len().div_ceil(2) {
+            bits.extend(group_2b_bits(0xC0DE, false, a, &t));
+        }
+        bits.push(0);
+        feed(&mut dec, &bits);
+        assert_eq!(dec.report().rt.as_deref(), Some("KQED News"));
+    }
+
+    /// T-971: AF codes from 0A block C (fillers and count indicators are not frequencies), and
+    /// CT from 4A.
+    #[test]
+    fn t971_af_and_ct() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        let mut bits = lead_in();
+        // 225 = "one AF follows", 205 = filler; 138 = 101.3 MHz, 114 = 98.9 MHz.
+        bits.extend(group_0a_af_bits(0xC0DE, 0, (225, 138)));
+        bits.extend(group_0a_af_bits(0xC0DE, 1, (114, 205)));
+        // MJD 61308 = 2026-09-25; 11:59 UTC, local −7 h (−14 half hours).
+        bits.extend(group_4a_bits(0xC0DE, 61_308, 11, 59, -14));
+        bits.extend(group_0a_af_bits(0xC0DE, 2, (138, 205)));
+        bits.push(0);
+        feed(&mut dec, &bits);
+        let r = dec.report();
+        assert_eq!(r.af_mhz, [98.9, 101.3], "{r:?}");
+        let ct = r.ct.expect("CT");
+        assert_eq!(
+            (ct.mjd, ct.hour, ct.minute, ct.offset_half_hours),
+            (61_308, 11, 59, -14)
+        );
+        assert_eq!(ct.utc_unix_s, 1_790_337_540, "2026-09-25T11:59:00Z");
+    }
+
+    /// T-971: a dynamic PS is its sequence, and the current PS is the latest complete frame;
+    /// hours of scrolling PS stay bounded.
+    #[test]
+    fn t971_ps_sequence_current_and_bounds() {
+        let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+        // The slip search evaluates a block one bit late: pad each feed's tail by a bit.
+        let padded = |mut bits: Vec<u8>| {
+            bits.push(0);
+            bits
+        };
+        feed(
+            &mut dec,
+            &padded(stream(&[b"101.3 - ", b"Animals ", b"Heat    "], 2)),
+        );
+        let r = dec.report();
+        assert_eq!(r.ps_current.as_deref(), Some("Heat    "));
+        assert!(r.ps_dynamic);
+        assert_eq!(
+            r.ps_sequence[r.ps_sequence.len() - 3..],
+            ["101.3 - ", "Animals ", "Heat    "],
+            "{:?}",
+            r.ps_sequence
+        );
+        // Many distinct frames: every accumulator stays at its cap.
+        let texts: Vec<[u8; 8]> = (0..(PS_DISTINCT_CAP + 40))
+            .map(|i| {
+                let mut t = *b"TEXT    ";
+                t[5..8].copy_from_slice(format!("{i:03}").as_bytes());
+                t
+            })
+            .collect();
+        let refs: Vec<&[u8; 8]> = texts.iter().collect();
+        feed(&mut dec, &padded(stream(&refs, 3)));
+        let r = dec.report();
+        assert!(
+            r.ps_frames.len() <= PS_DISTINCT_CAP,
+            "{}",
+            r.ps_frames.len()
+        );
+        assert!(r.frame_log.len() <= FRAME_LOG_CAP, "{}", r.frame_log.len());
+        assert!(r.ps_sequence.len() <= PS_SEQUENCE_CAP);
+        assert_eq!(r.ps_current.as_deref(), Some("TEXT 103"));
     }
 
     #[test]

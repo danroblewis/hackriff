@@ -729,6 +729,7 @@ impl ChainManager {
                         probe_s,
                         accept_modes,
                         require_pilot,
+                        follow_s,
                     } => analog::run(
                         shared,
                         rx,
@@ -740,6 +741,7 @@ impl ChainManager {
                             probe_s,
                             accept_modes,
                             require_pilot,
+                            follow_s,
                             channel_tolerance_hz,
                             record: analog_record,
                             owner: id,
@@ -1491,6 +1493,7 @@ mod tests {
             probe_s: 0.0,
             accept_modes: Vec::new(),
             require_pilot: false,
+            follow_s: 0.0,
         };
         let fsk = ChainShape::Fsk {
             pad_s: 0.02,
